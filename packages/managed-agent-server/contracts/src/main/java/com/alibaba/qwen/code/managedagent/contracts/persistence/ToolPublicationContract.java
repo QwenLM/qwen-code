@@ -6,9 +6,9 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.networknt.schema.JsonSchema;
-import com.networknt.schema.JsonSchemaFactory;
-import com.networknt.schema.SpecVersion.VersionFlag;
+import com.networknt.schema.Schema;
+import com.networknt.schema.SchemaRegistry;
+import com.networknt.schema.SpecificationVersion;
 import org.apache.commons.codec.digest.DigestUtils;
 
 import java.io.IOException;
@@ -272,7 +272,7 @@ public final class ToolPublicationContract {
         ObjectNode selected = JSON.createObjectNode().put("$schema", "https://json-schema.org/draft/2020-12/schema")
                 .put("$ref", "#/$defs/" + kind);
         selected.set("$defs", RESULT_SCHEMA.path("$defs"));
-        JsonSchema schema = JsonSchemaFactory.getInstance(VersionFlag.V202012).getSchema(selected);
+        Schema schema = SchemaRegistry.withDefaultDialect(SpecificationVersion.DRAFT_2020_12).getSchema(selected);
         require(schema.validate(value).isEmpty(), "Invalid tool-result " + kind);
         return value;
     }

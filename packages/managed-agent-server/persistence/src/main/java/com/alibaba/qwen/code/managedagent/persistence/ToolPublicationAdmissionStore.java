@@ -142,11 +142,8 @@ public final class ToolPublicationAdmissionStore {
                 "Original referenced publication conflicts");
         long revision = positiveCounter(publication.get("receipt_revision"));
         long sequence = positiveCounter(publication.get("receipt_sequence"));
-        var head = jdbc.query("SELECT journal_revision, committed_sequence, storage_version FROM ma_session_head"
+        var head = jdbc.query("SELECT journal_revision, committed_sequence FROM ma_session_head"
                 + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), ManagedSchemaKeys.key(text(key, "tenantId")), ManagedSchemaKeys.key(text(key, "sessionId")), text(key, "tenantId"), text(key, "sessionId")).getFirst();
-        require(((Number) head.get("storage_version")).intValue() >= 1
-                && ((Number) head.get("storage_version")).intValue() <= com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED,
-                "Managed Session storage version is unsupported");
         require(positiveCounter(head.get("journal_revision")) >= revision
                 && positiveCounter(head.get("committed_sequence")) >= sequence,
                 "Original receipt exceeds the committed Session head");
@@ -371,15 +368,14 @@ public final class ToolPublicationAdmissionStore {
         }
         return transactions.execute(status -> {
             boolean placement = data.lockPublicationPlacement(key, publicationId, authority != null);
-            sessions.lockCsiOriginal(text(key, "tenantId"), text(key, "sessionId"));
-            boolean csi = data.lockOriginalSettledResult(key, publicationId, finished);
+            data.lockOriginalSettledResult(key, publicationId, finished);
             // An ordinary receipt without lifecycle authority skips the tenant
             // publication guard: the journal commit below takes none, and the
-            // lane locks root, head, publication row, as collection does. A CSI
-            // original or a lifecycle-authority commit (which takes the guard
-            // in checkLifecycleWriter) keeps it where it was (design
+            // lane locks root, head, publication row, as collection does. A
+            // lifecycle-authority commit (which takes the guard in
+            // checkLifecycleWriter) keeps it (design
             // 2026-11-04-managed-publication-tenant-guards, C2).
-            boolean guard = csi || authority != null;
+            boolean guard = authority != null;
             if (guard) {
                 lockTenant(key);
             }
@@ -565,9 +561,7 @@ public final class ToolPublicationAdmissionStore {
 
     private void lockTenant(JsonNode key) {
         // This lane's publication-guard acquisition, bounded with the shared
-        // named-failure mapping (#13800). For a CSI-pinned Session,
-        // lockCsiOriginal above already took the same row with the same
-        // bound, and this re-lock returns at once.
+        // named-failure mapping (#13800).
         JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
                 text(key, "tenantId"), JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }

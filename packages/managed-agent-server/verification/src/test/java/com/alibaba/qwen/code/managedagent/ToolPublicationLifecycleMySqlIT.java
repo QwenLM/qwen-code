@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
@@ -151,6 +152,11 @@ class ToolPublicationLifecycleMySqlIT {
                     .agentId("qwen-code")
                     .selection(new WorkspaceSelection("neighbor", "."))
                     .build()).sessionId());
+            // Keep the v1 lifecycle witness on external-files: files moved to protocol 2,
+            // which requires a WorkspaceProfileLifecycleVerifier this hand-built store
+            // cannot inject (setProfiles is package-private to the persistence package).
+            jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                    WorkspaceToolProfiles.EXTERNAL_FILES, "tenant-1", session);
             String operationId = transaction.execute(ignored -> agents.beginWorkspaceLifecycle("tenant-1", session,
                     OperationKind.CLOSE, "owner", "a".repeat(64), "close", "digest", true, 1).operation().operationId());
             var operation = transaction.execute(ignored -> agents.claimOperation("tenant-1", session, operationId,
@@ -227,7 +233,7 @@ class ToolPublicationLifecycleMySqlIT {
                                         // (#16354), so the receipt parks on the root
                                         // statement its lane actually runs.
                                         if (execute && "receipt".equals(role)
-                                                && sql.startsWith("SELECT tenant_id, session_id, is_csi_guard FROM ma_session")) {
+                                                && sql.startsWith("SELECT tenant_id, session_id FROM ma_session")) {
                                             receiptPlacement.countDown();
                                         }
                                         try {

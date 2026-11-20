@@ -8,6 +8,7 @@ import { createServer, type Server } from 'node:http';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import express from 'express';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { OperationGrant } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
@@ -32,6 +33,14 @@ import {
   WORKSPACE_EXECUTION_PROFILE,
 } from './managed-workspace-activation.js';
 import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
+import {
+  MANAGED_MCP_RECLAIM_WORKER_ROUTE,
+  registerManagedMcpRoutes,
+} from './managed-mcp-routes.js';
+import {
+  ManagedMcpError,
+  type ManagedMcpRuntime,
+} from './managed-mcp-runtime.js';
 
 let worker: ManagedRuntimeAttestationWorkerHandle | undefined;
 let server: Server | undefined;
@@ -337,6 +346,23 @@ it('authenticates MCP controls, executes tools through the ordinary ledger and h
     state: 'settled',
     result: { executionStatus: 'success' },
   });
+  const reclaimed = await post(MANAGED_MCP_RECLAIM_WORKER_ROUTE.path, {
+    protocolVersion: 1,
+    runtimeSessionId,
+  });
+  expect(reclaimed.status).toBe(200);
+  expect(
+    JSON.stringify(
+      await (
+        await post('/internal/managed-runtime/v2/execute', {
+          ...execution,
+          reference: { ...reference, callId: 'tool-b' },
+          input: { ...invoke, operationId: 'tool-b' },
+        })
+      ).json(),
+    ),
+  ).toContain('managed_mcp_binding_conflict');
+  expect(effects).toBe(1);
   await post(
     MANAGED_MCP_ROUTE,
     request({
@@ -375,4 +401,47 @@ it('authenticates MCP controls, executes tools through the ordinary ledger and h
       })
     ).status,
   ).toBe(200);
+});
+
+it('reclaims only for an authenticated, well-formed request and names a refusal', async () => {
+  const drainSession = vi.fn<(id: string) => Promise<void>>();
+  const app = express();
+  registerManagedMcpRoutes(
+    app,
+    { token: 'test-token', leaseId: 'lease-a', epoch: 1 },
+    { drainSession } as unknown as ManagedMcpRuntime,
+  );
+  server = createServer(app);
+  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  const reclaim = (body: unknown, token = 'test-token') =>
+    fetch(`http://127.0.0.1:${port}${MANAGED_MCP_RECLAIM_WORKER_ROUTE.path}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        'cache-control': 'no-store',
+        'x-qwen-managed-lease-id': 'lease-a',
+        'x-qwen-managed-lease-epoch': '1',
+      },
+      body: JSON.stringify(body),
+    });
+  const valid = { protocolVersion: 1, runtimeSessionId: 'mcp-owner' };
+
+  expect((await reclaim(valid, 'wrong')).status).toBe(401);
+  expect((await reclaim({ ...valid, extra: true })).status).toBe(400);
+  expect(drainSession).not.toHaveBeenCalled();
+
+  drainSession.mockResolvedValueOnce();
+  const accepted = await reclaim(valid);
+  expect(accepted.status).toBe(200);
+  expect(await accepted.json()).toEqual({ ...valid, reclaimed: true });
+  expect(drainSession).toHaveBeenCalledWith('mcp-owner');
+
+  drainSession.mockRejectedValueOnce(
+    new ManagedMcpError('managed_mcp_drain_unknown'),
+  );
+  const refused = await reclaim(valid);
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toEqual({ code: 'managed_mcp_drain_unknown' });
 });

@@ -194,6 +194,29 @@ export const getGitBranch = (cwd: string): string | undefined => {
   }
 };
 
+/**
+ * Gets the current HEAD commit SHA, if in a git repository with commits.
+ * Returns undefined when HEAD cannot be read (not a repository, or an unborn
+ * HEAD with no commits yet) — callers treat that as "no boundary" rather than
+ * failing. Used to record a session's immutable start commit at creation.
+ */
+export const getHeadCommit = (cwd: string): string | undefined => {
+  try {
+    const sha = execFileSync(
+      'git',
+      [...NO_EXEC_CONFIG, 'rev-parse', '--verify', 'HEAD'],
+      {
+        cwd,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    ).trim();
+    return sha || undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 // Memoize git branch per cwd for the agent-launch path. `getGitBranch` runs
 // `git rev-parse` synchronously; caching avoids the per-launch subprocess
 // on paths that run every time a subagent starts — AgentTool's foreground and

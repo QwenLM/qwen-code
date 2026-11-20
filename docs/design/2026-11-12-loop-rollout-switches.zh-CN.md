@@ -10,12 +10,12 @@
 
 共享 agent loop 及其事件总线内核由两个实验性设置承载，但灰度机制无法一次一个入口地放开它们：
 
-1. **一个布尔值管所有入口。**`experimental.unifiedAgentLoop` 同时覆盖 headless、ACP、两个 TUI 和 AgentCore；`experimental.eventBusAgentLoop` 覆盖 headless。今天改一次默认值，所有入口一起动。
-2. **环境变量只能强制开启。**`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP === '1'` 时 `Config.isUnifiedAgentLoopEnabled()` 返回 `true`，否则返回设置值（`packages/core/src/config/config.ts:10833`）；事件总线 getter 同形（`:10838`）。没有办法从环境变量把某个入口强制关回去，而灰度规则要求环境变量作为切回手段。
-3. **没有按入口解析。**所有调用方读同一个无参 getter：headless（`packages/cli/src/nonInteractiveCli.ts:2742`）、ACP（`packages/cli/src/acp-integration/session/Session.ts:7559`）、Ink（`packages/cli/src/ui/hooks/use-llm-stream.ts:5063`）、OpenTUI（`packages/cli/src/ui/opentui/live-session.ts:1087`）、AgentCore（`packages/core/src/agents/runtime/agent-core.ts:1101`，经由 `runtimeContext`）。
-4. **nightly 信号不完整。**Linux E2E 矩阵在 schedule/dispatch 时跑 `unified` 组（`.github/workflows/e2e.yml:270`）；OpenTUI 任务（`:617`）没有 agent-loop 矩阵，也没有任何一组开着事件总线内核。OpenTUI 的 14 晚计数和每个内核默认值都在等这些组。
-5. **两个对拍 off 臂没有被强制。**ACP 对拍的 off 臂删除环境变量（`integration-tests/cli/acp-agent-loop-parity.test.ts:331`），TUI 对拍的 off 臂只是不设置它（`integration-tests/interactive/tui-agent-loop-parity.test.ts:500`）。默认值一旦开启，这两个 off 臂都会跑新路径，对比就悄悄变成了同一条路径自己比自己。headless 对拍已经用显式的按臂设置强制了两臂（`integration-tests/cli/agent-loop-parity.test.ts:243`）。
-6. **会话不说自己走了哪条 loop。**内核有 `[EVENT_BUS]` debug 标记（`packages/core/src/event-bus/adapter.ts:23`）；共享过程式路径和旧路径没有对等标记，`/about` 和 `/bug` 也没有 loop 行。
+1. **一个布尔值管所有入口。** `experimental.unifiedAgentLoop` 同时覆盖 headless、ACP、两个 TUI 和 AgentCore；`experimental.eventBusAgentLoop` 覆盖 headless。今天改一次默认值，所有入口一起动。
+2. **环境变量只能强制开启。** `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP === '1'` 时 `Config.isUnifiedAgentLoopEnabled()` 返回 `true`，否则返回设置值（`packages/core/src/config/config.ts:10833`）；事件总线 getter 同形（`:10838`）。没有办法从环境变量把某个入口强制关回去，而灰度规则要求环境变量作为切回手段。
+3. **没有按入口解析。** 所有调用方读同一个无参 getter：headless（`packages/cli/src/nonInteractiveCli.ts:2742`）、ACP（`packages/cli/src/acp-integration/session/Session.ts:7559`）、Ink（`packages/cli/src/ui/hooks/use-llm-stream.ts:5063`）、OpenTUI（`packages/cli/src/ui/opentui/live-session.ts:1087`）、AgentCore（`packages/core/src/agents/runtime/agent-core.ts:1101`，经由 `runtimeContext`）。
+4. **nightly 信号不完整。** Linux E2E 矩阵在 schedule/dispatch 时跑 `unified` 组（`.github/workflows/e2e.yml:270`）；OpenTUI 任务（`:617`）没有 agent-loop 矩阵，也没有任何一组开着事件总线内核。OpenTUI 的 14 晚计数和每个内核默认值都在等这些组。
+5. **两个对拍 off 臂没有被强制。** ACP 对拍的 off 臂删除环境变量（`integration-tests/cli/acp-agent-loop-parity.test.ts:331`），TUI 对拍的 off 臂只是不设置它（`integration-tests/interactive/tui-agent-loop-parity.test.ts:500`）。默认值一旦开启，这两个 off 臂都会跑新路径，对比就悄悄变成了同一条路径自己比自己。headless 对拍已经用显式的按臂设置强制了两臂（`integration-tests/cli/agent-loop-parity.test.ts:243`）。
+6. **会话不说自己走了哪条 loop。** 内核有 `[EVENT_BUS]` debug 标记（`packages/core/src/event-bus/adapter.ts:23`）；共享过程式路径和旧路径没有对等标记，`/about` 和 `/bug` 也没有 loop 行。
 
 ## 切片
 
@@ -39,37 +39,40 @@ Linux 矩阵增加第三个 `agent-loop` 值 `kernel`，OpenTUI 任务加上它�
 - 矩阵：`agent-loop` 在 push 时解析为 `["current"]`，其他事件解析为 `["current","unified","kernel"]`（今天是 `["current","unified"]`）。
 - 排除：`sandbox:docker` 同时排除 `unified` 和 `kernel`（今天只排除 `unified`）；开关组与既有 unified 组一样无沙箱运行。
 - `Run E2E tests` 步骤的环境变量：
-  - `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP`：`matrix.agent-loop != 'current'` 时为 `'1'`，否则 `''`。
-  - `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP`：`matrix.agent-loop == 'kernel'` 时为 `'1'`，否则 `''`。
+  - `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP`：`matrix.agent-loop != 'current'` 时为 `'1'`，否则 `'0'`。
+  - `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP`：`matrix.agent-loop == 'kernel'` 时为 `'1'`，否则 `'0'`。
+
+  切片 1 给其他组导出的是 `''`；#17048 把它改成 `'0'`，所以入口的默认值翻转之后，不属于共享 loop 的组仍留在现有 loop 上。
+
 - 任务名后缀：`unified` 为 ` - unified agent loop`（不变），`kernel` 为 ` - event-bus kernel`。
 
 **OpenTUI（`e2e-interactive-opentui`）。**
 
 - 同款 `agent-loop` 矩阵表达式、`fail-fast: false`，以及 `Run interactive E2E tests (OpenTUI)` 步骤上的同两个环境变量。
 - 任务名加同款后缀。
-- 渲染器仍由运行命令里既有的 `QWEN_E2E_RENDERER=opentui` 钉住；矩阵加的是 loop 臂，不是渲染器臂。
+- 渲染器仍由运行命令里既有的 `QWEN_E2E_RENDERER=opentui` 钉在 `opentui` 上；矩阵加的是 loop 臂，不是渲染器臂。
 
-**内核组今天实际跑什么。**内核开关已到达 headless、ACP、Ink、OpenTUI 与 AgentCore。Linux 内核组让 headless 及其子代理跑事件总线路径，OpenTUI 内核组让 OpenTUI 跑事件总线路径。这些组累积 nightly 计数，并随着每个入口的第 3 步落地验证接线。
+**内核组今天实际跑什么。** 内核开关已到达 headless、ACP、Ink、OpenTUI 与 AgentCore。Linux 内核组让 headless 及其子代理跑事件总线路径，OpenTUI 内核组让 OpenTUI 跑事件总线路径。这些组累积 nightly 计数，并随着每个入口的第 3 步落地验证接线。
 
-**隔离的交互套件能收到开关。**约一半交互套件从零构建子进程环境（`inheritEnv: false`）以排除操作者环境，因此各组导出的开关到不了它们，它们会在每个臂上都跑默认 loop。`InteractiveSession.start` 只把这两个 loop 变量转发进隔离环境（测试自己的 `options.env` 仍可覆盖），于是开关组让整个交互套件都跑到共享 loop。一个真实 spawn 用例钉住开关到达、操作者变量不泄漏、且测试自己的 `env` 值优先于转发值；`scripts/tests/interactive-session-start.test.ts` 的 PR 门禁字节形状 pin 守住转发块与合并顺序。
+**隔离的交互套件能收到开关。** 约一半交互套件从零构建子进程环境（`inheritEnv: false`）以排除操作者环境，因此各组导出的开关到不了它们，它们会在每个臂上都跑默认 loop。`InteractiveSession.start` 只把这两个 loop 变量转发进隔离环境（测试自己的 `options.env` 仍可覆盖），于是开关组让整个交互套件都跑到共享 loop。一个真实 spawn 用例钉住开关到达、操作者变量不泄漏、且测试自己的 `env` 值优先于转发值；`scripts/tests/interactive-session-start.test.ts` 的 PR 门禁字节形状 pin 守住转发块与合并顺序。
 
-**元测试。**`scripts/tests/e2e-workflow.test.js` 新增一个 describe 块，像并发 pin 求值自己的表达式那样，对 `push`、`schedule`、`workflow_dispatch` 求值真实的矩阵与环境变量表达式：push 在两个任务上都只产生 `current`；schedule/dispatch 产生全部三个值；docker 排除两个开关组；每个矩阵值在两个任务上映射到期望的一对环境变量值。既有的任务结构 pin（install 重试清单、artifact 时限、单一 build）不变，因为没有增删任务。
+**元测试。** `scripts/tests/e2e-workflow.test.js` 新增一个 describe 块，像并发 pin 求值自己的表达式那样，对 `push`、`schedule`、`workflow_dispatch` 求值真实的矩阵与环境变量表达式：push 在两个任务上都只产生 `current`；schedule/dispatch 产生全部三个值；docker 排除两个开关组；每个矩阵值在两个任务上映射到期望的一对环境变量值。既有的任务结构 pin（install 重试清单、artifact 时限、单一 build）不变，因为没有增删任务。
 
-**headless 对拍的内核维度也被强制。**headless 对拍把两个 loop 变量都 stub 掉，并用按臂设置强制各臂——unified 开关关/开，以及每个场景里内核开关关/开。stub 是为了不让 nightly 组的环境变量覆盖这些按臂设置：内核组里环境里的内核变量是 `1`，不 stub 的话会把每一臂都强推到内核上、让对比塌掉。ACP 对拍跑三个臂（current/shared/kernel），按臂用整值强制两个 loop 变量——unified 开关 current 臂 `0`、shared/kernel 臂 `1`，内核开关仅 kernel 臂 `1`（切片 2 强制关）。TUI 对拍用 `inheritEnv: false`，但 `InteractiveSession` 现在会把两个 loop 开关转发进这个隔离环境（好让 nightly 组到达其他交互套件）；因此 TUI 对拍通过 `options.env` 显式钉住每一臂——unified 开关控制臂 `0`、共享臂 `1`，这两臂的内核开关都是 `0`，OpenTUI 另加第三臂把内核开关设为 `1`、须与共享臂一致——覆盖转发值，其对比不受影响。
+**headless 对拍的内核维度也被强制。** headless 对拍把两个 loop 变量都 stub 掉，并用按臂设置强制各臂——unified 开关关/开，以及每个场景里内核开关关/开。stub 是为了不让 nightly 组的环境变量覆盖这些按臂设置：内核组里环境里的内核变量是 `1`，不 stub 的话会把每一臂都强推到内核上、让对比塌掉。ACP 对拍跑三个臂（current/shared/kernel），按臂用整值强制两个 loop 变量——unified 开关 current 臂 `0`、shared/kernel 臂 `1`，内核开关仅 kernel 臂 `1`（切片 2 强制关）。TUI 对拍用 `inheritEnv: false`，但 `InteractiveSession` 现在会把两个 loop 开关转发进这个隔离环境（好让 nightly 组到达其他交互套件）；因此 TUI 对拍通过 `options.env` 显式钉住每一臂——unified 开关控制臂 `0`、共享臂 `1`，这两臂的内核开关都是 `0`，OpenTUI 另加第三臂把内核开关设为 `1`、须与共享臂一致——覆盖转发值，其对比不受影响。
 
-**体积棘轮。**`e2e.yml` 当前 45412 字节，基线 45412，容差 4096 字节；新增的矩阵、env 行与后缀必须留在容差内，否则在同一 PR 里更新 `.github/workflows/.size-baseline` 并说明原因。
+**体积棘轮。** `e2e.yml` 当前 45412 字节，基线 45412，容差 4096 字节；新增的矩阵、env 行与后缀必须留在容差内，否则在同一 PR 里更新 `.github/workflows/.size-baseline` 并说明原因。
 
 ## 切片 2：按入口默认值与强制的对拍两臂
 
-**解析顺序。**对每个入口、每个开关，第一条能回答的规则生效：
+**解析顺序。** 对每个入口、每个开关，第一条能回答的规则生效：
 
 1. 环境变量，当它指向该入口时；
 2. 显式设置（`experimental.unifiedAgentLoop` / `experimental.eventBusAgentLoop`），当它被设置时；
-3. 该入口的内置默认值——headless 和 Ink TUI 是 `true`，其他入口都是 `false`；每个灰度 PR 一次翻转一个入口的默认值，且只翻转那一个。
+3. 该入口的内置默认值——headless、ACP、Ink TUI 和 AgentCore 是 `true`，其他入口都是 `false`；每个灰度 PR 一次翻转一个入口的默认值，且只翻转那一个。
 
-**入口标识符。**`headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`、`hosted`。它们命名的是 loop 入口，不是包：Ink TUI 是 `ink`，OpenTUI 渲染器是 `opentui`，跑在 AgentCore 上的子代理是 `agent-core`，Hosted Harness 是 `hosted`——它只开启模型轮，其 journal 化工具派发仍留在 `hosted-harness-model.ts`。
+**入口标识符。** `headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`、`hosted`。它们命名的是 loop 入口，不是包：Ink TUI 是 `ink`，OpenTUI 渲染器是 `opentui`，跑在 AgentCore 上的子代理是 `agent-core`，Hosted Harness 是 `hosted`——它只开启模型轮，其 journal 化工具派发仍留在 `hosted-harness-model.ts`。
 
-**环境变量文法。**`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 与 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` 都接受：
+**环境变量文法。** `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 与 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` 都接受：
 
 - `1`——强制所有入口开启（今天唯一的行为，不变）；
 - `0`——强制所有入口关闭（新增；切回手段）；
@@ -77,13 +80,13 @@ Linux 矩阵增加第三个 `agent-loop` 值 `kernel`，OpenTUI 任务加上它�
 
 token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 日志，这样为新版 CLI 写的列表不会弄坏旧版 CLI。畸形 token（`surface=2`）同样忽略，而不是在启动时抛错。
 
-**getter 形状。**`Config.isUnifiedAgentLoopEnabled(surface)` 与 `Config.isEventBusAgentLoopEnabled(surface)` 接收入口标识符；每个调用点写明自己的入口。AgentCore 的 `runtimeContext` 钩子传 `agent-core`。#17029（已合入）的 speculation 读取点传 `speculation`。共享 loop 关闭时内核开关仍然无效——解析按开关各自进行，内核只作用于 `runAgentLoop` 内部。
+**getter 形状。** `Config.isUnifiedAgentLoopEnabled(surface)` 与 `Config.isEventBusAgentLoopEnabled(surface)` 接收入口标识符；每个调用点写明自己的入口。AgentCore 的 `runtimeContext` 钩子传 `agent-core`。#17029（已合入）的 speculation 读取点传 `speculation`。共享 loop 关闭时内核开关仍然无效——解析按开关各自进行，内核只作用于 `runAgentLoop` 内部。
 
-**设置在运行时变为三态。**CLI 不再把未设置塌缩成 `false`（今天 `packages/cli/src/config/config.ts:2920` 是 `?? false`）；core 参数变为 `boolean | undefined`。合并后的设置对未设置的键本来就保持 undefined——加载器不会物化 schema 默认值（`packages/cli/src/config/settings.test.ts:4624` 钉住了这一点）——所以运行时不需要任何 schema 改动就能区分「未设置」和「显式关闭」。在那之前 schema 条目保留 `default: false`，`experimental.eventBusAgentLoop` 现在仍保留：当 schema 默认值为 undefined 时，`nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:687`）对未设置布尔值的第一次切换会写入 `false`，这会翻转今天两个设置对话框「第一次切换即开启」的行为。schema 默认值在第一个入口的内置默认值翻转时一并移除，同时给对话框的未设置态一个呈现方式：该设置声明 `unsetToggleValue: true`，所以在两个对话框和 `/config` 中，对未设置值的第一次切换仍写入 `true`；Web Shell 设置面板读的是生效值而不是 schema 默认值，两种情况下都不受影响。
+**设置在运行时变为三态。** CLI 不再把未设置塌缩成 `false`（本切片之前 `packages/cli/src/config/config.ts` 是 `?? false`）；core 参数变为 `boolean | undefined`。合并后的设置对未设置的键本来就保持 undefined——加载器不会物化 schema 默认值（`packages/cli/src/config/settings.test.ts:4679` 钉住了这一点）——所以运行时不需要任何 schema 改动就能区分「未设置」和「显式关闭」。在那之前 schema 条目保留 `default: false`，`experimental.eventBusAgentLoop` 现在仍保留：当 schema 默认值为 undefined 时，`nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:693`）对未设置布尔值的第一次切换会写入 `false`，这会翻转两个设置对话框「第一次切换即开启」的行为。schema 默认值在第一个入口的内置默认值翻转时一并移除，同时给对话框的未设置态一个呈现方式：该设置声明 `unsetToggleValue: true`，所以在两个对话框和 `/config` 中，对未设置值的第一次切换仍写入 `true`；Web Shell 设置面板读的是生效值而不是 schema 默认值，两种情况下都不受影响。
 
-**对拍两臂强制。**同一 PR 内：ACP 对拍的 off 臂把环境变量设为 `'0'` 而不是删除；TUI off 臂已在切片 1 钉住 `'0'`，切片 2 让 `'0'` 表示强制关闭。headless 对拍保留显式的按臂设置。有了切片 2 的强制关闭语义，`'0'` 无论默认值如何都钉住 off 臂；在切片 2 落地前，`'0'` 是惰性的（只读 `'1'`），所以 ACP 对拍改动可以与机制同 PR 安全落地。
+**对拍两臂强制。** 同一 PR 内：ACP 对拍的 off 臂把环境变量设为 `'0'` 而不是删除；TUI off 臂已在切片 1 钉住 `'0'`，切片 2 让 `'0'` 表示强制关闭。headless 对拍保留显式的按臂设置。有了切片 2 的强制关闭语义，`'0'` 无论默认值如何都钉住 off 臂；在切片 2 落地前，`'0'` 是惰性的（只读 `'1'`），所以 ACP 对拍改动可以与机制同 PR 安全落地。
 
-**与 PR 17048 的分工。**双向强制关闭与 PR 17048（「feat(core): let the loop switches be forced off, not only on」，对 `main` 开启）重叠。两者按范围分工而非重复实现：本切片负责按入口解析、整值 `1`/`0` 与逗号列表文法、以及项目级 `.env` 排除；PR 17048 负责整值 `true`/`false` 拼写与 nightly `current` 腿钉住（参考腿导出 `0` 而非空值）。因此本切片今天只接受 `1`/`0` 作为整值，`true`/`false` 值在 17048 落地前回退到设置。后落地方负责协调共享站点——Config getter、四份设置副本与 `e2e.yml`。有两条约束贯穿分工：`true`/`false` 拼写必须保持仅整值（列表内的裸 `false`，如 `headless,false`，不得强制所有入口关闭——解析模块单测已对 `1`/`0` 钉住同一规则）；`current` 腿钉住必须在第一个入口默认值翻转之前落地。在那次翻转之前，参考腿的空值解析到全 `false` 默认值，所以该钉住对本切片不承重——本切片不翻转任何默认值。
+**与 PR 17048 的分工。** 双向强制关闭与 PR 17048（「feat(core): let the loop switches be forced off, not only on」，已合入）重叠。两者按范围分工而非重复实现：本切片负责按入口解析、整值 `1`/`0` 与逗号列表文法、以及项目级 `.env` 排除；PR 17048 负责整值 `true`/`false` 拼写与 nightly `current` 腿钉住（参考腿导出 `0` 而非空值）。因此本切片今天只接受 `1`/`0` 作为整值，`true`/`false` 值在 17048 落地前回退到设置。后落地方负责协调共享站点——Config getter、四份设置副本与 `e2e.yml`。有两条约束贯穿分工：`true`/`false` 拼写必须保持仅整值（列表内的裸 `false`，如 `headless,false`，不得强制所有入口关闭——解析模块单测已对 `1`/`0` 钉住同一规则）；`current` 腿钉住必须在第一个入口默认值翻转之前落地。在那次翻转之前，参考腿的空值解析到全 `false` 默认值，所以该钉住对本切片不承重——本切片不翻转任何默认值。
 
 ## 切片 3：loop 可见性
 
@@ -137,6 +140,6 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 
 ## 待解问题
 
-- ~~设置加载器是否会把 schema 默认值注入合并后的设置对象？~~ 准备切片 1 时已解决：不会——合并后的设置对未设置的键保持 undefined（`packages/cli/src/config/settings.test.ts:4624` 对 `goals.modelProposed` 钉住了这一点），所以运行时三态只需要 CLI 不再把未设置塌缩成 `false`。schema 保留 `default: false` 直到第一个入口默认值翻转：更早移除会经由 `nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:687`）把两个设置对话框的第一次切换从开启翻成关闭，因此 schema 默认值的移除推迟到那次翻转，不属于三态本身。headless 的翻转移除了它，并设置 `unsetToggleValue: true`，让第一次切换仍是开启。
+- ~~设置加载器是否会把 schema 默认值注入合并后的设置对象？~~ 准备切片 1 时已解决：不会——合并后的设置对未设置的键保持 undefined（`packages/cli/src/config/settings.test.ts:4679` 对 `goals.modelProposed` 钉住了这一点），所以运行时三态只需要 CLI 不再把未设置塌缩成 `false`。schema 保留 `default: false` 直到第一个入口默认值翻转：更早移除会经由 `nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:693`）把两个设置对话框的第一次切换从开启翻成关闭，因此 schema 默认值的移除推迟到那次翻转，不属于三态本身。headless 的翻转移除了它，并设置 `unsetToggleValue: true`，让第一次切换仍是开启。
 - ~~环境变量列表文法是否接受列表内的裸 `0`/`1` token（如 `1,acp=0`）？~~ 已定：不接受——整值 `1`/`0` 才表示「所有入口」，列表内的裸 `1`/`0` 无入口名会被丢弃；此行为已在用户可见文本中写明，并被解析模块单测钉住。
 - ~~#17029 的 speculation 读取点：切片 2 在它之前还是之后落地？~~ 已解决：#17029 已合入，其读取点传 `speculation`；保留本切片的必选 surface 签名并适配了调用点。

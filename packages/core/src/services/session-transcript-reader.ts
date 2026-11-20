@@ -312,6 +312,15 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   };
   fileHistorySnapshots?: FileHistorySnapshot[];
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
+  /** Damage warnings from the artifact rebuild, present even when no
+   * readable record produced a snapshot (an all-refused journal). The
+   * first-open seed gates on these like the load funnel does. */
+  artifactJournalWarnings?: readonly string[];
+  /** Whether the transcript read completed (no torn tail). The first-open
+   * projection seed gates on this exactly like the load seed's
+   * sourceReadComplete; sourcesUnavailable is broader (it also flags a
+   * damaged sources snapshot, which does not narrow artifact delivery). */
+  sourceReadComplete?: boolean;
   goalRecords: GoalRecoveryRecord[];
   goalRecoverySourceUuid?: string;
   initialTurn: number;
@@ -423,6 +432,10 @@ function buildManagedSessionRestoreProjection(
   const restoredFileHistory = fileHistory.finish();
   const runtime: SessionRuntimeResumeState = {
     apiHistory: apiHistory.finish(),
+    // The managed projection rebuilds from the committed journal in full,
+    // so the first-open seed's read-completeness gate holds by construction
+    // (keeps the seed's managed behavior identical to the load funnel's).
+    sourceReadComplete: true,
     ...(restoredTokenCounts ? { resumeTokenCounts: restoredTokenCounts } : {}),
     uiTelemetryEvents,
     ...(attributionSnapshot ? { attributionSnapshot } : {}),
@@ -4084,6 +4097,10 @@ export class SessionTranscriptReader {
         ? restoreSessionSources(sourceRecords, sessionId)
         : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
+      ...(artifacts.warningList().length > 0
+        ? { artifactJournalWarnings: artifacts.warningList() }
+        : {}),
+      sourceReadComplete: index.sourceReadComplete,
       goalRecords,
       ...(goalRecovery.selectedGoalRecovery.sourceUuid
         ? {

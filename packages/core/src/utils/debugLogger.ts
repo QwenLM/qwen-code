@@ -28,6 +28,15 @@ export interface DebugLogger {
   info: (...args: unknown[]) => void;
   warn: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
+  /**
+   * Best-effort WARN that reports whether this particular write reached the
+   * debug log file. Optional so logger mocks that only implement the base
+   * methods keep working.
+   */
+  warnWithDelivery?: (
+    onDelivery: (delivered: boolean) => void,
+    ...args: unknown[]
+  ) => void;
 }
 
 let ensureDebugDirPromise: Promise<void> | null = null;
@@ -63,6 +72,13 @@ function getActiveSession(): DebugLogSession | null {
   }
 
   return globalSession;
+}
+
+export function getActiveDebugSessionLogPath(): string | null {
+  const activeSessionId = getActiveSession()?.getSessionId();
+  return activeSessionId === undefined
+    ? null
+    : Storage.getDebugLogPath(activeSessionId);
 }
 
 function ensureDebugDirExists(): Promise<void> {
@@ -118,8 +134,10 @@ function writeLog(
   level: LogLevel,
   tag: string | undefined,
   args: unknown[],
+  onDelivery?: (delivered: boolean) => void,
 ): void {
   if (!isDebugLogFileEnabled()) {
+    onDelivery?.(false);
     return;
   }
 
@@ -134,6 +152,13 @@ function writeLog(
   // logs right now, not just the last Config that was constructed.
   updateLatestDebugLogAlias(sessionId);
 
+  let reportedDelivery = false;
+  const reportDelivery = (delivered: boolean) => {
+    if (reportedDelivery) return;
+    reportedDelivery = true;
+    onDelivery?.(delivered);
+  };
+
   void ensureDebugDirExists()
     // Debug logs are best-effort diagnostic output: 1050+ call sites,
     // default-enabled, fire-and-forget. Per-line fsync would force
@@ -144,9 +169,15 @@ function writeLog(
     // (JSONL session writes via writeLine/writeLineSync DO use
     // flush:true — those are the actual closure target.)
     .then(() => fs.appendFile(logFilePath, line, 'utf8'))
-    .catch(() => {
-      hasWriteFailure = true;
-    });
+    .then(
+      () => reportDelivery(true),
+      () => {
+        hasWriteFailure = true;
+        reportDelivery(false);
+      },
+    )
+    // A throwing delivery observer is not a failed filesystem append.
+    .catch(() => {});
 }
 
 /**
@@ -297,6 +328,14 @@ export function createDebugLogger(tag?: string): DebugLogger {
       const session = getActiveSession();
       if (!session) return;
       writeLog(session, 'WARN', tag, args);
+    },
+    warnWithDelivery: (onDelivery, ...args) => {
+      const session = getActiveSession();
+      if (!session) {
+        onDelivery(false);
+        return;
+      }
+      writeLog(session, 'WARN', tag, args, onDelivery);
     },
     error: (...args: unknown[]) => {
       const session = getActiveSession();

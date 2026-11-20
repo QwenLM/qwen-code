@@ -52,15 +52,15 @@ public class WakeRecoveryStoreTest {
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id,"
                         + " session_id, harness_session_id, head_kind, state, journal_revision,"
                         + " committed_sequence, compacted_through_revision, writer_generation, activation_epoch,"
-                        + " storage_version, writer_lease_until, gmt_create, gmt_modified)"
+                        + " writer_lease_until, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, 'tenant', 'workspace', 'session', 'session', 'MANAGED_SESSION',"
-                        + " 'ACTIVE', 0, 0, 0, 1, 0, 1, 1, 1, 1)",
+                        + " 'ACTIVE', 0, 0, 0, 1, 0, 1, 1, 1)",
                 ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key("session"));
     }
 
     @Test
     void discoversEverySourceWithoutMqAndOnlyMatchingSettlementConsumesIt() {
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message", "loop")) {
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message", "loop", "pr_event")) {
             append("input.accepted", "turn-" + source, source);
         }
         // Cross the journal page boundary; neither an attempt nor a different Turn settles this input.
@@ -70,7 +70,7 @@ public class WakeRecoveryStoreTest {
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
                 + " wake_covered_sequence, gmt_modified) VALUES ('tenant', 'session', 'SESSION', '', 999, 1)");
         assertThat(store.hasPendingInput(candidate())).contains(true);
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "loop")) {
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "loop", "pr_event")) {
             append("turn.settled", "turn-" + source, null);
             assertThat(store.hasPendingInput(candidate())).contains(true);
         }
@@ -158,7 +158,7 @@ public class WakeRecoveryStoreTest {
     }
 
     @Test
-    void liveWritersAndLifecycleAndCsiAndWrongScopesNeverBecomeCandidates() {
+    void liveWritersAndLifecycleAndWrongScopesNeverBecomeCandidates() {
         assertThat(store.findPending("another-workspace", 8)).isEmpty();
         for (String status : List.of("CLOSING", "CLOSED")) {
             jdbc.update("UPDATE ma_session SET status = ?", status);
@@ -166,9 +166,7 @@ public class WakeRecoveryStoreTest {
         }
         jdbc.update("UPDATE ma_session SET status = 'ACTIVE', retired_at = 1");
         assertThat(store.findPending("workspace", 8)).isEmpty();
-        jdbc.update("UPDATE ma_session SET retired_at = NULL, runtime_request_key = ?", "a".repeat(64));
-        assertThat(store.findPending("workspace", 8)).isEmpty();
-        jdbc.update("UPDATE ma_session SET runtime_request_key = NULL");
+        jdbc.update("UPDATE ma_session SET retired_at = NULL");
         for (String state : List.of("DELETING", "DELETED")) {
             jdbc.update("UPDATE ma_session_head SET state = ?", state);
             assertThat(store.findPending("workspace", 8)).isEmpty();
@@ -179,9 +177,7 @@ public class WakeRecoveryStoreTest {
         var sealed = candidate();
         assertThat(store.claim(sealed)).isTrue();
         jdbc.update("UPDATE ma_session_head SET wake_retry_at = 0");
-        jdbc.update("UPDATE ma_session SET runtime_request_key = ?", "a".repeat(64));
-        assertThat(store.claim(sealed)).isFalse();
-        jdbc.update("UPDATE ma_session SET runtime_request_key = NULL, retired_at = 1");
+        jdbc.update("UPDATE ma_session SET retired_at = 1");
         assertThat(store.claim(sealed)).isFalse();
         jdbc.update("UPDATE ma_session SET retired_at = NULL, session_kind = 'CONTROL'");
         assertThat(store.claim(sealed)).isFalse();
@@ -234,7 +230,7 @@ public class WakeRecoveryStoreTest {
 
     @Test
     void hintOnlyMarksSupportedInputAdmissions() {
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message", "loop")) {
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message", "loop", "pr_event")) {
             assertThat(JdbcWakeRecoveryStore.isWakeInput(event("input.accepted", "turn", source))).isTrue();
         }
         assertThat(JdbcWakeRecoveryStore.isWakeInput(event("input.accepted", "turn", "user"))).isFalse();
@@ -251,9 +247,9 @@ public class WakeRecoveryStoreTest {
             jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, session_id,"
                             + " harness_session_id, workspace_id, head_kind, state, journal_revision,"
                             + " committed_sequence, compacted_through_revision, writer_generation,"
-                            + " activation_epoch, storage_version, gmt_create, gmt_modified)"
+                            + " activation_epoch, gmt_create, gmt_modified)"
                             + " SELECT tenant_key, ?, tenant_id, ?, ?, workspace_id, head_kind, state,"
-                            + " journal_revision, committed_sequence, compacted_through_revision, 1, 0, 1, 1, 1"
+                            + " journal_revision, committed_sequence, compacted_through_revision, 1, 0, 1, 1"
                             + " FROM ma_session_head WHERE session_id = ?",
                     "0".repeat(60) + String.format("%04d", index), id, id, "session");
         }
@@ -412,10 +408,10 @@ public class WakeRecoveryStoreTest {
                 + " VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', 1, 1)", session);
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id,"
                         + " session_id, harness_session_id, head_kind, state, journal_revision, committed_sequence,"
-                        + " compacted_through_revision, writer_generation, activation_epoch, storage_version,"
+                        + " compacted_through_revision, writer_generation, activation_epoch,"
                         + " writer_lease_until, gmt_create, gmt_modified) SELECT tenant_key, ?, tenant_id, workspace_id,"
                         + " ?, ?, head_kind, state, journal_revision, committed_sequence, compacted_through_revision,"
-                        + " writer_generation, activation_epoch, storage_version, writer_lease_until, gmt_create, gmt_modified"
+                        + " writer_generation, activation_epoch, writer_lease_until, gmt_create, gmt_modified"
                         + " FROM ma_session_head WHERE session_id = ?",
                 ManagedSchemaKeys.key(session), session, session, "session");
         for (var row : jdbc.queryForList("SELECT * FROM ma_session_journal_tx WHERE session_id = ?", "session")) {

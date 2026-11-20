@@ -5,16 +5,12 @@ import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.event.EventTransportConsumer.MaterializeOutcome;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcTransportConsumerStore;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.apache.rocketmq.client.apis.message.MessageId;
 import org.apache.rocketmq.client.apis.message.MessageView;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -99,75 +95,6 @@ public class EventTransportConsumerSqlTest {
 
         verify(harness, times(2)).activateForWake(TENANT, session);
         assertThat(wakeWatermark(session)).isEqualTo(5);
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    public void
-            aPrivateWakeCannotInsertOrAdvanceProgressOrActivate(boolean requestPinned) {
-        String session = session("ACTIVE");
-        if (requestPinned) {
-            jdbc.update(
-                    "UPDATE ma_session SET runtime_request_key = ?"
-                            + " WHERE tenant_id = ? AND session_id = ?",
-                    DIGEST,
-                    TENANT,
-                    session);
-        } else {
-            jdbc.update(
-                    "UPDATE ma_session SET tool_profile = ?"
-                            + " WHERE tenant_id = ? AND session_id = ?",
-                    CsiFilesRetirementProfile.PROFILE,
-                    TENANT,
-                    session);
-        }
-        head(session, "ACTIVE", 5, -60);
-        var sessionBefore =
-                jdbc.queryForMap(
-                        "SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
-                        TENANT,
-                        session);
-        var headBefore =
-                jdbc.queryForMap(
-                        "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
-                        TENANT,
-                        session);
-        assertThat(sessionBefore.get("is_csi_guard")).isEqualTo(true);
-
-        deliver(wake(session, WORKSPACE, 3));
-        assertThat(wakeWatermark(session)).isNull();
-
-        jdbc.update(
-                "UPDATE ma_event_stream SET wake_covered_sequence = 1 WHERE tenant_id = ?"
-                        + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
-                TENANT,
-                session);
-        var progressBefore =
-                jdbc.queryForMap(
-                        "SELECT " + ManagedSchemaProjection.EVENT_STREAM.columns() + " FROM ma_event_stream WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
-                        TENANT,
-                        session);
-        deliver(wake(session, WORKSPACE, 5));
-        assertThat(
-                        jdbc.queryForMap(
-                                "SELECT " + ManagedSchemaProjection.EVENT_STREAM.columns() + " FROM ma_event_stream WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
-                                TENANT,
-                                session))
-                .isEqualTo(progressBefore);
-        assertThat(
-                        jdbc.queryForMap(
-                                "SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
-                                TENANT,
-                                session))
-                .isEqualTo(sessionBefore);
-        assertThat(
-                        jdbc.queryForMap(
-                                "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
-                                TENANT,
-                                session))
-                .isEqualTo(headBefore);
-        verify(harness, never()).activateForWake(anyString(), anyString());
-        assertThat(activated).isEmpty();
     }
 
     @Test
@@ -419,12 +346,12 @@ public class EventTransportConsumerSqlTest {
     private void head(String session, String state, long committed,
             Integer leaseOffsetSeconds, String workspace) {
         jdbc.update("INSERT INTO ma_session_head (tenant_id,"
-                + " workspace_id, session_id, storage_version, state,"
+                + " workspace_id, session_id, state,"
                 + " writer_generation, writer_id, writer_lease_until,"
                 + " journal_revision, committed_sequence, activation_epoch,"
                 + " compacted_through_revision, recovery_status, gmt_create,"
                 + " gmt_modified, tenant_key, harness_key, harness_session_id, head_kind)"
-                + " VALUES (?, ?, ?, 1, ?, 1, 'writer', "
+                + " VALUES (?, ?, ?, ?, 1, 'writer', "
                 + (leaseOffsetSeconds == null ? "NULL"
                         : "(" + ManagedSchemaTime.SQL_NOW + " + " + leaseOffsetSeconds * 1000L + ")")
                 + ", 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, 'MANAGED_SESSION')",
