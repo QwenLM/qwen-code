@@ -84,12 +84,14 @@ import {
   GitWorktreeService,
   readWorktreeSessionMarker,
   isSessionRuntimeActive,
+  worktreeBranchForSlug,
   type GoalTurnHost,
 } from '@qwen-code/qwen-code-core';
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
   computeResumedPromptCountSeed,
+  computeResumedUserTurnCount,
 } from './utils/resumeHistoryUtils.js';
 import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
@@ -1126,6 +1128,7 @@ export const AppContainer = (props: AppContainerProps) => {
             originalCwd: worktreeSession.originalCwd,
             originalBranch: worktreeSession.originalBranch,
             originalHeadCommit: worktreeSession.originalHeadCommit,
+            worktreeBase: worktreeSession.worktreeBase,
           }
         : null,
     [worktreeSession],
@@ -1268,17 +1271,18 @@ export const AppContainer = (props: AppContainerProps) => {
             resumedSessionData.conversation.messages,
             config.getSessionId(),
           ),
+          computeResumedUserTurnCount(resumedSessionData.conversation.messages),
         );
       }
 
       // Restore the transcript before Mod diagnostics, without making input
-      // or Mod startup wait for asynchronous session recovery. Reply rows are
-      // offered only where the viewport can draw a committed row again; the
-      // terminal scrollback cannot.
+      // or Mod startup wait for asynchronous session recovery. Reply and
+      // thinking rows are offered only where the viewport can draw a committed
+      // row again; the terminal scrollback cannot.
       void getInteractiveModSession(config)
         ?.initialize(
           useTerminalBuffer
-            ? ['AbovePrompt', 'AssistantMessage']
+            ? ['AbovePrompt', 'AssistantMessage', 'Thinking']
             : ['AbovePrompt'],
           { prompts: true, runsPrompts: true },
         )
@@ -2457,6 +2461,12 @@ export const AppContainer = (props: AppContainerProps) => {
           const result = await svc.removeUserWorktree(activeWorktree.slug, {
             deleteBranch: true,
             forceDeleteBranch: true,
+            branchOwned:
+              activeWorktree.branch !== '' &&
+              activeWorktree.branch ===
+                worktreeBranchForSlug(activeWorktree.slug),
+            baseCommit:
+              activeWorktree.worktreeBase ?? activeWorktree.originalHeadCommit,
           });
           // removeUserWorktree returns {success, error} on failure — it
           // does NOT throw — so the previous try/catch never tripped on
@@ -2730,7 +2740,7 @@ export const AppContainer = (props: AppContainerProps) => {
   useContextualTips({
     streamingState,
     lastPromptTokenCount: sessionStats.lastPromptTokenCount,
-    sessionPromptCount: sessionStats.promptCount,
+    sessionPromptCount: sessionStats.userPromptCount,
     config,
     tipHistory,
     addItem: historyManager.addItem,

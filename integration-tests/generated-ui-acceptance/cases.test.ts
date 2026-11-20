@@ -529,7 +529,6 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               'persists-after-reload',
               'persists-after-reopen',
               'repeated-undo',
-              'save-acknowledged',
             ].map((id) => `checklist.${id}`),
           );
           // The reopened tab stays open while it is read, then is closed.
@@ -567,8 +566,6 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           expect(status('edit')).toBe(
             mode === 'no-edit' || mode === 'inert-edit' ? 'fail' : 'pass',
           );
-          // Nothing the host offers acknowledges a save yet.
-          expect(status('save-acknowledged')).toBe('not-applicable');
         } finally {
           await context.close();
         }

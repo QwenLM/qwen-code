@@ -52,6 +52,8 @@ public class ManagedSessionStoreController {
     private final com.alibaba.qwen.code.managedagent.persistence.JdbcSessionResourceObjects resourceObjects;
     @org.springframework.beans.factory.annotation.Autowired
     private com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs modelConfigs;
+    @org.springframework.beans.factory.annotation.Value("${qwen.managed-agent.wake-dispatch.enabled:false}")
+    private boolean wakeDispatch;
 
     public ManagedSessionStoreController(JdbcManagedSessionStore store, JdbcManagedUserMessageStore userMessages,
             ManagedNativeJournalSnapshots snapshots,
@@ -146,8 +148,8 @@ public class ManagedSessionStoreController {
                     String writerToken,
             @Valid @RequestBody AcquireWriterRequest request,
             @RequestHeader HttpHeaders headers) {
-        return store.acquireWriter(tenant.tenantId(), sessionId,
-                writerToken, request, lifecycleAuthority(headers));
+        return advertise(store.acquireWriter(tenant.tenantId(), sessionId,
+                writerToken, request, lifecycleAuthority(headers)));
     }
 
     @PostMapping("/writers:renew")
@@ -157,8 +159,12 @@ public class ManagedSessionStoreController {
                     String writerToken,
             @Valid @RequestBody RenewWriterRequest request,
             @RequestHeader HttpHeaders headers) {
-        return store.renewWriter(tenant.tenantId(), sessionId,
-                writerToken, request, lifecycleAuthority(headers));
+        return advertise(store.renewWriter(tenant.tenantId(), sessionId,
+                writerToken, request, lifecycleAuthority(headers)));
+    }
+
+    private WriterGrant advertise(WriterGrant grant) {
+        return wakeDispatch && grant != null ? grant.withWakeDispatch() : grant;
     }
 
     @PostMapping("/writers:seal")

@@ -596,10 +596,10 @@ export class Query implements AsyncIterable<SDKMessage> {
       return { behavior: 'deny', message: 'Denied' };
     }
 
+    let timeoutId: NodeJS.Timeout | undefined;
     try {
       const canUseToolTimeout =
         this.options.timeout?.canUseTool ?? DEFAULT_CAN_USE_TOOL_TIMEOUT;
-      let timeoutId: NodeJS.Timeout | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutId = setTimeout(
           () => reject(new Error('Permission callback timeout')),
@@ -616,10 +616,6 @@ export class Query implements AsyncIterable<SDKMessage> {
         ),
         timeoutPromise,
       ]);
-
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
 
       if (result.behavior === 'allow') {
         return {
@@ -651,6 +647,10 @@ export class Query implements AsyncIterable<SDKMessage> {
         behavior: 'deny',
         message: `Permission check failed: ${errorMessage}`,
       };
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
     }
   }
 
@@ -900,6 +900,16 @@ export class Query implements AsyncIterable<SDKMessage> {
       this.abortHandler = null;
     }
 
+    // Start teardown so the transport can record an already-visible exit
+    // failure before we settle pending requests. Still clean them up if a
+    // transport throws synchronously instead of returning a rejected promise.
+    let closing: Promise<void>;
+    try {
+      closing = this.transport.close();
+    } catch (error) {
+      closing = Promise.reject(error);
+    }
+
     // Use transport's exit error if available, otherwise use generic error
     const transportError = this.transport.exitError;
     const rejectionError = transportError ?? new Error('Query is closed');
@@ -917,7 +927,7 @@ export class Query implements AsyncIterable<SDKMessage> {
     }
     this.pendingMcpResponses.clear();
 
-    await this.transport.close();
+    await closing;
 
     /**
      * Complete input stream - check if aborted first.
