@@ -1247,6 +1247,47 @@ test('pastes long plain text as editable composer content @smoke', async ({
   );
 });
 
+test('allows drafting while session history loads and sends after replay @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const loadPath = `/session/${encodeURIComponent(scenario.sessionId)}/load`;
+  const loadGate = Promise.withResolvers<void>();
+  await page.route(
+    (url) => url.pathname === loadPath,
+    async (route) => {
+      await loadGate.promise;
+      await route.fallback();
+    },
+  );
+  const loadStarted = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === loadPath,
+  );
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await loadStarted;
+
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  const send = page.locator('[data-web-shell-composer-submit]');
+  const draft = 'Draft written while history is loading';
+  await expect(editor).toBeEditable();
+  await fillComposer(page, draft);
+  await expect(send).toBeDisabled();
+  await page.keyboard.press('Enter');
+  await expect(editor).toHaveText(draft);
+  expect(daemon.promptRequests()).toHaveLength(0);
+
+  loadGate.resolve();
+  await completeReplay(page, daemon, scenario.sessionId);
+  await expect(editor).toHaveText(draft);
+  await expect(send).toBeEnabled();
+  await send.click();
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  const request = firstRequest(daemon.promptRequests());
+  expect(request.path).toBe(`/session/${scenario.sessionId}/prompt`);
+  expectPromptBodyToContainText(requestBodyRecord(request), draft);
+});
+
 test('keeps later SSE connections alive when an earlier one is cancelled @smoke', async ({
   page,
 }, testInfo) => {

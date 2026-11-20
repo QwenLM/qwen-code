@@ -402,6 +402,7 @@ type ChatEditorTestProps = {
   isPreparing?: boolean;
   cancelArmed?: boolean;
   disabled?: boolean;
+  submitDisabled?: boolean;
   dialogOpen?: boolean;
   onToggleShortcuts?: () => void;
   reasoning?: {
@@ -32102,7 +32103,8 @@ describe('App session callbacks', () => {
     });
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(editorFocus).not.toHaveBeenCalled();
-    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+    expect(testState.latestChatEditorProps?.submitDisabled).toBe(true);
     expect(testState.latestChatEditorProps?.onSubmit('must stay on A')).toBe(
       false,
     );
@@ -32116,6 +32118,7 @@ describe('App session callbacks', () => {
       await load.promise;
     });
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(testState.latestChatEditorProps?.submitDisabled).toBe(false);
     expect(editorFocus).toHaveBeenCalledOnce();
   });
 

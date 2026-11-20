@@ -5,6 +5,8 @@
  */
 
 import {
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   rmSync,
@@ -12,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MANAGED_OUTBOUND_LIMIT } from '@qwen-code/channel-base';
 import type { ManagedInboundEvent } from '@qwen-code/channel-base';
@@ -31,11 +33,23 @@ import {
 // Let one test force a real write failure inside store.save (after the temp
 // file is opened) so the save-failure catch/finally actually executes; every
 // other call passes through to the real fs.
-const fsControl = vi.hoisted(() => ({ failWrite: false }));
+const fsControl = vi.hoisted(() => ({
+  failWrite: false,
+  failRename: false,
+  readdirOrder: null as string[] | null,
+}));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    readdirSync: ((...args: Parameters<typeof actual.readdirSync>) => {
+      if (fsControl.readdirOrder) {
+        return fsControl.readdirOrder as unknown as ReturnType<
+          typeof actual.readdirSync
+        >;
+      }
+      return actual.readdirSync(...args);
+    }) as typeof actual.readdirSync,
     writeFileSync: ((...args: Parameters<typeof actual.writeFileSync>) => {
       if (fsControl.failWrite) {
         throw Object.assign(
@@ -45,6 +59,14 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       return actual.writeFileSync(...args);
     }) as typeof actual.writeFileSync,
+    renameSync: ((...args: Parameters<typeof actual.renameSync>) => {
+      if (fsControl.failRename) {
+        throw Object.assign(new Error('EACCES: permission denied, rename'), {
+          code: 'EACCES',
+        });
+      }
+      return actual.renameSync(...args);
+    }) as typeof actual.renameSync,
   };
 });
 
@@ -484,7 +506,7 @@ describe('ManagedGithubStateStore', () => {
     expect(store.load()).toEqual(state);
   });
 
-  it('refuses to start over an unreadable or invalid state', () => {
+  it('refuses to start over a corrupt or invalid state, naming the file', () => {
     const store = new ManagedGithubStateStore(
       'gh-1',
       tempCwd(),
@@ -492,9 +514,40 @@ describe('ManagedGithubStateStore', () => {
     );
     store.save(freshState());
     writeFileSync(store.file, '{broken');
-    expect(() => store.load()).toThrow(/unreadable or invalid/);
+    let err: Error | undefined;
+    try {
+      store.load();
+    } catch (error) {
+      err = error as Error;
+    }
+    expect(err).toBeDefined();
+    expect(err!.message).toMatch(/is not valid JSON/);
+    expect(err!.message).toContain(store.file);
+    expect(err!.cause).toBeDefined();
     writeFileSync(store.file, JSON.stringify({ version: 99 }));
-    expect(() => store.load()).toThrow(/unreadable or invalid/);
+    expect(() => store.load()).toThrow(/is invalid/);
+    expect(() => store.load()).toThrow(store.file);
+  });
+
+  it('an I/O read failure is distinct from corrupt JSON and keeps the cause', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-1',
+      tempCwd(),
+      'https://api.github.com',
+    );
+    // A directory at the ledger path makes the read fail (EISDIR), which must
+    // be distinguishable from a merely corrupt file.
+    mkdirSync(store.file, { recursive: true });
+    let err: Error | undefined;
+    try {
+      store.load();
+    } catch (error) {
+      err = error as Error;
+    }
+    expect(err).toBeDefined();
+    expect(err!.message).toMatch(/could not be read/);
+    expect(err!.message).toContain(store.file);
+    expect((err!.cause as NodeJS.ErrnoException).code).toBe('EISDIR');
   });
 
   it('writes the directory 0700 and the file 0600', () => {
@@ -555,5 +608,568 @@ describe('ManagedGithubStateStore', () => {
     expect(a.directory).not.toBe(b.directory);
     expect(a.directory).not.toBe(c.directory);
     expect(a.directory).toMatch(/github-[0-9a-f]{16}$/);
+  });
+
+  it('keys the ledger file by registration identity beneath the shared entry directory', () => {
+    const cwd = tempCwd();
+    const a = new ManagedGithubStateStore(
+      'gh-1',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    const b = new ManagedGithubStateStore(
+      'gh-1',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-b|chan-1|actor|ws|.',
+    );
+    // The connection lock stays per entry: both registrations share ONE
+    // directory, but the ledger file beneath it is identity-keyed.
+    expect(a.directory).toBe(b.directory);
+    expect(a.file).not.toBe(b.file);
+    expect(basename(a.file)).toMatch(/^managed-state-[0-9a-f]{16}\.json$/);
+    expect(dirname(a.file)).toBe(a.directory);
+    // A pending claim staged under A is never loaded under B.
+    const state = freshState();
+    state.pending = [
+      {
+        eventId: 'github:IC_1',
+        event: event('github:IC_1'),
+        notificationThreadId: 'n-1',
+      },
+    ];
+    a.save(state);
+    expect(a.load()?.pending?.[0]?.eventId).toBe('github:IC_1');
+    expect(b.load()).toBeUndefined();
+  });
+
+  it('a workspace change within one tenant isolates the ledger', () => {
+    // One shared cwd so the workspace-scope parent is identical: the file
+    // difference must come from the identity key alone, not from separate
+    // tempCwd() parents (R2-4). A constant ledger name must red this.
+    const cwd = tempCwd();
+    const a = new ManagedGithubStateStore(
+      'gh-1',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    const b = new ManagedGithubStateStore(
+      'gh-1',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws-2|.',
+    );
+    expect(a.directory).toBe(b.directory);
+    expect(a.file).not.toBe(b.file);
+  });
+
+  it('reports a stranded legacy ledger on upgrade, without adopting it', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-legacy',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    // Asymmetric counts (2 pending, 3 outbound) so swapping the two count
+    // assignments or the two interpolations in the adapter notice reds this.
+    const legacy = {
+      ...freshState(),
+      pending: [
+        {
+          eventId: 'github:IC_1',
+          event: event('github:IC_1'),
+          notificationThreadId: 'n-1',
+        },
+        {
+          eventId: 'github:IC_2',
+          event: event('github:IC_2'),
+          notificationThreadId: 'n-2',
+        },
+      ],
+      outbound: [
+        { deliveryId: 'd-1', ordinal: 0 },
+        { deliveryId: 'd-2', ordinal: 1 },
+        { deliveryId: 'd-3', ordinal: 2 },
+      ],
+    };
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify(legacy),
+    );
+    const stranded = store.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.path).toBe(join(store.directory, 'managed-state.json'));
+    expect(stranded!.pending).toBe(2);
+    expect(stranded!.outbound).toBe(3);
+    expect(stranded!.readable).toBe(true);
+    // Reported, not adopted: load() still returns undefined (no keyed ledger).
+    expect(store.load()).toBeUndefined();
+    // Once archived, the legacy is no longer detected.
+    const archived = store.archiveStrandedLegacy();
+    expect(archived).toBeDefined();
+    expect(store.strandedLegacyLedger()).toBeUndefined();
+  });
+
+  it('still reports a legacy ledger staged after a rollback (keyed ledger exists)', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-rollback',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    store.save(freshState());
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({
+        ...freshState(),
+        pending: [
+          {
+            eventId: 'github:IC_rb',
+            event: event('github:IC_rb'),
+            notificationThreadId: 'n-rb',
+          },
+        ],
+      }),
+    );
+    const stranded = store.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.pending).toBe(1);
+    expect(stranded!.outbound).toBe(0);
+    expect(store.load()).toEqual(freshState());
+  });
+
+  it.each([
+    ['{not json', false],
+    ['null', false],
+    ['[]', false],
+    ['{}', false],
+  ])(
+    'a corrupt or non-ledger legacy (%s) is flagged unreadable, not a loss-free empty',
+    (raw, readable) => {
+      const store = new ManagedGithubStateStore(
+        'gh-corrupt',
+        tempCwd(),
+        'https://api.github.com',
+        'cp|tenant-a|chan-1|actor|ws|.',
+      );
+      mkdirSync(store.directory, { recursive: true });
+      writeFileSync(join(store.directory, 'managed-state.json'), raw);
+      const stranded = store.strandedLegacyLedger();
+      expect(stranded).toBeDefined();
+      expect(stranded!.pending).toBe(0);
+      expect(stranded!.outbound).toBe(0);
+      // A parseable non-ledger (null/[]/{}) is not a quiescent empty ledger:
+      // its claims are unknown, so it must not render as a loss-free 0/0
+      // (deferred item 7).
+      expect(stranded!.readable).toBe(readable);
+    },
+  );
+
+  it('an unreadable legacy ledger (directory at the path) is flagged, not empty', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-eisdir',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    mkdirSync(join(store.directory, 'managed-state.json'));
+    const stranded = store.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.readable).toBe(false);
+  });
+
+  it('no stranded legacy ledger when none exists', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-none',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    expect(store.strandedLegacyLedger()).toBeUndefined();
+    expect(store.archiveStrandedLegacy()).toBeUndefined();
+    expect(existsSync(join(store.directory, 'managed-state.json'))).toBe(false);
+  });
+
+  it('surfaces the legacy notification watermark, null when unreadable or cursor-less', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-watermark',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    const legacyPath = join(store.directory, 'managed-state.json');
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        ...freshState(),
+        cursor: {
+          lastProcessedAt: '2026-11-19T09:00:00Z',
+          dispatchedComments: [],
+        },
+      }),
+    );
+    expect(store.strandedLegacyLedger()!.watermark).toBe(
+      '2026-11-19T09:00:00Z',
+    );
+    // A cursor-less legacy has no watermark to name.
+    writeFileSync(legacyPath, JSON.stringify(freshState()));
+    expect(store.strandedLegacyLedger()!.watermark).toBeNull();
+    // A non-string watermark is not a timestamp: the typeof guard must reject
+    // it (a number here would otherwise be named as if it were a date).
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        ...freshState(),
+        cursor: { lastProcessedAt: 12345, dispatchedComments: [] },
+      }),
+    );
+    expect(store.strandedLegacyLedger()!.watermark).toBeNull();
+    // An unreadable legacy cannot surface a watermark.
+    writeFileSync(legacyPath, '{not json');
+    expect(store.strandedLegacyLedger()!.watermark).toBeNull();
+  });
+
+  it('merges entry-scoped watch.episodes, sanitized to the validator bound', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-episodes',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    const legacyPath = join(store.directory, 'managed-state.json');
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        ...freshState(),
+        watch: {
+          prs: {},
+          episodes: {
+            'owner/repo#7': 5,
+            'owner/repo#8': 0,
+            bad: 'x',
+            // Non-safe-integer counters must be dropped too: 2^53 is integer-
+            // valued and >= 1 but NOT a safe integer, and 1.5 is not an integer.
+            'owner/repo#9': Number.MAX_SAFE_INTEGER + 1,
+            'owner/repo#10': 1.5,
+          },
+        },
+      }),
+    );
+    // Only safe integers >= 1 are carried; the rest re-baseline (R2-2). The
+    // 2^53 case witnesses the Number.isSafeInteger half specifically.
+    expect(store.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 5 });
+    expect(store.entryWatchEpisodes().skipped).toEqual([]);
+    // A legacy without watch carries no episodes.
+    writeFileSync(legacyPath, JSON.stringify(freshState()));
+    expect(store.entryWatchEpisodes().episodes).toBeUndefined();
+    // An unreadable legacy carries no episodes, and its name is surfaced in
+    // skipped so the caller can log the lost counter source (deferred item 8).
+    writeFileSync(legacyPath, '{not json');
+    expect(store.entryWatchEpisodes().episodes).toBeUndefined();
+    expect(store.entryWatchEpisodes().skipped).toEqual([legacyPath]);
+    // No directory at all is best-effort undefined, never a throw.
+    const absent = new ManagedGithubStateStore(
+      'gh-episodes-absent',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    expect(absent.entryWatchEpisodes().episodes).toBeUndefined();
+    expect(absent.entryWatchEpisodes().skipped).toEqual([]);
+  });
+
+  it('resumes the episode counters from the archive after the legacy is renamed away (R3-1)', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-episodes-archive',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({
+        ...freshState(),
+        watch: { prs: {}, episodes: { 'owner/repo#7': 5 } },
+      }),
+    );
+    expect(store.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 5 });
+    // Registration A archives the legacy; a later registration B must still
+    // resume the counters from the .stranded-* archive, not restart at 0.
+    const archived = store.archiveStrandedLegacy();
+    expect(archived).toBeDefined();
+    expect(existsSync(join(store.directory, 'managed-state.json'))).toBe(false);
+    expect(store.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 5 });
+  });
+
+  it('merges episode counters Math.max across sibling registrations of one entry (R3-1)', () => {
+    const cwd = tempCwd();
+    const a = new ManagedGithubStateStore(
+      'gh-merge',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    const b = new ManagedGithubStateStore(
+      'gh-merge',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-b|chan-1|actor|ws|.',
+    );
+    expect(a.directory).toBe(b.directory);
+    expect(a.file).not.toBe(b.file);
+    a.save({
+      ...freshState(),
+      watch: { prs: {}, episodes: { 'owner/repo#7': 5, 'owner/repo#8': 2 } },
+    });
+    b.save({
+      ...freshState(),
+      watch: { prs: {}, episodes: { 'owner/repo#7': 3, 'owner/repo#9': 9 } },
+    });
+    // The entry-scoped merge takes the max per key across both ledgers, so
+    // neither registration re-derives an already-admitted input id.
+    const expected = {
+      'owner/repo#7': 5,
+      'owner/repo#8': 2,
+      'owner/repo#9': 9,
+    };
+    expect(a.entryWatchEpisodes().episodes).toEqual(expected);
+    expect(b.entryWatchEpisodes().episodes).toEqual(expected);
+  });
+
+  it('returns the full entry merge uncapped — the adapter owns the persisted bound (R7-1)', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-episodes-cap',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    const episodes: Record<string, number> = {};
+    for (let i = 0; i <= MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT; i++) {
+      episodes[`owner/repo#${i}`] = 1;
+    }
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({ ...freshState(), watch: { prs: {}, episodes } }),
+    );
+    const merged = store.entryWatchEpisodes().episodes!;
+    // The carry SOURCE is not capped: capping here would discard recoverable
+    // counters before the adapter can place them non-destructively under the
+    // validator's bound. Every counter is offered, head and tail alike.
+    expect(Object.keys(merged).length).toBe(
+      MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT + 1,
+    );
+    expect(merged['owner/repo#0']).toBe(1);
+    expect(merged[`owner/repo#${MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT}`]).toBe(
+      1,
+    );
+  });
+
+  it('carries a counter whose only home is a prs baseline episode (R7)', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-episodes-prs',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    // The watermark was evicted by the live cap; the baseline still holds it.
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({
+        ...freshState(),
+        watch: { prs: { 'owner/repo#7': { headSha: 'sha-a', episode: 9 } } },
+      }),
+    );
+    expect(store.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 9 });
+  });
+
+  it('the carry continues past an unreadable source to later readable ones (R7)', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-continue',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    const corrupt = 'managed-state-0000000000000000.json';
+    const readable = 'managed-state-ffffffffffffffff.json';
+    writeFileSync(join(store.directory, corrupt), '{not json');
+    writeFileSync(
+      join(store.directory, readable),
+      JSON.stringify({
+        ...freshState(),
+        watch: { prs: {}, episodes: { 'owner/repo#7': 5 } },
+      }),
+    );
+    // Force the corrupt source to be enumerated FIRST: a `break` would stop
+    // there and lose the readable source that follows; `continue` carries it.
+    fsControl.readdirOrder = [corrupt, readable];
+    try {
+      const { episodes, skipped } = store.entryWatchEpisodes();
+      expect(episodes).toEqual({ 'owner/repo#7': 5 });
+      expect(skipped).toEqual([join(store.directory, corrupt)]);
+    } finally {
+      fsControl.readdirOrder = null;
+    }
+  });
+
+  it('the merge is Math.max, not last-wins, in either read order (R7)', () => {
+    const cwd = tempCwd();
+    const a = new ManagedGithubStateStore(
+      'gh-max',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    const b = new ManagedGithubStateStore(
+      'gh-max',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-b|chan-1|actor|ws|.',
+    );
+    a.save({
+      ...freshState(),
+      watch: { prs: {}, episodes: { 'owner/repo#7': 9 } },
+    });
+    b.save({
+      ...freshState(),
+      watch: { prs: {}, episodes: { 'owner/repo#7': 3 } },
+    });
+    // Read the HIGHER value first: a last-wins merge would overwrite it with 3.
+    fsControl.readdirOrder = [basename(a.file), basename(b.file)];
+    try {
+      expect(a.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 9 });
+    } finally {
+      fsControl.readdirOrder = null;
+    }
+    // The reverse order keeps the max too.
+    fsControl.readdirOrder = [basename(b.file), basename(a.file)];
+    try {
+      expect(a.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 9 });
+    } finally {
+      fsControl.readdirOrder = null;
+    }
+  });
+
+  it('counts the legacy watch.prs queues so a queued transition is not a quiescent 0 pending (R3-1)', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-watch-pending',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    const legacyPath = join(store.directory, 'managed-state.json');
+    const queued = {
+      key: 'prw:ci_failure:owner/repo#9:sha-h:1',
+      episode: 1,
+      owner: 'owner',
+      repo: 'repo',
+      prNumber: 9,
+      transition: 'ci_failure',
+      headSha: 'sha-h',
+      evidence: 'CI failing',
+      detectedAt: '2026-11-19T09:00:00Z',
+    };
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        ...freshState(),
+        watch: {
+          prs: {
+            'owner/repo#9': { headSha: 'sha-h', pending: [queued] },
+            'owner/repo#8': { headSha: 'sha-x' },
+          },
+        },
+      }),
+    );
+    const stranded = store.strandedLegacyLedger()!;
+    expect(stranded.pending).toBe(0);
+    // One PR entry holds a non-empty queue; the baseline-only entry does not.
+    expect(stranded.watchPending).toBe(1);
+    // The keys let the caller check the loaded baselines for the stranded PRs.
+    expect(stranded.watchPendingKeys).toEqual(['owner/repo#9']);
+    // An empty queue counts no watch pending.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        ...freshState(),
+        watch: { prs: { 'owner/repo#9': { headSha: 'sha-h', pending: [] } } },
+      }),
+    );
+    expect(store.strandedLegacyLedger()!.watchPending).toBe(0);
+    expect(store.strandedLegacyLedger()!.watchPendingKeys).toEqual([]);
+    // No watch at all counts none.
+    writeFileSync(legacyPath, JSON.stringify(freshState()));
+    expect(store.strandedLegacyLedger()!.watchPending).toBe(0);
+    expect(store.strandedLegacyLedger()!.watchPendingKeys).toEqual([]);
+  });
+
+  it('counts only unknown-delivery-status outbound segments as a loss (deferred item 9)', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-outbound-receipt',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({
+        ...freshState(),
+        outbound: [
+          { deliveryId: 'd-0', ordinal: 0 },
+          {
+            deliveryId: 'd-1',
+            ordinal: 0,
+            receipt: {
+              outcome: 'accepted',
+              ordinal: 0,
+              providerMessageId: '9001',
+              acceptedAt: 1,
+            },
+          },
+          { deliveryId: 'd-2', ordinal: 1 },
+          // An 'unknown' receipt does NOT prove the outcome: it must count as
+          // an unknown-status loss, not be treated like a definitive receipt.
+          { deliveryId: 'd-3', ordinal: 0, receipt: { outcome: 'unknown' } },
+          { deliveryId: 'd-4', ordinal: 0, receipt: { outcome: 'rejected' } },
+        ],
+      }),
+    );
+    // d-0 and d-2 (no receipt) + d-3 (unknown receipt) = 3 unknown-status;
+    // d-1 (accepted) and d-4 (rejected) prove the outcome and are excluded.
+    expect(store.strandedLegacyLedger()!.outbound).toBe(3);
+  });
+
+  it('a failed archive rename leaves the legacy reported, never throws', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-archive-fail',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    const legacyPath = join(store.directory, 'managed-state.json');
+    writeFileSync(legacyPath, JSON.stringify(freshState()));
+    fsControl.failRename = true;
+    try {
+      // The documented rename-failure arm returns undefined and keeps the file
+      // so the next start reports it again (R2-6); it must not throw.
+      expect(store.archiveStrandedLegacy()).toBeUndefined();
+    } finally {
+      fsControl.failRename = false;
+    }
+    expect(existsSync(legacyPath)).toBe(true);
+    expect(store.strandedLegacyLedger()).toBeDefined();
   });
 });

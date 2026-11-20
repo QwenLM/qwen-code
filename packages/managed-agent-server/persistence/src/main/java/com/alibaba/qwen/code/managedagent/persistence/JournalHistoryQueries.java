@@ -265,7 +265,7 @@ final class JournalHistoryQueries {
         try {
             JournalStoreRows.HeadRow head = storeRows.requireHead(tenantId, sessionId);
             if (!Set.of("ACTIVE", "SEALED").contains(head.state())
-                    || !"READY".equals(head.recoveryStatus()) || head.storageVersion() != JournalStoreRows.STORAGE_VERSION
+                    || !"READY".equals(head.recoveryStatus())
                     || head.compactedThroughRevision() != 0 || head.latestCheckpointResourceId() != null
                     || head.journalRevision() < 1 || head.committedSequence() < 0
                     || workspaceId != null && !workspaceId.equals(head.workspaceId())) {
@@ -308,8 +308,7 @@ final class JournalHistoryQueries {
                             || !sessionId.equals(engine.path("sessionId").asText())
                             || !"managed_session_header_v1".equals(header.path("subtype").asText())
                             || !sessionId.equals(header.path("sessionId").asText())
-                            || value.size() != 7 || value.path("formatVersion").asInt() != JournalStoreRows.STORAGE_VERSION
-                            || !"managed-session/1".equals(value.path("minimumReader").asText())
+                            || value.size() != 6 || value.path("formatVersion").asInt() != JournalStoreRows.STORAGE_VERSION
                             || !"managed".equals(value.path("engine").asText())
                             || !"hosted-harness".equals(value.path("createdBy").asText())
                             || value.has("baseTranscriptProof") || !initialScope(value, head)) {
