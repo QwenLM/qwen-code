@@ -1031,6 +1031,36 @@ describe('mustDeferDuringStreaming (ink AppContainer mid-turn gate)', () => {
     );
   });
 
+  it.each(['/quit', '/exit'])(
+    'retains the real builtin invocation identity for %s',
+    async (typed) => {
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+        { ...quitCommand, source: 'builtin-command' },
+      ]);
+      const outcome = await dispatcher.handle(typed);
+      expect(host.items[0]).toMatchObject({ type: 'user', text: typed });
+      expect(outcome).toMatchObject({
+        kind: 'quit',
+        invocationItemId: host.items[0].id,
+      });
+    },
+  );
+
+  it('does not associate a custom quit result with its invocation echo', async () => {
+    const messages: HistoryItem[] = [
+      { type: 'user', text: 'custom farewell', id: 99 },
+    ];
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+      stub({ name: 'quit', action: () => ({ type: 'quit', messages }) }),
+    ]);
+    expect(await dispatcher.handle('/quit')).toEqual({
+      kind: 'quit',
+      messages,
+    });
+  });
+
   it('never defers quit, so a mid-turn exit stops the responding stream', async () => {
     const host = createFakeHost();
     const dispatcher = new OpenTuiSlashDispatcher(host, services, [

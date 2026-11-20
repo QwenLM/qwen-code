@@ -373,13 +373,11 @@ class ExternalWorkspaceRetirementServiceTest {
     @Test
     void slotActiveBindingMovedBetweenReadAndLockAnswersBlocked() {
         makeReady();
-        // The slot still pins the original binding as active while the binding
-        // row already carries a different version, the shape a concurrent
-        // re-provision leaves between the pre-transaction read and the lock.
-        original = bindings.claimOperation(original.getBindingId(), "bump", Duration.ofMinutes(1));
-        original = bindings.compareAndSet(original, original.withAttestation(
-                original.getLease(), original.getResourceHandle(), Instant.now(), Instant.now()));
-        bindings.releaseOperation(original.getBindingId(), "bump", original.getOperationGeneration());
+        // Move only the active slot: the pre-transaction binding snapshot and
+        // expected version remain valid, so the transaction lock must catch
+        // the generation swap itself.
+        jdbc.update("UPDATE ma_runtime_slot SET active_binding_id = ? WHERE active_binding_id = ?",
+                "replacement", original.getBindingId());
 
         assertThatThrownBy(() -> service.retire(request, this::terminated))
                 .isInstanceOf(RuntimeBrokerException.class)
@@ -396,10 +394,10 @@ class ExternalWorkspaceRetirementServiceTest {
         // own code; retirement must answer its documented refusal instead.
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key,"
                 + " tenant_id, session_id, harness_session_id, head_kind,"
-                + " state, storage_version, writer_generation,"
+                + " state, writer_generation,"
                 + " journal_revision, committed_sequence, activation_epoch,"
                 + " compacted_through_revision, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, 'tenant', 'user-session', 'user-session', 'MANAGED_SESSION', 'ACTIVE', 1, 1, 1, 1, 0,"
+                + " VALUES (?, ?, 'tenant', 'user-session', 'user-session', 'MANAGED_SESSION', 'ACTIVE', 1, 1, 1, 0,"
                 + " 0, 0, 0)",
                 com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("tenant"),
                 com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("user-session"));

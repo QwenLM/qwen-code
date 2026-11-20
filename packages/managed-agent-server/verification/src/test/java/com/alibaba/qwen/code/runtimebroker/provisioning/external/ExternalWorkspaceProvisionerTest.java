@@ -714,6 +714,40 @@ class ExternalWorkspaceProvisionerTest {
     }
 
     @Test
+    void retryableReattachFailureKeepsThePlacementUsableAsUnknown() throws Exception {
+        var first = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(first, "reattach-retryable", residentRequest());
+        first.close();
+
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        client.observeState = "UNKNOWN";
+        client.reattachFailure = new RuntimeBrokerException(503,
+                "runtime_external_provider_failed", "Reattach timed out.", true);
+
+        assertEquals(RuntimeObservation.Outcome.UNKNOWN, join(subject.reconcile(original.request(),
+                original.seed(), original.handle(), original.lease())).getOutcome());
+        assertEquals(1, client.reattaches.size());
+        assertTrue(subject.isUsable(original.lease()));
+    }
+
+    @Test
+    void nonRetryableReattachEvidenceFailureStaysPermanent() throws Exception {
+        var first = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(first, "reattach-evidence", residentRequest());
+        first.close();
+
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        client.observeState = "UNKNOWN";
+        client.reattachFailure = new RuntimeBrokerException(409,
+                "ephemeral_workspace_continuity_lost", "Continuity is lost.", false);
+
+        assertEquals(RuntimeObservation.Outcome.CONFLICT, join(subject.reconcile(original.request(),
+                original.seed(), original.handle(), original.lease())).getOutcome());
+        assertEquals(1, client.reattaches.size());
+        assertFalse(subject.isUsable(original.lease()));
+    }
+
+    @Test
     void reattachGoneIsPermanentAndCreatesNothing() throws Exception {
         var first = provisioner(registration(PROVIDER, 1, MOUNT));
         var original = place(first, "reattach-gone", residentRequest());
@@ -815,6 +849,7 @@ class ExternalWorkspaceProvisionerTest {
                 "handle", Map.of("requestId", "request-a"), "endpoint", ENDPOINT);
         private String observeState = "STARTING";
         private String reattachState = "UNKNOWN";
+        private RuntimeBrokerException reattachFailure;
         private String endpoint = ENDPOINT;
         private String reattachEndpoint = ENDPOINT;
         private Map<String, Object> storage;
@@ -844,6 +879,9 @@ class ExternalWorkspaceProvisionerTest {
         @Override
         public CompletionStage<Map<String, Object>> reattach(Map<String, Object> request) {
             reattaches.add(request);
+            if (reattachFailure != null) {
+                return CompletableFuture.failedFuture(reattachFailure);
+            }
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("protocolVersion", 1);
             response.put("state", reattachState);

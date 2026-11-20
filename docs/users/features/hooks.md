@@ -1617,7 +1617,7 @@ Async hooks are scoped to the Qwen process. On POSIX, Qwen reclaims a still-runn
 **Features:**
 
 - Cannot return decision control (the event continues as soon as the hook starts)
-- Output is not delivered yet: `systemMessage`, `additionalContext` and plain `stdout` from an async hook are neither shown to the user nor added to the model context. The debug log records only that the hook started, completed or failed. Delivering this output is planned.
+- Output is delivered to the model: when an async hook completes, its `additionalContext`, `systemMessage`, plain `stdout` and `stderr` are drained into the next request as a `<qwen:async-hook-context>` block, on sessions whose model round sends through the main client (headless, the TUIs, and ACP with the unified agent loop enabled). Hiding the block from the user-facing transcript projection and giving it resume provenance are follow-ups. The ACP default legacy session-chat path does not deliver it yet. The debug log also records that the hook started, completed or failed. The drained block is capped at 10,000 characters: notification messages (`systemMessage`, `stderr`, errors and warnings) are reserved first, and the `additionalContext` is truncated to the remaining budget — marked with a `[async hook context truncated]` notice. A message half that is itself too large is cut too, marked with a `[async hook message truncated]` notice, and a large message half can squeeze or even fully displace the context down to its notice. Output past the cap is discarded before the block is added to the request.
 - Suitable for side effects such as auditing, logging and background tests that write their results somewhere you can read them
 - Occupies one of 10 concurrent async hook slots until it finishes or reaches its `timeout` (60 seconds by default). While all 10 slots are in use, a new async hook is skipped
 
@@ -1648,7 +1648,10 @@ Async hooks are scoped to the Qwen process. On POSIX, Qwen reclaims a still-runn
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 if [[ "$FILE_PATH" != *.ts && "$FILE_PATH" != *.js ]]; then exit 0; fi
-# Async hook output is not shown yet, so write the result to a file.
+# Write the result to a file for a durable record. Plain-text (non-JSON) stdout
+# is also delivered to the model on the next request; JSON stdout is delivered
+# only through its systemMessage or hookSpecificOutput.additionalContext fields
+# (see above).
 LOG=/tmp/qwen-async-tests.log
 if npm test >"$LOG" 2>&1; then
   echo "Tests passed after editing $FILE_PATH" >>"$LOG"

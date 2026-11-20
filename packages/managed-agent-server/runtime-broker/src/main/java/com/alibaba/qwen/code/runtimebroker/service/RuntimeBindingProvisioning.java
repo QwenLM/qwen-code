@@ -800,7 +800,6 @@ final class RuntimeBindingProvisioning {
                 });
     }
 
-
     /** The one identity for "the reconciliation ran out of time" — the fault-gate predicates key on it. */
     private static RuntimeBrokerException reconcileTimeout() {
         return unavailable("runtime_broker_reconcile_timeout",

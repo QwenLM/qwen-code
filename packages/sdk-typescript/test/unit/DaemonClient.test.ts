@@ -1415,6 +1415,48 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setVisionBridgeSettings', () => {
+    it('POSTs both settings through the qualified workspace route', async () => {
+      const result = {
+        key: 'visionBridgeTimeoutMs',
+        scope: 'workspace',
+        value: 60_000,
+        requiresRestart: true,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceByCwd('/work/secondary')
+          .setVisionBridgeSettings('qwen-vl', 60_000),
+      ).resolves.toEqual(result);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspaces/%2Fwork%2Fsecondary/settings/vision-bridge',
+        body: '{"model":"qwen-vl","timeoutMs":60000}',
+      });
+    });
+
+    it('surfaces a missing batch route without falling back to separate writes', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(404, { error: 'Not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceById('secondary')
+          .setVisionBridgeSettings('qwen-vl', 60_000),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/secondary/settings/vision-bridge',
+      );
+    });
+  });
+
   describe('model configuration', () => {
     it('loads configured models and patches a window reset as null', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -2245,6 +2287,27 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('forwards excludeRefs as the exclude query parameter on both clients', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/w', available: true };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.workspaceGitLog(50, 0, 'base..HEAD', {
+        excludeRefs: ['abc123', 'def456'],
+      });
+      await client
+        .workspaceByCwd('/work/main')
+        .workspaceGitLog(50, 0, '/wt', 'base..HEAD', {
+          excludeRefs: ['abc123', 'def456'],
+          sessionId: 's1',
+        });
+
+      expect(calls.map((c) => c.url)).toEqual([
+        'http://daemon/workspace/git/log?limit=50&skip=0&range=base..HEAD&exclude=abc123%2Cdef456',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/log?limit=50&skip=0&cwd=%2Fwt&range=base..HEAD&exclude=abc123%2Cdef456&sessionId=s1',
+      ]);
+    });
+
     it('reads workspace-qualified GitHub pull requests over REST', async () => {
       const list = {
         v: 1 as const,
@@ -2329,6 +2392,34 @@ describe('DaemonClient', () => {
         [
           'GET',
           'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs/42/files?cwd=%2Fwork%2Fsecondary&sessionId=sess-1&repo=o%2Fr',
+        ],
+      ]);
+    });
+
+    it('omits an empty repo slug so the route resolves the PR locally', async () => {
+      // An empty repo means "not supplied"; forwarding `repo=` would hand the
+      // route a supplied-but-empty value it must reject with 400.
+      const files = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        available: true,
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: '',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, files));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitHubPullRequestFiles(42, '/work/secondary', 'sess-1', '');
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs/42/files?cwd=%2Fwork%2Fsecondary&sessionId=sess-1',
         ],
       ]);
     });
@@ -8133,6 +8224,51 @@ describe('DaemonClient', () => {
         status: 404,
       });
     });
+  });
+
+  describe('askSessionModRow', () => {
+    it.each(['rest', 'acp-http', 'acp-ws'] as const)(
+      'POSTs the row over REST with a %s client',
+      async (type) => {
+        const answer = {
+          status: 'answered',
+          props: { text: '你好', isFirstOfReply: true },
+        };
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, answer),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          ...(type === 'rest'
+            ? { fetch }
+            : {
+                transport: {
+                  type,
+                  supportsReplay: true,
+                  connected: true,
+                  restFetch: fetch,
+                  fetch: async () =>
+                    jsonResponse(404, { error: 'No ACP mapping' }),
+                  async *subscribeEvents() {},
+                  dispose() {},
+                },
+              }),
+        });
+        const row = {
+          component: 'AssistantMessage',
+          props: { text: 'Hello', isFirstOfReply: true },
+        };
+        const signal = new AbortController().signal;
+        await expect(
+          client.askSessionModRow('s/1', row, { clientId: 'client-1', signal }),
+        ).resolves.toEqual(answer);
+        expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/mod-row');
+        expect(calls[0]?.method).toBe('POST');
+        expect(JSON.parse(calls[0]!.body as string)).toEqual(row);
+        expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+        expect(calls[0]?.signal).toBe(signal);
+      },
+    );
   });
 
   describe('recapSession (#4175 follow-up)', () => {

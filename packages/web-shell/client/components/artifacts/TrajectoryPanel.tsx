@@ -1362,10 +1362,17 @@ export function TrajectoryPanel({
         );
       }
       parts.push(formatDuration(span.end - span.start));
-      if (span.ttftEnd !== undefined) {
+      const ttftMs =
+        span.row.kind === 'request' ? span.row.timing.ttftMs : undefined;
+      if (
+        span.ttftEnd !== undefined &&
+        ttftMs !== undefined &&
+        ttftMs >= 0 &&
+        ttftMs <= span.end - span.start
+      ) {
         parts.push(
           t('trajectory.ttft', {
-            duration: formatDuration(span.ttftEnd - span.start),
+            duration: formatDuration(ttftMs),
           }),
         );
       }

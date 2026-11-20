@@ -153,6 +153,7 @@ final class RuntimeExecutionDispatcher {
             RuntimePublicationGrant grant,
             VerifiedDispatchPayload verifiedPayload) {
         if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                && !WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
                 && (!"deferred".equals(prepared.getReference().get("dispatchMode"))
                         || prepared.getReference().containsKey("runtimeProtocol") || grant != null
                         || !prepared.isCancelRequested() && (payload == null

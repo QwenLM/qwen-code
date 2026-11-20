@@ -185,20 +185,15 @@ interface HostedActionOptionsBase {
 
 export type HostedActionOptions = HostedActionOptionsBase &
   (
-    | ({
+    | {
+        readonly v: 3;
         readonly options: ReadonlyArray<{
           readonly id: string;
           readonly label: string;
         }>;
-      } & (
-        | { readonly v: 1 }
-        | { readonly v: 2; readonly inputRef: ManagedSessionDurableRef }
-        | {
-            readonly v: 3;
-            readonly inputRef?: ManagedSessionDurableRef;
-            readonly continuationRef: ManagedSessionDurableRef;
-          }
-      ))
+        readonly inputRef?: ManagedSessionDurableRef;
+        readonly continuationRef?: ManagedSessionDurableRef;
+      }
     | {
         readonly v: 4;
         readonly questions: readonly HostedActionQuestion[];
@@ -235,15 +230,13 @@ export function parseHostedActionOptions(bytes: Buffer): HostedActionOptions {
       throw new Error('Invalid Hosted Action human decision floor.');
     fields.push('requiresHumanDecision');
   }
+  if (Object.hasOwn(options, 'inputRef')) fields.push('inputRef');
+  if (Object.hasOwn(options, 'continuationRef')) fields.push('continuationRef');
   if (
-    question ||
-    options['v'] === 2 ||
-    (options['v'] === 3 && options['inputRef'])
-  )
-    fields.push('inputRef');
-  if (question || options['v'] === 3) fields.push('continuationRef');
-  if (
-    ![1, 2, 3, 4].includes(options['v'] as number) ||
+    ![3, 4].includes(options['v'] as number) ||
+    (question &&
+      (!Object.hasOwn(options, 'inputRef') ||
+        !Object.hasOwn(options, 'continuationRef'))) ||
     Object.keys(options).length !== fields.length ||
     fields.some((field) => !Object.hasOwn(options, field)) ||
     !Number.isSafeInteger(options['inputRevision']) ||
@@ -298,6 +291,13 @@ export function parseHostedActionOptions(bytes: Buffer): HostedActionOptions {
     )
       throw new Error('Invalid Hosted Action reference.');
   }
+  if (
+    Object.hasOwn(options, 'inputRef') &&
+    (options['inputRef'] as { kind?: unknown }).kind ===
+      'managed-extension-command-input' &&
+    !Object.hasOwn(options, 'continuationRef')
+  )
+    throw new Error('Invalid Hosted Action reference.');
   return options as unknown as HostedActionOptions;
 }
 

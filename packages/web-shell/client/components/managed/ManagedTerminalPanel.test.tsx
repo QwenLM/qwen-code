@@ -173,6 +173,7 @@ describe('ManagedTerminalPanel', () => {
         />,
       );
     });
+    await act(async () => vi.dynamicImportSettled());
     await flush();
     return terminal;
   }

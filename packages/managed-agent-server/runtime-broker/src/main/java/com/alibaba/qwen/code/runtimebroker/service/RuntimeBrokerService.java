@@ -55,6 +55,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.sameLease;
@@ -97,6 +98,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     private final HarnessSessionResolver sessionResolver;
     private RuntimeExtensionCommandVerifier extensionCommandVerifier;
+    private volatile boolean mcpParking;
     private final RuntimeProvisioner provisioner;
     private final RuntimeTransport transport;
     private final RuntimeBindingRepository bindingRepository;
@@ -538,6 +540,81 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return bindingRegistry.runtimeProvisionerKind(record);
     }
 
+    /** Lets Harnesses park MCP owners; only a deployment that reclaims them may call this. */
+    public void enableMcpParking() {
+        mcpParking = true;
+    }
+
+    /** External storage has one holder, so a parked owner would exclude every rival. */
+    public boolean mcpParkable(RuntimeSessionRecord record) {
+        RuntimeBindingRecord binding = mcpParking ? bindingRepository.findById(record.getBindingId()) : null;
+        return binding != null && binding.getRequest().isManagedContext()
+                && !WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest());
+    }
+
+    @Override
+    public CompletionStage<Boolean> reclaimParkedMcp(String bindingId, long generation,
+            String runtimeSessionId, BooleanSupplier parked) {
+        requireOpen(closed);
+        RuntimeBindingRecord binding = bindingRepository.findById(bindingId);
+        BindingContext live = binding == null || binding.getGeneration() != generation
+                ? null : bindingRegistry.matchingLiveBinding(binding);
+        RuntimeSessionRecord saved = live == null
+                ? null : sessionRepository.findById(binding.getRequest().getScope(), runtimeSessionId);
+        if (saved == null || saved.getState() != RuntimeSessionRecord.State.READY
+                || !bindingId.equals(saved.getBindingId()) || saved.getRuntimeGeneration() != generation) {
+            return CompletableFuture.completedFuture(false);
+        }
+        CompletableFuture<SessionContext> adopted = new CompletableFuture<>();
+        var existing = bindingRegistry.registerSession(runtimeSessionId, adopted);
+        if (existing == null) {
+            safeStage(() -> executionRecovery.scanExecutions(
+                    new SessionContext(saved.getSession(), binding, live.lease()), saved, null))
+                    .whenComplete((context, error) -> {
+                        if (error == null) {
+                            adopted.complete(context);
+                        } else {
+                            bindingRegistry.removeSession(runtimeSessionId, adopted);
+                            adopted.completeExceptionally(unwrap(error));
+                        }
+                    });
+        }
+        return (existing == null ? adopted : existing).thenCompose(context -> context.binding().sameIdentity(binding)
+                ? reclaimParkedMcp(context, parked) : CompletableFuture.completedFuture(false));
+    }
+
+    // Connections close before the mount is handed back, so a stdio server
+    // never writes to storage it no longer holds. A successor's acquire
+    // replaces this claim, which makes the handback refuse.
+    private CompletionStage<Boolean> reclaimParkedMcp(SessionContext context, BooleanSupplier parked) {
+        String claim = UUID.randomUUID().toString();
+        String previous;
+        context.lock();
+        try {
+            previous = context.mountClaim();
+            context.mountClaim(claim);
+        } finally {
+            context.unlock();
+        }
+        CompletionStage<Boolean> reclaimed = !parked.getAsBoolean()
+                ? CompletableFuture.completedFuture(false)
+                : safeStage(() -> transport.reclaimMcp(context.lease(), context.session())).thenCompose(ignored ->
+                        !parked.getAsBoolean() ? CompletableFuture.completedFuture(false)
+                                : executionRecovery.settleUnprovenBackgroundRows(context, false)
+                                        .thenCompose(settled -> executionRecovery.releaseMountAfterSweep(context, claim,
+                                                context.session().getRuntimeSessionId())));
+        return reclaimed.whenComplete((released, error) -> {
+            context.lock();
+            try {
+                if (!Boolean.TRUE.equals(released) && claim.equals(context.mountClaim())) {
+                    context.mountClaim(previous);
+                }
+            } finally {
+                context.unlock();
+            }
+        });
+    }
+
     public CompletionStage<RuntimeSessionRecord> acquire(
             String harnessSessionId, String runtimeSessionId,
             String turnKind) {
@@ -956,6 +1033,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         VerifiedDispatchPayload verifiedPayload =
                                 VerifiedDispatchPayload.of(digest, toolName);
                         if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                                && !WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
                                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
                             executionRepository.settlePrepared(record, Map.of(
@@ -1716,88 +1794,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         }
         return bindingProvisioning.recoverBinding(
                 bindingId, expectedGeneration, false, expectedVersion);
-    }
-
-    private boolean blockRecovery(RuntimeBindingRecord claimed) {
-        return bindingRepository.compareAndSet(claimed, claimed.withState(
-                RuntimeBindingRecord.State.RECOVERY_BLOCKED,
-                claimed.getLease(), clock.instant())) != null;
-    }
-
-    /**
-     * Blocks recovery and answers whether the binding is now blocked. The
-     * deadline and the failure handler hold the same claim, so the one that
-     * writes second finds the block already there. A write or read that
-     * fails answers false, and the failure is kept on {@code cause}.
-     */
-    private boolean blockRecoveryQuietly(RuntimeBindingRecord claimed,
-            Throwable cause) {
-        try {
-            if (blockRecovery(claimed)) {
-                return true;
-            }
-            RuntimeBindingRecord latest = bindingRepository.findById(
-                    claimed.getBindingId());
-            return latest != null && latest.getState()
-                    == RuntimeBindingRecord.State.RECOVERY_BLOCKED;
-        } catch (RuntimeException failure) {
-            cause.addSuppressed(failure);
-            return false;
-        }
-    }
-
-    private void blockRecovery(String bindingId, long operationGeneration) {
-        RuntimeBindingRecord latest = bindingRepository.findById(bindingId);
-        if (latest != null && ownsOperation(latest, operationGeneration)
-                && latest.getState() == RuntimeBindingRecord.State.READY) {
-            blockRecovery(latest);
-        }
-    }
-
-    private boolean ownsOperation(RuntimeBindingRecord record,
-            long operationGeneration) {
-        return brokerOwnerId.equals(record.getOperationOwner())
-                && record.getOperationGeneration() == operationGeneration;
-    }
-
-    private long operationDeadlineNanos() {
-        long leaseNanos = operationLeaseDuration.toNanos();
-        return leaseNanos > Long.MAX_VALUE / 4
-                ? Long.MAX_VALUE : leaseNanos * 4;
-    }
-
-    private long operationDeadlineMillis() {
-        return Math.max(1, operationDeadlineNanos() / 1_000_000);
-    }
-
-    private record DurableProvision(RuntimeLease lease,
-            RuntimeResourceHandle handle) {
-    }
-
-    private record ReconcileStep(Kind kind, RuntimeObservation observation,
-            RuntimeBrokerException error) {
-        private enum Kind {
-            RETRY,
-            LOST,
-            BLOCKED,
-            READY
-        }
-
-        static ReconcileStep retry() {
-            return new ReconcileStep(Kind.RETRY, null, null);
-        }
-
-        static ReconcileStep lost(RuntimeObservation observation) {
-            return new ReconcileStep(Kind.LOST, observation, null);
-        }
-
-        static ReconcileStep blocked(RuntimeBrokerException error) {
-            return new ReconcileStep(Kind.BLOCKED, null, error);
-        }
-
-        static ReconcileStep ready(RuntimeObservation observation) {
-            return new ReconcileStep(Kind.READY, observation, null);
-        }
     }
 
     private RuntimeSessionRecord requireAcquireSessionRecord(SessionContext context) {

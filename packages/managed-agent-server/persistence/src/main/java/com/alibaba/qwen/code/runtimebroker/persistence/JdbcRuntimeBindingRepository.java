@@ -421,8 +421,6 @@ public final class JdbcRuntimeBindingRepository
         }
     }
 
-
-
     private void requireSameDataSource(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, String message) {
         if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
@@ -1070,7 +1068,8 @@ public final class JdbcRuntimeBindingRepository
                             connection.prepareStatement(
                                     "SELECT "
                                             + BINDING_COLUMNS
-                                            + " FROM ma_runtime_binding WHERE provisioner_kind = ?"
+                                            + " FROM ma_runtime_binding WHERE is_recovery_candidate = 1"
+                                            + " AND provisioner_kind = ?"
                                             + " AND binding_id > ? AND resource_handle_version = 2"
                                             + " AND binding_state IN ('PROVISIONING', 'READY',"
                                             + " 'DRAINING', 'RECOVERY_BLOCKED', 'LOST') AND NOT"

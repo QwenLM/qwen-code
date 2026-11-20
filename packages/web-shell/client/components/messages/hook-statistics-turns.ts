@@ -21,6 +21,7 @@ export function collectHookStatisticsTurns(
   for (const message of messages) {
     if (
       message.role === 'user' &&
+      !message.agentMessage?.sentTo &&
       isTurnCallsPrompt(message.source, message.content)
     ) {
       finish();

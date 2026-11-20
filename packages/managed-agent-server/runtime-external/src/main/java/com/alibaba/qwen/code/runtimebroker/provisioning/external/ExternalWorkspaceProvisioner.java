@@ -302,9 +302,8 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
                 throw refuse("external_storage_registration_mismatch",
                         "External storage evidence does not match the registration.");
             }
-            ExternalStorageRegistry.RegisteredExternalStorage storage = binding(request);
-            if (!storageRef(storage).equals(evidence.get("storageRef"))
-                    || !storage.mountRoot().equals(evidence.get("mountRoot"))) {
+            if (!storageRef(registered).equals(evidence.get("storageRef"))
+                    || !registered.mountRoot().equals(evidence.get("mountRoot"))) {
                 throw refuse("external_storage_registration_mismatch",
                         "External storage evidence does not match the registration.");
             }

@@ -68,6 +68,11 @@ class JdbcRuntimeBrokerMySqlIT {
     }
 
     @Test
+    void recoveryCandidatesSkipHistoryAndPreserveGlobalBinaryCursors() throws Exception {
+        inIsolatedSchema("broker_candidates_", RuntimeMaintenanceRecoveryTest::verifyRecoveryCandidates);
+    }
+
+    @Test
     void databaseClockIgnoresSessionTimeZone() throws Exception {
         DataSource dataSource = dataSource();
         for (String offset : new String[] {"+00:00", "+08:00", "-04:00"}) {
