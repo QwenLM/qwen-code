@@ -29,7 +29,7 @@ When a compaction request does not fit its window, it is reduced as the [compres
 
 ### The mark
 
-A part that holds what a person typed carries `partMetadata['qwen-code:typed-prompt'] = true`, set where the request is built. `partMetadata` is client-side bookkeeping: the native generator deletes it before the SDK sees it (Vertex AI rejects the field), and the OpenAI, Anthropic and Responses converters never serialize it. The session file keeps it, so a resumed session still has it.
+A part that holds what a person typed carries `partMetadata['qwen-code:typed-prompt'] = true`, set where the request is built. `partMetadata` is client-side bookkeeping: the native generator deletes it before the SDK sees it (Vertex AI rejects the field), and the OpenAI, Anthropic and Responses converters never serialize it. On the CLI path the session file keeps it, so a resumed session still has it. ACP and hosted serve record a turn from its unmarked text, so after a resume or a history rebuild their earlier turns are cut as before.
 
 Two checks drop a completed local command's input from resumed history only when its part has a lone `text` key: the history accumulator and its mirror in the serve prompt ledger. Both accept a part whose only metadata is the mark (`isBareTextPart`).
 
@@ -87,6 +87,7 @@ Only on the first send, after the plain reduction made the request smaller. The 
 ## Follow-ups
 
 - Mark the remaining producers: a plain `-p` prompt; slash-command expansions, keeping the files and shell output they inject unmarked; mid-turn messages; hosted input queued while a turn runs.
+- Record the mark in ACP's and hosted serve's turn records, so it survives a resume.
 - Keep as much of a long message as the budget allows, rather than all of it or none.
 - Keep the end of a long message as well as its start.
 - Condense older turns to the user's messages when cutting is not enough (#14953).
