@@ -19,16 +19,23 @@ ma_session.creator_actor_key)`), so converting one table breaks joins until all 
   `ma_event_stream.artifact_refs_resource_key`, `ma_resource_ref.resource_key`, …) cannot be
   expanded to local raw columns that do not exist in the referencing table; they need added
   raw scope+resource columns (or a canonical readable key), i.e. schema expansion in the same batch.
-- Probes (H2 2.4.240, MySQL mode): `utf8mb4_0900_bin` parses; VARCHAR equality/PK are NO PAD;
-  `setBytes`→VARCHAR round-trips UTF-8 and trailing spaces. So byte[] binds can temporarily
-  coerce, but that does not decouple the budget/fixture/hash coupling above.
+- Probes (H2 2.4.240, MySQL mode): `utf8mb4_0900_bin` parses, but a per-column plain
+  `CHARACTER SET … COLLATE …` clause breaks when followed by `NOT NULL DEFAULT` or on generated
+  columns; wrap charset+collate in a MySQL executable comment `/*!80000 … */` so H2 ignores it.
+  VARCHAR equality/PK are NO PAD; `setBytes`→VARCHAR round-trips UTF-8 and trailing spaces on
+  INSERT/`getBytes`, **but H2 rejects byte[] binds in WHERE against VARCHAR** (`CHARACTER VARYING`
+  vs `BINARY VARYING` not comparable). A type-only DDL migration is therefore red: the DDL type
+  change and the Java `byte[]`→`String` bind change must land together, on top of the
+  budget/fixture/hash coupling above.
 
 Therefore: one branch, temporarily red during conversion, commit+push only when fully green.
 
 ## Execution order
 
-1. **DDL (V1 in place).** Convert text-identity `VARBINARY` to `VARCHAR` budgets with
-   per-column `COLLATE utf8mb4_0900_bin`; keep binary payloads (`record_bytes`, `object_key`,
+1. **DDL (V1 in place).** Convert text-identity `VARBINARY` to `VARCHAR` budgets with per-column
+   NO PAD collation expressed as a MySQL executable comment
+   `/*!80000 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin */` (H2 ignores it; a plain clause
+   breaks on `NOT NULL DEFAULT` / generated columns); keep binary payloads (`record_bytes`, `object_key`,
    `capture_object_key`) as `VARBINARY`. Drop the 60 "Hashed" columns plus same-family derived
    identity keys (`physical_key`, `storage_key`, `holder_key`, `*_resource_key`, `import_key`,
    `runtime_binding_key`, `execution_storage_key`, `source_record_key`, `delivery_key`,
