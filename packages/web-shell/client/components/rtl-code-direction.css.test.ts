@@ -16,7 +16,6 @@ const LTR_CODE_SURFACES: Array<[string, string]> = [
   ['./messages/UserShellMessage.module.css', '.command'],
   ['./messages/PlanExecutionView.module.css', '.dagCanvas'],
   ['./messages/tools/DiffView.module.css', '.line'],
-  ['./messages/tools/ToolChrome.module.css', '.payloadText'],
   ['./messages/TasksStatusMessage.module.css', '.shellOutput'],
   ['./messages/TasksStatusMessage.module.css', '.monitorCommand'],
   ['./messages/ToolApproval.module.css', '.codeBlock'],
@@ -86,11 +85,13 @@ describe('RTL shell keeps code surfaces LTR', () => {
     },
   );
 
-  // The shared output classes also render localized placeholders and quota
-  // notices, so their machine-output renders carry the pin as `dir`
-  // attributes instead: the ShellToolOutput command/notices pres above, its
-  // output pre and the ToolGroup result rows conditionally (pinned by the
-  // DOM tests in ShellToolOutput.test.tsx and ToolGroup.test.tsx).
+  // The shared output classes also render localized placeholders, quota
+  // notices and arbitrary tool text, so their machine-output renders carry the
+  // pin as `dir` attributes instead: the ShellToolOutput command/notices pres
+  // above, its output pre and the ToolGroup result rows conditionally (pinned
+  // by the DOM tests in ShellToolOutput.test.tsx and ToolGroup.test.tsx). The
+  // payload pre resolves direction from its own content, so Latin output stays
+  // LTR without forcing Arabic prose into an LTR paragraph.
   it('leaves the shared output classes to the shell direction', () => {
     expect(
       directions('./messages/tools/ToolChrome.module.css', '.expandedOutput'),
@@ -100,6 +101,9 @@ describe('RTL shell keeps code surfaces LTR', () => {
     ).toEqual([]);
     expect(
       directions('./messages/tools/ToolChrome.module.css', '.shellOutput'),
+    ).toEqual([]);
+    expect(
+      directions('./messages/tools/ToolChrome.module.css', '.payloadText'),
     ).toEqual([]);
   });
 

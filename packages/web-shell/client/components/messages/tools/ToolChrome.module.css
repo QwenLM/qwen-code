@@ -655,7 +655,6 @@
 }
 
 .payloadText {
-  direction: ltr;
   margin: 0;
   padding: 8px 10px;
   max-height: 240px;

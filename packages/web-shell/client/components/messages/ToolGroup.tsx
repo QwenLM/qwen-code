@@ -283,7 +283,7 @@ function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
   return (
     <div className={styles.expandedRead}>
       {plainText ? (
-        <pre className={styles.expandedOutput} dir="ltr">
+        <pre className={styles.expandedOutput} dir="auto">
           {content}
         </pre>
       ) : (
@@ -400,7 +400,7 @@ function ToolPayloadBlock({
           <Markdown content={fencedCodeBlock('json', shown)} />
         </div>
       ) : (
-        <pre className={styles.payloadText}>
+        <pre className={styles.payloadText} dir="auto">
           {payload.json ? shown : renderWithSessionLinks(shown, renderMode)}
         </pre>
       )}

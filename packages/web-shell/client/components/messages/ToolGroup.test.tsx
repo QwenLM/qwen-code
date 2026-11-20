@@ -141,7 +141,7 @@ describe('ReadFile output availability', () => {
     expect(container.textContent).not.toContain('unavailable');
   });
 
-  it('leaves the Arabic placeholder to the shell and pins file content LTR', () => {
+  it('leaves the Arabic placeholder unpinned, read content auto and edit content LTR', () => {
     const outputDir = (container: HTMLElement) =>
       container.querySelector('[class*="expandedOutput"]')?.getAttribute('dir');
     const waiting = renderToolLine(
@@ -163,7 +163,7 @@ describe('ReadFile output availability', () => {
       {},
       'ar',
     );
-    expect(outputDir(read)).toBe('ltr');
+    expect(outputDir(read)).toBe('auto');
     const edit = renderToolLine(
       makeTool({
         toolName: 'Edit',
@@ -226,6 +226,59 @@ describe('tool result row direction', () => {
     const row = container.querySelector('[class*="lineOutput"]');
     expect(row?.getAttribute('dir')).toBe('auto');
     expect(row?.textContent).toContain('لقد استنفدت رصيدك');
+  });
+});
+
+describe('expanded tool text direction', () => {
+  it('renders an over-limit Arabic document auto-direction, like its shorter self', () => {
+    const line = 'هذا سطر من مستند عربي.';
+    const read = (lines: number) =>
+      renderToolLine(
+        makeTool({
+          toolName: 'ReadFile',
+          args: { file_path: '/workspace/notes.md' },
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: Array.from({ length: lines }, () => line).join('\n'),
+              },
+            },
+          ],
+        }),
+        { forceExpanded: true },
+        {},
+        'ar',
+      );
+
+    // Past the line budget the same bytes fall back to a plain <pre>, so the
+    // two renders must not disagree on direction.
+    const long = read(1001);
+    const pre = long.querySelector('[class*="expandedOutput"]');
+    expect(pre?.textContent).toContain(line);
+    expect(pre?.getAttribute('dir')).toBe('auto');
+
+    const short = read(999);
+    expect(short.querySelector('[class*="expandedOutput"]')).toBeNull();
+    expect(
+      short.querySelector('[class*="expandedRead"] > [dir="auto"]'),
+    ).not.toBeNull();
+  });
+
+  it('renders a plain-text tool payload auto-direction', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__echo',
+        rawOutput: 'تم إنشاء الملف بنجاح.',
+      }),
+      { forceExpanded: true },
+      {},
+      'ar',
+    );
+    const payload = container.querySelector('[class*="payloadText"]');
+    expect(payload?.textContent).toBe('تم إنشاء الملف بنجاح.');
+    expect(payload?.getAttribute('dir')).toBe('auto');
   });
 });
 
