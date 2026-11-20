@@ -1240,6 +1240,13 @@ export class BackgroundAgentResumeService {
         resolvedMode,
         signal: bgAbortController.signal,
       });
+      const additionalContext = contextState.get('hook_context');
+      if (additionalContext) {
+        contextState.set(
+          'task_prompt',
+          `${String(contextState.get('task_prompt'))}\n\n${String(additionalContext)}`,
+        );
+      }
       const bgEmitter = subagent.getCore().getEventEmitter();
       let liveToolCallCount = 0;
 

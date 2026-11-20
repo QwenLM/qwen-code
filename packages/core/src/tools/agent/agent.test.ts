@@ -3777,6 +3777,21 @@ describe('AgentTool', () => {
       expect(AgentHeadless.create).toHaveBeenCalledTimes(1);
     });
 
+    it('appends SubagentStart additionalContext to the fork task prompt', async () => {
+      const hookSystem = installHookSystem();
+      vi.mocked(hookSystem.fireSubagentStartEvent).mockResolvedValue({
+        getAdditionalContext: vi.fn().mockReturnValue('Fork context'),
+      } as never);
+      mockContextState.get = vi.fn().mockReturnValue('Fork directive');
+
+      await runFork(forkParams('some task'));
+
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        'Fork directive\n\nFork context',
+      );
+    });
+
     it('resolves a project fork profile into the existing execution gate and task prompt', () =>
       withProfiles(
         'qwen-agent-fork-profile-',
@@ -4423,6 +4438,18 @@ describe('AgentTool', () => {
       expect(mockContextState.set).toHaveBeenCalledWith(
         'hook_context',
         'Extra context from hook',
+      );
+    });
+
+    it('appends additionalContext to the initial task prompt', async () => {
+      startOutput('Extra context from hook');
+      mockContextState.get = vi.fn().mockReturnValue('Original task');
+
+      await runFg();
+
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        'Original task\n\nExtra context from hook',
       );
     });
 
@@ -5826,6 +5853,22 @@ describe('AgentTool', () => {
       } finally {
         attachSpy.mockRestore();
       }
+    });
+
+    it('appends additionalContext to the initial background task prompt', async () => {
+      const hookSystem = installHookSystem();
+      vi.mocked(hookSystem.fireSubagentStartEvent).mockResolvedValue({
+        getAdditionalContext: vi.fn().mockReturnValue('Background context'),
+      } as never);
+      mockContextState.get = vi.fn().mockReturnValue('Watch for changes');
+
+      await launch();
+
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        'Watch for changes\n\nBackground context',
+      );
+      await untilCompleted();
     });
 
     it('fires SubagentStop when the final background register check fails after SubagentStart', async () => {

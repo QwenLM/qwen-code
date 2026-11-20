@@ -1199,7 +1199,7 @@ describe('BackgroundAgentResumeService', () => {
     await waitForStatus(agentId, 'completed');
   });
 
-  it('fires SubagentStart hooks when resuming and injects hook context', async () => {
+  it('fires SubagentStart hooks when resuming and appends hook context to the task prompt', async () => {
     const sessionId = 'session-resume';
     const agentId = 'agent-resume';
     seedPaused(sessionId, agentId, 'Resume with hooks', {
@@ -1250,7 +1250,7 @@ describe('BackgroundAgentResumeService', () => {
       throw new Error('Expected resume execute context');
     }
     expect(contextArg.get('hook_context')).toBe('resume-context');
-    expect(contextArg.get('task_prompt')).toBe('continue');
+    expect(contextArg.get('task_prompt')).toBe('continue\n\nresume-context');
     expect(resumedInvocation).toBeUndefined();
     await waitForStatus(agentId, 'completed');
   });

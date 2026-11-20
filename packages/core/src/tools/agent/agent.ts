@@ -2538,6 +2538,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const additionalContext = startHookOutput?.getAdditionalContext();
           if (additionalContext) {
             contextState.set('hook_context', additionalContext);
+            contextState.set(
+              'task_prompt',
+              `${String(contextState.get('task_prompt'))}\n\n${additionalContext}`,
+            );
           }
         } catch (hookError) {
           debugLogger.warn(
@@ -3899,6 +3903,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const additionalContext = startHookOutput?.getAdditionalContext();
             if (additionalContext) {
               contextState.set('hook_context', additionalContext);
+              contextState.set(
+                'task_prompt',
+                `${String(contextState.get('task_prompt'))}\n\n${additionalContext}`,
+              );
             }
             subagentStartHookCompleted = true;
           } catch (hookError) {
