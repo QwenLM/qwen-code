@@ -1232,7 +1232,6 @@ const EN: Messages = {
   'composerMobile.searchCommands': 'Search commands',
   'composerMobile.history': 'Input history',
   'composerMobile.acceptFollowup': 'Accept suggestion',
-  'composerMobile.fillFollowup': 'Fill in',
   'composerMobile.dismissFollowup': 'Dismiss suggestion',
   'composerMobile.stop': 'Stop',
   'composerMobile.attachments': (v) =>

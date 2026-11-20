@@ -1289,28 +1289,44 @@
   min-height: 44px;
 }
 
+/* Chip styling so the bar reads as a tappable button on touch (no hover to
+   discover it): the suggestion content is the label, the insert icon and
+   container carry the affordance. */
 .mobileFollowupAccept {
+  display: flex;
   flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   min-height: 44px;
-  padding: 0 8px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--chat-editor-text-dimmed, #666);
+  padding: 0 10px;
+  border: 1px solid var(--chat-editor-border-color);
+  border-radius: 8px;
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
   line-height: 1.4;
   text-align: start;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   cursor: pointer;
 }
 
+.mobileFollowupAccept > svg {
+  flex: 0 0 auto;
+  color: var(--chat-editor-text-dimmed, #666);
+}
+
+.mobileFollowupText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .mobileFollowupAccept:not(:disabled):hover {
-  background: var(--chat-editor-bg-tertiary);
-  color: var(--chat-editor-text-primary);
+  background: var(--chat-editor-bg-secondary, var(--chat-editor-bg-tertiary));
+  border-color: var(--chat-editor-text-dimmed, #666);
 }
 
 .editorArea .cm-scroller {

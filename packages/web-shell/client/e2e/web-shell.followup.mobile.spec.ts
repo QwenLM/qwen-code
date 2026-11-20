@@ -6,10 +6,11 @@
 
 // Touch follow-up suggestion acceptance. Runs under the `mobile-chromium`
 // (Pixel 7) and `mobile-webkit` (iPhone 13) projects, where the composer is
-// the plain-textarea backend: the suggestion renders as a tappable bar above
-// the input (every variant) and as a fill key in the editing row (default
-// variant only). Both fill the textarea without submitting, matching desktop
-// Tab; Send with an empty input keeps submitting the suggestion directly.
+// the plain-textarea backend: the suggestion renders as a single tappable
+// chip bar above the input in every variant — its content is its label, and
+// the editing row carries no follow-up key. Tapping the chip fills the
+// textarea without submitting, matching desktop Tab; Send with an empty
+// input keeps submitting the suggestion directly.
 
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import {
@@ -26,7 +27,6 @@ const COMPOSER_SUBMIT = '[data-web-shell-composer-submit]';
 const FOLLOWUP_BAR = '[data-web-shell-mobile-followup]';
 const FOLLOWUP_ACCEPT = '[data-web-shell-mobile-followup-accept]';
 const FOLLOWUP_DISMISS = '[data-web-shell-mobile-followup-dismiss]';
-const FOLLOWUP_FILL = '[data-web-shell-mobile-followup-fill]';
 const SUGGESTION = 'run the tests';
 const ZH_SUGGESTION = '运行测试';
 
@@ -127,7 +127,7 @@ test('mobile suggestion bar fills the textarea without submitting', async ({
   await expect(textarea).not.toHaveAttribute('placeholder', SUGGESTION);
   await expect(send).toBeEnabled();
   await page.screenshot({
-    path: testInfo.outputPath('followup-bar-simple-v3.png'),
+    path: testInfo.outputPath('followup-bar-simple-v4.png'),
   });
   await page.locator(FOLLOWUP_ACCEPT).tap();
   await expect(textarea).toHaveValue(SUGGESTION);
@@ -216,7 +216,7 @@ test('mobile prefix typing keeps the send completion without the bar', async ({
   );
 });
 
-test('mobile editing row fill key fills the textarea without submitting', async ({
+test('mobile editing row carries no follow-up key while the chip bar accepts', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -225,21 +225,21 @@ test('mobile editing row fill key fills the textarea without submitting', async 
   const textarea = page.locator(COMPOSER_TEXTAREA);
   const editingRow = page.locator('[data-web-shell-mobile-editing-actions]');
   await expect(editingRow).toBeVisible();
-  await expect(page.locator(FOLLOWUP_FILL)).toHaveCount(0);
   const idlePlaceholder = await textarea.getAttribute('placeholder');
   await pushSuggestion(daemon, scenario.sessionId);
-  const fillKey = page.locator(FOLLOWUP_FILL);
-  await expect(fillKey).toBeVisible();
-  await expect(fillKey).toHaveText('Fill in');
   await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
+  await expect(editingRow.locator(FOLLOWUP_ACCEPT)).toHaveCount(0);
+  await expect(editingRow.locator(FOLLOWUP_DISMISS)).toHaveCount(0);
+  await expect(
+    editingRow.getByRole('button', { name: 'Fill in', exact: true }),
+  ).toHaveCount(0);
   await expect(textarea).toHaveAttribute('placeholder', idlePlaceholder!);
   await page.screenshot({
-    path: testInfo.outputPath('followup-fill-key-v3.png'),
+    path: testInfo.outputPath('followup-bar-default-v4.png'),
   });
-  await fillKey.tap();
+  await page.locator(FOLLOWUP_ACCEPT).tap();
   await expect(textarea).toHaveValue(SUGGESTION);
   await expect(textarea).toBeFocused();
-  await expect(fillKey).toHaveCount(0);
   await expect(page.locator(FOLLOWUP_BAR)).toHaveCount(0);
   expect(daemon.promptRequests()).toHaveLength(0);
 });
@@ -259,37 +259,38 @@ test('mobile follow-up bar renders in Simplified Chinese', async ({
     'aria-label',
     '忽略建议',
   );
-  await expect(page.locator(FOLLOWUP_FILL)).toHaveCount(0);
   await expect(textarea).toHaveAttribute('placeholder', idlePlaceholder!);
   await expect(textarea).not.toHaveAttribute('placeholder', ZH_SUGGESTION);
   await page.screenshot({
-    path: testInfo.outputPath('followup-bar-simple-zh.png'),
+    path: testInfo.outputPath('followup-bar-simple-zh-v2.png'),
   });
   await page.locator(FOLLOWUP_ACCEPT).tap();
   await expect(textarea).toHaveValue(ZH_SUGGESTION);
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile editing row fill key renders in Simplified Chinese', async ({
+test('mobile chip bar accepts in Simplified Chinese without an editing-row key', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
   await gotoHarness(page, scenario, daemon, 'default', 'zh-CN');
   const textarea = page.locator(COMPOSER_TEXTAREA);
-  await expect(page.locator(FOLLOWUP_FILL)).toHaveCount(0);
+  const editingRow = page.locator('[data-web-shell-mobile-editing-actions]');
+  await expect(editingRow).toBeVisible();
   const idlePlaceholder = await textarea.getAttribute('placeholder');
   await pushSuggestion(daemon, scenario.sessionId, ZH_SUGGESTION);
-  const fillKey = page.locator(FOLLOWUP_FILL);
-  await expect(fillKey).toBeVisible();
-  await expect(fillKey).toHaveText('填入');
   await expect(page.locator(FOLLOWUP_ACCEPT)).toHaveText(ZH_SUGGESTION);
+  await expect(editingRow.locator(FOLLOWUP_ACCEPT)).toHaveCount(0);
+  await expect(
+    editingRow.getByRole('button', { name: '填入', exact: true }),
+  ).toHaveCount(0);
   await expect(textarea).toHaveAttribute('placeholder', idlePlaceholder!);
   await page.screenshot({
-    path: testInfo.outputPath('followup-fill-key-zh.png'),
+    path: testInfo.outputPath('followup-bar-default-zh-v2.png'),
   });
-  await fillKey.tap();
+  await page.locator(FOLLOWUP_ACCEPT).tap();
   await expect(textarea).toHaveValue(ZH_SUGGESTION);
-  await expect(fillKey).toHaveCount(0);
+  await expect(page.locator(FOLLOWUP_BAR)).toHaveCount(0);
   expect(daemon.promptRequests()).toHaveLength(0);
 });

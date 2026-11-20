@@ -139,6 +139,7 @@ import {
   Maximize2Icon,
   LoaderCircleIcon,
   SlashIcon,
+  TextCursorInputIcon,
   UploadIcon,
   XIcon,
 } from 'lucide-react';
@@ -4099,8 +4100,8 @@ export const ChatEditor = memo(
 
     // Touch accept fills the textarea without submitting (desktop Tab
     // semantics); Send with an empty input still submits the suggestion
-    // directly. The bar covers every variant, the editing-row fill key only
-    // the default one, and both hide once the user starts typing.
+    // directly. The chip bar is the single touch accept surface — its
+    // content is its label — and it hides once the user starts typing.
     const mobileFollowupSuggestion =
       !disabled &&
       core.mobileComposer &&
@@ -4812,20 +4813,6 @@ export const ChatEditor = memo(
                     {workspaceControls(false)}
                   </div>
                 )}
-                {mobileFollowupSuggestion && (
-                  <button
-                    type="button"
-                    className={styles.toolBtn}
-                    disabled={disabled}
-                    aria-label={t('composerMobile.acceptFollowup')}
-                    title={t('composerMobile.acceptFollowup')}
-                    data-web-shell-mobile-followup-fill
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => core.onAcceptFollowup('tab')}
-                  >
-                    {t('composerMobile.fillFollowup')}
-                  </button>
-                )}
                 {!showAddMenuAction && (
                   <button
                     type="button"
@@ -4897,11 +4884,19 @@ export const ChatEditor = memo(
                   type="button"
                   className={styles.mobileFollowupAccept}
                   data-web-shell-mobile-followup-accept
+                  aria-label={`${t('composerMobile.acceptFollowup')}: ${mobileFollowupSuggestion}`}
                   title={t('composerMobile.acceptFollowup')}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => core.onAcceptFollowup('tab')}
                 >
-                  {mobileFollowupSuggestion}
+                  <TextCursorInputIcon
+                    size={14}
+                    strokeWidth={1.5}
+                    aria-hidden="true"
+                  />
+                  <span className={styles.mobileFollowupText}>
+                    {mobileFollowupSuggestion}
+                  </span>
                 </button>
                 <button
                   type="button"

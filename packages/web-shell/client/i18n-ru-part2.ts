@@ -258,7 +258,6 @@ export const RU_PART2: Record<
   'composerMobile.searchCommands': 'Поиск команд',
   'composerMobile.history': 'История ввода',
   'composerMobile.acceptFollowup': 'Принять предложение',
-  'composerMobile.fillFollowup': 'Вставить',
   'composerMobile.dismissFollowup': 'Скрыть предложение',
   'composerMobile.stop': 'Стоп',
   'composerMobile.attachments': (v) => `Вложения/изображения: ${v?.count ?? 0}`,

@@ -2,7 +2,7 @@
 
 [English](web-shell-mobile-followup-acceptance.md) | [简体中文](web-shell-mobile-followup-acceptance.zh-CN.md)
 
-Status: implemented in the working tree (2026-11-20), not yet committed.
+Status: implemented on `feat/web-shell-mobile-followup-acceptance` (PR #17918), revised through three review rounds on 2026-11-20 (Tab key → action-word key → single chip bar).
 
 ## Problem
 
@@ -12,12 +12,13 @@ Two earlier decisions shape this change. The mobile-composer-actions redesign re
 
 ## Design
 
-Two touch points, one accept path:
+One touch point, one accept path:
 
-- **Suggestion bar** above the input row, in every composer variant: the suggestion text as a tappable button plus a dismiss button.
-- **Editing-row fill key**, default variant only (the editing row does not render in the simple variant or during voice capture): a button labelled with the localized action word (`Fill in` / 填入 / Вставить) that appears only while a suggestion is visible. It names the action rather than a desktop key: touch users have no Tab key and no Tab-accept muscle memory, so a `Tab` label would reference hardware they do not have.
+- **Suggestion chip bar** above the input row, in every composer variant: a chip-styled tappable button whose label is the suggestion text itself, preceded by an insert icon, plus a dismiss button. The editing row carries no follow-up control.
 
-Visibility for both: touch backend mounted, suggestion visible, draft empty, composer enabled. Both hide as soon as the user types, matching the desktop ghost's prefix rule in spirit while keeping the touch surface draft-free. While the bar is visible the touch textarea keeps its ordinary placeholder, so the suggestion text appears on exactly one surface; an earlier revision also left it in the placeholder, which duplicated the text on screen. Desktop keeps rendering the suggestion as placeholder (empty input) and ghost completion (typed prefix).
+The single chip is the end state of three review rounds. The first revision added the bar plus an editing-row key labelled `Tab`; review noted touch users have no Tab key or Tab-accept habit. The second revision relabelled that key with the localized action word (`Fill in` / 填入 / Вставить); review noted a bare transitive verb still lacks its object and sits spatially detached from the suggestion content. The final revision removes the editing-row key entirely and gives the bar a chip container (subtle background, border, insert icon) so it reads as tappable without hover: the content is the label, the most understandable form, matching mobile suggestion chips elsewhere. The `composerMobile.fillFollowup` catalog keys were removed with the key.
+
+Visibility: touch backend mounted, suggestion visible, draft empty, composer enabled. The chip hides as soon as the user types, matching the desktop ghost's prefix rule in spirit while keeping the touch surface draft-free. While the chip is visible the touch textarea keeps its ordinary placeholder, so the suggestion text appears on exactly one surface; an earlier revision also left it in the placeholder, which duplicated the text on screen. Desktop keeps rendering the suggestion as placeholder (empty input) and ghost completion (typed prefix).
 
 Accept calls `onAcceptFollowup('tab')` without `skipOnAccept`, so the host's existing `onAccept → insertText` wiring fills the textarea and focuses it inside the tap gesture (iOS opens the keyboard only for gesture-initiated focus). Dismiss calls `onDismissFollowup`, keeping the existing ignored-outcome telemetry. No new data path: the daemon sidechannel, controller, and insertText touch branch are reused unchanged.
 
@@ -25,14 +26,14 @@ Preserved fast paths: Send with an empty input still submits the visible suggest
 
 ## Constraints
 
-- 44px touch targets; the bar occupies one 44px row only while a suggestion is visible, so idle layout is unchanged.
-- The textarea keeps its 16px font (iOS focus auto-zoom rule); the bar is a button and uses 14px dimmed text with ellipsis.
-- The accept button prevents mousedown default like the other editing-row controls, so focus is not lost before the gesture-driven insert.
-- The old "no simulated keyboard keys" acceptance stays true when no suggestion is visible; the fill key is contextual, not a revived dead key, and its label never names a keyboard key.
+- 44px touch targets; the chip row occupies one 44px row only while a suggestion is visible, so idle layout is unchanged.
+- The textarea keeps its 16px font (iOS focus auto-zoom rule); the chip is a button with 14px text, an insert icon and single-line ellipsis.
+- The chip prevents mousedown default like the other composer controls, so focus is not lost before the gesture-driven insert; its aria-label combines the localized action with the suggestion text so screen readers get both.
+- The old "no simulated keyboard keys" acceptance stays true: no follow-up control names a keyboard key or a bare verb, and the editing row carries none at all.
 
 ## Validation
 
-- `client/e2e/web-shell.followup.mobile.spec.ts`, mobile-chromium (Pixel 7 touch emulation): 8/8 passed — bar fill without submit, dismiss, empty-send direct submit, typing hides the bar, prefix completion, editing-row fill key accept (labelled `Fill in`), the placeholder staying ordinary while the bar shows (single surface), and two zh-CN cases pinning the localized bar text, dismiss label and `填入` fill key while capturing Chinese-UI screenshots. The composer-layout harness takes an optional `language` URL param for those cases; the spec captures evidence screenshots into its
+- `client/e2e/web-shell.followup.mobile.spec.ts`, mobile-chromium (Pixel 7 touch emulation): 8/8 passed — chip fill without submit, dismiss, empty-send direct submit, typing hides the chip, prefix completion, the editing row carrying no follow-up key while the chip accepts (default variant), the placeholder staying ordinary while the chip shows (single surface), and two zh-CN cases pinning the localized chip text and dismiss label while capturing Chinese-UI screenshots. The composer-layout harness takes an optional `language` URL param for those cases; the spec captures evidence screenshots into its
   test-results output.
 - `ChatEditor.test.tsx` mobile composer actions: 8 new unit tests pin visibility (draft, hidden suggestion, desktop backend, disabled, simple variant) and the accept/dismiss wiring; 383/383 passed with `i18n.test.ts` at the merged head.
 - web-shell `tsc --noEmit` and ESLint on the changed files: clean.
