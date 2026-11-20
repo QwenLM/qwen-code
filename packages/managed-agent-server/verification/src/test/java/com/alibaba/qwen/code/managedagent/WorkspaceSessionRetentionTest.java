@@ -207,8 +207,11 @@ class WorkspaceSessionRetentionTest {
         archive(tenant, session, "archive-again");
         request(post(PUBLIC + session + "/unarchive"), tenant, "owner", "unarchive")
                 .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("archived"));
+        // D3: the session was closed on files-v2, so a protocol-2 lifecycle
+        // operation exists and the claim gate names the fence
+        // (workspace_lifecycle_claim_fenced) ahead of the v1 admission-closed code.
         assertThatThrownBy(() -> journal.acquireWriter(tenant, session, "b".repeat(43),
-                new AcquireWriterRequest("ws", "late", 60_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
+                new AcquireWriterRequest("ws", "late", 60_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced"));
         assertThat(count(tenant, session, "session.archived")).isEqualTo(2);
         assertThat(count(tenant, session, "session.unarchived")).isEqualTo(1);
         assertThat(runtime.calls.get(session)).isEqualTo(1);

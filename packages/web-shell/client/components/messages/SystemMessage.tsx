@@ -191,7 +191,9 @@ export const SystemMessage = memo(function SystemMessage({
   ) {
     content = t('subscription.loginRequired');
   }
-  const backgroundDetails = useSubagentDetails()?.onOpenBackground;
+  const subagentDetails = useSubagentDetails();
+  const backgroundDetails = subagentDetails?.onOpenBackground;
+  const openSession = subagentDetails?.onOpenSession;
   const [copied, flashCopied] = useCopiedFlash();
   const handleCopy = useCallback(() => {
     void writeClipboardText(content)
@@ -202,9 +204,30 @@ export const SystemMessage = memo(function SystemMessage({
   }, [content, flashCopied]);
   if (source === 'background_notification_turn_started') {
     const turn = parseDaemonBackgroundTurn(data);
-    const taskStatus = (
-      data as { backgroundTask?: { status?: string } } | undefined
-    )?.backgroundTask?.status;
+    const backgroundTask = (
+      data as
+        | {
+            backgroundTask?: {
+              status?: string;
+              fromSession?: { sessionId?: unknown; workspaceCwd?: unknown };
+            };
+          }
+        | undefined
+    )?.backgroundTask;
+    // A reply from another session opens that session, not task details.
+    const fromSession = backgroundTask?.fromSession;
+    const openFromSession =
+      openSession && turn && typeof fromSession?.sessionId === 'string'
+        ? () =>
+            openSession({
+              sessionId: fromSession.sessionId as string,
+              ...(typeof fromSession.workspaceCwd === 'string'
+                ? { workspaceCwd: fromSession.workspaceCwd }
+                : {}),
+              title: turn.label ?? turn.kind,
+            })
+        : undefined;
+    const taskStatus = backgroundTask?.status;
     const markerLabel =
       taskStatus === 'completed'
         ? t('system.taskCompleted')
@@ -249,12 +272,12 @@ export const SystemMessage = memo(function SystemMessage({
         )}
         <span className="shrink-0 text-muted-foreground">
           {t(
-            turn?.kind === 'agent'
-              ? 'background.agent'
-              : turn?.kind === 'peer'
-                ? teammate
-                  ? 'background.teammate'
-                  : 'background.peer'
+            turn?.kind === 'peer' || backgroundTask?.fromSession
+              ? teammate
+                ? 'background.teammate'
+                : 'background.peer'
+              : turn?.kind === 'agent'
+                ? 'background.agent'
                 : 'background.task',
           )}
         </span>
@@ -281,13 +304,16 @@ export const SystemMessage = memo(function SystemMessage({
             </Button>
           )}
           {/* A peer turn has no task behind it to show the details of. */}
-          {backgroundDetails && turn && turn.kind !== 'peer' && (
+          {(openFromSession ||
+            (backgroundDetails && turn && turn.kind !== 'peer')) && (
             <Button
               type="button"
               variant="ghost"
               size="sm"
               className="h-auto gap-1 p-0 font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
-              onClick={() => backgroundDetails(turn)}
+              onClick={() =>
+                openFromSession ? openFromSession() : backgroundDetails?.(turn!)
+              }
             >
               <FileTextIcon size={12} aria-hidden="true" />
               {t('background.details')}

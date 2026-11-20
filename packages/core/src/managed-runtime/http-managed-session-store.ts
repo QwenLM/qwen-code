@@ -202,6 +202,14 @@ export interface HttpManagedSessionStores {
   };
   assertWritable(): Promise<void>;
   stopLocal(): Promise<void>;
+  /**
+   * Ends the writer lease's renewal timer without fencing the client. A
+   * suspension that cannot confirm its seal needs the lease to lapse so a
+   * successor generation fences the old writer, while the same client must
+   * still be able to reconcile that seal — `stopLocal()` refuses those
+   * requests too. An on-demand renewal for a commit still runs.
+   */
+  stopWriterRenewal(): void;
   quiesceOwnership(placement: HostedHarnessPlacement): Promise<void>;
   releaseOwnership(
     request: HostedHarnessReleaseRequest,
@@ -445,6 +453,7 @@ export function createHttpManagedSessionStores(
     },
     assertWritable: () => client.assertWritable(),
     stopLocal: () => client.stopLocal(),
+    stopWriterRenewal: () => client.stopWriterRenewal(),
     quiesceOwnership: (placement) => client.quiesceOwnership(placement),
     releaseOwnership: (request) => client.releaseOwnership(request),
     close: () => client.seal(),
@@ -478,7 +487,6 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   );
   const head = parseRestoreHead(snapshot['head']);
   if (
-    ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
     head.recoveryStatus !== 'READY' ||
     head.compactedThroughRevision !== 0
@@ -640,45 +648,6 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   if (resources.size !== references.size) {
     throw corrupt('snapshot resource enumeration conflicts.');
   }
-  if (
-    head.storageVersion < 5 &&
-    [...resources.values()].some(
-      ({ ref }) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
-    )
-  )
-    throw corrupt('Tool measurements require storage version 5.');
-  const executionPresent = [...resources.values()].some(
-    ({ ref }) => ref.kind === EXECUTION_DIAGNOSTICS_KIND,
-  );
-  if (executionPresent && head.storageVersion < 4)
-    throw corrupt('Execution diagnostics require storage version 4.');
-  const diagnosticsPresent = [...resources.values()].some(({ ref }) =>
-    MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind),
-  );
-  if (diagnosticsPresent && head.storageVersion < 3)
-    throw corrupt('snapshot diagnostics require storage version 3.');
-  const definitionResource = resources.get(
-    scan.header.definitionRef.resourceId,
-  );
-  const profile =
-    definitionResource?.ref.kind === 'managed-definition'
-      ? (
-          JSON.parse(definitionResource.bytes.toString('utf8')) as {
-            toolProfile?: string;
-          }
-        ).toolProfile
-      : undefined;
-  if (
-    (profile === 'csi-files-retirement/1' &&
-      (diagnosticsPresent || head.storageVersion !== 1)) ||
-    (profile === 'csi-files-retirement/2' &&
-      (executionPresent ||
-        head.storageVersion !== (diagnosticsPresent ? 3 : 1))) ||
-    (profile === 'csi-files-retirement/3' &&
-      head.storageVersion !==
-        (executionPresent ? 4 : diagnosticsPresent ? 3 : 1))
-  )
-    throw corrupt('snapshot CSI profile storage floor conflicts.');
   for (const [resourceId, revisions] of references) {
     const actual = resourceRevisions.get(resourceId)!;
     if (actual.some((revision) => !revisions.has(revision))) {
@@ -997,7 +966,6 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 interface WriterGrant {
   readonly activationLeaseRenewal: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
-  readonly supportedStorageVersion: number;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
   readonly journalRevision: number;
@@ -1009,7 +977,6 @@ interface WriterGrant {
 interface RestoreHead {
   readonly activationLease?: ManagedSessionActivationLease;
   readonly state: string;
-  readonly storageVersion: number;
   readonly writerGeneration: number;
   readonly journalRevision: number;
   readonly committedSequence: number;
@@ -1059,10 +1026,10 @@ interface TransactionDescriptor {
 
 class ManagedSessionStoreHttpClient {
   supportsExecutionDiagnostics(): boolean {
-    return (this.grant?.supportedStorageVersion ?? 1) >= 4;
+    return true;
   }
   supportsModelDiagnostics(): boolean {
-    return (this.grant?.supportedStorageVersion ?? 1) >= 3;
+    return true;
   }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
@@ -1559,7 +1526,7 @@ class ManagedSessionStoreHttpClient {
     // writer stayed fenced; the lease-active verdict is implied by the
     // acquire itself succeeding.
     debugLogger.debug(
-      `Managed Session Store restore head matches grant: session=${this.sessionKey.sessionId} writerId=${this.writerId} acquiredWriterGeneration=${this.requireGrant().writerGeneration} headGeneration=${head.writerGeneration} journalRevision=${head.journalRevision} committedSequence=${head.committedSequence} state=${head.state} storageVersion=${head.storageVersion}`,
+      `Managed Session Store restore head matches grant: session=${this.sessionKey.sessionId} writerId=${this.writerId} acquiredWriterGeneration=${this.requireGrant().writerGeneration} headGeneration=${head.writerGeneration} journalRevision=${head.journalRevision} committedSequence=${head.committedSequence} state=${head.state}`,
     );
     const chunks: Buffer[] = [];
     let afterRevision = 0;
@@ -1592,25 +1559,6 @@ class ManagedSessionStoreHttpClient {
         this.sessionKey,
       );
       requireStoredTransactionMatches(transaction, descriptor);
-      if (
-        head.storageVersion < 5 &&
-        descriptor.refs.some(
-          (ref) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
-        )
-      )
-        throw corrupt('Tool measurements require storage version 5.');
-      if (
-        head.storageVersion < 4 &&
-        descriptor.refs.some((ref) => ref.kind === EXECUTION_DIAGNOSTICS_KIND)
-      )
-        throw corrupt('Execution diagnostics require storage version 4.');
-      if (
-        head.storageVersion < 3 &&
-        descriptor.refs.some((ref) =>
-          MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind),
-        )
-      )
-        throw corrupt('journal diagnostics require storage version 3.');
       if (
         usesSnapshot &&
         (transaction.previousCommitDigest !== lastCommitDigest ||
@@ -1823,10 +1771,6 @@ class ManagedSessionStoreHttpClient {
       resourceCount: safeCounter(raw['resourceCount'], 'resourceCount'),
       lastPageDigest: digest(raw['lastPageDigest'], 'lastPageDigest'),
     };
-    const storageVersion = safeCounter(
-      raw['storageVersion'],
-      'snapshot storageVersion',
-    );
     if (
       raw['format'] !== 'qwen-managed-native-session-snapshot/1' ||
       raw['payloadFormat'] !== 'committed-prefix-v1' ||
@@ -1835,8 +1779,6 @@ class ManagedSessionStoreHttpClient {
       raw['sessionId'] !== this.sessionKey.sessionId ||
       snapshot.snapshotId.length === 0 ||
       Buffer.byteLength(snapshot.snapshotId, 'utf8') > 512 ||
-      ![1, 2, 3, 4, 5].includes(storageVersion) ||
-      storageVersion > head.storageVersion ||
       snapshot.coveredJournalRevision < 1 ||
       snapshot.coveredJournalRevision > head.journalRevision ||
       snapshot.committedSequence > head.committedSequence ||
@@ -1948,29 +1890,6 @@ class ManagedSessionStoreHttpClient {
         const nested: typeof declared = [];
         for (const resource of added) {
           const body = await this.readResource(resource);
-          if (
-            storageVersion < 5 &&
-            resource.kind === MANAGED_TOOL_MEASUREMENTS_KIND
-          )
-            throw corrupt('Tool measurements require storage version 5.');
-          if (
-            storageVersion < 4 &&
-            resource.kind === EXECUTION_DIAGNOSTICS_KIND
-          )
-            throw corrupt('Execution diagnostics require storage version 4.');
-          if (
-            storageVersion < 3 &&
-            (MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(resource.kind) ||
-              (resource.kind === 'managed-history_maintenance' &&
-                (
-                  JSON.parse(body.toString('utf8')) as {
-                    schemaVersion?: number;
-                  }
-                ).schemaVersion === 2))
-          )
-            throw corrupt(
-              'native snapshot diagnostics require storage version 3.',
-            );
           nested.push(...collectNestedResourceRefs(resource, body));
         }
         // Direct references are the transaction's own census: a missing one is
@@ -2372,37 +2291,6 @@ class ManagedSessionStoreHttpClient {
           event.payload?.['sourceBootId'] !== undefined
         );
       });
-    if (needsVersionTwo && grant.supportedStorageVersion < 2)
-      throw new ManagedSessionRecordError(
-        'Managed Session Store does not support Hosted recovery storage version 2.',
-      );
-    const needsVersionThree = commitResources.some(
-      (resource) =>
-        MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(resource.kind) ||
-        (resource.kind === 'managed-history_maintenance' &&
-          resource.bytesBase64 &&
-          JSON.parse(
-            Buffer.from(resource.bytesBase64, 'base64').toString('utf8'),
-          ).schemaVersion === 2),
-    );
-    if (needsVersionThree && grant.supportedStorageVersion < 3)
-      throw new ManagedSessionRecordError(
-        'Managed Session Store does not support model diagnostics storage version 3.',
-      );
-    if (
-      commitResources.some(
-        (resource) => resource.kind === EXECUTION_DIAGNOSTICS_KIND,
-      ) &&
-      grant.supportedStorageVersion < 4
-    )
-      throw corrupt('Execution diagnostics require storage version 4.');
-    if (
-      descriptor.refs.some(
-        (ref) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
-      ) &&
-      grant.supportedStorageVersion < 5
-    )
-      throw corrupt('Tool measurements require storage version 5.');
     const publicationIds = new Set(
       descriptor.refs.flatMap((ref) => {
         const id = this.publicationAdmissions.get(ref.resourceId);
@@ -2680,7 +2568,6 @@ class ManagedSessionStoreHttpClient {
           method,
           headers: {
             Accept: 'application/json',
-            'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
             ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
             [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
               this.sessionKey.tenantId,
@@ -3213,7 +3100,6 @@ class ManagedSessionStoreHttpClient {
       this.grant = {
         ...this.requireGrant(),
         leaseUntil: renewed.leaseUntil,
-        supportedStorageVersion: renewed.supportedStorageVersion,
       };
       this.scheduleRenewal();
     })();
@@ -3310,8 +3196,6 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (
       head.state !== 'ACTIVE' ||
-      ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
-      head.storageVersion > grant.supportedStorageVersion ||
       head.writerGeneration !== grant.writerGeneration ||
       head.recoveryStatus !== 'READY' ||
       head.compactedThroughRevision !== 0
@@ -3525,7 +3409,6 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: accept,
-          'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
@@ -3862,13 +3745,6 @@ function parseWriterGrant(value: unknown): WriterGrant {
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),
-    supportedStorageVersion:
-      record['supportedStorageVersion'] === undefined
-        ? 1
-        : safeCounter(
-            record['supportedStorageVersion'],
-            'supportedStorageVersion',
-          ),
     writerGeneration: safeCounter(
       record['writerGeneration'],
       'writerGeneration',
@@ -3894,7 +3770,6 @@ function parseRestoreHead(value: unknown): RestoreHead {
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),
     state: string(record['state'], 'state'),
-    storageVersion: safeCounter(record['storageVersion'], 'storageVersion'),
     writerGeneration: safeCounter(
       record['writerGeneration'],
       'writerGeneration',

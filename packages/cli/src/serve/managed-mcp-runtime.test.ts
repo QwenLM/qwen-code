@@ -1939,3 +1939,203 @@ it('lists only published pins for its boot Workspace without connecting or expos
     instance.publishedDefinitions(sessionKey.tenantId, sessionKey.workspaceId),
   ).toThrow('managed_mcp_closed');
 });
+
+describe('parked connection upkeep', () => {
+  type PingReply = 'alive' | 'expired' | 'unsupported';
+
+  async function remoteDefinition(
+    serverId: string,
+    ping: () => PingReply,
+    methods: string[] = [],
+  ): Promise<ManagedMcpDefinition> {
+    const server = createServer(async (request, response) => {
+      if (request.method !== 'POST') {
+        response.writeHead(405).end();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const body = JSON.parse(Buffer.concat(chunks).toString()) as {
+        id?: string | number;
+        method: string;
+      };
+      if (body.id === undefined) {
+        response.writeHead(202).end();
+        return;
+      }
+      methods.push(body.method);
+      if (body.method === 'ping' && ping() === 'expired') {
+        response.writeHead(404).end();
+        return;
+      }
+      const reply =
+        body.method === 'ping' && ping() === 'unsupported'
+          ? { error: { code: -32601, message: 'Not supported' } }
+          : {
+              result:
+                body.method === 'initialize'
+                  ? {
+                      protocolVersion: '2024-11-05',
+                      capabilities: { tools: {} },
+                      serverInfo: { name: 'remote', version: '1' },
+                    }
+                  : body.method === 'tools/list'
+                    ? { tools: [] }
+                    : {},
+            };
+      response
+        .writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ jsonrpc: '2.0', id: body.id, ...reply }));
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as { port: number };
+    return {
+      tenantId: sessionKey.tenantId,
+      workspaceId: sessionKey.workspaceId,
+      serverId,
+      serverRevision: 1,
+      definitionDigest,
+      transport: 'streamable-http',
+      url: `http://127.0.0.1:${port}/mcp`,
+    };
+  }
+
+  const discover = (
+    catalog: ManagedMcpCatalog,
+    operationId: string,
+    revalidate = true,
+  ): ManagedMcpControl => ({
+    kind: 'mcp-discover',
+    sessionKey,
+    operationId,
+    serverId: catalog.serverId,
+    serverRevision: catalog.serverRevision,
+    connectionGeneration: catalog.connectionGeneration,
+    ...(revalidate ? { revalidate: true as const } : {}),
+    grant: grant('configuration-1'),
+  });
+
+  it.each(['alive', 'unsupported'] as const)(
+    'keeps a remote connection whose ping answers %s',
+    async (answer) => {
+      const methods: string[] = [];
+      const instance = runtime([
+        await remoteDefinition('fixture', () => answer, methods),
+      ]);
+      const { catalog } = await settled(instance, configure());
+      const view = await settled(instance, discover(catalog!, 'revalidate'));
+      expect(view.catalog?.connectionGeneration).toBe(
+        catalog!.connectionGeneration,
+      );
+      expect(methods.filter((method) => method === 'ping')).toHaveLength(1);
+    },
+  );
+
+  it('retires a remote connection whose session expired, leaving it releasable', async () => {
+    let answer: PingReply = 'alive';
+    const instance = runtime([await remoteDefinition('fixture', () => answer)]);
+    const { catalog } = await settled(instance, configure());
+    answer = 'expired';
+
+    const view = await settled(instance, discover(catalog!, 'revalidate'));
+    expect(view.error?.code).toBe('managed_mcp_retiring');
+    expect(
+      (await settled(instance, discover(catalog!, 'after', false))).error?.code,
+    ).toBe('managed_mcp_binding_conflict');
+    const release = await settled(instance, {
+      kind: 'mcp-release',
+      sessionKey,
+      operationId: 'release-expired',
+      serverId: 'fixture',
+      serverRevision: 1,
+      connectionGeneration: catalog!.connectionGeneration,
+      grant: grant('configuration-1'),
+    });
+    expect(release.response).toEqual({ released: true });
+  });
+
+  it('does not ping a stdio server or an ordinary discover', async () => {
+    const instance = runtime();
+    const { catalog } = await settled(instance, configure());
+    await settled(instance, discover(catalog!, 'revalidate'));
+    await settled(instance, discover(catalog!, 'plain', false));
+    const methods = await readFile(path.join(directory, 'calls-1'), 'utf8');
+    expect(methods).not.toContain('ping');
+  });
+
+  it('rejects a revalidate flag on any other value', async () => {
+    const instance = runtime();
+    const { catalog } = await settled(instance, configure());
+    await expect(
+      instance.control(runtimeSessionId, {
+        ...discover(catalog!, 'invalid'),
+        revalidate: false,
+      } as unknown as ManagedMcpControl),
+    ).rejects.toThrow('managed_mcp_invalid');
+  });
+
+  it('evicts only another Session idle connection once the quota is reached', async () => {
+    const definitions = await Promise.all(
+      Array.from({ length: 17 }, (_, index) =>
+        remoteDefinition(`remote-${index}`, () => 'alive'),
+      ),
+    );
+    const instance = new ManagedMcpRuntime(
+      { ...sessionKey, workspaceGeneration: '1' },
+      async () => directory,
+      { version: 1, servers: definitions },
+    );
+    runtimes.push(instance);
+    const settle = async (id: string, control: ManagedMcpControl) => {
+      await instance.control(id, control);
+      let view!: ManagedMcpOperationView;
+      await vi.waitFor(async () => {
+        view = await instance.control(id, {
+          kind: 'mcp-status',
+          sessionKey,
+          operationId: 'lookup',
+          targetOperationId: control.operationId,
+        });
+        expect(view.state).not.toBe('running');
+      });
+      return view;
+    };
+    const install = (id: string, index: number, operationId: string) =>
+      settle(id, {
+        ...configure(),
+        serverId: `remote-${index}`,
+        operationId,
+        grant: grant(operationId),
+      });
+    const first = await install('parked', 0, 'parked-0');
+    for (let index = 1; index < 16; index++)
+      await install('parked', index, `parked-${index}`);
+
+    expect((await install('new', 16, 'too-early')).error?.code).toBe(
+      'managed_mcp_connection_quota',
+    );
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 301_000);
+    try {
+      expect((await install('parked', 16, 'own-session')).error?.code).toBe(
+        'managed_mcp_connection_quota',
+      );
+      expect((await install('new', 16, 'evicting')).catalog).toBeDefined();
+      const evicted = await settle('parked', {
+        kind: 'mcp-discover',
+        sessionKey,
+        operationId: 'evicted',
+        serverId: 'remote-0',
+        serverRevision: 1,
+        connectionGeneration: first.catalog!.connectionGeneration,
+        grant: grant('parked-0'),
+      });
+      expect(evicted.error?.code).toBe('managed_mcp_binding_conflict');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  }, 30_000);
+});

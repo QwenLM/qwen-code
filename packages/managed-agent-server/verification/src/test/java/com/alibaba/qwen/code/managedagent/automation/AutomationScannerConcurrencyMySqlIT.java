@@ -2,16 +2,21 @@ package com.alibaba.qwen.code.managedagent.automation;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcAutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.OccurrenceRow;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.ScheduleRow;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -179,6 +184,104 @@ class AutomationScannerConcurrencyMySqlIT {
                 "schedule:2026-06-01T10:01:00Z").orElseThrow().outcome())
                 .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(connector.fires.get()).isEqualTo(1);
+    }
+
+    private TransactionTemplate repeatableRead() {
+        var tx = new TransactionTemplate(new DataSourceTransactionManager(database.source()));
+        tx.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        tx.setTimeout(10);
+        return tx;
+    }
+
+    private void projectTerminal(OccurrenceRow row) {
+        repeatableRead().executeWithoutResult(status -> {
+            jdbc.queryForList("SELECT tenant_id FROM ma_session"
+                    + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", row.tenantId(), row.sessionId());
+            jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
+                            + " session_id, domain, record_id, revision, task_kind, task_state, record_resource_id, gmt_create)"
+                            + " VALUES (?, ?, ?, 'workspace', ?, 'automation_run', ?, 1, 'automation_run', 'completed', 'res', 42)",
+                    ManagedSessionStore.sessionScopeKey(row.tenantId(), row.sessionId()),
+                    ManagedExtensionProjection.recordKey(row.sessionId(), "automation_run", row.runId()),
+                    row.tenantId(), row.sessionId(), row.runId());
+            jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = 1"
+                            + " WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?"
+                            + " AND session_id = ? AND run_id = ?",
+                    row.tenantId(), row.scheduleId(), row.occurrenceKey(), row.sessionId(), row.runId());
+        });
+    }
+
+    @Test
+    void insertAndBothSettlesReadTerminalMirrorsBeyondAnOuterRepeatableReadSnapshot() throws Exception {
+        ExecutorService writer = Executors.newSingleThreadExecutor();
+        try {
+            for (int variant = 0; variant < 3; variant++) {
+                String scheduleId = "schedule-snapshot-" + variant;
+                arm(scheduleId, T0);
+                long fence = store.claim(TENANT, scheduleId, "owner", T0 + 60_000, T0);
+                var row = OccurrenceRow.decision(store.findSchedule(TENANT, scheduleId).orElseThrow(),
+                        "manual:snapshot", null, "manual", variant == 0 ? "fired" : "firing", null, fence, T0);
+                if (variant != 0) {
+                    store.recordOccurrence(row, "owner");
+                }
+                int operation = variant;
+                repeatableRead().executeWithoutResult(status -> {
+                    assertThat(store.countActive(TENANT, scheduleId)).isEqualTo(operation == 0 ? 0 : 1);
+                    try {
+                        writer.submit(() -> projectTerminal(row)).get(5, TimeUnit.SECONDS);
+                    } catch (Exception error) {
+                        throw new AssertionError(error);
+                    }
+                    // The snapshot still predates the mirror; only a current read can observe it.
+                    assertThat(store.findOccurrenceView(TENANT, scheduleId, row.occurrenceKey())
+                            .map(view -> view.taskState())).isEmpty();
+                    if (operation == 0) {
+                        store.recordOccurrence(row, "owner");
+                    } else if (operation == 1) {
+                        assertThat(store.settleOccurrence(TENANT, scheduleId, row.occurrenceKey(),
+                                "fired", null, "owner", fence, T0 + 1)).isTrue();
+                    } else {
+                        assertThat(store.settleOccurrence(TENANT, scheduleId, row.occurrenceKey(),
+                                "fired", null, "detail", "owner", fence, T0 + 1)).isTrue();
+                    }
+                    assertThat(store.countActive(TENANT, scheduleId)).isZero();
+                    assertThat(jdbc.queryForObject("SELECT is_run_terminal FROM ma_schedule_occurrence"
+                                    + " WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?",
+                            Integer.class, TENANT, scheduleId, row.occurrenceKey())).isEqualTo(1);
+                });
+                assertThat(store.countActive(TENANT, scheduleId)).isZero();
+            }
+        } finally {
+            writer.shutdownNow();
+        }
+    }
+
+    @Test
+    void anOccurrenceAbsentFromTheOuterSnapshotRequiresAFreshRetry() throws Exception {
+        String scheduleId = "schedule-invisible";
+        arm(scheduleId, T0);
+        long fence = store.claim(TENANT, scheduleId, "owner", T0 + 60_000, T0);
+        var row = OccurrenceRow.decision(store.findSchedule(TENANT, scheduleId).orElseThrow(),
+                "manual:invisible", null, "manual", "firing", null, fence, T0);
+        ExecutorService writer = Executors.newSingleThreadExecutor();
+        try {
+            repeatableRead().executeWithoutResult(status -> {
+                assertThat(store.findOccurrence(TENANT, scheduleId, row.occurrenceKey())).isEmpty();
+                try {
+                    writer.submit(() -> store.recordOccurrence(row, "owner")).get(5, TimeUnit.SECONDS);
+                } catch (Exception error) {
+                    throw new AssertionError(error);
+                }
+                assertThat(store.settleOccurrence(TENANT, scheduleId, row.occurrenceKey(),
+                        "fired", null, "owner", fence, T0 + 1)).isFalse();
+                var duplicate = OccurrenceRow.decision(store.findSchedule(TENANT, scheduleId).orElseThrow(),
+                        row.occurrenceKey(), null, "manual", "skipped", "must not replace", fence, T0 + 1);
+                assertThat(store.recordOccurrence(duplicate, "owner")).contains(row);
+            });
+            assertThat(store.settleOccurrence(TENANT, scheduleId, row.occurrenceKey(),
+                    "fired", null, "owner", fence, T0 + 2)).isTrue();
+        } finally {
+            writer.shutdownNow();
+        }
     }
 
     /** The automation verb answers delivered; everything else is out of scope here. */

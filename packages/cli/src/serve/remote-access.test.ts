@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import express from 'express';
 import { createServer, type Server } from 'node:http';
+import { connect as netConnect } from 'node:net';
 import * as os from 'node:os';
 import { RemoteAccessService } from './remote-access.js';
 import { CredentialStore } from './local-control/credentials.js';
@@ -169,4 +170,30 @@ it('does not echo internal error detail to the client on an unexpected failure (
   expect(body.code).toBe('remote_access_failed');
   expect(body.error).toBe('Remote access operation failed.');
   expect(JSON.stringify(body)).not.toContain(secretPath);
+});
+
+it('enables TCP keepalive on accepted remote-access sockets', async () => {
+  // The remote-access listener serves the same app behind NATs; it must
+  // register the same keepalive policy as the primary listener (R1-3).
+  const net = await import('node:net');
+  const spy = vi.spyOn(net.Socket.prototype, 'setKeepAlive');
+  try {
+    const enabled = await (await manage('enable', { port: 0 })).json();
+    expect(enabled.active).toBe(true);
+    const url = new URL(enabled.url);
+    await new Promise<void>((resolve, reject) => {
+      const sock = netConnect(Number(url.port), url.hostname, () => {
+        sock.destroy();
+        resolve();
+      });
+      sock.on('error', reject);
+    });
+    // The server-side 'connection' handler runs after the client's
+    // connect callback; let the accept settle before asserting.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(spy).toHaveBeenCalledWith(true, 30_000);
+    await manage('disable');
+  } finally {
+    spy.mockRestore();
+  }
 });

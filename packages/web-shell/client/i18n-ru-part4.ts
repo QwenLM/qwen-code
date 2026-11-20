@@ -26,6 +26,8 @@ export const RU_PART4: Record<
   'sidebar.switchFailed': 'Не удалось переключить сессию',
   'sidebar.currentDeleteDisabled':
     'Текущая сессия выполняется и не может быть удалена',
+  'sidebar.deleteRunningDisabled':
+    'Сессию с фоновыми задачами нельзя удалить: удаление остановит их',
   'sidebar.currentStandaloneDeleteDisabled':
     'Сначала откройте другой чат, чтобы удалить текущую сессию без рабочей области',
   'sidebar.deleteConfirmDescription': (v) =>
@@ -362,13 +364,13 @@ export const RU_PART4: Record<
   'slash.category.system': 'Системные команды',
   'language.changed': (v) => `Язык UI изменён на ${v?.language ?? ''}`,
   'language.current': (v) => `Текущий язык UI: ${v?.language ?? ''}`,
-  'language.invalid': 'Недопустимый язык. Доступно: en, zh-CN, ru',
+  'language.invalid': 'Недопустимый язык. Доступно: en, zh-CN, zh-TW, ru',
   'language.options': 'Доступные варианты:',
   'language.set': 'Задать язык UI',
   'language.refreshFailed':
     'Язык UI сохранён, но не удалось применить его полностью.',
   'language.usage':
-    'Использование: /language ui [en|zh-CN|ru] [--project|--global] | output <language>',
+    'Использование: /language ui [en|zh-CN|zh-TW|ru] [--project|--global] | output <language>',
   'localCommand.noSession':
     'Пока нет активной сессии. Отправьте первое сообщение, прежде чем использовать эту команду.',
   'localCommand.diffNoWorkspace':

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import {
   TeamEventType,
@@ -127,6 +127,7 @@ describe('attachTeamSink', () => {
   let injectLeaderMessage: ReturnType<typeof vi.fn>;
   let injectLeaderNotice: ReturnType<typeof vi.fn>;
   let requestPermission: ReturnType<typeof vi.fn>;
+  let switchToDefaultMode: Mock<() => Promise<void>>;
   let reportRosterChange: ReturnType<typeof vi.fn>;
   let retireTeamBinding: ReturnType<typeof vi.fn>;
   let retireTeammateApprovals: ReturnType<typeof vi.fn>;
@@ -144,6 +145,7 @@ describe('attachTeamSink', () => {
     injectLeaderMessage = vi.fn();
     injectLeaderNotice = vi.fn();
     requestPermission = vi.fn();
+    switchToDefaultMode = vi.fn(async () => {});
     reportRosterChange = vi.fn();
     retireTeamBinding = vi.fn(async () => {});
     retireTeammateApprovals = vi.fn(async () => {});
@@ -157,6 +159,7 @@ describe('attachTeamSink', () => {
       retireTeamBinding,
       retireTeammateApprovals,
       requestPermission,
+      switchToDefaultMode,
     };
   });
 
@@ -273,6 +276,48 @@ describe('attachTeamSink', () => {
       teammateName: 'security',
     });
     expect(respond.mock.calls[0]![0]).toBe(offered!.options[0]!.optionId);
+    expect(switchToDefaultMode).not.toHaveBeenCalled();
+  });
+
+  it('applies switch-to-Default to the session before forwarding the teammate approval', async () => {
+    attachTeamSink(deps);
+    let offered: RequestPermissionRequest | undefined;
+    requestPermission.mockImplementation(async (params) => {
+      offered = params;
+      return {
+        outcome: {
+          outcome: 'selected',
+          optionId: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+        },
+      };
+    });
+
+    const { event, respond } = approvalEvent({
+      confirmationDetails: {
+        ...editConfirmation(),
+        autoModeFallback: {
+          reason: 'classifier_unavailable',
+          message: 'Classifier unavailable.',
+        },
+      },
+    });
+    manager.emitter.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, event);
+
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    expect(
+      offered?.options.some(
+        (option) =>
+          option.optionId ===
+          ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+      ),
+    ).toBe(true);
+    expect(switchToDefaultMode).toHaveBeenCalledTimes(1);
+    expect(switchToDefaultMode.mock.invocationCallOrder[0]!).toBeLessThan(
+      respond.mock.invocationCallOrder[0]!,
+    );
+    expect(respond.mock.calls[0]![0]).toBe(
+      ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    );
   });
 
   it('does not report a host failure when the abort rejects the request', async () => {

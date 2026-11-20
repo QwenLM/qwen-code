@@ -392,7 +392,6 @@ async function snapshotOf(
     },
     head: {
       state: 'ACTIVE',
-      storageVersion: 1,
       writerGeneration: 1,
       journalRevision: transactions.length,
       committedSequence: scan.committed,

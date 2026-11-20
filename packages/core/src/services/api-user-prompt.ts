@@ -11,18 +11,10 @@ import {
   isSystemReminderContent,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
 } from '../core/environmentContext.js';
 import { isClearedMediaPlaceholder } from './microcompaction/microcompact.js';
-
-// Envelope the background registries wrap a notification's `modelText` in
-// (agents, monitors, shells, workflows, the dropped-notification tally).
-// Same shape `turn-interruption.ts` keys on; see that file for the envelope's
-// trust model (role-gated, emitter escaping not uniform).
-const TASK_NOTIFICATION_OPEN = '<task-notification>';
-const TASK_NOTIFICATION_CLOSE = '</task-notification>';
-// Peer turns remain distinct from cold copies for interruption recovery.
-const PEER_NOTIFICATION_OPEN = '<peer-notification>';
-const PEER_NOTIFICATION_CLOSE = '</peer-notification>';
 
 function isWrappedText(text: string, open: string, close: string): boolean {
   return text.startsWith(open) && text.trimEnd().endsWith(close);
@@ -30,7 +22,7 @@ function isWrappedText(text: string, open: string, close: string): boolean {
 
 /**
  * Whether `content` is a delivered automatic notification turn: every text
- * part is a per-turn `<system-reminder>` or a task/peer notification envelope,
+ * part is a per-turn `<system-reminder>` or a `<task-notification>` envelope,
  * and at least one part is an envelope.
  *
  * The reminder allowance is what separates this from the cold-projection trim
@@ -49,12 +41,7 @@ function isDeliveredNotificationTurn(content: Content): boolean {
     if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true) continue;
     if (!('text' in part) || typeof part.text !== 'string') return false;
     if (
-      isWrappedText(
-        part.text,
-        TASK_NOTIFICATION_OPEN,
-        TASK_NOTIFICATION_CLOSE,
-      ) ||
-      isWrappedText(part.text, PEER_NOTIFICATION_OPEN, PEER_NOTIFICATION_CLOSE)
+      isWrappedText(part.text, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE)
     ) {
       sawEnvelope = true;
     } else if (
@@ -116,14 +103,14 @@ export interface ApiUserPromptOptions {
 
   /**
    * Exclude delivered background-notification turns: user entries whose text
-   * parts are all per-turn `<system-reminder>`s or task/peer notification
+   * parts are all per-turn `<system-reminder>`s or `<task-notification>`
    * envelopes, with at least one envelope (#9608).
    *
-   * ACP rewind sets this: the daemon's notification drain sends
-   * `[...systemReminders, ...notificationParts]` as one user entry that never
-   * produced a client-visible turn or a per-prompt file-history snapshot, so
-   * counting it inflates the rewindable count and shifts every cut point
-   * after it.
+   * An ordinal rewind surface may opt into this when its notification drain
+   * sends `[...systemReminders, ...notificationParts]` as one user entry that
+   * never produced a client-visible turn or a per-prompt file-history
+   * snapshot, so counting it would inflate the rewindable count and shift
+   * every cut point after it.
    *
    * The TUI must NOT set it: there, queued notifications ride into history
    * inside the next genuine user message's parts, and such a mixed entry

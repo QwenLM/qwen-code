@@ -52,6 +52,8 @@ export interface AdmissibleNotification {
    * cross-session traffic, and the dropped summary names it as such.
    */
   agent?: { kind: string };
+  /** Producer class retained even when a batch has no single sender. */
+  producer?: 'teammate';
   /**
    * Registry id (agent / shell / monitor / workflow) or cron job id. Used
    * only to name what was lost in the dropped summary.
@@ -152,7 +154,10 @@ function droppedNoun(item: AdmissibleNotification, count: number): string {
 }
 
 function isTeammateReport(item: AdmissibleNotification): boolean {
-  return item.kind === 'peer' && item.agent?.kind === 'teammate';
+  return (
+    item.kind === 'peer' &&
+    (item.producer === 'teammate' || item.agent?.kind === 'teammate')
+  );
 }
 
 /** Ordering of the per-kind clauses in the summary; stable across drains. */
