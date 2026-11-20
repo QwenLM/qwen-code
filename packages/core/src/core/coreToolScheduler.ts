@@ -65,7 +65,11 @@ import {
   firePermissionRequestHook,
   appendAdditionalContext,
 } from './toolHookTriggers.js';
-import type { PermissionRequestHookResult } from './toolHookTriggers.js';
+import type {
+  PermissionRequestHookResult,
+  PostToolUseFailureHookResult,
+  PostToolUseHookResult,
+} from './toolHookTriggers.js';
 import {
   appendTextToFunctionResponse,
   appendToolHookContextToParts,
@@ -498,6 +502,58 @@ const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE =
   'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.';
 const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE =
   'The tool had already completed; its output was discarded. User intentionally cancelled. Stop and await further instructions; do not retry.';
+/**
+ * The abort reason of a turn the user ended to send a message. A tool it
+ * interrupts is told to read that message, not to stop for good.
+ */
+export const USER_MESSAGE_INTERRUPT_ABORT_REASON = 'qwen:mid-turn-send-now';
+export const TOOL_INTERRUPTED_FOR_USER_MESSAGE =
+  'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.';
+export const TOOL_DISCARDED_FOR_USER_MESSAGE =
+  'The tool had already completed, but its output was discarded when the user interrupted to send you a message, which follows. Read it before deciding whether to run the tool again.';
+
+function interruptedForUserMessage(signal: AbortSignal): boolean {
+  return signal.reason === USER_MESSAGE_INTERRUPT_ABORT_REASON;
+}
+
+function cancelledBeforeCompletionMessage(signal: AbortSignal): string {
+  return interruptedForUserMessage(signal)
+    ? TOOL_INTERRUPTED_FOR_USER_MESSAGE
+    : TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE;
+}
+
+function cancelledAfterCompletionMessage(signal: AbortSignal): string {
+  return interruptedForUserMessage(signal)
+    ? TOOL_DISCARDED_FOR_USER_MESSAGE
+    : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+}
+
+type PostToolHookResult<T> = T & { waitInterrupted?: true };
+
+async function waitForPostToolHook<T>(
+  signal: AbortSignal,
+  interruptedResult: T,
+  runHook: (hookSignal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const hookController = new AbortController();
+  let finishWait!: () => void;
+  const interrupted = new Promise<T>((resolve) => {
+    finishWait = () => resolve(interruptedResult);
+  });
+  // Ordinary Stop still waits for the hook and keeps its output.
+  const onAbort = () => {
+    if (!interruptedForUserMessage(signal)) return;
+    finishWait();
+    hookController.abort(signal.reason);
+  };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    return await Promise.race([interrupted, runHook(hookController.signal)]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
 
 /**
  * Builds the failure ToolResult surfaced when a tool call exceeds the
@@ -606,24 +662,31 @@ async function safelyFirePostToolUseFailureHook(
   toolInput: Record<string, unknown>,
   errorMessage: string,
   isInterrupt: boolean,
+  turnSignal: AbortSignal,
   permissionMode?: string,
   tool_call_id?: string,
   durationMs?: number,
   owner?: HookExecutionOwner,
-): ReturnType<typeof firePostToolUseFailureHook> {
+): Promise<PostToolHookResult<PostToolUseFailureHookResult>> {
   try {
-    return await firePostToolUseFailureHook(
-      messageBus,
-      toolUseId,
-      toolName,
-      toolInput,
-      errorMessage,
-      isInterrupt,
-      permissionMode,
-      undefined,
-      tool_call_id,
-      durationMs,
-      owner,
+    return await waitForPostToolHook<
+      PostToolHookResult<PostToolUseFailureHookResult>
+    >(turnSignal, { waitInterrupted: true }, (hookSignal) =>
+      firePostToolUseFailureHook(
+        messageBus,
+        toolUseId,
+        toolName,
+        toolInput,
+        errorMessage,
+        isInterrupt,
+        permissionMode,
+        // An interrupt still emits the failure hook. Its result is no longer
+        // needed by the ending turn.
+        isInterrupt && hookSignal.aborted ? undefined : hookSignal,
+        tool_call_id,
+        durationMs,
+        owner,
+      ),
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -2734,13 +2797,15 @@ export class CoreToolScheduler {
    */
   private postToolUseFailureEndMeta = (
     r: Awaited<ReturnType<typeof safelyFirePostToolUseFailureHook>>,
-  ): HookSpanMetadata =>
-    r.hookError
+  ): HookSpanMetadata => {
+    if (r.waitInterrupted) return { waitInterrupted: true };
+    return r.hookError
       ? { success: false, error: r.hookError }
       : {
           success: true,
           hasAdditionalContext: !!r.additionalContext,
         };
+  };
 
   /**
    * Open the call's tool span, or return the one already open for it. It is
@@ -6303,7 +6368,7 @@ export class CoreToolScheduler {
     let executionSettled = false;
     let execSpan: Span | undefined;
     const cancelIfFinished = (
-      message = TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+      message = cancelledAfterCompletionMessage(signal),
     ): boolean => {
       if (!this.schedulerOptions.isFinished?.()) return false;
       this.setStatusInternal(callId, 'cancelled', message, executionStatus);
@@ -6772,8 +6837,8 @@ export class CoreToolScheduler {
         // finished: producers that signal interruption by returning (the shell
         // tool on user cancel) set `interruptedBeforeCompletion`.
         let cancelMessage = toolResult.interruptedBeforeCompletion
-          ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
-          : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+          ? cancelledBeforeCompletionMessage(signal)
+          : cancelledAfterCompletionMessage(signal);
         if (cancelIfFinished(cancelMessage)) return;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
@@ -6792,6 +6857,7 @@ export class CoreToolScheduler {
                 toolInput,
                 cancelMessage,
                 true,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
@@ -6845,7 +6911,7 @@ export class CoreToolScheduler {
         const cancelledResponse = createCancelledResponse(
           scheduledCall.request,
           // Reached only after `execute()` settled with a result.
-          TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+          cancelledAfterCompletionMessage(signal),
           executionStatus,
           artifacts,
           preserved?.persistedOutputFiles,
@@ -6891,20 +6957,29 @@ export class CoreToolScheduler {
           const postHookResult = await this.withHookSpan(
             { hookEvent: 'PostToolUse', toolName: canonicalName, toolUseId },
             () =>
-              firePostToolUseHook(
-                messageBus,
-                canonicalName,
-                toolInput,
-                toolResponse,
-                toolUseId,
-                permissionMode,
-                undefined, // signal
-                callId, // Original API call ID (e.g., call_xxx)
-                elapsedExecutionMs(),
-                this.hookOwners.get(callId),
+              waitForPostToolHook<PostToolHookResult<PostToolUseHookResult>>(
+                signal,
+                {
+                  shouldStop: false,
+                  waitInterrupted: true,
+                },
+                (hookSignal) =>
+                  firePostToolUseHook(
+                    messageBus,
+                    canonicalName,
+                    toolInput,
+                    toolResponse,
+                    toolUseId,
+                    permissionMode,
+                    hookSignal,
+                    callId,
+                    elapsedExecutionMs(),
+                    this.hookOwners.get(callId),
+                  ),
               ),
-            (r) =>
-              r.hookError
+            (r) => {
+              if (r.waitInterrupted) return { waitInterrupted: true };
+              return r.hookError
                 ? {
                     success: false,
                     error: r.hookError,
@@ -6920,7 +6995,8 @@ export class CoreToolScheduler {
                     shouldStop: r.shouldStop,
                     hasAdditionalContext: !!r.additionalContext,
                     blockType: r.shouldStop ? 'stop' : undefined,
-                  },
+                  };
+            },
           );
           if (cancelIfFinished()) return;
 
@@ -7455,6 +7531,7 @@ export class CoreToolScheduler {
                 toolInput,
                 failureMessage,
                 false,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
@@ -7852,8 +7929,8 @@ export class CoreToolScheduler {
       }
 
       const cancelMessage = executionThrew
-        ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
-        : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+        ? cancelledBeforeCompletionMessage(signal)
+        : cancelledAfterCompletionMessage(signal);
       if (cancelIfFinished(cancelMessage)) return;
       if (aborted) {
         // PostToolUseFailure Hook (user interrupt)
@@ -7878,6 +7955,7 @@ export class CoreToolScheduler {
                 toolInput,
                 failureMessage,
                 true,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
@@ -7929,6 +8007,7 @@ export class CoreToolScheduler {
                 toolInput,
                 errorMessage,
                 false,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
@@ -7956,8 +8035,8 @@ export class CoreToolScheduler {
             // The abort landed while the failure hook was running; the
             // tool's own outcome is still what `executionThrew` says.
             executionThrew
-              ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
-              : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+              ? cancelledBeforeCompletionMessage(signal)
+              : cancelledAfterCompletionMessage(signal),
             executionStatus,
             failureHookArtifacts,
           );

@@ -204,7 +204,10 @@ export interface GoalRuntime {
   markTurnDelivered(turnKey: string): void;
   permitForTurn(turnKey: string): GoalTurnPermit | undefined;
   getVerifierFeedback(permit: GoalTurnPermit): string | undefined;
-  finishTurn(permit: GoalTurnPermit): Promise<void>;
+  finishTurn(
+    permit: GoalTurnPermit,
+    settlement?: { interruptedForUserInput: boolean },
+  ): Promise<void>;
   getGoalForWorker(permit: GoalTurnPermit): Promise<GoalWorkerView>;
   recordTerminalProposal(
     permit: GoalTurnPermit,
@@ -1244,7 +1247,7 @@ export function createGoalRuntime(
       }
       return currentTurnFeedback;
     },
-    finishTurn(permit: GoalTurnPermit): Promise<void> {
+    finishTurn(permit, settlement): Promise<void> {
       const finish = enqueue(
         async (): Promise<{ verification?: VerificationAttempt }> => {
           assertOperational();
@@ -1271,14 +1274,17 @@ export function createGoalRuntime(
           // (a turn carrying the user's text is the user steering, and the
           // streak restarts from there), recorded no evidence-bearing tool
           // result, and proposed no terminal state. The hand-off turn is
-          // exempt: it is asked to hand off, not to work.
+          // exempt: it is asked to hand off, not to work. Send now can cut
+          // work short before the host can submit the queued input.
           const turnToolResults = takeTurnToolResults(permit.turnId);
-          const noProgressTurns =
-            turnToolResults === undefined || heldWindDown
-              ? undefined
-              : !delivered || turnToolResults > 0 || currentProposal
-                ? 0
-                : (snapshot.goal.noProgressTurns ?? 0) + 1;
+          let noProgressTurns: number | undefined;
+          if (turnToolResults !== undefined && !heldWindDown) {
+            if (!delivered || turnToolResults > 0 || currentProposal) {
+              noProgressTurns = 0;
+            } else if (!settlement?.interruptedForUserInput) {
+              noProgressTurns = (snapshot.goal.noProgressTurns ?? 0) + 1;
+            }
+          }
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
             now: Date.now(),
             tokensUsed: takeTurnTokens(permit.turnId),

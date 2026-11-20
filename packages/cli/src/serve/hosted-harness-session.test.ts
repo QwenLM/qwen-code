@@ -32637,6 +32637,7 @@ describe('Hosted Harness refusal reasons', () => {
       warn: vi.fn(),
       error: vi.fn(),
       raw: vi.fn(),
+      setPort: vi.fn(),
       getLogPath: () => '',
       getDaemonId: () => 'daemon:test',
       getStatus: () => ({
@@ -47006,6 +47007,10 @@ describe('idle suspension', () => {
       .send(operation())
       .expect(202);
     expect(requests.some((r) => r.kind === 'mcp-configure')).toBe(!parkable);
+    // Do not leak this second idle teardown into the next test's mock scope.
+    await vi.waitFor(() => expect(statsOf(server).cleanSuspensions).toBe(2), {
+      timeout: 10_000,
+    });
   });
 
   it('an admitted mutation resets the idle timer', async () => {
