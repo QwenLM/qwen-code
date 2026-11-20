@@ -1347,8 +1347,13 @@
 }
 
 .mobileFollowupAccept:not(:disabled):hover {
-  background: var(--chat-editor-bg-secondary, var(--chat-editor-bg-tertiary));
+  background: var(--chat-editor-bg-primary);
   border-color: var(--chat-editor-text-dimmed, #666);
+}
+
+.mobileFollowup .toolBtn > svg {
+  width: 18px;
+  height: 18px;
 }
 
 .editorArea .cm-scroller {
@@ -3296,6 +3301,14 @@
 }
 
 .mobileEditingActions > button > svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* The caret keys nest one level deeper in .mobileEditingKeys, which has no
+   box of its own (display: contents); the selector must not rely on a direct
+   child of .mobileEditingActions. */
+.mobileEditingKeys > button > svg {
   width: 18px;
   height: 18px;
 }

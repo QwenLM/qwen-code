@@ -140,6 +140,11 @@ function getMirror(el: HTMLTextAreaElement, text: string): MirrorCache | null {
   if (typeof document === 'undefined' || width <= 0) return null;
   const cached = mirrorCache.get(el);
   if (cached && cached.text === text && cached.width === width) return cached;
+  // Never abandon a superseded mirror in the document: it would hold a full
+  // copy of that old draft for the life of the page. One live mirror per
+  // textarea, discarded on clear/unmount via discardMirror.
+  cached?.mirror.remove();
+  mirrorCache.delete(el);
   const style = window.getComputedStyle(el);
   const mirror = document.createElement('div');
   mirror.setAttribute('aria-hidden', 'true');
@@ -180,6 +185,13 @@ function getMirror(el: HTMLTextAreaElement, text: string): MirrorCache | null {
   const entry: MirrorCache = { text, width, mirror, node };
   mirrorCache.set(el, entry);
   return entry;
+}
+
+/** Drop a textarea's mirror node and its cached draft text. */
+export function discardMirror(el: HTMLTextAreaElement | null): void {
+  if (!el) return;
+  mirrorCache.get(el)?.mirror.remove();
+  mirrorCache.delete(el);
 }
 
 /** Layout top of the displayed line containing offset. */
@@ -289,10 +301,12 @@ export function visualLineStartsAround(
   } else if (index + 1 < logicalStarts.length) {
     const nextStart = logicalStarts[index + 1];
     starts.push(nextStart);
+    // The sentinel after a logical line is the *start* of the line after
+    // next, not next-1: an empty next line is zero-length, and next-1 would
+    // collapse onto nextStart and drop the boundary entirely (down then
+    // reads to document end and skips the blank line).
     const nextEnd =
-      index + 2 < logicalStarts.length
-        ? logicalStarts[index + 2] - 1
-        : text.length;
+      index + 2 < logicalStarts.length ? logicalStarts[index + 2] : text.length;
     if (nextEnd > nextStart) starts.push(nextEnd);
   } else if (caret < text.length) {
     // The document-end sentinel bounds the current line, but it must not

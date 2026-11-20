@@ -106,7 +106,7 @@ function expectPromptBodyToContainText(
   ).toBe(true);
 }
 
-test('mobile suggestion bar fills the textarea without submitting', async ({
+test('@smoke mobile suggestion bar fills the textarea without submitting', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -144,7 +144,7 @@ test('mobile suggestion bar fills the textarea without submitting', async ({
   await expect(textarea).toHaveValue('');
 });
 
-test('mobile suggestion dismiss clears the placeholder and send', async ({
+test('@smoke mobile suggestion dismiss clears the placeholder and send', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -162,7 +162,7 @@ test('mobile suggestion dismiss clears the placeholder and send', async ({
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile empty send submits the visible suggestion directly', async ({
+test('@smoke mobile empty send submits the visible suggestion directly', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -179,7 +179,7 @@ test('mobile empty send submits the visible suggestion directly', async ({
   await expect(page.locator(COMPOSER_TEXTAREA)).toHaveValue('');
 });
 
-test('mobile typing hides the suggestion bar and sends the draft', async ({
+test('@smoke mobile typing hides the suggestion bar and sends the draft', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -198,7 +198,7 @@ test('mobile typing hides the suggestion bar and sends the draft', async ({
   );
 });
 
-test('mobile prefix typing keeps the send completion without the bar', async ({
+test('@smoke mobile prefix typing keeps the send completion without the bar', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -217,7 +217,7 @@ test('mobile prefix typing keeps the send completion without the bar', async ({
   );
 });
 
-test('mobile editing row carries no follow-up key while the chip bar accepts', async ({
+test('@smoke mobile editing row carries no follow-up key while the chip bar accepts', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -245,7 +245,7 @@ test('mobile editing row carries no follow-up key while the chip bar accepts', a
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile editing-row direction keys move the caret', async ({
+test('@smoke mobile editing-row direction keys move the caret', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -280,7 +280,7 @@ test('mobile editing-row direction keys move the caret', async ({
   });
 });
 
-test('mobile editing keys share the row at 390px and own a line at 240px', async ({
+test('@smoke mobile editing keys share the row at 390px and own a line at 240px', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -313,7 +313,7 @@ test('mobile editing keys share the row at 390px and own a line at 240px', async
   );
 });
 
-test('mobile right key accepts the visible suggestion', async ({
+test('@smoke mobile right key accepts the visible suggestion', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -330,7 +330,7 @@ test('mobile right key accepts the visible suggestion', async ({
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile right key label and accept stay in sync on a typed prefix', async ({
+test('@smoke mobile right key label and accept stay in sync on a typed prefix', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -350,7 +350,7 @@ test('mobile right key label and accept stay in sync on a typed prefix', async (
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile right key steps whole graphemes and slash keeps emoji intact', async ({
+test('@smoke mobile right key steps whole graphemes and slash keeps emoji intact', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -374,7 +374,7 @@ test('mobile right key steps whole graphemes and slash keeps emoji intact', asyn
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile vertical keys follow soft-wrapped lines like the native arrows', async ({
+test('@smoke mobile vertical keys follow soft-wrapped lines like the native arrows', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -402,7 +402,7 @@ test('mobile vertical keys follow soft-wrapped lines like the native arrows', as
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile up-move to a wrapped line end keeps the emoji whole', async ({
+test('@smoke mobile up-move to a wrapped line end keeps the emoji whole', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -434,7 +434,7 @@ test('mobile up-move to a wrapped line end keeps the emoji whole', async ({
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile down after a horizontal move does not restore the old column', async ({
+test('@smoke mobile down after a horizontal move does not restore the old column', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -482,7 +482,7 @@ test('mobile keys stay responsive on a 50k draft without full-draft measurement'
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile vertical run holds the preferred column through short lines', async ({
+test('@smoke mobile vertical run holds the preferred column through short lines', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -506,7 +506,7 @@ test('mobile vertical run holds the preferred column through short lines', async
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile caret keys scroll long drafts back into the visible window', async ({
+test('@smoke mobile caret keys scroll long drafts back into the visible window', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -540,7 +540,7 @@ test('mobile caret keys scroll long drafts back into the visible window', async 
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile dismiss does not focus the empty composer', async ({
+test('@smoke mobile dismiss does not focus the empty composer', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -559,7 +559,7 @@ test('mobile dismiss does not focus the empty composer', async ({
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile expanded dialog keeps the suggestion on its placeholder', async ({
+test('@smoke mobile expanded dialog keeps the suggestion on its placeholder', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -577,6 +577,102 @@ test('mobile expanded dialog keeps the suggestion on its placeholder', async ({
   });
   await expanded.fill('draft');
   await expect(expanded).not.toHaveAttribute('placeholder', SUGGESTION);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('@smoke mobile mirror does not accumulate and is discarded on clear', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const right = page.locator('[data-web-shell-mobile-caret-right]');
+  const mirrorCount = () => page.locator('div[aria-hidden="true"]').count();
+  await textarea.fill('a');
+  await right.tap();
+  const base = await mirrorCount();
+  for (let i = 2; i <= 10; i += 1) {
+    await textarea.fill('a'.repeat(i));
+    await right.tap();
+  }
+  expect(await mirrorCount()).toBe(base);
+  await textarea.fill('');
+  expect(await mirrorCount()).toBe(base - 1);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('@smoke mobile down lands on an empty next line and continues', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const down = page.locator('[data-web-shell-mobile-caret-down]');
+  const caret = () =>
+    textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart);
+  await textarea.fill('abcd\n\nwxyz');
+  await textarea.evaluate((el) => el.setSelectionRange(3, 3));
+  await down.tap();
+  expect(await caret()).toBe(5);
+  await down.tap();
+  expect(await caret()).toBe(9);
+  await textarea.fill('hello\n\nworld');
+  await textarea.evaluate((el) => el.setSelectionRange(5, 5));
+  await down.tap();
+  expect(await caret()).toBe(6);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('@smoke mobile repeated up crosses a wrap boundary like native arrows', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const up = page.locator('[data-web-shell-mobile-caret-up]');
+  const caret = () =>
+    textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart);
+  await textarea.fill('go ' + 'a'.repeat(60));
+  await textarea.evaluate((el) => el.setSelectionRange(9, 9));
+  const seen: number[] = [];
+  for (let i = 0; i < 3; i += 1) {
+    await up.tap();
+    seen.push(await caret());
+  }
+  expect(seen).toEqual([3, 0, 0]);
+  await textarea.evaluate((el) => el.setSelectionRange(9, 9));
+  await textarea.focus();
+  const native: number[] = [];
+  for (let i = 0; i < 3; i += 1) {
+    await page.keyboard.press('ArrowUp');
+    native.push(await caret());
+  }
+  expect(native).toEqual(seen);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('@smoke mobile caret and dismiss icons share the 18px sibling geometry', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  await pushSuggestion(daemon, scenario.sessionId);
+  await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
+  const expandSvg = page
+    .getByRole('button', {
+      name: 'Expand editor',
+      exact: true,
+    })
+    .locator('svg');
+  const caretSvg = page.locator('[data-web-shell-mobile-caret-up] svg');
+  const dismissSvg = page.locator(`${FOLLOWUP_DISMISS} svg`);
+  const expandBox = (await expandSvg.boundingBox())!;
+  expect((await caretSvg.boundingBox())!.width).toBe(expandBox.width);
+  expect((await dismissSvg.boundingBox())!.width).toBe(expandBox.width);
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
@@ -626,7 +722,9 @@ test('mobile caret keys yield to an active IME composition', async ({
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile slash key inserts a literal slash', async ({ page }, testInfo) => {
+test('@smoke mobile slash key inserts a literal slash', async ({
+  page,
+}, testInfo) => {
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
   await gotoHarness(page, scenario, daemon, 'default');
@@ -636,7 +734,7 @@ test('mobile slash key inserts a literal slash', async ({ page }, testInfo) => {
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile follow-up bar renders in Simplified Chinese', async ({
+test('@smoke mobile follow-up bar renders in Simplified Chinese', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -661,7 +759,7 @@ test('mobile follow-up bar renders in Simplified Chinese', async ({
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile chip bar accepts in Simplified Chinese with caret keys only', async ({
+test('@smoke mobile chip bar accepts in Simplified Chinese with caret keys only', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();

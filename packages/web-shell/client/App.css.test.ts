@@ -20,6 +20,13 @@ const chatPaneCss = postcss.parse(
   },
 );
 
+const chatEditorCss = postcss.parse(
+  readFileSync(
+    new URL('./components/ChatEditor.module.css', import.meta.url),
+    'utf8',
+  ),
+);
+
 const tidy = (text: string) => text.replace(/\s+/g, ' ').trim();
 
 function declarations(rule: Rule): Map<string, string> {
@@ -113,5 +120,29 @@ describe('Chat layout relayout boundary CSS contracts', () => {
     );
     expect(emptyApprovalRules).toHaveLength(1);
     expect(emptyApprovalRules[0]?.get('position')).toBe('relative');
+  });
+});
+
+describe('touch follow-up chip hover tokens', () => {
+  it('uses background tokens declared in both theme blocks', () => {
+    const hoverRules = findRules(
+      chatEditorCss,
+      '.mobileFollowupAccept:not(:disabled):hover',
+    );
+    expect(hoverRules.length).toBeGreaterThan(0);
+    const backgroundTokens = hoverRules
+      .flatMap((decls) => decls.get('background') ?? '')
+      .join(' ')
+      .match(/--chat-editor-[\w-]+/g);
+    expect(backgroundTokens).not.toBeNull();
+    for (const theme of ['.themeDark', '.themeLight']) {
+      const declared = new Set<string>();
+      findRules(appCss, theme).forEach((decls) => {
+        for (const prop of decls.keys()) declared.add(prop);
+      });
+      for (const token of backgroundTokens!) {
+        expect(declared.has(token), `${theme} declares ${token}`).toBe(true);
+      }
+    }
   });
 });

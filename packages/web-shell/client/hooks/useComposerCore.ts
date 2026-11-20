@@ -84,6 +84,7 @@ import {
 import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
 import {
   caretGraphemeColumn,
+  discardMirror,
   logicalLineStarts,
   lineContentEnd,
   visualLineStartsAround,
@@ -1804,6 +1805,11 @@ export function useComposerCore(
   // across consecutive up/down presses until a horizontal move, edit or
   // selection jump resets it.
   const verticalColumnRef = useRef<number | null>(null);
+  // The displayed line the last vertical move actually landed on. At a
+  // wrap boundary the next press must use this line, not the line of the
+  // character after the caret — otherwise Up re-selects the same offset.
+  const verticalLineStartRef = useRef<number | null>(null);
+  const mirrorHostsRef = useRef<Set<HTMLTextAreaElement>>(new Set());
   // selectionchange (React onSelect) also fires for our own setSelectionRange
   // calls; without this exemption the reset would erase the column we just
   // remembered and the vertical run would crawl like the pre-fix behavior.
@@ -1821,7 +1827,11 @@ export function useComposerCore(
     mobileTextVersionRef.current += 1;
     mobileTextRef.current = text;
     verticalColumnRef.current = null;
+    verticalLineStartRef.current = null;
     programmaticSelectionRef.current = null;
+    if (text === '') {
+      for (const host of mirrorHostsRef.current) discardMirror(host);
+    }
     setMobileTextState(text);
     if (draftIdentityRef.current.storageKey === undefined) {
       unscopedDraftEditedRef.current = true;
@@ -1841,6 +1851,13 @@ export function useComposerCore(
       onInputTextChangeRef.current?.(mobileTextRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    const hosts = mirrorHostsRef.current;
+    return () => {
+      for (const host of hosts) discardMirror(host);
+      hosts.clear();
+    };
   }, []);
   const onCycleModeRef = useRef(onCycleMode);
   onCycleModeRef.current = onCycleMode;
@@ -5047,6 +5064,7 @@ export function useComposerCore(
       const el = expandedTextareaRef.current ?? mobileTextareaRef.current;
       if (!el) return;
       const text = mobileTextRef.current;
+      mirrorHostsRef.current.add(el);
       if (key === 'right') {
         verticalColumnRef.current = null;
         const followup = followupStateRef.current;
@@ -5098,18 +5116,31 @@ export function useComposerCore(
       // Up/down: only the visual lines around the caret are measured, and
       // the preferred column is written here alone — a horizontal or slash
       // move clears it above and must not write the pre-move column back.
-      const lineStarts = visualLineStartsAround(el, text, end);
+      // At a wrap boundary the anchor is the line the last vertical move
+      // landed on, not the line of the character after the caret.
+      const anchor = verticalLineStartRef.current ?? end;
+      const lineStarts = visualLineStartsAround(el, text, anchor);
       const column =
-        verticalColumnRef.current ?? caretGraphemeColumn(text, end, lineStarts);
+        verticalColumnRef.current ??
+        caretGraphemeColumn(text, anchor, lineStarts);
       const target = computeCaretTarget(
         text,
-        start,
-        end,
+        anchor,
+        anchor,
         key,
         lineStarts,
         column,
       );
       verticalColumnRef.current = column;
+      const landedIndex = lineIndexAt(lineStarts, target);
+      // At a wrap boundary the clamp put us at the previous line's end, not
+      // at the start of the next one: anchor to the line we actually landed
+      // on, or the next Up would resolve the same boundary offset again.
+      const landedStart =
+        key === 'up' && target > 0 && lineStarts[landedIndex] === target
+          ? lineStarts[Math.max(0, landedIndex - 1)]
+          : lineStarts[landedIndex];
+      verticalLineStartRef.current = landedStart;
       programmaticSelectionRef.current = [target, target];
       el.focus();
       el.setSelectionRange(target, target);
@@ -5130,6 +5161,7 @@ export function useComposerCore(
       return;
     }
     verticalColumnRef.current = null;
+    verticalLineStartRef.current = null;
   }, []);
 
   const getText = useCallback(() => {
