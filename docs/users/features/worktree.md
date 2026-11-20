@@ -236,11 +236,11 @@ config/*.json
 - **Committed, so it is shared.** Everyone with push access can change which files a clone copies into its worktrees. Keep it to files you would be comfortable seeing in a colleague's worktree.
 - **Read at creation time.** A worktree created before you added a line does not retroactively receive the file.
 
-|                | `.worktreeinclude`                                                     | `worktree.symlinkDirectories`                   |
-| -------------- | ---------------------------------------------------------------------- | ----------------------------------------------- |
-| **Configured** | `.worktreeinclude`, committed to the repo                              | `settings.json`, per developer                  |
-| **Effect**     | copy (independent file)                                                | symlink (shared file)                           |
-| **Applies to** | every worktree the CLI creates, Agent Arena included, and the daemon's | general-purpose worktrees only, not Agent Arena |
+|                | `.worktreeinclude`                                                                                                      | `worktree.symlinkDirectories`                   |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| **Configured** | `.worktreeinclude`, committed to the repo                                                                               | `settings.json`, per developer                  |
+| **Effect**     | copy (independent file)                                                                                                 | symlink (shared file)                           |
+| **Applies to** | worktrees the CLI creates (`--worktree`, `enter_worktree`, agent isolation). Not Agent Arena, not the daemon's sessions | general-purpose worktrees only, not Agent Arena |
 
 Reach for a copy when an agent editing the file inside the worktree must not touch your main checkout — which is exactly the case for `.env`. Reach for a symlink when the content is large and read-mostly: copying `node_modules` costs gigabytes per worktree.
 
@@ -360,7 +360,7 @@ The following items are intentionally not implemented in the current phase:
 
 - **No sparse checkout.** Large monorepos check out the full tree. (`worktree.sparsePaths` is a roadmap item.)
 - **No tmux integration.** The CLI does not spawn worktree sessions in new tmux windows.
-- **`.worktreeinclude` copies the whole matched set, with no size limit.** A pattern that reaches a large generated tree costs that tree's size per worktree; nothing deduplicates it the way a symlink would.
+- **`.worktreeinclude` copies the whole matched set, with no size limit.** A pattern that reaches a large generated tree costs that tree's size per worktree; nothing deduplicates it the way a symlink would. The daemon path is the exception: its carried-path journal has a 32 KiB budget, so a large included set is trimmed to the prefix that fits and the remainder is not copied.
 - **Worktrees are separate "projects" for session storage.** Sessions started with `--worktree foo` are saved under that worktree's chats dir; to resume them later you must pass `--worktree foo` again. Sessions started without `--worktree` are saved under the main checkout and won't appear in the worktree's resume picker.
 - **No cross-slug session override.** `qwen --resume <sid> --worktree second` where `<sid>` was created with `--worktree first` will fail to find the session — sessions and worktrees are tightly bound by `projectHash(cwd)`. To switch worktrees on an existing session you must exit, then re-launch with the new `--worktree` and a fresh prompt. A future architectural change (anchoring storage at the repo root instead of `cwd`) would lift this constraint.
 - **Mid-session `enter_worktree` does NOT switch `process.cwd()` or `Config.targetDir`.** That tool uses the model-context-only convention (see [Sub-Agents](./sub-agents.md)). Only the startup `--worktree` flag actually switches the process working directory.

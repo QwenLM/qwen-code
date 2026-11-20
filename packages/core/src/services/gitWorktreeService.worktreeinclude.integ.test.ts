@@ -269,6 +269,75 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     expect(await exists(path.join(wt, 'secrets', 'id.json'))).toBe(true);
   });
 
+  it('copies an ignored path whose name holds a backslash', async () => {
+    // `git check-ignore` renders such a name C-quoted (`"a\\b.secret"`),
+    // and unquoting it by hand turns the backslash into a separator: the
+    // destination's ignore check then never matches and the file is
+    // silently left behind. `-z --stdin` keeps it verbatim.
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), '*.secret\n');
+    await fs.writeFile(path.join(repoRoot, 'a\\b.secret'), 'TOKEN=abc\n');
+    await fs.writeFile(
+      path.join(repoRoot, WORKTREE_INCLUDE_FILE),
+      '*.secret\n',
+    );
+    gitIn(repoRoot, 'add', '.gitignore');
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include secrets', '--no-verify');
+
+    const wt = await setup();
+
+    expect(await read(path.join(wt, 'a\\b.secret'))).toBe('TOKEN=abc\n');
+  });
+
+  it('keeps copying when a chunk of selected paths is not ignored', async () => {
+    // `git check-ignore` exits 1 when NO path in the chunk matches, which is
+    // an answer, not a failure. Read as a failure it makes the destination
+    // state look unavailable, and the whole copy is dropped — including
+    // chunks that do match. `listIgnoredPaths` checks 50 paths per call, so
+    // this needs a non-matching chunk of 50 ahead of a matching one.
+    //
+    // The destination branch (`pre-early`) ignores `z.env` but predates the
+    // `early-*` rule, so the 51 selected paths split into [50 no-match] then
+    // [1 match].
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), '.env\nz.env\n');
+    gitIn(repoRoot, 'add', '.gitignore');
+    gitIn(repoRoot, 'commit', '-q', '-m', 'ignore z.env', '--no-verify');
+    gitIn(repoRoot, 'branch', '-q', 'pre-early');
+
+    for (let i = 0; i < 50; i++) {
+      const name = `early-${String(i).padStart(2, '0')}.txt`;
+      await fs.writeFile(path.join(repoRoot, name), `${name}\n`);
+    }
+    await fs.writeFile(path.join(repoRoot, 'z.env'), 'TOKEN=abc\n');
+    await fs.writeFile(
+      path.join(repoRoot, '.gitignore'),
+      '.env\nearly-*\nz.env\n',
+    );
+    gitIn(repoRoot, 'add', '.gitignore');
+    await fs.writeFile(
+      path.join(repoRoot, WORKTREE_INCLUDE_FILE),
+      ['early-*', 'z.env'].join('\n'),
+    );
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include early', '--no-verify');
+
+    const service = new GitWorktreeService(repoRoot, baseDir);
+    const result = await service.setupWorktrees({
+      sessionId: 's-chunk',
+      sourceRepoPath: repoRoot,
+      worktreeNames: ['chunk'],
+      baseBranch: 'pre-early',
+    });
+    expect(result.success).toBe(true);
+
+    // The early files are not ignored in the destination and must stay out;
+    // `z.env` is, and must land even though its chunk comes after the one
+    // whose check exits 1.
+    const wt = result.worktrees[0].path;
+    expect(await exists(path.join(wt, 'early-00.txt'))).toBe(false);
+    expect(await read(path.join(wt, 'z.env'))).toBe('TOKEN=abc\n');
+  });
+
   it('never copies a tracked file named by a pattern', async () => {
     await fs.writeFile(
       path.join(repoRoot, WORKTREE_INCLUDE_FILE),
@@ -407,6 +476,52 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     expect(wtRootEntries.filter((name) => name === 'appsettings.json')).toEqual(
       [],
     );
+  });
+
+  it('does not write through a destination leaf symlink', async () => {
+    // `worktree.symlinkDirectories` links single files too (`.env`,
+    // `secrets.json`), and runs before the include copy. When the same path
+    // is also listed in `.worktreeinclude`, `copyFile` used to follow the
+    // link and rewrite the main checkout's own `.env` — untracked,
+    // gitignored, and unrecoverable — while reporting a copy that never
+    // landed in the worktree.
+    await writeIgnoredFixtures();
+    await fs.writeFile(path.join(repoRoot, WORKTREE_INCLUDE_FILE), '.env\n');
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include list', '--no-verify');
+
+    // A second checkout of the same repo: the session's, as the
+    // `dirtyStateSource` case has. Its `.env` differs from the main
+    // checkout's, so a write-through is visible as a value change.
+    const sessionRoot = path.join(repoParent, 'session');
+    gitIn(
+      repoRoot,
+      'worktree',
+      'add',
+      '-q',
+      sessionRoot,
+      '-b',
+      'session-branch',
+    );
+    await fs.writeFile(
+      path.join(sessionRoot, '.env'),
+      'TOKEN=SESSION_CHECKOUT\n',
+    );
+
+    const service = new GitWorktreeService(repoRoot, baseDir);
+    const created = await service.createUserWorktree('leaf-link', 'main', {
+      carryDirtyState: true,
+      symlinkDirectories: ['.env'],
+      dirtyStateSource: sessionRoot,
+    });
+    expect(created.success).toBe(true);
+    const wt = created.worktree!.path;
+    // The configured symlink survives — single-file entries must keep
+    // working — but the copy step must not reach through it.
+    expect((await fs.lstat(path.join(wt, '.env'))).isSymbolicLink()).toBe(true);
+    expect(await read(path.join(repoRoot, '.env'))).toBe('TOKEN=abc\n');
+    // Not reported as copied: nothing entered the worktree.
+    expect(created.carriedPaths ?? []).not.toContain('.env');
   });
 
   it('does not copy a path the destination revision does not ignore', async () => {

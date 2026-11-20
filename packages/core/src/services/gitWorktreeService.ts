@@ -4406,24 +4406,33 @@ export class GitWorktreeService {
     const chunkSize = 50;
     for (let i = 0; i < relPaths.length; i += chunkSize) {
       const chunk = relPaths.slice(i, i + chunkSize);
+      const matched: string[] = [];
       try {
-        const { stdout } = await runGitCapture(worktreePath, [
-          ...NO_EXEC_CONFIG,
-          '-c',
-          'core.quotepath=false',
-          'check-ignore',
-          '--',
-          ...chunk,
-        ]).catch((error: { code?: number | string; stdout?: string }) => {
+        // `-z --stdin` prints each matched path verbatim, NUL-terminated.
+        // Without it git C-quotes any path holding a backslash, quote or
+        // newline, and the only way back is git's own unquoting rules — a
+        // hand-rolled `\\` → `/` rewrite turns `a\b` into `a/b`, so the
+        // genuine entry never matches the listing and is silently not
+        // copied.
+        await streamGitRecords(
+          worktreePath,
+          [...NO_EXEC_CONFIG, 'check-ignore', '-z', '--stdin'],
+          (record) => {
+            matched.push(record.toString('utf8'));
+            return false;
+          },
+          undefined,
+          { stdin: chunk.map((p) => `${p}\0`).join('') },
+        ).catch((error: Error) => {
           // Exit 1 means "no path in this chunk is ignored", not a failure.
-          if (error?.code === 1) {
-            return { stdout: error.stdout ?? '', stderr: '' };
-          }
+          // `streamGitRecords` rejects with a plain Error, so the status is
+          // only in the message it builds from git's stderr.
+          if (/exited with 1\b/.test(error.message)) return true;
           throw error;
         });
-        for (const line of stdout.split('\n')) {
+        for (const line of matched) {
           if (line) {
-            ignored.add(line.split('\\').join('/'));
+            ignored.add(line);
           }
         }
       } catch (error) {
@@ -4473,7 +4482,9 @@ export class GitWorktreeService {
    * -A` — and skipped when it is tracked, when it is not ignored, or when a
    * listing is unavailable. The guarded key comes from the resolved
    * destination path so a committed directory symlink cannot bypass the
-   * check by a different lexical name. When the destination folds case the
+   * check by a different lexical name, and a destination leaf that is itself
+   * a symlink (`worktree.symlinkDirectories` links single files too) is
+   * skipped rather than written through. When the destination folds case the
    * tracked set is compared folded too (Unicode composition folded with it),
    * matching the ignore check's own case-insensitivity.
    *
@@ -4526,6 +4537,20 @@ export class GitWorktreeService {
         if (!isWithinRoot(realParent, realRoot)) {
           debugLogger.warn(
             `copyWorktreeIncludePaths: ${relPath} resolves outside ${worktreePath}; skipping it`,
+          );
+          continue;
+        }
+        // The parent is contained, but the leaf itself can already be a
+        // symlink: `worktree.symlinkDirectories` links single files too
+        // (`.env`, `secrets.json`) and runs before this step, so `copyFile`
+        // would follow the link — rewriting the main checkout's own copy
+        // (gitignored, uncommitted, otherwise unrecoverable) — while
+        // reporting a copy that never landed in the worktree. The link stays;
+        // only the write is refused.
+        const dstStat = await fs.lstat(dst).catch(() => null);
+        if (dstStat?.isSymbolicLink()) {
+          debugLogger.warn(
+            `copyWorktreeIncludePaths: ${relPath} is a symlink in ${worktreePath}; not writing through it`,
           );
           continue;
         }
