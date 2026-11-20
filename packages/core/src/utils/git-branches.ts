@@ -1882,18 +1882,22 @@ function normalizeCommitPaths(paths: readonly string[]): string[] {
 function parseStatusEntries(output: string): Array<{
   path: string;
   oldPath?: string;
+  copied?: boolean;
 }> {
   const tokens = output.split('\0');
-  const entries: Array<{ path: string; oldPath?: string }> = [];
+  const entries: Array<{ path: string; oldPath?: string; copied?: boolean }> =
+    [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     if (token.length < 4) continue;
     const xy = token.slice(0, 2);
     if (xy.includes('R') || xy.includes('C')) {
-      // A rename entry is `XY newpath\0oldpath\0`.
+      // A rename or copy entry is `XY newpath\0oldpath\0`.
       const oldPath = tokens[i + 1];
       i++;
-      entries.push({ path: token.slice(3), oldPath });
+      // A copy leaves its source in place, so it carries no pre-image to
+      // guard: the old path is not a deletion this commit publishes.
+      entries.push({ path: token.slice(3), oldPath, copied: xy.includes('C') });
     } else {
       entries.push({ path: token.slice(3) });
     }
@@ -1977,6 +1981,13 @@ async function resolveCommitPaths(
         continue;
       }
       push(entry.path);
+      // A copy's source is still in the tree and the checklist lists it as its
+      // own row, so it is named here only when the selection reaches it — never
+      // as a pre-image, since nothing about the copy deletes it.
+      if (entry.copied) {
+        if (selectedOrPrefix(entry.oldPath)) push(entry.oldPath);
+        continue;
+      }
       // The status pair's `oldPath` is only named when the selection reaches
       // it too: `status` pairs a staged rename even when the worktree copy was
       // rewritten past git's rename threshold — the checklist then shows two

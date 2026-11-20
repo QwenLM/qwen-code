@@ -2868,6 +2868,28 @@ describe('gitCommit', () => {
     );
   });
 
+  it('commits a copy when `status.renames=copies` reports it as `C`', async () => {
+    // A copy keeps its source in place, so it has no pre-image to guard. The
+    // status pair names the live source, which a shipped dialog would have
+    // selected too. git only pairs a copy when the source changed in the same
+    // commit, so the source is edited after the copy is taken.
+    const dir = makeRepo();
+    git(dir, 'config', 'status.renames', 'copies');
+    const lines = Array.from({ length: 20 }, (_, i) => `line${i + 1}`);
+    commitFile(dir, 'a.txt', lines.join('\n') + '\n', 'add a');
+    fs.copyFileSync(path.join(dir, 'a.txt'), path.join(dir, 'b.txt'));
+    write(dir, { 'a.txt': lines.join('\n') + '\nEXTRA\n' });
+    git(dir, 'add', 'a.txt', 'b.txt');
+
+    const result = await gitCommit(dir, 'copy a', {
+      paths: ['a.txt', 'b.txt'],
+    });
+    expect(result.sha).toBeTruthy();
+    const names = git(dir, 'show', '--name-only', '--format=', 'HEAD').trim();
+    expect(names.split('\n').sort()).toEqual(['a.txt', 'b.txt']);
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+  });
+
   it.skipIf(process.platform === 'win32')(
     'refuses when a dangling symlink sits at a rename pre-image',
     async () => {
