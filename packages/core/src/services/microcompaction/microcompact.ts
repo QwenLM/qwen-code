@@ -443,20 +443,27 @@ function estimatePartTokens(part: Part): number {
     }
     // Tool results may carry nested media on `functionResponse.parts`
     // (see `coreToolScheduler.createFunctionResponsePart`).
-    const nested = (part.functionResponse as { parts?: unknown }).parts;
-    if (Array.isArray(nested)) {
-      for (const inner of nested as Part[]) {
-        if (inner.inlineData || inner.fileData) {
-          total += MEDIA_PART_TOKEN_ESTIMATE;
-        }
-      }
-    }
+    total += estimateNestedMediaTokens(part);
     return total;
   }
   if (part.inlineData || part.fileData) {
     return MEDIA_PART_TOKEN_ESTIMATE;
   }
   return 0;
+}
+
+/** Token estimate for the media nested on `functionResponse.parts`, excluding the text output. */
+function estimateNestedMediaTokens(part: Part): number {
+  const nested = (part.functionResponse as { parts?: unknown } | undefined)
+    ?.parts;
+  if (!Array.isArray(nested)) return 0;
+  let total = 0;
+  for (const inner of nested as Part[]) {
+    if (inner.inlineData || inner.fileData) {
+      total += MEDIA_PART_TOKEN_ESTIMATE;
+    }
+  }
+  return total;
 }
 
 /** Defensive guard against re-clearing if a future change reshapes a cleared part into a collectable form. */
@@ -909,7 +916,9 @@ export function microcompactHistory(
       // would destroy the only reference to the saved bytes. Zero-character
       // non-media tool refs are never clearable either (mirrors the size
       // path's skip). Both are excluded from keepRecent candidates above, so
-      // without this guard they would be blanked here.
+      // without this guard they would be blanked here. The `hasNestedMedia`
+      // bypass keeps a stub whose media alone is reclaimable in the list; the
+      // clearing loop then drops the media and leaves the text untouched.
       if (toolKeys.has(refKey(r)) && !(part && hasNestedMedia(part))) {
         const { chars, persisted } = getClearableToolOutput(
           part,
@@ -990,12 +999,25 @@ export function microcompactHistory(
           part.functionResponse &&
           toolName &&
           COMPACTABLE_TOOLS.has(toolName) &&
-          !isErrorResponse(part) &&
+          !isErrorResponse(part)
+        ) {
           // Same predicate the plan counted with. The plan only sees refs it
           // can account for; re-checking here keeps a stub that reached the
           // clear list some other way from losing its saved-output reference.
-          !getClearableToolOutput(part, callIdentityById).persisted
-        ) {
+          if (getClearableToolOutput(part, callIdentityById).persisted) {
+            // The saved-path text must survive, but the nested media is not
+            // part of that reference — and a stub only lands in the clear list
+            // through the `hasNestedMedia` bypass, so refusing the whole ref
+            // would leave the inline bytes resident for the rest of the
+            // conversation. Strip the media, keep the text.
+            if (!hasNestedMedia(part)) return part;
+            tokensSaved += estimateNestedMediaTokens(part);
+            mediaCleared++;
+            touched = true;
+            return {
+              functionResponse: stripNestedMedia(part.functionResponse),
+            };
+          }
           tokensSaved += estimatePartTokens(part);
           toolsCleared++;
           touched = true;

@@ -1050,6 +1050,52 @@ the last characters`;
     ).toBe(stub);
   });
 
+  it('reclaims nested media from a persisted-output stub without blanking its text', () => {
+    // A heavy batch that also returns media (e.g. `read_mcp_resource`) gets its
+    // text persisted and keeps the inline bytes on `functionResponse.parts`.
+    // The saved-path reference must survive, but the media is not part of that
+    // reference — and it is the only reason the ref reaches the clear list — so
+    // leaving the whole part alone would strand the bytes for the rest of the
+    // conversation. The newest result below holds the single keepRecent slot.
+    const stub = makePersistedOutputStub();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'c1',
+              name: 'run_shell_command',
+              response: { output: stub },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'BASE64IMAGE' } },
+              ],
+            } as unknown as NonNullable<
+              Content['parts']
+            >[number]['functionResponse'],
+          },
+        ],
+      },
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'r'.repeat(5_000)),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, DEFAULT_SETTINGS, {
+      force: true,
+    });
+
+    const cleared = result.history[1]!.parts![0]!.functionResponse as {
+      response: { output: string };
+      parts?: unknown;
+    };
+    // Saved-path text survives; only the nested media is dropped.
+    expect(cleared.response.output).toBe(stub);
+    expect(cleared.parts).toBeUndefined();
+    expect(result.meta).toMatchObject({ mediaCleared: 1, toolsCleared: 0 });
+    expect(result.meta!.tokensSaved).toBeGreaterThan(0);
+  });
+
   it('leaves a truncate-and-save envelope intact on the size path too', () => {
     const envelope = makeTruncationEnvelope();
     const history: Content[] = [
