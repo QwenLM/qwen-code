@@ -166,6 +166,13 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
 
+    it('keeps an empty busy replay empty', async () => {
+      await replayer.replay([], undefined, { finalizeDangling: false });
+
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+      expect(replayer.getPendingToolCalls()).toEqual([]);
+    });
+
     it('should replay records in order', async () => {
       const records = [
         createUserRecord('Hello'),
@@ -293,6 +300,16 @@ describe('HistoryReplayer', () => {
   });
 
   describe('function call replay', () => {
+    const callRecord = (uuid: string, ids: string[]): ChatRecord => ({
+      ...createAssistantRecord(''),
+      uuid,
+      message: {
+        role: 'model',
+        parts: ids.map((id) => ({
+          functionCall: { id, name: 'read_file', args: {} },
+        })),
+      },
+    });
     it('should emit tool_call for function call parts', async () => {
       const record: ChatRecord = {
         ...createAssistantRecord(''),
@@ -469,6 +486,190 @@ describe('HistoryReplayer', () => {
       ]);
       expect(replayer.getPendingToolCalls()).toEqual([
         expect.objectContaining({ callId: 'call-inflight' }),
+      ]);
+    });
+
+    it.each([false, true])(
+      'finalizes calls without a turn boundary only for idle replay (idle: %s)',
+      async (finalizeDangling) => {
+        await replayer.replay(
+          [
+            callRecord('first-call', ['first']),
+            createAssistantRecord('continuation without a user record'),
+            callRecord('parallel-calls', ['second', 'parallel']),
+          ],
+          undefined,
+          { finalizeDangling },
+        );
+
+        expect(
+          sentUpdates()
+            .filter((update) => update['status'] === 'failed')
+            .map((update) => update['toolCallId']),
+        ).toEqual(finalizeDangling ? ['first', 'second', 'parallel'] : []);
+        expect(
+          replayer.getPendingToolCalls().map((pending) => pending.callId),
+        ).toEqual(finalizeDangling ? [] : ['first', 'second', 'parallel']);
+      },
+    );
+
+    it.each([false, true])(
+      'finalizes an older call while preserving parallel trailing calls (duplicate ids: %s)',
+      async (duplicateIds) => {
+        const firstId = 'call-old';
+        const secondId = duplicateIds ? firstId : 'call-live';
+        await replayer.replay(
+          [
+            { ...createUserRecord('old turn'), uuid: 'user-old' },
+            callRecord('assistant-old', [firstId]),
+            { ...createUserRecord('live turn'), uuid: 'user-live' },
+            callRecord('assistant-live', [secondId, 'call-parallel']),
+            {
+              ...createUserRecord('same-turn input'),
+              uuid: 'mid-turn',
+              subtype: 'mid_turn_user_message',
+            },
+          ],
+          undefined,
+          { finalizeDangling: false },
+        );
+
+        expect(
+          sentUpdates().filter(
+            (update) => update['sessionUpdate'] === 'tool_call_update',
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            toolCallId: firstId,
+            status: 'failed',
+          }),
+        ]);
+        expect(
+          replayer.getPendingToolCalls().map((pending) => pending.callId),
+        ).toEqual([duplicateIds ? `${firstId}:2` : secondId, 'call-parallel']);
+      },
+    );
+
+    it('completes a preserved live call when its result arrives later', async () => {
+      await replayer.replay(
+        [
+          callRecord('old-call', ['old']),
+          createUserRecord('current turn'),
+          callRecord('current-call', ['live', 'parallel']),
+        ],
+        undefined,
+        { finalizeDangling: false },
+      );
+      const result = createToolResultRecord('read_file', 'live result');
+      result.toolCallResult!.callId = 'live';
+
+      await replayer.replayPage([result], {
+        pendingToolCalls: replayer.getPendingToolCalls(),
+        finalizeDangling: false,
+      });
+
+      expect(sentUpdates()).toContainEqual(
+        expect.objectContaining({ toolCallId: 'live', status: 'completed' }),
+      );
+      expect(
+        replayer.getPendingToolCalls().map((pending) => pending.callId),
+      ).toEqual(['parallel']);
+    });
+
+    it('finalizes an old call when the newest user turn has not called a tool', async () => {
+      await replayer.replay(
+        [callRecord('old-call', ['old']), createUserRecord('new prompt')],
+        undefined,
+        { finalizeDangling: false },
+      );
+
+      expect(sentUpdates()).toContainEqual(
+        expect.objectContaining({ toolCallId: 'old', status: 'failed' }),
+      );
+      expect(replayer.getPendingToolCalls()).toEqual([]);
+    });
+
+    it('matches a late result before finalizing calls from an earlier turn', async () => {
+      const resultRecord = createToolResultRecord('read_file', 'late result');
+      resultRecord.toolCallResult!.callId = 'old';
+
+      await replayer.replay(
+        [
+          callRecord('old-call', ['old']),
+          createUserRecord('new prompt'),
+          resultRecord,
+        ],
+        undefined,
+        { finalizeDangling: false },
+      );
+
+      const results = sentUpdates().filter(
+        (update) => update['sessionUpdate'] === 'tool_call_update',
+      );
+      expect(results).toEqual([
+        expect.objectContaining({ toolCallId: 'old', status: 'completed' }),
+      ]);
+      expect(replayer.getPendingToolCalls()).toEqual([]);
+    });
+
+    it.each([
+      'notification',
+      'cron',
+      'goal_runtime',
+      'agent_mention',
+      'agent_message',
+      'realtime_message',
+    ] as const)(
+      'does not treat inline %s records as a new replay turn',
+      async (subtype) => {
+        await replayer.replay(
+          [
+            createUserRecord('current turn'),
+            callRecord('current-call', ['live']),
+            { ...createUserRecord('inline message'), uuid: 'inline', subtype },
+          ],
+          undefined,
+          { finalizeDangling: false },
+        );
+
+        expect(sentUpdates()).not.toContainEqual(
+          expect.objectContaining({ toolCallId: 'live', status: 'failed' }),
+        );
+        expect(replayer.getPendingToolCalls()).toEqual([
+          expect.objectContaining({ callId: 'live' }),
+        ]);
+      },
+    );
+
+    it('keeps pending calls when a busy replay fails before reading their results', async () => {
+      const unreadResult = createToolResultRecord('read_file', 'unread result');
+      unreadResult.toolCallResult!.callId = 'old';
+      sendUpdateSpy.mockImplementation(
+        async (update: Record<string, unknown>) => {
+          if (update['sessionUpdate'] === 'agent_message_chunk') {
+            throw new Error('replay interrupted');
+          }
+        },
+      );
+
+      await expect(
+        replayer.replay(
+          [
+            callRecord('old-call', ['old']),
+            createAssistantRecord('unavailable update'),
+            createUserRecord('new prompt'),
+            unreadResult,
+          ],
+          undefined,
+          { finalizeDangling: false },
+        ),
+      ).rejects.toThrow('replay interrupted');
+
+      expect(sentUpdates()).not.toContainEqual(
+        expect.objectContaining({ toolCallId: 'old', status: 'failed' }),
+      );
+      expect(replayer.getPendingToolCalls()).toEqual([
+        expect.objectContaining({ callId: 'old' }),
       ]);
     });
 

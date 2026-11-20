@@ -377,11 +377,12 @@ export async function collectHistoryReplayUpdates({
    */
   suppressRestoreAskUserQuestion?: boolean;
   /**
-   * Ungated live-session loads (qwen/session/loadUpdates) while the
-   * session still has an active turn must not finalize dangling calls: a
-   * trailing unmatched call is in-flight, not abandoned, and its result
-   * arrives through the live stream (#9704). The gated live loadSession
-   * path and non-live loads pass true.
+   * Complete bulk replay: false protects unmatched calls in the trailing
+   * replay turn while still finalizing earlier unmatched calls (#9953).
+   * Ungated live-session loads (qwen/session/loadUpdates) pass false while
+   * busy so the live stream can deliver the trailing results (#9704).
+   * Gated live loadSession and non-live loads pass true. Paged replay has
+   * a separate contract: false disables all finalization.
    */
   finalizeDangling?: boolean;
   /**
