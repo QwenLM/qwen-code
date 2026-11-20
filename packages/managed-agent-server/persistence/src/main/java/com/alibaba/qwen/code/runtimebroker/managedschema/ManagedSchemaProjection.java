@@ -166,7 +166,7 @@ public enum ManagedSchemaProjection {
                     + "hook_ordinal, hook_definition_hash, record_kind, state, action_id, action_version, "
                     + "decision_receipt_id, decision_digest, prompt_id, turn_id, options_json"),
     STORAGE(
-            "alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key, "
+            "alias_key, tenant_id, storage_id, physical_key, "
                     + "registration_state, storage_kind, registration_revision, registration_json, "
                     + "fence_operation_id, mount_revision, gmt_create, gmt_modified"),
     STORAGE_OWNER(
@@ -174,7 +174,7 @@ public enum ManagedSchemaProjection {
                     + "tenant_id, storage_id, mount_revision, mount_state, mount_operation_id, "
                     + "mount_completed_operation_id, mount_root, mount_host_id, mount_device, mount_inode, "
                     + "mount_birth_time, mount_registration_id, storage_kind, "
-                    + "maintenance_id, maintenance_generation, physical_key, "
+                    + "maintenance_id, maintenance_generation, "
                     + "member_count"),
     TENANT_GUARD(
             "tenant_id, guard_domain"),
