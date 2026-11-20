@@ -137,4 +137,4 @@
 
 ## 未决问题
 
-- `EXPLAIN` 检查应作为 `StorageRowLockOrderMySqlIT` 的永久断言，还是只作为一次性的 PR 证据？提议：为 owner `FOR UPDATE` 路径加一条断言，因为它改变了可选的索引；其余作为 PR 证据。
+- 已决定：`EXPLAIN` 检查只作为一次性的 PR 证据，不新增永久断言。改动后，每处 owner `FOR UPDATE` 读取只按 `storage_key` 过滤，而它只有一个唯一索引，MySQL 会把它当作该索引上的 const 查找，执行计划不会变化。这类断言要防的回归是 owner 表上再出现第二个唯一键，而那本身会以 V1 DDL 改动的形式出现。现有的 `uk_ma_storage_business_key` 断言保留，因为 `ma_storage` 仍有其他索引可供清 fence 的语句选择。

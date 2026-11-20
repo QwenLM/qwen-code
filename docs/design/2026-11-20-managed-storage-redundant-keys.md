@@ -137,4 +137,4 @@ Non-goals:
 
 ## Open questions
 
-- Should the `EXPLAIN` checks become permanent assertions in `StorageRowLockOrderMySqlIT`, or stay as one-off PR evidence? Proposal: add one assertion for the owner `FOR UPDATE` path, because it changes which index can be chosen; keep the rest as PR evidence.
+- Resolved: the `EXPLAIN` checks stay as one-off PR evidence, with no new permanent assertion. After the change, each owner `FOR UPDATE` read filters only on `storage_key`, which has a single unique index, so MySQL resolves it as a const lookup on that index and the plan cannot vary. The regression such an assertion would catch, a second unique key on the owner table, would itself show up as a V1 DDL change. The existing `uk_ma_storage_business_key` assertion stays, because `ma_storage` still has other indexes that the fence-clearing statement could use.
