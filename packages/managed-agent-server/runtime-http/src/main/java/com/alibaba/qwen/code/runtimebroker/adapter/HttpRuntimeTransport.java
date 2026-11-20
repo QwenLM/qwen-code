@@ -670,22 +670,6 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
 
     private static void validateExternalDrain(byte[] bytes) {
         Map<String, Object> response = parseExternalPublication(bytes);
-        if (!Long.valueOf(2).equals(BrokerValues.exactLong(response.get("protocolVersion")))) {
-            throw protocol("External Workspace drain was not confirmed.");
-        }
-        try {
-            Map<String, Object> fields = ManagedCsiFilesProtocol.parse(
-                    response.body().bytes(), EXTERNAL_PUBLICATION_LIMIT);
-            return fields.keySet().equals(Set.of("code", "error"))
-                    && "managed_runtime_publication_closed".equals(fields.get("code"))
-                    && fields.get("error") instanceof String message && !message.isEmpty();
-        } catch (RuntimeException ignored) {
-            return false;
-        }
-    }
-
-    private static void validateExternalDrain(byte[] bytes) {
-        Map<String, Object> response = parseExternalPublication(bytes);
         if ("unknown".equals(response.get("state"))
                 && response.keySet().equals(Set.of("protocolVersion", "state"))) {
             throw unavailable(null);

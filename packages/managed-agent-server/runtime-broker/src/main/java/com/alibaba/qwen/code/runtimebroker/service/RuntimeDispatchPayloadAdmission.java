@@ -1,9 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
-import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
@@ -43,7 +41,7 @@ final class RuntimeDispatchPayloadAdmission {
     }
 
     /**
-     * The admitted payload and its verified classification. A Resident refusal
+     * The admitted payload and its verified classification. A profile refusal
      * settles the PREPARED row and reports {@code refused} instead, so the caller
      * answers that record rather than dispatching; its own settle may answer null
      * when the row moved on, which the caller re-reads.
@@ -113,21 +111,6 @@ final class RuntimeDispatchPayloadAdmission {
                     "error", Map.of("type", "workspace_tool_unsupported",
                             "message", "External Workspace requires a file Tool v2 payload")), clock.instant());
             throw invalid("runtime_payload_invalid", "External Workspace requires a file Tool v2 payload");
-        }
-        if (CsiFilesRetirementProfile.isProfile(context.binding().getRequest().getScope())
-                && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
-            throw invalid("runtime_payload_invalid", "The private CSI profile requires a file Tool v2 payload");
-        }
-        if (ResidentWorkspaceProfile.selects(context.binding().getRequest().getScope())
-                && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
-            Map<String, Object> refusal = new LinkedHashMap<>();
-            refusal.put("executionStatus", "not_started");
-            refusal.put("responseParts", List.of());
-            refusal.put("capture", null);
-            refusal.put("error", Map.of("type", "resident_tool_unsupported",
-                    "message", "Resident Workspace supports only read_file, write_file and edit."));
-            ToolExecutionRecord settled = executionRepository.settlePrepared(record, refusal, clock.instant());
-            return new Admitted(payload, verifiedPayload, true, settled);
         }
         return new Admitted(payload, verifiedPayload, false, null);
     }

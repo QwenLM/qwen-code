@@ -17,6 +17,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.externalShellNoStartAnswer;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.failed;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isV3Family;
@@ -50,7 +51,8 @@ final class RuntimeToolAcknowledgements {
             return failed(conflict("workspace_close_identity_unverified", "External drain requires settled file Tool v2 results"));
         }
         if (externalShell && (!execution.isSettled() || execution.getResult() == null
-                || !isPublicationV3(execution.getReference()))) {
+                || !externalShellNoStartAnswer(execution.getResult())
+                        && !isPublicationV3(execution.getReference()))) {
             return failed(conflict("workspace_close_identity_unverified",
                     "External Shell drain requires a settled Tool v3 result"));
         }

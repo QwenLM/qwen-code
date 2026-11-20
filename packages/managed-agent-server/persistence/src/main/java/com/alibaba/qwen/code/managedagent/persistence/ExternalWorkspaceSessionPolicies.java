@@ -65,6 +65,8 @@ final class ExternalWorkspaceSessionPolicies {
             }
             effective = new AgentSessionPolicies.AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
                     profile, false, false, List.of());
+        } else if (command.requestedToolProfile() != null) {
+            throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         return selectApprovalMode(effective, command.requestedApprovalMode(), command.approvalSelectionSupported());
     }

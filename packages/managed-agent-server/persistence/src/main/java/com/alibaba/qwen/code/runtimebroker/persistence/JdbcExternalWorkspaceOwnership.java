@@ -110,8 +110,10 @@ public final class JdbcExternalWorkspaceOwnership {
     private static void requireBoot(RuntimeBindingRecord binding, RegisteredExternalStorage registration) {
         var seed = binding.getProvisionSeed();
         var handle = binding.getResourceHandle();
+        int expectedHandleVersion = WorkspaceExecutionProfile.isExternalShellRequest(binding.getRequest())
+                ? WorkspaceExecutionProfile.EXTERNAL_SHELL_HANDLE_VERSION : 1;
         if (seed == null || binding.getLease() == null || !seed.matches(binding.getLease()) || handle == null
-                || handle.getVersion() != 1 || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(handle.getKind())
+                || handle.getVersion() != expectedHandleVersion || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(handle.getKind())
                 || binding.getAttestationGeneration() <= 0
                 || !registration.mountRoot().equals(binding.getRequest().getScope().getCanonicalCwd())) {
             throw unavailable();
