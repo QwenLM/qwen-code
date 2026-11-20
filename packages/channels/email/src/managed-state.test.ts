@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -16,6 +17,13 @@ import {
   type ManagedEmailState,
 } from './managed-state.js';
 import type { EmailSettings } from './config.js';
+
+// Wrap renameSync so the archive-failure path can be driven deterministically
+// on every platform; every other fs export stays the real implementation.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, renameSync: vi.fn(actual.renameSync) };
+});
 
 const settings = {
   address: 'agent@example.com',
@@ -358,6 +366,86 @@ describe('ManagedEmailStateStore registration-identity keying', () => {
     );
     expect(store.strandedLegacyLedger()).toBeUndefined();
     expect(store.archiveStrandedLegacy()).toBeUndefined();
+  });
+
+  it('a parseable non-ledger is flagged unreadable, not a loss-free 0/0', () => {
+    const store = new ManagedEmailStateStore(
+      'mail',
+      tempCwd(),
+      settings,
+      'cp|tenant-a|chan|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    for (const nonLedger of [
+      '{}',
+      '[]',
+      'null',
+      '{"version":1}',
+      '{"pending":[]}',
+    ]) {
+      writeFileSync(join(store.directory, 'managed-state.json'), nonLedger);
+      const stranded = store.strandedLegacyLedger()!;
+      expect(stranded.readable).toBe(false);
+      expect(stranded.pending).toBe(0);
+      expect(stranded.outbound).toBe(0);
+    }
+  });
+
+  it('returns undefined and keeps the legacy when the archive rename fails', () => {
+    const store = new ManagedEmailStateStore(
+      'mail',
+      tempCwd(),
+      settings,
+      'cp|tenant-a|chan|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    const legacyPath = join(store.directory, 'managed-state.json');
+    writeFileSync(legacyPath, JSON.stringify(pendingState(5, '1:5')));
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw new Error('EACCES');
+    });
+    expect(store.archiveStrandedLegacy()).toBeUndefined();
+    expect(existsSync(legacyPath)).toBe(true);
+    // A later start can still archive once the rename succeeds again.
+    expect(store.archiveStrandedLegacy()).toBeDefined();
+  });
+
+  it('carries the highest generation across legacy, keyed ledgers, and archives', () => {
+    const store = new ManagedEmailStateStore(
+      'mail',
+      tempCwd(),
+      settings,
+      'cp|tenant-a|chan|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    expect(store.highestSiblingGeneration()).toBe(0);
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({ ...freshState(), generation: 2 }),
+    );
+    writeFileSync(
+      join(store.directory, 'managed-state-aaaaaaaaaaaaaaaa.json'),
+      JSON.stringify({ ...freshState(), generation: 3 }),
+    );
+    writeFileSync(
+      join(store.directory, 'managed-state.json.stranded-xyz'),
+      JSON.stringify({ ...freshState(), generation: 5 }),
+    );
+    // A corrupt sibling, an in-flight tmp, and the Legacy state contribute
+    // nothing — only the managed ledgers and archives carry the counter.
+    writeFileSync(
+      join(store.directory, 'managed-state-bbbbbbbbbbbbbbbb.json'),
+      '{not json',
+    );
+    writeFileSync(
+      join(store.directory, 'cccc.tmp'),
+      JSON.stringify({ generation: 99 }),
+    );
+    writeFileSync(
+      join(store.directory, 'state.json'),
+      JSON.stringify({ generation: 99 }),
+    );
+    expect(store.highestSiblingGeneration()).toBe(5);
   });
 
   it('the saved state round-trips through the validator', () => {

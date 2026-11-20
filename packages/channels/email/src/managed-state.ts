@@ -6,6 +6,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -241,6 +242,18 @@ export class ManagedEmailStateStore {
         lastUid?: unknown;
         generation?: unknown;
       } | null;
+      // A parseable non-ledger (`{}`, `[]`, `null`, or an object without the
+      // pending/outbound arrays) is not a quiescent empty ledger: it is an
+      // unrecognized file whose claims are unknown. Flag it unreadable so the
+      // notice reports a possible loss, never a loss-free 0/0 all-clear
+      // (mirrors the GitHub store).
+      const isLedgerShape =
+        !!value &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        Array.isArray(value.pending) &&
+        Array.isArray(value.outbound);
+      if (!isLedgerShape) readable = false;
       const pendingList = value?.pending;
       const outboundList = value?.outbound;
       pending = Array.isArray(pendingList) ? pendingList.length : 0;
@@ -300,6 +313,54 @@ export class ManagedEmailStateStore {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * The highest monotonic account generation durable anywhere in this mailbox
+   * directory: the live legacy, every registration's identity-keyed ledger,
+   * and the `.stranded-*` archives. The control plane fences
+   * `account_generation` on a `(tenant_id, channel_id)` row that EVERY
+   * registration identity of the mailbox shares, so a second registration must
+   * meet the high-water even after the first archived the literal legacy.
+   * Reading the archives and siblings — not just the live legacy — is what
+   * makes the seed survive the first start's rename (mirrors the GitHub store's
+   * entry-scoped `entryWatchEpisodes` carry). Only the counter is carried,
+   * never pending/cursor state. Best-effort: an unreadable or corrupt sibling
+   * contributes nothing, never a startup failure. Returns 0 when no ledger
+   * carries a generation.
+   */
+  highestSiblingGeneration(): number {
+    let names: string[];
+    try {
+      names = readdirSync(this.directory);
+    } catch {
+      return 0;
+    }
+    let highest = 0;
+    for (const name of names) {
+      // The legacy ledger, the identity-keyed ledgers, and the legacy archives
+      // — never an in-flight <uuid>.tmp or the lock metadata.
+      if (!/^managed-state(-[0-9a-f]{16})?\.json(\.stranded-.+)?$/.test(name)) {
+        continue;
+      }
+      try {
+        const value = JSON.parse(
+          readFileSync(join(this.directory, name), 'utf8'),
+        ) as { generation?: unknown } | null;
+        const generation = value?.generation;
+        if (
+          typeof generation === 'number' &&
+          Number.isSafeInteger(generation) &&
+          generation >= 1 &&
+          generation > highest
+        ) {
+          highest = generation;
+        }
+      } catch {
+        // An unreadable sibling contributes nothing.
+      }
+    }
+    return highest;
   }
 
   save(state: ManagedEmailState): void {

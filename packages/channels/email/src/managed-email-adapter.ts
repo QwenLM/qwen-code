@@ -241,12 +241,20 @@ export class ManagedEmailAdapter {
         // lost inbound mail.
         const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
         const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
-        // The "fresh window" loss claims only hold when no keyed ledger was
-        // loaded. On a roll-forward after a rollback the keyed ledger keeps its
-        // own cursor, so the poll re-fetches from it and the legacy window is
-        // NOT skipped — claiming a loss there would page the operator about a
-        // loss that does not happen (mirrors the GitHub freshWindow gate).
-        const freshWindow = !loaded;
+        // The "fresh window" loss claims hold when this start's cursor pins past
+        // the legacy cursor, so the legacy window sits below it and is never
+        // re-fetched. That is true on a fresh upgrade (no ledger loaded) AND on
+        // the retry after a first start that failed after openMailbox already
+        // pinned a fresh ledger to the tip — `!loaded` alone would suppress the
+        // clauses on that retry even though the window is permanently skipped.
+        // On a roll-forward after a rollback whose keyed cursor still sits below
+        // the legacy cursor, the poll re-fetches the legacy window, so claiming a
+        // loss there would page the operator about a loss that does not happen.
+        // This is a reporting gate, not a cursor adoption: the cursor itself is
+        // never seeded from the legacy.
+        const freshWindow =
+          loaded === undefined ||
+          (legacy.lastUid !== undefined && loaded.lastUid >= legacy.lastUid);
         let consequence = '';
         if (!legacy.readable) {
           consequence =
@@ -300,22 +308,32 @@ export class ManagedEmailAdapter {
       await this.openMailbox();
       if (!this.running)
         throw new Error('Managed email adapter stopped during connection.');
-      // A fresh ledger starts at generation 1, but the control plane's account
-      // generation never moves back (it fences a lower one with
-      // channel_generation_stale). A mailbox that already re-keyed (a UIDVALIDITY
-      // change) persisted a higher generation in the legacy; seed ONLY that
-      // monotonic counter so the upgrade restart registers it instead of being
-      // refused on every start. This adopts no pending/cursor state — the fresh
-      // ledger still starts at the mailbox tip with empty pending.
-      if (
-        !loaded &&
+      // The control plane fences account_generation on a (tenant_id, channel_id)
+      // row that every registration identity of the mailbox shares, and it never
+      // moves back (a lower one is refused channel_generation_stale). A mailbox
+      // that already re-keyed persisted a higher generation; seed ONLY that
+      // monotonic counter from EVERY durable source in the mailbox directory
+      // (the live legacy, sibling keyed ledgers, and the .stranded-* archives),
+      // so a second registration still meets the high-water after the first
+      // archived the literal legacy. The `>` comparison makes this idempotent on
+      // a current ledger; the empty-pending guard keeps it from raising the
+      // generation under staged claims, which would change their dedupe key.
+      // This adopts no pending/cursor state — a fresh ledger still starts at the
+      // mailbox tip with empty pending.
+      const seedGeneration = Math.max(
         legacy?.readable &&
-        typeof legacy.generation === 'number' &&
-        Number.isSafeInteger(legacy.generation) &&
+          typeof legacy.generation === 'number' &&
+          Number.isSafeInteger(legacy.generation)
+          ? legacy.generation
+          : 0,
+        this.store.highestSiblingGeneration(),
+      );
+      if (
         this.state &&
-        legacy.generation > this.state.generation
+        this.state.pending.length === 0 &&
+        seedGeneration > this.state.generation
       ) {
-        this.state.generation = legacy.generation;
+        this.state.generation = seedGeneration;
         this.persist();
       }
       await this.ensureRegistered(this.state!);

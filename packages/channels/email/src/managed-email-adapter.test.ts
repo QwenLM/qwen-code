@@ -2439,4 +2439,104 @@ describe('managed email adapter registration-identity isolation', () => {
       ),
     ).toHaveLength(0);
   });
+
+  it('a second registration seeds the archived generation high-water', async () => {
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 2;
+    plane.destinationKey = 'cp|tenant-a|chan|actor-a|ws|.';
+    const a = make();
+    const dir = dirname(a.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 2 }),
+    );
+    await a.connect();
+    expect(plane.registrations).toContainEqual({ accountGeneration: 2 });
+    // A archived the literal legacy on its successful start.
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(false);
+    await a.disconnect();
+    // B is a different actor/workspace of the same tenant/channel: it shares
+    // the control plane's generation row but keys a different ledger, and the
+    // literal legacy is gone — the seed must come from the archives/siblings.
+    plane.destinationKey = 'cp|tenant-a|chan|actor-b|ws|.';
+    const b = make();
+    await b.connect();
+    expect(b.stateFile).not.toBe(a.stateFile);
+    expect(plane.registrations.at(-1)).toEqual({ accountGeneration: 2 });
+    expect(state(b).generation).toBe(2);
+    await b.disconnect();
+  });
+
+  it('repeats the loss clauses on the retry after a failed first start', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const first = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(first.stateFile);
+    mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 5; i++) append(raw(`retry-${i}`));
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(1, 0), lastUid: 2 }),
+    );
+    plane.failRegisters = 1;
+    await expect(first.connect()).rejects.toThrow();
+    const s1 = lines.filter((l) => l.includes('is stranded and not replayed'));
+    expect(s1[0]).toContain('does not re-fetch them');
+    expect(s1[0]).toContain('Mail received after the legacy cursor (UID 2)');
+    await first.disconnect();
+    // The failed start left a keyed ledger pinned to the tip; the retry loads
+    // it, but the legacy window is still permanently below that cursor.
+    lines.length = 0;
+    const second = make({}, { log: (l: string) => lines.push(l) });
+    await second.connect();
+    const s2 = lines.filter((l) => l.includes('is stranded and not replayed'));
+    expect(s2).toHaveLength(1);
+    expect(s2[0]).toContain('does not re-fetch them');
+    expect(s2[0]).toContain('Mail received after the legacy cursor (UID 2)');
+    await second.disconnect();
+  });
+
+  it('logs and keeps the legacy when the archive rename fails', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify(legacyState(1, 0)),
+    );
+    const store = (
+      adapter as unknown as {
+        store: { archiveStrandedLegacy(): string | undefined };
+      }
+    ).store;
+    const spy = vi
+      .spyOn(store, 'archiveStrandedLegacy')
+      .mockReturnValue(undefined);
+    try {
+      await adapter.connect();
+      expect(
+        lines.some((l) => l.includes('could not archive the legacy ledger')),
+      ).toBe(true);
+      expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+      expect(
+        readdirSync(dir).filter((f) =>
+          f.startsWith('managed-state.json.stranded-'),
+        ),
+      ).toHaveLength(0);
+      await adapter.disconnect();
+      // The kept legacy is reported again on the next start.
+      lines.length = 0;
+      const second = make({}, { log: (l: string) => lines.push(l) });
+      await second.connect();
+      expect(
+        lines.filter((l) => l.includes('is stranded and not replayed')),
+      ).toHaveLength(1);
+      await second.disconnect();
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
