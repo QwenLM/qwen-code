@@ -117,6 +117,10 @@ import type {
   DaemonSessionLiveStateBatchSnapshot,
   DaemonSessionLiveStateBatchError,
   DaemonSessionLiveStateBatchResult,
+  DaemonRestartRecoveryBatchRequest,
+  DaemonRestartRecoveryBatchResult,
+  DaemonRestartRecoveryContinueRequest,
+  DaemonRestartRecoveryContinueResult,
   DaemonSessionTurnIndexEntry,
   DaemonSessionTurnIndexPage,
   DaemonSessionTurnIndexPageOptions,
@@ -842,6 +846,36 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
         request: DaemonSessionLiveStateBatchRequest,
         opts?: { signal?: AbortSignal; timeoutMs?: number },
       ) => Promise<DaemonSessionLiveStateBatchResult>
+    >();
+  });
+
+  it('exposes the restart recovery batch surface', () => {
+    expect(typeof Public.DaemonClient.prototype.getRestartRecoveries).toBe(
+      'function',
+    );
+    expect(typeof Public.DaemonClient.prototype.continueRestartRecoveries).toBe(
+      'function',
+    );
+    expectTypeOf<DaemonRestartRecoveryBatchRequest>().toEqualTypeOf<{
+      workspaces: string[];
+      sinceMs?: number;
+    }>();
+    expectTypeOf<DaemonRestartRecoveryContinueRequest>().toEqualTypeOf<{
+      sessions: Array<{ workspace: string; sessionId: string }>;
+      confirmToolTurn?: boolean;
+    }>();
+    expectTypeOf<DaemonRestartRecoveryContinueResult['status']>().toEqualTypeOf<
+      | 'accepted'
+      | 'not_continuable'
+      | 'confirmation_required'
+      | 'rejected'
+      | 'error'
+    >();
+    expectTypeOf<DaemonClient['getRestartRecoveries']>().toEqualTypeOf<
+      (
+        request: DaemonRestartRecoveryBatchRequest,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
+      ) => Promise<DaemonRestartRecoveryBatchResult>
     >();
   });
 

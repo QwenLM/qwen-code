@@ -46,7 +46,7 @@ class TransportWakeActivatorTest {
 
     private static WakeFence fence(String status, String workspace,
             String state, long committed, boolean liveWriter) {
-        return new WakeFence(status, workspace, state, committed, liveWriter);
+        return new WakeFence(status, workspace, state, committed, liveWriter, false);
     }
 
     private void fenceIs(String status, String workspace, String state,
@@ -102,6 +102,16 @@ class TransportWakeActivatorTest {
         fenceIs("ACTIVE", "w1", "ACTIVE", 5, true);
 
         assertEquals(Outcome.OWNED, activator.onWake(wake(3)));
+
+        verifyNoAttempt();
+    }
+
+    @Test
+    void aWakeForAStampedHeadNotYetDueIsLeftToTheBackstop() {
+        when(store.wakeFence("t1", "s1")).thenReturn(Optional.of(
+                new WakeFence("ACTIVE", "w1", "SEALED", 5, false, true)));
+
+        assertEquals(Outcome.NOT_DUE, activator.onWake(wake(3)));
 
         verifyNoAttempt();
     }

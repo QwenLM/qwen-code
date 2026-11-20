@@ -733,6 +733,17 @@ The [English design](../../docs/design/2026-10-18-hosted-wake-recovery.md) and
 [Chinese design](../../docs/design/2026-10-18-hosted-wake-recovery.zh-CN.md) describe
 the recovery boundary and acceptance criteria.
 
+Suspension with pending wake inputs is opt-in through
+`qwen.managed-agent.wake-dispatch.enabled=true` (default `false`). The Store
+then advertises `wakeDispatch` in its writer grants, and a Harness that sees it
+may suspend an idle Session whose only pending inputs are deferred,
+unattempted wake inputs. Its seal stamps the head with what the wake pump would pick: the scan
+skips the head until its earliest input is due, then loads it without replaying
+the journal. Any later writer acquisition clears the stamp. Disabling the flag
+stops new such suspensions; heads already stamped are still delivered when due.
+See the [English design](../../docs/design/2026-11-19-managed-control-plane-wake-seal-stamp.md)
+and [Chinese design](../../docs/design/2026-11-19-managed-control-plane-wake-seal-stamp.zh-CN.md).
+
 ## Managed automation (H6)
 
 The control plane runs the H6 automation runtime for `persistent`
