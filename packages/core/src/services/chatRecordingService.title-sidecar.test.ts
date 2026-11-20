@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
+import { Storage } from '../config/storage.js';
 import {
   ChatRecordingService,
   type ChatRecord,
@@ -19,6 +20,7 @@ import {
   sessionTitleSidecarPath,
   writeSessionTitleSidecar,
 } from './session-title-sidecar.js';
+import { SessionService } from './sessionService.js';
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 
@@ -26,6 +28,7 @@ describe('ChatRecordingService - list title sidecar', () => {
   let root: string;
   let projectDir: string;
   let service: ChatRecordingService;
+  let sessionService: SessionService;
   let sidecarPath: string;
 
   function makeConfig(overrides: Record<string, unknown> = {}): Config {
@@ -57,13 +60,17 @@ describe('ChatRecordingService - list title sidecar', () => {
 
   beforeEach(() => {
     root = mkdtempSync(path.join(tmpdir(), 'qwen-recording-title-'));
-    projectDir = path.join(root, '.qwen', 'projects', 'test-project');
+    const runtimeBaseDir = path.join(root, '.qwen');
+    projectDir = new Storage(root, runtimeBaseDir).getProjectDir();
+    sessionService = new SessionService(root, { runtimeBaseDir });
     mkdirSync(path.join(projectDir, 'chats'), { recursive: true });
     sidecarPath = sessionTitleSidecarPath(
       path.join(projectDir, 'chats'),
       SESSION_ID,
     );
-    service = newService();
+    service = newService(
+      makeConfig({ getSessionService: () => sessionService }),
+    );
   });
 
   afterEach(() => {
@@ -85,6 +92,63 @@ describe('ChatRecordingService - list title sidecar', () => {
 
     expect(readSessionTitleSidecar(sidecarPath)).toMatchObject({
       displayName: 'CI 验证与复验',
+      source: 'manual',
+    });
+  });
+
+  it('initializes the title once after the first prompt is recorded', async () => {
+    service.recordUserMessage([{ text: 'Fix login!' }]);
+    await service.flush();
+
+    await expect(service.recordInitialTitle('Fix login')).resolves.toBe(true);
+    await expect(service.recordInitialTitle('Retry title')).resolves.toBe(
+      false,
+    );
+
+    expect(sessionService.getSessionTitleInfo(SESSION_ID)).toEqual({
+      title: 'Fix login',
+      source: 'auto',
+    });
+  });
+
+  it('skips an initial title while a manual rename is pending', async () => {
+    const rename = service.recordCustomTitle('My title');
+    const initial = service.recordInitialTitle('First prompt');
+
+    await expect(rename).resolves.toBe(true);
+    await expect(initial).resolves.toBe(false);
+    expect(sessionService.getSessionTitleInfo(SESSION_ID)).toEqual({
+      title: 'My title',
+      source: 'manual',
+    });
+  });
+
+  it('keeps the manual title when its write follows an in-flight initial title', async () => {
+    const recordedTitles: string[] = [];
+    service.setTitleRecordedCallback((title) => recordedTitles.push(title));
+    const initial = service.recordInitialTitle('First prompt');
+    const rename = service.recordCustomTitle('My title');
+
+    await expect(initial).resolves.toBe(true);
+    await expect(rename).resolves.toBe(true);
+    expect(recordedTitles).toEqual(['My title']);
+    expect(sessionService.getSessionTitleInfo(SESSION_ID)).toEqual({
+      title: 'My title',
+      source: 'manual',
+    });
+  });
+
+  it('skips an initial title when a manual title exists on disk', async () => {
+    await expect(newService().recordCustomTitle('My title')).resolves.toBe(
+      true,
+    );
+    expect(service.getCurrentCustomTitle()).toBeUndefined();
+
+    await expect(service.recordInitialTitle('First prompt')).resolves.toBe(
+      false,
+    );
+    expect(sessionService.getSessionTitleInfo(SESSION_ID)).toEqual({
+      title: 'My title',
       source: 'manual',
     });
   });

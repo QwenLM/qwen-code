@@ -411,7 +411,7 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed git log exclude-refs route',
   ),
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
-    'no Managed worktree management route',
+    'Managed lists, inspects and cleans up its own Session worktrees, not the repository-wide Git worktree set',
   ),
   workspace_git_check_ignore: NO_MANAGED_EQUIVALENT(
     'no Managed Git ignore query route',
@@ -420,7 +420,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:MCP_MANAGEMENT',
   },
-  session_recap: NO_MANAGED_EQUIVALENT('no Managed recap route'),
+  session_recap: {
+    standing: 'managed',
+    evidence: 'surface:SIDE_QUERY_CREATE',
+  },
   session_mod_rows: NO_MANAGED_EQUIVALENT('no Managed Mod row route'),
   session_generation: NO_MANAGED_EQUIVALENT(
     'no Managed stateless generation route',
@@ -428,10 +431,14 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_generation: NO_MANAGED_EQUIVALENT(
     'no Managed stateless generation route',
   ),
-  session_btw: NO_MANAGED_EQUIVALENT('no Managed side-question route'),
-  session_btw_stream: NO_MANAGED_EQUIVALENT(
-    'no Managed streaming side-question route',
-  ),
+  session_btw: {
+    standing: 'managed',
+    evidence: 'surface:SIDE_QUERY_CREATE',
+  },
+  session_btw_stream: {
+    standing: 'managed',
+    evidence: 'surface:SIDE_QUERY_STREAM',
+  },
   session_shell_command: {
     standing: 'managed',
     evidence: 'tool:run_shell_command',
@@ -567,24 +574,34 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:TRANSCRIPT_QUERY',
   },
-  workspace_archived_session_export: NO_MANAGED_EQUIVALENT(
-    'no Managed archived export route',
-  ),
+  workspace_archived_session_export: {
+    standing: 'managed',
+    evidence: 'surface:ITEM_LIST',
+  },
   workspace_session_live_state: NO_MANAGED_EQUIVALENT(
     'no Managed live-state snapshot',
   ),
   workspace_session_live_state_batch: NO_MANAGED_EQUIVALENT(
     'no Managed live-state snapshot',
   ),
+  restart_recovery: NO_MANAGED_EQUIVALENT(
+    'no Managed restart recovery surface',
+  ),
   workspace_session_metadata: NO_MANAGED_EQUIVALENT(
     'Managed renames a Session and has no metadata bag',
   ),
   session_worktree_persistence_v1: NO_MANAGED_EQUIVALENT(
-    'no Managed worktrees',
+    'Managed persists Session-owned worktrees, but its descriptor has no per-response persisted-v1 attestation',
   ),
-  session_worktree_reset_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
-  session_worktree_branch_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
-  session_worktree_handoff_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
+  session_worktree_reset_v1: NO_MANAGED_EQUIVALENT(
+    'Managed worktree inspect and cleanup do not transfer checkout ownership to a fresh replacement Session',
+  ),
+  session_worktree_branch_v1: NO_MANAGED_EQUIVALENT(
+    'Managed allocates an initial branch during worktree creation, but has no post-create create-branch-here operation',
+  ),
+  session_worktree_handoff_v1: NO_MANAGED_EQUIVALENT(
+    'Managed has no operation that moves a Session and its work between its worktree and the local checkout',
+  ),
   workspace_qualified_acp: LEGACY_ONLY('no ACP in Managed'),
   client_mcp_over_ws: NO_MANAGED_EQUIVALENT(
     'no client-hosted MCP over the Managed transport',
@@ -751,10 +768,8 @@ export const MANAGED_ONLY_REPORTED: readonly string[] = [
   'SESSION_WORKTREE',
   'SIDE_QUERY_CANCEL',
   'SIDE_QUERY_CONTEXT',
-  'SIDE_QUERY_CREATE',
   'SIDE_QUERY_GET',
   'SIDE_QUERY_LIST',
-  'SIDE_QUERY_STREAM',
 ];
 
 /**

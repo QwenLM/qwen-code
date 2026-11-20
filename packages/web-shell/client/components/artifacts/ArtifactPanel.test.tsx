@@ -24,6 +24,22 @@ import type { TurnOutputScheduledTask } from './TurnOutputs';
 const mockDocxRender = vi.hoisted(() => vi.fn());
 vi.mock('docx-preview', () => ({ renderAsync: mockDocxRender }));
 
+vi.mock('./WorkspacePdfRangePreview', () => ({
+  default: function MockWorkspacePdfRangePreview({
+    initialStat,
+    onOpenFull,
+  }: {
+    initialStat: { sizeBytes: number };
+    onOpenFull: () => void;
+  }) {
+    return (
+      <button data-pdf-size={initialStat.sizeBytes} onClick={onOpenFull}>
+        Open full PDF
+      </button>
+    );
+  },
+}));
+
 const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
   URL,
   'createObjectURL',
@@ -5993,9 +6009,82 @@ describe('ArtifactPanel binary document previews', () => {
       patch.workspacePath ?? 'reports/Report.PDF',
       { offset: 0, maxBytes: 256 * 1024 },
     );
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(2);
     const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
     expect(blob.type).toBe('application/pdf');
     expect(Buffer.from(await blob.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('only loads a large PDF into the native viewer after it is requested', async () => {
+    const sizeBytes = 4 * 1024 * 1024;
+    const fixture = Buffer.alloc(sizeBytes);
+    bytes.copy(fixture);
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readFileBytes.mockImplementation(
+      async (
+        _path: string,
+        { offset, maxBytes }: { offset: number; maxBytes: number },
+      ) => {
+        const chunk = fixture.subarray(offset, offset + maxBytes);
+        return {
+          contentBase64: chunk.toString('base64'),
+          offset,
+          returnedBytes: chunk.length,
+          sizeBytes,
+        };
+      },
+    );
+    const { root, container } = mountPdf();
+    const artifact = pdfArtifact();
+    act(() => root.render(artifactPanel(artifact)));
+    await vi.waitFor(async () => {
+      await flushPreview();
+      expect(container.querySelector('[data-pdf-size]')?.textContent).toBe(
+        'Open full PDF',
+      );
+    });
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    expect(container.querySelector('iframe')).toBeNull();
+
+    const updatedHeader = '%PDF-1.6';
+    fixture.write(updatedHeader);
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes,
+      modifiedMs: 2,
+    });
+    act(() =>
+      container.querySelector<HTMLButtonElement>('[data-pdf-size]')!.click(),
+    );
+    await flush();
+    expect(container.querySelector('[data-pdf-size]')).toBeNull();
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe(
+      'blob:pdf-preview',
+    );
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(3);
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(16);
+    const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
+    expect(blob.size).toBe(sizeBytes);
+    expect(await blob.slice(0, updatedHeader.length).text()).toBe(
+      updatedHeader,
+    );
+
+    act(() =>
+      root.render(
+        artifactPanel({ ...artifact, updatedAt: '2026-10-20T00:00:00Z' }),
+      ),
+    );
+    await flush();
+    expect(container.querySelector('[data-pdf-size]')).not.toBeNull();
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(4);
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(16);
   });
 
   it.each(['missing', 'expired'])(

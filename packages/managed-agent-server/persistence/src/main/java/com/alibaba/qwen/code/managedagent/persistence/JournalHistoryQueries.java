@@ -284,11 +284,16 @@ final class JournalHistoryQueries {
                         || !Objects.equals(digest, row.previousCommitDigest())) {
                     return false;
                 }
-                if (row.recordBytes() == null) {
+                byte[] bytes = row.recordBytes();
+                if (bytes == null && packs != null) {
+                    bytes = packs.resolveBytes(tenantId, sessionId, row.journalRevision(),
+                            row.recordDigest(), row.byteLength());
+                }
+                if (bytes == null) {
                     return false;
                 }
-                JournalStoreRows.validateUtf8JsonLines(row.recordBytes(), revision == 1 ? 2 : row.eventCount() + 1);
-                String[] lines = new String(row.recordBytes(), StandardCharsets.UTF_8).split("\n");
+                JournalStoreRows.validateUtf8JsonLines(bytes, revision == 1 ? 2 : row.eventCount() + 1);
+                String[] lines = new String(bytes, StandardCharsets.UTF_8).split("\n");
                 if (revision == 1) {
                     if (!"session.create".equals(row.operation()) || row.eventCount() != 0
                             || row.firstSequence() != 0 || row.lastSequence() != 0 || lines.length != 2

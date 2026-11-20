@@ -143,6 +143,7 @@ import {
   type ManagedSessionJournalHandle,
   type ManagedSessionJournalScan,
   type ManagedSessionResourceStore,
+  type ManagedSessionWakeStamp,
 } from './managed-session-storage.js';
 
 export type {
@@ -825,13 +826,13 @@ export class LocalManagedSessionAuthority {
    * keeps a lock that a default acquire declines, so the authoritative log
    * stays closed to writers that do not know how to take it over.
    */
-  async close(): Promise<void> {
+  async close(wake?: ManagedSessionWakeStamp): Promise<void> {
     if (this.retirementPreparation) {
       throw new ManagedSessionConflictError(
         'original CSI retirement owns the final boundary.',
       );
     }
-    await this.journal.seal(this.commitProof);
+    await this.journal.seal(this.commitProof, wake);
   }
 
   /**
