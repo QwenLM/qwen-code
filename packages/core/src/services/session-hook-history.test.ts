@@ -242,7 +242,10 @@ describe('persisted hook turn pages', () => {
     const reader = new SessionTranscriptReader(cwd);
     const anchor = await reader.readTurnIndexPage(sessionId);
     const indexBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    // Refusal needs both classes full: an aggregate that crosses the shared
+    // budget moves the entry into the oversized class when that one has room.
     setSessionTranscriptIndexCacheMaxBytesForTest(indexBytes);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(indexBytes);
     const read = vi.fn();
     setSessionTranscriptSelectedLineReadHookForTest(read);
     for (let i = 0; i < 2; i++) {
@@ -350,6 +353,35 @@ describe('persisted hook turn pages', () => {
       snapshot: anchor.snapshot,
     });
     expect(read).not.toHaveBeenCalled();
+  });
+  it('moves a shared entry into the oversized class when its hook aggregate crosses the shared budget', async () => {
+    append(event('one'));
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const anchor = await reader.readTurnIndexPage(sessionId);
+    const indexBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    expect(indexBytes).toBeGreaterThan(0);
+    // Room for the physical index alone; the aggregate pushes the combined
+    // entry past the shared budget while the oversized class has room.
+    setSessionTranscriptIndexCacheMaxBytesForTest(indexBytes);
+    const read = vi.fn();
+    setSessionTranscriptSelectedLineReadHookForTest(read);
+    expect(
+      await reader.readTurnHooksPage(sessionId, promptId, {
+        snapshot: anchor.snapshot,
+      }),
+    ).toMatchObject({ totalExecutions: 1, coverage: 'recorded' });
+    expect(read).toHaveBeenCalled();
+    const accounted = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    expect(accounted).toBeGreaterThan(indexBytes);
+    read.mockClear();
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchor.snapshot,
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      accounted,
+    );
   });
   it('rejects a cached frozen aggregate after an equal-length rewrite', async () => {
     append(event('old'));
