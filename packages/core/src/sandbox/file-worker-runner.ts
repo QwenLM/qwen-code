@@ -6,7 +6,7 @@
 
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { writeUserFile } from '../utils/write-user-file.js';
 import { assertSandboxFileVersion } from './file-version.js';
 import { readSandboxWriteRequest } from './file-worker-protocol.js';
 
@@ -20,7 +20,7 @@ export async function runFileWorker(
       assertSandboxFileVersion(request.destination, request.expected);
     assertCanCommit();
     await mkdir(path.dirname(request.destination), { recursive: true });
-    await atomicWriteFile(request.destination, request.content, {
+    await writeUserFile(request.destination, request.content, {
       assertCanCommit,
     });
     writeReply(JSON.stringify({ ok: true }) + '\n');

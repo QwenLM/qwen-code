@@ -355,6 +355,25 @@ describe('readWorktreeSessionStrict', () => {
 });
 
 describe('writeWorktreeSession', () => {
+  it('heals a hard-link residue left by interrupted sidecar publication', async () => {
+    await createWorktreeSession(filePath, sample);
+    const staged = `${filePath}.inflight`;
+    await fs.link(filePath, staged);
+    expect((await fs.stat(filePath)).nlink).toBe(2);
+    await expectStrictInvalid();
+    const replacement = { ...sample, slug: 'updated' };
+
+    await writeWorktreeSession(filePath, replacement);
+
+    expect((await fs.stat(filePath)).nlink).toBe(1);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session: replacement,
+    });
+    expect(JSON.parse(await fs.readFile(staged, 'utf8'))).toEqual(sample);
+    expect((await fs.stat(staged)).nlink).toBe(1);
+  });
+
   it('writes a readable JSON file', async () => {
     await writeWorktreeSession(filePath, sample);
     const raw = await fs.readFile(filePath, 'utf-8');
