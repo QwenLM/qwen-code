@@ -68,6 +68,7 @@ Footer 以 `openedFromFooter: true` 打开 effort 对话框。对话框：
 ## 限制与已知问题
 
 - Static provider/global effort knob 会保留。它们仍可能压过持久化 tier，与 Ink `/effort` 完全一致；当 config 暴露 override 时，既有 `formatEffortChangeMessage` 会报告。
+- 对于档位来自 `capabilities.reasoning.efforts`、但没有 profile 的模型，footer 显示会跟随刚选的 tier，而保留的 static provider/global knob 仍可能在请求时胜出。Override 侦测不覆盖这种情况，只会套用通用的「requested; the effective tier depends on the active provider/model」提示。
 - System/SystemDefaults 设置由 operator 拥有，此 picker 不会写入。
 - Provider 专属 budget knob 不会映射到 canonical ladder。
 - Status line 为了点击目标拆成三个 text run；rebase 到 selection-clipboard PR 后需要做一次视觉确认。
@@ -83,7 +84,7 @@ Footer 以 `openedFromFooter: true` 打开 effort 对话框。对话框：
 
 - 点击 tier 会打开 picker；点击其他 status-line 内容不会。
 - 拖拽选择后在 tier 上放开不会打开 picker。
-- 选择 tier 后会把 `model.reasoningEffort` 持久化到与 Ink 相同的 scope。Footer 继续显示 effective tier，因此 static knob 压过选择时，显示的 tier 不会改变。
+- 选择 tier 后会把 `model.reasoningEffort` 持久化到与 Ink 相同的 scope。Footer 会依显示路径重新渲染；当 static knob 在请求时仍胜出，它可能显示刚选的 tier，而请求会保留配置的 static 值。
 - 重启后选择的 tier 仍生效，除非用户配置的 static knob 压过它，行为与 Ink `/effort` 一致。
 - Provider/global static knob 与 provider array 保持逐字节不变。
 - Ink 输出与交互不变。

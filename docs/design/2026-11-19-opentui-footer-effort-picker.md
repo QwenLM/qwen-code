@@ -112,6 +112,12 @@ displayed.
 - Static provider/global effort knobs are preserved. They can still outrank the
   persisted tier, exactly as they do for Ink's `/effort`; the existing
   `formatEffortChangeMessage` reports an override when the config exposes one.
+- For a model whose effort ladder comes from declared
+  `capabilities.reasoning.efforts` without a profile, the footer display
+  follows the picked tier while a preserved static provider/global knob can
+  still win at request time. Override detection does not cover that case; only
+  the generic "requested; the effective tier depends on the active
+  provider/model" message applies.
 - System/SystemDefaults settings are operator-owned and are never written by
   this picker.
 - Provider-specific budget knobs are not mapped to the canonical ladder.
@@ -121,10 +127,11 @@ displayed.
 
 ## Validation
 
-- Unit tests cover segment exposure, toggle-only inertness, footer
-  preselection, click vs drag selection, persistence through the same scope and
-  call path as Ink, preservation of static provider/global knobs, Workspace vs
-  User scope ownership, and failure notification.
+- Unit tests cover segment exposure, toggle-only inertness, tier membership (a
+  displayed tier outside the model's ladder stays inert), footer preselection,
+  click vs drag selection, persistence through the same scope and call path as
+  Ink, preservation of static provider/global knobs, Workspace vs User scope
+  ownership, and failure notification.
 - A PTY end-to-end run remains the manual check for clicking the footer tier,
   selecting a different tier, restarting the CLI, and reading the new tier
   back.
@@ -136,8 +143,9 @@ displayed.
   not.
 - A drag selection that ends on the tier does not open the picker.
 - Choosing a tier persists `model.reasoningEffort` to the same scope Ink uses.
-  The footer keeps showing the effective tier, so when a static knob outranks
-  the pick the displayed tier does not change.
+  The footer re-renders from the display path, which can show the picked tier
+  even when a static knob still wins at request time; the request keeps the
+  configured static value.
 - After a restart, the chosen tier is still in effect unless a user-configured
   static knob outranks it, exactly as with Ink's `/effort`.
 - Provider/global static knobs and provider arrays are left byte-for-byte

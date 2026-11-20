@@ -1791,9 +1791,6 @@ describe('OpenTuiEffortDialog', () => {
 
   it('persists through the same path as ink and preserves static provider knobs', () => {
     const harness = renderEffortDialog('max');
-    const providersBefore = structuredClone(
-      harness.userSettings.modelProviders,
-    );
     press('down');
     press('return');
 
@@ -1803,12 +1800,9 @@ describe('OpenTuiEffortDialog', () => {
       'model.reasoningEffort',
       'high',
     );
-    expect(
-      harness.setValue.mock.calls.some(
-        ([, key]) => key === 'modelProviders.openai',
-      ),
-    ).toBe(false);
-    expect(harness.userSettings.modelProviders).toEqual(providersBefore);
+    expect(harness.setValue.mock.calls.map(([, key]) => key)).toEqual([
+      'model.reasoningEffort',
+    ]);
     expect(harness.generation.extra_body).toEqual({
       reasoning_effort: 'max',
       temperature: 1,
@@ -1835,19 +1829,15 @@ describe('OpenTuiEffortDialog', () => {
     press('down');
     press('return');
 
+    expect(harness.setValue.mock.calls.map(([, key]) => key)).toEqual([
+      'model.reasoningEffort',
+    ]);
     expect(harness.generation.extra_body).toEqual({
       reasoning: { effort: 'max' },
       temperature: 1,
     });
     expect(harness.generation.samplingParams).toEqual({
       reasoning: { effort: 'max' },
-    });
-    expect(harness.userSettings.model?.generationConfig).toEqual({
-      extra_body: {
-        reasoning: { budget_tokens: 8192 },
-        temperature: 1,
-      },
-      samplingParams: { reasoning: { effort: 'max' } },
     });
     expect(harness.notify).toHaveBeenCalledWith(
       expect.stringContaining('Reasoning effort: high'),
