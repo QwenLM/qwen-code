@@ -3396,21 +3396,18 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     expect(mockAssertFullIcuAvailable).not.toHaveBeenCalled();
   });
 
-  it('hands the screen-reader flag to the renderer gate', async () => {
+  it('passes the resolved screen-reader Config to the selected Native entry', async () => {
     await interactiveMainSetup(/* screenReader */ true);
     selectOpentui(false);
-    mockStartOpenTuiUI.mockResolvedValue(false);
-
+    mockStartOpenTuiUI.mockResolvedValue(true);
     await main();
-
-    // The gate is what keeps a screen-reader session on ink; dropping this
-    // argument would silently serve OpenTUI, which has no SR render path.
     expect(mockSelectTuiRenderer).toHaveBeenLastCalledWith(
       undefined,
       undefined,
       expect.anything(),
-      true,
     );
+    const config = mockStartOpenTuiUI.mock.calls.at(-1)![0] as Config;
+    expect(config.getScreenReader()).toBe(true);
   });
 });
 

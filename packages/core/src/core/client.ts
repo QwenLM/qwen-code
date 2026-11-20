@@ -88,7 +88,10 @@ import {
   type RepairOrphanedToolUseOptions,
   userContentPushSnapshotKey,
 } from './llm-chat.js';
-import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
+import {
+  findRestorableAskUserQuestion,
+  restorableAskUserQuestionCallIds,
+} from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   assembleSystemPrompt,
@@ -224,6 +227,10 @@ import {
   deliveredUserPromptSubmitContexts,
 } from '../hooks/user-prompt-submit-context.js';
 import {
+  appendAsyncHookContextPart,
+  drainAsyncHookContextPart,
+} from '../hooks/async-hook-context.js';
+import {
   TrustedUserAnswers,
   type TrustedUserAnswerQuestion,
   type TrustedUserAnswerSnapshot,
@@ -295,6 +302,12 @@ function hostContinuationOptions(
     }),
     ...(options?.skipMemoryExtraction && { skipMemoryExtraction: true }),
     ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
+    // A side query's client-initiated continuation (Stop-hook / stop-policy)
+    // must keep the flag: it is a Hook send, so without it the async-drain gate
+    // would not recognise it as a side query and it would drain the owning
+    // turn's pending block. The owning turn's own continuations carry no flag
+    // and keep draining.
+    ...(options?.isConcurrentSideQuery && { isConcurrentSideQuery: true }),
     // A Goal turn's continuation runs under the same permit.
     ...(options?.goalPermit && {
       goalPermit: options.goalPermit,
@@ -304,11 +317,19 @@ function hostContinuationOptions(
       getInterruptedGoalPauseReason: options.getInterruptedGoalPauseReason,
       getQueuedGoalTurnKey: options.getQueuedGoalTurnKey,
     }),
+    // A client-initiated Stop-hook/stop-policy continuation keeps the turn's
+    // ledger key: its prompt id carries a continuation suffix, so without the
+    // base key beginTurn would read it as a new turn and reset the consumed
+    // marks mid-turn (R16).
+    ...(options?.ledgerTurnKey && { ledgerTurnKey: options.ledgerTurnKey }),
   };
 }
 
 /** Upper bound on prompt ids tracked for an in-flight Stop-hook chain. */
 export const MAX_STOP_HOOK_CHAIN_PROMPT_IDS = 32;
+
+/** Upper bound on background-interaction prompt ids retained for ledger exclusion. */
+export const MAX_BACKGROUND_INTERACTION_PROMPT_IDS = 32;
 
 export type UserTurnRecord =
   | {
@@ -505,6 +526,14 @@ export interface SendMessageOptions {
    * (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * Stable model-availability ledger turn key for this send, when it differs
+   * from the send's `prompt_id`. A headless runtime Goal run keeps the
+   * foreground turn's `prompt_id` for identity but opens its own ledger turn
+   * so a fallback the foreground turn exhausted is re-probed for the Goal run.
+   * Forwarded to `LlmChat`; defaults to `prompt_id` when unset.
+   */
+  ledgerTurnKey?: string;
 }
 
 /** UserPromptSubmit's verdict on a prompt, taken before the prompt expands. */
@@ -746,6 +775,27 @@ export class LlmClient {
   // is bound to its owning interaction: every budget entrypoint below is a
   // no-op for an invocation that does not own it.
   private toolExplorationBudgetPromptId: string | undefined;
+  // Prompt ids claimed by background interactions: concurrent `/btw` side
+  // queries, Notification and Teammate sends. The CLI advances the prompt
+  // counter for each, so their ids are unique (R6-1/R7-1 root fix). Their
+  // ToolResult/Hook/Steer continuations are resubmitted without the background
+  // flag, so model-availability ledger membership must exclude the whole
+  // interaction by prompt id, not just the first send's messageType. Within a
+  // session the id is never reused by a foreground turn (the mint counter
+  // advances); a rewind/resume can re-mint a transcript id, but startNewSession
+  // clears this set at the session boundary, so a reused id never hits a stale
+  // registration. The set is bounded FIFO like stopHookChains, evicting by
+  // insertion order (R8-F11); this is safe because a background interaction's
+  // continuations drain within its turn, long before 32 newer interactions
+  // would evict its id — the bound is not a drain check.
+  private readonly backgroundInteractionPromptIds = new Set<string>();
+  // Prompt ids introduced by a flagged concurrent side query. Their tool-result
+  // continuations arrive unflagged, so the recorded id — not the flag — is what
+  // keeps them from draining the owning turn's pending async hook block. Kept
+  // for the client's lifetime: a side query still awaiting its continuation must
+  // stay refused even after a new main turn starts, and prompt ids are per-turn
+  // unique, so a recorded id is never legitimately reused.
+  private readonly concurrentSideQueryPromptIds = new Set<string>();
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
@@ -852,6 +902,16 @@ export class LlmClient {
     this.compressionObserver = observer;
     this.compressionObserverOptions = options;
     this.chat?.setCompressionObserver(observer, options);
+  }
+
+  /**
+   * Drop the background prompt-id registry on a session swap. The registered
+   * Notification/Teammate/side-query ids belong to the outgoing conversation;
+   * a resumed transcript can reuse an id, so a stale registration must not
+   * exclude a new foreground turn from the ledger (P2).
+   */
+  clearBackgroundInteractionPromptIds(): void {
+    this.backgroundInteractionPromptIds.clear();
   }
 
   async initialize(
@@ -2302,7 +2362,30 @@ export class LlmClient {
         ...(gitStatus ? [{ text: wrapSystemReminder(gitStatus) }] : []),
       ],
     };
-    this.getChat().addHistory(markApiHistoryDirectoryContext(context));
+    const chat = this.getChat();
+    const pendingQuestion = chat.peekLastHistoryEntry();
+    if (findRestorableAskUserQuestion(pendingQuestion)) {
+      const directoryContext: Content = {
+        role: 'user',
+        parts: [{ text: await getDirectoryContextString(this.config) }],
+      };
+      if (chat.peekLastHistoryEntry() === pendingQuestion) {
+        // Keep the pending call last and adjacent to its future answer.
+        const history = chat.getHistoryShallow();
+        history.splice(
+          -1,
+          0,
+          markApiHistoryDirectoryContext(context),
+          markApiHistoryDirectoryContext(directoryContext),
+        );
+        chat.setHistory(history, chat.getCompletedToolCallIds());
+      } else {
+        chat.addHistory(markApiHistoryDirectoryContext(context));
+        chat.addHistory(markApiHistoryDirectoryContext(directoryContext));
+      }
+      return;
+    }
+    chat.addHistory(markApiHistoryDirectoryContext(context));
     await this.addDirectoryContext();
   }
 
@@ -4370,10 +4453,35 @@ export class LlmClient {
       // nor take over (or clear) the running turn's exploration phase, which
       // the ownership check below every budget entrypoint enforces for the
       // side turn's tool results too.
+      // Register background interactions so their unflagged ToolResult/Hook/
+      // Steer continuations stay excluded from the ledger by prompt id (see
+      // backgroundInteractionPromptIds), not just the first send's messageType.
+      // Notification/Teammate/side-query ids are unique: the CLI advances the
+      // prompt counter for each (R6-1/R7-1 root fix), so a registered id is
+      // never reused by a foreground turn and cannot drop it from the ledger.
+      if (
+        options?.isConcurrentSideQuery ||
+        messageType === SendMessageType.Notification ||
+        messageType === SendMessageType.Teammate
+      ) {
+        this.backgroundInteractionPromptIds.add(prompt_id);
+        while (
+          this.backgroundInteractionPromptIds.size >
+          MAX_BACKGROUND_INTERACTION_PROMPT_IDS
+        ) {
+          const oldest = this.backgroundInteractionPromptIds
+            .keys()
+            .next().value;
+          if (oldest === undefined) break;
+          this.backgroundInteractionPromptIds.delete(oldest);
+        }
+      }
       if (!options?.isConcurrentSideQuery) {
         this.toolExplorationBudget.reset();
         this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);
+      } else {
+        this.concurrentSideQueryPromptIds.add(prompt_id);
       }
       // New input starts this interaction, so its first Stop is not
       // hook-forced even when a retry or goal turn reuses the prompt id.
@@ -4731,6 +4839,7 @@ export class LlmClient {
             undefined,
             goalPermit,
             /* deliveredTurn */ true,
+            /* teammateTurn */ messageType === SendMessageType.Teammate,
           );
       }
     }
@@ -5181,6 +5290,19 @@ export class LlmClient {
         options?.toolCallPreparations,
         suppressedHookContext,
         workflowModeEligible ? () => onModelRequestDispatched?.() : undefined,
+        messageType === SendMessageType.Retry,
+        // Ledger membership is decided here, where the sender is known: the
+        // live turn's own sends participate. Notification/Teammate first sends
+        // are background, not this turn, and are excluded by messageType.
+        // Notification, Teammate and concurrent side queries are additionally
+        // registered by prompt id so their unflagged ToolResult/Hook/Steer
+        // continuations stay excluded (the flag/messageType is only on the first
+        // send). Their ids are unique (the CLI advances the prompt counter), so
+        // a registered id never drops a foreground turn (R6-1/R7-1).
+        messageType !== SendMessageType.Notification &&
+          messageType !== SendMessageType.Teammate &&
+          !this.backgroundInteractionPromptIds.has(prompt_id),
+        options?.ledgerTurnKey,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -5198,6 +5320,38 @@ export class LlmClient {
             appendedHookContext,
             appendedHookContexts,
           );
+      }
+      // Background (async) hooks may have produced output since the last
+      // turn. Drain it (get-and-clear) and deliver it to the model on this
+      // request, before the send and its auto-compaction so the threshold
+      // sees the same tail the provider will (capability ledger L11). Splice
+      // it ahead of the trailing UserPromptSubmit receipt so that block stays
+      // last for the resume/projection/title strips that recognize it only in
+      // last position. getHookSystem is read defensively: a config double
+      // without it (or a hook system without pending output) delivers nothing.
+      // A concurrent `/btw` side query must not consume the running turn's
+      // pending block: its first send carries isConcurrentSideQuery, but its
+      // tool-result continuation arrives unflagged, so the prompt id recorded
+      // at that flagged first send is what refuses the continuation. Every
+      // other ToolResult drains — the owning turn's continuation and a
+      // continue-interrupted turn that sends ToolResult first under an id no
+      // side query claimed. The exploration-budget prompt id cannot serve as
+      // that discriminator: it is only claimed on startsInteraction, so a
+      // ToolResult-first turn (fresh or stale budget id) would be refused and
+      // silently lose the block.
+      const skipAsyncHookDrain =
+        options?.isConcurrentSideQuery === true ||
+        (messageType === SendMessageType.ToolResult &&
+          this.concurrentSideQueryPromptIds.has(prompt_id));
+      const asyncHookContextPart = skipAsyncHookDrain
+        ? null
+        : drainAsyncHookContextPart(this.config.getHookSystem?.());
+      if (asyncHookContextPart) {
+        requestToSend = appendAsyncHookContextPart(
+          requestToSend,
+          asyncHookContextPart,
+          Boolean(appendedHookContext),
+        );
       }
       if (ideContextText) {
         const firstText = requestToSend.find(

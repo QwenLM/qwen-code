@@ -264,6 +264,8 @@ export function useStatusLineState(
   useThemeColors: boolean;
   respectUserColors: boolean;
   hideContextIndicator: boolean;
+  /** Command output is opaque and may refresh on a timer, unlike a preset. */
+  commandSourced?: boolean;
 } {
   const settingsStatusLineConfig = getStatusLineConfig(settings);
   const statusLineConfigOverride = uiState.statusLineConfigOverride;
@@ -797,6 +799,7 @@ export function useStatusLineState(
 
   return {
     lines: output,
+    commandSourced: statusLineConfig?.type === 'command',
     useThemeColors: statusLinePreset?.useThemeColors === true,
     respectUserColors:
       statusLineConfig?.type === 'command' &&

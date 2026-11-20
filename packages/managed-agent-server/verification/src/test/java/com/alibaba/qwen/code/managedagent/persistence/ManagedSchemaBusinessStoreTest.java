@@ -380,37 +380,216 @@ public class ManagedSchemaBusinessStoreTest {
 
     @Test
     void schedulePagesUseCurrentRootPermissionsThroughoutTheChildWorkspaceChain() {
-        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
-                + " VALUES (?,?,'qwen-code',1,1)", tenant, session);
-        byte[] actor = ManagedWorkspaceRegistry.actorKey(tenant, "operator");
-        String parent = null;
-        for (String workspace : List.of("root", "child", "grandchild", "foreign")) {
-            boolean child = workspace.equals("child") || workspace.equals("grandchild");
-            jdbc.update(
-                    "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
-                            + " storage_id, display_name, config_ref, policy_ref, state,"
-                            + " workspace_kind, parent_workspace_id) VALUES (?, ?, 1, 'storage',"
-                            + " 'Workspace', 'config', 'policy', 'ACTIVE', ?, ?)",
-                    tenant, workspace, child ? "CHILD_GIT" : "ROOT", child ? parent : null);
-            parent = workspace;
-            int time = workspace.equals("root") ? 1 : workspace.equals("child") ? 2 : workspace.equals("grandchild") ? 3 : 4;
-            jdbc.update(
-                    "INSERT INTO ma_schedule (tenant_id, schedule_id, session_id, workspace_id, actor_id, record_revision, definition_revision, definition_digest, goal, cron, timezone, session_mode, overlap, catch_up, is_enabled, state, armed_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 1, 1, ?, 'goal', '0 * * * *', 'UTC', 'new_session', 'skip', 'none', TRUE, 'armed', 0, ?, ?)",
-                    tenant, "schedule-" + workspace, session, workspace, actor, "a".repeat(64), time, time);
+        seedSession(tenant, session, "PUBLIC", "ACTIVE");
+        String root = "根!";
+        String child = "子".repeat(80) + "Child!";
+        String grandchild = "孙".repeat(168) + "Tail!   ";
+        List<String> workspaces = List.of(root, child, grandchild, "foreign");
+        for (int index = 0; index < workspaces.size(); index++) {
+            String workspace = workspaces.get(index);
+            seedWorkspace(tenant, workspace, index == 1 || index == 2 ? workspaces.get(index - 1) : null);
+            seedSchedule(tenant, session, workspace, "schedule-" + index, index + 1);
         }
-        jdbc.update(
-                "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES"
-                        + " (?, 'root', ?, 'READER')",
-                tenant, actor);
+        grantWorkspace(tenant, root, "operator");
+        grantWorkspace(tenant, grandchild, "operator");
         JdbcAutomationLedgerStore automation = new JdbcAutomationLedgerStore(jdbc);
         var first = automation.listReadableSchedules(tenant, "operator", null, 2);
         assertThat(first.hasMore()).isTrue();
-        assertThat(first.rows()).extracting(JdbcAutomationLedgerStore.ScheduleRow::workspaceId).containsExactly("grandchild", "child");
-        var second = automation.listReadableSchedules(tenant, "operator", new JdbcAutomationLedgerStore.ScheduleCursor(2, "schedule-child"), 2);
-        assertThat(second.rows()).extracting(JdbcAutomationLedgerStore.ScheduleRow::workspaceId).containsExactly("root");
+        assertThat(first.rows()).extracting(JdbcAutomationLedgerStore.ScheduleRow::workspaceId).containsExactly(grandchild, child);
+        var cursor = new JdbcAutomationLedgerStore.ScheduleCursor(2, "schedule-1");
+        var second = automation.listReadableSchedules(tenant, "operator", cursor, 2);
+        assertThat(second.rows()).extracting(JdbcAutomationLedgerStore.ScheduleRow::workspaceId).containsExactly(root);
+        assertThat(second.hasMore()).isFalse();
         assertThat(automation.listReadableSchedules(tenant, "Operator", null, 2).rows()).isEmpty();
-        jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ?", tenant, "root");
+        jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ?", tenant, root);
+        var revoked = automation.listReadableSchedules(tenant, "operator", cursor, 2);
+        assertThat(revoked.rows()).isEmpty();
+        assertThat(revoked.hasMore()).isFalse();
         assertThat(automation.listReadableSchedules(tenant, "operator", null, 2).rows()).isEmpty();
+    }
+
+    @Test
+    void schedulePagesMatchExactUnicodeCaseTrailingSpaceAndSentinelIdentities() {
+        String scopedTenant = tenant + "-identity";
+        List<String> tenants = List.of(scopedTenant, scopedTenant + ":", scopedTenant + "_",
+                scopedTenant.toUpperCase(java.util.Locale.ROOT));
+        List<String> roots = List.of("工作区", "工作区 ", "工作区!", "Workspace", "workspace");
+        JdbcAutomationLedgerStore automation = new JdbcAutomationLedgerStore(jdbc);
+        for (int tenantIndex = 0; tenantIndex < tenants.size(); tenantIndex++) {
+            String ownerTenant = tenants.get(tenantIndex);
+            String ownerSession = session + "-" + tenantIndex;
+            seedSession(ownerTenant, ownerSession, "PUBLIC", "ACTIVE");
+            for (int index = 0; index < roots.size(); index++) {
+                String root = roots.get(index);
+                String child = "子-" + root;
+                seedWorkspace(ownerTenant, root, null);
+                seedWorkspace(ownerTenant, child, root);
+                seedSchedule(ownerTenant, ownerSession, root, "root-" + index, 1);
+                seedSchedule(ownerTenant, ownerSession, child, "child-" + index, 2);
+                grantWorkspace(ownerTenant, root, "reader-" + index);
+            }
+        }
+        for (String ownerTenant : tenants) {
+            for (int index = 0; index < roots.size(); index++) {
+                var page = automation.listReadableSchedules(ownerTenant, "reader-" + index, null, 10);
+                assertThat(page.rows()).extracting(JdbcAutomationLedgerStore.ScheduleRow::tenantId).containsOnly(ownerTenant);
+                assertThat(page.rows()).extracting(JdbcAutomationLedgerStore.ScheduleRow::workspaceId)
+                        .containsExactly("子-" + roots.get(index), roots.get(index));
+                assertThat(page.hasMore()).isFalse();
+            }
+        }
+    }
+
+    @Test
+    void schedulePagesFilterOwnerOnlySessionsBeforePagination() {
+        seedWorkspace(tenant, "root", null);
+        grantWorkspace(tenant, "root", "operator");
+        List<String> sessions = List.of(session, session + "-mine", session + "-hidden");
+        for (int index = 0; index < sessions.size(); index++) {
+            String ownerSession = sessions.get(index);
+            seedSession(tenant, ownerSession, "PUBLIC", "ACTIVE");
+            seedSchedule(tenant, ownerSession, "root", "schedule-" + index, index + 1);
+            if (index > 0) {
+                jdbc.update("UPDATE ma_session SET owner_only = 1, owner_actor_key = ?, creator_actor_key = ?"
+                                + " WHERE tenant_id = ? AND session_id = ?",
+                        ManagedWorkspaceRegistry.actorKey(tenant, index == 1 ? "operator" : "other"),
+                        ManagedWorkspaceRegistry.actorKey(tenant, index == 1 ? "other" : "operator"),
+                        tenant, ownerSession);
+            }
+        }
+        JdbcAutomationLedgerStore automation = new JdbcAutomationLedgerStore(jdbc);
+        var first = automation.listReadableSchedules(tenant, "operator", null, 1);
+        assertThat(first.rows()).extracting(JdbcAutomationLedgerStore.ScheduleRow::sessionId).containsExactly(session + "-mine");
+        assertThat(first.hasMore()).isTrue();
+        var second = automation.listReadableSchedules(tenant, "operator", new JdbcAutomationLedgerStore.ScheduleCursor(2, "schedule-1"), 1);
+        assertThat(second.rows()).extracting(JdbcAutomationLedgerStore.ScheduleRow::sessionId).containsExactly(session);
+        assertThat(second.hasMore()).isFalse();
+    }
+
+    @Test
+    void channelPendingSessionsDeduplicateBindingsBeforeGlobalOrdering() {
+        String first = session + "-z";
+        String second = session + "-a";
+        String third = session + "-b";
+        for (String ownerSession : List.of(second, third, first)) {
+            seedSession(tenant, ownerSession, "PUBLIC", "ACTIVE");
+            for (int binding = 0; binding < 6; binding++) {
+                seedChannelBinding(tenant, "channel", ownerSession, ownerSession + "-" + binding, 1);
+            }
+            seedChannelRecord(tenant, ownerSession, "newer", "channel_delivery", "planned", 90);
+            seedChannelRecord(tenant, ownerSession, "oldest", "channel_delivery",
+                    ownerSession.equals(first) ? "partial" : "planned", ownerSession.equals(first) ? 10 : 20);
+        }
+        for (int index = 0; index < 8; index++) {
+            String idle = session + "-idle-" + index;
+            seedSession(tenant, idle, "PUBLIC", "ACTIVE");
+            seedChannelBinding(tenant, "channel", idle, "new-binding-" + index, 1000 + index);
+            seedChannelRecord(tenant, idle, "done", "channel_delivery", "delivered", 0);
+        }
+        String unbound = session + "-unbound";
+        seedSession(tenant, unbound, "PUBLIC", "ACTIVE");
+        for (int index = 0; index < 32; index++) {
+            seedChannelRecord(tenant, first, "done-" + index, "channel_delivery", "delivered", 0);
+            seedChannelRecord(tenant, unbound, "unbound-" + index, "channel_delivery", "planned", 0);
+        }
+        String otherOnly = session + "-other-channel";
+        seedSession(tenant, otherOnly, "PUBLIC", "ACTIVE");
+        seedChannelRecord(tenant, otherOnly, "other", "channel_delivery", "planned", 5);
+        seedChannelBinding(tenant, "other-channel", otherOnly, "only-other", 1);
+        seedChannelBinding(tenant, "other-channel", first, "shared-1", 1);
+        seedChannelBinding(tenant, "other-channel", first, "shared-2", 1);
+        JdbcChannelInstanceStore channels = new JdbcChannelInstanceStore(jdbc);
+        assertThat(channels.listSessionsWithPendingDeliveries(tenant, "channel", 1)).containsExactly(first);
+        assertThat(channels.listSessionsWithPendingDeliveries(tenant, "channel", 2)).containsExactly(first, second);
+        assertThat(channels.listSessionsWithPendingDeliveries(tenant, "channel", 10)).containsExactly(first, second, third);
+        assertThat(channels.listSessionsWithPendingDeliveries(tenant, "other-channel", 10)).containsExactly(otherOnly, first);
+    }
+
+    @Test
+    void channelPendingSessionsRequireTheirOwnTenantActivePublicSessionAndDeliveryKind() {
+        String earlier = session + "-earlier";
+        for (String ownerSession : List.of(session, earlier)) {
+            seedSession(tenant, ownerSession, "PUBLIC", "ACTIVE");
+            seedChannelBinding(tenant, "channel", ownerSession, ownerSession, 1);
+            seedChannelRecord(tenant, ownerSession, "due", "channel_delivery", "planned",
+                    ownerSession.equals(earlier) ? 30 : 50);
+        }
+        for (String excluded : List.of("closed", "control", "delivered", "other-domain", "action", "missing")) {
+            String ownerSession = session + "-" + excluded;
+            if (!excluded.equals("missing")) {
+                seedSession(tenant, ownerSession, excluded.equals("control") ? "CONTROL" : "PUBLIC",
+                        excluded.equals("closed") ? "CLOSED" : "ACTIVE");
+            }
+            seedChannelBinding(tenant, "channel", ownerSession, excluded, 1);
+            seedChannelRecord(tenant, ownerSession, "excluded",
+                    excluded.equals("other-domain") ? "session_message" : "channel_delivery",
+                    excluded.equals("delivered") ? "delivered" : "planned", 0);
+            if (excluded.equals("action")) {
+                jdbc.update("UPDATE ma_session_record SET record_kind = 'ACTION', action_id = 'action',"
+                                + " action_version = 1, options_json = '{}' WHERE session_scope_key = ?",
+                        ManagedSessionStore.sessionScopeKey(tenant, ownerSession));
+            }
+        }
+        String foreignTenant = tenant + " ";
+        seedSession(foreignTenant, session, "CONTROL", "ACTIVE");
+        seedChannelBinding(foreignTenant, "channel", session, "same-session", 1);
+        seedChannelRecord(foreignTenant, session, "due", "channel_delivery", "planned", 0);
+        String foreignSession = session + "-foreign";
+        seedSession(foreignTenant, foreignSession, "PUBLIC", "ACTIVE");
+        seedChannelBinding(foreignTenant, "channel", foreignSession, "foreign", 1);
+        seedChannelRecord(foreignTenant, foreignSession, "due", "channel_delivery", "planned", 5);
+        seedChannelBinding(tenant, "channel", foreignSession, "foreign-session", 1);
+        seedChannelBinding(foreignTenant, "channel", earlier, "foreign-binding", 1);
+        JdbcChannelInstanceStore channels = new JdbcChannelInstanceStore(jdbc);
+        assertThat(channels.listSessionsWithPendingDeliveries(tenant, "channel", 1)).containsExactly(earlier);
+        assertThat(channels.listSessionsWithPendingDeliveries(tenant, "channel", 10)).containsExactly(earlier, session);
+        assertThat(channels.listSessionsWithPendingDeliveries(foreignTenant, "channel", 10)).containsExactly(foreignSession);
+    }
+
+    private void seedChannelBinding(String ownerTenant, String channel, String ownerSession, String route, long time) {
+        jdbc.update("INSERT INTO ma_channel_binding (tenant_id, channel_id, route_id, session_id,"
+                        + " scope_kind, gmt_create) VALUES (?, ?, ?, ?, 'sender', ?)",
+                ownerTenant, channel, route, ownerSession, time);
+    }
+
+    private void seedChannelRecord(String ownerTenant, String ownerSession, String id, String domain, String state, long time) {
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
+                        + " session_id, record_kind, domain, record_id, revision, record_resource_id,"
+                        + " delivery_state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, 'DOMAIN', ?, ?, 1, 'body', ?, ?)",
+                ManagedSessionStore.sessionScopeKey(ownerTenant, ownerSession),
+                ManagedExtensionProjection.recordKey(ownerSession, domain, id), ownerTenant, ownerSession, domain, id, state, time);
+    }
+
+    private void seedWorkspace(String ownerTenant, String workspace, String parent) {
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
+                        + " storage_id, display_name, config_ref, policy_ref, state, workspace_kind,"
+                        + " parent_workspace_id) VALUES (?, ?, 1, 'storage', 'Workspace', 'config',"
+                        + " 'policy', 'ACTIVE', ?, ?)",
+                ownerTenant, workspace, parent == null ? "ROOT" : "CHILD_GIT", parent);
+    }
+
+    private void grantWorkspace(String ownerTenant, String workspace, String actor) {
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, 'READER')",
+                ownerTenant, workspace, ManagedWorkspaceRegistry.actorKey(ownerTenant, actor));
+    }
+
+    private void seedSchedule(String ownerTenant, String ownerSession, String workspace, String id, long time) {
+        jdbc.update("INSERT INTO ma_schedule (tenant_id, schedule_id, session_id, workspace_id, actor_id,"
+                        + " record_revision, definition_revision, definition_digest, goal, cron, timezone,"
+                        + " session_mode, overlap, catch_up, is_enabled, state, armed_at, gmt_create, gmt_modified)"
+                        + " VALUES (?, ?, ?, ?, ?, 1, 1, ?, 'goal', '0 * * * *', 'UTC', 'new_session',"
+                        + " 'skip', 'none', TRUE, 'armed', 0, ?, ?)",
+                ownerTenant, id, ownerSession, workspace, ManagedWorkspaceRegistry.actorKey(ownerTenant, "operator"),
+                "a".repeat(64), time, time);
+    }
+
+    private void seedSession(String ownerTenant, String ownerSession, String kind, String status) {
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, session_kind, status,"
+                        + " tenant_key, session_key, session_scope_key, gmt_create, gmt_modified)"
+                        + " VALUES (?, ?, 'qwen-code', ?, ?, ?, ?, ?, 1, 1)",
+                ownerTenant, ownerSession, kind, status, ManagedSchemaKeys.key(ownerTenant),
+                ManagedSchemaKeys.key(ownerSession), ManagedSessionStore.sessionScopeKey(ownerTenant, ownerSession));
     }
 
     @Test

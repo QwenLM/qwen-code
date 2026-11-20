@@ -676,8 +676,12 @@ export function logApiResponse(
   sessionId?: string,
   uiSubagentIdentity?: UiSubagentIdentity,
 ): void {
+  const { first_visible_offset_ms, ...apiEvent } = event;
   const uiEvent = {
-    ...event,
+    ...apiEvent,
+    ...(first_visible_offset_ms === undefined
+      ? {}
+      : { first_visible_offset_ms }),
     ...(uiSubagentIdentity
       ? {
           subagent_id: uiSubagentIdentity.id,
@@ -699,7 +703,7 @@ export function logApiResponse(
   if (!isTelemetrySdkInitialized()) return;
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
-    ...event,
+    ...apiEvent,
     ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),

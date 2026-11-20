@@ -1,22 +1,15 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
-import com.alibaba.qwen.code.managedagent.config.ManagedSessionReaderVersion;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationStorageException;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
-import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -39,7 +32,6 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -70,7 +62,7 @@ public class ToolPublicationAsyncVerificationTest {
         DataSource source = dataSource();
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         bucket = new Bucket();
-        fixture = PublicationJournalFixture.create(source, null, bucket, null);
+        fixture = PublicationJournalFixture.create(source, bucket, null);
         fixture.reserve();
         key = fixture.binding.path("sessionKey");
         data = replacement();
@@ -137,110 +129,6 @@ public class ToolPublicationAsyncVerificationTest {
                 assertThat(fixture.sessions.blockRecovery("tenant-1", "session-1", WRITER_TOKEN,
                         new ManagedSessionStoreModels.BlockRecoveryRequest("workspace-1", "writer-1", 1,
                                 recovery, "test_recovery")).recoveryStatus()).isEqualTo(recovery));
-    }
-
-    private DataSource acceptCsiOperation() {
-        DataSource source = dataSource();
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-        var registration = new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
-                "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
-                "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1);
-        fixture = PublicationJournalFixture.create(source, registration);
-        fixture.reserve();
-        fixture.store.verifyDispatch(fixture.executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN);
-        var claim = fixture.executions.claimDispatch("execution-1", "dispatcher", Duration.ofMinutes(1));
-        fixture.bindings.authorizeDispatch(new JdbcRuntimeSessionRepository(source), fixture.executions,
-                claim, "dispatcher", claim.getDispatchGeneration());
-        key = fixture.binding.path("sessionKey");
-        data = replacement();
-        assertThat(publish("csi", 0, "stored").path("state").asText()).isEqualTo("PENDING");
-        return source;
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"released", "registration"})
-    void permanentCsiAuthorityLossLeavesTheQueueAndRemainsFailedAfterDeadline(String failure) {
-        acceptCsiOperation();
-        if (failure.equals("released")) {
-            var runtime = fixture.bindings.findById("binding-1");
-            assertThat(fixture.bindings.compareAndSet(runtime,
-                    runtime.withState(RuntimeBindingRecord.State.RELEASED, runtime.getLease(), Instant.now())))
-                    .isNotNull();
-            assertThat(fixture.jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot",
-                    String.class)).isNull();
-        } else {
-            fixture.jdbc.update("UPDATE ma_storage SET registration_json = '{}'");
-        }
-        assertThat(data.verifyNextOperation()).isTrue();
-        assertThat(status("csi").path("state").asText()).isEqualTo("FAILED");
-        assertThat(status("csi").path("error").path("code").asText())
-                .isEqualTo("managed_tool_publication_runtime_unavailable");
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
-                Timestamp.class)).isNull();
-        fixture.jdbc.update("UPDATE ma_operation SET deadline = ?",
-                Timestamp.valueOf("2000-01-01 00:00:00"));
-        assertThat(status("csi").path("state").asText()).isEqualTo("FAILED");
-        assertThat(data.verifyNextOperation()).isFalse();
-        assertThat(bucket.opens).hasValue(0);
-    }
-
-    @Test
-    void settledCsiRetirementStillVerifiesAcceptedWork() {
-        acceptCsiOperation();
-        var registration = new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
-                "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
-                "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1);
-        new WorkspaceCsiReservationStore(fixture.jdbc, fixture.manager, JSON).beginRetirement(
-                registration, fixture.bindings, fixture.bindings.findById("binding-1"),
-                fixture.csiReservation, UUID.randomUUID().toString());
-        var execution = fixture.executions.findByExecutionCallId("execution-1");
-        assertThat(fixture.executions.compareAndSet(execution, execution.withResult(
-                java.util.Map.of("executionStatus", "success"), execution.getLastSequence(), Instant.now()),
-                "dispatcher", execution.getDispatchGeneration())).isNotNull();
-        assertThat(data.verifyNextOperation()).isTrue();
-        assertThat(status("csi").path("state").asText()).isEqualTo("SUCCEEDED");
-    }
-
-    @Test
-    void missingReplicaCredentialKeyDoesNotBecomePermanentCsiFailure() {
-        DataSource source = acceptCsiOperation();
-        var bindings = new JdbcRuntimeBindingRepository(source,
-                new AesGcmSecretProtector("other-replica-key", new byte[32]));
-        var grants = new ToolPublicationStore(fixture.jdbc, fixture.manager, fixture.sessions, fixture.executions,
-                bindings, new ToolPublicationStore.Capacity(1024, 1024, 1024, 10));
-        var other = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, grants, fixture.sessions, bucket,
-                Duration.ofSeconds(10), Duration.ofSeconds(2),
-                new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
-        assertThat(other.verifyNextOperation()).isTrue();
-        assertThat(other.verifyNextOperation()).isFalse();
-        assertThat(status("csi").path("state").asText()).isEqualTo("PENDING");
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Boolean.class)).isTrue();
-        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM ma_output_capture", String.class))
-                .isEqualTo("csi");
-        due("csi");
-        assertThat(data.verifyNextOperation()).isTrue();
-        assertThat(status("csi").path("state").asText()).isEqualTo("SUCCEEDED");
-    }
-
-    @Test
-    void unavailableReplicaKeyDoesNotKeepAnExpiredCandidateDue() {
-        DataSource source = acceptCsiOperation();
-        var bindings = new JdbcRuntimeBindingRepository(source,
-                new AesGcmSecretProtector("other-replica-key", new byte[32]));
-        var grants = new ToolPublicationStore(fixture.jdbc, fixture.manager, fixture.sessions, fixture.executions,
-                bindings, new ToolPublicationStore.Capacity(1024, 1024, 1024, 10));
-        var other = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, grants, fixture.sessions, bucket,
-                Duration.ofSeconds(10), Duration.ofSeconds(2),
-                new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
-        fixture.jdbc.update("UPDATE ma_operation SET deadline = ?",
-                Timestamp.valueOf("2000-01-01 00:00:00"));
-        assertThat(other.verifyNextOperation()).isFalse();
-        assertThat(status("csi").path("state").asText()).isEqualTo("EXPIRED");
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
-                Timestamp.class)).isNull();
-        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM ma_output_capture", String.class)).isNull();
-        assertThat(bucket.opens).hasValue(0);
     }
 
     @ParameterizedTest
@@ -334,9 +222,8 @@ public class ToolPublicationAsyncVerificationTest {
                 .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
                 .withBean(JdbcManagedSessionStore.class, () -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(
                         fixture.jdbc, new JdbcManagedExtensionRecordStore(fixture.jdbc), null, null, null, bucket, null, null,
-                        WriterCredentialPolicy.unbound(), fixture.bindings))
+                        WriterCredentialPolicy.unbound()))
                 .withBean(HarnessRules.class, SdkHarnessRules::new)
-                .withBean(StorageReadPolicy.class, ManagedSessionReaderVersion::new)
                 .withBean(com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class, () -> fixture.executions)
                 .withBean(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class, () -> fixture.bindings)
                 .withBean(org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder.class,

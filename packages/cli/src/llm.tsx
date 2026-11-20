@@ -727,10 +727,6 @@ export async function main() {
     const npmBunHandoff = selectNpmBunHandoff({
       interactive:
         isInteractiveInvocation(argv) && Boolean(process.stdout.isTTY),
-      screenReader:
-        argv.screenReader ??
-        settings.merged.ui?.accessibility?.screenReader ??
-        false,
       protocolMode: Boolean(
         isAcpMode ||
           argv.inputFormat === InputFormat.STREAM_JSON ||
@@ -1513,12 +1509,7 @@ export async function main() {
       const { selectTuiRenderer, TUI_RENDERER_STRICT_ENV_VAR } = await import(
         './ui/opentui/renderer-selection.js'
       );
-      const selection = selectTuiRenderer(
-        undefined,
-        undefined,
-        process.env,
-        config.getScreenReader(),
-      );
+      const selection = selectTuiRenderer(undefined, undefined, process.env);
       const { setTuiRendererOfRecord } = await import(
         './ui/tui-renderer-of-record.js'
       );

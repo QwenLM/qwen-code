@@ -227,3 +227,127 @@ export const MANAGED_EXTENSION_MESSAGES_ZH: Record<
   'managed.install.discarded':
     '已放弃草稿。已保存的包或 settings revisions 仍保留在此 Workspace。',
 };
+
+export const MANAGED_EXTENSION_MESSAGES_RU: Record<
+  keyof typeof MANAGED_EXTENSION_MESSAGES_EN,
+  string
+> = {
+  'managed.install.skillsTitle': 'Managed Skills',
+  'managed.extensions.title': 'Managed-расширения',
+  'managed.extensions.description':
+    'Опубликуйте фиксированный пакет, выберите версии, затем примените к простаивающей сессии.',
+  'managed.extensions.selectSession':
+    'Выберите workspace и сессию для управления расширениями.',
+  'managed.extensions.unsupported':
+    'Пакетные расширения для этой цели недоступны.',
+  'managed.extensions.source': 'Исходный Git, npm, каталог или архив',
+  'managed.extensions.ref': 'Редакция источника (необязательно)',
+  'managed.extensions.target': 'Целевая платформа',
+  'managed.extensions.publish': 'Опубликовать пакет',
+  'managed.extensions.new': 'Новое расширение',
+  'managed.extensions.update': 'Обновить выбранное расширение',
+  'managed.extensions.apply': 'Применить выбор',
+  'managed.extensions.retry': 'Повторить исходный запрос',
+  'managed.extensions.continue': 'Продолжить исходную операцию',
+  'managed.extensions.recover': 'Восстановить предыдущую версию',
+  'managed.extensions.settings': 'Настройки',
+  'managed.extensions.settingsDescription':
+    'Введите полный набор переменных окружения. Сохранённые значения никогда не отображаются.',
+  'managed.extensions.addSetting': 'Добавить настройку',
+  'managed.extensions.key': 'Переменная окружения',
+  'managed.extensions.value': 'Значение',
+  'managed.extensions.saveSettings': 'Сохранить редакцию настроек',
+  'managed.extensions.useSettings':
+    'Использовать сохранённую редакцию настроек',
+  'managed.extensions.settingsRevision': 'Редакция настроек (необязательно)',
+  'managed.extensions.installed': 'Установлено',
+  'managed.extensions.pending': 'Ожидает применения',
+  'managed.extensions.active': 'Активно',
+  'managed.extensions.preparing': 'Подготовка',
+  'managed.extensions.prepared': 'Готово к применению',
+  'managed.extensions.committed': 'Применение',
+  'managed.extensions.recovery_required': 'Восстановление заблокировано',
+  'managed.extensions.failed': 'Ошибка',
+  'managed.extensions.empty':
+    'В этой рабочей области нет опубликованных пакетов.',
+  'managed.extensions.failedRequest':
+    'Запрос не удалось подтвердить. Обновите статус или повторите исходный запрос.',
+  'managed.extensions.localPublisher':
+    'Для подготовки исходного источника нужен подключённый daemon.',
+  'managed.install.title': 'Установить Skill или MCP-соединение',
+  'managed.install.description':
+    'Сохраните версию в этой рабочей области и примените её только к выбранной простаивающей сессии.',
+  'managed.install.kind': 'Источник установки',
+  'managed.install.kind.skill': 'Архив Skill',
+  'managed.install.kind.extension': 'Архив расширения',
+  'managed.install.kind.mcp': 'Конфигурация MCP',
+  'managed.install.name': 'Имя (для архивов необязательно)',
+  'managed.install.serverName': 'Имя MCP-сервера',
+  'managed.install.archive': 'Архив ZIP или tar.gz',
+  'managed.install.transport': 'Транспорт',
+  'managed.install.command': 'Исполняемая команда',
+  'managed.install.arguments': 'Аргументы (JSON-массив строк)',
+  'managed.install.environment': 'Окружение (JSON-объект)',
+  'managed.install.url': 'URL MCP-сервера',
+  'managed.install.headers': 'Заголовки (JSON-объект)',
+  'managed.install.secretHelp':
+    'Ниже объявите имена секретных настроек. Используйте ${NAME} в аргументах, окружении, URL или заголовках; значение вводите только в соответствующем поле пароля.',
+  'managed.install.secretKeys': 'Имена секретных настроек, через запятую',
+  'managed.install.workspaceCredentials':
+    'Служебные учётные данные Workspace могут использовать авторизованные выполнения в этой рабочей области. Сохранённые значения никогда не отображаются.',
+  'managed.install.keepSettings':
+    'Оставить текущую выбранную сохранённую редакцию настроек',
+  'managed.install.updateTarget': 'Новый пакет или цель обновления',
+  'managed.install.install': 'Установить в текущую сессию',
+  'managed.install.complete': 'Установлено в выбранную сессию.',
+  'managed.install.savedNotApplied':
+    'Установка не подтверждена. Сохранённый пакет может быть доступен; проверьте или повторите исходный запрос, прежде чем начинать другую установку.',
+  'managed.install.recoverBeforeEdit':
+    'Более ранняя установка требует восстановления. Отмените правку, чтобы вернуться к исходной установке, прежде чем менять это соединение.',
+  'managed.install.required.source':
+    'Выберите или заново создайте исходный ввод, чтобы продолжить. Его дайджест должен совпадать с сохранённым запросом.',
+  'managed.install.required.settings':
+    'Введите полный набор значений учётных данных, чтобы продолжить. После перезагрузки значения не сохраняются.',
+  'managed.install.stage.publish': 'Сохранение версии пакета…',
+  'managed.install.stage.settings': 'Пакет сохранён; подготовка настроек…',
+  'managed.install.stage.apply':
+    'Пакет сохранён; применение к выбранной сессии…',
+  'managed.install.reviewAgain': 'Просмотреть текущий выбор',
+  'managed.install.inspect': 'Просмотреть пакет',
+  'managed.install.packageSource': 'Версионированный пакет',
+  'managed.install.staticSource': 'Статический снимок сессии',
+  'managed.install.staticHelp':
+    'Статические снимки Skill остаются фиксированными. Установите отдельно квалифицированный пакетный Skill или создайте новую сессию, чтобы сменить базовый снимок.',
+  'managed.install.ownedMcp':
+    'Это соединение принадлежит пакету. Редактируйте конфигурацию пакета, а не независимое определение сервера.',
+  'managed.install.editMcp': 'Изменить конфигурацию соединения',
+  'managed.install.files': 'Файлы пакета',
+  'managed.install.truncated': 'Список файлов усечён.',
+  'managed.install.review': 'Просмотреть пакет',
+  'managed.install.reviewed':
+    'Текущий выбор загружен. Снова подтвердите исходную установку, чтобы применить её сохранённый пакет.',
+  'managed.install.invalidInput':
+    'Источник не удалось подготовить. Проверьте архив, поля конфигурации и объявленные настройки.',
+  'managed.install.redacted':
+    'Сохранённые литеральные значения окружения/заголовков скрыты. Введите их снова или замените объявленными плейсхолдерами секретов перед просмотром.',
+  'managed.install.createMcp': 'Создать MCP-соединение',
+  'managed.install.packageEditUnavailable':
+    'Этот пакет нельзя открыть как одно соединение. Составные расширения управляйте со страницы расширений.',
+  'managed.install.replacePackage':
+    'Это обновит весь выбранный пакет в этой сессии. Другие сессии сохранят выбранные версии.',
+  'managed.runtimeSkills.title': 'Импорт из текущего Workspace',
+  'managed.runtimeSkills.description':
+    'Просканируйте проектные Skills в выбранном Runtime, просмотрите неизменяемый снимок, затем явно установите его в эту сессию.',
+  'managed.runtimeSkills.scan': 'Сканировать текущий Runtime',
+  'managed.runtimeSkills.empty':
+    'В текущем Runtime проектные Skills не найдены.',
+  'managed.runtimeSkills.shadowed': 'Источник с более низким приоритетом',
+  'managed.runtimeSkills.incompatible':
+    'Этот Skill использует неподдерживаемые метаданные.',
+  'managed.runtimeSkills.failed':
+    'Источник Runtime не удалось подтвердить. Проверьте исходную операцию; изменённые источники или владельцы Runtime требуют явного нового сканирования и снимка.',
+  'managed.install.discardDraft':
+    'Отбросить черновик; сохранить сохранённые версии',
+  'managed.install.discarded':
+    'Черновик отброшен. Сохранённые пакеты или редакции настроек остаются доступны в этой рабочей области.',
+};
