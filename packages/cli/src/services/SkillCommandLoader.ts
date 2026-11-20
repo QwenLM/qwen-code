@@ -209,8 +209,12 @@ export class SkillCommandLoader implements ICommandLoader {
             }
             // Same MCP dependency warning the Skill tool emits, so a
             // user-invoked activation also learns before the first tool
-            // call fails opaquely (#17323 F3).
-            const mcpWarning = buildMcpDependencyWarning(this.config, skill);
+            // call fails opaquely (#17323 F3). The config is nullable on
+            // this loader — without it there is nothing to check (#17323
+            // R7-1).
+            const mcpWarning = this.config
+              ? buildMcpDependencyWarning(this.config, skill)
+              : '';
             if (mcpWarning) {
               content = appendToLastTextPart(content, mcpWarning);
             }
