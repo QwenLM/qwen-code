@@ -2,7 +2,7 @@
 
 [English](2026-11-19-send-now-never-waits.md) | [简体中文](2026-11-19-send-now-never-waits.zh-CN.md)
 
-Status: decided; implemented in two PRs.
+Status: decided; implemented in two PRs (PR 1: #17825).
 
 [Send queued mid-turn messages now](2026-10-08-send-mid-turn-messages-now.md)
 includes the decision "No cut once a tool call starts" and guarantees that
@@ -148,21 +148,38 @@ background first and then the other tools are interrupted.
 ### Move shells to the background (PR 2)
 
 1. Expose the promotion controllers for running foreground shells to the
-   session. In the legacy loop, pass `setPromoteAbortControllerCallback` from
-   `runTool`. In the shared round, read the existing controllers from scheduler
-   updates in `runAcpToolBatch` and pass them through the batch host.
+   session. In the legacy loop, `runTool` passes
+   `setPromoteAbortControllerCallback` for a top-level shell call. In the shared
+   round, `runAcpToolBatch` reads the existing controllers from scheduler
+   updates and passes them to the session, and also reports each call that
+   settles. A shell that has not spawned yet, a nested `exec` call, a simulated
+   `sed` edit and a Managed runtime call hand over no controller and are
+   interrupted as in PR 1.
 2. When a Send now request arrives, each handle gets
-   `abort({ kind: 'background' })`. If only those shells were left in the batch,
-   the batch ends, the tool boundary drains, and the same turn answers; if other
-   tools remain, the turn is then interrupted as in PR 1.
-3. The tool result carries the background id and the output location, and says
-   why: the command moved to the background so a user message could arrive, and
-   it was not interrupted (unlike a manual move by the user).
+   `abort({ kind: 'background', shellId, forUserMessage: true })`, with a
+   `bg_` id the session picks so it can stop the shell later. If only those
+   shells were left in the batch (every call of the batch that has not settled
+   is a moved shell; the legacy loop runs calls in order, so calls not started
+   yet count as remaining), the batch ends, the tool boundary drains, and the
+   same turn answers. If other tools remain, the turn is interrupted as in
+   PR 1 once the moved shells' tool calls have settled: an earlier interrupt
+   would replace their results with the interrupt text, and the model would
+   lose the background id and might run the command again. The drain and
+   late-message checks of PR 1 apply to that interrupt only, and are checked
+   again when it fires. A second request while shells are moving moves nothing
+   more and does not interrupt early.
+3. The tool result carries the background id, the output location and the
+   status line, and says why: the command moved to the background without
+   being interrupted so that a user message could reach the model, and the
+   message follows (unlike a manual move by the user).
 4. When such a shell ends later, ACP's existing background shell notification
    reports it.
 5. If the user presses Stop later in the same turn, the shells moved for the
-   message are stopped too; once the next turn starts they get no special
-   treatment.
+   message are stopped too, once their tool calls have settled and their
+   background entries exist; once the next turn starts they get no special
+   treatment. The session watches the turn signal for a user cancel, since
+   Stop can arrive as a session cancel or as the daemon's prompt-cancel
+   request.
 
 ### Web Shell
 

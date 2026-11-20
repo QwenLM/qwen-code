@@ -35,6 +35,8 @@ import {
   TRUNCATION_RETRY_LOOP_DIRECTIVE,
   USER_MESSAGE_INTERRUPT_ABORT_REASON,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import type { ShellAbortReason } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
+import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import {
   runAgentLoop,
@@ -92,7 +94,7 @@ import {
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   getStartupContextLength,
   isWrappedSystemReminderPart,
@@ -628,6 +630,17 @@ const MID_TURN_INPUT_KEPT_ABORT_REASON = 'qwen:mid-turn-input-kept';
 // prompt. Unlike a user cancel, it leaves cron jobs, background notifications
 // and the Goal running.
 const MID_TURN_SEND_NOW_ABORT_REASON = USER_MESSAGE_INTERRUPT_ABORT_REASON;
+
+interface MovableShell {
+  /** The turn whose tool batch runs the shell. */
+  turn: AbortSignal;
+  promote: AbortController;
+  /** Resolves once the shell's tool call settles. */
+  settled: Promise<void>;
+  settle(): void;
+  /** Set once the shell was moved to the background. */
+  shellId?: string;
+}
 /** The failure a Goal turn stopped by loop protection pauses with. */
 const GOAL_LOOP_STOP_FAILURE = 'loop detected';
 const GOAL_HELD_RECOVERY_COMMANDS =
@@ -2831,6 +2844,16 @@ export class Session implements SessionContext {
   private midTurnToolPhaseFor: AbortSignal | undefined;
   // Drain requests awaiting the host's answer.
   private midTurnDrainsInFlight = 0;
+  // Running foreground shells of the turn's tool batch, by call id: a
+  // send-now request moves them to the background instead of ending them.
+  private readonly movableShells = new Map<string, MovableShell>();
+  // How many calls of the running tool batch have not settled.
+  private openToolCalls: (() => number) | undefined;
+  // Shells moved to the background for a message, stopped if the turn that
+  // moved them is stopped.
+  private shellsMovedFor:
+    | { turn: AbortSignal; shells: MovableShell[] }
+    | undefined;
   // A drain started for an open response and still awaiting its answer. Later
   // drains wait for it, so the messages it takes are never stranded.
   private earlyMidTurnDrain: Promise<void> | undefined;
@@ -4086,19 +4109,102 @@ export class Session implements SessionContext {
     if (!pending) return;
     this.midTurnSendNowFor = pending.signal;
     this.pullForOpenResponse?.();
+    // A running foreground shell keeps running in the background, and its
+    // tool call settles at once: when only such shells were left, the batch
+    // ends and the tool boundary brings the input into this turn.
+    const moving = this.#moveShellsToBackground(pending.signal);
     // The host sends this request only while it holds user input, and only
     // once every drain that took input has answered, on the same ordered
     // connection: with no drain out, the input is still with the host and is
     // promoted when the turn ends; a drain still out brings it into this
     // turn. Input a timed-out drain handed over late waits for the tool
     // boundary, and the newer input with it, so the two stay in order.
-    if (
+    const shouldInterrupt = () =>
+      this.pendingPrompt === pending &&
       this.midTurnDrainsInFlight === 0 &&
       this.midTurnRecoveredMessages.length === 0 &&
       (this.midTurnToolPhaseFor === pending.signal ||
-        this.openResponseHasToolCall?.(pending.signal) === true)
-    ) {
+        this.openResponseHasToolCall?.(pending.signal) === true);
+    if (!shouldInterrupt()) return;
+    if (moving.length === 0) {
       pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
+      return;
+    }
+    if ((this.openToolCalls?.() ?? Infinity) <= moving.length) return;
+    // Other tools remain. A moved shell's result says where it went, so the
+    // turn ends only once those results are recorded.
+    void Promise.all(moving.map((shell) => shell.settled)).then(() => {
+      if (shouldInterrupt()) pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
+    });
+  }
+
+  #trackMovableShell(
+    callId: string,
+    turn: AbortSignal,
+    promote: AbortController,
+  ): void {
+    if (this.movableShells.get(callId)?.promote === promote) return;
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => (settle = resolve));
+    this.movableShells.set(callId, { turn, promote, settled, settle });
+  }
+
+  #settleMovableShell(callId: string): void {
+    const shell = this.movableShells.get(callId);
+    if (!shell) return;
+    this.movableShells.delete(callId);
+    shell.settle();
+  }
+
+  /** A settled tool batch leaves no shell of its turn movable. */
+  #settleMovableShells(turn: AbortSignal): void {
+    for (const [callId, shell] of this.movableShells) {
+      if (shell.turn === turn) this.#settleMovableShell(callId);
+    }
+  }
+
+  /** Moves the turn's running foreground shells to the background; returns
+   * every shell moved and not settled yet, including earlier moves. */
+  #moveShellsToBackground(turn: AbortSignal): MovableShell[] {
+    const moving: MovableShell[] = [];
+    for (const shell of this.movableShells.values()) {
+      if (shell.turn !== turn) continue;
+      if (!shell.promote.signal.aborted) {
+        shell.shellId = `bg_${randomBytes(4).toString('hex')}`;
+        if (this.shellsMovedFor?.turn !== turn) {
+          this.shellsMovedFor = { turn, shells: [] };
+          turn.addEventListener(
+            'abort',
+            () => {
+              if (turn.reason === USER_CANCEL_ABORT_REASON) {
+                this.#stopShellsMovedFor(turn);
+              }
+            },
+            { once: true },
+          );
+        }
+        this.shellsMovedFor.shells.push(shell);
+        shell.promote.abort({
+          kind: 'background',
+          shellId: shell.shellId,
+          forUserMessage: true,
+        } satisfies ShellAbortReason);
+      }
+      if (shell.shellId) moving.push(shell);
+    }
+    return moving;
+  }
+
+  /** Stopping a turn (Stop, not Send now) stops the shells it moved to the
+   * background. */
+  #stopShellsMovedFor(turn: AbortSignal): void {
+    const moved = this.shellsMovedFor;
+    if (moved?.turn !== turn) return;
+    this.shellsMovedFor = undefined;
+    const registry = this.config.getBackgroundShellRegistry();
+    for (const shell of moved.shells) {
+      // The background entry exists once the tool call settles.
+      void shell.settled.then(() => registry.requestCancel(shell.shellId!));
     }
   }
 
@@ -16422,6 +16528,8 @@ export class Session implements SessionContext {
       if (this.midTurnToolPhaseFor === args[0]) {
         this.midTurnToolPhaseFor = undefined;
       }
+      this.openToolCalls = undefined;
+      this.#settleMovableShells(args[0]);
     }
   }
 
@@ -16440,10 +16548,18 @@ export class Session implements SessionContext {
     todoWorkChainContext.enterWith(
       this.config.getActiveTodoWorkChainOwner(promptId),
     );
+    let settledCalls = 0;
+    this.openToolCalls = () => requests.length - settledCalls;
     const batch = await runAcpToolBatch(this.#toolBatchHost(), {
       requests,
       loop,
       signal: abortSignal,
+      onShellMovable: (callId, promote) =>
+        this.#trackMovableShell(callId, abortSignal, promote),
+      onCallSettled: (callId) => {
+        settledCalls += 1;
+        this.#settleMovableShell(callId);
+      },
       onFullTurnModel,
       duplicates: {
         handled: new Map(
@@ -16617,6 +16733,8 @@ export class Session implements SessionContext {
       if (this.midTurnToolPhaseFor === args[0]) {
         this.midTurnToolPhaseFor = undefined;
       }
+      this.openToolCalls = undefined;
+      this.#settleMovableShells(args[0]);
     }
   }
 
@@ -17136,6 +17254,9 @@ export class Session implements SessionContext {
         );
       }
     };
+    // Calls run in order, so the calls from the running one on are open.
+    let runningCall = 0;
+    this.openToolCalls = () => dedupedFunctionCalls.length - runningCall;
     const memoryWriteCandidates: MemoryWriteCandidate[] = [];
     const collectMemoryWriteCandidates = (result: RunToolResult): void => {
       if (result.memoryWriteCandidates) {
@@ -17367,6 +17488,7 @@ export class Session implements SessionContext {
           }
         } else {
           for (const fc of batch.calls) {
+            runningCall = dedupedFunctionCalls.indexOf(fc);
             const r = await this.runTool(
               abortSignal,
               promptId,
@@ -17379,6 +17501,8 @@ export class Session implements SessionContext {
               onFullTurnModel,
               undefined,
               finalizeNestedToolResult,
+            ).finally(() =>
+              this.#settleMovableShell(executionCallIds.get(fc)!),
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
@@ -19868,22 +19992,36 @@ export class Session implements SessionContext {
                     finishToolLifecycle(lifecycleTerminalOutcome);
                 };
                 try {
-                  return invocation
-                    .execute(
-                      activeToolAbortSignal,
-                      onToolProgress,
-                      this.config.getShellExecutionConfig(),
-                    )
-                    .then(
-                      (result) => {
-                        settle(result);
-                        return result;
-                      },
-                      (error: unknown) => {
-                        settle(undefined, error, true);
-                        throw error;
-                      },
-                    );
+                  const execution =
+                    !codeModeContext &&
+                    canonicalToolName(toolName) === ToolNames.SHELL
+                      ? (invocation as ShellToolInvocation).execute(
+                          activeToolAbortSignal,
+                          onToolProgress,
+                          this.config.getShellExecutionConfig(),
+                          undefined,
+                          (promote) =>
+                            this.#trackMovableShell(
+                              callId,
+                              abortSignal,
+                              promote,
+                            ),
+                        )
+                      : invocation.execute(
+                          activeToolAbortSignal,
+                          onToolProgress,
+                          this.config.getShellExecutionConfig(),
+                        );
+                  return execution.then(
+                    (result) => {
+                      settle(result);
+                      return result;
+                    },
+                    (error: unknown) => {
+                      settle(undefined, error, true);
+                      throw error;
+                    },
+                  );
                 } catch (error) {
                   settle(undefined, error, true);
                   throw error;

@@ -162,7 +162,13 @@ function applyUtf8Prefix(command: string, shell: ShellType): string {
  */
 export type ShellAbortReason =
   | { kind: 'cancel' }
-  | { kind: 'background'; shellId?: string };
+  | {
+      kind: 'background';
+      /** The `bg_<8 hex>` id the background entry takes. */
+      shellId?: string;
+      /** Moved so that a message from the user could reach the model. */
+      forUserMessage?: boolean;
+    };
 
 /**
  * Returns true only for a real process-signal termination.

@@ -5692,6 +5692,31 @@ describe('ShellTool', () => {
         expect(result.error).toBeUndefined();
       });
 
+      it('takes the requested id and says why when moved for a user message', async () => {
+        const { promise, setPromoteAc } = executeWithPromote(build('npm test'));
+        await vi.waitFor(() => expect(setPromoteAc).toHaveBeenCalledTimes(1));
+        (setPromoteAc.mock.calls[0][0] as AbortController).abort({
+          kind: 'background',
+          shellId: 'bg_0123abcd',
+          forUserMessage: true,
+        });
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 4242,
+        });
+        const result = await promise;
+
+        expect(registeredEntry().shellId).toBe('bg_0123abcd');
+        expectText(result.llmContent, [
+          'Foreground command "npm test" was moved to the background as bg_0123abcd, without being interrupted, so that a message from the user could reach you. The user\'s message follows.',
+          "task_stop({ task_id: 'bg_0123abcd' })",
+        ]);
+      });
+
       it('aborting entry.abortController kills the child via SIGTERM/SIGKILL and marks the registry entry cancelled', async () => {
         // `task_stop bg_xxx` (`registry.requestCancel` →
         // `entry.abortController.abort()`) must kill the child and mark the

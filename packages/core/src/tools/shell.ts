@@ -60,6 +60,7 @@ import {
 } from '../utils/github-prs.js';
 import { findGitRoot } from '../utils/gitUtils.js';
 import type {
+  ShellAbortReason,
   ShellExecutionConfig,
   ShellExecutionResult,
   ShellOutputEvent,
@@ -4893,7 +4894,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
       throw mkdirError;
     }
 
-    const shellId = `bg_${crypto.randomBytes(4).toString('hex')}`;
+    const promoteReason = abortController.signal.reason as
+      | Partial<Extract<ShellAbortReason, { kind: 'background' }>>
+      | undefined;
+    const requestedShellId = promoteReason?.shellId;
+    const shellId =
+      typeof requestedShellId === 'string' &&
+      /^bg_[0-9a-f]{8}$/.test(requestedShellId)
+        ? requestedShellId
+        : `bg_${crypto.randomBytes(4).toString('hex')}`;
     const outputPath = path.join(outputDir, `shell-${shellId}.output`);
     // PR-2.5: open an append-mode write stream so the initial snapshot
     // AND post-promote bytes from the still-running child both land in
@@ -5091,11 +5100,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
       outputPath,
       abortController: entryAc,
     };
-    // Reference `abortController` so it's not unused — the parameter
-    // is kept on the signature so a future PR-2.5 that needs to
-    // double-link the original promote signal can read it without
-    // re-plumbing.
-    void abortController;
 
     // `registry.register` is internally safe today (Map.set + emit),
     // but if a future implementation throws, the promoted child is
@@ -5383,7 +5387,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ? `Process has already exited; no \`task_stop\` needed (the entry is observable in \`/tasks\` for inspection).`
       : `To stop the now-background process: \`task_stop({ task_id: '${shellId}' })\`.`;
     const llmContent = [
-      `Foreground command "${commandToExecute}" promoted to background as ${shellId}.`,
+      promoteReason?.forUserMessage === true
+        ? `Foreground command "${commandToExecute}" was moved to the background as ${shellId}, without being interrupted, so that a message from the user could reach you. The user's message follows.`
+        : `Foreground command "${commandToExecute}" promoted to background as ${shellId}.`,
       statusLine,
       `Output snapshot at promote time saved to: ${outputPath}`,
       statusFileLine,

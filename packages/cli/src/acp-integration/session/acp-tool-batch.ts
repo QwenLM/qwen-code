@@ -158,6 +158,10 @@ export async function runAcpToolBatch(
     signal: AbortSignal;
     duplicates: AgentLoopDuplicateState;
     onFullTurnModel?: (model: string) => boolean;
+    /** A foreground shell of the batch is running and can move to the background. */
+    onShellMovable?: (callId: string, promote: AbortController) => void;
+    /** A call of the batch settled. */
+    onCallSettled?: (callId: string) => void;
   },
 ): Promise<AcpToolBatchResult> {
   const { config } = host.ctx;
@@ -434,6 +438,7 @@ export async function runAcpToolBatch(
     const state = stateOf(request);
     if (state.settled) return;
     state.settled = true;
+    options.onCallSettled?.(request.callId);
     state.settleRelatedAgent?.(status === 'success');
     state.cleanupTracker?.();
     const isTodoWrite =
@@ -521,8 +526,19 @@ export async function runAcpToolBatch(
       switch (call.status) {
         case 'validating':
         case 'scheduled':
+          trackAgent(call, state);
+          break;
         case 'executing':
           trackAgent(call, state);
+          if (
+            call.promoteAbortController &&
+            canonicalToolName(call.request.name) === ToolNames.SHELL
+          ) {
+            options.onShellMovable?.(
+              call.request.callId,
+              call.promoteAbortController,
+            );
+          }
           break;
         case 'awaiting_approval':
           trackAgent(call, state);
