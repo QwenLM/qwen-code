@@ -172,13 +172,22 @@ Flow lifecycle:
   so an orphan no longer polls upstream for its whole 480 s deadline. The bound
   is sized against the worst gap between two _serviced_ polls, not the cadence:
   the panel schedules its next poll only after the previous one settles and
-  each request carries a 15 s budget (16.5 s from one stalled request), and a
-  tab hidden for five minutes is throttled to about one timer per minute
+  each poll carries a 15 s budget (16.5 s from one stalled poll; starting a
+  flow has its own 35 s budget — the daemon's 30 s mint bound plus headroom
+  for the render that follows it), and a tab hidden for five minutes is
+  throttled to about one timer per minute
   (~75 s). Sizing it against the 1.5 s interval alone would reap a login the
   operator is still watching, and the panel would read the resulting 404 as
   "logged out" with no error. Terminal views are governed by the retention
   timer instead, so a client that stops polling just before the login
   completes still finds the outcome.
+  The longer bound buys a longer slot hold: four page reloads while a QR is on
+  screen, inside 120 s, keep all four live slots, so a fifth start answers
+  `429 too_many_flows` until the oldest is reaped. Reloading is the trigger, not
+  the panel's own refresh or re-login — every in-panel start cancels the flow it
+  replaces, so those hold one slot, not four. The panel surfaces the `429` and
+  keeps the login action, so it recovers without a reload — the cost is a slower
+  recovery from repeated abandonment, not a wedged panel.
 - Starting a flow calls `startLogin`, renders `qrcodeUrl` to `qrText`, and stores
   the view. A response that carries a QR id but no scannable URL is treated as a
   failed mint (`502 qr_unavailable`, slot released) rather than a live flow: with

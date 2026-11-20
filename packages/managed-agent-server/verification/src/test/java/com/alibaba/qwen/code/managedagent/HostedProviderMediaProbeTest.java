@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.Headers;
@@ -143,7 +143,7 @@ class HostedProviderMediaProbeTest {
                 + " 'tool', 'binding', 1, 'READY', 1, ?, ?)", "e".repeat(64), tenant, System.currentTimeMillis(), physical);
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key)"
                 + " VALUES (?, ?, ?, ?, 'storage-0', ?)",
-                JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage-0"),
+                RuntimeAdmissionFences.storageAliasKey(tenant, "storage-0"),
                 "f".repeat(64), "0".repeat(64), tenant, physical);
         jdbc.update("INSERT INTO ma_storage_owner (storage_key) VALUES (?)", physical);
         var probe = mock(HostedProviderMediaProbe.class, CALLS_REAL_METHODS);

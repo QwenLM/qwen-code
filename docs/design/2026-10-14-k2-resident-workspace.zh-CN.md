@@ -108,7 +108,7 @@ Pod 字段，worker endpoint 仍使用原 Pod 字面 IP。
 binding 身份。镜像须包含 Node 22+ 和构建后的 CLI。worker 使用 UID/GID 1000、
 只读根文件系统、不增加 capability、不挂 service-account token、固定 PVC 和临时
 emptyDir，restartPolicy 为 Never。应用须连通原 Kubernetes API 和 worker endpoint。
-[配置指南](../../deploy/k2-resident/README.zh-CN.md)包含模板和既有 operator 调用。
+[配置指南](../../packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident/README.zh-CN.md)包含模板和既有 operator 调用。
 安装本特性不需要特权节点 collector。
 
 ## 分层改动与拆分边界

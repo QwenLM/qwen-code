@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -90,6 +91,66 @@ class ManagedMcpSettingsStoreTest {
         assertThatThrownBy(() -> ManagedMcpSettings.find(jdbc, "tenant", id)).isInstanceOf(RuntimeException.class);
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"key", "scope", "tenant", "session", "domain", "id"})
+    void findRequiresTheCanonicalRecordKeyAndAllRawScopeFields(String mismatch) throws Exception {
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id);
+        ObjectNode first = settings(1, "enabled", null);
+        var request = journal.requestOrdinary(first.path("operationId").asText(), "config_install", first,
+                event -> {}, records -> records, 0);
+        journal.commit(request);
+        journal.committed(request);
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id)).isEqualTo(json.readTree(first.toString()));
+        String key = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
+                .recordKey(id, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
+        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", id);
+        String update = switch (mismatch) {
+            case "key" -> "UPDATE ma_session_record SET record_key = ?";
+            case "scope" -> "UPDATE ma_session_record SET session_scope_key = ?";
+            case "tenant" -> "UPDATE ma_session_record SET tenant_id = ?";
+            case "session" -> "UPDATE ma_session_record SET session_id = ?";
+            case "domain" -> "UPDATE ma_session_record SET domain = ?";
+            case "id" -> "UPDATE ma_session_record SET record_id = ?";
+            default -> throw new AssertionError(mismatch);
+        };
+        jdbc.update(update + " WHERE session_scope_key = ? AND record_key = ?", "c".repeat(64), scope, key);
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id)).isNull();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"missing", "tenant", "session", "workspace", "length", "digest", "revision"})
+    void canonicalLookupStillRejectsCorruptOrUnjoinedSettingsResources(String corruption) throws Exception {
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id);
+        ObjectNode first = settings(1, "enabled", null);
+        var request = journal.requestOrdinary(first.path("operationId").asText(), "config_install", first,
+                event -> {}, records -> records, 0);
+        journal.commit(request);
+        journal.committed(request);
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id)).isEqualTo(json.readTree(first.toString()));
+        String resource = ExtensionRecordJournal.resourceId(ExtensionRecordJournal.bytes(first));
+        switch (corruption) {
+            case "missing" -> jdbc.update("UPDATE ma_session_record SET record_resource_id = 'missing'"
+                    + " WHERE tenant_id = ? AND session_id = ? AND domain = ?", "tenant", id, ManagedMcpSettings.DOMAIN);
+            case "tenant" -> jdbc.update("UPDATE ma_resource SET tenant_id = 'other-tenant'"
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", "tenant", id, resource);
+            case "session" -> jdbc.update("UPDATE ma_resource SET session_id = 'other-session'"
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", "tenant", id, resource);
+            case "workspace" -> jdbc.update("UPDATE ma_resource SET workspace_id = 'other-workspace'"
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", "tenant", id, resource);
+            case "length" -> jdbc.update("UPDATE ma_resource SET byte_length = byte_length + 1"
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", "tenant", id, resource);
+            case "digest" -> jdbc.update("UPDATE ma_resource SET sha256 = ?"
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", "c".repeat(64), "tenant", id, resource);
+            case "revision" -> jdbc.update("UPDATE ma_session_record SET revision = revision + 1"
+                    + " WHERE tenant_id = ? AND session_id = ? AND domain = ?", "tenant", id, ManagedMcpSettings.DOMAIN);
+            default -> throw new AssertionError(corruption);
+        }
+        assertThatThrownBy(() -> ManagedMcpSettings.find(jdbc, "tenant", id))
+                .isInstanceOf(ManagedExtensionRecords.InvalidRecordException.class);
+    }
+
     @Test
     void legacySettingsRevisionsReplaceTheirProjectionRowInsteadOfAccumulating() throws Exception {
         String id = UUID.randomUUID().toString();
@@ -112,6 +173,28 @@ class ManagedMcpSettingsStoreTest {
         // accumulating one per revision for the Session's whole life.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD' AND session_id=?",
                 Integer.class, session)).isEqualTo(1);
+    }
+
+    @Test
+    void boundsRetainedTombstonesAtThePersistenceBoundary() throws Exception {
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id);
+        ObjectNode settings = settingsWithServers(32, 64);
+        assertThat(json.writeValueAsBytes(settings).length).isLessThan(64 * 1024);
+        var request = journal.requestOrdinary(settings.path("operationId").asText(), "config_install", settings,
+                event -> {}, records -> records, 0);
+        journal.commit(request);
+        journal.committed(request);
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id)).isEqualTo(json.readTree(settings.toString()));
+
+        ObjectNode overfilled = settings.deepCopy();
+        overfilled.withArray("servers").addObject()
+                .put("serverId", "x".repeat(128))
+                .put("serverRevision", 9_007_199_254_740_990L)
+                .put("definitionDigest", "a".repeat(64))
+                .put("state", "removed");
+        assertThatThrownBy(() -> ManagedMcpSettings.require(overfilled))
+                .isInstanceOf(ManagedExtensionRecords.InvalidRecordException.class);
     }
 
     @Test
@@ -225,5 +308,30 @@ class ManagedMcpSettingsStoreTest {
                     .put("digest", DigestUtils.sha256Hex(bytes));
         }
         return result;
+    }
+
+    private ObjectNode settingsWithServers(int live, int removed) {
+        String operation = UUID.randomUUID().toString();
+        ObjectNode result = json.createObjectNode().put("kind", "hosted-mcp-settings").put("schemaVersion", 1)
+                .put("operationId", operation).put("revision", 1);
+        var servers = result.putArray("servers");
+        for (int index = 0; index < live + removed; index++) {
+            servers.addObject()
+                    .put("serverId", serverId(index < live ? "live-" : "removed-", index))
+                    .put("serverRevision", 9_007_199_254_740_990L)
+                    .put("definitionDigest", "a".repeat(64))
+                    .put("state", index == 0 ? "enabled" : index < live ? "disabled" : "removed");
+        }
+        var command = result.putObject("command").put("operationId", operation).put("actorKey", "b".repeat(64))
+                .put("action", "add").put("serverId", serverId("live-", 0)).put("expectedRevision", 0);
+        command.putObject("server").put("serverId", serverId("live-", 0))
+                .put("serverRevision", 9_007_199_254_740_990L).put("definitionDigest", "a".repeat(64));
+        result.putNull("previousRecordRef");
+        return result;
+    }
+
+    private static String serverId(String prefix, int index) {
+        String id = prefix + index;
+        return id + "x".repeat(128 - id.length());
     }
 }

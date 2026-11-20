@@ -7,6 +7,53 @@
 // Traduccions en català per al CLI de Qwen Code per Jordi Mas i Hernàndez <jmas@softcatala.org>
 
 export default {
+  user: 'usuari',
+  assistant: 'assistent',
+  thinking: 'raonament',
+  task: 'tasca',
+  compaction: 'compressió',
+  info: 'informació',
+  warning: 'avís',
+  retry: 'reintent',
+  'stop-hook': 'ganxo d’aturada',
+  'away-recap': 'resum d’absència',
+  'user-shell': 'ordre de l’usuari',
+  advisor: 'assessor',
+  'arena-agent': 'agent d’arena',
+  'arena-session': 'sessió d’arena',
+  goal: 'objectiu',
+  'Protected input': 'Entrada protegida',
+  'Focused input. Cursor: {{position}}':
+    'Entrada amb focus. Cursor: {{position}}',
+  'Unfocused input.': 'Entrada sense focus.',
+  'Focused Prompt: {{value}}': 'Indicació amb focus: {{value}}',
+  'Prompt: {{value}}': 'Indicació: {{value}}',
+  'Focused Input: {{value}}': 'Entrada amb focus: {{value}}',
+  'Input: {{value}}': 'Entrada: {{value}}',
+  'Placeholder: {{value}}': 'Text de mostra: {{value}}',
+  'Cursor: {{position}}': 'Cursor: {{position}}',
+  'Selected {{value}}': 'Seleccionat {{value}}',
+  'Disabled {{value}}': 'Desactivat {{value}}',
+  'Focused Toggle on: {{value}}': 'Amb focus, opció activada: {{value}}',
+  'Focused Toggle off: {{value}}': 'Amb focus, opció desactivada: {{value}}',
+  'Toggle on: {{value}}': 'Opció activada: {{value}}',
+  'Toggle off: {{value}}': 'Opció desactivada: {{value}}',
+  'Conversation cleared.': 'Conversa esborrada.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Revisió {{value}}',
+  Dialog: 'Diàleg',
+  'Dialog closed. Focus: prompt.': 'Diàleg tancat. Focus: indicació.',
+  'Dialog closed.': 'Diàleg tancat.',
+  'Waiting for confirmation': 'Esperant confirmació',
+  'Working. Escape to cancel.': 'En curs. Escape per cancel·lar.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'Historial {{start}}-{{end}} de {{total}}.',
+  'Worktree: {{value}}': 'Arbre de treball: {{value}}',
+  'Workflow mode: on': 'Mode de flux de treball: activat',
+  'Workflow mode: on (unavailable)':
+    'Mode de flux de treball: activat (no disponible)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Maj+Amunt/Avall o PageUp/PageDown per llegir; Ctrl+Home/End per al primer/més recent.',
   'Generated UI': 'Generated UI',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     'Activa el Generated UI integrat a les sessions locals compatibles. Reinicieu la sessió corresponent per aplicar els canvis.',
@@ -102,6 +149,7 @@ export default {
   Auth: 'Autenticació',
   Model: 'Model',
   'Fast Model': 'Model ràpid',
+  'Agent Loop': 'Bucle agent',
   Sandbox: 'Entorn aïllat',
   'Session ID': 'ID de sessió',
   'Base URL': 'Base URL',
@@ -1035,6 +1083,26 @@ export default {
     'Ús: /forget <text de memòria a eliminar>',
   'No managed auto-memory entries matched: {{query}}':
     'Cap entrada de memòria automàtica gestionada coincideix: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Vincula una pull request de GitHub a aquesta sessió',
+  'Usage: /pr <number | url>': 'Ús: /pr <número | url>',
+  'No PRs bound to this session.': 'Cap PR vinculat a aquesta sessió.',
+  'Bound PRs: {{list}}': 'PR vinculats: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Referència de PR no vàlida. Ús: /pr <número | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'No s’ha pogut resoldre el PR #{{number}} mitjançant gh. Indiqueu l’URL complet del PR.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} vinculat a aquesta sessió: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'El PR #{{number}} ja està vinculat a aquesta sessió: {{url}}',
+  'Failed to bind PR #{{number}}.': 'No s’ha pogut vincular el PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'No s’ha pogut vincular el PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'No s’han pogut llegir els vincles de PR d’aquesta sessió.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) no està disponible o ha excedit el temps d’espera. Indiqueu l’URL complet del PR per vincular sense ell.',
   'Consolidate managed auto-memory topic files.':
     'Consolida els fitxers de temes de memòria automàtica gestionada.',
   'Open MCP management dialog': 'Obre el diàleg de gestió MCP',
@@ -1210,6 +1278,8 @@ export default {
     "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió s'ha truncat.",
   'Could not compress chat history due to an API error.':
     "No s'ha pogut comprimir l'historial del xat per un error de l'API.",
+  'Could not compress chat history because it is too large for the context window.':
+    "No s'ha pogut comprimir l'historial del xat perquè és massa gran per a la finestra de context.",
   // ============================================================================
   // Ordres - Directori
   // ============================================================================

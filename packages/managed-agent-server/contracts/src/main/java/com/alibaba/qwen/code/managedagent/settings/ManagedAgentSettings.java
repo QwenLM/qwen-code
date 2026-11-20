@@ -1,9 +1,5 @@
 package com.alibaba.qwen.code.managedagent.settings;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity;
-import com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact;
-
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -11,11 +7,15 @@ import java.util.Map;
 public interface ManagedAgentSettings {
     public Harness getHarness();
     public boolean admitsPublicChildAgents();
+    public boolean isExternalWorkspaceFilesConfigured();
     public Automation getAutomation();
     public Channels getChannels();
     public EventTransport getEventTransport();
     public SessionStore getSessionStore();
+    public ClientFiles getClientFiles();
     public ToolPublication getToolPublication();
+    /** Null means session-resource OSS externalization and journal compaction are disabled. */
+    public default SessionResources getSessionResources() { return null; }
     public Artifacts getArtifacts();
     public ManagedExtensions getManagedExtensions();
     public Extensions getExtensions();
@@ -59,13 +59,6 @@ public interface ManagedAgentSettings {
         public String getKeyStorePasswordFile();
         public String getTrustStoreFile();
         public String getTrustStorePasswordFile();
-        public String getKubernetesApiUrl();
-        public String getKubernetesTokenFile();
-        public String getKubernetesCaFile();
-        public String getNamespace();
-        public String getServiceName();
-        public String getServiceUid();
-        public String getPortName();
     }
     public interface HarnessInstance {
         public String getInstanceId();
@@ -79,8 +72,15 @@ public interface ManagedAgentSettings {
         public String getBindingKey();
         public boolean isAllowInsecureHttp();
     }
+    public interface ClientFiles {
+        public boolean isEnabled();
+        public int getQueueDepth();
+        public Duration getRequestTtl();
+        public Duration getBindingTtl();
+        public int getMaxPayloadBytes();
+        public String getRelayUrl();
+    }
     public interface ToolPublication {
-        public boolean isAsyncVerificationEnabled();
         public int getVerificationConcurrency();
         public boolean isGcEnabled();
         public Duration getDeletionGrace();
@@ -98,6 +98,15 @@ public interface ManagedAgentSettings {
         public Duration getClaimTimeout();
         public Long getVerificationBytesPerSecond();
         public Duration getMaxVerificationTimeout();
+    }
+    public interface SessionResources {
+        public boolean isEnabled();
+        public String getOssKeyPrefix();
+        public boolean isPackJobEnabled();
+        public boolean isDeletionEnabled();
+        public long getPackTargetBytes();
+        public int getPackMaxTransactions();
+        public Duration getDeletionGrace();
     }
     public interface ManagedExtensions {
         public boolean isEnabled();
@@ -143,6 +152,13 @@ public interface ManagedAgentSettings {
     public interface RuntimeBroker {
         public SshSettings getSsh();
         public Retention getRetention();
+        public McpParking getMcpParking();
+        public interface McpParking {
+            public boolean isEnabled();
+            public Duration getIdleDuration();
+            public int getBatchSize();
+            public Duration getScanDelay();
+        }
         public interface Retention {
             public boolean isEnabled();
             public Duration getMaxAge();
@@ -166,6 +182,11 @@ public interface ManagedAgentSettings {
             return false;
         }
 
+        /** Whether placed Workspaces gain the user-terminal surface. */
+        public default boolean isWebTerminal() {
+            return false;
+        }
+
         public boolean isSessionCreateWarm();
         public List<? extends WorkspaceMount> getWorkspaceMounts();
         public String getWorkspaceCreationRoot();
@@ -175,19 +196,6 @@ public interface ManagedAgentSettings {
             public String storageId();
             public String root();
         }
-        public interface ResidentWorkspace {
-            public String workspaceId();
-            public long workspaceGeneration();
-            public WorkspaceCsiRegistration registration();
-            public ProtectionIdentity protection();
-            public String image();
-            public List<String> command();
-            public List<WorkerArtifact> artifacts();
-        }
-        public List<? extends ResidentWorkspace> getResidentWorkspaces();
-        public String getResidentKubernetesApiUrl();
-        public String getResidentKubernetesTokenFile();
-        public String getResidentKubernetesCaFile();
         public boolean isDurableLocalProcess();
         public boolean isTrustedLocalRebootRecovery();
         public boolean isOperatorRecoveryEnabled();

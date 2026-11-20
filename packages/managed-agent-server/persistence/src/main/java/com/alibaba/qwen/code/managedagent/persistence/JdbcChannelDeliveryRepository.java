@@ -24,7 +24,7 @@ public final class JdbcChannelDeliveryRepository
     private static final String COLUMNS = String.join(", ",
             "tenant_id", "channel_id AS channel_instance_id", "delivery_id", "segment_id",
             "segment_ordinal", "transport_state AS state", "provider_receipt_json", "gmt_create",
-            "gmt_modified");
+            "gmt_modified", "segment_count");
     private static final RowMapper<ChannelDelivery> MAPPER = (row, index) ->
             new ChannelDelivery(
                     row.getString("tenant_id"),
@@ -35,7 +35,8 @@ public final class JdbcChannelDeliveryRepository
                     row.getString("state"),
                     receipt(row.getString("provider_receipt_json")),
                     row.getLong("gmt_create"),
-                    row.getLong("gmt_modified"));
+                    row.getLong("gmt_modified"),
+                    row.getInt("segment_count"));
 
     private final JdbcTemplate jdbc;
 
@@ -53,15 +54,15 @@ public final class JdbcChannelDeliveryRepository
             long now = databaseNow();
             jdbc.update("INSERT INTO ma_delivery (delivery_key, delivery_kind, source_scope_key,"
                             + " tenant_id, channel_id, delivery_id, segment_id, segment_ordinal,"
-                            + " transport_state, reception_state, consumption_state, provider_receipt_json,"
-                            + " payload_json, gmt_create, gmt_modified)"
-                            + " VALUES (?, 'CHANNEL', ?, ?, ?, ?, ?, ?, ?, 'NOT_APPLICABLE',"
+                            + " segment_count, transport_state, reception_state, consumption_state,"
+                            + " provider_receipt_json, payload_json, gmt_create, gmt_modified)"
+                            + " VALUES (?, 'CHANNEL', ?, ?, ?, ?, ?, ?, ?, ?, 'NOT_APPLICABLE',"
                             + " 'NOT_APPLICABLE', ?, '{\"schemaVersion\":1}', ?, ?)",
                     deliveryKey(candidate.tenantId(), candidate.channelInstanceId(), candidate.deliveryId()),
                     channelScope(candidate.tenantId(), candidate.channelInstanceId()),
                     candidate.tenantId(), candidate.channelInstanceId(), candidate.deliveryId(),
-                    candidate.segmentId(), candidate.ordinal(), candidate.state(),
-                    receiptJson(candidate.providerReceipt()), now, now);
+                    candidate.segmentId(), candidate.ordinal(), candidate.segmentCount(),
+                    candidate.state(), receiptJson(candidate.providerReceipt()), now, now);
         } catch (DuplicateKeyException duplicate) {
             // A retried create of one delivery: keep the first row.
         }

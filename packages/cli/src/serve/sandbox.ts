@@ -100,6 +100,10 @@ export function getSandboxPassthroughEnvArgs(
     // otherwise read only the mounted settings and ignore the exported switch.
     'QWEN_CODE_ENABLE_WORKFLOWS',
     'QWEN_CODE_DISABLE_WORKFLOWS',
+    // Same precedent for the agent-loop switches: the documented env force
+    // on/off must reach the inner CLI, not be shadowed by the mounted settings.
+    'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
   ].flatMap((envVar) =>
     env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
   );
@@ -919,8 +923,9 @@ export async function start_sandbox(
     const setupUserCommands = [
       // Use -f with groupadd to avoid errors if the group already exists.
       `groupadd -f -g ${gid} ${username}`,
-      // Create user only if it doesn't exist. Use -o for non-unique UID.
-      `id -u ${username} &>/dev/null || useradd -o -u ${uid} -g ${gid} -d ${homeDir} -s /bin/bash ${username}`,
+      // Create user only if it doesn't exist. Use -o for non-unique UID and
+      // -m so the passed-through HOME exists inside the container.
+      `id -u ${username} &>/dev/null || useradd -o -m -u ${uid} -g ${gid} -d ${homeDir} -s /bin/bash ${username}`,
     ].join(' && ');
 
     const originalCommand = finalEntrypoint[2];

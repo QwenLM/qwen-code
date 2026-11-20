@@ -24,12 +24,17 @@ public class JdbcManagedToolDetailsStore
     private final JdbcManagedExtensionRecordStore resources;
     private final ObjectMapper json;
 
+    private JdbcJournalPacks packs;
+
     public JdbcManagedToolDetailsStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             JdbcManagedExtensionRecordStore resources, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.resources = resources;
         this.json = json;
     }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
 
     public WebShellToolDetails read(String tenant, String workspace,
             String session, String itemId) {
@@ -59,28 +64,35 @@ public class JdbcManagedToolDetailsStore
         int remaining = READ_LIMIT;
         for (int page = 0; page < 512; page++) {
             List<Journal> rows = jdbc.query("SELECT journal_revision, record_digest,"
-                            + " CASE WHEN OCTET_LENGTH(record_bytes) <= ? THEN record_bytes END AS record_bytes"
+                            + " CASE WHEN OCTET_LENGTH(record_bytes) <= ? THEN record_bytes END AS record_bytes,"
+                            + " byte_length, record_bytes IS NULL AS is_packed"
                             + " FROM ma_session_journal_tx"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ?"
                             + " AND journal_revision < ? ORDER BY journal_revision DESC LIMIT 1",
-                    (row, index) -> new Journal(row.getLong(1), row.getString(2), row.getBytes(3)),
+                    (row, index) -> new Journal(row.getLong(1), row.getString(2), row.getBytes(3),
+                            row.getLong(4), row.getBoolean(5)),
                     remaining, tenant, workspace, session, before);
             if (rows.isEmpty()) {
                 break;
             }
             for (Journal row : rows) {
-                if (row.bytes() == null) {
+                byte[] bytes = row.bytes();
+                if (bytes == null && row.packed() && packs != null) {
+                    bytes = packs.resolveBytes(tenant, session, row.revision(), row.digest(),
+                            row.byteLength());
+                }
+                if (bytes == null) {
                     throw limit();
                 }
-                if (!DigestUtils.sha256Hex(row.bytes()).equals(row.digest())) {
+                if (!DigestUtils.sha256Hex(bytes).equals(row.digest())) {
                     throw new IllegalStateException("Stored tool journal is corrupt");
                 }
-                remaining -= row.bytes().length;
+                remaining -= bytes.length;
                 if (remaining < 0) {
                     throw limit();
                 }
                 before = row.revision();
-                for (String line : new String(row.bytes(), StandardCharsets.UTF_8).split("\n")) {
+                for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
                     JsonNode event = parse(line.getBytes(StandardCharsets.UTF_8)).path("managedSession");
                     JsonNode key = event.path("sessionKey");
                     JsonNode payload = event.path("payload");
@@ -291,7 +303,7 @@ public class JdbcManagedToolDetailsStore
         }
     }
 
-    private record Journal(long revision, String digest, byte[] bytes) { }
+    private record Journal(long revision, String digest, byte[] bytes, long byteLength, boolean packed) { }
 
     private record Message(byte[] bytes, int readBytes) { }
 

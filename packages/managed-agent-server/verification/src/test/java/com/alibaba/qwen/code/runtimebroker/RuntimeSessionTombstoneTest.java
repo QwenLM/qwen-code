@@ -1,13 +1,10 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -21,10 +18,9 @@ class RuntimeSessionTombstoneTest {
     private static final RuntimeScope SCOPE = new RuntimeScope(
             "tenant", "workspace", "generation", "/workspace", "capability", "session");
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void retirementUsesReleaseRulesAndKeepsAdmissionClosed(boolean jdbc) {
-        var fixture = fixture(jdbc);
+    @Test
+    void retirementUsesReleaseRulesAndKeepsAdmissionClosed() {
+        var fixture = fixture();
         var binding = fixture.binding;
         binding = fixture.bindings.compareAndSet(binding,
                 binding.withState(RuntimeBindingRecord.State.DRAINING, null, Instant.now())
@@ -43,10 +39,9 @@ class RuntimeSessionTombstoneTest {
         assertNull(fixture.sessions.findById(SCOPE, "new-runtime"));
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void tombstoneCannotOverwriteAnAcquiredOwnerOrOpenAdmission(boolean jdbc) {
-        var fixture = fixture(jdbc);
+    @Test
+    void tombstoneCannotOverwriteAnAcquiredOwnerOrOpenAdmission() {
+        var fixture = fixture();
         var acquired = fixture.bindings.admitSession(fixture.sessions,
                 record(fixture.binding, "runtime", RuntimeSessionRecord.State.ACQUIRING));
         assertEquals(acquired.getState(), fixture.bindings.createSessionTombstone(fixture.sessions,
@@ -57,10 +52,9 @@ class RuntimeSessionTombstoneTest {
         assertNull(fixture.sessions.findById(SCOPE, "new-runtime"));
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void retirementRejectsAnUnreconciledOriginalGeneration(boolean jdbc) {
-        var fixture = fixture(jdbc);
+    @Test
+    void retirementRejectsAnUnreconciledOriginalGeneration() {
+        var fixture = fixture();
         var binding = fixture.binding;
         fixture.bindings.compareAndSet(binding,
                 binding.withState(RuntimeBindingRecord.State.LOST, null, Instant.now()));
@@ -78,20 +72,13 @@ class RuntimeSessionTombstoneTest {
                 binding.getBindingId(), binding.getGeneration(), state, 0, Instant.now());
     }
 
-    private static Fixture fixture(boolean jdbc) {
-        RuntimeBindingRepository bindings;
-        RuntimeSessionRepository sessions;
-        if (jdbc) {
-            var source = new JdbcDataSource();
-            source.setURL("jdbc:h2:mem:tombstone-" + UUID.randomUUID()
-                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-            bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
-            sessions = new JdbcRuntimeSessionRepository(source);
-        } else {
-            bindings = new InMemoryRuntimeBindingRepository();
-            sessions = new InMemoryRuntimeSessionRepository();
-        }
+    private static Fixture fixture() {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:tombstone-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        RuntimeBindingRepository bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        RuntimeSessionRepository sessions = new JdbcRuntimeSessionRepository(source);
         var binding = bindings.findOrCreate(new RuntimeProvisionRequest(SCOPE, "harness"));
         binding = bindings.claimOperation(binding.getBindingId(), "test-owner", Duration.ofMinutes(1));
         binding = bindings.compareAndSet(binding,

@@ -122,5 +122,18 @@ public final class PublicationProbeWiring {
             guard.run();
             return open(key);
         }
+
+        @Override
+        public InputStream openRange(String key, long offset, long length, Runnable guard) {
+            guard.run();
+            byte[] bytes = objects.get(key);
+            if (bytes == null) {
+                throw new IllegalStateException("Unknown object " + key);
+            }
+            if (offset < 0 || length < 0 || offset + length > bytes.length) {
+                throw new IllegalArgumentException("Invalid object range");
+            }
+            return new ByteArrayInputStream(bytes, (int) offset, (int) length);
+        }
     }
 }

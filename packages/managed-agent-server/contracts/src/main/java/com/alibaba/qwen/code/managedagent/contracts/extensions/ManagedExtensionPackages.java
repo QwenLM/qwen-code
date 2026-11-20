@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.contracts.extensions;
 
+import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -32,6 +33,14 @@ public final class ManagedExtensionPackages {
         }
     }
 
+    public record StandaloneSkill(String name, String description, boolean userInvocable, int catalogEntryBytes) {
+        public StandaloneSkill {
+            if (!AgentDefinitionExtensions.validSkillMetadata(name, description) || catalogEntryBytes <= 0) {
+                throw new IllegalArgumentException("Invalid compiled Skill metadata");
+            }
+        }
+    }
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Manifest(int schemaVersion, int compilerVersion, String name, String version,
             Target target, List<String> components, String sourceType, String sourceRevision) {
@@ -46,7 +55,27 @@ public final class ManagedExtensionPackages {
         }
     }
 
-    public record Package(Pin pin, Manifest manifest, long byteLength) {
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Package(Pin pin, Manifest manifest, long byteLength, SourceOrigin source) {
+        public Package(Pin pin, Manifest manifest, long byteLength) { this(pin, manifest, byteLength, null); }
+    }
+
+    public record SourceOrigin(ManagedExtensionSource.Reference reference, String sourceDigest, String requestDigest) { }
+
+    public record SourceImport(ManagedExtensionSource.Reference reference, Target target) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown extension source import field");
+        }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SourceImportResult(String operationId, String state, ManagedExtensionSource.Reference reference,
+            Operation operation, SourceOrigin source, Pin pin) {
+        public SourceImportResult(Operation operation, SourceOrigin source, Pin pin) {
+            this(operation.operationId(), operation.state(), source.reference(), operation, source,
+                    "settled".equals(operation.state()) ? pin : null);
+        }
     }
 
     public record SelfService(boolean supported, boolean canPublish) { }

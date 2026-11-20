@@ -112,7 +112,7 @@ class ManagedArtifactApiIntegrationTest {
             }
         };
         var service = new ManagedArtifactService(sessions, fixture.results(), fixture.reader(),
-                policy, fixture.properties());
+                policy, fixture.properties(), new JdbcManagedWorkspaceRegistry(fixture.jdbc()));
         var details = new ManagedToolDetailsService(sessions,
                 new JdbcManagedToolDetailsStore(fixture.jdbc(), new JdbcManagedExtensionRecordStore(fixture.jdbc()), JSON));
         mvc = MockMvcBuilders.standaloneSetup(new ManagedArtifactController(service), new ManagedToolDetailsController(details))
@@ -508,7 +508,8 @@ class ManagedArtifactApiIntegrationTest {
     void contentAdmissionChecksCatalogOnceAndChunkGuardsStillRun() throws Exception {
         var reader = org.mockito.Mockito.spy(fixture.reader());
         var policy = org.mockito.Mockito.spy(fixture.policy());
-        var service = new ManagedArtifactService(sessions, fixture.results(), reader, policy, fixture.properties());
+        var service = new ManagedArtifactService(sessions, fixture.results(), reader, policy, fixture.properties(),
+                new JdbcManagedWorkspaceRegistry(fixture.jdbc()));
         var response = new org.springframework.mock.web.MockHttpServletResponse();
         service.content(new com.alibaba.qwen.code.managedagent.model.TenantContext("tenant-1", "reader"),
                 "session-1", stdout.path("id").asText(), stdout.path("revision").asText(), "bytes=0-2", null, null, response);
@@ -802,7 +803,8 @@ class ManagedArtifactApiIntegrationTest {
             throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(409,
                     "tool_output_session_retired", "Retired during lease admission");
         }).when(reader).lease(org.mockito.ArgumentMatchers.any());
-        var service = new ManagedArtifactService(sessions, fixture.results(), reader, fixture.policy(), fixture.properties());
+        var service = new ManagedArtifactService(sessions, fixture.results(), reader, fixture.policy(), fixture.properties(),
+                new JdbcManagedWorkspaceRegistry(fixture.jdbc()));
         assertThatThrownBy(() -> service.content(new com.alibaba.qwen.code.managedagent.model.TenantContext("tenant-1", "reader"),
                 "session-1", stdout.path("id").asText(), stdout.path("revision").asText(), null, null, null,
                 new org.springframework.mock.web.MockHttpServletResponse()))

@@ -14,7 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
@@ -140,7 +140,7 @@ class JdbcRuntimeRetentionTest {
                 "other-tenant", "other-harness", "other-harness");
         fixture.execute("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id)"
                 + " VALUES (?, ?, ?, ?, ?, ?)",
-                JdbcRuntimeBindingRepository.storageAliasKey("other-tenant", "other-storage"),
+                RuntimeAdmissionFences.storageAliasKey("other-tenant", "other-storage"),
                 JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-storage"),
                 "other-tenant", "other-storage", UUID.randomUUID().toString());
 
@@ -603,7 +603,7 @@ class JdbcRuntimeRetentionTest {
 
         Fixture(DataSource dataSource) {
             source = dataSource;
-            JdbcRuntimeBrokerSchema.initialize(source);
+            ManagedSchema.initialize(source);
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32]),
                     () -> nextId);
             sessions = new JdbcRuntimeSessionRepository(source);

@@ -1999,29 +1999,43 @@ export class ExtensionManager {
         // The Agent Plugins v1 schema defines no workflows.
         extension.workflows = [];
       } else {
-        extension.commands = await loadCommandsFromDir(
-          `${effectiveExtensionPath}/commands`,
-        );
-        extension.contextFiles = getContextFileNames(config)
-          .map((contextFileName) =>
-            path.join(effectiveExtensionPath, contextFileName),
-          )
-          .filter((contextFilePath) => fs.existsSync(contextFilePath));
-        extension.skills = await loadSkillsFromDir(
-          `${effectiveExtensionPath}/skills`,
-          onSkillsDiscoveryError,
-        );
         const agentExecutorRefusals = new Map<string, SubagentError>();
-        extension.agents = await loadSubagentFromDir(
-          `${effectiveExtensionPath}/agents`,
-          agentExecutorRefusals,
-        );
-        extension.agentExecutorRefusals = agentExecutorRefusals;
-        extension.workflows = await loadExtensionWorkflows(
-          effectiveExtensionPath,
-          { name: config.name, displayName: config.displayName },
-          config.workflows,
-        );
+        const results = await Promise.allSettled([
+          loadCommandsFromDir(`${effectiveExtensionPath}/commands`).then(
+            (commands) => {
+              head.extension.commands = commands;
+              head.extension.contextFiles = getContextFileNames(config)
+                .map((contextFileName) =>
+                  path.join(effectiveExtensionPath, contextFileName),
+                )
+                .filter((contextFilePath) => fs.existsSync(contextFilePath));
+            },
+          ),
+          loadSkillsFromDir(
+            `${effectiveExtensionPath}/skills`,
+            onSkillsDiscoveryError,
+          ).then((skills) => {
+            head.extension.skills = skills;
+          }),
+          loadSubagentFromDir(
+            `${effectiveExtensionPath}/agents`,
+            agentExecutorRefusals,
+          ).then((agents) => {
+            head.extension.agents = agents;
+            head.extension.agentExecutorRefusals = agentExecutorRefusals;
+          }),
+          loadExtensionWorkflows(
+            effectiveExtensionPath,
+            { name: config.name, displayName: config.displayName },
+            config.workflows,
+          ).then((workflows) => {
+            head.extension.workflows = workflows;
+          }),
+        ]);
+        // Drain reads before a failure can release the store's read lock.
+        for (const result of results) {
+          if (result.status === 'rejected') throw result.reason;
+        }
       }
 
       if (

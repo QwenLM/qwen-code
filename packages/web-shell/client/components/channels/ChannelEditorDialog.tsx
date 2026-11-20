@@ -68,7 +68,7 @@ import { Switch } from '../ui/switch';
 import styles from './ChannelEditorDialog.module.css';
 import { ChannelPairingRequests } from './ChannelPairingRequests';
 import { ChannelQrLogin } from './ChannelQrLogin';
-import type { DaemonChannelQrLoginActions } from '../../daemon/workspace/types';
+import type { DaemonChannelQrLoginHandlers } from '../../daemon/workspace/types';
 import { WeixinLoginPanel, type WeixinLoginApi } from './WeixinLoginPanel';
 import {
   buildChannelUpsertRequest,
@@ -104,17 +104,35 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     clientId: 'channels.editor.field.dingtalk.clientId',
     clientSecret: 'channels.editor.field.dingtalk.clientSecret',
   },
+  'dingtalk-webhook': {
+    webhookUrl: 'channels.editor.field.webhook.webhookUrl',
+    signingSecret: 'channels.editor.field.webhook.signingSecret',
+  },
   weixin: {
     groupPolicy: 'channels.editor.field.weixin.groupPolicy',
+    allowedUsers: 'channels.editor.field.weixin.allowedUsers',
   },
   wecom: {
     botId: 'channels.editor.field.wecom.botId',
     secret: 'channels.editor.field.wecom.secret',
     wsUrl: 'channels.editor.field.wecom.wsUrl',
   },
+  'wecom-webhook': {
+    webhookUrl: 'channels.editor.field.webhook.webhookUrl',
+  },
   feishu: {
     clientId: 'channels.editor.field.feishu.clientId',
     clientSecret: 'channels.editor.field.feishu.clientSecret',
+  },
+  'feishu-webhook': {
+    webhookUrl: 'channels.editor.field.webhook.webhookUrl',
+    signingSecret: 'channels.editor.field.webhook.signingSecret',
+  },
+  'generic-webhook': {
+    webhookUrl: 'channels.editor.field.genericWebhook.webhookUrl',
+    bearerToken: 'channels.editor.field.genericWebhook.bearerToken',
+    allowPrivateNetwork:
+      'channels.editor.field.genericWebhook.allowPrivateNetwork',
   },
   dws: {
     privatePolicy: 'channels.editor.field.dws.privatePolicy',
@@ -133,8 +151,6 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     requireBoundWatch: 'channels.editor.field.github.requireBoundWatch',
     prCommentWatch: 'channels.editor.field.github.prCommentWatch',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
-    prWatchLimit: 'channels.editor.field.github.prWatchLimit',
-    prWatchBudgetReserve: 'channels.editor.field.github.prWatchBudgetReserve',
     boundSessionActions: 'channels.editor.field.github.boundSessionActions',
   },
   gitlab: {
@@ -189,8 +205,6 @@ const BOUND_SESSION_FIELD_KEYS = new Set([
   'requireBoundWatch',
   'prCommentWatch',
   'prWatchEvents',
-  'prWatchLimit',
-  'prWatchBudgetReserve',
   'boundSessionActions',
 ]);
 
@@ -211,6 +225,9 @@ const FIELD_PLACEHOLDER_KEYS: Record<string, string> = {
   'github.repoFilter': 'owner/repo, owner/repo',
   'email.allowedUsers': 'you@example.com, colleague@example.com',
   'email.operators': 'you@example.com',
+  // The id shape, not a WeChat handle: an operator who reads "user ID" and
+  // types their WeChat name gets a silently inert allowlist entry.
+  'weixin.allowedUsers': 'oAbCd…@im.wechat',
 };
 
 // Email's endpoint and TLS keys are declared by no other channel, so listing
@@ -238,6 +255,7 @@ const CONNECTION_FIELD_KEYS = new Set([
  * panel, quietly undoing the slim default view.
  */
 const ADVANCED_FIELD_KEYS = new Set([
+  'allowPrivateNetwork',
   'pollInterval',
   'reasonFilter',
   'messageRoutes',
@@ -284,7 +302,7 @@ export interface ChannelEditorDialogProps {
     request: DaemonChannelUpsertRequest,
   ) => Promise<unknown>;
   onReload: () => Promise<unknown>;
-  qrLoginActions?: DaemonChannelQrLoginActions;
+  qrLoginActions?: DaemonChannelQrLoginHandlers;
   listPairingRequests: (
     name: string,
   ) => Promise<DaemonChannelPairingRequestsSnapshot>;
@@ -557,15 +575,21 @@ export function ChannelEditorDialog({
     if (code === 'invalidGroupId')
       return t('channels.editor.validation.invalidGroupId');
     if (code === 'invalidRepoId')
-      return t('channels.editor.validation.invalidRepoId');
+      return t(
+        descriptor.type === 'gitlab'
+          ? 'channels.editor.validation.invalidProjectPath'
+          : 'channels.editor.validation.invalidRepoId',
+      );
     if (code === 'repoFilterRequired')
       return t('channels.editor.validation.repoFilterRequired');
     if (code === 'conflictingRepoAliases')
-      return t('channels.editor.validation.conflictingRepoAliases');
+      return t(
+        descriptor.type === 'gitlab'
+          ? 'channels.editor.validation.conflictingProjectAliases'
+          : 'channels.editor.validation.conflictingRepoAliases',
+      );
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
-    if (code === 'requiresBoundDelivery')
-      return t('channels.editor.validation.requiresBoundDelivery');
     if (code === 'requiresBoundDeliveryForWatchGate')
       return t('channels.editor.validation.requiresBoundDeliveryForWatchGate');
     if (code === 'number') return t('channels.editor.validation.number');
@@ -1305,8 +1329,16 @@ export function ChannelEditorDialog({
   };
 
   const renderRepositoryOverrides = () => {
-    const repositories = repositoryAllowlistIds(draft.allowedGroupIds);
+    const repositories = repositoryAllowlistIds(
+      draft.allowedGroupIds,
+      descriptor.type,
+    );
     if (repositories.length === 0) return null;
+    // Speakers are GitHub logins or GitLab usernames; only the copy differs.
+    const speakerCopyKey =
+      descriptor.type === 'gitlab'
+        ? 'channels.editor.field.gitlab.repositorySpeakers'
+        : 'channels.editor.field.github.repositorySpeakers';
     const groups = instance?.config['groups'];
     // Fold the stored keys the same way the save path does, so a mixed-case
     // stored repository still finds its own row.
@@ -1444,8 +1476,8 @@ export function ChannelEditorDialog({
                   label={t('channels.editor.field.github.repositorySpeakers')}
                   description={t(
                     ownsSpeakerList
-                      ? 'channels.editor.field.github.repositorySpeakers.description'
-                      : 'channels.editor.field.github.repositorySpeakers.inherited',
+                      ? `${speakerCopyKey}.description`
+                      : `${speakerCopyKey}.inherited`,
                   )}
                 >
                   <Input
@@ -1535,14 +1567,21 @@ export function ChannelEditorDialog({
                   instance
                     ? 'channels.editor.editTitle'
                     : 'channels.editor.addTitle',
-                  { platform: descriptor.displayName },
+                  {
+                    platform:
+                      descriptor.type === 'generic-webhook'
+                        ? t('channels.platform.name.generic-webhook')
+                        : descriptor.displayName,
+                  },
                 )}
               </DialogTitle>
               <DialogDescription className="mt-1">
                 {t(
-                  instance
-                    ? 'channels.editor.editDescription'
-                    : 'channels.editor.addDescription',
+                  descriptor.outboundOnly
+                    ? 'channels.statusDescription.outbound'
+                    : instance
+                      ? 'channels.editor.editDescription'
+                      : 'channels.editor.addDescription',
                 )}
               </DialogDescription>
             </div>
@@ -1694,7 +1733,7 @@ export function ChannelEditorDialog({
               );
             })}
 
-            {boundSessionFields.length > 0 ? (
+            {!descriptor.outboundOnly && boundSessionFields.length > 0 ? (
               <section className={styles.settingsPanel}>
                 <div className={styles.settingsPanelHeader}>
                   <h3 className={styles.settingsPanelTitle}>
@@ -1708,7 +1747,7 @@ export function ChannelEditorDialog({
               </section>
             ) : null}
 
-            {sessionFields.length > 0 ? (
+            {!descriptor.outboundOnly && sessionFields.length > 0 ? (
               <section className={styles.settingsPanel}>
                 <h3 className={styles.settingsPanelTitle}>
                   {t('channels.editor.section.session')}
@@ -1780,9 +1819,15 @@ export function ChannelEditorDialog({
             ) : null}
 
             {(() => {
+              if (descriptor.outboundOnly) return null;
               const repositoryOnly = isRepositoryOnlyChannelType(
                 descriptor.type,
               );
+              // GitLab allowlists nested project paths; GitHub lists owner/repo.
+              const repositoryAllowlistKey =
+                descriptor.type === 'gitlab'
+                  ? 'channels.editor.field.gitlab.allowedRepos'
+                  : 'channels.editor.field.github.allowedRepos';
               const privateOnly = isPrivateOnlyChannelType(descriptor.type);
               const descriptorPolicy = hasDescriptorPrivatePolicy(descriptor);
               const effectivePolicy = repositoryOnly
@@ -1898,12 +1943,12 @@ export function ChannelEditorDialog({
                       id={`${formId}-allowedGroupIds`}
                       label={t(
                         repositoryOnly
-                          ? 'channels.editor.field.github.allowedRepos'
+                          ? repositoryAllowlistKey
                           : 'channels.editor.field.shared.allowedGroupIds',
                       )}
                       description={t(
                         repositoryOnly
-                          ? 'channels.editor.field.github.allowedRepos.description'
+                          ? `${repositoryAllowlistKey}.description`
                           : 'channels.editor.field.shared.allowedGroupIds.description',
                       )}
                       error={errors['allowedGroupIds']}
@@ -1914,7 +1959,7 @@ export function ChannelEditorDialog({
                         aria-invalid={Boolean(errors['allowedGroupIds'])}
                         placeholder={t(
                           repositoryOnly
-                            ? 'channels.editor.field.github.allowedRepos.placeholder'
+                            ? `${repositoryAllowlistKey}.placeholder`
                             : 'channels.editor.field.shared.allowedGroupIds.placeholder',
                         )}
                         onChange={(event) =>
@@ -2067,7 +2112,11 @@ export function ChannelEditorDialog({
                 </h3>
                 <CollapsibleContent className={styles.advancedContent}>
                   <p className={styles.settingsPanelDescription}>
-                    {t('channels.editor.section.advanced.description')}
+                    {t(
+                      descriptor.type === 'generic-webhook'
+                        ? 'channels.editor.field.genericWebhook.networkDescription'
+                        : 'channels.editor.section.advanced.description',
+                    )}
                   </p>
                   {advancedFields.filter(isFieldVisible).map(renderField)}
                 </CollapsibleContent>

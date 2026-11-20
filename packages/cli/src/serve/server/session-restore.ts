@@ -12,6 +12,7 @@ import {
   readWorktreeSessionMarkerStrict,
 } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { readWorktreeSessionStrict } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import { readSessionBranchSidecar } from '@qwen-code/qwen-code-core/services/session-branch-sidecar.js';
 import {
   isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
@@ -110,6 +111,13 @@ interface ReconcileRestoredSessionWorktreeInput {
    * none. The non-legacy checks refuse a checkout this key does not cover.
    */
   heldWorktreeOwnershipLockKey: string | undefined;
+  /**
+   * Whether the child is holding automatic work until this restore relocates
+   * it. Armed only when the sidecar was still strict in the read under the
+   * ownership lock; a hold left without a strict reconciliation can never be
+   * released, so a later downgrade fails closed.
+   */
+  automaticWorkDeferred: boolean;
   /** Checked just before the session is marked `persisted-v1`. */
   assertRuntimeGenerationOpen: (() => void) | undefined;
   /**
@@ -131,7 +139,10 @@ interface ReconcileRestoredSessionWorktreeInput {
  * Any other sidecar must prove ownership: one that reads `invalid` always
  * fails, every failure releases the session and rethrows, and success
  * marks the session `persisted-v1` except in the one shape explained at
- * `hasUnlocatedRestoredPrompt`. Without a sidecar the session is untouched.
+ * `hasUnlocatedRestoredPrompt`. When the deferred automatic-work hold is
+ * installed — the read under the ownership lock saw a strict sidecar — the
+ * sidecar must remain strict until reconciliation; it cannot become a
+ * missing or legacy sidecar.
  *
  * The caller owns three things, as `restoreSessionHandler` does:
  * - The worktree ownership lock (`acquireWorktreeOwnershipOp`), taken when
@@ -154,6 +165,7 @@ async function reconcileRestoredSessionWorktree({
   session,
   deferRestoreAskUserQuestionPrompt,
   heldWorktreeOwnershipLockKey,
+  automaticWorkDeferred,
   assertRuntimeGenerationOpen,
   cleanupRestoredSession,
   daemonLog,
@@ -162,6 +174,19 @@ async function reconcileRestoredSessionWorktree({
     runtime,
   ).getWorktreeSessionPath(restoredStorageSessionId);
   const sidecarResult = await readWorktreeSessionStrict(sidecarPath);
+  if (
+    automaticWorkDeferred &&
+    (sidecarResult.state !== 'valid' ||
+      sidecarResult.session.workspaceCwd === undefined)
+  ) {
+    // The hold is installed only when the locked read saw a strict sidecar.
+    // A record that degraded after that read leaves no strict reconciliation
+    // to release it, so fail closed instead of handing back a session whose
+    // automatic work can never resume. Legacy records that were never strict
+    // under the lock keep the lock-free legacy path below.
+    await cleanupRestoredSession();
+    throw new Error('Worktree sidecar changed during restore');
+  }
   if (
     sidecarResult.state === 'valid' &&
     sidecarResult.session.workspaceCwd === undefined
@@ -241,6 +266,9 @@ async function reconcileRestoredSessionWorktree({
         slug: sidecar.slug,
         path: realTarget,
         branch: sidecar.worktreeBranch,
+        baseCommit:
+          sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+        baseBranch: sidecar.originalBranch || undefined,
       };
       try {
         if (!session.hasActivePrompt) {
@@ -399,6 +427,9 @@ async function reconcileRestoredSessionWorktree({
         slug: sidecar.slug,
         path: realTarget,
         branch: sidecar.worktreeBranch,
+        baseCommit:
+          sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+        baseBranch: sidecar.originalBranch || undefined,
       };
       // A parked deferred restore prompt reads inactive here by
       // design (the bridge's restore response excludes it), so the
@@ -528,6 +559,7 @@ export async function restoreSessionCore(options: {
   let restoredStorageSessionId = sessionId;
   let suppressWorktreeContextRestore = false;
   let deferRestoreAskUserQuestionPrompt = false;
+  let deferAutomaticWorkUntilCwdRestore = false;
   let releaseWorktreeRestore: (() => void) | undefined;
   let heldWorktreeOwnershipLockKey: string | undefined;
   try {
@@ -644,30 +676,31 @@ export async function restoreSessionCore(options: {
         } else {
           suppressWorktreeContextRestore = isChannelRestore;
         }
-        deferRestoreAskUserQuestionPrompt =
-          suppressWorktreeContextRestore &&
+        const canDeferRestoreQuestion =
           runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt !==
             undefined &&
           runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt !==
             undefined;
+        // The pre-read only decides whether to take the ownership lock: a
+        // reset or transfer can replace the sidecar while this request waits
+        // for it. The read under the lock is the authoritative one, and it
+        // decides whether the strict path — and with it the automatic-work
+        // hold — still applies. A sidecar that is already legacy there keeps
+        // the pre-existing lock-free legacy behavior.
+        let sidecarStrictUnderLock = false;
         if (isPart4AWorktreeRestore && part4AWorktreeKey !== undefined) {
           releaseWorktreeRestore =
             await acquireWorktreeOwnershipOp(part4AWorktreeKey);
           heldWorktreeOwnershipLockKey = part4AWorktreeKey;
-          if (isChannelRestore) {
-            // A reset moved this session's worktree ownership to a
-            // replacement: never restore the superseded session — tell
-            // the caller where the ownership went so it can redirect (and
-            // self-heal its registry). Decided on the locked read, so a
-            // transfer that rolled back while this request waited cannot
-            // make it redirect to a replacement that no longer exists.
-            const sidecarUnderLock = await readWorktreeSessionStrict(
-              sessionService.getWorktreeSessionPath(restoredStorageSessionId),
-            );
-            if (
-              sidecarUnderLock.state === 'valid' &&
-              sidecarUnderLock.session.workspaceCwd !== undefined
-            ) {
+          const sidecarUnderLock = await readWorktreeSessionStrict(
+            sessionService.getWorktreeSessionPath(restoredStorageSessionId),
+          );
+          if (
+            sidecarUnderLock.state === 'valid' &&
+            sidecarUnderLock.session.workspaceCwd !== undefined
+          ) {
+            sidecarStrictUnderLock = true;
+            if (isChannelRestore) {
               assertWorktreeOwnershipLockHeld(
                 heldWorktreeOwnershipLockKey,
                 ownershipLockKeyForWorktree(
@@ -675,6 +708,14 @@ export async function restoreSessionCore(options: {
                 ),
               );
             }
+          }
+          if (isChannelRestore) {
+            // A reset moved this session's worktree ownership to a
+            // replacement: never restore the superseded session — tell
+            // the caller where the ownership went so it can redirect (and
+            // self-heal its registry). Decided on the locked read, so a
+            // transfer that rolled back while this request waited cannot
+            // make it redirect to a replacement that no longer exists.
             if (
               sidecarUnderLock.state === 'valid' &&
               sidecarUnderLock.session.supersededBy !== undefined
@@ -686,6 +727,19 @@ export async function restoreSessionCore(options: {
             }
           }
         }
+        deferAutomaticWorkUntilCwdRestore =
+          isPart4AWorktreeRestore &&
+          sidecarStrictUnderLock &&
+          canDeferRestoreQuestion;
+        // The hold does not imply suppression: the child's own worktree
+        // restore only heals a missing ownership marker and sets the resumed
+        // notice — it never relocates nor starts automatic work — so it must
+        // keep running for non-Channel restores. Suppressing it would turn a
+        // missing marker into a permanent 409 and drop the notice.
+        deferRestoreAskUserQuestionPrompt =
+          (suppressWorktreeContextRestore ||
+            deferAutomaticWorkUntilCwdRestore) &&
+          canDeferRestoreQuestion;
         assertRuntimeGenerationOpen?.();
         if (isInternalWorkspaceRuntime(runtime)) {
           sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
@@ -717,12 +771,13 @@ export async function restoreSessionCore(options: {
                 sessionId,
                 workspaceCwd,
                 ...(suppressWorktreeContextRestore
-                  ? {
-                      suppressWorktreeContextRestore: true,
-                      ...(deferRestoreAskUserQuestionPrompt
-                        ? { deferRestoreAskUserQuestionPrompt: true }
-                        : {}),
-                    }
+                  ? { suppressWorktreeContextRestore: true }
+                  : {}),
+                ...(deferRestoreAskUserQuestionPrompt
+                  ? { deferRestoreAskUserQuestionPrompt: true }
+                  : {}),
+                ...(deferAutomaticWorkUntilCwdRestore
+                  ? { deferAutomaticWorkUntilCwdRestore: true }
                   : {}),
                 historyReplay: 'response',
                 ...(historyPageSize !== undefined ? { historyPageSize } : {}),
@@ -738,12 +793,13 @@ export async function restoreSessionCore(options: {
                 sessionId,
                 workspaceCwd,
                 ...(suppressWorktreeContextRestore
-                  ? {
-                      suppressWorktreeContextRestore: true,
-                      ...(deferRestoreAskUserQuestionPrompt
-                        ? { deferRestoreAskUserQuestionPrompt: true }
-                        : {}),
-                    }
+                  ? { suppressWorktreeContextRestore: true }
+                  : {}),
+                ...(deferRestoreAskUserQuestionPrompt
+                  ? { deferRestoreAskUserQuestionPrompt: true }
+                  : {}),
+                ...(deferAutomaticWorkUntilCwdRestore
+                  ? { deferAutomaticWorkUntilCwdRestore: true }
                   : {}),
                 ...(clientId !== undefined ? { clientId } : {}),
                 ...(approvalMode !== undefined ? { approvalMode } : {}),
@@ -873,10 +929,33 @@ export async function restoreSessionCore(options: {
         session,
         deferRestoreAskUserQuestionPrompt,
         heldWorktreeOwnershipLockKey,
+        automaticWorkDeferred: deferAutomaticWorkUntilCwdRestore,
         assertRuntimeGenerationOpen,
         cleanupRestoredSession,
         daemonLog,
       });
+    }
+    // Re-apply the persisted branch point for a checkpoint-branch session
+    // (persist-only at branch time, so no live entry captured it there). The
+    // setter is fill-only: a session that already recorded a start commit
+    // (spawn capture, or branch/worktree meta) is left untouched (R8-2).
+    try {
+      const branchSidecar = readSessionBranchSidecar(
+        createWorkspaceRuntimeSessionService(
+          runtime,
+        ).getBranchSessionPathForArchiveState(
+          restoredStorageSessionId,
+          'active',
+        ),
+      );
+      if (branchSidecar) {
+        runtime.bridge.setSessionBaseCommit?.(
+          session.sessionId,
+          branchSidecar.baseCommit,
+        );
+      }
+    } catch {
+      // Best-effort hydration; the restore stays valid without it.
     }
     if (isCancelled()) {
       await cleanupRestoredSession();

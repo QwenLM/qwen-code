@@ -51,6 +51,30 @@ function called() {
 }
 
 describe('weixin auth API wiring', () => {
+  it('gives the mint-backed start its own budget, not the poll budget', async () => {
+    // The start handler awaits the upstream QR mint, which the daemon allows
+    // 30 s. On the shared 15 s poll budget a 16–30 s mint aborted in the
+    // browser and the daemon then cancelled the flow it was about to return.
+    // The budget is read off AbortSignal.timeout rather than inferred from the
+    // signal, which does not expose its deadline.
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    try {
+      respond({ id: 'flow-1', status: 'waiting' });
+      await startWeixinLogin(target);
+      expect(timeout).toHaveBeenLastCalledWith(35_000);
+
+      respond({ id: 'flow-1', status: 'waiting' });
+      await getWeixinLoginFlow(target, 'flow-1');
+      expect(timeout).toHaveBeenLastCalledWith(15_000);
+
+      respond({ enabled: true, configured: false });
+      await getWeixinAccountStatus(target);
+      expect(timeout).toHaveBeenLastCalledWith(15_000);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
   it('reads the account status from the process-global route', async () => {
     respond({ enabled: true, configured: false });
 

@@ -1,9 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
@@ -30,12 +27,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RuntimeDispatchAdmissionTest {
-    @Test
-    void memoryAdmissionRejectsSealedParentsButAllowsOriginalCompletion() {
-        verify(new InMemoryRuntimeBindingRepository(), new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository());
-    }
-
     @Test
     void jdbcAdmissionUsesTheSameParentSessionAndExecutionTransaction() {
         var source = new JdbcDataSource();

@@ -5,10 +5,10 @@
  */
 
 /**
- * A Mod's `ui.render` hook on reply rows in the Ink terminal, on the built CLI
- * in a real terminal: once a reply block is complete, the row shows the text
- * the hook passed down, here from a model call another Mod answers, while the
- * stored reply and what the model reads next keep the original.
+ * A Mod's `ui.render` hook on reply and thinking rows, on the built CLI in a
+ * real terminal: once a reply block is complete, or a thought is complete and
+ * expanded, the row shows the text the hook passed down, while the stored
+ * reply and what the model reads next keep the original.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -28,6 +28,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { InteractiveSession } from './interactive-session.js';
 import {
   startFakeOpenAIServer,
+  type FakeOpenAIResponse,
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
@@ -60,8 +61,7 @@ const text = (content: unknown): string =>
       ? content.map((part) => (part as { text?: string }).text ?? '').join('\n')
       : '';
 
-// Only Ink draws reply rows so far.
-describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
+describe(`Reply rows in the ${renderer} terminal`, () => {
   let server: FakeOpenAIServer | undefined;
   let session: InteractiveSession | undefined;
   let scratch: string | undefined;
@@ -75,8 +75,13 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
     scratch = undefined;
   });
 
-  async function start(plugins: Record<string, string>) {
-    scratch = mkdtempSync(join(tmpdir(), 'qwen-mods-assistant-message-'));
+  async function start(
+    plugins: Record<string, string>,
+    respond = (n: number): FakeOpenAIResponse => ({ content: reply(n) }),
+  ) {
+    scratch = mkdtempSync(
+      join(tmpdir(), `qwen-mods-assistant-message-${renderer}-`),
+    );
     const workspace = join(scratch, 'workspace');
     const qwenHome = join(scratch, 'home');
     const env = {
@@ -114,9 +119,7 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
 
     let answered = 0;
     server = await startFakeOpenAIServer(({ body }) =>
-      body['stream'] === true
-        ? { content: reply(++answered) }
-        : { content: '{}' },
+      body['stream'] === true ? respond(++answered) : { content: '{}' },
     );
     const cli = resolveE2eCliCommand(renderer);
     for (const [name, hooks] of Object.entries(plugins)) {
@@ -193,25 +196,28 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
         on('model.complete', ($, e) => ({ value: { isAnswered: true,
           text: e.prompt.toUpperCase(), usage: { input_tokens: 0, output_tokens: 0,
           cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }));`,
+      // Marks each row with the session that drew it: s1, s2, ...
       'shout-rows': `
-        const sessionsByText = new Map();
-        let firstSession;
-        let sawOldRowInNewSession = false;
+        const sessions = [];
+        const rowsBySession = new Map();
         on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
           const session = await $.session.id();
-          firstSession ??= session;
-          const previous = sessionsByText.get(e.props.text);
-          if (previous && previous !== session) sawOldRowInNewSession = true;
-          sessionsByText.set(e.props.text, session);
+          if (!sessions.includes(session)) sessions.push(session);
+          const rows = rowsBySession.get(session) ?? [];
+          rows.push(e.props.text);
+          rowsBySession.set(session, rows);
           const r = await $.model.complete({ model: 'haiku', prompt: e.props.text });
           if (!r.isAnswered) return next(e);
           const text = r.text.includes('ANSWER 1')
             ? r.text + '\\n\\nExtra line A.\\n\\nExtra line B.'
             : r.text.split('\\n\\n')[0];
+          // The session after /clear draws only its own transcript.
           const afterClear = r.text.includes('ANSWER 3')
-            ? (session !== firstSession && !sawOldRowInNewSession ? ' Clean switch.' : ' Stale switch.')
+            ? (rows.every((row) => row.includes('Answer 3')) ? ' Clean switch.' : ' Stale switch.')
             : '';
-          return next({ ...e, props: { ...e.props, text: 'Shouted ${nonce}: ' + text + afterClear } });
+          const mark = 's' + (sessions.indexOf(session) + 1);
+          return next({ ...e, props: { ...e.props,
+            text: 'Shouted ${nonce} ' + mark + ': ' + text + afterClear } });
         });`,
     });
 
@@ -222,7 +228,7 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
       60_000,
     );
     const first = await terminal.screen();
-    expect(first).toContain(`Shouted ${nonce}: ANSWER 1 READS PLAINLY.`);
+    expect(first).toContain(`Shouted ${nonce} s1: ANSWER 1 READS PLAINLY.`);
     expect(first).toContain('ECHO 1');
     expect(first).not.toContain('Answer 1 reads plainly.');
 
@@ -231,7 +237,7 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
     await terminal.send(`Again ${nonce}`);
     await terminal.waitForScreen(
       (screen) =>
-        screen.includes(`Shouted ${nonce}: ANSWER 2 READS PLAINLY.`) &&
+        screen.includes(`Shouted ${nonce} s1: ANSWER 2 READS PLAINLY.`) &&
         !screen.includes('Second paragraph 2.'),
       'the second rewritten row',
       60_000,
@@ -240,13 +246,13 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
     const screen = await terminal.screen();
     const order = [
       `Look ${nonce}`,
-      `Shouted ${nonce}: ANSWER 1 READS PLAINLY.`,
+      `Shouted ${nonce} s1: ANSWER 1 READS PLAINLY.`,
       'SECOND PARAGRAPH 1.',
       'ECHO 1',
       'Extra line A.',
       'Extra line B.',
       `Again ${nonce}`,
-      `Shouted ${nonce}: ANSWER 2 READS PLAINLY.`,
+      `Shouted ${nonce} s1: ANSWER 2 READS PLAINLY.`,
     ];
     for (const line of order)
       expect(screen.split(line).length - 1, line).toBe(1);
@@ -260,6 +266,19 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
     expect(storedReplies().join('\n')).toContain('Answer 1 reads plainly.');
     expect(storedReplies().join('\n')).not.toContain('Shouted');
 
+    // The branch's transcript carries both replies, and each is drawn again
+    // for the branch's session even where the transcript switched first.
+    await terminal.idle(300, 20_000);
+    await terminal.send('/branch');
+    const branched = await terminal.waitForScreen(
+      (screen) =>
+        screen.includes(`Shouted ${nonce} s2: ANSWER 1 READS PLAINLY.`) &&
+        screen.includes(`Shouted ${nonce} s2: ANSWER 2 READS PLAINLY.`),
+      'the inherited rows drawn for the branch',
+      60_000,
+    );
+    expect(branched).not.toContain(`Shouted ${nonce} s1:`);
+
     await terminal.idle(300, 20_000);
     await terminal.send('/clear');
     await terminal.waitForScreen(
@@ -272,10 +291,91 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
     await terminal.idle(300, 20_000);
     await terminal.send(`After clear ${nonce}`);
     const afterClear = await terminal.waitForScreen(
-      (screen) => screen.includes(`Shouted ${nonce}: ANSWER 3 READS PLAINLY.`),
+      (screen) =>
+        screen.includes(`Shouted ${nonce} s3: ANSWER 3 READS PLAINLY.`),
       'the new session reply',
       60_000,
     );
     expect(afterClear).toContain('Clean switch.');
+  });
+
+  it('shows the text a hook rewrote for a complete thought only once it is expanded', async () => {
+    const nonce = randomUUID().slice(0, 8);
+    const renderPrompt = `Render thought ${nonce}`;
+    const terminal = await start(
+      {
+        // Count requests at the server even when their answer is offscreen.
+        'ponder-rows': `
+          let renders = 0;
+          on('ui.render', { component: 'Thinking' }, async ($, e, next) => {
+            const result = await $.model.complete({ model: 'sonnet', prompt: '${renderPrompt}' });
+            if (!result.isAnswered) return next(e);
+            return next({ ...e, props: { ...e.props, text: 'Pondered ${nonce} #' + ++renders + ': '
+              + e.props.text.toUpperCase() } });
+          });`,
+      },
+      (n) => ({
+        reasoning: `Plan the answer ${n} carefully.`,
+        content: `Answer ${n} is ready.`,
+      }),
+    );
+    const renderRequests = () =>
+      server!.requests.filter(
+        ({ body }) =>
+          body['stream'] !== true &&
+          ((body['messages'] ?? []) as Message[]).some(
+            (message) => text(message.content) === renderPrompt,
+          ),
+      );
+
+    await terminal.send(`Think ${nonce}`);
+    const collapsed = await terminal.waitForScreen(
+      (screen) =>
+        screen.includes('Answer 1 is ready.') &&
+        screen.includes('ctrl+o to expand'),
+      'the reply under a collapsed thought',
+      60_000,
+    );
+    expect(collapsed).not.toContain('Pondered');
+    expect(collapsed).not.toContain('Plan the answer 1');
+
+    await terminal.idle(300, 20_000);
+    expect(renderRequests()).toHaveLength(0);
+    terminal.pressKey('\x0f');
+    const expanded = await terminal.waitForScreen(
+      (screen) =>
+        screen.includes(`Pondered ${nonce} #1: PLAN THE ANSWER 1 CAREFULLY.`),
+      'the rewritten thought',
+      60_000,
+    );
+    expect(expanded).not.toContain('Plan the answer 1 carefully.');
+    expect(expanded).toContain('Answer 1 is ready.');
+    expect(renderRequests()).toHaveLength(1);
+
+    // Collapsed and expanded again, the thought draws its kept answer.
+    await terminal.idle(300, 20_000);
+    terminal.pressKey('\x0f');
+    await terminal.waitForScreen(
+      (screen) => !screen.includes('Pondered'),
+      'the collapsed thought',
+      60_000,
+    );
+    await terminal.idle(300, 20_000);
+    terminal.pressKey('\x0f');
+    const again = await terminal.waitForScreen(
+      (screen) => screen.includes(`Pondered ${nonce} #`),
+      'the thought expanded again',
+      60_000,
+    );
+    expect(again).toContain(`Pondered ${nonce} #1:`);
+    await terminal.idle(1_000, 20_000);
+    expect(renderRequests()).toHaveLength(1);
+
+    const stored = files(scratch!)
+      .filter((file) => file.endsWith('.jsonl'))
+      .map((file) => readFileSync(file, 'utf8'))
+      .join('\n');
+    expect(stored).toContain('Plan the answer 1 carefully.');
+    expect(stored).not.toContain('Pondered');
   });
 });

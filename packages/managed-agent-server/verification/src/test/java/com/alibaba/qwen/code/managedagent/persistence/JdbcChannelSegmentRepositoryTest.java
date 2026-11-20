@@ -114,6 +114,12 @@ class JdbcChannelSegmentRepositoryTest {
         assertThat(segments.list(tenant + "-other", channel, "d1")).isEmpty();
         assertThat(segments.list(tenant, channel + "-other", "d1")).isEmpty();
         assertThat(segments.list(tenant, channel, "d2")).isEmpty();
+        // The batched read is tenant/channel-scoped too: a foreign scope keeps
+        // the per-id entry but it must be empty, never another scope's rows.
+        assertThat(segments.listByDelivery(tenant + "-other", channel, List.of("d1"))
+                .get("d1")).isEmpty();
+        assertThat(segments.listByDelivery(tenant, channel + "-other", List.of("d1"))
+                .get("d1")).isEmpty();
         assertThat(segments.receipt(tenant + "-other", channel, "d1", 0, "x")).isFalse();
         assertThat(segments.list(tenant, channel, "d1").get(0).providerReceipt())
                 .isEqualTo("m0");
@@ -131,6 +137,138 @@ class JdbcChannelSegmentRepositoryTest {
         assertThat(segments.list(tenant, channel, "d1"))
                 .extracting(SegmentLedger::ordinal)
                 .containsExactly(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
+    }
+
+    @Test
+    void plansTheFullContractBoundAndReplanStaysIdempotent() {
+        List<SegmentLedger> plan = java.util.stream.IntStream.range(0, 64)
+                .mapToObj(i -> new SegmentLedger("d1:" + i, i, null))
+                .toList();
+        segments.plan(tenant, channel, "d1", plan);
+        assertThat(segments.list(tenant, channel, "d1"))
+                .extracting(SegmentLedger::ordinal)
+                .containsExactlyElementsOf(
+                        java.util.stream.IntStream.range(0, 64).boxed().toList());
+        // A re-claim replays the whole batch; no row duplicates.
+        segments.plan(tenant, channel, "d1", plan);
+        assertThat(count()).isEqualTo(64);
+    }
+
+    @Test
+    void aBatchBackfillsExistingRowsAndCarriesReceiptsOnNewOnes() {
+        // The pre-existing null-receipt row sits at batch position 0 but
+        // carries ordinal 1, and the new row at position 1 carries ordinal 0,
+        // so neither skipping count-0 rows nor indexing the insert counts by
+        // ordinal instead of batch position can hide.
+        segments.plan(tenant, channel, "d1",
+                List.of(new SegmentLedger("d1:1", 1, null)));
+        segments.plan(tenant, channel, "d1", List.of(
+                new SegmentLedger("d1:1", 1, "m1"),
+                new SegmentLedger("d1:0", 0, "m0")));
+        assertThat(segments.list(tenant, channel, "d1"))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("m0", "m1");
+        assertThat(count()).isEqualTo(2);
+    }
+
+    @Test
+    void aDriverReportingNoPerRowCountStillBackfills() {
+        segments.plan(tenant, channel, "d1",
+                List.of(new SegmentLedger("d1:0", 0, null)));
+        // A driver that reports SUCCESS_NO_INFO for the insert batch: the
+        // count is neither 1 (fresh insert) nor 0 (ignored), so the backfill
+        // must still run via the guarded update. Dropping the != 1 fallback
+        // (or turning it into == 0) leaves the receipt null and reds this case.
+        JdbcTemplate spied = org.mockito.Mockito.spy(jdbc);
+        org.mockito.Mockito.doReturn(
+                new int[]{java.sql.Statement.SUCCESS_NO_INFO})
+                .when(spied).batchUpdate(
+                        org.mockito.ArgumentMatchers.startsWith("INSERT IGNORE"),
+                        org.mockito.ArgumentMatchers.any(
+                                org.springframework.jdbc.core.BatchPreparedStatementSetter.class));
+        new JdbcChannelSegmentRepository(spied).plan(tenant, channel, "d1",
+                List.of(new SegmentLedger("d1:0", 0, "m0")));
+        assertThat(segments.list(tenant, channel, "d1").get(0).providerReceipt())
+                .isEqualTo("m0");
+    }
+
+    @Test
+    void aReclaimBatchesTheBackfillWithoutPerRowUpdates() {
+        segments.plan(tenant, channel, "d1", java.util.stream.IntStream.range(0, 3)
+                .mapToObj(i -> new SegmentLedger("d1:" + i, i, null)).toList());
+        segments.receipt(tenant, channel, "d1", 0, "m0");
+        segments.receipt(tenant, channel, "d1", 1, "m1");
+        segments.receipt(tenant, channel, "d1", 2, "m2");
+        // A re-claim where every row is pre-existing and receipted: the
+        // backfill must be one guarded batch, not a per-row UPDATE round trip
+        // per segment. Reverting it to per-row receiptOnce reds this case.
+        JdbcTemplate spied = org.mockito.Mockito.spy(jdbc);
+        new JdbcChannelSegmentRepository(spied).plan(tenant, channel, "d1",
+                java.util.stream.IntStream.range(0, 3)
+                        .mapToObj(i -> new SegmentLedger("d1:" + i, i, "m" + i))
+                        .toList());
+        // The backfill is one guarded batch (the Collection overload), not a
+        // per-row receiptOnce UPDATE per segment.
+        org.mockito.Mockito.verify(spied, org.mockito.Mockito.times(1))
+                .batchUpdate(
+                        org.mockito.ArgumentMatchers.startsWith("UPDATE ma_channel_segment"),
+                        org.mockito.ArgumentMatchers.any(java.util.Collection.class),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.any(
+                                org.springframework.jdbc.core.ParameterizedPreparedStatementSetter.class));
+        assertThat(segments.list(tenant, channel, "d1"))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("m0", "m1", "m2");
+    }
+
+    @Test
+    void aFreshPlanWithReceiptsNeedsNoBackfillBatch() {
+        // A first plan whose segments already carry receipts: every insert is
+        // fresh (count 1), so the count-driven backfill must issue no UPDATE
+        // batch at all. Turning the condition into `true` would pay a needless
+        // guarded UPDATE per row and red this case.
+        JdbcTemplate spied = org.mockito.Mockito.spy(jdbc);
+        new JdbcChannelSegmentRepository(spied).plan(tenant, channel, "d1",
+                java.util.stream.IntStream.range(0, 3)
+                        .mapToObj(i -> new SegmentLedger("d1:" + i, i, "m" + i))
+                        .toList());
+        org.mockito.Mockito.verify(spied, org.mockito.Mockito.never())
+                .batchUpdate(
+                        org.mockito.ArgumentMatchers.startsWith("UPDATE ma_channel_segment"),
+                        org.mockito.ArgumentMatchers.any(java.util.Collection.class),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.any(
+                                org.springframework.jdbc.core.ParameterizedPreparedStatementSetter.class));
+        assertThat(segments.list(tenant, channel, "d1"))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("m0", "m1", "m2");
+    }
+
+    @Test
+    void listByDeliveryReadsTheWholePageGroupedByDelivery() {
+        // Plan twelve segments in reverse ordinal order: the id order is
+        // 11..0 and the segment-id index order is 0,1,10,11,2,..., so only an
+        // ordinal-ordered page read returns 0..11.
+        segments.plan(tenant, channel, "d1",
+                java.util.stream.IntStream.range(0, 12)
+                        .mapToObj(i -> new SegmentLedger("d1:" + (11 - i),
+                                11 - i, (11 - i) == 0 ? "m0" : null))
+                        .toList());
+        segments.plan(tenant, channel, "d3",
+                List.of(new SegmentLedger("d3:0", 0, null)));
+        var byDelivery = segments.listByDelivery(tenant, channel,
+                List.of("d1", "d2", "d3"));
+        assertThat(byDelivery.keySet()).containsExactly("d1", "d2", "d3");
+        assertThat(byDelivery.get("d1"))
+                .extracting(SegmentLedger::ordinal)
+                .containsExactly(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
+        assertThat(byDelivery.get("d1").get(0).providerReceipt()).isEqualTo("m0");
+        // A delivery with no segments keeps an empty entry, not a missing key.
+        assertThat(byDelivery.get("d2")).isEmpty();
+        assertThat(byDelivery.get("d3"))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly("d3:0");
+        assertThat(segments.listByDelivery(tenant, channel, List.of())).isEmpty();
     }
 
     @Test

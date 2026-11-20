@@ -220,8 +220,21 @@ function streamingTailAppendBlockId(
     first.type === 'assistant.text.delta'
       ? next.activeAssistantBlockId
       : next.activeThoughtBlockId;
-  const before = previous.blocks[previous.blocks.length - 1];
-  const after = next.blocks[next.blocks.length - 1];
+  if (!blockId || nextBlockId !== blockId) return undefined;
+  const index = previous.blockIndexById[blockId];
+  if (index === undefined) return undefined;
+  // A Mod log line stays below the reply without closing its text block.
+  for (let i = index + 1; i < next.blocks.length; i++) {
+    const block = next.blocks[i];
+    if (
+      block !== previous.blocks[i] ||
+      block?.kind !== 'status' ||
+      block.source !== 'mod_log'
+    )
+      return undefined;
+  }
+  const before = previous.blocks[index];
+  const after = next.blocks[index];
   const appendedTextLength = events.reduce(
     (length, event) =>
       length +
@@ -232,8 +245,6 @@ function streamingTailAppendBlockId(
     0,
   );
   if (
-    !blockId ||
-    nextBlockId !== blockId ||
     before?.id !== blockId ||
     after?.id !== blockId ||
     before.kind !== after.kind ||

@@ -454,6 +454,72 @@ it('registerTool parses arguments and wraps errors like the legacy tool() call',
   expect(textOf(sdkResults[2])).toContain('-32602');
 });
 
+it.each([
+  ['sdk', tool, createSdkMcpServer],
+  ['daemon', daemonTool, createDaemonSdkMcpServer],
+] as const)(
+  '%s MCP rejects oversized arguments before parsing and remains usable',
+  async (_, defineTool, createServer) => {
+    const parsed = vi.fn(() => true);
+    const handler = vi.fn(async () => ({
+      content: [{ type: 'text' as const, text: 'accepted' }],
+    }));
+    const server = createServer({
+      name: 'input-budget',
+      tools: [
+        defineTool(
+          'batch',
+          'Accept a batch',
+          { values: z.array(z.number()).refine(parsed) },
+          handler,
+        ),
+        defineTool('text', 'Accept text', { text: z.string() }, handler),
+      ],
+    }).instance;
+    const client = new Client({ name: 'input-budget-test', version: '1' });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const accepted = await client.callTool({
+        name: 'batch',
+        arguments: { values: Array(99_999).fill(0) },
+      });
+      expect(textOf(accepted)).toBe('accepted');
+      expect(handler).toHaveBeenCalledOnce();
+      parsed.mockClear();
+      handler.mockClear();
+
+      const rejected = await client.callTool({
+        name: 'batch',
+        arguments: { values: Array(100_000).fill(0) },
+      });
+      expect(rejected.isError).toBe(true);
+      expect(textOf(rejected)).toContain('100000');
+      expect(parsed).not.toHaveBeenCalled();
+      expect(handler).not.toHaveBeenCalled();
+
+      const healthy = await client.callTool({
+        name: 'batch',
+        arguments: { values: [1] },
+      });
+      expect(textOf(healthy)).toBe('accepted');
+      expect(handler).toHaveBeenCalledOnce();
+      handler.mockClear();
+      const longText = await client.callTool({
+        name: 'text',
+        arguments: { text: 'x'.repeat(100_001) },
+      });
+      expect(textOf(longText)).toBe('accepted');
+      expect(handler).toHaveBeenCalledOnce();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  },
+);
+
 function textOf(result: unknown): string {
   const content = (result as { content?: { text?: string }[] }).content;
   return content?.[0]?.text ?? '';

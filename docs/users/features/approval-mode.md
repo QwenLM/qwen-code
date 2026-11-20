@@ -118,11 +118,13 @@ Ask Permissions Mode is the standard way to work with Qwen Code. In this mode, y
 
 **Turn on Ask Permissions Mode during a session**
 
-You can switch into Ask Permissions Mode during a session using **Shift+Tab**​ (or **Tab** on Windows) to cycle through permission modes. If you're in any other mode, pressing **Shift+Tab** (or **Tab** on Windows) will eventually cycle back to Ask Permissions Mode, indicated by the absence of any mode indicator at the bottom of the terminal.
+You can switch into Ask Permissions Mode during a session using **Shift+Tab**​ (or **Tab** on Windows) to cycle through permission modes. If you're in any other mode, pressing **Shift+Tab** (or **Tab** on Windows) will eventually cycle back to Ask Permissions Mode, shown as `⏸ Ask permissions` at the bottom of the terminal.
 
 **Start a new session in Ask Permissions Mode**
 
-Ask Permissions Mode is the initial mode when you start Qwen Code. If you've changed modes and want to return to Ask Permissions Mode, use:
+Standard sessions in trusted folders default to Auto Mode. The built-in default is Ask Permissions Mode in untrusted folders and when using `--bare` or `--safe-mode`.
+
+To [set Ask Permissions Mode as the default](#configure-ask-permissions-mode-as-default), set `tools.approvalMode` to `"default"` in `~/.qwen/settings.json` for your user account or in `.qwen/settings.json` for the current project. To select it for a single launch, pass `--approval-mode default`. To switch the current session, use:
 
 ```
 /approval-mode default
@@ -130,10 +132,16 @@ Ask Permissions Mode is the initial mode when you start Qwen Code. If you've cha
 
 **Run "headless" queries in Ask Permissions Mode**
 
-When running headless commands, Ask Permissions Mode is the default behavior. You can explicitly specify it with:
+Headless runs use the same startup defaults. In standard headless runs with text input, Auto and Ask Permissions exclude shell, monitor, `edit`, and `write_file` tools by default.
+
+An explicit allow rule in `permissions.allow` or `--allowed-tools` can keep a tool available. The selected approval mode and permission rules then determine which calls can run. For example, a path-scoped allow rule can keep `edit` available, and Auto Mode can still approve ordinary workspace edits outside that rule.
+
+With both `--input-format stream-json` and `--output-format stream-json`, the host can respond to approval requests through the protocol.
+
+To run in Ask Permissions Mode explicitly:
 
 ```
-qwen --prompt "Analyze this code for potential bugs"
+qwen --approval-mode default --prompt "Analyze this code for potential bugs"
 ```
 
 ### Example: Safely implementing a feature
@@ -156,8 +164,9 @@ You can review each proposed change and approve or reject it individually.
 
 ### Configure Ask Permissions Mode as default
 
-```bash
-// .qwen/settings.json
+Add this to `~/.qwen/settings.json` for your user default or to `.qwen/settings.json` for the current project.
+
+```json
 {
   "tools": {
     "approvalMode": "default"
@@ -170,6 +179,8 @@ You can review each proposed change and approve or reject it individually.
 Auto-Edit Mode instructs Qwen Code to automatically approve file edits while requiring manual approval for shell commands, ideal for accelerating development workflows while maintaining system safety.
 
 Auto-approved edit tools include `edit`, `write_file`, and `notebook_edit`.
+
+A call that matches a [`permissions.ask`](../configuration/settings.md#permissions) rule still asks for confirmation in this mode, the same as in Auto Mode. That applies to subagents too, which run in Auto-Edit by default when the session is in Ask Permissions mode in a trusted folder: a foreground subagent asks inline, and a background subagent, which cannot ask, has the call denied.
 
 ### When to use Auto-Accept Edits Mode
 
@@ -211,9 +222,9 @@ configuration, troubleshooting, FAQ).
 - **Trusted projects**: Internal codebases where the agent should keep
   moving but you still want a guardrail on destructive shell commands and
   outbound network calls.
-- **Headless / scheduled runs**: Where Auto-Edit isn't enough (the agent
-  needs to run shell commands too) but you want safety on `rm -rf /`,
-  `curl ... | sh`, credential exfiltration, etc.
+- **Headless / scheduled runs**: For text-input runs that need shell commands,
+  explicitly keep the shell tool available, for example with a command-scoped
+  allow rule. Auto Mode then applies its normal approval rules to each call.
 
 ### How to use Auto Mode
 
@@ -392,6 +403,6 @@ Plan Mode → Ask Permissions Mode → Auto-Edit Mode → Auto Mode → YOLO Mod
 ### Mode Usage Recommendations
 
 1. **New to codebase**: Start with **Plan Mode**​ for safe exploration
-2. **Daily development tasks**: Use **Auto-Accept Edits**​ (default mode), efficient and safe
+2. **Daily development tasks**: Use **Auto-Accept Edits**​, efficient and safe
 3. **Automated scripts**: Use **YOLO Mode**​ in controlled environments for full automation
 4. **Complex refactoring**: Use **Plan Mode**​ first for detailed planning, then switch to appropriate mode for execution

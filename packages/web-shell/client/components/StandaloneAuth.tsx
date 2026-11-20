@@ -124,6 +124,39 @@ const EN_COPY: AuthCopy = {
 
 const COPY: Record<WebShellLanguage, AuthCopy> = {
   en: EN_COPY,
+  'zh-TW': {
+    pairingFailed:
+      '配對失敗或二維碼已過期。請掃描新的二維碼，或輸入 daemon 令牌。',
+    heading: '連線到 Qwen Code',
+    connecting: '正在連線…',
+    starting: '守護程序正在啟動…',
+    unreachable: '無法訪問守護程序，正在重試…',
+    remoteUnreachable:
+      '無法連線守護程序，正在重試… 瀏覽器無法區分網路、證書或跨域失敗，請檢視下方的遠端連線配置說明。',
+    notReady: '守護程序尚未就緒，正在重試…',
+    startFailed: '守護程序啟動失敗。',
+    invalidToken:
+      '令牌無效或已過期，請從伺服器遠端連線設定或啟動輸出複製當前 token。',
+    enterToken: '請輸入伺服器遠端連線設定或啟動輸出中的 bearer token。',
+    policyBlocked:
+      '服務或代理拒絕了請求（HTTP 403），請檢查訪問規則、Host 策略，以及遠端連線設定是否允許當前頁面來源。',
+    invalidAddress: 'Daemon 地址無效。請輸入 HTTP 或 HTTPS origin。',
+    mixedContent:
+      '當前 HTTPS 頁面無法連線遠端 HTTP 服務，請使用遠端服務的 HTTPS 地址。',
+    addressChanged: '連線已暫停。點選“連線”以使用填寫的地址。',
+    confirmTarget:
+      '此頁面指向一個本瀏覽器從未連線過的守護程序。僅在你信任它時再連線。',
+    remoteHint: '令牌會傳送到上方顯示的地址。請只輸入該守護程序簽發的令牌。',
+    switchUnavailable: '瀏覽器儲存不可用，因此無法把 token 帶到該 daemon。',
+    addressLabel: 'Daemon 地址',
+    tokenLabel: 'Bearer token（可選）',
+    connect: '連線',
+    local: '返回本地工作區',
+    remoteAddCancel: '取消新增工作區',
+    connectionAddCancel: '取消新增連線',
+    retry: '重試',
+    hint: '該令牌擁有守護程序的完整訪問權限。請僅在從守護程序終端或其二維碼開啟的頁面中輸入。',
+  },
   'zh-CN': {
     pairingFailed:
       '配对失败或二维码已过期。请扫描新的二维码，或输入 daemon 令牌。',
@@ -157,9 +190,44 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     retry: '重试',
     hint: '该令牌拥有守护进程的完整访问权限。请仅在从守护进程终端或其二维码打开的页面中输入。',
   },
-  // Not translated yet — same partial-catalog policy as the ru table in
-  // i18n.tsx (#13391): ru reuses the EN copy.
-  ru: EN_COPY,
+  ru: {
+    pairingFailed:
+      'Сопряжение не удалось или QR-код истёк. Отсканируйте новый QR-код или введите токен демона.',
+    heading: 'Подключение к Qwen Code',
+    connecting: 'Подключение…',
+    starting: 'Демон запускается…',
+    unreachable: 'Не удаётся связаться с демоном. Повторная попытка…',
+    remoteUnreachable:
+      'Не удаётся связаться с демоном. Повторная попытка… Браузер не различает сетевой, сертификатный или cross-origin сбой. См. настройку удалённого подключения ниже.',
+    notReady: 'Демон ещё не готов. Повторная попытка…',
+    startFailed: 'Демону не удалось запуститься.',
+    invalidToken:
+      'Недействительный или истёкший токен. Скопируйте текущий токен из настроек удалённого подключения сервера или из вывода при запуске.',
+    enterToken:
+      'Введите bearer-токен из настроек удалённого подключения сервера или из вывода при запуске.',
+    policyBlocked:
+      'Сервер или прокси отклонил запрос (HTTP 403). Проверьте правила доступа, политику Host и разрешённые источники страниц в настройках удалённого подключения.',
+    invalidAddress:
+      'Недействительный адрес демона. Введите origin HTTP или HTTPS.',
+    mixedContent:
+      'Эта страница HTTPS не может подключиться к удалённому HTTP-демону. Используйте HTTPS-адрес удалённого сервиса.',
+    addressChanged:
+      'Подключение приостановлено. Нажмите «Подключить», чтобы использовать введённый адрес.',
+    confirmTarget:
+      'Эта страница указывает на демон, к которому этот браузер ещё не подключался. Подключайтесь, только если вы ему доверяете.',
+    remoteHint:
+      'Токен отправляется на адрес, указанный выше. Вводите только токен, выданный этим демоном.',
+    switchUnavailable:
+      'Хранилище браузера недоступно, поэтому токен не удалось перенести к этому демону.',
+    addressLabel: 'Адрес демона',
+    tokenLabel: 'Bearer-токен (необязательно)',
+    connect: 'Подключить',
+    local: 'Вернуться к локальным рабочим областям',
+    remoteAddCancel: 'Отменить добавление рабочей области',
+    connectionAddCancel: 'Отменить добавление подключения',
+    retry: 'Повторить',
+    hint: 'Этот токен даёт полный доступ к демону. Вводите его только на странице, которую вы открыли из терминала демона или по его QR-коду.',
+  },
 };
 
 /** `Retry-After` in milliseconds (delta-seconds or HTTP-date), or undefined. */

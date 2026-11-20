@@ -84,6 +84,21 @@ public final class ManagedExtensionsClient {
         return importInput(workspaceId, null, input, metadata, null, true);
     }
 
+    public Map<String, Object> importSource(String workspaceId, String providerId, String kind,
+            String resourceId, String revision, Map<String, Object> target, String idempotencyKey) {
+        return json("POST", workspace(workspaceId) + "/source-imports", Map.of("reference", Map.of(
+                "providerId", providerId, "kind", kind, "resourceId", resourceId, "revision", revision), "target", target),
+                header(idempotencyKey));
+    }
+
+    public Map<String, Object> sourceImportReceipt(String workspaceId, String operationId) {
+        return json("GET", workspace(workspaceId) + "/source-imports/" + segment(operationId), null, null);
+    }
+
+    public Map<String, Object> lookupSourceImport(String workspaceId, String idempotencyKey) {
+        return json("GET", workspace(workspaceId) + "/source-imports", null, header(idempotencyKey));
+    }
+
     public Map<String, Object> importPackage(String workspaceId, String extensionId, Path input,
             Map<String, Object> metadata, String idempotencyKey) {
         return importInput(workspaceId, extensionId, input, metadata, header(idempotencyKey), false);

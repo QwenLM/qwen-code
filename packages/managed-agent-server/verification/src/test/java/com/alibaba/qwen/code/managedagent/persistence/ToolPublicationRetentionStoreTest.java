@@ -383,8 +383,26 @@ public class ToolPublicationRetentionStoreTest {
                 new ManagedSessionStoreModels.SealWriterRequest("workspace-1", "writer", 1)));
         assertThat(tx.<Boolean>execute(status -> publicStore.completeOperation(tenant, session, operation.operationId(),
                 "worker", claim.claimGeneration() - 1, false))).isFalse();
+        assertThatThrownBy(() -> tx.executeWithoutResult(status -> {
+            assertThat(publicStore.completeOperation(tenant, session, operation.operationId(),
+                    "worker", claim.claimGeneration(), false)).isTrue();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind IN"
+                    + " ('SESSION_RESOURCE_GC', 'CAPTURE_GC')", Long.class)).isEqualTo(2);
+            throw new IllegalStateException("rollback public deletion");
+        })).hasMessage("rollback public deletion");
+        assertThat(publicStore.requireSession(tenant, session).status()).isEqualTo("DELETING");
+        assertThat(jdbc.queryForObject("SELECT retired_at FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session)).isNull();
+        assertThat(jdbc.queryForObject("SELECT retention_state FROM ma_output_capture WHERE scope_key = ?",
+                String.class, scope)).isEqualTo("PINNED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind IN"
+                + " ('SESSION_RESOURCE_GC', 'CAPTURE_GC')", Long.class)).isZero();
         assertThat(tx.<Boolean>execute(status -> publicStore.completeOperation(tenant, session, operation.operationId(),
                 "worker", claim.claimGeneration(), false))).isTrue();
+        assertThat(props.getToolPublication().isGcEnabled()).isFalse();
+        assertThat(jdbc.queryForList("SELECT operation_kind FROM ma_operation WHERE operation_kind IN"
+                + " ('SESSION_RESOURCE_GC', 'CAPTURE_GC')", String.class))
+                .containsExactlyInAnyOrder("SESSION_RESOURCE_GC", "CAPTURE_GC");
         assertThat(publicStore.requireSession(tenant, session).status()).isEqualTo("DELETED");
         assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ?",
                 String.class, tenant)).isEqualTo("DELETED");
@@ -528,6 +546,14 @@ public class ToolPublicationRetentionStoreTest {
         protected final Map<String, byte[]> bytes = new HashMap<>();
         @Override public void putIfAbsent(String key, byte[] value) { bytes.putIfAbsent(key, value.clone()); }
         @Override public InputStream open(String key) { return new ByteArrayInputStream(bytes.get(key)); }
+        @Override public InputStream openRange(String key, long offset, long length, Runnable guard) {
+            guard.run();
+            byte[] value = bytes.get(key);
+            if (value == null || offset < 0 || length < 0 || offset + length > value.length) {
+                throw new IllegalArgumentException("Invalid object range");
+            }
+            return new ByteArrayInputStream(value, (int) offset, (int) length);
+        }
         @Override public void validateConfiguration() {}
     }
 }

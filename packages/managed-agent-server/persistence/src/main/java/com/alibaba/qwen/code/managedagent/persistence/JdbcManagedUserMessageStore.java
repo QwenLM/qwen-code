@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.UserMessagePolicy;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -34,6 +35,8 @@ public class JdbcManagedUserMessageStore
     private final ObjectMapper json;
     private final RequestDigests digests;
     private final UserMessagePolicy agents;
+    private long retirementCursor;
+    private long retirementRoundEnd;
 
     public JdbcManagedUserMessageStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json, RequestDigests digests, @Qualifier("managedUserMessagePolicy") UserMessagePolicy agents) {
         this.jdbc = jdbc;
@@ -83,7 +86,7 @@ public class JdbcManagedUserMessageStore
         switch (command.action()) {
             case "submit" -> {
                 JdbcSessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, session);
-                List<Map<String, Object>> input = agents.userMessageInput(command.input());
+                List<Map<String, Object>> input = input(tenant, session, command.input());
                 Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM ma_user_message WHERE tenant_id = ?"
                         + " AND session_id = ? AND state IN ('queued', 'claimed', 'recovery_blocked')", Integer.class, tenant, session);
                 if (count != null && count >= 32) {
@@ -98,10 +101,15 @@ public class JdbcManagedUserMessageStore
                         tenant, session, "umsg_" + UUID.randomUUID(), sequence, actor, encode(input), context);
                 jdbc.update("UPDATE ma_user_message_queue SET next_sequence = next_sequence + 1 WHERE tenant_id = ? AND session_id = ?",
                         tenant, session);
+                jdbc.update("UPDATE ma_session SET preview = ?, preview_revision = ?, gmt_modified = "
+                                + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW
+                                + " WHERE tenant_id = ? AND session_id = ? AND preview_revision < ?",
+                        previewOf(input), sequence, tenant, session, sequence);
+                bumpQueueRevision(tenant, session);
                 SideQueryConversation.mainInputAccepted(jdbc, tenant, session);
             }
             case "edit", "withdraw" -> {
-                String input = "edit".equals(command.action()) ? encode(agents.userMessageInput(command.input())) : null;
+                String input = "edit".equals(command.action()) ? encode(input(tenant, session, command.input())) : null;
                 if (input == null && snapshot(tenant, session).messages().stream()
                         .anyMatch(message -> message.id().equals(command.messageId()) && "recovery_blocked".equals(message.state()))) {
                     jdbc.update("UPDATE ma_user_message_queue SET is_paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
@@ -117,6 +125,7 @@ public class JdbcManagedUserMessageStore
                 if (changed != 1) {
                     throw conflict("user_message_conflict");
                 }
+                bumpQueueRevision(tenant, session);
             }
             case "resume" -> {
                 JdbcSessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, session);
@@ -130,6 +139,7 @@ public class JdbcManagedUserMessageStore
                 String turn = latestTurn(tenant, session).get("turnId");
                 jdbc.update("UPDATE ma_user_message_queue SET is_paused = FALSE, resumed_turn_id = ? WHERE tenant_id = ? AND session_id = ?",
                         turn, tenant, session);
+                bumpQueueRevision(tenant, session);
             }
             default -> throw refusal("invalid_request", "Unknown user message action.");
         }
@@ -163,23 +173,27 @@ public class JdbcManagedUserMessageStore
             jdbc.update("UPDATE ma_user_message SET state = 'recovery_blocked' WHERE tenant_id = ? AND session_id = ? AND state = 'queued'",
                     tenant, session);
             jdbc.update("UPDATE ma_user_message_queue SET is_paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+            bumpQueueRevision(tenant, session);
             return List.of();
         }
-        jdbc.update("UPDATE ma_user_message SET state = 'claimed', turn_id = ?, prompt_id = ? WHERE tenant_id = ?"
+        int claimed = jdbc.update("UPDATE ma_user_message SET state = 'claimed', turn_id = ?, prompt_id = ? WHERE tenant_id = ?"
                 + " AND session_id = ? AND state = 'queued'", turns.getFirst(), promptId, tenant, session);
+        if (claimed > 0) {
+            bumpQueueRevision(tenant, session);
+        }
         // A lost reply must never make an already claimed message look absent.
         return read(tenant, session, "state = 'claimed' AND prompt_id = ?", promptId);
     }
 
     public List<Map<String, String>> readySessions() {
-        return jdbc.query("SELECT DISTINCT m.tenant_id, m.session_id, q.last_dispatch_at FROM ma_user_message m JOIN ma_session s"
-                + " ON s.tenant_id = m.tenant_id AND s.session_id = m.session_id JOIN ma_user_message_queue q"
-                + " ON q.tenant_id = m.tenant_id AND q.session_id = m.session_id WHERE s.status = 'ACTIVE'"
-                + " AND q.is_paused = FALSE AND m.state = 'queued' AND NOT EXISTS (SELECT 1 FROM ma_turn t"
-                + " WHERE t.tenant_id = m.tenant_id AND t.session_id = m.session_id AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING', 'RECOVERY_BLOCKED'))"
-                + " AND NOT EXISTS (SELECT 1 FROM ma_user_message blocked WHERE blocked.tenant_id = m.tenant_id"
-                + " AND blocked.session_id = m.session_id AND blocked.state IN ('claimed', 'recovery_blocked'))"
-                + " ORDER BY q.last_dispatch_at, m.tenant_id, m.session_id LIMIT 32", (row, index) -> Map.of("tenant", row.getString(1), "session", row.getString(2)));
+        return jdbc.query("SELECT q.tenant_id, q.session_id, q.last_dispatch_at FROM ma_user_message_queue q JOIN ma_session s"
+                + " ON s.tenant_id = q.tenant_id AND s.session_id = q.session_id WHERE s.status = 'ACTIVE'"
+                + " AND q.is_paused = FALSE AND EXISTS (SELECT 1 FROM ma_user_message m WHERE m.tenant_id = q.tenant_id"
+                + " AND m.session_id = q.session_id AND m.state = 'queued') AND NOT EXISTS (SELECT 1 FROM ma_turn t"
+                + " WHERE t.tenant_id = q.tenant_id AND t.session_id = q.session_id AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING', 'RECOVERY_BLOCKED'))"
+                + " AND NOT EXISTS (SELECT 1 FROM ma_user_message blocked WHERE blocked.tenant_id = q.tenant_id"
+                + " AND blocked.session_id = q.session_id AND blocked.state IN ('claimed', 'recovery_blocked'))"
+                + " ORDER BY q.last_dispatch_at, q.tenant_id, q.session_id LIMIT 32", (row, index) -> Map.of("tenant", row.getString(1), "session", row.getString(2)));
     }
 
     @Transactional
@@ -234,13 +248,66 @@ public class JdbcManagedUserMessageStore
                 String.class, tenant, session, admission.turnId());
         jdbc.update("UPDATE ma_user_message SET state = 'claimed', turn_id = ?, prompt_id = ? WHERE tenant_id = ?"
                 + " AND session_id = ? AND message_id = ? AND state = 'claimed'", admission.turnId(), prompt, tenant, session, first.id());
+        bumpQueueRevision(tenant, session);
     }
 
     @Transactional
-    public void retireClosed() {
-        jdbc.update("UPDATE ma_user_message SET state = 'withdrawn' WHERE state = 'queued' AND EXISTS"
-                + " (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_user_message.tenant_id"
-                + " AND s.session_id = ma_user_message.session_id AND s.status <> 'ACTIVE')");
+    public synchronized void retireClosed() {
+        if (retirementCursor == 0) {
+            Long roundEnd = jdbc.queryForObject("SELECT MAX(id) FROM ma_user_message_queue", Long.class);
+            retirementRoundEnd = roundEnd == null ? 0 : roundEnd;
+        }
+        record Queue(long id, String tenant, String session) { }
+        var queues = jdbc.query("SELECT id, tenant_id, session_id FROM ma_user_message_queue"
+                        + " WHERE id > ? AND id <= ? ORDER BY id LIMIT 32",
+                (row, index) -> new Queue(row.getLong(1), row.getString(2), row.getString(3)),
+                retirementCursor, retirementRoundEnd);
+        for (Queue queue : queues) {
+            // Current reads, without waiting on a parent/child lifecycle's differently ordered locks.
+            var status = jdbc.query("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE SKIP LOCKED",
+                    (row, index) -> row.getString(1), queue.tenant(), queue.session());
+            if (!status.isEmpty() && !"ACTIVE".equals(status.getFirst())) {
+                retireQueued(jdbc, queue.tenant(), queue.session());
+            }
+        }
+        // Advance over source rows even when none needs repair; revisit skipped rows after wrapping.
+        long lastId = queues.isEmpty() ? 0 : queues.getLast().id();
+        retirementCursor = queues.size() < 32 || lastId >= retirementRoundEnd ? 0 : lastId;
+    }
+
+    // The caller holds the non-ACTIVE Session row; do not reacquire earlier lifecycle locks here.
+    static void retireQueued(JdbcTemplate jdbc, String tenant, String session) {
+        int changed = jdbc.update("UPDATE ma_user_message SET state = 'withdrawn'"
+                + " WHERE tenant_id = ? AND session_id = ? AND state = 'queued'", tenant, session);
+        if (changed > 0) {
+            jdbc.update("UPDATE ma_user_message_queue SET queue_revision = queue_revision + 1 WHERE tenant_id = ? AND session_id = ?",
+                    tenant, session);
+        }
+    }
+
+    private void bumpQueueRevision(String tenant, String session) {
+        jdbc.update("UPDATE ma_user_message_queue SET queue_revision = queue_revision + 1 WHERE tenant_id = ? AND session_id = ?",
+                tenant, session);
+    }
+
+    private static String previewOf(List<Map<String, Object>> input) {
+        for (Map<String, Object> block : input) {
+            if (block.get("text") instanceof String value && !value.isBlank()) {
+                return value.length() <= 1024 ? value : value.substring(0, 1024);
+            }
+        }
+        return null;
+    }
+
+    private List<Map<String, Object>> input(String tenant, String session, List<InputBlock> blocks) {
+        List<Map<String, Object>> input = agents.userMessageInput(blocks);
+        String profile = jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session);
+        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                && input.stream().anyMatch(block -> !"text".equals(block.get("type")))) {
+            throw conflict("workspace_unavailable");
+        }
+        return input;
     }
 
     private String lockSession(String tenant, String session) {
@@ -271,23 +338,30 @@ public class JdbcManagedUserMessageStore
 
     private void reconcile(String tenant, String session) {
         Map<String, String> turn = latestTurn(tenant, session);
+        int pausedChanged = 0;
         if (List.of("FAILED", "CANCELLED", "CANCELLING", "RECOVERY_BLOCKED").contains(turn.getOrDefault("status", ""))) {
             String resumed = jdbc.queryForObject("SELECT resumed_turn_id FROM ma_user_message_queue WHERE tenant_id = ? AND session_id = ?",
                     String.class, tenant, session);
             if (!Objects.equals(resumed, turn.get("turnId"))) {
-                jdbc.update("UPDATE ma_user_message_queue SET is_paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+                pausedChanged = jdbc.update("UPDATE ma_user_message_queue SET is_paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
             }
         }
-        jdbc.update("UPDATE ma_user_message SET state = 'recovery_blocked' WHERE tenant_id = ? AND session_id = ? AND state = 'claimed'"
+        int blocked = jdbc.update("UPDATE ma_user_message SET state = 'recovery_blocked' WHERE tenant_id = ? AND session_id = ? AND state = 'claimed'"
                 + " AND turn_id IN (SELECT turn_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                 + " AND status IN ('COMPLETED', 'FAILED', 'CANCELLED'))", tenant, session, tenant, session);
+        if (pausedChanged > 0 || blocked > 0) {
+            bumpQueueRevision(tenant, session);
+        }
     }
 
     private Snapshot snapshot(String tenant, String session) {
         boolean paused = Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_paused FROM ma_user_message_queue"
                 + " WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session));
         List<Message> messages = read(tenant, session, "state IN ('queued', 'claimed', 'recovery_blocked')");
-        return new Snapshot(paused || messages.stream().anyMatch(message -> "recovery_blocked".equals(message.state())), messages);
+        List<Long> revisions = jdbc.queryForList("SELECT queue_revision FROM ma_user_message_queue WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session);
+        long queueRevision = revisions.isEmpty() ? 0L : revisions.getFirst();
+        return new Snapshot(paused || messages.stream().anyMatch(message -> "recovery_blocked".equals(message.state())), queueRevision, messages);
     }
 
     private List<Message> read(String tenant, String session, String predicate, Object... parameters) {

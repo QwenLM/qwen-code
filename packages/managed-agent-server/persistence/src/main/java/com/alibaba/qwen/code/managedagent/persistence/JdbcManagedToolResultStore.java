@@ -38,12 +38,17 @@ public class JdbcManagedToolResultStore
     private final TransactionTemplate transactions;
     private final EventProjectionStore sessions;
 
+    private JdbcJournalPacks packs;
+
     public JdbcManagedToolResultStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             EventProjectionStore sessions) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(manager);
         this.sessions = sessions;
     }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
 
     void captureEvents(String tenant, String workspace, String session, long revision, List<JsonNode> events) {
         Map<String, Source> sources = new LinkedHashMap<>();
@@ -116,12 +121,7 @@ public class JdbcManagedToolResultStore
                                                         + epoch
                                                         + " AS due_at FROM ma_operation WHERE"
                                                         + " operation_kind ="
-                                                        + " 'TOOL_RESULT_PROJECTION' AND NOT EXISTS"
-                                                        + " (SELECT 1 FROM ma_session s WHERE"
-                                                        + " s.tenant_id = ma_operation.tenant_id"
-                                                        + " AND s.session_id ="
-                                                        + " ma_operation.session_id AND s.is_csi_guard"
-                                                        + " = TRUE) AND state = ? AND "
+                                                        + " 'TOOL_RESULT_PROJECTION' AND state = ? AND "
                                                         + due
                                                         + " <= "
                                                         + bound
@@ -147,13 +147,9 @@ public class JdbcManagedToolResultStore
                             for (var candidate : rows) {
                                 String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");
-                                // No tenant publication guard: a pinned Session is
-                                // skipped, and an ordinary one orders on its root and
-                                // head before the operation row, as collection does
-                                // (design 2026-11-04-managed-publication-tenant-guards, C2).
-                                if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
-                                    continue;
-                                }
+                                // No tenant publication guard: an ordinary Session
+                                // orders on its root and head before the operation row,
+                                // as collection does (design 2026-11-04-managed-publication-tenant-guards, C2).
                                 ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
                                 var current =
                                         jdbc.queryForList(
@@ -245,9 +241,6 @@ public class JdbcManagedToolResultStore
                             String tenant = (String) rows.getFirst().get("tenant_id");
                             String session = (String) rows.getFirst().get("session_id");
                             // As in claim: no tenant publication guard.
-                            if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
-                                return false;
-                            }
                             ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
                             var row =
                                     jdbc.queryForMap(
@@ -280,7 +273,7 @@ public class JdbcManagedToolResultStore
     public void verifySource(Source source) {
         var rows =
                 jdbc.query(
-                        "SELECT record_bytes, record_digest FROM ma_session_journal_tx WHERE"
+                        "SELECT record_bytes, record_digest, byte_length FROM ma_session_journal_tx WHERE"
                                 + " tenant_id = ? AND workspace_id = ? AND session_id = ? AND"
                                 + " journal_revision = ?",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
@@ -290,6 +283,12 @@ public class JdbcManagedToolResultStore
                         source.journalRevision());
         require(rows.size() == 1, "Original receipt journal is missing");
         byte[] bytes = (byte[]) rows.getFirst().get("record_bytes");
+        if (bytes == null && packs != null) {
+            bytes = packs.resolveBytes(source.tenantId(), source.sessionId(),
+                    source.journalRevision(), (String) rows.getFirst().get("record_digest"),
+                    ((Number) rows.getFirst().get("byte_length")).longValue());
+        }
+        require(bytes != null, "Original receipt journal is missing");
         require(ToolPublicationContract.sha256(bytes).equals(rows.getFirst().get("record_digest")),
                 "Original receipt journal changed");
         int matches = 0;
@@ -318,8 +317,6 @@ public class JdbcManagedToolResultStore
                             if (!admitsLegacyProjection(claim)) {
                                 return false;
                             }
-                            ManagedLegacySessionGuard.requireLegacyMutation(
-                                    jdbc, source.tenantId(), source.sessionId());
                             var retired =
                                     jdbc.query(
                                             "SELECT retirement_generation FROM ma_session WHERE"
@@ -567,6 +564,45 @@ public class JdbcManagedToolResultStore
                         args.toArray());
         return new ArtifactPage(List.copyOf(rows.subList(0, Math.min(rows.size(), limit))), through, rows.size() > limit);
     }
+
+    private static final String WORKSPACE_ARTIFACT_SOURCE =
+            " FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION'"
+                    + " AND r.operation_id = a.result_id JOIN ma_session s ON s.tenant_id = r.tenant_id"
+                    + " AND s.session_id = r.session_id WHERE r.tenant_id = ? AND r.workspace_id = ?"
+                    + " AND s.workspace_id = ? AND r.state = 'READY' AND s.session_kind = 'PUBLIC'"
+                    + " AND s.status NOT IN ('DELETED', 'DELETING')"
+                    + " AND (s.owner_only = 0 OR COALESCE(s.owner_actor_key, s.creator_actor_key) = ?)";
+
+    public WorkspaceArtifactPage listWorkspaceArtifacts(String tenant, byte[] actorKey, String workspace,
+            Long watermark, Long beforeId, int limit) {
+        require(
+                limit >= 1 && limit <= 100 && (watermark == null) == (beforeId == null),
+                "Invalid workspace artifact page");
+        require(watermark == null || watermark >= 0, "Invalid workspace artifact watermark");
+        List<Object> args = new ArrayList<>(List.of(tenant, workspace, workspace, actorKey));
+        String cursor = "";
+        if (watermark != null) {
+            cursor = " AND a.id <= ? AND a.id < ?";
+            args.add(watermark);
+            args.add(beforeId);
+        }
+        args.add(limit + 1);
+        List<WorkspaceRow> rows =
+                jdbc.query(
+                        "SELECT a.id, " + ManagedSchemaProjection.ARTIFACT.columns("a")
+                                + ", r.request_json" + WORKSPACE_ARTIFACT_SOURCE
+                                + cursor + " ORDER BY a.id DESC LIMIT ?",
+                        (row, index) -> new WorkspaceRow(artifact(row, index), row.getLong("id")),
+                        args.toArray());
+        // The watermark bounds row ids; visibility is re-evaluated on every page.
+        long through = watermark == null ? (rows.isEmpty() ? 0 : rows.getFirst().id()) : watermark;
+        List<WorkspaceRow> page = rows.subList(0, Math.min(rows.size(), limit));
+        List<Artifact> artifacts = page.stream().map(WorkspaceRow::artifact).toList();
+        long lastId = page.isEmpty() ? 0 : page.getLast().id();
+        return new WorkspaceArtifactPage(List.copyOf(artifacts), through, rows.size() > limit, lastId);
+    }
+
+    private record WorkspaceRow(Artifact artifact, long id) { }
 
     private Artifact artifact(ResultSet row, int index) throws SQLException {
         return new Artifact(

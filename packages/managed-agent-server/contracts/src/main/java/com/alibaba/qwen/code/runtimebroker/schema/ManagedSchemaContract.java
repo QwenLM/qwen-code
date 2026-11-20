@@ -20,8 +20,10 @@ public final class ManagedSchemaContract {
                     "ma_session_record",
                     "ma_agent_definition",
                     "ma_extension_package",
+                    "ma_extension_source_import",
                     "ma_extension_settings",
                     "ma_extension_operation",
+                    "ma_journal_pack",
                     "ma_resource",
                     "ma_resource_ref",
                     "ma_output_capture",
@@ -44,10 +46,13 @@ public final class ManagedSchemaContract {
                     "ma_read_lease",
                     "ma_channel_instance",
                     "ma_channel_binding",
+                    "ma_pr_watch_binding",
                     "ma_delivery",
                     "ma_channel_segment",
                     "ma_schedule",
-                    "ma_schedule_occurrence");
+                    "ma_schedule_occurrence",
+                    "ma_client_files_binding",
+                    "ma_client_files_request");
 
     private ManagedSchemaContract() {}
 
@@ -75,10 +80,10 @@ public final class ManagedSchemaContract {
         WORKSPACE_OPERATOR_RECOVERY,
         WORKSPACE_RECOVERY,
         STORAGE_MIGRATION,
-        CSI_RETIREMENT,
         WORKSPACE_RETIREMENT,
         WORKSPACE_UPLOAD,
         CHANNEL_INGRESS,
+        PR_WATCH_INJECT,
         SUBMIT_INPUT,
         CANCEL
     }
@@ -90,11 +95,14 @@ public final class ManagedSchemaContract {
         AGENT_DEFINITION,
         AUTOMATION,
         CHANNEL_INGRESS,
+        PR_WATCH_INJECT,
         ACTION_DECISION,
         WORKSPACE_CREATE,
         EXTERNAL_STORAGE,
+        EXTERNAL_WORKSPACE,
         MEMORY,
-        SIDE_QUERY
+        SIDE_QUERY,
+        RESOURCE_ALLOCATE
     }
 
     public enum ReceiptScope {
@@ -109,10 +117,7 @@ public final class ManagedSchemaContract {
         RESOURCE,
         EXECUTION_ACK,
         RUNTIME_BINDING,
-        CSI_WORKER_ACK,
-        RECOVERY_EVIDENCE,
-        POD_DELETE_ATTEMPT,
-        POD_FINALIZER_ATTEMPT
+        RECOVERY_EVIDENCE
     }
 
     public enum ResourceOwnerKind {

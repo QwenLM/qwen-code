@@ -8,6 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { FunctionDeclaration } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ExtensionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import {
@@ -46,6 +47,29 @@ import type {
 
 function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+const DURABLE_MCP_OWNER_PREFIX = 'mcp-';
+
+/**
+ * The MCP owner named after the durable configuration ids. Every load of the
+ * same records recomputes it, so a terminal release tombstones the id the next
+ * load must re-acquire. One builder for the producer, beside the predicate
+ * that recognises it.
+ */
+export function hostedDurableMcpOwnerId(
+  sessionKey: ManagedSessionKey,
+  configurationIdsDigest: string | undefined,
+): string {
+  return `${DURABLE_MCP_OWNER_PREFIX}${digest([sessionKey, configurationIdsDigest])}`;
+}
+
+/**
+ * Recognises an id built by `hostedDurableMcpOwnerId`. Only trustworthy for
+ * ids the Harness constructed, never for a client-chosen input id.
+ */
+export function isHostedDurableMcpOwner(runtimeSessionId: string): boolean {
+  return runtimeSessionId.startsWith(DURABLE_MCP_OWNER_PREFIX);
 }
 
 export class HostedMcpRecoveryRequiredError extends Error {
@@ -114,6 +138,7 @@ export class HostedMcpSession {
   }
 
   private grantsRenewed = false;
+  private readonly revalidating = new Set<string>();
   private readonly bindings = new Map<
     string,
     { configuration: McpConfiguration; catalog: ManagedMcpCatalog }
@@ -162,7 +187,10 @@ export class HostedMcpSession {
         session.authority.sessionHeader.sessionKey,
         owners.values().next().value ??
           hookOwner ??
-          `mcp-${digest([session.authority.sessionHeader.sessionKey, previous])}`,
+          hostedDurableMcpOwnerId(
+            session.authority.sessionHeader.sessionKey,
+            previous,
+          ),
       );
   }
 
@@ -422,6 +450,7 @@ export class HostedMcpSession {
         signal?.throwIfAborted();
         if (this.configuring.has(catalog.serverId))
           throw new Error('Runtime MCP configuration is in progress.');
+        const revalidate = this.revalidating.has(configuration.configurationId);
         const response = await this.dispatch(
           {
             kind: 'mcp-discover',
@@ -430,6 +459,7 @@ export class HostedMcpSession {
             serverId: catalog.serverId,
             serverRevision: catalog.serverRevision,
             connectionGeneration: catalog.connectionGeneration,
+            ...(revalidate ? { revalidate: true as const } : {}),
             grant: this.grant(
               'mcp_configuration',
               configuration.configurationId,
@@ -447,6 +477,7 @@ export class HostedMcpSession {
           continue;
         if (response.state !== 'settled')
           throw new Error('Runtime MCP discovery failed.');
+        this.revalidating.delete(configuration.configurationId);
         if (response.catalog && digest(response.catalog) === digest(catalog))
           continue;
         if (
@@ -470,10 +501,26 @@ export class HostedMcpSession {
           ),
           signal,
         );
+        // Retired only after the replacement lands: a refused replacement
+        // leaves the row active so the next load can try again.
+        if (
+          response.error?.code === 'managed_mcp_binding_conflict' ||
+          (revalidate && response.error?.code === 'managed_mcp_retiring')
+        )
+          await this.retire(configuration.configurationId);
       }
     } finally {
       this.refreshing--;
     }
+  }
+
+  private async retire(configurationId: string): Promise<void> {
+    const current = () =>
+      this.configurations().find(
+        (entry) => entry.configurationId === configurationId,
+      )!;
+    await this.drainConfigurations([current()]);
+    await this.commitConfiguration({ ...current(), releaseState: 'released' });
   }
 
   private async initialize(signal?: AbortSignal): Promise<void> {
@@ -687,6 +734,12 @@ export class HostedMcpSession {
         signal,
       );
     } else {
+      if (configuration.catalogRef) {
+        // lookup() reports every failure as an unknown outcome; acquiring
+        // first keeps a retryable Broker refusal recognizable.
+        await this.acquireOwner(true);
+        this.revalidating.add(configuration.configurationId);
+      }
       operation = await waitForTurn(
         this.lookup(configuration.configurationId),
         signal,
@@ -1080,6 +1133,51 @@ export class HostedMcpSession {
   async close(opts: { terminal?: boolean } = {}): Promise<void> {
     await this.reconcileEffects();
     await this.closeResources(opts);
+  }
+
+  /**
+   * The idle-suspension close: leaves settled connections and the mount to
+   * the Broker's idle reclamation when it advertises parking, and drains
+   * otherwise. The sealed journal head is what marks the owner parked.
+   */
+  async suspend(): Promise<void> {
+    await this.reconcileEffects();
+    if (!(await this.park())) await this.closeResources({ terminal: false });
+  }
+
+  private async park(): Promise<boolean> {
+    const configurations = this.configurations();
+    const kept = new Map<string, McpConfiguration>();
+    for (const pin of this.selectedServers) {
+      if (pin.state !== 'enabled') continue;
+      const latest = configurations
+        .filter(
+          (entry) =>
+            entry.serverId === pin.serverId &&
+            !['failed', 'cancelled'].includes(entry.run.state),
+        )
+        .sort((a, b) => a.configRevision - b.configRevision)
+        .at(-1);
+      if (latest) kept.set(latest.configurationId, latest);
+    }
+    if (
+      kept.size === 0 ||
+      [...kept.values()].some(
+        (entry) =>
+          entry.releaseState !== 'active' ||
+          entry.run.state !== 'settled' ||
+          entry.connectionGeneration === null,
+      )
+    )
+      return false;
+    // Not the reuse form: a recovery-blocked turn may have handed the mount
+    // back, and a parked owner must hold it to be found and reclaimed.
+    await this.acquireOwner();
+    if (!this.broker.mcpParkable) return false;
+    for (const entry of configurations)
+      if (entry.releaseState !== 'released' && !kept.has(entry.configurationId))
+        await this.retire(entry.configurationId);
+    return true;
   }
 
   async reconcileEffects(): Promise<void> {

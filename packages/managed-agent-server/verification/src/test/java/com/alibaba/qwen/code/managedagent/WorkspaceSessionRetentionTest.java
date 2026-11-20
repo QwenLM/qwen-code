@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
@@ -27,6 +26,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -306,13 +306,13 @@ class WorkspaceSessionRetentionTest {
         // while the fresh key meets the same 404 every other read gets.
         String fence = UUID.randomUUID().toString();
         if (jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE tenant_key = ? AND storage_key = ?",
-                fence, JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                JdbcRuntimeBindingRepository.storageFenceKey("storage")) == 0) {
+                fence, RuntimeAdmissionFences.storageFenceKey(tenant),
+                RuntimeAdmissionFences.storageFenceKey("storage")) == 0) {
             jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
                             + " fence_operation_id) VALUES (?, ?, ?, ?, 'storage', ?)",
-                    JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
-                    JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                    JdbcRuntimeBindingRepository.storageFenceKey("storage"), tenant, fence);
+                    RuntimeAdmissionFences.storageAliasKey(tenant, "storage"),
+                    RuntimeAdmissionFences.storageFenceKey(tenant),
+                    RuntimeAdmissionFences.storageFenceKey("storage"), tenant, fence);
         }
         // Replay-first, like every other mutation path: the recorded
         // success answers its body with the Session as last visible
@@ -527,13 +527,13 @@ class WorkspaceSessionRetentionTest {
                 ObjectMapper mapper, JdbcManagedWorkspaceRegistry registry,
                 WorktreeFiles worktreeFiles, JdbcManagedSessionSkills skills, ExtensionPackages extensions,
                 @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
-                @Nullable JdbcSessionWorktreeStore worktrees, @Nullable JournalEventTransport transport,
+                @Nullable JdbcSessionWorktreeStore worktrees,
                 @Lazy @Nullable JdbcManagedExtensionRecordStore records) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry,
                     properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), worktreeFiles,
-                    skills, extensions, lifecycle, definitions, worktrees, transport, records);
+                    skills, extensions, lifecycle, definitions, worktrees, records);
         }
     }
 
