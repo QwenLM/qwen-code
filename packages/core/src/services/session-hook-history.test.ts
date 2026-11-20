@@ -15,6 +15,7 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   getSessionTranscriptIndexCacheStatsForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
+  setSessionTranscriptIndexCacheOversizedMaxBytesForTest,
   setSessionTranscriptSelectedLineReadHookForTest,
   setSessionTranscriptIndexBuildCompleteHookForTest,
 } from './session-transcript-reader.js';
@@ -266,6 +267,7 @@ describe('persisted hook turn pages', () => {
     });
     expect(read).not.toHaveBeenCalled();
     setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
     const build = vi.fn();
     setSessionTranscriptIndexBuildCompleteHookForTest(build);
     for (let i = 0; i < 2; i++) {
@@ -275,6 +277,79 @@ describe('persisted hook turn pages', () => {
       expect(build).toHaveBeenCalledTimes(i + 1);
     }
     expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(0);
+  });
+  it('accounts hook retention against the oversized budget when the entry is oversized', async () => {
+    append(event('one'));
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const anchor = await reader.readTurnIndexPage(sessionId);
+    const indexBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    expect(indexBytes).toBeGreaterThan(0);
+    setSessionTranscriptIndexCacheMaxBytesForTest(indexBytes - 1);
+    const read = vi.fn();
+    setSessionTranscriptSelectedLineReadHookForTest(read);
+    expect(
+      await reader.readTurnHooksPage(sessionId, promptId, {
+        snapshot: anchor.snapshot,
+      }),
+    ).toMatchObject({ totalExecutions: 1, coverage: 'recorded' });
+    expect(read).toHaveBeenCalled();
+    expect(
+      getSessionTranscriptIndexCacheStatsForTest().byteSize,
+    ).toBeGreaterThan(indexBytes);
+    read.mockClear();
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchor.snapshot,
+    });
+    expect(read).not.toHaveBeenCalled();
+  });
+  it('retains hook turns on a shared entry while an oversized index is cached elsewhere', async () => {
+    append(event('one'));
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const anchor = await reader.readTurnIndexPage(sessionId);
+    const sharedBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+
+    // A second session whose index lands in the oversized class once the
+    // shared budget is tightened below its estimate.
+    const otherSessionId = '660e8400-e29b-41d4-a716-446655440000';
+    const otherRecords = Array.from({ length: 20 }, (_, i) => ({
+      uuid: `o${i}`,
+      parentUuid: i ? `o${i - 1}` : null,
+      sessionId: otherSessionId,
+      cwd,
+      version: '1',
+      timestamp: new Date(1000 + i).toISOString(),
+      type: 'user',
+      promptId,
+      message: { role: 'user', parts: [{ text: `other ${i}` }] },
+    }));
+    const chats = path.join(new Storage(cwd).getProjectDir(), 'chats');
+    await fs.writeFile(
+      path.join(chats, `${otherSessionId}.jsonl`),
+      otherRecords.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    );
+    await reader.readTurnIndexPage(otherSessionId);
+    // Room for the shared entry plus one hook aggregate; the cached
+    // oversized index pushes the total far above this budget.
+    setSessionTranscriptIndexCacheMaxBytesForTest(sharedBytes + 2048);
+
+    const read = vi.fn();
+    setSessionTranscriptSelectedLineReadHookForTest(read);
+    expect(
+      await reader.readTurnHooksPage(sessionId, promptId, {
+        snapshot: anchor.snapshot,
+      }),
+    ).toMatchObject({ totalExecutions: 1, coverage: 'recorded' });
+    expect(read).toHaveBeenCalled();
+    expect(
+      getSessionTranscriptIndexCacheStatsForTest().byteSize,
+    ).toBeGreaterThan(sharedBytes + 2048);
+    read.mockClear();
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchor.snapshot,
+    });
+    expect(read).not.toHaveBeenCalled();
   });
   it('rejects a cached frozen aggregate after an equal-length rewrite', async () => {
     append(event('old'));

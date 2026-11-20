@@ -106,6 +106,9 @@ import {
   type BranchPointRecord,
 } from './branch-points.js';
 
+// `limit` counts active ChatRecords (replay uuids), not replay events: one
+// record can produce several events, and a backward page may expand past
+// `limit` to keep turn and tool-call/result boundaries intact.
 export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
@@ -598,6 +601,19 @@ interface CacheEntry {
 
 const INDEX_CACHE_MAX_ENTRIES = 32;
 const INDEX_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+// Refusing indexes above the shared budget outright made every page of a
+// large session reparse the whole JSONL (#17889): the one session that most
+// needs the cache could never enter it. Oversized indexes get their own
+// bounded budget instead, so the shared byte budget keeps capping
+// small-session retention exactly as before while a large session's index
+// survives across requests. Worst-case byte retention is the sum of both
+// budgets. Still O(snapshot) per page: an index estimated above this cap
+// (dense short records reach it well below the file-size cap), and a session
+// refused while the class is full — refusal keeps the resident indexes
+// instead of thrashing between them. The 32-entry count cap stays global, so
+// an oversized entry can take a slot a warm small index held (at most three
+// oversized entries fit the class budget).
+const INDEX_CACHE_OVERSIZED_MAX_BYTES = 256 * 1024 * 1024;
 const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const INDEX_ENTRY_BASE_BYTES = 256;
 const INDEX_SEGMENT_BYTES = 64;
@@ -727,6 +743,7 @@ function trimPromptTimeScopes(): void {
 // who can already read the key file next to the transcripts it signs.
 const cursorHmacKeys = new Map<string, Buffer>();
 let indexCacheMaxBytesForTest: number | undefined;
+let indexCacheOversizedMaxBytesForTest: number | undefined;
 let expandedPageBytesForTest: number | undefined;
 let cooperativeReadByteBudgetForTest: number | undefined;
 let cooperativeReadTimeBudgetMsForTest: number | undefined;
@@ -1822,6 +1839,10 @@ function getIndexCacheMaxBytes(): number {
   return indexCacheMaxBytesForTest ?? INDEX_CACHE_MAX_BYTES;
 }
 
+function getIndexCacheOversizedMaxBytes(): number {
+  return indexCacheOversizedMaxBytesForTest ?? INDEX_CACHE_OVERSIZED_MAX_BYTES;
+}
+
 function estimateStringBytes(value: string | null | undefined): number {
   return value ? value.length * INDEX_STRING_BYTES : 0;
 }
@@ -1919,6 +1940,20 @@ function getIndexCacheBytes(): number {
   return total;
 }
 
+// An entry's class follows the current shared budget, not the budget it was
+// admitted under, so lowering the budget reclassifies and prunes consistently.
+function getIndexCacheBytesByClass(): { shared: number; oversized: number } {
+  const sharedBudget = getIndexCacheMaxBytes();
+  let shared = 0;
+  let oversized = 0;
+  for (const entry of indexCache.values()) {
+    if (!entry.byteSize) continue;
+    if (entry.byteSize > sharedBudget) oversized += entry.byteSize;
+    else shared += entry.byteSize;
+  }
+  return { shared, oversized };
+}
+
 function pruneCache(now = Date.now()): void {
   for (const [key, entry] of indexCache) {
     if (entry.expiresAt <= now) {
@@ -1932,10 +1967,30 @@ function pruneCache(now = Date.now()): void {
     indexCache.delete(oldest);
     debugLogger.debug(`index cache evicted LRU ${oldest}`);
   }
-  while (getIndexCacheBytes() > getIndexCacheMaxBytes()) {
+  pruneCacheByteBudget(false);
+  pruneCacheByteBudget(true);
+}
+
+// Evicts least-recently-used entries of one class until that class fits its
+// own budget. The classes never evict each other by byte budget: an oversized
+// index must not push warm small-session indexes out of the shared budget
+// (#17889). The 32-entry count cap in pruneCache remains global.
+function pruneCacheByteBudget(oversizedClass: boolean): void {
+  const sharedBudget = getIndexCacheMaxBytes();
+  const budget = oversizedClass
+    ? getIndexCacheOversizedMaxBytes()
+    : sharedBudget;
+  const inClass = (byteSize: number) =>
+    byteSize > sharedBudget === oversizedClass;
+  let total = 0;
+  for (const entry of indexCache.values()) {
+    if (entry.byteSize && inClass(entry.byteSize)) total += entry.byteSize;
+  }
+  while (total > budget) {
     let evicted = false;
     for (const [key, entry] of indexCache) {
-      if (!entry.byteSize) continue;
+      if (!entry.byteSize || !inClass(entry.byteSize)) continue;
+      total -= entry.byteSize;
       indexCache.delete(key);
       debugLogger.debug(`index cache evicted by byte budget ${key}`);
       evicted = true;
@@ -2531,7 +2586,11 @@ async function getCachedIndex(params: {
   try {
     const value = await pending;
     const byteSize = estimateIndexCacheBytes(value);
-    if (byteSize > getIndexCacheMaxBytes()) {
+    const oversized = byteSize > getIndexCacheMaxBytes();
+    const classBudget = oversized
+      ? getIndexCacheOversizedMaxBytes()
+      : getIndexCacheMaxBytes();
+    if (byteSize > classBudget) {
       if (indexCache.get(key)?.pending === pending) {
         indexCache.delete(key);
       }
@@ -2544,7 +2603,11 @@ async function getCachedIndex(params: {
       debugLogger.debug(`index cache skipped stale completion ${key}`);
       return value;
     }
-    if (getIndexCacheBytes() + byteSize > getIndexCacheMaxBytes()) {
+    const classBytes = getIndexCacheBytesByClass();
+    if (
+      (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
+      classBudget
+    ) {
       indexCache.delete(key);
       debugLogger.debug(
         `index cache skipped byte-budget admission ${key} byteSize=${byteSize}`,
@@ -2751,9 +2814,15 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
   );
   if (indexCache.has(key)) return;
   const byteSize = estimateIndexCacheBytes(index);
+  const oversized = byteSize > getIndexCacheMaxBytes();
+  const classBudget = oversized
+    ? getIndexCacheOversizedMaxBytes()
+    : getIndexCacheMaxBytes();
+  const classBytes = getIndexCacheBytesByClass();
   if (
-    byteSize > getIndexCacheMaxBytes() ||
-    getIndexCacheBytes() + byteSize > getIndexCacheMaxBytes() ||
+    byteSize > classBudget ||
+    (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
+      classBudget ||
     indexCache.size >= INDEX_CACHE_MAX_ENTRIES
   ) {
     debugLogger.debug(
@@ -3481,7 +3550,18 @@ export class SessionTranscriptReader {
             (INDEX_ENTRY_BASE_BYTES + INDEX_CONTAINER_SLOT_BYTES) +
           estimateStringBytes(promptId) +
           estimateStringBytes(JSON.stringify(turn));
-        if (getIndexCacheBytes() + byteSize <= getIndexCacheMaxBytes()) {
+        // Account against the entry's own budget class: an oversized index
+        // cached elsewhere must not block hook retention on shared entries.
+        const entryOversized = (cached.byteSize ?? 0) > getIndexCacheMaxBytes();
+        const classBytes = getIndexCacheBytesByClass();
+        const classBudget = entryOversized
+          ? getIndexCacheOversizedMaxBytes()
+          : getIndexCacheMaxBytes();
+        if (
+          (entryOversized ? classBytes.oversized : classBytes.shared) +
+            byteSize <=
+          classBudget
+        ) {
           cached.hookTurns ??= new Map();
           cached.hookTurns.set(promptId, turn);
           cached.byteSize = (cached.byteSize ?? 0) + byteSize;
@@ -4586,6 +4666,7 @@ export function resetSessionTranscriptIndexCacheForTest(): void {
   indexCache.clear();
   cursorHmacKeys.clear();
   indexCacheMaxBytesForTest = undefined;
+  indexCacheOversizedMaxBytesForTest = undefined;
   expandedPageBytesForTest = undefined;
   cooperativeReadByteBudgetForTest = undefined;
   cooperativeReadTimeBudgetMsForTest = undefined;
@@ -4624,6 +4705,13 @@ export function setSessionTranscriptIndexCacheMaxBytesForTest(
   maxBytes: number,
 ): void {
   indexCacheMaxBytesForTest = maxBytes;
+  pruneCache();
+}
+
+export function setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+  maxBytes: number,
+): void {
+  indexCacheOversizedMaxBytesForTest = maxBytes;
   pruneCache();
 }
 

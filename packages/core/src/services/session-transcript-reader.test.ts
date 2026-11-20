@@ -99,6 +99,7 @@ import {
   setSessionTranscriptExpandedPageBytesForTest,
   setSessionTranscriptIndexBuildCompleteHookForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
+  setSessionTranscriptIndexCacheOversizedMaxBytesForTest,
   setSessionTranscriptSelectedLineReadHookForTest,
   SessionTranscriptCursorCodec,
   SessionTranscriptSnapshotUnavailableError,
@@ -3173,6 +3174,7 @@ describe('SessionTranscriptReader', () => {
   it('shares an oversized in-flight index without retaining its completion', async () => {
     const filePath = await writeRecords(chain('hello', 'reply'));
     setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
     const builds = countBuilds(filePath);
     const reader = newReader();
     const [first, second] = await Promise.all([
@@ -3185,7 +3187,7 @@ describe('SessionTranscriptReader', () => {
   });
 
   it('does not evict cached indexes when a new index exceeds the byte budget alone', async () => {
-    const { reader, state } = await firstPage('hello', 'reply');
+    const { filePath, reader, state } = await firstPage('hello', 'reply');
     const warmCache = getSessionTranscriptIndexCacheStatsForTest();
     expect(warmCache.entries).toBe(1);
     setSessionTranscriptIndexCacheMaxBytesForTest(warmCache.byteSize + 1);
@@ -3196,12 +3198,168 @@ describe('SessionTranscriptReader', () => {
       otherSessionId,
     );
     await reader.readPage(otherSessionId, { limit: 1 });
+    // The oversized index is retained in its own budget class; the warm
+    // shared entry keeps its place and its bytes.
     const afterOversizedRead = getSessionTranscriptIndexCacheStatsForTest();
-    expect(afterOversizedRead.entries).toBe(1);
-    expect(afterOversizedRead.byteSize).toBe(warmCache.byteSize);
+    expect(afterOversizedRead.entries).toBe(2);
+    expect(afterOversizedRead.byteSize).toBeGreaterThan(warmCache.byteSize);
 
+    const builds = countBuilds(filePath);
     const second = await readAfter(reader, state, { limit: 1 });
     expect(uuids(second.records)).toEqual(['a1']);
+    expect(builds.count).toBe(0);
+  });
+
+  it('retains an index above the shared byte budget and serves repeats without rebuilding (#17889)', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply'));
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const builds = countBuilds(filePath);
+    const reader = newReader();
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    const cached = getSessionTranscriptIndexCacheStatsForTest();
+    expect(cached.entries).toBe(1);
+    expect(cached.byteSize).toBeGreaterThan(1);
+
+    const repeat = await reader.readPage(sessionId, { limit: 1 });
+    const continuation = await readAfter(reader, first.nextCursorState!, {
+      limit: 1,
+    });
+    expect(builds.count).toBe(1);
+    expect(uuids(repeat.records)).toEqual(uuids(first.records));
+    expect(uuids(continuation.records)).toEqual(['a1']);
+  });
+
+  it('refuses a second oversized index that does not fit the oversized budget', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    await writeRecords(chain('hello', 'reply'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const firstBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+
+    const secondPath = await writeRecords(
+      linear(
+        'large-',
+        0,
+        19,
+        null,
+        (i) => `large transcript ${i}`,
+        otherSessionId,
+      ),
+      otherSessionId,
+    );
+    // Learn the second index's estimate under the default oversized budget,
+    // then cap the class so each index fits alone but not together.
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const secondBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - firstBytes;
+    expect(secondBytes).toBeGreaterThan(firstBytes);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(secondBytes + 1);
+
+    const builds = countBuilds(secondPath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(otherSessionId, { limit: 1 });
+    await reader.readPage(otherSessionId, { limit: 1 });
+    expect(builds.count).toBe(2);
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual({
+      entries: 1,
+      byteSize: firstBytes,
+    });
+  });
+
+  it('prunes oversized indexes by their own budget without touching shared ones', async () => {
+    const reader = newReader();
+    await writeRecords(chain('hello', 'reply'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const firstBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    setSessionTranscriptIndexCacheMaxBytesForTest(firstBytes);
+
+    await writeRecords(
+      linear(
+        'large-',
+        0,
+        19,
+        null,
+        (i) => `large transcript ${i}`,
+        otherSessionId,
+      ),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const both = getSessionTranscriptIndexCacheStatsForTest();
+    expect(both.entries).toBe(2);
+    const secondBytes = both.byteSize - firstBytes;
+    expect(secondBytes).toBeGreaterThan(firstBytes);
+
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual({
+      entries: 1,
+      byteSize: firstBytes,
+    });
+  });
+
+  it('invalidates a retained oversized index when the transcript is appended', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply'));
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const builds = countBuilds(filePath);
+    const reader = newReader();
+    await reader.readPage(sessionId, { limit: 1 });
+    await appendRecords(filePath, record('u2', 'a1', 'next prompt'));
+    const page = await reader.readPage(sessionId, { limit: 500 });
+    expect(builds.count).toBe(2);
+    expect(uuids(page.records)).toEqual(['u1', 'a1', 'u2']);
+  });
+
+  it('accounts admission against the entry class, not total bytes, with both classes warm', async () => {
+    const reader = newReader();
+    const thirdSessionId = '730e8400-e29b-41d4-a716-446655440000';
+    const large = (i: number) => `large transcript ${i}`;
+    await writeRecords(chain('hello', 'reply'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const sharedBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await writeRecords(
+      linear('large-', 0, 19, null, large, otherSessionId),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const secondLargePath = await writeRecords(
+      linear('large-', 0, 19, null, large, thirdSessionId),
+      thirdSessionId,
+    );
+    await reader.readPage(thirdSessionId, { limit: 1 });
+    const warm = getSessionTranscriptIndexCacheStatsForTest();
+    expect(warm.entries).toBe(3);
+
+    // Each class fits its own entries exactly; the total exceeds the
+    // oversized budget, so total-byte accounting would refuse the re-read.
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheMaxBytesForTest(sharedBytes);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      warm.byteSize - sharedBytes,
+    );
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const builds = countBuilds(secondLargePath);
+    await reader.readPage(thirdSessionId, { limit: 1 });
+    await reader.readPage(thirdSessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual(warm);
+  });
+
+  it('offers a restore-built oversized index to the cache for later pages (#17889)', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply'));
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    const cached = getSessionTranscriptIndexCacheStatsForTest();
+    expect(cached.entries).toBe(1);
+    expect(cached.byteSize).toBeGreaterThan(1);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(0);
   });
 
   it('accounts for retained projection hints in the cache byte estimate', async () => {
