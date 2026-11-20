@@ -2190,9 +2190,10 @@ describe('managed email adapter registration-identity isolation', () => {
       'outbound segments with an unknown delivery status were dropped',
     );
     // The legacy cursor (lastUid 2) is named as a skipped offline window even
-    // though this legacy also carries pending/outbound (R1-1).
+    // though this legacy also carries pending/outbound (R1-1), bounded by the
+    // pinned cursor (the fresh tip, 5).
     expect(stranded[0]).toContain(
-      'Mail received after the legacy cursor (UID 2)',
+      'Mail between the legacy cursor (UID 2) and the pinned cursor (UID 5)',
     );
     // Not adopted: the legacy pending never enters this registration's state.
     expect(state(adapter).pending).toEqual([]);
@@ -2237,9 +2238,9 @@ describe('managed email adapter registration-identity isolation', () => {
     expect(stranded).toHaveLength(1);
     expect(stranded[0]).toContain('0 pending');
     expect(stranded[0]).toContain('0 outbound');
-    expect(stranded[0]).not.toContain('does not re-fetch them');
+    expect(stranded[0]).not.toContain('re-fetch');
     expect(stranded[0]).not.toContain('unknown delivery status');
-    expect(stranded[0]).not.toContain('Mail received after the legacy cursor');
+    expect(stranded[0]).not.toContain('Mail between the legacy cursor');
     await adapter.disconnect();
   });
 
@@ -2264,7 +2265,7 @@ describe('managed email adapter registration-identity isolation', () => {
     expect(stranded[0]).toContain('0 pending');
     expect(stranded[0]).toContain('0 outbound');
     expect(stranded[0]).toContain(
-      'Mail received after the legacy cursor (UID 2)',
+      'Mail between the legacy cursor (UID 2) and the pinned cursor (UID 5)',
     );
     expect(stranded[0]).toContain('will not be admitted');
     // The skipped mail is never admitted: the fresh ledger starts at the tip.
@@ -2314,10 +2315,10 @@ describe('managed email adapter registration-identity isolation', () => {
     );
     expect(stranded).toHaveLength(1);
     expect(stranded[0]).toContain('1 pending');
-    // Roll-forward: the keyed ledger keeps its own cursor and re-fetches, so
-    // the fresh-window loss clauses must NOT fire (R1-2).
-    expect(stranded[0]).not.toContain('does not re-fetch them');
-    expect(stranded[0]).not.toContain('Mail received after the legacy cursor');
+    // Roll-forward: the keyed ledger keeps its own cursor (below the legacy
+    // cursor) and re-fetches, so the loss clauses must NOT fire (R1-2).
+    expect(stranded[0]).not.toContain('re-fetch');
+    expect(stranded[0]).not.toContain('Mail between the legacy cursor');
     await second.disconnect();
   });
 
@@ -2514,17 +2515,29 @@ describe('managed email adapter registration-identity isolation', () => {
     await expect(first.connect()).rejects.toThrow();
     const s1 = lines.filter((l) => l.includes('is stranded and not replayed'));
     expect(s1[0]).toContain('does not re-fetch them');
-    expect(s1[0]).toContain('Mail received after the legacy cursor (UID 2)');
+    expect(s1[0]).toContain(
+      'Mail between the legacy cursor (UID 2) and the pinned cursor (UID 5)',
+    );
     await first.disconnect();
-    // The failed start left a keyed ledger pinned to the tip; the retry loads
-    // it, but the legacy window is still permanently below that cursor.
+    // Mail arrives after the failed start. The retry loads the ledger pinned to
+    // 5, so the notice must bound the lost window by 5 (not claim the new mail
+    // is lost) and must not describe the loaded ledger as a fresh one.
+    append(raw('retry-after'));
     lines.length = 0;
     const second = make({}, { log: (l: string) => lines.push(l) });
     await second.connect();
     const s2 = lines.filter((l) => l.includes('is stranded and not replayed'));
     expect(s2).toHaveLength(1);
-    expect(s2[0]).toContain('does not re-fetch them');
-    expect(s2[0]).toContain('Mail received after the legacy cursor (UID 2)');
+    expect(s2[0]).toContain('so they are not re-fetched');
+    expect(s2[0]).toContain("this ledger's cursor (UID 5)");
+    expect(s2[0]).toContain(
+      'Mail between the legacy cursor (UID 2) and the pinned cursor (UID 5)',
+    );
+    expect(s2[0]).not.toContain('fresh ledger');
+    expect(s2[0]).not.toContain('UID 6');
+    // The mail above the pinned cursor is admitted by the next poll, not lost.
+    await second.tick();
+    expect(plane.events).toHaveLength(1);
     await second.disconnect();
   });
 
@@ -2650,7 +2663,7 @@ describe('managed email adapter registration-identity isolation', () => {
     await second.connect();
     const s2 = lines.filter((l) => l.includes('is stranded and not replayed'));
     expect(s2).toHaveLength(1);
-    expect(s2[0]).not.toContain('Mail received after the legacy cursor');
+    expect(s2[0]).not.toContain('Mail between the legacy cursor');
     await second.tick();
     expect(plane.events.length).toBeGreaterThan(0);
     await second.disconnect();
@@ -2740,7 +2753,7 @@ describe('managed email adapter registration-identity isolation', () => {
       l.includes('is stranded and not replayed'),
     );
     expect(stranded).toHaveLength(1);
-    expect(stranded[0]).not.toContain('Mail received after the legacy cursor');
+    expect(stranded[0]).not.toContain('Mail between the legacy cursor');
     await adapter.disconnect();
   });
 });

@@ -315,12 +315,14 @@ export class ManagedEmailAdapter {
         } else {
           if (legacy.pending > 0 && pendingStranded)
             consequence +=
-              ' Its staged-but-unadmitted claims are stranded; the fresh ledger starts at the current mailbox tip and does not re-fetch them.';
+              loaded === undefined
+                ? ' Its staged-but-unadmitted claims are stranded; the fresh ledger starts at the current mailbox tip and does not re-fetch them.'
+                : ` Its staged-but-unadmitted claims are stranded; this ledger's cursor (UID ${pinned}) is already past them, so they are not re-fetched.`;
           if (legacy.outbound > 0)
             consequence +=
               ' Its outbound segments with an unknown delivery status were dropped.';
           if (offlineSkipped)
-            consequence += ` Mail received after the legacy cursor (UID ${cursor}) and before this start was never listed and will not be admitted.`;
+            consequence += ` Mail between the legacy cursor (UID ${cursor}) and the pinned cursor (UID ${pinned}) was never listed and will not be admitted.`;
         }
         this.log(
           `Managed email upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
@@ -341,8 +343,7 @@ export class ManagedEmailAdapter {
       // failed start above leaves it untouched for a rollback to recover; the
       // notice then simply repeats on the retry. An UNREADABLE legacy is kept in
       // place, not archived: the notice told the operator to repair it at that
-      // path, and archiving would invalidate the instruction and turn the corrupt
-      // file into a permanent unreadable generation source no start can clear.
+      // path, and archiving would invalidate the instruction it printed.
       if (legacy && legacy.readable) {
         const archived = this.store.archiveStrandedLegacy();
         // The notice above names the legacy path, which this rename moves; name
