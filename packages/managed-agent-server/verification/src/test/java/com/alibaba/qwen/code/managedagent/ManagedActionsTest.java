@@ -6,7 +6,6 @@ import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
@@ -14,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
@@ -23,9 +23,12 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegist
 import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedActionService;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
@@ -60,7 +63,9 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -73,9 +78,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.Mockito.RETURNS_DEFAULTS;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -101,6 +110,7 @@ class ManagedActionsTest {
     @Autowired private JdbcManagedActionStore actions;
     @Autowired private AgentStateStore sessions;
     @Autowired private ManagedAgentStore store;
+    @Autowired private ManagedAgentService readableSessions;
 
     @TestBean(methodName = "createHarness")
     private HarnessConnector harness;
@@ -130,13 +140,13 @@ class ManagedActionsTest {
                 com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher publisher,
                 WorktreeFiles worktreeFiles, JdbcManagedSessionSkills skills, ExtensionPackages extensions,
                 @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
-                @Nullable JdbcSessionWorktreeStore worktrees, @Nullable JournalEventTransport transport,
+                @Nullable JdbcSessionWorktreeStore worktrees,
                 @Lazy @Nullable JdbcManagedExtensionRecordStore records) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, clock, publisher, registry,
                     properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), worktreeFiles,
-                    skills, extensions, lifecycle, definitions, worktrees, transport, records);
+                    skills, extensions, lifecycle, definitions, worktrees, records);
         }
     }
 
@@ -281,6 +291,134 @@ class ManagedActionsTest {
                         .header("Idempotency-Key", "wrong-owner").contentType(MediaType.APPLICATION_JSON)
                         .content(response("allow")))
                 .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void pagesMultipleChildActionsAcrossSessionAndActionTies() throws Exception {
+        String tenant = tenant();
+        String root = session(tenant);
+        List<String> children = List.of(childSession(tenant, root), childSession(tenant, root))
+                .stream().sorted(Comparator.reverseOrder()).toList();
+        String lowId = "command_approval_" + "a".repeat(48);
+        String highId = "command_approval_" + "b".repeat(48);
+        List<String> expected = new ArrayList<>();
+        for (String child : children) {
+            ActionJournal low = new ActionJournal(journals, tenant, child, 100, 9_007_199_254_740_991L);
+            low.id = lowId;
+            low.options.put("requestId", low.id);
+            low.change("requested", null);
+            ActionJournal high = new ActionJournal(low, 100, 9_007_199_254_740_991L);
+            high.id = highId;
+            high.options.put("requestId", high.id);
+            high.change("requested", null);
+            expected.add(child + ":" + highId);
+            expected.add(child + ":" + lowId);
+        }
+        ActionJournal own = action(tenant, root, 90, 9_007_199_254_740_991L);
+        expected.add(root + ":" + own.id);
+        for (int limit = 1; limit <= expected.size(); limit++) {
+            List<String> actual = new ArrayList<>();
+            String cursor = null;
+            for (int offset = 0; offset < expected.size(); offset += limit) {
+                var request = auth(get("/v1/agents/sessions/" + root + "/actions")
+                        .param("include_children", "true").param("limit", Integer.toString(limit)), tenant, "owner");
+                if (cursor != null) {
+                    request.param("cursor", cursor);
+                }
+                JsonNode page = read(request);
+                assertThat(page.path("data")).hasSize(Math.min(limit, expected.size() - offset));
+                page.path("data").forEach(row -> actual.add(row.path("session_id").asText()
+                        + ":" + row.path("id").asText()));
+                boolean more = offset + limit < expected.size();
+                assertThat(page.path("has_more").asBoolean()).isEqualTo(more);
+                cursor = page.path("next_cursor").asText(null);
+                if (more) {
+                    assertThat(cursor).isNotBlank();
+                } else {
+                    assertThat(cursor).isNull();
+                }
+            }
+            assertThat(actual).as("limit %d", limit).containsExactlyElementsOf(expected);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {2, 4, 5})
+    void authorizesEachDistinctChildOncePerRequestAndRejectsRevokedAccess(int limit) throws Exception {
+        String tenant = tenant();
+        String root = session(tenant);
+        String first = childSession(tenant, root);
+        String second = childSession(tenant, root);
+        for (String child : List.of(first, second)) {
+            long created = child.equals(first) ? 200 : 100;
+            ActionJournal one = action(tenant, child, created, 9_007_199_254_740_991L);
+            new ActionJournal(one, created, 9_007_199_254_740_991L).change("requested", null);
+        }
+        action(tenant, root, 50, 9_007_199_254_740_991L);
+        var checked = mock(ManagedAgentService.class, delegatesTo(readableSessions));
+        var service = new ManagedActionService(checked, actions, mock(ManagedExtensionRecordStore.class),
+                mock(ActionResponseCoordinator.class), new RequestDigests(), Clock.systemUTC(), json);
+        List<String> expected = List.of(first, first, second, second, root).subList(0, limit);
+        var publicPage = service.listPublic(tenant, "owner", root, null, limit, true);
+        assertThat(publicPage.data()).extracting(row -> row.path("session_id").asText())
+                .containsExactlyElementsOf(expected);
+        assertThat(publicPage.hasMore()).isEqualTo(limit < 5);
+        for (String session : List.of(root, first, second)) {
+            verify(checked).requireReadableSession(tenant, "owner", session);
+        }
+        var webPage = service.listWebShell(tenant, "owner", root, null, limit, true);
+        assertThat(webPage.data()).extracting(row -> row.path("sessionId").asText())
+                .containsExactlyElementsOf(expected);
+        assertThat(webPage.hasMore()).isEqualTo(limit < 5);
+        for (String session : List.of(root, first, second)) {
+            verify(checked, times(2)).requireReadableSession(tenant, "owner", session);
+        }
+        assertThat(jdbc.update("UPDATE ma_session SET owner_only = TRUE, owner_actor_key = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                "other".getBytes(StandardCharsets.UTF_8), tenant, second)).isEqualTo(1);
+        // At limit 2 the unreadable child is the lookahead row, not a returned Action.
+        assertThatThrownBy(() -> service.listPublic(tenant, "owner", root, null, limit, true))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(404);
+                    assertThat(error.getCode()).isEqualTo("session_not_found");
+                });
+        for (String session : List.of(root, first, second)) {
+            verify(checked, times(3)).requireReadableSession(tenant, "owner", session);
+        }
+        verifyNoMoreInteractions(checked);
+        mvc.perform(auth(get("/v1/agents/sessions/" + root + "/actions")
+                        .param("include_children", "true").param("limit", Integer.toString(limit)), tenant, "owner"))
+                .andExpect(status().isNotFound()).andExpect(jsonPath("$.error.code").value("session_not_found"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void childAggregationDoesNotJoinActionsFromAnotherScope(boolean childRow) throws Exception {
+        String tenant = tenant();
+        String root = session(tenant);
+        String child = childSession(tenant, root);
+        String other = session(tenant);
+        ActionJournal own = action(tenant, root, 100, 9_007_199_254_740_991L);
+        ActionJournal nested = action(tenant, child, 200, 9_007_199_254_740_991L);
+        ActionJournal foreign = action(tenant, other, 300, 9_007_199_254_740_991L);
+        for (String session : List.of(root, child, other)) {
+            assertThat(jdbc.queryForObject("SELECT session_scope_key FROM ma_session"
+                            + " WHERE tenant_id = ? AND session_id = ?", String.class, tenant, session))
+                    .isEqualTo(ManagedSessionStore.sessionScopeKey(tenant, session));
+        }
+        // Keep the foreign writer's real scope; only corrupt its denormalized Session identity.
+        assertThat(jdbc.update("UPDATE ma_session_record SET session_id = ? WHERE session_scope_key = ?"
+                        + " AND record_kind = 'ACTION' AND action_id = ?", childRow ? child : root,
+                ManagedSessionStore.sessionScopeKey(tenant, other), foreign.id)).isEqualTo(1);
+        assertThat(actions.listWithChildren(tenant, root, null, null, null, 10))
+                .extracting(row -> row.sessionId() + ":" + row.action().id())
+                .containsExactly(child + ":" + nested.id, root + ":" + own.id);
+        JsonNode page = read(auth(get("/v1/agents/sessions/" + root + "/actions")
+                .param("include_children", "true"), tenant, "owner"));
+        assertThat(page.path("data")).extracting(row -> row.path("session_id").asText()
+                        + ":" + row.path("id").asText())
+                .containsExactly(child + ":" + nested.id, root + ":" + own.id);
+        assertThat(page.path("has_more").asBoolean()).isFalse();
     }
 
     @ParameterizedTest
@@ -1390,6 +1528,17 @@ class ManagedActionsTest {
         ActionJournal journal = new ActionJournal(journals, tenant, session, created, expiry);
         journal.change("requested", null);
         return journal;
+    }
+
+    private String childSession(String tenant, String root) throws Exception {
+        String child = session(tenant);
+        jdbc.update("UPDATE ma_session SET public_child_agents_version = 1 WHERE tenant_id = ? AND session_id = ?",
+                tenant, root);
+        jdbc.update("UPDATE ma_session SET public_child_agents_version = 1, parent_session_id = ?,"
+                        + " root_session_id = ?, parent_child_run_id = ?, child_depth = 1"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                root, root, "run-" + child, tenant, child);
+        return child;
     }
 
     private String session(String tenant) throws Exception {

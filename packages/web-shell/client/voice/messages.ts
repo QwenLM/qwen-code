@@ -104,3 +104,59 @@ export const VOICE_MESSAGES_ZH: Record<string, VoiceMessage> = {
   'voice.closeReason.voiceError': '语音转写失败',
   'voice.closeReason.unknown': '未知原因',
 };
+
+export const VOICE_MESSAGES_RU: Record<string, VoiceMessage> = {
+  'voice.noSpeech': 'Речь не обнаружена.',
+  'voice.stopDictation': 'Остановить диктовку',
+  'voice.transcribing': 'Транскрибирование…',
+  'voice.starting': 'Запуск…',
+  'voice.errorRetry': (v) =>
+    `Ошибка голоса — нажмите, чтобы повторить${v?.message ? `: ${v.message}` : ''}`,
+  'voice.noSpeechRetry': 'Речь не обнаружена — нажмите, чтобы повторить',
+  'voice.startDictation': 'Начать голосовую диктовку',
+  'voice.error': 'Ошибка голоса',
+  'voice.dismissFeedback': 'Скрыть голосовое сообщение',
+  'voice.error.noModel':
+    'Для этой рабочей области не настроена голосовая модель.',
+  'voice.error.transcription':
+    'Голосовая транскрипция не удалась. Попробуйте снова.',
+  'voice.error.tooManySessions':
+    'Слишком много голосовых сессий; повторите чуть позже.',
+  'voice.error.microphoneBlocked':
+    'Микрофон заблокирован. Нажмите значок камеры или замка в адресной строке, чтобы разрешить микрофон для этого сайта, и включите браузер в «Системные настройки → Конфиденциальность → Микрофон», затем повторите.',
+  'voice.error.noMicrophone': 'Микрофон не найден. Подключите его и повторите.',
+  'voice.error.microphoneInUse':
+    'Микрофон занят другим приложением. Закройте его и повторите.',
+  'voice.error.unsupportedBrowser':
+    'Захват с микрофона в этом браузере не поддерживается.',
+  'voice.error.insecureContext':
+    'Микрофону нужен защищённый контекст — откройте Web Shell через localhost/127.0.0.1 или https.',
+  'voice.error.sampleRate': (v) =>
+    `Частота аудио браузера ${v?.actual} Гц, требуется ${v?.required} Гц.`,
+  'voice.error.startTimeout':
+    'Захват голоса превысил время ожидания при запуске.',
+  'voice.error.bufferLimit':
+    'Достигнут предел буфера захвата голоса при запуске.',
+  'voice.error.noResponse':
+    'Нет ответа от сервера. Проверьте, что голосовая модель запущена.',
+  'voice.error.capacityUnavailable':
+    'Голосовая ёмкость временно недоступна. Повторите чуть позже.',
+  'voice.error.connectionClosed': (v) =>
+    `Голосовое соединение закрыто (code=${v?.code}, reason=${v?.reason}).`,
+  'voice.error.transcriptionTimeout': 'Время транскрипции истекло.',
+  'voice.error.finalize': 'Не удалось завершить голосовую транскрипцию.',
+  'voice.error.sessionTimeLimit': 'Голосовая сессия превысила лимит времени.',
+  'voice.error.recordingTooLong':
+    'Запись слишком длинная для транскрипции (макс. ~5 минут).',
+  'voice.error.queueLimit': 'Очередь голосового аудио превысила лимит памяти.',
+  'voice.closeReason.none': 'причина не указана',
+  'voice.closeReason.busy': 'голосовой сервис занят',
+  'voice.closeReason.connectionLimit': 'достигнут лимит соединений',
+  'voice.closeReason.serverShutdown': 'сервер завершает работу',
+  'voice.closeReason.workspaceRemoved': 'рабочая область удалена',
+  'voice.closeReason.trustChanged':
+    'изменены настройки доверия рабочей области',
+  'voice.closeReason.runtimeChanged': 'runtime рабочей области перенастроен',
+  'voice.closeReason.voiceError': 'голосовая транскрипция не удалась',
+  'voice.closeReason.unknown': 'неизвестная причина',
+};

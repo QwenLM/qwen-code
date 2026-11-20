@@ -123,6 +123,23 @@
   outline-offset: -1px;
 }
 
+.select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: inherit;
+}
+
+.select:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: -1px;
+}
+
 .formHint {
   font-size: 12px;
   line-height: 1.5;
@@ -247,6 +264,16 @@
   cursor: default;
 }
 
+/* Navigation, not a control: the session-jump icon wears the interactive
+   blue so it reads apart from the grey edit/pause/clear actions. Declared
+   after the `.iconAction:hover` rules so the blue survives hover at equal
+   specificity. */
+.sessionAction,
+.sessionAction:hover:not(:disabled),
+.sessionAction:focus-visible:not(:disabled) {
+  color: var(--agent-blue-500);
+}
+
 .cardReason {
   font-size: 12px;
   line-height: 1.5;
@@ -282,11 +309,94 @@
   padding: 3px 10px;
 }
 
+/* Lifecycle tones from the shared execution-status palette (App.module.css),
+   the same mapping the cockpit header and workflow inspector use. */
+.statusPill[data-status='running'] {
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
+}
+
+.statusPill[data-status='attention'] {
+  color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
+}
+
+.statusPill[data-status='done'] {
+  color: var(--status-done-fg);
+  background: var(--status-done-bg);
+}
+
+/* ── Budget progress ─────────────────────────────────────────── */
+
+.budgets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.budgetRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Natural width, not a fixed column: the labels are localized and a fixed
+   basis would clip the longer ru strings. */
+.budgetLabel {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.budgetTrack {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--muted);
+  overflow: hidden;
+}
+
+.budgetFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--status-running-fg);
+}
+
+/* The active-time ratio advances on the one-second tick, so an unguarded
+   transition would replay a 300ms animation every second for users who
+   asked for reduced motion. Same guard as the sibling progress fills in
+   PlanExecutionView / SessionWorkflowInspector. */
+@media (prefers-reduced-motion: no-preference) {
+  .budgetFill {
+    transition: width 0.3s ease;
+  }
+}
+
+.budgetFill[data-status='attention'] {
+  background: var(--status-attention-fg);
+}
+
+.budgetFill[data-status='done'] {
+  background: var(--status-done-fg);
+}
+
+.budgetValue {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
 .meta {
   font-size: 12px;
   color: var(--muted-foreground);
 }
 
+/* A link, not a label: interactive blue plus the message and arrow icons
+   make "jump to this session" readable at a glance — grey text alone was
+   indistinguishable from the surrounding meta. */
 .sessionLink {
   appearance: none;
   background: transparent;
@@ -295,16 +405,34 @@
   margin-left: auto;
   font: inherit;
   font-size: 12px;
-  color: var(--muted-foreground);
+  font-weight: 500;
+  color: var(--agent-blue-500);
   cursor: pointer;
   max-width: 40%;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 4px;
+}
+
+.sessionLink > svg {
+  flex: 0 0 auto;
+}
+
+.sessionLinkText {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.sessionLink:hover,
-.sessionLink:focus-visible {
-  color: var(--foreground);
+.sessionLink:hover .sessionLinkText,
+.sessionLink:focus-visible .sessionLinkText {
   text-decoration: underline;
+}
+
+.sessionLink:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }

@@ -12,8 +12,11 @@ import {
   startSpeculation,
   type SpeculationState,
 } from './speculation.js';
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
+import * as agentLoop from '../core/agent-loop.js';
+import * as agentLoopRollout from '../config/agent-loop-rollout.js';
+import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import type { CacheSafeParams } from '../agents/forkedAgent.js';
 import type { LlmClient } from '../core/client.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
@@ -24,6 +27,7 @@ import {
   fnResponse,
   modelText,
 } from '../test-utils/model-fixtures.js';
+import { OverlayFs } from './overlayFs.js';
 
 const forkedAgentMocks = vi.hoisted(() => ({
   getCacheSafeParams: vi.fn<
@@ -57,6 +61,10 @@ vi.mock('../agents/forkedAgent.js', () => ({
   createForkedChat: forkedAgentMocks.createForkedChat.mockImplementation(
     () => ({
       sendMessageStream: forkedAgentMocks.sendMessageStream,
+      // The Turn's error path calls this before yielding an Error event; a
+      // real LlmChat has it. Without it the error path throws a TypeError and
+      // masks whether throwErrors is set.
+      maybeIncludeSchemaDepthContext: async () => {},
     }),
   ),
   runForkedAgent: forkedAgentMocks.runForkedAgent,
@@ -72,6 +80,23 @@ vi.mock('../agents/forkedAgent.js', () => ({
 afterEach(() => {
   vi.clearAllMocks();
 });
+
+// A response chunk as a real GenerateContentResponse exposes it: the
+// functionCalls getter is derived from the candidate parts, so a fixture
+// cannot disagree with itself. The Turn reads functionCalls; the raw-chunk
+// round reads the parts.
+function responseChunk(parts: Part[]) {
+  const functionCalls = parts
+    .filter((p) => p.functionCall)
+    .map((p) => p.functionCall!);
+  return {
+    type: 'chunk',
+    value: {
+      candidates: [{ content: { parts } }],
+      ...(functionCalls.length > 0 ? { functionCalls } : {}),
+    },
+  };
+}
 
 describe('startSpeculation', () => {
   it('rejects tool sandbox sessions before starting host speculation', async () => {
@@ -96,6 +121,75 @@ describe('startSpeculation', () => {
 
     expect(forkedAgentMocks.createForkedChat).not.toHaveBeenCalled();
     expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
+  });
+
+  it('does not log the entry marker when the speculation never starts', async () => {
+    // The marker must sit after the early returns: a sandboxed, cache-less or
+    // pre-aborted speculation never runs a round, so it must not log a path.
+    const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+    const sandboxed = {
+      getShellExecutionSandbox: () => ({}),
+    } as unknown as Config;
+    await expect(startSpeculation(sandboxed, 'write a.ts')).rejects.toThrow(
+      'unavailable with tools.executionSandbox',
+    );
+    const cacheless = {
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+    } as unknown as Config;
+    forkedAgentMocks.getCacheSafeParams.mockReturnValueOnce(null);
+    await expect(startSpeculation(cacheless, 'read a.ts')).rejects.toThrow(
+      'CacheSafeParams not available for speculation',
+    );
+    // The third early return: a parent signal already aborted at entry resolves
+    // to an aborted state without running a round, so it must not log either.
+    forkedAgentMocks.getCacheSafeParams.mockReturnValueOnce(
+      {} as CacheSafeParams,
+    );
+    await expect(
+      startSpeculation(cacheless, 'read a.ts', AbortSignal.abort()),
+    ).resolves.toMatchObject({ status: 'aborted' });
+    expect(entrySpy).not.toHaveBeenCalled();
+    entrySpy.mockRestore();
+  });
+
+  it('logs the speculation loop entry marker', async () => {
+    const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+    const toolRegistry = {
+      isPermissionDeferred: vi.fn().mockReturnValue(true),
+      ensureTool: vi.fn(),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [
+            {
+              content: {
+                parts: [fnCall('read_file', { path: '.env' }, 'call-marker')],
+              },
+            },
+          ],
+        },
+      };
+    });
+
+    const state = await startSpeculation(config, 'read .env');
+    await vi.waitFor(() => expect(state.status).toBe('boundary'));
+
+    expect(entrySpy).toHaveBeenCalledWith(config, 'speculation');
+    entrySpy.mockRestore();
+    await abortSpeculation(state);
   });
 
   it('stops before executing a permission-deferred tool', async () => {
@@ -934,5 +1028,512 @@ describe('acceptSpeculation', () => {
     // The forked chat already reported these results, so the main chat must
     // not emit their injection events a second time.
     expect(markToolResultsInjected).toHaveBeenCalledWith(result.messages);
+  });
+});
+
+describe('speculation model round on the shared agent loop', () => {
+  // Each scenario is the model's rounds as raw chunk parts; the mock exposes
+  // them as a real response does (functionCalls derived from the parts).
+  async function runScenario(
+    unified: boolean,
+    rounds: Array<{ parts: Part[] }>,
+  ) {
+    forkedAgentMocks.sendMessageStream.mockReset();
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'file contents',
+      returnDisplay: 'file contents',
+    });
+    const toolRegistry = {
+      isPermissionDeferred: vi.fn().mockReturnValue(false),
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({
+          params: { path: 'a.ts' },
+          execute,
+        }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      isUnifiedAgentLoopEnabled: vi.fn().mockReturnValue(unified),
+    } as unknown as Config;
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      const round = forkedAgentMocks.sendMessageStream.mock.calls.length;
+      const chunk = rounds[round - 1];
+      if (!chunk) return;
+      yield responseChunk(chunk.parts);
+    });
+
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+    const snapshot = {
+      messages: state.messages,
+      status: state.status,
+      toolUseCount: state.toolUseCount,
+      executeCalls: execute.mock.calls.length,
+    };
+    await abortSpeculation(state);
+    return snapshot;
+  }
+
+  const call = (id: string) => ({
+    parts: [fnCall('read_file', { path: 'a.ts' }, id)],
+  });
+  const text = (value: string) => ({ parts: [{ text: value }] });
+
+  it.each([
+    {
+      name: 'text-only completion',
+      rounds: [text('done')],
+      expectedExecuteCalls: 0,
+    },
+    {
+      name: 'one tool call then completion',
+      rounds: [call('call-parity'), text('done')],
+      expectedExecuteCalls: 1,
+    },
+    {
+      name: 'two tool calls keep their order',
+      rounds: [
+        {
+          parts: [
+            fnCall('read_file', { path: 'a.ts' }, 'call-1'),
+            fnCall('read_file', { path: 'b.ts' }, 'call-2'),
+          ],
+        },
+        text('done'),
+      ],
+      expectedExecuteCalls: 2,
+    },
+    {
+      name: 'a thought part is dropped',
+      rounds: [
+        { parts: [{ text: 'reasoning', thought: true }, { text: 'done' }] },
+      ],
+      expectedExecuteCalls: 0,
+    },
+  ])(
+    'matches the raw-chunk round: $name',
+    async ({ rounds, expectedExecuteCalls }) => {
+      const off = await runScenario(false, rounds);
+      const on = await runScenario(true, rounds);
+      expect(off.status).toBe('completed');
+      // Absolute anchors: parity alone would also pass if both arms ran nothing.
+      expect(off.executeCalls).toBe(expectedExecuteCalls);
+      expect(off.toolUseCount).toBe(expectedExecuteCalls);
+      expect(on.executeCalls).toBe(off.executeCalls);
+      expect(on.toolUseCount).toBe(off.toolUseCount);
+      expect(on.messages).toEqual(off.messages);
+    },
+  );
+
+  it('runs the shared round only with the setting on (branch marker)', async () => {
+    const spy = vi.spyOn(agentLoop, 'runModelRound');
+    try {
+      await runScenario(true, [text('done')]);
+      expect(spy).toHaveBeenCalled();
+      spy.mockClear();
+      await runScenario(false, [text('done')]);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('speculation partial-batch boundary hand-back', () => {
+  // A batch that bails mid-way keeps the executed responses and strips the
+  // unexecuted calls from the model message by order, not by name. Both arms
+  // must hand back the same partial history (the coverage item #17324 names).
+  type Scenario = {
+    parts: Part[];
+    isPermissionDeferred?: (name: string) => boolean;
+    guard?: ToolInvocationGuard;
+  };
+
+  async function runPartialBatch(unified: boolean, scenario: Scenario) {
+    forkedAgentMocks.sendMessageStream.mockReset();
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'file contents',
+      returnDisplay: 'file contents',
+    });
+    const toolRegistry = {
+      isPermissionDeferred: vi.fn(
+        scenario.isPermissionDeferred ?? (() => false),
+      ),
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({ params: { path: 'a.ts' }, execute }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      isUnifiedAgentLoopEnabled: vi.fn().mockReturnValue(unified),
+      getToolInvocationGuard: vi.fn().mockReturnValue(scenario.guard),
+    } as unknown as Config;
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield responseChunk(scenario.parts);
+      }
+    });
+
+    const sharedRound = vi.spyOn(agentLoop, 'runModelRound');
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() => expect(state.status).toBe('boundary'));
+    const snapshot = {
+      messages: state.messages,
+      boundaryDetail: state.boundary?.detail,
+      executeCalls: execute.mock.calls.length,
+      sharedRoundCalls: sharedRound.mock.calls.length,
+    };
+    sharedRound.mockRestore();
+    await abortSpeculation(state);
+    return snapshot;
+  }
+
+  function expectPartialHandBack(
+    snapshot: Awaited<ReturnType<typeof runPartialBatch>>,
+    kept: { callId: string; text?: string },
+  ) {
+    expect(snapshot.boundaryDetail).toBe('speculation_boundary');
+    expect(snapshot.executeCalls).toBe(1);
+    expect(snapshot.messages).toHaveLength(3);
+    const modelMessage = snapshot.messages[1];
+    expect(modelMessage.role).toBe('model');
+    const keptCalls = (modelMessage.parts ?? []).filter((p) => p.functionCall);
+    expect(keptCalls).toHaveLength(1);
+    expect(keptCalls[0].functionCall?.id).toBe(kept.callId);
+    const keptTexts = (modelMessage.parts ?? [])
+      .filter((p) => p.text !== undefined)
+      .map((p) => p.text);
+    expect(keptTexts).toEqual(kept.text === undefined ? [] : [kept.text]);
+    const resultMessage = snapshot.messages[2];
+    expect(resultMessage.role).toBe('user');
+    expect(resultMessage.parts).toHaveLength(1);
+    expect(resultMessage.parts?.[0].functionResponse).toMatchObject({
+      id: kept.callId,
+      name: 'read_file',
+    });
+  }
+
+  const scenarios: Array<{
+    name: string;
+    make: () => Scenario;
+    kept: { callId: string; text?: string };
+  }> = [
+    {
+      name: 'a permission-deferred second call bails after the first executes',
+      make: () => ({
+        parts: [
+          { text: 'Reading both files.' },
+          fnCall('read_file', { path: 'a.ts' }, 'call-kept'),
+          fnCall('write_file', { path: 'b.ts' }, 'call-stripped'),
+        ],
+        isPermissionDeferred: (name) => name === 'write_file',
+      }),
+      kept: { callId: 'call-kept', text: 'Reading both files.' },
+    },
+    {
+      name: 'a guard denial on the second same-named call keeps the first by order',
+      make: () => ({
+        parts: [
+          fnCall('read_file', { path: 'a.ts' }, 'call-dup-1'),
+          fnCall('read_file', { path: 'b.ts' }, 'call-dup-2'),
+        ],
+        guard: vi
+          .fn<ToolInvocationGuard>()
+          .mockResolvedValueOnce({ allowed: true })
+          .mockResolvedValue({
+            allowed: false,
+            reason: 'host policy denied',
+          }),
+      }),
+      kept: { callId: 'call-dup-1' },
+    },
+  ];
+
+  it.each(scenarios)(
+    'hands back the partial batch: $name',
+    async ({ make, kept }) => {
+      const off = await runPartialBatch(false, make());
+      expect(off.sharedRoundCalls).toBe(0);
+      expectPartialHandBack(off, kept);
+
+      const on = await runPartialBatch(true, make());
+      expect(on.sharedRoundCalls).toBeGreaterThan(0);
+      expectPartialHandBack(on, kept);
+      expect(on.messages).toEqual(off.messages);
+    },
+  );
+});
+
+describe('speculation shared-round event semantics', () => {
+  const chunk = responseChunk;
+
+  async function runEventRound(
+    unified: boolean,
+    events: Array<Record<string, unknown>>,
+    throws?: Error,
+  ) {
+    forkedAgentMocks.sendMessageStream.mockReset();
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'file contents',
+      returnDisplay: 'file contents',
+    });
+    const toolRegistry = {
+      isPermissionDeferred: vi.fn().mockReturnValue(false),
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({ params: { path: 'a.ts' }, execute }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      isUnifiedAgentLoopEnabled: vi.fn().mockReturnValue(unified),
+    } as unknown as Config;
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length !== 1) return;
+      if (throws) throw throws;
+      for (const event of events) yield event;
+    });
+
+    const cleanupSpy = vi.spyOn(OverlayFs.prototype, 'cleanup');
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() =>
+      expect(['completed', 'aborted', 'boundary']).toContain(state.status),
+    );
+    const snapshot = {
+      messages: state.messages,
+      status: state.status,
+      toolUseCount: state.toolUseCount,
+      requests: forkedAgentMocks.sendMessageStream.mock.calls.map((call) => ({
+        message: call[1]?.message as Part[] | undefined,
+        abortSignal: call[1]?.config?.abortSignal as AbortSignal | undefined,
+        promptId: call[2] as string | undefined,
+      })),
+      stateSignal: state.abortController?.signal,
+      // Captured before abortSpeculation, which cleans up unconditionally.
+      overlayCleanups: cleanupSpy.mock.calls.length,
+    };
+    cleanupSpy.mockRestore();
+    await abortSpeculation(state);
+    return snapshot;
+  }
+
+  const modelTexts = (messages: Content[]) =>
+    (messages.find((m) => m.role === 'model')?.parts ?? [])
+      .filter((p) => p.text !== undefined)
+      .map((p) => p.text);
+
+  it('a continuation retry keeps the text it appends to', async () => {
+    const on = await runEventRound(true, [
+      chunk([{ text: 'The answer is ' }]),
+      { type: 'retry', isContinuation: true },
+      chunk([{ text: '42.' }]),
+    ]);
+    expect(on.status).toBe('completed');
+    expect(modelTexts(on.messages)).toEqual(['The answer is ', '42.']);
+  });
+
+  it.each([
+    { name: 'a fresh retry', event: { type: 'retry', isContinuation: false } },
+    { name: 'an un-flagged retry', event: { type: 'retry' } },
+    {
+      name: 'a model fallback',
+      event: {
+        type: 'model_fallback',
+        info: {
+          fromModel: 'm1',
+          toModel: 'm2',
+          statusCode: 429,
+          fallbackIndex: 1,
+        },
+      },
+    },
+  ])(
+    '$name drops the abandoned text on the shared round, keeps it on the raw round',
+    async ({ event }) => {
+      const events = [
+        chunk([{ text: 'abandoned' }]),
+        event,
+        chunk([{ text: 'kept' }]),
+      ];
+      const on = await runEventRound(true, events);
+      expect(on.status).toBe('completed');
+      expect(modelTexts(on.messages)).toEqual(['kept']);
+      // The raw round skips non-chunk events, so it keeps both halves.
+      const off = await runEventRound(false, events);
+      expect(off.status).toBe('completed');
+      expect(modelTexts(off.messages)).toEqual(['abandoned', 'kept']);
+    },
+  );
+
+  it('a failed request aborts and cleans the overlay on both paths', async () => {
+    const off = await runEventRound(
+      false,
+      [],
+      new Error('429 quota exhausted'),
+    );
+    const on = await runEventRound(true, [], new Error('429 quota exhausted'));
+    expect(off.status).toBe('aborted');
+    expect(on.status).toBe('aborted');
+    // The catch's cleanup ran before abortSpeculation's unconditional one.
+    expect(off.overlayCleanups).toBeGreaterThanOrEqual(1);
+    expect(on.overlayCleanups).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a name-less function call is dropped, not sent to the gate', async () => {
+    const off = await runEventRound(false, [
+      chunk([{ functionCall: { args: { path: 'a.ts' } } }]),
+    ]);
+    const on = await runEventRound(true, [
+      chunk([{ functionCall: { args: { path: 'a.ts' } } }]),
+    ]);
+    expect(off.status).toBe('completed');
+    expect(on.status).toBe('completed');
+    expect(on.toolUseCount).toBe(0);
+  });
+
+  const modelCalls = (messages: Content[]) =>
+    (messages.find((m) => m.role === 'model')?.parts ?? [])
+      .filter((p) => p.functionCall)
+      .map((p) => p.functionCall!);
+  const responseIds = (messages: Content[]) =>
+    messages
+      .filter((m) => m.role === 'user')
+      .flatMap((m) => m.parts ?? [])
+      .filter((p) => p.functionResponse)
+      .map((p) => p.functionResponse!.id);
+
+  it('the rounds send the suggestion then the tool results, under the speculation prompt id', async () => {
+    const off = await runEventRound(false, [
+      chunk([fnCall('read_file', { path: 'a.ts' }, 'call-req')]),
+    ]);
+    const on = await runEventRound(true, [
+      chunk([fnCall('read_file', { path: 'a.ts' }, 'call-req')]),
+    ]);
+    for (const arm of [off, on]) {
+      expect(arm.requests.length).toBeGreaterThanOrEqual(2);
+      expect(arm.requests[0].promptId).toBe('speculation');
+      expect(arm.requests[1].promptId).toBe('speculation');
+      // Round 1 carries the suggestion's parts.
+      expect(arm.requests[0].message?.some((p) => p.text === 'read a.ts')).toBe(
+        true,
+      );
+      // Round 2 carries the call's functionResponse, not the original prompt.
+      expect(arm.requests[1].message?.some((p) => p.functionResponse)).toBe(
+        true,
+      );
+      expect(arm.requests[1].message?.some((p) => p.text === 'read a.ts')).toBe(
+        false,
+      );
+    }
+  });
+
+  it('the shared round sends the run abort signal in the request', async () => {
+    const on = await runEventRound(true, [chunk([{ text: 'done' }])]);
+    expect(on.requests[0].abortSignal).toBe(on.stateSignal);
+    // abortSpeculation ran, so the very signal the request carries is aborted.
+    expect(on.requests[0].abortSignal?.aborted).toBe(true);
+    const off = await runEventRound(false, [chunk([{ text: 'done' }])]);
+    expect(off.requests[0].abortSignal).toBeUndefined();
+  });
+
+  it('an id-less named call gains a generated id on the shared round, none on the raw round', async () => {
+    const events = [
+      chunk([{ functionCall: { name: 'read_file', args: { path: 'a.ts' } } }]),
+    ];
+    const on = await runEventRound(true, events);
+    expect(on.status).toBe('completed');
+    const calls = modelCalls(on.messages);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].id).toBeTruthy();
+    expect(responseIds(on.messages)).toEqual([calls[0].id]);
+    // The raw round keeps no id on the call or its response.
+    const off = await runEventRound(false, events);
+    expect(off.status).toBe('completed');
+    expect(modelCalls(off.messages)[0].id).toBeUndefined();
+    expect(responseIds(off.messages)).toEqual([undefined]);
+  });
+
+  it('a chunk with two text parts becomes one text part on the shared round', async () => {
+    const on = await runEventRound(true, [
+      chunk([{ text: 'a' }, { text: 'b' }]),
+    ]);
+    expect(on.status).toBe('completed');
+    expect(modelTexts(on.messages)).toEqual(['ab']);
+    // The raw round keeps one part per streamed text part.
+    const off = await runEventRound(false, [
+      chunk([{ text: 'a' }, { text: 'b' }]),
+    ]);
+    expect(modelTexts(off.messages)).toEqual(['a', 'b']);
+  });
+
+  it('a thought part never reaches the model message on either round', async () => {
+    const events = [
+      chunk([{ text: 'reasoning', thought: true }, { text: 'done' }]),
+    ];
+    const on = await runEventRound(true, events);
+    expect(on.status).toBe('completed');
+    expect(modelTexts(on.messages)).toEqual(['done']);
+    const off = await runEventRound(false, events);
+    expect(modelTexts(off.messages)).toEqual(['done']);
+  });
+
+  it.each([
+    { name: 'a fresh retry', event: { type: 'retry', isContinuation: false } },
+    { name: 'an un-flagged retry', event: { type: 'retry' } },
+    {
+      name: 'a model fallback',
+      event: {
+        type: 'model_fallback',
+        info: {
+          fromModel: 'm1',
+          toModel: 'm2',
+          statusCode: 429,
+          fallbackIndex: 1,
+        },
+      },
+    },
+  ])('$name drops an abandoned call, not only text', async ({ event }) => {
+    const events = [
+      chunk([fnCall('read_file', { path: 'a.ts' }, 'call-abandoned')]),
+      event,
+      chunk([fnCall('read_file', { path: 'b.ts' }, 'call-kept')]),
+    ];
+    const on = await runEventRound(true, events);
+    expect(on.status).toBe('completed');
+    expect(modelCalls(on.messages).map((c) => c.id)).toEqual(['call-kept']);
+    expect(on.toolUseCount).toBe(1);
+    expect(responseIds(on.messages)).toEqual(['call-kept']);
+    // The raw round skips non-chunk events, so it keeps both calls.
+    const off = await runEventRound(false, events);
+    expect(off.status).toBe('completed');
+    expect(modelCalls(off.messages).map((c) => c.id)).toEqual([
+      'call-abandoned',
+      'call-kept',
+    ]);
+    expect(off.toolUseCount).toBe(2);
   });
 });

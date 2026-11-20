@@ -49,6 +49,24 @@ const COPY = {
     notActive:
       "No active Plus or Pro subscription was found for this account. If you've already subscribed, make sure you used the same Qwen account.",
   },
+  'zh-TW': {
+    device: '無法申請授權連結，請重新登入。',
+    exchange: '無法完成授權，請重新登入。',
+    credentials: '無法讀取或儲存 Qwen 憑證，請檢查本地檔案權限和磁碟空間。',
+    refresh: '無法重新整理 Qwen 登入憑證，請重試。',
+    revoke: '本地已退出登入，但未能撤銷遠端會話。',
+    cleanup: '無法清除本地 Qwen 憑證，請檢查本地檔案權限。',
+    denied: '授權或訪問被拒絕。',
+    rateLimited: '請求過多，請稍後重試。',
+    network: '網路請求失敗或超時。',
+    invalidResponse: '服務返回的資料格式無效。',
+    expired: '登入憑證已失效，請執行 /auth 重新登入。',
+    timeout: '身份驗證超時，請重試或選擇其他身份驗證方式。',
+    queryFailed: '無法查詢你的訂閱狀態，請重試。',
+    purchaseTimeout: '你的訂閱尚未生效。如果已完成付款，請稍等片刻後重試。',
+    notActive:
+      '此帳號未找到有效的 Plus 或 Pro 訂閱。如果已經訂閱，請確認使用的是同一個 Qwen 帳號。',
+  },
   'zh-CN': {
     device: '无法申请授权链接，请重新登录。',
     exchange: '无法完成授权，请重新登录。',
@@ -66,6 +84,29 @@ const COPY = {
     purchaseTimeout: '你的订阅尚未生效。如果已完成付款，请稍等片刻后重试。',
     notActive:
       '此账号未找到有效的 Plus 或 Pro 订阅。如果已经订阅，请确认使用的是同一个 Qwen 账号。',
+  },
+  ru: {
+    device: 'Не удалось запросить ссылку авторизации. Попробуйте войти снова.',
+    exchange: 'Не удалось завершить авторизацию. Попробуйте войти снова.',
+    credentials:
+      'Не удалось прочитать или сохранить учётные данные Qwen. Проверьте права доступа к локальным файлам и свободное место на диске.',
+    refresh: 'Не удалось обновить сессию Qwen. Попробуйте ещё раз.',
+    revoke: 'Вы вышли локально, но удалённую сессию отозвать не удалось.',
+    cleanup:
+      'Не удалось удалить локальные учётные данные Qwen. Проверьте права доступа к локальным файлам.',
+    denied: 'Авторизация или доступ отклонены.',
+    rateLimited: 'Слишком много запросов. Попробуйте позже.',
+    network: 'Сетевой запрос не удался или истёк по времени.',
+    invalidResponse: 'Сервис вернул недействительный ответ.',
+    expired:
+      'Ваши учётные данные для входа больше недействительны. Выполните /auth, чтобы войти снова.',
+    timeout:
+      'Время аутентификации истекло. Попробуйте снова или выберите другой способ аутентификации.',
+    queryFailed: 'Не удалось проверить статус подписки. Попробуйте ещё раз.',
+    purchaseTimeout:
+      'Подписка ещё не активна. Если оплата уже прошла, подождите немного и повторите попытку.',
+    notActive:
+      'Для этой учётной записи не найдена активная подписка Plus или Pro. Если вы уже подписались, убедитесь, что использовали тот же аккаунт Qwen.',
   },
 };
 
@@ -112,7 +153,7 @@ export function useSubscription(
   onOpenExternal: (url: string) => void | Promise<void>,
 ) {
   const { language } = useI18n();
-  const messages = COPY[language === 'zh-CN' ? 'zh-CN' : 'en'];
+  const messages: (typeof COPY)['en'] = COPY[language];
   const copy = useRef(messages);
   copy.current = messages;
   const open = useRef(onOpenExternal);

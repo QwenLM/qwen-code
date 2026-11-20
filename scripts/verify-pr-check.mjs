@@ -22,11 +22,30 @@
  * error, 2 on a usage error.
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import {
+  closeSync,
+  existsSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { isEntryPoint } from './lib/entry-point.js';
 
 export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
+
+/**
+ * How the round isolated the untrusted PR code. `container` is a
+ * credential-free boundary the isolation gate passed; `waived` is a
+ * maintainer's explicit decision to run on the host, recorded so a host
+ * round is a visible exception instead of a silent default.
+ */
+export const BOUNDARY_MODES = ['container', 'vm', 'waived'];
 
 /**
  * Who caused a failed assertion. `pr` is the only one that can stamp a defect
@@ -56,7 +75,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--publish-lane] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -71,24 +90,102 @@ Checks a local round against the rules the CI publisher enforces:
     the PR is a contradiction: expected reds are passes
   - a mutations.json claiming per-commit coverage covers every commit it lists,
     and lists at least one commit (an empty set makes the claim vacuous)
+  - boundary.json declares where the untrusted PR code ran: mode container
+    with a non-empty detail, backed by the boundary-gate.json record a passing
+    --require-isolation --artifact-dir gate run wrote, or mode waived with the
+    approving maintainer (by), a permalink to the approval comment (approval)
+    and the reason; a round without the declaration is refused. When the
+    snapshot carries repo and pr, the approval permalink must cite that PR.
+    The CI publish job's own ci-lane record is honored only under
+    --publish-lane, the flag the publish job passes (an argv claim, not an
+    authenticated identity). On the CI entry path ($QWEN_VERIFY_CONTEXT
+    set) an absent declaration — or a container declaration whose gate record
+    is absent — is only a warning: the publish job (CI lane) or the host check
+    step (container recipe) writes both before the verdict is trusted
+  - an unreadable artifact (a directory, a non-regular file such as a FIFO or
+    symlink, or a permission-denied file in its place) is reported as
+    unreadable, not silently treated as absent
 
 and warns (without failing) when the report does not lead with its verdict and
 head OID, when the verdict line is a heading (GitHub renders the whole
 paragraph as one giant H1), when evidence/ carries no kebab-case PNG capture,
 when a round with failures carries no failures ledger at all, when over
 ${SUITE_SIZED_TOTAL} assertions come with no gate results (an existing test suite
-counted as the round's own), or when comment.md — the exact body a local round
-posts, optional — repeats the heading shape or lacks the attribution footer.
+counted as the round's own), when the Methodology's **Boundary.** disclosure
+is empty, still a template, or contradicts the recorded mode, or when
+comment.md — the exact body a local round posts, optional — repeats the
+heading shape or lacks the attribution footer.
 
 With --context <snapshot>, the head-OID check reads that file instead of the
 round's own context.json. Pass a copy the round never saw: the artifact
-directory is writable by the PR code the round executed.
+directory is writable by the PR code the round executed, so a --context path
+inside the PR-writable tree is refused — it cannot supply the coordinates
+that judge its waiver. Pass --context-root <pr-clone> (the host-held PR clone
+path, which must contain the artifact dir) to name that tree explicitly; the
+trust root must come from the host, never from git state inside the tree the
+round controls. Without it, a pr<n>-verify-<ts> dir under tmp/ falls back to
+the clone root (the tmp container's parent); a plain dir is its own root.
+
+The path and link-count guards only refuse a context that is demonstrably
+round-controlled (inside the trust root, or a hard link retaining a second
+name); a single-link file outside the root is NOT proof the host wrote it.
+Pass --context-sha256 <digest> — the sha256 that verify-pr-prepare.mjs prints
+host-side when it writes the snapshot — to bind the content: the check refuses
+a --context whose bytes do not match, so a rewritten or substituted snapshot
+is rejected even when its path and link count look clean.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
 
+// The artifact directory is writable by the PR code the round executed, so
+// a path may be a directory or otherwise unreadable. Degrade to a sentinel
+// instead of crashing with EISDIR before any check runs — but an unreadable
+// artifact is NOT an absent one: main() reports it as an error, so a damaged
+// mutations.json or comment.md cannot silently drop its check.
+const UNREADABLE = '\u0000unreadable';
+// Artifacts are reports and JSON, never bulk data; a PR-planted sparse file
+// of arbitrary size must not be read whole into memory (R12 deferred).
+const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
 function readIfExists(path) {
-  return existsSync(path) ? readFileSync(path, 'utf8') : null;
+  // lstat, not existsSync + readFileSync: a FIFO blocks open(2) forever with
+  // no writer, and a symlink to /dev/zero reads without end — neither raises
+  // the synchronous error the catch below relies on. A non-regular file in
+  // this PR-writable tree is a refusal, not a hang. A symlink is non-regular
+  // too: it can point outside the tree, so it is refused rather than followed.
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch {
+    return null;
+  }
+  if (!st.isFile() || st.size > MAX_ARTIFACT_BYTES) return UNREADABLE;
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return UNREADABLE;
+  }
+}
+
+// A filesystem root contains every path on its volume: '/' on POSIX, a drive
+// root like 'C:\' on Windows. Both must fail closed rather than be used as a
+// discriminating trust root (R17-1, deferred Windows drive-root case). '/' is
+// also a valid root spelling on Windows (where sep is '\\'), so accept it on
+// every platform, not only where it equals sep (R6-1).
+export function isFilesystemRoot(root) {
+  return root === sep || root === '/' || /^[A-Za-z]:[\\/]$/.test(root);
+}
+
+// Root-aware containment. A filesystem root contains every path, so it must
+// fail closed rather than compare against '//' — no real path starts with
+// '//', which silently disabled the refusal for a round dir directly under a
+// root-level tmp/ (R17-1). Both the --context refusal and the --context-root
+// containment test use this so the two stay consistent.
+function withinRoot(root, p) {
+  return (
+    isFilesystemRoot(root) ||
+    p === root ||
+    p.startsWith(root.endsWith(sep) ? root : root + sep)
+  );
 }
 
 /** OIDs are quoted at every length from 7 to 40; compare by prefix. */
@@ -163,6 +260,385 @@ export function checkMutationCoverage(text) {
   return { errors };
 }
 
+/**
+ * A round that executes untrusted PR code without declaring where it ran
+ * reads exactly like one that ran inside the boundary. Two local rounds on
+ * PR #16866 executed the whole battery on the maintainer's host with no
+ * isolation gate, no waiver, and no boundary line in the report — the rule
+ * existed only as prose. The declaration is the artifact that makes the
+ * exception visible; the checker refuses a round without one.
+ */
+// A container declaration must be backed by a gate record: the record is
+// written by verify-pr-prepare.mjs --require-isolation (gate
+// "require-isolation"). The CI publish job writes its own "ci-lane"
+// record, and that value is honored ONLY under --publish-lane, the flag
+// the publish job passes. The record lives in the PR-writable artifact
+// tree and the flag is argv, so this corroborates an operator who ran the
+// gate — it is not proof against a round that forges both.
+function gateRecordErrors(gateText, { publishLane = false } = {}) {
+  if (gateText === null || gateText === undefined || gateText.trim() === '') {
+    return [
+      'boundary-gate.json is missing: a mode:"container" declaration must be backed by a gate run — verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir> inside the boundary (the CI publish job writes its own ci-lane record)',
+    ];
+  }
+  let gate;
+  try {
+    gate = JSON.parse(gateText);
+  } catch {
+    return ['boundary-gate.json is not valid JSON'];
+  }
+  if (!gate || typeof gate !== 'object' || Array.isArray(gate)) {
+    return ['boundary-gate.json must be an object'];
+  }
+  const values = publishLane
+    ? ['require-isolation', 'ci-lane']
+    : ['require-isolation'];
+  if (!values.includes(gate.gate) || gate.passed !== true) {
+    return [
+      `boundary-gate.json does not record a passed isolation gate (gate: ${values.join(' | ')}, passed: true)`,
+    ];
+  }
+  // A container claim needs the facts the gate itself established, not a
+  // two-key file PR content can leave behind: an OBSERVED boundary marker
+  // (a self-chosen container= string cannot distinguish a real container
+  // from a bare host), the credential-free attestation, and the signal list.
+  // The CI publisher's ci-lane record is exempt — the publish job writes it
+  // inside the lane it owns.
+  if (gate.gate !== 'ci-lane') {
+    const observed = Array.isArray(gate.observed) ? gate.observed : [];
+    if (observed.length === 0) {
+      return [
+        'boundary-gate.json records no observed boundary marker (/.dockerenv or /run/.containerenv): a declared container= string alone is not an observed boundary — an attested VM uses mode:"vm" with the maintainer\'s approval',
+      ];
+    }
+    if (gate.credentialFree !== true) {
+      return [
+        'boundary-gate.json does not record the credential-free attestation (credentialFree: true)',
+      ];
+    }
+    if (!Array.isArray(gate.signals) || gate.signals.length === 0) {
+      return ['boundary-gate.json records no isolation signals'];
+    }
+  }
+  return [];
+}
+
+/**
+ * Whether a round log carries a `container-nonce: <value>` line whose value's
+ * sha256 equals the gate record's hash (R16-1). Walks the round dir, skipping
+ * the declaration and gate record themselves, the TOP-LEVEL binary `evidence/`
+ * subtree (the skill's PNG artifacts never carry the nonce, and charging the
+ * byte budget against them would refuse a compliant round with large evidence —
+ * R3-1; a nested dir named evidence is still scanned — R4-5), and any
+ * non-regular file (a symlink is not followed). This is the SINGLE authoritative
+ * matcher (the step-7 shell no longer re-implements it, R1-2/R2-6), so it reads
+ * each log whole — a marker behind earlier output or straddling a chunk boundary
+ * is still found (the partial line is scanned before the carry is capped, R3-3)
+ * — while bounding the AGGREGATE work: one hoisted scratch buffer (R2-5), a
+ * total byte budget, and a visited-entry cap that counts directories too, so a
+ * PR-planted dir of huge no-newline files, many empty files, or a forest of
+ * empty dirs cannot stall the check (R3-3, R4-4). Returns { found, bounded } so
+ * the caller can tell "no marker" from "stopped at the bound" (R4-1). The
+ * plaintext lives only container-local, so a host battery cannot produce a match.
+ */
+function nonceLogMatches(roundDir, expected) {
+  const CHUNK_BYTES = 1024 * 1024;
+  const TOTAL_BUDGET = 64 * 1024 * 1024;
+  // The carry is capped to bound the per-chunk concatenation (a no-newline file
+  // would otherwise grow it quadratically), but the partial line is SCANNED
+  // before capping so a marker at its head is never lost (R3-3).
+  const CARRY_CAP = 256;
+  const MAX_ENTRIES = 20000;
+  const buf = Buffer.alloc(CHUNK_BYTES);
+  let budget = TOTAL_BUDGET;
+  let visited = 0;
+  let bounded = false;
+  const matches = (text) => {
+    for (const line of text.split('\n')) {
+      const match = /container-nonce:[ \t]*(\S+)/.exec(line);
+      if (
+        match &&
+        createHash('sha256').update(match[1]).digest('hex') === expected
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const walk = (d) => {
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const entry of entries) {
+      if (budget <= 0 || visited >= MAX_ENTRIES) {
+        bounded = true;
+        return false;
+      }
+      const p = join(d, entry.name);
+      if (entry.isDirectory()) {
+        // Only the TOP-LEVEL evidence/ subtree (the skill's binary PNG
+        // artifacts) is exempt from the byte budget; a nested directory named
+        // evidence is still scanned, so a log there is not silently lost
+        // (R4-5). Directories count against the entry cap so a planted forest
+        // of empty dirs cannot make the walk unbounded (R4-4).
+        if (d === roundDir && entry.name === 'evidence') continue;
+        visited++;
+        if (walk(p)) return true;
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (
+        entry.name === 'boundary.json' ||
+        entry.name === 'boundary-gate.json'
+      ) {
+        continue;
+      }
+      visited++;
+      let fd;
+      try {
+        fd = openSync(p, 'r');
+      } catch {
+        continue;
+      }
+      try {
+        let carry = '';
+        let pos = 0;
+        while (budget > 0) {
+          const toRead = Math.min(CHUNK_BYTES, budget);
+          const n = readSync(fd, buf, 0, toRead, pos);
+          if (n === 0) break;
+          pos += n;
+          budget -= n;
+          // The budget can exhaust on the LAST file, where no next entry would
+          // trip the loop-top check; record the bound here so the caller can
+          // tell exhaustion from a genuine absence (R4-1).
+          if (budget <= 0) bounded = true;
+          const text = carry + buf.toString('utf8', 0, n);
+          const lastNl = text.lastIndexOf('\n');
+          if (lastNl >= 0) {
+            if (matches(text.slice(0, lastNl))) return true;
+            const partial = text.slice(lastNl + 1);
+            if (matches(partial)) return true;
+            carry = partial.slice(-CARRY_CAP);
+          } else {
+            if (matches(text)) return true;
+            carry = text.slice(-CARRY_CAP);
+          }
+          if (n < toRead) break;
+        }
+        if (carry && matches(carry)) return true;
+      } catch {
+        // An unreadable file is skipped, not a crash out of the check.
+      } finally {
+        closeSync(fd);
+      }
+    }
+    return false;
+  };
+  const found = walk(roundDir);
+  return { found, bounded };
+}
+
+/**
+ * The container nonce corroboration (R16-1 / D17-1 / D17-2). The gate record
+ * carries only the nonce hash, never the plaintext, and a mode:"container"
+ * declaration is refused unless a round log line hashes to it. Runs against
+ * the round dir (the checker is the authoritative enforcement point, not the
+ * shell recipe). A missing/invalid gate is left to gateRecordErrors; the
+ * ci-lane record the publish job writes is exempt.
+ */
+export function containerNonceErrors(boundaryText, gateText, roundDir) {
+  let boundary;
+  try {
+    boundary = JSON.parse(boundaryText);
+  } catch {
+    return [];
+  }
+  if (
+    !boundary ||
+    typeof boundary !== 'object' ||
+    boundary.mode !== 'container'
+  ) {
+    return [];
+  }
+  let gate;
+  try {
+    gate = JSON.parse(gateText);
+  } catch {
+    return [];
+  }
+  if (
+    !gate ||
+    typeof gate !== 'object' ||
+    gate.gate !== 'require-isolation' ||
+    gate.passed !== true
+  ) {
+    return [];
+  }
+  const expected = gate.nonceSha256;
+  if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected)) {
+    return [
+      'boundary-gate.json records no nonceSha256 (the 64-hex sha256 of the container-local nonce): a mode:"container" declaration must be tied to a nonce the battery echoed from inside the boundary, not a plaintext copied from the PR-writable record',
+    ];
+  }
+  if (roundDir) {
+    const { found, bounded } = nonceLogMatches(roundDir, expected);
+    if (found) return [];
+    if (bounded) {
+      return [
+        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume or echo the nonce into an early log; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+      ];
+    }
+  }
+  return [
+    'round logs carry no container-nonce line whose sha256 matches boundary-gate.json nonceSha256: refusing mode:"container" — the battery must echo the container-local nonce ($HOME/.qwen-verify-nonce) into its logs; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+  ];
+}
+
+// A waiver's approval must be a permalink a reader can open, not free text:
+// the maintainer's approval comment on the PR or an issue. The capture
+// groups let the checker compare the target against the round's own
+// coordinates when they are available.
+const APPROVAL_PERMALINK =
+  /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull)\/(\d+)#issuecomment-\d+$/;
+
+// The skill's template strings are <placeholder> shaped; a declaration
+// that still carries one was copied, not filled in. The tell is the
+// skill's own tokens or a wholly-<…> value — not any angle brackets: a
+// maintainer written as the standard git identity `Name <email>` is a
+// filled-in value, not a placeholder.
+const TEMPLATE_TOKENS = [
+  '<maintainer>',
+  '<why this round may run outside a boundary>',
+  '<image, network policy, credential-free mount>',
+  '<owner>/<repo>',
+  '<round-dir>',
+];
+// A surviving template token inside an otherwise filled value is still a
+// placeholder: "node:22-bookworm, <network policy>, credential-free mount"
+// leaves the egress policy unstated even though the image was edited. The
+// body excludes '@' so a filled git identity whose local part starts with a
+// token word ("Name <repo@example.com>") is not accused — the skill's
+// placeholders never carry an address.
+const TEMPLATE_TOKEN_RE =
+  /<(?:image|network(?: policy)?|credential-free mount|maintainer|permalink|why|round-dir|owner|repo)\b[^>@]*>/i;
+const placeholder = (value) =>
+  typeof value === 'string' &&
+  (/^<[^>]+>$/.test(value.trim()) ||
+    TEMPLATE_TOKENS.some((token) => value.includes(token)) ||
+    TEMPLATE_TOKEN_RE.test(value));
+
+export function checkBoundary(
+  text,
+  gateText = null,
+  { publishLane = false, coordinates = null } = {},
+) {
+  if (text === null || text === undefined || text.trim() === '') {
+    return {
+      errors: [
+        'boundary.json is missing: every round declares where the untrusted PR code ran — {"mode":"container","detail":…} once the isolation gate passes, or {"mode":"waived","by":…,"approval":…,"reason":…} for a host round the maintainer explicitly approved',
+      ],
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { errors: ['boundary.json is not valid JSON'] };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { errors: ['boundary.json must be an object with a mode'] };
+  }
+  if (!BOUNDARY_MODES.includes(parsed.mode)) {
+    return {
+      errors: [
+        `boundary.json mode must be one of ${BOUNDARY_MODES.join(' | ')}; got ${JSON.stringify(parsed.mode)}`,
+      ],
+    };
+  }
+  const nonEmpty = (value) => typeof value === 'string' && value.trim() !== '';
+  if (parsed.mode === 'container' && !nonEmpty(parsed.detail)) {
+    return {
+      errors: [
+        'boundary.json mode container needs a non-empty detail naming the boundary (image and network policy, or the CI lane)',
+      ],
+    };
+  }
+  if (parsed.mode === 'container' && placeholder(parsed.detail)) {
+    return {
+      errors: [
+        'boundary.json detail still carries a <placeholder>: name the actual image and network policy',
+      ],
+    };
+  }
+  if (parsed.mode === 'container') {
+    const gateErrors = gateRecordErrors(gateText, { publishLane });
+    if (gateErrors.length > 0) return { errors: gateErrors };
+  }
+  // A waived host round and an attested VM both run outside an observed
+  // container boundary, so both need the maintainer's recorded approval.
+  // The VM additionally records what the operator attested (nothing mounted).
+  const approvalMode = parsed.mode === 'waived' || parsed.mode === 'vm';
+  if (approvalMode && (!nonEmpty(parsed.by) || !nonEmpty(parsed.reason))) {
+    return {
+      errors: [
+        `boundary.json mode ${parsed.mode} needs non-empty by (the maintainer who approved execution outside an observed container) and reason (why this round may run outside a boundary)`,
+      ],
+    };
+  }
+  if (approvalMode && (placeholder(parsed.by) || placeholder(parsed.reason))) {
+    return {
+      errors: [
+        `boundary.json ${parsed.mode} declaration still carries a <placeholder>: record the actual maintainer and reason`,
+      ],
+    };
+  }
+  if (parsed.mode === 'vm' && !nonEmpty(parsed.attestation)) {
+    return {
+      errors: [
+        'boundary.json mode vm needs a non-empty attestation: what the operator confirmed before declaring the VM credential-free (nothing mounted, no host credentials)',
+      ],
+    };
+  }
+  if (parsed.mode === 'vm' && placeholder(parsed.attestation)) {
+    return {
+      errors: [
+        'boundary.json vm attestation still carries a <placeholder>: record what the operator actually confirmed',
+      ],
+    };
+  }
+  if (approvalMode) {
+    const match = APPROVAL_PERMALINK.exec(parsed.approval ?? '');
+    if (!match) {
+      return {
+        errors: [
+          `boundary.json mode ${parsed.mode} needs approval: a permalink to the maintainer's approval comment (https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>) — free-text by is a claim, not a verifiable reference${coordinates ? '' : ' (no round coordinates available, so only the URL shape is checked)'}`,
+        ],
+      };
+    }
+    // The permalink is the declaration's only machine-checkable element: it
+    // must cite this round's PR, not any comment on any repository.
+    if (
+      coordinates &&
+      (match[1].toLowerCase() !== coordinates.owner.toLowerCase() ||
+        match[2].toLowerCase() !== coordinates.repo.toLowerCase() ||
+        match[3] !== String(coordinates.number))
+    ) {
+      return {
+        errors: [
+          `boundary.json approval permalink cites ${match[1]}/${match[2]}#${match[3]}, not this round's ${coordinates.owner}/${coordinates.repo}#${coordinates.number}: the approval must be the maintainer's comment on this PR`,
+        ],
+      };
+    }
+  }
+  // `by` is a recorded claim, not an identity the checker can verify; the
+  // approval permalink and the maintainer's review are the enforcement there.
+  return { errors: [] };
+}
+
 // GitHub renders CRLF and LF identically, so a Windows-authored artifact
 // must not fail the line-anchored checks on a stray \r.
 function normalizeNewlines(text) {
@@ -187,15 +663,191 @@ function leadShapeWarnings(text, verdict, label) {
 }
 
 /**
+ * The Methodology must OPEN with the Boundary line, not merely mention the
+ * rule somewhere: a bare token search passes a report that discusses the
+ * requirement while reporting nothing about where the PR code actually ran.
+ */
+function boundaryLineWarnings(text, label, boundaryMode = null) {
+  const lines = text.split('\n');
+  const token = '**Boundary.**';
+  // A Methodology heading or Boundary disclosure inside a code fence is a
+  // copied template, not the round's own declaration: scan prose only, so a
+  // fenced example neither satisfies the disclosure nor accuses a real
+  // Methodology that follows it. Track ``` / ~~~ fences (a closing run is the
+  // same character, at least as long, with nothing after it).
+  const prose = [];
+  let fence = null;
+  for (const line of lines) {
+    const run = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(line);
+    if (run) {
+      const [, , marks, rest] = run;
+      if (fence === null) {
+        fence = { char: marks[0], len: marks.length };
+        continue;
+      }
+      if (
+        marks[0] === fence.char &&
+        marks.length >= fence.len &&
+        rest.trim() === ''
+      ) {
+        fence = null;
+        continue;
+      }
+    }
+    if (fence === null) prose.push(line);
+  }
+  // Locate the Methodology label by its first word after stripping the
+  // shapes a report may wrap it in — blockquote, list marker, ATX hashes,
+  // bold/italic wrapping — so a bold-only "**Methodology**" or a Setext
+  // heading is found, not just the hand-listed ATX/numbered forms.
+  // Strip the outer heading marker before the list marker so an ATX heading
+  // that itself carries a number ("## 8. Methodology") normalises fully
+  // (R12 deferred); a single fixed order missed the nested shape.
+  const normalize = (line) =>
+    line
+      .trim()
+      .replace(/^(?:>\s*)+/, '')
+      .replace(/^#{1,6}\s+/, '')
+      .replace(/^(?:[-*]\s+|\d+\.\s+)+/, '')
+      .replace(/^(\*{1,2}|_{1,2})/, '')
+      .replace(/(\*{1,2}|_{1,2})$/, '')
+      .trim();
+  const isMethodology = (line, i) => {
+    if (!/^Methodology\b/i.test(normalize(line))) return false;
+    const trimmed = line.trim();
+    const isList = /^(?:[-*]\s+|\d+\.\s+)/.test(trimmed);
+    // Headings (ATX/Setext) and the bold numbered label are always sections.
+    if (
+      !isList ||
+      /\*\*Methodology/i.test(trimmed) ||
+      trimmed.includes(token)
+    ) {
+      return true;
+    }
+    // A bare list bullet ("− Methodology", "1. Methodology") is a section
+    // only when the Boundary line follows it; otherwise it is a table-of-
+    // contents entry and must not claim the section (R11 deferred).
+    const next = prose.slice(i + 1).find((l) => l.trim() !== '');
+    return !!next && next.trim().startsWith(token);
+  };
+  let idx = prose.findIndex((line, i) => isMethodology(line, i));
+  if (idx === -1) {
+    // Setext form: a "Methodology" line underlined by === or ---.
+    idx = prose.findIndex(
+      (line, i) =>
+        /^Methodology\s*$/i.test(line.trim()) &&
+        /^(?:={3,}|-{3,})\s*$/.test((prose[i + 1] ?? '').trim()),
+    );
+  }
+  // A Setext underline (=== / ---) belongs to the heading, not the body:
+  // skip it when looking for the first line after the Methodology opening,
+  // or a valid Setext heading is accused of missing its Boundary line.
+  const setext =
+    idx !== -1 && /^(?:={3,}|-{3,})\s*$/.test((prose[idx + 1] ?? '').trim());
+  const warnings = [];
+  let boundaryLine = null;
+  if (idx === -1) {
+    warnings.push(
+      `${label} has no Methodology section (a Methodology heading or the numbered **Methodology** label): it opens with a **Boundary.** line naming where the untrusted PR code ran (the image and network policy, or the recorded waiver)`,
+    );
+    // Still police the disclosure: fall back to the first Boundary line so
+    // an empty or template disclosure is reported even without the section.
+    boundaryLine =
+      prose.find((line) => line.trim().startsWith(token))?.trim() ?? null;
+  } else {
+    // The label line may carry the Boundary line on the same line, with only
+    // a separator between ("8. **Methodology** — **Boundary.** …"); a prose
+    // mention ("we discuss the **Boundary.** rule") is not a declaration.
+    const opening = prose[idx].trim();
+    if (
+      /(?:#{1,6}\s+|\d+\.\s+)?\*{0,2}Methodology\*{0,2}\s*(?:[—:-]\s*)?\*\*Boundary\.\*\*/i.test(
+        opening,
+      )
+    ) {
+      boundaryLine = opening;
+    } else {
+      const first = prose
+        .slice(setext ? idx + 2 : idx + 1)
+        .find((line) => line.trim() !== '');
+      if (first && first.trim().startsWith(token)) {
+        boundaryLine = first.trim();
+      } else {
+        warnings.push(
+          `${label}: the first line after the Methodology opening must be the **Boundary.** line — a prose mention of the rule elsewhere does not declare where the untrusted PR code ran`,
+        );
+      }
+    }
+  }
+  if (boundaryLine !== null) {
+    // The disclosure must say something and must not contradict the recorded
+    // declaration. The content is what follows the token — on the same-line
+    // form the label precedes it. The recorded mode is authoritative: a
+    // container claim contradicted by waiver/VM prose is flagged, but a
+    // truthful waiver phrased without the "waiv" stem is not accused.
+    const content = boundaryLine
+      .slice(boundaryLine.indexOf(token) + token.length)
+      .trim();
+    if (content === '' || placeholder(content)) {
+      warnings.push(
+        `${label}: the **Boundary.** line carries ${content === '' ? 'no disclosure' : 'a <placeholder> disclosure'} — name the image and network policy, or the recorded waiver`,
+      );
+    }
+    // Probe for a positive waiver/VM claim, not the bare word: a truthful
+    // container report may say "not a VM" or "no VM used" without claiming
+    // a VM boundary. The abbreviated "VM" needs an execution preposition;
+    // the full phrase "virtual machine" is specific enough on its own.
+    if (
+      boundaryMode === 'container' &&
+      (/\bwaived\b/i.test(content) ||
+        /\b(?:in|on|inside|within|using|via)\s+(?:a\s+|an\s+)?vm\b|virtual machine/i.test(
+          content,
+        ))
+    ) {
+      warnings.push(
+        `${label}: boundary.json records a container but the **Boundary.** line claims a waiver or VM — the prose names a boundary the declaration contradicts`,
+      );
+    }
+    // A waiver/VM is contradicted by prose naming a container runtime. Probe
+    // for a positive container signal (an image, a network policy), not the
+    // bare word "container": a truthful "no container was used" must not be
+    // accused, and a waiver phrased without the "waiv" stem is not flagged.
+    if (
+      (boundaryMode === 'waived' || boundaryMode === 'vm') &&
+      /node:\d|--network none/i.test(content)
+    ) {
+      warnings.push(
+        `${label}: boundary.json records a ${boundaryMode} but the **Boundary.** line names a container runtime — the prose names a boundary the declaration contradicts`,
+      );
+    }
+  }
+  return warnings;
+}
+
+/**
  * Pure check over already-read artifacts. `files` carries raw text or null;
  * `evidence` is the PNG file names under evidence/.
+ * `publisherOwnsBoundary` marks the CI entry path, where the publish job
+ * writes the declaration after the round finishes: a round's own pre-finish
+ * self-check (which a base-pinned skill still instructs) must not see a
+ * false error for a file only the later job writes.
  */
-export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
+export function checkArtifacts({
+  files,
+  evidence = [],
+  expectedHead = null,
+  publisherOwnsBoundary = false,
+  publishLane = false,
+  coordinates = null,
+  evidenceUnreadable = false,
+  unreadableKeys = new Set(),
+}) {
   const errors = [];
   const warnings = [];
 
   for (const name of ['report.md', 'verdict.txt', 'assertions.json']) {
     const key = name.split('.')[0];
+    // An unreadable artifact is reported as unreadable, not also as missing.
+    if (unreadableKeys.has(key)) continue;
     const text = files[key];
     if (text === null || text === undefined) {
       errors.push(`${name} is missing`);
@@ -356,6 +1008,82 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
   }
 
   errors.push(...checkMutationCoverage(files.mutations).errors);
+  const boundaryAbsent =
+    files.boundary === null ||
+    files.boundary === undefined ||
+    files.boundary.trim() === '';
+  if (unreadableKeys.has('boundary')) {
+    // The declaration itself is unreadable; already reported.
+  } else if (publisherOwnsBoundary && boundaryAbsent) {
+    warnings.push(
+      'boundary.json is absent on the CI entry path ($QWEN_VERIFY_CONTEXT): the publish job (CI lane) or the host check step (container recipe) writes the declaration before the verdict is trusted',
+    );
+  } else {
+    // An unreadable gate record is reported separately, but it must not
+    // suppress the declaration's own defects (R12 deferred). Its gate-missing
+    // error would duplicate the unreadable report, so drop that one error.
+    const gateUnreadable = unreadableKeys.has('boundaryGate');
+    const boundaryErrors = checkBoundary(files.boundary, files.boundaryGate, {
+      publishLane,
+      coordinates,
+    }).errors.filter(
+      (error) =>
+        !(gateUnreadable && error.startsWith('boundary-gate.json is missing')),
+    );
+    // The publisher owns the gate record too: on the CI entry path a
+    // round-authored container declaration whose gate run has not happened
+    // yet is the same expected gap as an absent declaration, not a refusal
+    // the round can clear — the publish job writes its own ci-lane record.
+    const gateAbsent =
+      files.boundaryGate === null ||
+      files.boundaryGate === undefined ||
+      files.boundaryGate.trim() === '';
+    for (const error of boundaryErrors) {
+      if (
+        publisherOwnsBoundary &&
+        gateAbsent &&
+        error.startsWith('boundary-gate.json is missing')
+      ) {
+        warnings.push(
+          'boundary-gate.json is absent on the CI entry path ($QWEN_VERIFY_CONTEXT): the publish job writes its ci-lane record before it trusts the verdict',
+        );
+      } else {
+        errors.push(error);
+      }
+    }
+  }
+
+  // The report's Boundary disclosure is compared against the recorded
+  // mode when a usable declaration exists; on the CI entry path the
+  // publish job writes it later, so there is nothing to compare yet.
+  let boundaryMode = null;
+  if (files.boundary && files.boundary.trim() !== '') {
+    try {
+      const declared = JSON.parse(files.boundary);
+      if (
+        declared &&
+        typeof declared === 'object' &&
+        BOUNDARY_MODES.includes(declared.mode)
+      ) {
+        boundaryMode = declared.mode;
+      }
+    } catch {
+      // checkBoundary already reports the invalid JSON.
+    }
+  }
+
+  // Disclose the coordinate-check downgrade: a waiver/vm whose approval
+  // permalink was only shape-checked (no trusted repo/pr coordinates) must
+  // not read as "the approval was compared against this PR".
+  if (
+    !publisherOwnsBoundary &&
+    (boundaryMode === 'waived' || boundaryMode === 'vm') &&
+    !coordinates
+  ) {
+    warnings.push(
+      "the waiver's approval target was not compared against this PR: no trusted repo/pr coordinates were available, so only the approval permalink's URL shape was checked",
+    );
+  }
 
   if (files.report && files.report.trim() !== '') {
     const report = normalizeNewlines(files.report);
@@ -381,6 +1109,7 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
       );
     }
     warnings.push(...leadShapeWarnings(report, verdict, 'report.md'));
+    warnings.push(...boundaryLineWarnings(report, 'report.md', boundaryMode));
   }
 
   // comment.md is the exact body a local round posts: report content plus
@@ -391,6 +1120,7 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
   if (files.comment && files.comment.trim() !== '') {
     const comment = normalizeNewlines(files.comment);
     warnings.push(...leadShapeWarnings(comment, verdict, 'comment.md'));
+    warnings.push(...boundaryLineWarnings(comment, 'comment.md', boundaryMode));
     const lines = comment.split('\n').filter((line) => line.trim() !== '');
     if (!FOOTER.test(lines[lines.length - 1] ?? '')) {
       warnings.push(
@@ -399,7 +1129,7 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
     }
   }
 
-  if (evidence.length === 0) {
+  if (evidence.length === 0 && !evidenceUnreadable) {
     warnings.push(
       'evidence/ holds no PNG capture: a table is the claim, a capture is the witness',
     );
@@ -421,6 +1151,9 @@ function main(argv) {
     return 0;
   }
   let contextPath = null;
+  let contextRoot = null;
+  let contextSha = null;
+  let publishLane = false;
   const positional = [];
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
@@ -432,12 +1165,39 @@ function main(argv) {
         );
         return 2;
       }
+    } else if (arg === '--context-root') {
+      contextRoot = argv[++index];
+      if (!contextRoot) {
+        process.stderr.write(
+          `verify-pr check: --context-root requires a path\n\n${HELP}`,
+        );
+        return 2;
+      }
+    } else if (arg === '--context-sha256') {
+      contextSha = argv[++index];
+      if (!contextSha || !/^[0-9a-f]{64}$/.test(contextSha)) {
+        process.stderr.write(
+          `verify-pr check: --context-sha256 requires the 64-hex digest prepare printed\n\n${HELP}`,
+        );
+        return 2;
+      }
+    } else if (arg === '--publish-lane') {
+      // The CI publish job's flag: honors the ci-lane gate record the job
+      // writes itself. An argv claim, not an authenticated identity — a
+      // local shell passing it makes an operator claim, not proof.
+      publishLane = true;
     } else if (arg.startsWith('-')) {
       process.stderr.write(`verify-pr check: unknown option ${arg}\n\n${HELP}`);
       return 2;
     } else {
       positional.push(arg);
     }
+  }
+  if (contextSha && !contextPath) {
+    process.stderr.write(
+      `verify-pr check: --context-sha256 binds a --context snapshot; pass --context too\n\n${HELP}`,
+    );
+    return 2;
   }
   const dir = positional[0];
   if (!dir || positional.length > 1) {
@@ -450,6 +1210,38 @@ function main(argv) {
     process.stderr.write(`verify-pr check: ${dir} does not exist\n`);
     return 1;
   }
+  // A --context-root must resolve to a directory containing the artifact
+  // dir; a root no path can be inside would disable the refusal entirely
+  // (R15 R14-1). Validate it whenever supplied, not only with --context.
+  if (contextRoot) {
+    let realRoot;
+    let realDir;
+    try {
+      realRoot = realpathSync(contextRoot);
+      realDir = realpathSync(dir);
+    } catch {
+      process.stderr.write(
+        `verify-pr check: --context-root ${contextRoot} must resolve to a directory\n\n${HELP}`,
+      );
+      return 2;
+    }
+    // A root of '/' contains every path, so it cannot discriminate the
+    // PR-writable tree; it is a usage error, not a trust root (R2-2). Reject
+    // it here even without --context, where the in-context refusal below is
+    // never reached.
+    if (isFilesystemRoot(realRoot)) {
+      process.stderr.write(
+        `verify-pr check: --context-root ${contextRoot} is a filesystem root, which cannot discriminate the PR-writable tree — pass the PR clone path\n\n${HELP}`,
+      );
+      return 2;
+    }
+    if (!withinRoot(realRoot, realDir)) {
+      process.stderr.write(
+        `verify-pr check: --context-root ${contextRoot} does not contain the artifact directory ${dir}\n\n${HELP}`,
+      );
+      return 2;
+    }
+  }
 
   const files = {
     report: readIfExists(join(dir, 'report.md')),
@@ -457,13 +1249,52 @@ function main(argv) {
     assertions: readIfExists(join(dir, 'assertions.json')),
     mutations: readIfExists(join(dir, 'mutations.json')),
     comment: readIfExists(join(dir, 'comment.md')),
+    boundary: readIfExists(join(dir, 'boundary.json')),
+    boundaryGate: readIfExists(join(dir, 'boundary-gate.json')),
   };
+  // An unreadable artifact is a refusal, not an absent one: a damaged
+  // mutations.json must not silently drop its coverage check.
+  const ARTIFACT_NAMES = {
+    report: 'report.md',
+    verdict: 'verdict.txt',
+    assertions: 'assertions.json',
+    mutations: 'mutations.json',
+    comment: 'comment.md',
+    boundary: 'boundary.json',
+    boundaryGate: 'boundary-gate.json',
+  };
+  const unreadableErrors = [];
+  const unreadableKeys = new Set();
+  for (const [key, name] of Object.entries(ARTIFACT_NAMES)) {
+    if (files[key] === UNREADABLE) {
+      unreadableErrors.push(
+        `${name} is unreadable (a directory, non-regular file, or permission-denied file is not an absent artifact)`,
+      );
+      // Keep the key out of the "is missing" branch downstream: the file is
+      // present but unreadable, and telling the author to write a file that
+      // is already there conflates the two cases the sentinel separates.
+      unreadableKeys.add(key);
+      files[key] = null;
+    }
+  }
   const evidenceDir = join(dir, 'evidence');
-  const evidence = existsSync(evidenceDir)
-    ? readdirSync(evidenceDir).filter((name) =>
+  let evidence = [];
+  let evidenceUnreadable = false;
+  if (existsSync(evidenceDir)) {
+    // A PR-writable path named evidence may be a regular file or
+    // unreadable: that is a refusal like the other artifacts, not a
+    // crash out of the CLI.
+    try {
+      evidence = readdirSync(evidenceDir).filter((name) =>
         name.toLowerCase().endsWith('.png'),
-      )
-    : [];
+      );
+    } catch {
+      evidenceUnreadable = true;
+      unreadableErrors.push(
+        'evidence/ is unreadable (a directory, non-regular file, or permission-denied file is not an absent artifact)',
+      );
+    }
+  }
 
   // With the round's own snapshot, the report
   // has to cite the head it verified — not merely some 40-hex token, which a
@@ -472,18 +1303,150 @@ function main(argv) {
   let expectedHead = null;
   let snapshotWarning = null;
   let snapshotPath = null;
+  // The waiver's approval permalink is checked against the round's
+  // coordinates ONLY when they come from the host-held --context snapshot:
+  // the artifact directory is writable by the PR code the round executed,
+  // so its own context.json must not supply the coordinates that judge its
+  // waiver. Without a trusted snapshot only the URL shape is checkable.
+  const dirPrNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
+  const coordinatesFrom = (snapshot) => {
+    const repoMatch = /^([\w.-]+)\/([\w.-]+)$/.exec(snapshot?.repo ?? '');
+    const pr =
+      Number.isInteger(snapshot?.pr) && snapshot.pr > 0 ? snapshot.pr : null;
+    // The number must come from the trusted snapshot, never the artifact
+    // directory's basename: the round controls that name, so a fallback to
+    // it would let the round satisfy "this PR" by naming its directory after
+    // the PR whose comment it cites.
+    const number =
+      pr ??
+      (Number.isInteger(snapshot?.number) && snapshot.number > 0
+        ? snapshot.number
+        : null);
+    return repoMatch && number
+      ? { owner: repoMatch[1], repo: repoMatch[2], number }
+      : null;
+  };
+  let coordinates = null;
   if (contextPath) {
-    // A host-held snapshot: the artifact directory is writable by the PR code
-    // the round just executed, so its own context.json cannot pin the head
-    // when the maintainer supplies a copy that code never saw.
+    // A host-held snapshot: the PR clone is mounted read-write, so the round
+    // can write ANY path inside it — the artifact dir AND the
+    // tmp/verify-context sibling prepare prints. Refuse a --context whose
+    // REAL path lands anywhere in the clone's worktree (a lexical prefix of
+    // the round dir misses both a symlink and the sibling), and read through
+    // the same lstat guard so a FIFO/symlink refuses instead of hanging or
+    // being followed (R12-1).
+    let realContext;
     try {
-      const snapshot = JSON.parse(readFileSync(contextPath, 'utf8'));
-      if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
-        expectedHead = snapshot.headRefOid;
-        snapshotPath = contextPath;
-      }
+      realContext = realpathSync(contextPath);
     } catch {
-      // Reported below; never falls back to the writable artifact copy.
+      realContext = resolve(contextPath);
+    }
+    // The trust root must come from the HOST, never from git state inside
+    // the PR-writable tree: the round controls that state (it can `git init`
+    // the artifact dir or damage .git), so deriving the root from it lets
+    // the round judge its own waiver (R14-1). The host passes the PR clone
+    // path via --context-root, which must resolve to a directory containing
+    // the artifact dir (a root no path can be inside would disable the
+    // refusal). Without the flag, fall back to a root derived from the
+    // artifact dir's own path — which prepare (host-side) fixed, not the
+    // round: a pr<n>-verify-<ts> dir under tmp/ lives in the read-write clone,
+    // so the writable root is the CLONE root (the tmp container's parent),
+    // covering a snapshot planted anywhere in the clone, not just under tmp/
+    // (R15 R14-1); a plain fixture dir is its own root. Both sides are
+    // real-path resolved so a symlinked dir (macOS TMPDIR) compares
+    // consistently.
+    // --context-root was validated above (contains the artifact dir). The
+    // fallback root is the clone root for a pr<n>-verify-<ts> dir under tmp/
+    // (the tmp container's parent), or the dir itself for a plain fixture.
+    let trustRoot;
+    if (contextRoot) {
+      trustRoot = realpathSync(contextRoot);
+    } else {
+      const container = dirname(resolve(dir));
+      trustRoot =
+        dirPrNumber && basename(container) === 'tmp'
+          ? realpathSync(dirname(container))
+          : realpathSync(dir);
+    }
+    const insideByPath = withinRoot(trustRoot, realContext);
+    // A hard link gives a PR-writable file a second name outside the trust
+    // root; realpath cannot see the source name, but a freshly written host
+    // copy has exactly one link, so a link count above one means the context
+    // shares an inode with another name the round may control (R17-1). This
+    // needs no walk of the PR-writable tree, so an unreadable subdirectory or
+    // a source outside the artifact dir cannot hide the alias (R1-1, R1-2).
+    // Only check when the path test did not already refuse.
+    let contextIsAlias = false;
+    let contextLinks = 0;
+    if (!insideByPath) {
+      try {
+        const ctxStat = statSync(realContext);
+        if (ctxStat.isFile()) {
+          contextLinks = ctxStat.nlink;
+          contextIsAlias = ctxStat.nlink !== 1;
+        }
+      } catch {
+        // A missing/unreadable context is reported by the head-OID check below.
+      }
+    }
+    if (insideByPath || contextIsAlias) {
+      // One sentence per cause: for an alias or a '/' trust root the path is
+      // demonstrably outside the worktree, so the path-inside wording would
+      // be false and its remedy unreachable (R1-4).
+      let reason;
+      if (contextIsAlias) {
+        reason = `--context ${contextPath} is a hard link (${contextLinks} names) to a file the round can write; copy it instead of linking it, so the coordinates judging the waiver come from a host-held copy the round never saw`;
+      } else if (isFilesystemRoot(trustRoot)) {
+        // Only the derived root reaches here: an explicit filesystem-root
+        // --context-root is already a usage error at the containment gate
+        // (R2-2). The artifact dir sits directly under root-level tmp/ and no
+        // PR clone can contain it, so the remedy is to move it, not to pass
+        // --context-root (which would only trade this refusal for a containment
+        // error, R1-4).
+        reason = `--context ${contextPath} cannot be trusted: the artifact dir sits directly under a root-level tmp/, so the derived trust root is '${trustRoot}', which contains every path — move the artifact dir out of root-level tmp/ (no PR clone can contain it)`;
+      } else {
+        reason = `--context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw`;
+      }
+      process.stderr.write(`verify-pr check: ${reason}\n`);
+      return 1;
+    }
+    const snapshotText = readIfExists(contextPath);
+    // Content binding (R2-1): the digest prepare computed host-side is the
+    // provenance proof. A path outside the root and a single link can both be
+    // arranged by the round, but the bytes prepare wrote cannot be forged
+    // without matching this digest. Refuse on mismatch or an unverifiable read.
+    if (contextSha) {
+      if (snapshotText === null || snapshotText === UNREADABLE) {
+        process.stderr.write(
+          `verify-pr check: --context ${contextPath} is missing or unreadable; cannot verify it against --context-sha256\n`,
+        );
+        return 1;
+      }
+      const actualSha = createHash('sha256')
+        .update(snapshotText, 'utf8')
+        .digest('hex');
+      if (actualSha !== contextSha) {
+        process.stderr.write(
+          `verify-pr check: --context ${contextPath} does not match --context-sha256 (the snapshot prepare wrote); it was modified or is not the host-held copy — re-copy it from the prepare context\n`,
+        );
+        return 1;
+      }
+    } else {
+      // Disclose that provenance was never bound, rather than letting a clean
+      // path/link check read as proof the host wrote the snapshot (deferred).
+      snapshotWarning = `--context ${contextPath} has no --context-sha256 binding; provenance rests on the path/link checks alone — pass the digest prepare printed to bind the snapshot's bytes`;
+    }
+    if (snapshotText !== null && snapshotText !== UNREADABLE) {
+      try {
+        const snapshot = JSON.parse(snapshotText);
+        if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
+          expectedHead = snapshot.headRefOid;
+          snapshotPath = contextPath;
+        }
+        coordinates = coordinatesFrom(snapshot);
+      } catch {
+        // Reported below; never falls back to the writable artifact copy.
+      }
     }
     if (!expectedHead) {
       process.stderr.write(
@@ -492,30 +1455,63 @@ function main(argv) {
       return 1;
     }
   } else {
+    // The eighth read from the PR-writable directory gets the same lstat
+    // guard as the other seven: a planted FIFO at context.json must refuse
+    // with a warning, not block open(2) forever (R11-3).
     snapshotPath = join(dir, 'context.json');
-    const prNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
-    if (!existsSync(snapshotPath) && prNumber) {
+    let snapshotText = readIfExists(snapshotPath);
+    if (snapshotText === null && dirPrNumber) {
       snapshotPath = join(
         dirname(resolve(dir)),
         'verify-context',
-        `pr${prNumber}.json`,
+        `pr${dirPrNumber}.json`,
       );
+      snapshotText = readIfExists(snapshotPath);
     }
-    if (existsSync(snapshotPath)) {
+    if (snapshotText === UNREADABLE) {
+      snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
+    } else if (snapshotText !== null) {
       try {
-        const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+        const snapshot = JSON.parse(snapshotText);
         if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
           expectedHead = snapshot.headRefOid;
         } else {
           snapshotWarning = `snapshot ${snapshotPath} has no valid head OID; the head-OID check fell back to presence-only`;
         }
+        // No coordinates from the artifact's own context.json: it is
+        // PR-writable, so it cannot be the input that judges the waiver.
       } catch {
         snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
       }
     }
   }
 
-  const result = checkArtifacts({ files, evidence, expectedHead });
+  // The CI entry path is defined by $QWEN_VERIFY_CONTEXT; there the publish
+  // job owns the declaration, so an absent boundary.json is a warning for
+  // the round's own pre-finish self-check, not an error it cannot clear.
+  const publisherOwnsBoundary = !!process.env.QWEN_VERIFY_CONTEXT;
+  const result = checkArtifacts({
+    files,
+    evidence,
+    expectedHead,
+    publisherOwnsBoundary,
+    publishLane,
+    coordinates,
+    evidenceUnreadable,
+    unreadableKeys,
+  });
+  // The container nonce corroboration (R16-1) needs the round dir to scan the
+  // battery's logs, so it lives here rather than in checkArtifacts. It runs
+  // UNCONDITIONALLY: the exemption is the RECORD, not a flag — containerNonceErrors
+  // returns [] for the ci-lane record the publish job writes and for non-container
+  // modes, so neither the --publish-lane flag (R1-7) nor $QWEN_VERIFY_CONTEXT
+  // (R2-7) can switch the binding off for a require-isolation container claim.
+  // publisherOwnsBoundary still governs the absent-declaration tolerance in
+  // checkArtifacts; it does not exempt the nonce binding.
+  result.errors.push(
+    ...containerNonceErrors(files.boundary, files.boundaryGate, dir),
+  );
+  result.errors.unshift(...unreadableErrors);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];
   if (expectedHead) lines.push(`  head source: ${snapshotPath}`);

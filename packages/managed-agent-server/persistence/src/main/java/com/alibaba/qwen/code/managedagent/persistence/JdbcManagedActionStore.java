@@ -148,7 +148,6 @@ public class JdbcManagedActionStore
             if (!"action.changed".equals(event.path("kind").asText())) {
                 continue;
             }
-            ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
             jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
                     String.class, tenantId, sessionId);
             JsonNode envelope = event.deepCopy();
@@ -436,7 +435,8 @@ public class JdbcManagedActionStore
         args.add(limit);
         return jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns("r")
                         + " FROM ma_session_record r JOIN ma_session s ON s.tenant_id=r.tenant_id"
-                        + " AND s.session_id=r.session_id WHERE r.tenant_id=? AND r.record_kind='ACTION'"
+                        + " AND s.session_id=r.session_id AND s.session_scope_key=r.session_scope_key"
+                        + " WHERE r.tenant_id=? AND r.record_kind='ACTION'"
                         + " AND r.state='requested' AND s.deleted_at IS NULL AND (s.session_id=?"
                         + " OR s.parent_session_id=? AND s.public_child_agents_version=1)" + cursor
                         + " ORDER BY r.gmt_create DESC, r.session_id DESC, r.action_id DESC LIMIT ?",
@@ -482,10 +482,10 @@ public class JdbcManagedActionStore
             String actionId,
             JsonNode body,
             long now) {
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         // Serialize admission with journal projection and other Session commands.
-        jdbc.queryForObject(
-                "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id ="
+        // The guard may have opened an older repeatable-read snapshot.
+        String sessionStatus = jdbc.queryForObject(
+                "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id ="
                         + " ? AND session_kind = 'PUBLIC' FOR UPDATE",
                 String.class,
                 tenantId,
@@ -544,15 +544,11 @@ public class JdbcManagedActionStore
                 Optional<Action> action = failedResponse.actionId() == null
                         ? Optional.empty()
                         : find(tenantId, sessionId, failedResponse.actionId());
-                var replaySession = jdbc.queryForMap(
-                        "SELECT status, workspace_storage_id FROM"
+                String replayStorage = jdbc.queryForObject(
+                        "SELECT workspace_storage_id FROM"
                                 + " ma_session WHERE tenant_id = ?"
                                 + " AND session_id = ?",
-                        tenantId, sessionId);
-                String replaySessionStatus =
-                        (String) replaySession.get("status");
-                String replayStorage =
-                        (String) replaySession.get("workspace_storage_id");
+                        String.class, tenantId, sessionId);
                 // A workspace migration holding the storage fence blocks a
                 // resurrected delivery exactly like a fresh admission
                 // (requireSessionOpen below): the fence is the migration's
@@ -565,7 +561,7 @@ public class JdbcManagedActionStore
                         && "requested".equals(action.get().state())
                         && now < action.get().options().path("expiresAt")
                                 .asLong()
-                        && "ACTIVE".equals(replaySessionStatus)
+                        && "ACTIVE".equals(sessionStatus)
                         && (replayStorage == null
                                 || WorkspaceMigrationAdmission.owner(jdbc,
                                         tenantId, replayStorage) == null)) {
@@ -673,8 +669,6 @@ public class JdbcManagedActionStore
                     "Hosted Workspace execution is not available.");
         }
         WorkspaceMigrationAdmission.requireSessionOpenForAdmission(jdbc, tenantId, sessionId);
-        String sessionStatus = jdbc.queryForObject("SELECT status FROM ma_session"
-                + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
         if (!"ACTIVE".equals(sessionStatus)) {
             throw new ManagedAgentException(409, "session_inactive", "The Session does not accept responses.");
         }
@@ -783,25 +777,29 @@ public class JdbcManagedActionStore
     }
 
     public void settleEndedResponses(long now) {
-        List<OperationTarget> ended = jdbc.query(
-                        "SELECT o.tenant_id, o.session_id, o.operation_id FROM ma_operation o JOIN"
+        record EndedResponse(OperationTarget target, JsonNode body, String actionState,
+                String decisionDigest, String decisionReceiptId) { }
+        List<EndedResponse> ended = jdbc.query(
+                        "SELECT o.tenant_id, o.session_id, o.operation_id, o.request_json,"
+                            + " a.state, a.decision_digest, a.decision_receipt_id FROM ma_operation o JOIN"
                             + " ma_session_record a ON a.record_kind = 'ACTION' AND"
                             + " a.session_scope_key = o.scope_key AND a.tenant_id = o.tenant_id AND"
                             + " a.session_id = o.session_id AND a.action_id = o.action_id WHERE"
                             + " o.operation_kind = 'ACTION_RESPONSE' AND o.delivery_state IN"
                             + " ('PENDING', 'LEASED') AND a.state <> 'requested' LIMIT 50",
-                (r, row) -> new OperationTarget(r.getString(1), r.getString(2), r.getString(3)));
-        for (OperationTarget target : ended) {
-            Response response = response(target.tenantId(), target.sessionId(), target.operationId());
-            Action action = find(target.tenantId(), target.sessionId(), response.actionId()).orElseThrow();
-            boolean matched = "decided".equals(action.state())
-                    && ManagedActionStore.decisionDigest(response.body()).equals(action.decisionDigest());
+                (r, row) -> new EndedResponse(
+                        new OperationTarget(r.getString(1), r.getString(2), r.getString(3)),
+                        read(r.getString(4)), r.getString(5), r.getString(6), r.getString(7)));
+        for (EndedResponse response : ended) {
+            OperationTarget target = response.target();
+            boolean matched = "decided".equals(response.actionState())
+                    && ManagedActionStore.decisionDigest(response.body()).equals(response.decisionDigest());
             jdbc.update(
                     "UPDATE ma_operation SET state = ?, phase = 'SETTLED', admission_stage = 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?, failure_code = ?, decision_receipt_id = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND operation_kind = 'ACTION_RESPONSE' AND delivery_state IN ('PENDING', 'LEASED')",
                     matched ? "COMPLETED" : "FAILED",
                     "rcpt_" + UUID.randomUUID().toString().replace("-", ""),
-                    matched ? null : ManagedActionStore.endedCode(action.state()),
-                    matched ? action.decisionReceiptId() : null,
+                    matched ? null : ManagedActionStore.endedCode(response.actionState()),
+                    matched ? response.decisionReceiptId() : null,
                     now, now, target.tenantId(), target.sessionId(), target.operationId());
         }
     }
@@ -814,7 +812,6 @@ public class JdbcManagedActionStore
             String decisionReceiptId,
             boolean harnessConfirmed,
             long now) {
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, op.tenantId(), op.sessionId());
         jdbc.update(
                 "UPDATE ma_operation SET state = ?, phase = 'SETTLED', admission_stage = ?, delivery_state = 'CONFIRMED', receipt_id = ?, failure_code = ?, decision_receipt_id = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND delivery_state = 'LEASED' AND claim_owner = ? AND operation_kind = 'ACTION_RESPONSE' AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW,
                 errorCode == null ? "COMPLETED" : "FAILED",

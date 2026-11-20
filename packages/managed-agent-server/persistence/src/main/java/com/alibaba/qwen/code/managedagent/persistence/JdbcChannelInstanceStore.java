@@ -84,16 +84,21 @@ public class JdbcChannelInstanceStore
             // An ownership move must not inherit what was visible to the
             // old owner: every retained binding still names a Session of
             // the old Workspace, and its routes and receipts would answer
-            // under the new connection's read authority. Re-registering a
-            // fresh connection with no bindings keeps the history.
+            // under the new connection's read authority. Both binding
+            // classes count — channel route bindings and PR-watch bindings.
+            // Re-registering a fresh connection with no bindings keeps the
+            // history.
             boolean ownershipMoves = !current.actorId()
                     .equals(candidate.actorId())
                     || !current.workspaceId().equals(candidate.workspaceId())
                     || !current.cwdRelative().equals(candidate.cwdRelative());
             if (ownershipMoves && jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM ma_channel_binding"
-                            + " WHERE tenant_id = ? AND channel_id = ?",
+                    "SELECT (SELECT COUNT(*) FROM ma_channel_binding"
+                            + " WHERE tenant_id = ? AND channel_id = ?)"
+                            + " + (SELECT COUNT(*) FROM ma_pr_watch_binding"
+                            + " WHERE tenant_id = ? AND channel_id = ?)",
                     Long.class, candidate.tenantId(),
+                    candidate.channelId(), candidate.tenantId(),
                     candidate.channelId()) > 0) {
                 throw new IllegalStateException("channel_ownership_conflict");
             }
@@ -102,7 +107,8 @@ public class JdbcChannelInstanceStore
             // longer slip between the earlier SELECT and this UPDATE. An
             // ownership move's binding count rides in this same statement:
             // a racing bind committed between the pre-check and now makes
-            // the subquery flatten the write to zero rows (R10 P2).
+            // the subquery flatten the write to zero rows (R10 P2). Both
+            // binding classes count, so a racing PR-watch bind is caught too.
             if (ownershipMoves) {
                 int rows = jdbc.update("UPDATE ma_channel_instance"
                                 + " SET account_generation = ?, state = ?,"
@@ -111,15 +117,20 @@ public class JdbcChannelInstanceStore
                                 + " gmt_modified = ?"
                                 + " WHERE tenant_id = ? AND channel_id = ?"
                                 + " AND account_generation <= ?"
-                                + " AND (SELECT COUNT(*) FROM"
+                                + " AND ((SELECT COUNT(*) FROM"
                                 + " ma_channel_binding b"
                                 + " WHERE b.tenant_id = ?"
-                                + " AND b.channel_id = ?) = 0",
+                                + " AND b.channel_id = ?)"
+                                + " + (SELECT COUNT(*) FROM"
+                                + " ma_pr_watch_binding p"
+                                + " WHERE p.tenant_id = ?"
+                                + " AND p.channel_id = ?)) = 0",
                         candidate.accountGeneration(), candidate.state(),
                         candidate.actorId(), candidate.workspaceId(),
                         candidate.cwdRelative(), candidate.policyJson(), now,
                         candidate.tenantId(), candidate.channelId(),
                         candidate.accountGeneration(), candidate.tenantId(),
+                        candidate.channelId(), candidate.tenantId(),
                         candidate.channelId());
                 if (rows == 0) {
                     throw new IllegalStateException(
@@ -218,6 +229,9 @@ public class JdbcChannelInstanceStore
      */
     public List<String> listSessionsWithPendingDeliveries(String tenantId,
             String channelId, int limit) {
+        // ma_session.session_scope_key stays NULL for PUBLIC Sessions (only
+        // CONTROL admission writes it), so the record join must stay on the
+        // raw tenant/session identity, not the scope key.
         return jdbc.query("SELECT r.session_id, MIN(r.gmt_create) AS"
                         + " oldest_due"
                         + " FROM ma_session_record r"

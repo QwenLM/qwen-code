@@ -67,6 +67,14 @@ export interface UseVoiceCaptureReturn {
   start: () => void;
   stop: () => void;
   abort: () => void;
+  /**
+   * Stop an active capture and resolve with its final transcript once the
+   * server finalizes ('' when idle, empty, failed, or aborted). While a flush
+   * is pending the final transcript is delivered only through this promise —
+   * `onFinal` is suppressed so the caller owns insertion (e.g. a send that
+   * must include the dictation).
+   */
+  flush: () => Promise<string>;
 }
 
 const SAMPLE_RATE = 16_000;
@@ -98,6 +106,12 @@ interface CaptureSnapshot {
   onUnexpectedClose?: (event: VoiceUnexpectedClose) => void;
 }
 
+interface PendingFlush {
+  promise: Promise<string>;
+  resolve: (text: string) => void;
+  timeout?: ReturnType<typeof setTimeout>;
+}
+
 export function useVoiceCapture({
   baseUrl,
   token,
@@ -118,6 +132,7 @@ export function useVoiceCapture({
   const stopWhenConnectedRef = useRef(false);
   const statusRef = useRef<VoiceCaptureStatus>('idle');
   const snapshotRef = useRef<CaptureSnapshot | undefined>(undefined);
+  const flushRef = useRef<PendingFlush | null>(null);
 
   const applyStatus = useCallback((next: VoiceCaptureStatus) => {
     statusRef.current = next;
@@ -129,6 +144,14 @@ export function useVoiceCapture({
     if (!resources.transcribeTimeout) return;
     clearTimeout(resources.transcribeTimeout);
     resources.transcribeTimeout = undefined;
+  }, []);
+
+  const settleFlush = useCallback((text: string) => {
+    const pending = flushRef.current;
+    if (!pending) return;
+    flushRef.current = null;
+    if (pending.timeout) clearTimeout(pending.timeout);
+    pending.resolve(text);
   }, []);
 
   const teardownAudio = useCallback(() => {
@@ -194,6 +217,7 @@ export function useVoiceCapture({
           ? error.message
           : String(error);
       cleanup();
+      settleFlush('');
       if (!mountedRef.current) return;
       applyStatus('error');
       setInterimText('');
@@ -201,20 +225,25 @@ export function useVoiceCapture({
       setErrorMessage(message);
       snapshot.onError?.(message);
     },
-    [applyStatus, cleanup, snapshotIsCurrent],
+    [applyStatus, cleanup, settleFlush, snapshotIsCurrent],
   );
 
   const finishWith = useCallback(
     (text: string, snapshot: CaptureSnapshot) => {
       if (!snapshotIsCurrent(snapshot)) return;
+      const flushing = flushRef.current !== null;
       cleanup();
+      settleFlush(text);
       if (!mountedRef.current) return;
       applyStatus('idle');
       setInterimText('');
       setAudioLevel(0);
-      snapshot.onFinal(text);
+      // A pending flush owns the transcript: its caller inserts the text
+      // (e.g. into the composer right before a send), so onFinal must not
+      // insert it a second time.
+      if (!flushing) snapshot.onFinal(text);
     },
-    [applyStatus, cleanup, snapshotIsCurrent],
+    [applyStatus, cleanup, settleFlush, snapshotIsCurrent],
   );
 
   const abort = useCallback(() => {
@@ -227,12 +256,13 @@ export function useVoiceCapture({
       }
     }
     cleanup();
+    settleFlush('');
     if (!mountedRef.current) return;
     applyStatus('idle');
     setInterimText('');
     setAudioLevel(0);
     setErrorMessage(undefined);
-  }, [applyStatus, cleanup]);
+  }, [applyStatus, cleanup, settleFlush]);
 
   const finalize = useCallback(
     (ws: WebSocket, snapshot: CaptureSnapshot) => {
@@ -543,6 +573,28 @@ export function useVoiceCapture({
     finalize(ws, snapshot);
   }, [abort, clearTranscribeTimeout, finalize, teardownAudio]);
 
+  const flush = useCallback((): Promise<string> => {
+    if (flushRef.current) return flushRef.current.promise;
+    if (!snapshotRef.current) return Promise.resolve('');
+    let resolve!: (text: string) => void;
+    const promise = new Promise<string>((resolver) => {
+      resolve = resolver;
+    });
+    const pending: PendingFlush = { promise, resolve };
+    flushRef.current = pending;
+    // stop() while still connecting clears the start timeout, so a flush
+    // needs its own bound. Route the expiry through fail() like the regular
+    // transcribe timeout: the send proceeds without the dictation, but the
+    // user sees why instead of a silent abort that also clears the error.
+    pending.timeout = setTimeout(() => {
+      const snapshot = snapshotRef.current;
+      if (snapshot) fail('Transcription timed out.', snapshot);
+      else settleFlush('');
+    }, TRANSCRIPTION_TIMEOUT_MS);
+    stop();
+    return promise;
+  }, [fail, settleFlush, stop]);
+
   useEffect(() => {
     const unsubscribe = availability?.subscribe(() => {
       const snapshot = snapshotRef.current;
@@ -560,9 +612,10 @@ export function useVoiceCapture({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      settleFlush('');
       cleanup();
     };
-  }, [cleanup]);
+  }, [cleanup, settleFlush]);
 
   return {
     status,
@@ -572,5 +625,6 @@ export function useVoiceCapture({
     start,
     stop,
     abort,
+    flush,
   };
 }

@@ -816,13 +816,16 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     } else {
       // Top-level path: merge only consecutive same-kind chunks that
       // also have no parentToolCallId. Preserves text segmentation
-      // around tool calls (text before / text after stay separate).
+      // around tool calls and between slash-command output and model replies.
       const lastSlot = this.slots[this.slots.length - 1];
       if (
         lastSlot &&
         lastSlot.kind === kind &&
         lastSlot.parentToolCallId == null &&
-        stringArraysEqual(lastSlot.sourceRecordIds, sourceRecordIds)
+        stringArraysEqual(lastSlot.sourceRecordIds, sourceRecordIds) &&
+        (kind !== 'text' ||
+          hasSlashCommandSource(lastSlot.lastMeta) ===
+            hasSlashCommandSource(meta))
       ) {
         lastSlot.chunks.push(text);
         if (event.id !== undefined) lastSlot.lastEventId = event.id;
@@ -1294,6 +1297,14 @@ function hasDiscreteMessageMeta(meta: unknown): boolean {
     typeof meta === 'object' &&
     meta !== null &&
     (meta as Record<string, unknown>)['qwenDiscreteMessage'] === true
+  );
+}
+
+function hasSlashCommandSource(meta: unknown): boolean {
+  return (
+    typeof meta === 'object' &&
+    meta !== null &&
+    (meta as Record<string, unknown>)['source'] === 'slash_command'
   );
 }
 

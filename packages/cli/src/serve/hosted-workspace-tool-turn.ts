@@ -68,6 +68,7 @@ import {
   HOSTED_TODO_MAX_ITEMS,
 } from './hosted-workspace-tool-input.js';
 import {
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE_V3,
@@ -79,6 +80,7 @@ import {
   HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
+  isHostedWorkspaceExternalShellProfile,
   isHostedWorkspaceSearchProfile,
   isHostedWorkspaceGlobProfile,
   isHostedWorkspaceReadProfile,
@@ -738,6 +740,40 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+const HOSTED_FOREGROUND_SHELL_DESCRIPTION =
+  'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.';
+
+/**
+ * The one foreground Shell declaration: the shared declaration without
+ * `is_background`, so both lanes tell the model the same thing about the same
+ * schema.
+ */
+function hostedForegroundShellTool(): FunctionDeclaration {
+  const shell = HOSTED_WORKSPACE_SHELL_TOOLS.find(
+    (tool) => tool.name === 'run_shell_command',
+  )!;
+  const schema = structuredClone(shell.parametersJsonSchema) as {
+    properties?: Record<string, unknown>;
+  };
+  delete schema.properties?.['is_background'];
+  return {
+    ...shell,
+    description: HOSTED_FOREGROUND_SHELL_DESCRIPTION,
+    parametersJsonSchema: schema,
+  };
+}
+
+/**
+ * The external placement's whole tool set (#15512 slice C). Foreground Shell
+ * only — no `is_background`, no `monitor` and no `web_fetch`, because this
+ * placement's drain can only prove one worker's foreground captures, and
+ * `web_fetch` would need an egress lane it does not have.
+ */
+export const HOSTED_WORKSPACE_EXTERNAL_SHELL_TOOLS: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_FILE_TOOLS,
+  hostedForegroundShellTool(),
+];
+
 const HOSTED_GLOB_TOOL: FunctionDeclaration = {
   name: 'glob',
   description:
@@ -893,8 +929,7 @@ export const HOSTED_CRON_CREATE_TOOL: FunctionDeclaration = {
 // rendered exactly as cron_delete accepts it.
 export const HOSTED_CRON_LIST_TOOL: FunctionDeclaration = {
   name: 'cron_list',
-  description:
-    'List this Session’s live recurring cron schedules (created via cron_create) and any pending loop wakeup scheduled via loop_wakeup. Shows each schedule’s id, cron, timezone, state and a short goal label, and each wakeup’s id, fire time and a short prompt preview.',
+  description: cronListDescription(true, true),
   parametersJsonSchema: {
     type: 'object',
     properties: {},
@@ -903,21 +938,72 @@ export const HOSTED_CRON_LIST_TOOL: FunctionDeclaration = {
 };
 export const HOSTED_CRON_DELETE_TOOL: FunctionDeclaration = {
   name: 'cron_delete',
-  description:
-    'Cancel a recurring cron schedule or a pending loop wakeup by its id (as returned by cron_list). A wakeup whose turn already started cannot be cancelled.',
+  description: cronDeleteDescription(true),
   parametersJsonSchema: {
     type: 'object',
     properties: {
       id: {
         type: 'string',
-        description:
-          'A schedule id from cron_create, or a wakeup id (loop:<wakeupId>) from loop_wakeup.',
+        description: cronDeleteIdDescription(true, true),
       },
     },
     required: ['id'],
     additionalProperties: false,
   },
 };
+// The cron union surface ships on profiles that lack one of the two creators:
+// files/4 and team-lead/2 carry the trio without loop_wakeup, shell/3 keeps the
+// wakeup slice's list/delete without cron_create. The declarations must never
+// name a tool the Session does not declare — naming one steers the model into
+// emitting it, which the admission chain refuses and fails the whole turn.
+//
+// The handlers are not narrowed by profile: cron_list always spreads the
+// Session's definitions and wakeups, and cron_delete retires any non-loop id.
+// Recurring schedules can exist on ANY profile because the public actor-scoped
+// automation route creates them without consulting the CLI tool profile, so the
+// schedule half is always described; wakeups only exist where loop_wakeup is
+// declared. Each creator is named only when the profile declares it. The
+// sentences are composed from those clauses (no per-state literal copies), and
+// the exported HOSTED_CRON_* constants above are the (true, true) composition,
+// so the served wording has a single producer. The (false, false) corner names
+// neither tool.
+export function cronListDescription(
+  hasCronCreate: boolean,
+  hasLoopWakeup: boolean,
+): string {
+  const schedules = hasCronCreate
+    ? 'live recurring cron schedules (created via cron_create)'
+    : 'live recurring cron schedules';
+  const scheduleFields =
+    'Shows each schedule’s id, cron, timezone, state and a short goal label';
+  if (!hasLoopWakeup) {
+    return `List this Session’s ${schedules}. ${scheduleFields}.`;
+  }
+  return `List this Session’s ${schedules} and any pending loop wakeup scheduled via loop_wakeup. ${scheduleFields}, and each wakeup’s id, fire time and a short prompt preview.`;
+}
+
+export function cronDeleteDescription(hasLoopWakeup: boolean): string {
+  const target = hasLoopWakeup
+    ? 'a recurring cron schedule or a pending loop wakeup'
+    : 'a recurring cron schedule';
+  const wakeupNote = hasLoopWakeup
+    ? ' A wakeup whose turn already started cannot be cancelled.'
+    : '';
+  return `Cancel ${target} by its id (as returned by cron_list).${wakeupNote}`;
+}
+
+export function cronDeleteIdDescription(
+  hasCronCreate: boolean,
+  hasLoopWakeup: boolean,
+): string {
+  const scheduleId = hasCronCreate
+    ? 'A schedule id from cron_create'
+    : 'A schedule id';
+  if (!hasLoopWakeup) {
+    return `${scheduleId}.`;
+  }
+  return `${scheduleId}, or a wakeup id (loop:<wakeupId>) from loop_wakeup.`;
+}
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
 // call it does not declare.
@@ -2315,6 +2401,45 @@ export class HostedWorkspaceToolTurn {
       recoveryBroker?: HostedWorkspaceBroker;
     },
   ) {
+    const externalShellLane = isHostedWorkspaceExternalShellProfile(
+      extras?.profile,
+    );
+    const externalLane =
+      externalShellLane ||
+      extras?.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE;
+    // The Shell lane's publication is the capture its drain proves, so it is
+    // required there and forbidden on files; every other lane is closed on both.
+    const closedLane =
+      externalLane &&
+      ((externalShellLane
+        ? publicationOrShell === undefined
+        : publicationOrShell !== undefined) ||
+        shell !== undefined ||
+        [
+          extras!.mcp,
+          extras!.hooks,
+          extras!.memory,
+          extras!.childRuns,
+          extras!.monitors,
+          extras!.backgroundLane,
+          extras!.childAgents,
+          extras!.messages,
+          extras!.teams,
+          extras!.commands,
+          extras!.skills,
+          extras!.extensionConfig,
+          extras!.allowedToolNames,
+        ].some((lane) => lane !== undefined) ||
+        (extras!.extensionAgents?.length ?? 0) > 0 ||
+        extras!.memoryOnly === true ||
+        extras!.publicPlanMode === true ||
+        extras!.memberPlanMode === true);
+    if (closedLane)
+      throw new Error(
+        externalShellLane
+          ? 'External Shell profile requires a publication and no other lanes.'
+          : 'External files profile does not support optional lanes.',
+      );
     this.configuredOptions = options;
     this.memory = extras?.memory;
     this.memoryOnly = extras?.memoryOnly === true;
@@ -2593,6 +2718,20 @@ export class HostedWorkspaceToolTurn {
       this.questionChild = await this.questionWaitAdmitted();
       if (this.questionChild) await waitForTurn(this.warmed, signal);
     }
+    if (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE) {
+      this.advertised = hostedWorkspaceDeclarations(
+        [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_GLOB_TOOL],
+        !this.fileBackupsEnabled,
+      );
+      return this.advertised;
+    }
+    if (isHostedWorkspaceExternalShellProfile(this.profile)) {
+      this.advertised = hostedWorkspaceDeclarations(
+        [...HOSTED_WORKSPACE_EXTERNAL_SHELL_TOOLS, HOSTED_GLOB_TOOL],
+        !this.fileBackupsEnabled,
+      );
+      return this.advertised;
+    }
     if (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
       (this.profile === undefined &&
@@ -2676,20 +2815,33 @@ export class HostedWorkspaceToolTurn {
             tool.name === 'run_shell_command' &&
             !this.backgroundShellAdmitted()
           ) {
-            const schema = structuredClone(tool.parametersJsonSchema) as {
-              properties?: Record<string, unknown>;
-            };
-            delete schema.properties?.['is_background'];
-            tool = {
-              ...tool,
-              description:
-                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
-              parametersJsonSchema: schema,
-            };
+            tool = hostedForegroundShellTool();
           }
           if (tool.name === 'cron_create' && !loopTool) {
             // The profile has no loop_wakeup to fall back to; do not name it.
             tool = { ...tool, description: CRON_CREATE_DESCRIPTION };
+          }
+          if (tool.name === 'cron_list') {
+            tool = {
+              ...tool,
+              description: cronListDescription(cronCreate, loopTool),
+            };
+          }
+          if (tool.name === 'cron_delete') {
+            const schema = structuredClone(tool.parametersJsonSchema) as {
+              properties?: Record<string, { description?: string }>;
+            };
+            if (schema.properties?.['id']) {
+              schema.properties['id'].description = cronDeleteIdDescription(
+                cronCreate,
+                loopTool,
+              );
+            }
+            tool = {
+              ...tool,
+              description: cronDeleteDescription(loopTool),
+              parametersJsonSchema: schema,
+            };
           }
           return extensionToolDeclaration(
             hostedWorkspaceDeclarations([tool], !this.fileBackupsEnabled)[0],
@@ -3101,7 +3253,8 @@ export class HostedWorkspaceToolTurn {
           original === this.broker &&
           !this.hooks &&
           !this.mcp &&
-          !isHostedWorkspaceShellProfile(this.profile)
+          !isHostedWorkspaceShellProfile(this.profile) &&
+          !isHostedWorkspaceExternalShellProfile(this.profile)
         ) {
           await oweHostedTurnCleanup(this.session, this.promptId, original);
           this.cleanupOwed = original.runtime !== undefined;
@@ -3146,6 +3299,7 @@ export class HostedWorkspaceToolTurn {
       !this.hooks &&
       !this.mcp &&
       (this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+        this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
         isHostedWorkspaceReadProfile(this.profile))
     ) {
       this.uncertain = true;
@@ -3165,16 +3319,23 @@ export class HostedWorkspaceToolTurn {
           items.every(
             (item) =>
               item.state === 'settled' &&
-              ['read_file', 'write_file', 'edit', 'glob', 'web_fetch'].includes(
-                item.toolName,
-              ),
+              [
+                'read_file',
+                'write_file',
+                'edit',
+                'glob',
+                ...(this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+                  ? []
+                  : ['web_fetch']),
+              ].includes(item.toolName),
           ) &&
           (saved ||
             items.every((item) =>
               [
                 'read_file',
                 'glob',
-                ...(isHostedWorkspaceReadProfile(this.profile)
+                ...(isHostedWorkspaceReadProfile(this.profile) ||
+                this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
                   ? []
                   : ['web_fetch']),
               ].includes(item.toolName),
@@ -3230,7 +3391,8 @@ export class HostedWorkspaceToolTurn {
             if (
               !this.cleanupOwed &&
               !this.mcp &&
-              !isHostedWorkspaceShellProfile(this.profile)
+              !isHostedWorkspaceShellProfile(this.profile) &&
+              !isHostedWorkspaceExternalShellProfile(this.profile)
             )
               await oweHostedTurnCleanup(
                 this.session,
@@ -3241,6 +3403,7 @@ export class HostedWorkspaceToolTurn {
               !this.mcp &&
               !this.hooks &&
               !isHostedWorkspaceShellProfile(this.profile) &&
+              !isHostedWorkspaceExternalShellProfile(this.profile) &&
               this.broker.runtime
             )
               this.cleanupOwed = true;
