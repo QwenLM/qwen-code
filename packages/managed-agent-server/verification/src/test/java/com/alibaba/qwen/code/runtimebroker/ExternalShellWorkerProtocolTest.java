@@ -89,7 +89,7 @@ class ExternalShellWorkerProtocolTest {
         // (0xC3 ends block 0, 0xA9 starts block 1), so per-block decoding
         // would mangle a correct capture.
         var payload = "x".repeat(32 * 1024 - 1) + "é" + "y".repeat(11) + "\n";
-        try (var worker = ExternalShellWorkerFixture.start(payload, "")) {
+        try (var worker = ExternalShellWorkerFixture.start(payload, payload)) {
             var commandLine = String.join(" ", worker.launchCommand);
             assertTrue(commandLine.length() < 32767,
                     "The worker command line must fit Windows process creation limits");
@@ -99,7 +99,9 @@ class ExternalShellWorkerProtocolTest {
 
             assertEquals(payload, stdout.bytes());
             assertEquals(List.of(false, false, true), stdout.eofs());
-            worker.copy(transport, channel, "stderr");
+            var stderr = worker.copy(transport, channel, "stderr");
+            assertEquals(payload, stderr.bytes());
+            assertEquals(List.of(false, false, true), stderr.eofs());
             assertEquals("drained", worker.stopDrained(transport));
         }
     }
