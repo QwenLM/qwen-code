@@ -180,6 +180,7 @@ final class AgentLifecycleOperations {
                 SessionMutationEvents.mutationSource(namespace, scopedKey, "requested"), now);
         jdbc.update("UPDATE ma_session SET status = 'CLOSED', gmt_modified = ?, version = version + 1"
                 + " WHERE tenant_id = ? AND session_id = ?", now, tenantId, sessionId);
+        JdbcManagedUserMessageStore.retireQueued(jdbc, tenantId, sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null, "session.unarchived", data, false,
                 SessionMutationEvents.mutationSource(namespace, scopedKey, "completed"), now);
         return new SessionMutation(storeRows.requireSessionForUpdate(tenantId, sessionId), false);
@@ -536,6 +537,7 @@ final class AgentLifecycleOperations {
                         + " tenant_id = ? AND session_id = ?",
                 archive ? "ARCHIVED" : LifecycleOperationNames.pendingStatus(kind), now, tenantId,
                 sessionId);
+        JdbcManagedUserMessageStore.retireQueued(jdbc, tenantId, sessionId);
         ManagedSideQueryStore.cancelSession(jdbc, tenantId, sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null,
                 archive ? LifecycleOperationNames.completedEvent(kind) : LifecycleOperationNames.requestedEvent(kind), data,
@@ -686,6 +688,7 @@ final class AgentLifecycleOperations {
                             + " tenant_id = ? AND session_id = ?",
                     now, now, tenantId, sessionId);
         }
+        JdbcManagedUserMessageStore.retireQueued(jdbc, tenantId, sessionId);
         jdbc.update(
                 "UPDATE ma_operation SET failure_code = NULL, phase = 'COMPLETED', state ="
                     + " 'COMPLETED', admission_stage = ?, delivery_state = 'CONFIRMED', receipt_id"

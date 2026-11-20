@@ -90,14 +90,27 @@ export function getCached<K, V>(
   cache: Map<K, Promise<V>>,
   key: K,
   load: () => Promise<V>,
+  signal: AbortSignal,
 ) {
   let promise = cache.get(key);
   if (!promise) {
-    promise = load().catch((error) => {
-      cache.delete(key);
-      throw error;
-    });
+    const discard = () => {
+      if (cache.get(key) === promise) cache.delete(key);
+    };
+    promise = load().then(
+      (value) => {
+        signal.removeEventListener('abort', discard);
+        return value;
+      },
+      (error) => {
+        signal.removeEventListener('abort', discard);
+        discard();
+        throw error;
+      },
+    );
     cache.set(key, promise);
+    if (signal.aborted) discard();
+    else signal.addEventListener('abort', discard, { once: true });
   }
   return promise;
 }
@@ -408,8 +421,11 @@ export function createFileProvider(
         try {
           const { dirPath, entryQuery } = splitFileQuery(query, currentDir);
           const lowerQuery = entryQuery.toLowerCase();
-          const listing = await getCached(getCache().directories, dirPath, () =>
-            listDirectory(dirPath, { signal }),
+          const listing = await getCached(
+            getCache().directories,
+            dirPath,
+            () => listDirectory(dirPath, { signal }),
+            signal,
           );
           if (signal.aborted) return [];
           const entries = listing.entries
@@ -474,8 +490,11 @@ export function createFileProvider(
       }
       try {
         const pattern = fileSearchGlobPattern(query);
-        const result = await getCached(getCache().globResults, pattern, () =>
-          globWorkspace(pattern, { maxResults: ITEM_LIMIT, signal }),
+        const result = await getCached(
+          getCache().globResults,
+          pattern,
+          () => globWorkspace(pattern, { maxResults: ITEM_LIMIT, signal }),
+          signal,
         );
         if (signal.aborted) return [];
         return result.matches

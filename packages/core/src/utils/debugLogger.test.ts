@@ -90,6 +90,40 @@ describe('debugLogger', () => {
       expect(fs.appendFile).not.toHaveBeenCalled();
     });
 
+    it('reports delivery for disabled, successful and failed writes', async () => {
+      const deliveries: boolean[] = [];
+      const logger = createDebugLogger('DELIVERY_TEST');
+      const submit = (message: string) => {
+        logger.warnWithDelivery?.(
+          (delivered) => deliveries.push(delivered),
+          message,
+        );
+      };
+
+      setDebugLogSession(null);
+      submit('no session');
+      expect(deliveries).toEqual([false]);
+      expect(fs.appendFile).not.toHaveBeenCalled();
+
+      setDebugLogSession(mockSession);
+      process.env['QWEN_DEBUG_LOG_FILE'] = '0';
+      submit('file output disabled');
+      expect(deliveries).toEqual([false, false]);
+      expect(fs.appendFile).not.toHaveBeenCalled();
+
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+      submit('delivered');
+      await vi.runAllTimersAsync();
+      expect(deliveries).toEqual([false, false, true]);
+      expect(fs.appendFile).toHaveBeenCalledOnce();
+
+      vi.mocked(fs.appendFile).mockRejectedValueOnce(new Error('Disk full'));
+      submit('not delivered');
+      await vi.runAllTimersAsync();
+      expect(deliveries).toEqual([false, false, true, false]);
+      expect(fs.appendFile).toHaveBeenCalledTimes(2);
+    });
+
     it('suppresses the global debug session within an async context', async () => {
       const logger = createDebugLogger('READ_ONLY');
 
@@ -393,6 +427,18 @@ describe('debugLogger', () => {
       await vi.runAllTimersAsync();
 
       expect(isDebugLoggingDegraded()).toBe(true);
+    });
+
+    it('does not blame a successful append for a throwing observer', async () => {
+      const logger = createDebugLogger();
+      logger.warnWithDelivery?.(() => {
+        throw new Error('observer failed');
+      }, 'successful append');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledOnce();
+      expect(isDebugLoggingDegraded()).toBe(false);
     });
 
     it('stays true after failure even if subsequent writes succeed', async () => {
