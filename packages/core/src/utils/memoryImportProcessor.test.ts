@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   processImports,
@@ -580,6 +582,38 @@ Inner content
       expect(valid(toParent, [base])).toBe(false);
       expect(valid(toParent, [base, parentPath])).toBe(true);
       expect(valid(path.join('nested', 'sub', 'file.md'), [base])).toBe(true);
+    });
+
+    it('should reject symlinks that resolve outside the allowed directory', () => {
+      if (process.platform === 'win32') return;
+      const tempRoot = fsSync.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-memory-import-'),
+      );
+      const projectRoot = path.join(tempRoot, 'project');
+      const outsideRoot = path.join(tempRoot, 'outside');
+      fsSync.mkdirSync(projectRoot);
+      fsSync.mkdirSync(outsideRoot);
+      const secret = path.join(outsideRoot, 'secret.md');
+      const inside = path.join(projectRoot, 'inside.md');
+      const insideLink = path.join(projectRoot, 'inside-link.md');
+      const link = path.join(projectRoot, 'linked.md');
+      fsSync.writeFileSync(secret, 'private');
+      fsSync.writeFileSync(inside, 'inside');
+      fsSync.symlinkSync(inside, insideLink);
+      fsSync.symlinkSync(secret, link);
+      try {
+        expect(
+          validateImportPath('./inside.md', projectRoot, [projectRoot]),
+        ).toBe(true);
+        expect(
+          validateImportPath('./inside-link.md', projectRoot, [projectRoot]),
+        ).toBe(true);
+        expect(
+          validateImportPath('./linked.md', projectRoot, [projectRoot]),
+        ).toBe(false);
+      } finally {
+        fsSync.rmSync(tempRoot, { recursive: true, force: true });
+      }
     });
 
     it('should handle absolute paths correctly', () => {
