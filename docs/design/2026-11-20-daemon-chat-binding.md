@@ -70,6 +70,21 @@ gate) are the next increment.
   later increment wires them. The contract's `acknowledge` exposure (to release
   consumed terminal rows) also lands with the surface.
 
+Two decisions the surface switch must make explicitly before it renders
+certifications (review follow-ups, not silently carryable):
+
+- **Decision-emission race window.** The derivation can emit `applied: true` when
+  the block leaves the pending set before this controller's POST result resolves;
+  if someone else answered the same request and this POST then returns `false`, the
+  engine's monotonic freeze cannot withdraw the certification. This is inherent to
+  request-level correlation plus block-resolution authority. The surface must
+  decide whether to gate the emitted decision on the transport's admission or to
+  accept block-resolution authority and dedupe at the provider.
+- **Superseded rendering.** `pendingApprovals` never carries `status: 'superseded'`
+  because the selector drops resolved blocks, while the contract comment describes
+  superseded approvals lingering until confirmed. The surface must decide whether
+  superseded rendering reads the operation rows instead.
+
 ## Constraints respected
 
 - No daemon routes, Java routes, or OpenAPI change; no UI behavior change (the hook
