@@ -7,8 +7,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, useReducer } from 'react';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonInputAnnotation,
+  DaemonTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
 import type { SessionChatController } from '../chat-core/contract.js';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes.js';
 
 const harness = vi.hoisted(() => ({
   connection: {
@@ -108,6 +112,7 @@ beforeEach(() => {
   harness.submitPrompt.mockClear();
   harness.submitPrompt.mockResolvedValue({ promptId: 'p1' });
   harness.cancel.mockClear();
+  harness.cancel.mockResolvedValue(undefined);
   harness.submitPermission.mockClear();
   harness.submitPermission.mockResolvedValue(true);
   harness.respondToPermission.mockClear();
@@ -126,10 +131,18 @@ afterEach(() => {
 describe('useDaemonChatController', () => {
   it('forwards inputAnnotations to the submit action', async () => {
     mountReact(<Probe />);
-    const annotations = [{ type: 'file', path: '/w/a.ts' }];
+    const annotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: '@a.ts',
+        reference: { id: 'ref-1', kind: 'file', value: '/w/a.ts' },
+      },
+    ];
     await controller!.submit({
       text: 'hi',
-      metadata: { inputAnnotations: annotations as never },
+      metadata: { inputAnnotations: annotations },
     });
     expect(harness.submitPrompt).toHaveBeenCalledWith(
       'hi',
@@ -323,12 +336,12 @@ describe('useDaemonChatController', () => {
 
   it('forwards images and files to the submit action', async () => {
     mountReact(<Probe />);
-    const images = [{ mimeType: 'image/png', data: 'aW1n' }];
-    const files = [{ path: '/w/a.ts' }];
+    const images: PromptImage[] = [{ data: 'aW1n', media_type: 'image/png' }];
+    const files: PromptFile[] = [{ name: 'a.ts', media_type: 'text/plain' }];
     await controller!.submit({
       text: 'hi',
-      images: images as never,
-      files: files as never,
+      images,
+      files,
     });
     expect(harness.submitPrompt).toHaveBeenCalledWith(
       'hi',
@@ -418,5 +431,68 @@ describe('useDaemonChatController', () => {
       { questionId: '0', value: 'Alice' },
     ]);
     expect(result.admission).toBe('unknown');
+  });
+
+  it('establishes an approval applied while its vote is still in flight', async () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    let resolveVote: ((applied: boolean) => void) | undefined;
+    harness.submitPermission.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveVote = resolve;
+        }),
+    );
+    mountReact(<Probe />);
+    let result:
+      | ReturnType<SessionChatController['respondApproval']>
+      | undefined;
+    await act(async () => {
+      result = controller!.respondApproval('a1', 'submit');
+      await Promise.resolve();
+    });
+    // The daemon applies the permission and drops it before the POST resolves;
+    // the answer must already be tracked so this reads as a decision, not a
+    // supersession.
+    harness.pendingPermissions = [];
+    forceRerender!();
+    await act(async () => {
+      resolveVote!(true);
+      await result;
+    });
+    expect((await result)!.admission).toBe('accepted');
+    expect(
+      controller!.operations.find((op) => op.kind === 'approval')?.state,
+    ).toBe('established');
+  });
+
+  it('establishes a question applied while its vote is still in flight', async () => {
+    harness.pendingPermissions = [permissionBlock('q1', { questions: true })];
+    let resolveVote: ((applied: boolean) => void) | undefined;
+    harness.submitPermission.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveVote = resolve;
+        }),
+    );
+    mountReact(<Probe />);
+    let result:
+      | ReturnType<SessionChatController['respondQuestion']>
+      | undefined;
+    await act(async () => {
+      result = controller!.respondQuestion('q1', [
+        { questionId: '0', value: 'Alice' },
+      ]);
+      await Promise.resolve();
+    });
+    harness.pendingPermissions = [];
+    forceRerender!();
+    await act(async () => {
+      resolveVote!(true);
+      await result;
+    });
+    expect((await result)!.admission).toBe('accepted');
+    expect(
+      controller!.operations.find((op) => op.kind === 'question')?.state,
+    ).toBe('established');
   });
 });
