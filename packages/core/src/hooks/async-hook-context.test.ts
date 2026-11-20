@@ -562,6 +562,24 @@ describe('async-hook-context', () => {
       expect(body).toContain(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE);
     });
 
+    it('a cap-sized retained body does not crowd out a short fresh body', () => {
+      // The fresh drain's notification messages must survive: a tail cut that
+      // spends the whole budget on the older retained body would lose them.
+      const big = 'R'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH);
+      const merged = mergeAsyncHookContextParts([
+        { text: wrapAsyncHookContext(big) },
+        { text: wrapAsyncHookContext('fresh notification') },
+      ]);
+      expect(merged).not.toBeNull();
+      expect(merged?.text).toContain('fresh notification');
+      const body = (merged?.text ?? '').slice(
+        ASYNC_HOOK_CONTEXT_OPEN.length + 1,
+        -(ASYNC_HOOK_CONTEXT_CLOSE.length + 1),
+      );
+      expect(body.length).toBeLessThanOrEqual(MAX_ASYNC_HOOK_CONTEXT_LENGTH);
+      expect(isAsyncHookContextPartText(merged?.text ?? '')).toBe(true);
+    });
+
     it('skips blank bodies and non-envelope parts', () => {
       const merged = mergeAsyncHookContextParts([
         { text: wrapAsyncHookContext('   ') },

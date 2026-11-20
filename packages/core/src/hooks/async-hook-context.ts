@@ -230,7 +230,11 @@ export function mergeAsyncHookContextParts(
     if (body.trim()) bodies.push(body);
   }
   if (bodies.length === 0) return null;
-  const joined = bodies.join('\n\n');
+  // Give each body a share so an older retained block cannot crowd out the
+  // freshly drained one: formatAsyncHookOutput keeps notification messages
+  // last, and a tail cut would lose them forever (the registry is cleared).
+  const share = Math.floor(MAX_ASYNC_HOOK_CONTEXT_LENGTH / bodies.length);
+  const joined = bodies.map((body) => boundHalf(body, share)).join('\n\n');
   return {
     text: wrapAsyncHookContext(
       boundHalf(joined, MAX_ASYNC_HOOK_CONTEXT_LENGTH),

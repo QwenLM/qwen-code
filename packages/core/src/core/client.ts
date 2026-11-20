@@ -5854,11 +5854,21 @@ export class LlmClient {
             ),
         );
         const seen = new Set<string>();
-        const deduped = candidates.filter((part) => {
-          if (present.has(part.text) || seen.has(part.text)) return false;
+        const deduped: Array<{ text: string }> = [];
+        for (const part of candidates) {
+          if (present.has(part.text)) {
+            // The request already carries it, so do not append a second copy —
+            // but the retention entry was consumed above, and only this send's
+            // push snapshot decides whether it survives. Register it for
+            // settlement without re-appending, or a pre-push exit would lose it
+            // (the restored Retry entry no longer carries it).
+            attachedAsyncHookParts.push({ text: part.text });
+            continue;
+          }
+          if (seen.has(part.text)) continue;
           seen.add(part.text);
-          return true;
-        });
+          deduped.push(part);
+        }
         const merged = mergeAsyncHookContextParts(deduped);
         if (merged) {
           const lastPart = requestToSend[requestToSend.length - 1];

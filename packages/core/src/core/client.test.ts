@@ -1504,6 +1504,7 @@ describe('Gemini Client (client.ts)', () => {
       vi.mocked(mockConfig.getHookSystem).mockReturnValue({
         getPendingAsyncOutput: () => registry.getPendingOutput(),
       } as unknown as ReturnType<Config['getHookSystem']>);
+      return registry;
     };
 
     // Identify the async envelope with the same exact matcher the code under
@@ -1787,7 +1788,7 @@ describe('Gemini Client (client.ts)', () => {
     it('a loop-detection exit before the drain leaves the block for the next send', async () => {
       // The result-aware loop detection returns the turn before the drain site,
       // so the get-and-clear block must not be consumed by the halted turn.
-      installAsyncOutput('survives loop detection');
+      const registry = installAsyncOutput('survives loop detection');
       const detector = (
         client as unknown as {
           loopDetector: {
@@ -1806,6 +1807,11 @@ describe('Gemini Client (client.ts)', () => {
       expect(events.some((e) => e.type === LlmEventType.LoopDetected)).toBe(
         true,
       );
+      // The block must still be pending in the registry — never consumed by the
+      // halted turn. This separates "never drained" (drain after loop detection)
+      // from "drained then re-retained" (a drain folded back above the guards),
+      // which the next-send delivery assertion alone cannot distinguish.
+      expect(registry.hasPendingOutput()).toBe(true);
       recordSpy.mockReturnValue(false);
       await run([{ text: 'next' }], 'prompt-loop-next', {
         type: SendMessageType.UserQuery,
@@ -1975,6 +1981,80 @@ describe('Gemini Client (client.ts)', () => {
       expect((asyncParts[0] as Part).text?.length ?? 0).toBeLessThanOrEqual(
         MAX_ASYNC_HOOK_CONTEXT_LENGTH + envelopeOverhead,
       );
+    });
+
+    it('a continue Retry that exits before the push still delivers the carried block once', async () => {
+      // The dedup drops the retained copy because the payload already carries
+      // it, but must register it for settlement: a pre-push exit restores the
+      // stripped entry WITHOUT the envelope, so only the retention can save it.
+      const envelope = wrapAsyncHookContext('carried then pre-push exit');
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        { text: envelope },
+      );
+      let pushes = 0;
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn(() => pushes),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run(
+          [{ text: 'original prompt' }, { text: envelope }],
+          'prompt-continue-prepush',
+          { type: SendMessageType.Retry },
+        ),
+      ).rejects.toThrow('chat pre-push failure');
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, pushes++);
+        return textTurn('ok');
+      });
+      // The next send (block-free payload) must still deliver the block once.
+      await run([{ text: 'next' }], 'prompt-continue-prepush-next', {
+        type: SendMessageType.UserQuery,
+      });
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      const asyncParts = parts.filter(isAsyncHookPart);
+      expect(asyncParts).toHaveLength(1);
+      expect((asyncParts[0] as Part).text).toContain(
+        'carried then pre-push exit',
+      );
+    });
+
+    it('a byte-identical fresh drain of a retained block is deduped', async () => {
+      // A standing hook rule produces the same output each turn; the retained
+      // copy and the identical fresh drain must merge to one, not two.
+      installAsyncOutput('stable standing rule');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 1');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-seen-1', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 1');
+      installAsyncOutput('stable standing rule');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 2');
+      });
+      await expect(
+        run([{ text: 'second' }], 'prompt-seen-2', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 2');
+      await run([{ text: 'third' }], 'prompt-seen-3', {
+        type: SendMessageType.UserQuery,
+      });
+      // Count occurrences: toContain would pass with a duplicated block too.
+      expect(
+        getLastTurnRequestText().split('stable standing rule').length - 1,
+      ).toBe(1);
     });
   });
 
