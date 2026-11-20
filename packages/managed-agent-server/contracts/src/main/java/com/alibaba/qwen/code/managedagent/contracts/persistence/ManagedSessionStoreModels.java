@@ -209,30 +209,23 @@ public final class ManagedSessionStoreModels {
     public record WriterGrant(long writerGeneration, long leaseUntil,
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
-            boolean replayed, int supportedStorageVersion, boolean activationLeaseRenewal, ActivationLease activationLease,
+            boolean replayed, boolean activationLeaseRenewal, ActivationLease activationLease,
             boolean wakeDispatch) {
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
-                int supportedStorageVersion, boolean activationLeaseRenewal, ActivationLease activationLease) {
+                boolean activationLeaseRenewal, ActivationLease activationLease) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
-                    activationEpoch, replayed, supportedStorageVersion, activationLeaseRenewal, activationLease, false);
-        }
-        public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
-                long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
-                int supportedStorageVersion) {
-            this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
-                    activationEpoch, replayed, supportedStorageVersion, true, null);
+                    activationEpoch, replayed, activationLeaseRenewal, activationLease, false);
         }
         /** Advertises that this control plane consumes seal-time wake stamps. */
         public WriterGrant withWakeDispatch() {
             return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
-                    lastCommitDigest, activationEpoch, replayed, supportedStorageVersion,
-                    activationLeaseRenewal, activationLease, true);
+                    lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease, true);
         }
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
-                    activationEpoch, replayed, ManagedStorageVersions.SUPPORTED);
+                    activationEpoch, replayed, true, null);
         }
     }
 
@@ -318,17 +311,17 @@ public final class ManagedSessionStoreModels {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record RestoreHead(String state, int storageVersion,
+    public record RestoreHead(String state, boolean activityDiagnostics,
             long writerGeneration, long journalRevision,
             long committedSequence, String lastCommitDigest,
             long activationEpoch, String latestCheckpointResourceId,
             long compactedThroughRevision, String recoveryStatus,
             String recoveryDetailCode, ActivationLease activationLease) {
-        public RestoreHead(String state, int storageVersion, long writerGeneration, long journalRevision,
+        public RestoreHead(String state, boolean activityDiagnostics, long writerGeneration, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch,
                 String latestCheckpointResourceId, long compactedThroughRevision, String recoveryStatus,
                 String recoveryDetailCode) {
-            this(state, storageVersion, writerGeneration, journalRevision, committedSequence, lastCommitDigest,
+            this(state, activityDiagnostics, writerGeneration, journalRevision, committedSequence, lastCommitDigest,
                     activationEpoch, latestCheckpointResourceId, compactedThroughRevision, recoveryStatus,
                     recoveryDetailCode, null);
         }

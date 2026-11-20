@@ -196,7 +196,6 @@ describe('workspace recovery private worker', () => {
       workspaceId: 'private-key',
       sessionId: original.sessionId,
       state: 'DELETED',
-      storageVersion: 1,
       writerId: null,
       writerGeneration: 9,
       writerLeaseUntil: null,

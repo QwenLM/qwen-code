@@ -1370,11 +1370,25 @@ function harnessAuthorizationDetail(
     : `${authorization.reason}: ${sanitizeDaemonLogLine(authorization.message)}`;
 }
 
+/** The fence codes a close in flight raises under either lifecycle
+ * protocol: the v1 lifecycle fence or the v2 claim fence (files-on-v2).
+ * Shared by ordinaryAuthorizationError and the children/operations claim
+ * gate so the two cannot drift apart. */
+function isLifecycleFenceRemoteCode(code: unknown): boolean {
+  return (
+    code === 'managed_session_lifecycle_active' ||
+    code === 'workspace_lifecycle_claim_fenced'
+  );
+}
+
 function ordinaryAuthorizationError(res: Response, cause: unknown): void {
+  // A close in flight fences ordinary admission under either protocol:
+  // the v1 lifecycle fence or the v2 claim fence (files-on-v2). Both are
+  // conflicts that retry cannot clear until the close finishes.
   if (
     cause instanceof ManagedSessionStoreHttpError &&
     cause.status === 409 &&
-    cause.remoteCode === 'managed_session_lifecycle_active'
+    isLifecycleFenceRemoteCode(cause.remoteCode)
   )
     return error(res, 409, 'hosted_lifecycle_operation_active');
   error(res, 503, 'hosted_execution_authorization_unavailable');
@@ -9128,7 +9142,7 @@ export function registerHostedHarnessSessionRoutes(
           req.path === '/children/operations' &&
           cause instanceof ManagedSessionStoreHttpError &&
           cause.status === 409 &&
-          cause.remoteCode === 'managed_session_lifecycle_active'
+          isLifecycleFenceRemoteCode(cause.remoteCode)
         ) {
           // Closing work means lifecycle admission, so the parent's own
           // child cleanup presents the matching lifecycle claim instead:

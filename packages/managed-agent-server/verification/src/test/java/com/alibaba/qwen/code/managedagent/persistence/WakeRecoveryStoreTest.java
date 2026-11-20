@@ -52,9 +52,9 @@ public class WakeRecoveryStoreTest {
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id,"
                         + " session_id, harness_session_id, head_kind, state, journal_revision,"
                         + " committed_sequence, compacted_through_revision, writer_generation, activation_epoch,"
-                        + " storage_version, writer_lease_until, gmt_create, gmt_modified)"
+                        + " writer_lease_until, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, 'tenant', 'workspace', 'session', 'session', 'MANAGED_SESSION',"
-                        + " 'ACTIVE', 0, 0, 0, 1, 0, 1, 1, 1, 1)",
+                        + " 'ACTIVE', 0, 0, 0, 1, 0, 1, 1, 1)",
                 ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key("session"));
     }
 
@@ -247,9 +247,9 @@ public class WakeRecoveryStoreTest {
             jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, session_id,"
                             + " harness_session_id, workspace_id, head_kind, state, journal_revision,"
                             + " committed_sequence, compacted_through_revision, writer_generation,"
-                            + " activation_epoch, storage_version, gmt_create, gmt_modified)"
+                            + " activation_epoch, gmt_create, gmt_modified)"
                             + " SELECT tenant_key, ?, tenant_id, ?, ?, workspace_id, head_kind, state,"
-                            + " journal_revision, committed_sequence, compacted_through_revision, 1, 0, 1, 1, 1"
+                            + " journal_revision, committed_sequence, compacted_through_revision, 1, 0, 1, 1"
                             + " FROM ma_session_head WHERE session_id = ?",
                     "0".repeat(60) + String.format("%04d", index), id, id, "session");
         }
@@ -408,10 +408,10 @@ public class WakeRecoveryStoreTest {
                 + " VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', 1, 1)", session);
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id,"
                         + " session_id, harness_session_id, head_kind, state, journal_revision, committed_sequence,"
-                        + " compacted_through_revision, writer_generation, activation_epoch, storage_version,"
+                        + " compacted_through_revision, writer_generation, activation_epoch,"
                         + " writer_lease_until, gmt_create, gmt_modified) SELECT tenant_key, ?, tenant_id, workspace_id,"
                         + " ?, ?, head_kind, state, journal_revision, committed_sequence, compacted_through_revision,"
-                        + " writer_generation, activation_epoch, storage_version, writer_lease_until, gmt_create, gmt_modified"
+                        + " writer_generation, activation_epoch, writer_lease_until, gmt_create, gmt_modified"
                         + " FROM ma_session_head WHERE session_id = ?",
                 ManagedSchemaKeys.key(session), session, session, "session");
         for (var row : jdbc.queryForList("SELECT * FROM ma_session_journal_tx WHERE session_id = ?", "session")) {

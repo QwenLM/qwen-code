@@ -58,7 +58,6 @@ import {
   MANAGED_SESSION_FORMAT_VERSION,
   MANAGED_SESSION_HEADER_SUBTYPE,
   MANAGED_SESSION_LIMITS,
-  MANAGED_SESSION_MINIMUM_READER,
   ManagedSessionRecordError,
   ManagedSessionWritesStoppedError,
   assertManagedSessionChildContinuationEnabled,
@@ -723,7 +722,6 @@ export class LocalManagedSessionAuthority {
       }
       header = parseManagedSessionHeader({
         formatVersion: MANAGED_SESSION_FORMAT_VERSION,
-        minimumReader: MANAGED_SESSION_MINIMUM_READER,
         sessionKey: options.sessionKey,
         engine: 'managed',
         definitionRef: options.create.definitionRef,
