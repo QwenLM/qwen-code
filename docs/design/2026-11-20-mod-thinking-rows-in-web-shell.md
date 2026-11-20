@@ -55,7 +55,7 @@ The page offers the thoughts of the session's own model. A subagent's thought dr
 
 ### What keeps the original
 
-The page draws the rewrite only in the expanded body. The stored thought and the collapsed line keep the model's original. The built-in translate button beside a thought translates the original, which repeats the work of a translating Mod, so the page hides the button once it has drawn a Mod's rewrite of the thought. A thought whose hooks left it as it is keeps the button, and so does a subagent's thought.
+The page draws the rewrite only in the expanded body. The stored thought and the collapsed line keep the model's original. The built-in translate button beside a thought translates the original, which repeats the work of a translating Mod, so the page hides the button once it has drawn a Mod's rewrite of the thought. If replay gives the row different text or the expanded body returns to the original, the button is available again. A thought whose hooks left it as it is keeps the button, and so does a subagent's thought.
 
 ### The export
 
@@ -71,6 +71,7 @@ Unit tests:
 - Web Shell, other cases: a collapsed thought, a blank thought and a subagent's thought are not asked for. In the compact tool summary, a folded thought is asked once expanded and then drops its translate button, while a subagent's folded thought is not asked and keeps its button. After the session answers `unhooked` for thinking rows, the page asks for no more thoughts and keeps asking for reply rows.
 - Web Shell, compact summary: a new tool call completes an expanded streaming thought and moves it before the tool. The thought stays expanded and shows the rewrite. Closing a workflow summary withdraws a queued thought before the visibility observer reports the collapse.
 - Web Shell, transcript: a thought from a missing parent stays apart from the model's thought and keeps its parent, and the compact fold carries the parent.
+- Web Shell, replay: a reused standalone or folded row shows Translate when its current thought is unmodified. An expanded row also restores Translate if it keeps the same text and the new session connection leaves it unchanged.
 - Mutation check: each of these tests fails once the subagent check, the trim, the parent rule for merging, the parent in the fold or the hidden translate button is removed.
 
 An integration test runs a real `qwen serve`, where the probe Mod hooks `Thinking` and the model streams a thought in two chunks:
@@ -86,7 +87,7 @@ A browser check ran against the real Web Shell, with two turns:
 - Expanded, the standalone thought showed render #1, and it still showed #1 after being collapsed and expanded again. The folded thoughts showed #2 and #3.
 - After a reload and in a second tab, all three showed their first renders, and the Mod's log still counted three renders.
 
-The export renderer grew by 379 bytes, from 2,146,831 to 2,147,210 of its 2,148,200-byte budget.
+The export renderer grew by 343 bytes, from 2,146,831 to 2,147,174 of its 2,148,200-byte budget.
 
 Acceptance: in the Web Shell, with `experimental.mods` on and a Mod that rewrites `Thinking`:
 
@@ -99,4 +100,4 @@ Acceptance: in the Web Shell, with `experimental.mods` on and a Mod that rewrite
 - A thought whose hook awaits a model call shows the original when expanded, then changes height when the answer arrives.
 - A workflow summary keeps its lines mounted when collapsed. Its thoughts resume their expansion state when the summary reopens and draw any cached answers.
 - The page knows a thought was rewritten only once it has drawn the rewrite. A collapsed thought therefore shows the translate button until it is expanded, including after a reload, though the session already keeps its answer.
-- The export renderer is 990 bytes under its budget after this step.
+- The export renderer is 1,026 bytes under its budget after this step.

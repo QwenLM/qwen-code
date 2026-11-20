@@ -585,9 +585,8 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   const documentMode = transcriptRenderMode === 'document';
   const documentExpanded = useTranscriptDocumentExpanded();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
-  // A thought a Mod rewrote needs no translate button.
-  const [rewritten, setRewritten] = useState(false);
-  const markRewritten = useCallback(() => setRewritten(true), []);
+  const [rewrittenSource, setRewrittenSource] = useState<string>();
+  const rewritten = !fromSubagent && rewrittenSource === content;
   const showThinking = documentMode ? documentExpanded : thinkingExpanded;
   const thinkingActive = isStreaming === true;
   const startTimeRef = useRef(timestamp ?? Date.now());
@@ -674,7 +673,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                       content={content}
                       isStreaming={isStreaming}
                       fromSubagent={fromSubagent}
-                      onRewritten={markRewritten}
+                      onRewrittenChange={setRewrittenSource}
                     />
                   </div>
                 </div>

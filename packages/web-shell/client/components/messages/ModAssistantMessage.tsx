@@ -71,7 +71,7 @@ export function ModThinkingBody({
   content,
   isStreaming,
   fromSubagent,
-  onRewritten,
+  onRewrittenChange,
 }: ThinkingBodyProps) {
   const asker = useContext(ModRowAskerContext);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -87,9 +87,10 @@ export function ModThinkingBody({
   )?.['text'];
   const rewrite =
     typeof answer === 'string' && answer !== text ? answer : undefined;
+  const rewrittenSource = rewrite === undefined ? undefined : content;
   useLayoutEffect(() => {
-    if (rewrite !== undefined) onRewritten?.();
-  }, [rewrite, onRewritten]);
+    onRewrittenChange?.(rewrittenSource);
+  }, [rewrittenSource, onRewrittenChange]);
   return (
     <div ref={bodyRef}>
       <Markdown

@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createContext, useContext, type ComponentType } from 'react';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  type ComponentType,
+} from 'react';
 import { Markdown } from './Markdown';
 
 export interface ThinkingBodyProps {
@@ -12,8 +17,8 @@ export interface ThinkingBodyProps {
   isStreaming?: boolean;
   /** A subagent's thought, drawn outside its tool card. */
   fromSubagent?: boolean;
-  /** Called once the body draws a Mod's rewrite of the thought. */
-  onRewritten?: () => void;
+  /** Reports the source text of the displayed rewrite, if any. */
+  onRewrittenChange?: (source: string | undefined) => void;
 }
 
 export const ThinkingBodyComponentContext = createContext<
@@ -23,6 +28,10 @@ export const ThinkingBodyComponentContext = createContext<
 /** The body an expanded thought shows. */
 export function ThinkingBody(props: ThinkingBodyProps) {
   const Component = useContext(ThinkingBodyComponentContext);
+  const { onRewrittenChange } = props;
+  useEffect(() => {
+    if (!Component) onRewrittenChange?.(undefined);
+  }, [Component, onRewrittenChange]);
   if (Component) return <Component {...props} />;
   return (
     <Markdown

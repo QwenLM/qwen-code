@@ -979,6 +979,80 @@ describe('ThinkingMessage Mod rows', () => {
     expect(translate()).toBeNull();
   });
 
+  it.each([
+    { afterReplay: 'Read the file.', collapsed: false, hasAsker: true },
+    { afterReplay: 'Read the file.', collapsed: true, hasAsker: true },
+    { afterReplay: 'Check the queue.', collapsed: false, hasAsker: true },
+    { afterReplay: 'Check the queue.', collapsed: false, hasAsker: false },
+  ])(
+    'restores Translate for a reused thought row ($afterReplay, collapsed: $collapsed, asker: $hasAsker)',
+    async ({ afterReplay, collapsed, hasAsker }) => {
+      const original = 'Check the queue.';
+      const rewrite = '先看队列。';
+      const originalAsker = new ModRowAsker(async () => ({
+        status: 'answered',
+        props: { text: rewrite },
+      }));
+      const askAfterReplay = vi.fn(async () => ({
+        status: 'answered' as const,
+      }));
+      const replayAsker = new ModRowAsker(askAfterReplay);
+      const generateContent = vi.fn();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const draw = (content: string, asker: typeof originalAsker | undefined) =>
+        act(async () =>
+          root.render(
+            <I18nProvider language="zh-CN">
+              <ModRowAskerContext.Provider value={asker}>
+                <ModRowsProvider messages={[]}>
+                  <ThinkingMessage
+                    key="thought-2"
+                    content={content}
+                    generateContent={generateContent}
+                    timestamp={0}
+                  />
+                </ModRowsProvider>
+              </ModRowAskerContext.Provider>
+            </I18nProvider>,
+          ),
+        );
+      const summary = () =>
+        container.querySelector<HTMLButtonElement>('button[aria-expanded]')!;
+      const translate = () => container.querySelector('button[title="翻译"]');
+      const body = () =>
+        container.querySelector(`.${styles.thinkingExpandedWrap}`)?.textContent;
+
+      await draw(original, originalAsker);
+      const sameSummary = summary();
+      await act(async () => sameSummary.click());
+      expect(body()).toBe(rewrite);
+      expect(translate()).toBeNull();
+      if (collapsed) act(() => sameSummary.click());
+
+      await draw(afterReplay, hasAsker ? replayAsker : undefined);
+      expect(summary()).toBe(sameSummary);
+      if (collapsed) {
+        expect(body()).toBeUndefined();
+        expect(askAfterReplay).not.toHaveBeenCalled();
+        expect(translate()).not.toBeNull();
+        await act(async () => sameSummary.click());
+      }
+      if (hasAsker) {
+        expect(askAfterReplay).toHaveBeenCalledExactlyOnceWith({
+          component: 'Thinking',
+          props: { text: afterReplay },
+        });
+      } else {
+        expect(askAfterReplay).not.toHaveBeenCalled();
+      }
+      expect(body()).toBe(afterReplay);
+      expect(translate()).not.toBeNull();
+    },
+  );
+
   it("asks for neither a collapsed, a blank nor a subagent's thought", () => {
     const observers = watchScreen();
     try {

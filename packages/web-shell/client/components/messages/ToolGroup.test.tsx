@@ -3165,6 +3165,64 @@ describe('thinking rows in the compact summary', () => {
     expect(translateButtons()).toBe(1);
   });
 
+  it('restores Translate when a folded thought displays new original text', async () => {
+    const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+    const { ModRowsProvider } = await import('./ModAssistantMessage');
+    const ask = vi
+      .fn(async () => ({
+        status: 'answered' as const,
+        props: { text: 'Replayed thought' },
+      }))
+      .mockResolvedValueOnce({
+        status: 'answered',
+        props: { text: 'Rewritten thought' },
+      });
+    const asker = new ModRowAsker(ask);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const generateContent = vi.fn();
+    const tools = [makeTool({ callId: 'read', toolName: 'ReadFile' })];
+    const draw = (content: string) =>
+      root.render(
+        <I18nProvider language="zh-CN">
+          <ModRowAskerContext.Provider value={asker}>
+            <ModRowsProvider messages={[]}>
+              <ToolGroup
+                generateContent={generateContent}
+                tools={tools}
+                thoughts={[{ id: 'thought', content }]}
+              />
+            </ModRowsProvider>
+          </ModRowAskerContext.Provider>
+        </I18nProvider>,
+      );
+    const translateButton = () =>
+      container.querySelector('button[title="翻译"]');
+    const thoughtHeader = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="compact-thinking-summary"]',
+      )!;
+
+    act(() => draw('Original thought'));
+    act(() => container.querySelector('button')!.click());
+    const openThought = thoughtHeader();
+    await act(async () => openThought.click());
+    expect(container.textContent).toContain('Rewritten thought');
+    expect(translateButton()).toBeNull();
+
+    await act(async () => draw('Replayed thought'));
+    expect(thoughtHeader()).toBe(openThought);
+    expect(ask).toHaveBeenNthCalledWith(2, {
+      component: 'Thinking',
+      props: { text: 'Replayed thought' },
+    });
+    expect(container.textContent).toContain('Replayed thought');
+    expect(container.textContent).not.toContain('Rewritten thought');
+    expect(translateButton()).not.toBeNull();
+  });
+
   it('withdraws a queued thought when its workflow summary closes', async () => {
     const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
     const { ModRowsProvider } = await import('./ModAssistantMessage');

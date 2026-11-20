@@ -2024,9 +2024,8 @@ const ThoughtLine = memo(function ThoughtLine({
   const documentMode = transcriptRenderMode === 'document';
   const documentExpanded = useTranscriptDocumentExpanded();
   const [expanded, setExpanded] = useState(false);
-  // A thought a Mod rewrote needs no translate button.
-  const [rewritten, setRewritten] = useState(false);
-  const markRewritten = useCallback(() => setRewritten(true), []);
+  const [rewrittenSource, setRewrittenSource] = useState<string>();
+  const rewritten = !fromSubagent && rewrittenSource === content;
   const showContent = documentMode ? documentExpanded : expanded;
   const handleToggle = useCallback(() => {
     if (!documentMode) setExpanded((value) => !value);
@@ -2049,7 +2048,7 @@ const ThoughtLine = memo(function ThoughtLine({
             content={content}
             isStreaming={isStreaming}
             fromSubagent={fromSubagent}
-            onRewritten={markRewritten}
+            onRewrittenChange={setRewrittenSource}
           />
         </div>
       )}
