@@ -511,6 +511,14 @@
   overflow-wrap: anywhere;
 }
 
+/* The sheet is portaled out of .editorShell, so the mobile composer's 44px
+   overrides never reach its rows. The section row keeps its own taller floor. */
+:global([data-web-shell-model-sheet]) .dropdownItem:not(.sheetSectionRow),
+:global([data-web-shell-model-sheet]) .reasoningThinkingRow,
+:global([data-web-shell-model-sheet]) .reasoningEffortRow {
+  min-height: 44px;
+}
+
 .slashPanel {
   max-height: min(
     460px,

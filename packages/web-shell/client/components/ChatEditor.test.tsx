@@ -5616,6 +5616,64 @@ describe('ChatEditor model picker host content', () => {
     }
   });
 
+  it('gives the sheet search field a touch height and a 16px floor', () => {
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === MODEL_SHEET_QUERY,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      const container = renderChatEditor({
+        visibleToolbarActions: ['model'],
+        currentModel: modelA.id,
+        availableModels: [modelA, modelB],
+      });
+      open(container);
+      const sheet = document.querySelector('[data-web-shell-model-sheet]')!;
+      expect(sheet).not.toBeNull();
+      const search = sheet.querySelector<HTMLInputElement>(
+        'input[type="search"]',
+      )!;
+      expect(search).not.toBeNull();
+      expect(search.className).toContain('h-11');
+      // The shared Input shrinks to text-sm at md, which a landscape tablet
+      // still matches; iOS zooms the page below 16px.
+      expect(search.className).toContain('md:text-base');
+      expect(search.getAttribute('autocapitalize')).toBe('off');
+      expect(search.getAttribute('autocorrect')).toBe('off');
+      expect(search.getAttribute('enterkeyhint')).toBe('search');
+      expect(search.getAttribute('spellcheck')).toBe('false');
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
+
+  it('leaves the desktop popover search field at its default size', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: modelA.id,
+      availableModels: [modelA, modelB],
+    });
+    open(container);
+    const search = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-toolbar-popover] input[type="search"]',
+    )!;
+    expect(search).not.toBeNull();
+    expect(search.className).not.toContain('h-11');
+    expect(search.className).not.toContain('md:text-base');
+    expect(search.getAttribute('enterkeyhint')).toBeNull();
+  });
+
   it('keeps the mode picker as a popover on coarse pointers', () => {
     const media = vi.mocked(window.matchMedia).mockImplementation(
       (query: string) =>

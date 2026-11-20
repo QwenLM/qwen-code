@@ -238,6 +238,69 @@ test('keeps the unavailable-model authorize action reachable inside the mobile s
   await expect(sheet).toBeVisible();
 });
 
+test('model sheet rows and search field stay touch-sized, including on a tablet @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  scenario.state.configOptions = [
+    {
+      id: 'reasoning_effort',
+      name: 'Reasoning effort',
+      type: 'select',
+      currentValue: 'high',
+      options: [
+        { value: 'none', name: 'Thinking off' },
+        { value: 'low', name: 'Low' },
+        { value: 'high', name: 'High' },
+      ],
+      _meta: { 'qwenCode/reasoning': { defaultEffort: 'high' } },
+    },
+  ];
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  await page.locator('[data-web-shell-model-button]').tap();
+  const sheet = page.locator('[data-web-shell-model-sheet]');
+  await expect(sheet).toBeVisible();
+
+  const heightsOf = (locator: ReturnType<typeof page.locator>) =>
+    locator.evaluateAll((nodes) =>
+      nodes.map((node) => node.getBoundingClientRect().height),
+    );
+
+  const effortRows = sheet.locator('[data-web-shell-effort]');
+  await expect(effortRows.first()).toBeVisible();
+  const effortHeights = await heightsOf(effortRows);
+  expect(effortHeights.length).toBeGreaterThan(0);
+  for (const height of effortHeights) {
+    expect(height).toBeGreaterThanOrEqual(44);
+  }
+
+  const section = sheet.locator('[data-web-shell-model-submenu-trigger]');
+  // The section row carries its own taller floor; the row rule must not
+  // shrink it.
+  expect((await section.boundingBox())!.height).toBeGreaterThanOrEqual(48);
+  await section.tap();
+  const rows = sheet.locator('[data-model-id]');
+  await expect(rows.first()).toBeVisible();
+  const rowHeights = await heightsOf(rows);
+  expect(rowHeights.length).toBeGreaterThan(0);
+  for (const height of rowHeights) {
+    expect(height).toBeGreaterThanOrEqual(44);
+  }
+
+  // A landscape tablet still matches the coarse-pointer half of the sheet
+  // query, but now also matches the Input's md: breakpoint.
+  await page.setViewportSize({ width: 1024, height: 768 });
+  const search = sheet.locator('input[type="search"]');
+  await expect(search).toBeVisible();
+  const fontSize = await search.evaluate((node) =>
+    parseFloat(getComputedStyle(node).fontSize),
+  );
+  expect(fontSize).toBeGreaterThanOrEqual(16);
+  expect((await search.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+});
+
 test('simple mobile composer switches directly to advanced mode without losing its draft or attachments @smoke', async ({
   page,
 }, testInfo) => {

@@ -1130,6 +1130,9 @@ function ToolbarPopover({
       )}
     </div>
   );
+  // iOS zooms the page when a focused field is under 16px. The sheet also
+  // opens on landscape tablets, which still match the Input's md: shrink to
+  // text-sm, so the touch field holds text-base at every breakpoint.
   const searchInput = searchable ? (
     <Input
       ref={searchInputRef}
@@ -1138,6 +1141,11 @@ function ToolbarPopover({
       aria-label={searchLabel}
       placeholder={searchLabel}
       autoComplete="off"
+      className={mobileSheet ? 'h-11 text-base md:text-base' : undefined}
+      autoCapitalize={mobileSheet ? 'off' : undefined}
+      autoCorrect={mobileSheet ? 'off' : undefined}
+      spellCheck={mobileSheet ? false : undefined}
+      enterKeyHint={mobileSheet ? 'search' : undefined}
       onChange={(event) => setSearchQuery(event.target.value)}
       onKeyDown={(event) => {
         if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
