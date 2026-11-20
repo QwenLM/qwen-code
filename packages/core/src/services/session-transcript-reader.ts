@@ -2746,10 +2746,6 @@ async function getCachedIndex(params: {
     return cached.value;
   }
   if (cached?.pending && cached.expiresAt > now) {
-    // Refresh recency like the value-hit path so an actively awaited build
-    // is not the LRU victim of unrelated admissions.
-    indexCache.delete(key);
-    indexCache.set(key, cached);
     debugLogger.debug(`index cache pending hit ${key}`);
     params.onCacheState?.('pending');
     return cached.pending;

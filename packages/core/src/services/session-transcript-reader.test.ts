@@ -4357,7 +4357,7 @@ describe('SessionTranscriptReader', () => {
     expect(projectionReads.count).toBe(1);
   });
 
-  it('accounts a projection attached while the build was pending against the class budget', async () => {
+  it('accounts projections decoded by concurrent pages against the class budget', async () => {
     const bigText = 'x'.repeat(256 * 1024);
     const { file, authority } = await openManagedFixture([
       { uuid: 'u1', parent: null, text: 'short prompt' },

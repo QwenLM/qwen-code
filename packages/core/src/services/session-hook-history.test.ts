@@ -12,6 +12,7 @@ import {
   SessionTranscriptReader,
   InvalidSessionTranscriptCursorError,
   resetSessionTranscriptIndexCacheForTest,
+  clearSessionTranscriptIndexCacheEntriesForTest,
   SessionTranscriptSnapshotUnavailableError,
   getSessionTranscriptIndexCacheStatsForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
@@ -316,7 +317,7 @@ describe('persisted hook turn pages', () => {
     // A second session whose index lands in the oversized class once the
     // shared budget is tightened below its estimate.
     const otherSessionId = '660e8400-e29b-41d4-a716-446655440000';
-    const otherRecords = Array.from({ length: 20 }, (_, i) => ({
+    const otherRecords: ChatRecord[] = Array.from({ length: 20 }, (_, i) => ({
       uuid: `o${i}`,
       parentUuid: i ? `o${i - 1}` : null,
       sessionId: otherSessionId,
@@ -381,6 +382,63 @@ describe('persisted hook turn pages', () => {
     expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
       indexBytes,
     );
+  });
+  it('reclaims a superseded entry when a hook aggregate crosses into a full oversized class', async () => {
+    append(event('one'));
+    await write();
+    const oldRaw = await fs.readFile(file, 'utf8');
+    const reader = new SessionTranscriptReader(cwd);
+    const anchor = await reader.readTurnIndexPage(sessionId);
+    const indexBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchor.snapshot,
+    });
+    const oldTotal = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    expect(oldTotal).toBeGreaterThan(indexBytes);
+    // Grow the transcript and calibrate the new physical/aggregate sizes.
+    append();
+    await write();
+    const newRaw = await fs.readFile(file, 'utf8');
+    const anchor2 = await reader.readTurnIndexPage(sessionId);
+    const newPhysical =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldTotal;
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchor2.snapshot,
+    });
+    const newTotal =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldTotal;
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    // The new physical index fits the shared class; its aggregate crosses
+    // into the oversized class, which the old snapshot+aggregate fills.
+    setSessionTranscriptIndexCacheMaxBytesForTest(newPhysical + 50);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(newTotal + 100);
+    expect(oldTotal).toBeGreaterThan(newPhysical + 50);
+    // Re-cache the old snapshot under the tightened budgets.
+    await fs.writeFile(file, oldRaw);
+    const anchorOld = await reader.readTurnIndexPage(sessionId);
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchorOld.snapshot,
+    });
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      oldTotal,
+    );
+    // The new snapshot's aggregate crossing reclaims the superseded entry.
+    await fs.writeFile(file, newRaw);
+    const anchorNew = await reader.readTurnIndexPage(sessionId);
+    const read = vi.fn();
+    setSessionTranscriptSelectedLineReadHookForTest(read);
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchorNew.snapshot,
+    });
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      newTotal,
+    );
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+    read.mockClear();
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchorNew.snapshot,
+    });
+    expect(read).not.toHaveBeenCalled();
   });
   it('moves a shared entry into the oversized class when its hook aggregate crosses the shared budget', async () => {
     append(event('one'));

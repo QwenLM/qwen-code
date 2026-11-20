@@ -50,4 +50,4 @@ The TypeScript SDK exposes the method on `WorkspaceDaemonClient`. It forces nati
 
 ## Deferred work
 
-Archived transcript reading, reverse/tail pagination, live follow, automatic full-history loading, worker-thread indexing, cross-restart cursors, frozen-prefix digest validation for rewrite-then-append snapshots, and the Web Shell viewer are separate follow-ups.
+Archived transcript reading, reverse/tail pagination, live follow, automatic full-history loading, worker-thread indexing, cross-restart cursors, frozen-prefix digest validation on rebuild (closing the rewrite-then-append residual), and the Web Shell viewer are separate follow-ups.
