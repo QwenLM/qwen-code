@@ -560,9 +560,14 @@ public class HarnessPoolConnector implements HarnessConnector {
         if (WorkspaceToolProfiles.isExternal(profile)) {
             return isWorkspaceFilesAvailable() && supportsSavedLifecycle(profile);
         }
-        return contract != null && (WorkspaceToolProfiles.FILES.equals(profile)
-                ? isWorkspaceFilesAvailable() && contract.lifecycle() == 1
-                : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2 && contract.profiles().contains(profile));
+        // D3: ordinary files joins the negotiated v2 profiles, keeping its
+        // availability gate; external-files stays on the saved v1 path above.
+        if (WorkspaceToolProfiles.FILES.equals(profile) && !isWorkspaceFilesAvailable()) {
+            return false;
+        }
+        return contract != null
+                && WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
+                && contract.profiles().contains(profile);
     }
 
     @Override
@@ -570,6 +575,16 @@ public class HarnessPoolConnector implements HarnessConnector {
         return WorkspaceToolProfiles.isExternal(profile)
                 ? contract != null && contract.lifecycle() == 1 && contract.features().contains(profile)
                 : supportsLifecycle(profile);
+    }
+
+    @Override
+    public boolean supportsPublicChildAgents() {
+        // D5′: the negotiated pool contract gates children — the same feature
+        // token and lifecycle v2 Shell the single connector reads.
+        Contract negotiated = contract;
+        return negotiated != null
+                && HarnessFeature.PUBLIC_CHILD_AGENTS.in(negotiated.features())
+                && supportsLifecycle(WorkspaceToolProfiles.SHELL);
     }
 
     @Override

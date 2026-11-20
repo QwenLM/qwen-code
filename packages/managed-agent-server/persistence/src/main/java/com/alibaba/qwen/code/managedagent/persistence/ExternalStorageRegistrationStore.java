@@ -252,9 +252,10 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         if (tenantWorkspaceIds.isEmpty()) {
             return java.util.Map.of();
         }
-        List<Object> arguments = new java.util.ArrayList<>(tenantWorkspaceIds.size() + 1);
+        List<Object> arguments = new java.util.ArrayList<>(tenantWorkspaceIds.size() * 2 + 1);
         arguments.add(tenant);
         arguments.addAll(tenantWorkspaceIds);
+        tenantWorkspaceIds.forEach(id -> arguments.add(RuntimeAdmissionFences.storageAliasKey(tenant, id)));
         List<StoredRegistration> rows;
         try {
             rows = jdbc.query(
@@ -263,6 +264,9 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                             + " FROM ma_storage s JOIN ma_storage_owner o"
                             + " ON o.storage_key = s.physical_key"
                             + " WHERE s.tenant_id = ? AND s.storage_id IN ("
+                            + String.join(",", java.util.Collections.nCopies(
+                                    tenantWorkspaceIds.size(), "?"))
+                            + ") AND s.alias_key IN ("
                             + String.join(",", java.util.Collections.nCopies(
                                     tenantWorkspaceIds.size(), "?"))
                             + ") AND s.storage_kind IN ('EXTERNAL', 'EPHEMERAL')"

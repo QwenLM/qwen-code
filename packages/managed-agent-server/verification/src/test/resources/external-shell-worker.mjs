@@ -9,9 +9,12 @@
 //   - the EOF is its own empty sequence, so every earlier sequence has bytes;
 //   - acknowledgedSequence may equal the sequence being read but never exceed
 //     it, which is the only way the last one — the EOF included — is acked;
-//   - the channel horizon only moves forward, and an expired channel is closed.
+//   - the channel horizon only moves forward; an expired channel refuses its
+//     own drain paths, but its owner revives it on begin/renew with a fresh
+//     horizon and the identical captured input.
 import { Buffer } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import process from 'node:process';
 
@@ -23,7 +26,9 @@ const CLOSED = 'managed_runtime_publication_closed';
 const input = await new Promise((resolve, reject) => {
   const chunks = [];
   process.stdin.on('data', (chunk) => chunks.push(chunk));
-  process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+  process.stdin.on('end', () =>
+    resolve(Buffer.concat(chunks).toString('utf8')),
+  );
   process.stdin.on('error', reject);
 });
 let boot;
@@ -32,7 +37,11 @@ try {
 } catch {
   process.exit(1);
 }
-if (boot?.type !== 'boot' || boot.version !== 2 || boot.managedContext !== MANAGED_CONTEXT) {
+if (
+  boot?.type !== 'boot' ||
+  boot.version !== 2 ||
+  boot.managedContext !== MANAGED_CONTEXT
+) {
   process.exit(1);
 }
 
@@ -44,9 +53,20 @@ const value = (name) => {
 };
 // Each stream's payload, so a case can drive a multi-block copy and an empty
 // stderr without the stand-in inventing output of its own.
-const stdout = Buffer.from(value('stdout') ?? 'witness\n', 'utf8');
-const stderr = Buffer.from(value('stderr') ?? '', 'utf8');
+const stdoutFile = value('stdout-file');
+const stdout =
+  stdoutFile === undefined
+    ? Buffer.from(value('stdout') ?? 'witness\n', 'utf8')
+    : readFileSync(stdoutFile);
+const stderrFile = value('stderr-file');
+const stderr =
+  stderrFile === undefined
+    ? Buffer.from(value('stderr') ?? '', 'utf8')
+    : readFileSync(stderrFile);
 const exitCode = Number(value('exit-code') ?? '0');
+// The storage revision this worker registered with. A request carrying any
+// other revision is the closed-lane refusal, as on the shipped worker.
+const revision = Number(value('storage-revision') ?? '1');
 // A wedged channel: read answers pending for ever, so only the Broker's own
 // bounded wait can end the drain.
 const neverReady = flag('never-ready');
@@ -78,12 +98,27 @@ function respond(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
+// The drained proof and per-channel receipts are manifest references in the
+// shipped worker's resource store; the stand-in mints the same closed shape
+// over its own payload so the transport's drain validation is exercised.
+function referenceOf(payload) {
+  return {
+    resourceId: randomUUID(),
+    kind: 'external-publication',
+    schemaVersion: 1,
+    byteLength: Buffer.byteLength(payload),
+    digest: createHash('sha256').update(payload).digest('hex'),
+  };
+}
+
 function authenticated(request) {
   return (
     request.headers.authorization === `Bearer ${boot.token}` &&
     request.headers['x-qwen-managed-lease-id'] === boot.leaseId &&
     request.headers['x-qwen-managed-lease-epoch'] === String(boot.epoch) &&
-    request.headers['x-qwen-managed-runtime-incarnation'] === boot.runtimeIncarnation &&
+    request.headers['x-qwen-managed-runtime-incarnation'] ===
+      boot.runtimeIncarnation &&
+    request.headers['x-qwen-managed-storage-revision'] === String(revision) &&
     request.headers['cache-control'] === 'no-store'
   );
 }
@@ -197,29 +232,52 @@ function begin(response, body) {
     !Number.isSafeInteger(expiresAt) ||
     expiresAt <= 0
   ) {
-    throw refusal('managed_runtime_publication_invalid', 'Publication begin is invalid.', 400);
+    throw refusal(
+      'managed_runtime_publication_invalid',
+      'Publication begin is invalid.',
+      400,
+    );
   }
-  const key = `${capture.executionCallId}:${capture.bindingGeneration}`;
-  const existing = [...channels.values()].find((channel) => channel.key === key);
+  // The shipped worker keys the idempotent retry on the execution alone: the
+  // request digest — which covers the binding generation — is the fence, so a
+  // re-begin with a changed generation is the closed-lane refusal, not a
+  // second channel whose cursors restart at zero.
+  const existing = [...channels.values()].find(
+    (channel) => channel.executionCallId === capture.executionCallId,
+  );
   if (existing) {
     // The captured input is fixed at begin; only the horizon may move.
-    if (existing.captureId !== captureId || existing.requestDigest !== digestOf(reference, capture, captureId)) {
-      throw refusal(CLOSED, 'Publication channel was opened for another capture.');
+    if (
+      existing.captureId !== captureId ||
+      existing.requestDigest !== digestOf(reference, capture, captureId)
+    ) {
+      throw refusal(
+        CLOSED,
+        'Publication channel was opened for another capture.',
+      );
     }
+    // A lapsed horizon revives on its owner's re-begin: the fresh expiresAt
+    // plus the identical request digest are the authorization.
     existing.horizon = Math.max(existing.horizon, expiresAt);
-    respond(response, 200, { protocolVersion: 2, channelId: existing.channelId });
+    respond(response, 200, {
+      protocolVersion: 2,
+      channelId: existing.channelId,
+    });
     return;
   }
   const channelId = randomUUID();
   channels.set(channelId, {
-    key,
     channelId,
+    executionCallId: capture.executionCallId,
     captureId,
     requestDigest: digestOf(reference, capture, captureId),
     horizon: expiresAt,
     streams: { stdout: blocks(stdout), stderr: blocks(stderr) },
     delivered: { stdout: -1, stderr: -1 },
     acknowledged: { stdout: -1, stderr: -1 },
+    finalReceipt: referenceOf(
+      JSON.stringify({ type: 'final', channelId, captureId }),
+    ),
   });
   respond(response, 200, { protocolVersion: 2, channelId });
 }
@@ -244,11 +302,16 @@ function digestOf(reference, capture, captureId) {
     .digest('hex');
 }
 
-function live(body) {
+function channelOf(body) {
   const channel = channels.get(body.channelId);
   if (!channel) {
     throw refusal(CLOSED, 'Managed Runtime publication is closed.');
   }
+  return channel;
+}
+
+function live(body) {
+  const channel = channelOf(body);
   if (channel.horizon <= Date.now()) {
     throw refusal(CLOSED, 'Managed Runtime publication channel expired.');
   }
@@ -268,21 +331,27 @@ function read(response, body) {
     // delivered on this stream, and the next read may not skip past the
     // acknowledged cursor. (managed-external-publication.ts:354-358)
     acknowledgedSequence > channel.delivered[streamId] ||
-    sequence > Math.max(channel.acknowledged[streamId], acknowledgedSequence) + 1
+    sequence >
+      Math.max(channel.acknowledged[streamId], acknowledgedSequence) + 1
   ) {
-    throw refusal('managed_runtime_publication_invalid', 'Publication cursor is invalid.', 400);
+    throw refusal(CLOSED, 'Managed Runtime publication is closed.');
   }
   const parts = channel.streams[streamId];
   if (sequence >= parts.length) {
-    throw refusal('managed_runtime_publication_invalid', 'Publication cursor is invalid.', 400);
-  }
-  channel.acknowledged[streamId] = Math.max(channel.acknowledged[streamId], acknowledgedSequence);
-  if (sequence > channel.delivered[streamId]) {
-    channel.delivered[streamId] = sequence;
+    throw refusal(CLOSED, 'Managed Runtime publication is closed.');
   }
   if (neverReady) {
+    // The shipped worker answers pending above both cursor writes, so a
+    // pending read mutates no cursor state.
     respond(response, 200, { protocolVersion: 2, state: 'pending' });
     return;
+  }
+  channel.acknowledged[streamId] = Math.max(
+    channel.acknowledged[streamId],
+    acknowledgedSequence,
+  );
+  if (sequence > channel.delivered[streamId]) {
+    channel.delivered[streamId] = sequence;
   }
   const block = parts[sequence];
   respond(response, 200, {
@@ -303,10 +372,11 @@ function read(response, body) {
 }
 
 function renew(response, body) {
-  const channel = live(body);
+  const channel = channelOf(body);
   if (!Number.isSafeInteger(body.expiresAt) || body.expiresAt <= Date.now()) {
-    throw refusal('managed_runtime_publication_invalid', 'Publication renewal is invalid.', 400);
+    throw refusal(CLOSED, 'Managed Runtime publication is closed.');
   }
+  // A lapsed horizon revives on its owner's renewal, as on re-begin.
   // Only ever forward: a stale renewal must not shorten a live channel.
   channel.horizon = Math.max(channel.horizon, body.expiresAt);
   respond(response, 200, { protocolVersion: 2, renewed: true });
@@ -318,7 +388,11 @@ function renew(response, body) {
  */
 function stopDrained(response, body) {
   if (body.channel !== 'all') {
-    throw refusal('managed_runtime_publication_invalid', 'Publication stop is invalid.', 400);
+    throw refusal(
+      'managed_runtime_publication_invalid',
+      'Publication stop is invalid.',
+      400,
+    );
   }
   const undrained = [...channels.values()].filter(
     (channel) =>
@@ -335,16 +409,22 @@ function stopDrained(response, body) {
   }
   stopped = true;
   const payload = JSON.stringify(
-    [...channels.values()].map((channel) => [channel.channelId, channel.captureId, channel.requestDigest]).sort(),
+    [...channels.values()]
+      .map((channel) => [
+        channel.channelId,
+        channel.captureId,
+        channel.requestDigest,
+      ])
+      .sort(),
   );
   respond(response, 200, {
     protocolVersion: 2,
     state: 'drained',
-    proof: {
-      kind: 'external-publication',
-      digest: createHash('sha256').update(payload).digest('hex'),
-      byteLength: Buffer.byteLength(payload),
-    },
+    proof: referenceOf(payload),
+    receipts: [...channels.values()].map((channel) => ({
+      channelId: channel.channelId,
+      receipt: channel.finalReceipt,
+    })),
   });
 }
 

@@ -12,6 +12,7 @@ import { networkInterfaces } from 'node:os';
 import type { Socket } from 'node:net';
 import type { Application } from 'express';
 import { MutableOriginAllowlist, parseAllowOriginPatterns } from './auth.js';
+import { PAIRING_LISTENER_MAX_CONNECTIONS } from './daemon-status.js';
 import type { CredentialStore } from './local-control/credentials.js';
 import { tagListener } from './local-control/listener-identity.js';
 import { SOCKET_KEEPALIVE_IDLE_MS } from './socket-keepalive.js';
@@ -170,7 +171,7 @@ export class RemoteAccessService {
         // Same keepalive policy as the primary listener.
         socket.setKeepAlive(true, SOCKET_KEEPALIVE_IDLE_MS);
       });
-      server.maxConnections = 64;
+      server.maxConnections = PAIRING_LISTENER_MAX_CONNECTIONS;
       server.headersTimeout = 10_000;
       server.requestTimeout = 30 * 60_000;
       server.keepAliveTimeout = 5000;

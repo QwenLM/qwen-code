@@ -169,6 +169,13 @@ public interface ManagedAgentSettings {
     public interface RuntimeBroker {
         public SshSettings getSsh();
         public Retention getRetention();
+        public McpParking getMcpParking();
+        public interface McpParking {
+            public boolean isEnabled();
+            public Duration getIdleDuration();
+            public int getBatchSize();
+            public Duration getScanDelay();
+        }
         public interface Retention {
             public boolean isEnabled();
             public Duration getMaxAge();

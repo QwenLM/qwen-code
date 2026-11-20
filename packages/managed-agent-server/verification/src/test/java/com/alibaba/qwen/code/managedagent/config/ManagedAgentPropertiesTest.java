@@ -301,6 +301,8 @@ public class ManagedAgentPropertiesTest {
                     "Events.materializeInterval",
                     "RuntimeBroker.childWorkspaceGitTimeout",
                     "Retention.scanDelay",
+                    "McpParking.idleDuration",
+                    "McpParking.scanDelay",
                     "Automation.scanDelay",
                     "Automation.lease",
                     "Automation.lateTolerance",
@@ -350,10 +352,10 @@ public class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 39 is the current field
+        // exceptions would go unchecked. 41 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(39);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(41);
     }
 
     @Test
@@ -693,6 +695,7 @@ public class ManagedAgentPropertiesTest {
                 "dispatch.scan-delay",
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
+                "runtime-broker.mcp-parking.scan-delay",
                 "runtime-broker.retention.scan-delay",
                 "session-resources.scan-delay",
                 "session-worktree.scan-delay",
@@ -1030,6 +1033,32 @@ public class ManagedAgentPropertiesTest {
         assertThat(properties.admitsPublicChildAgents()).isFalse();
         properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
         properties.getRuntimeBroker().setProvisioner("static");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+    }
+
+    @Test
+    public void publicChildrenAdmitAnSshBrokerWithNodesAndSessionIsolation() {
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getRuntimeBroker().setProvisioner("ssh-process");
+        // D5′: the SSH arm mirrors the sshFiles capability expression — a
+        // configured node and session isolation on both classes.
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().getSsh().setNodes(List.of(new SshRuntimeSettings.Node(
+                "remote", "Remote", "remote-host", "/node", "/cli.js", "/state",
+                List.of("/work"), 41270, "0.25.1", List.of())));
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getRuntimeBroker().setIsolationClass("workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setIsolationClass("session");
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        // durable-local-process belongs to the local arm only.
+        properties.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getRuntimeBroker().setProvisioner("external-scratch");
         assertThat(properties.admitsPublicChildAgents()).isFalse();
     }
 

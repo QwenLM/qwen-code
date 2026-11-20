@@ -501,6 +501,30 @@ describe('OpenTuiSessionPicker Space-to-preview', () => {
     expect(onCancel).not.toHaveBeenCalled();
   });
 
+  it('tags the preview subtree so speech replaces it instead of appending it', async () => {
+    const { container } = renderPicker([session(1)], {
+      enablePreview: true,
+      sessionService: serviceWith(
+        vi
+          .fn()
+          .mockResolvedValue(
+            loadedSession([
+              { type: 'user', uuid: 'u1', text: 'Previewed prompt' },
+            ]),
+          ),
+      ),
+    });
+    press({ name: 'space', sequence: ' ' });
+    await flush();
+    const tagged = [...container.querySelectorAll('[data-p]')].filter(
+      (element) =>
+        JSON.parse(element.getAttribute('data-p') ?? '{}')['id'] ===
+        'screen-reader-live-preview',
+    );
+    expect(tagged).toHaveLength(1);
+    expect(tagged[0].textContent).toContain('Previewed prompt');
+  });
+
   it('comes back to the list on Esc with the cursor and the query untouched', async () => {
     const { onCancel } = renderPicker(
       [

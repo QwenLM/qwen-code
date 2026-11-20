@@ -163,7 +163,10 @@ export class ManagedExternalPublication
       const priorId = this.executions.get(request.capture.executionCallId);
       if (priorId) {
         const prior = this.channels.get(priorId)!;
-        this.live(prior);
+        // A lapsed horizon is not terminal on this path: the recovered
+        // dispatch is the channel's owner, and its fresh `expiresAt` plus the
+        // identical request digest are the authorization. The write gate and
+        // the drain below still re-check the horizon.
         // The captured input is fixed for the execution's life; the horizon is
         // not, because the grant that bounds it is renewed. A recovered
         // dispatch therefore offers its own current horizon.
@@ -312,7 +315,9 @@ export class ManagedExternalPublication
       expiresAt <= Date.now()
     )
       throw new Error(CLOSED);
-    this.live(channel);
+    // A lapsed horizon is recoverable here for the same reason as on the
+    // re-begin path: the renewing Broker is the channel's owner, and this
+    // fresh `expiresAt` is its authorization.
     channel.horizon.expiresAt = Math.max(channel.horizon.expiresAt, expiresAt);
     await channel.resources.publish(
       'external-publication',

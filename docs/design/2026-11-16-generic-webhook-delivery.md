@@ -144,8 +144,11 @@ secret controls and boolean field support. The private/local option belongs in
 advanced settings. No inbound, pairing or agent-session controls are shown.
 Configured targets use endpoint/destination wording. Keep the wire target as
 `chat/default`; changing its label alone is insufficient because current task
-UI selects group wording from the target type. Existing platform group wording,
-saved/unavailable targets and older-daemon fallback remain intact.
+UI selects group wording from the target type. The editor retains existing
+platform group wording, saved/unavailable targets and older-daemon fallback.
+Scheduled-task list cards display the Channel name and destination ID for every
+target type, so they need no additional cross-workspace metadata fetch to avoid
+describing a generic endpoint as a chat.
 
 ## Affected components
 

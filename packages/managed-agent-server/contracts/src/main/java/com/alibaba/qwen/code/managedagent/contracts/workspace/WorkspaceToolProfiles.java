@@ -75,11 +75,12 @@ public final class WorkspaceToolProfiles {
     }
 
     public static int lifecycleProtocol(String profile) {
-        if (FILES.equals(profile) || EXTERNAL_FILES.equals(profile)
-                || EXTERNAL_SHELL.equals(profile)) {
+        // D3: ordinary files closes on the unified v2; external-files keeps v1
+        // (its Runtime does not support the v2 resource phase).
+        if (EXTERNAL_FILES.equals(profile)) {
             return 1;
         }
-        if (SHELL.equals(profile) || SHELL_V3.equals(profile)
+        if (FILES.equals(profile) || SHELL.equals(profile) || SHELL_V3.equals(profile)
                 || SHELL_V4.equals(profile) || MCP.equals(profile)) {
             return 2;
         }

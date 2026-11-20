@@ -572,10 +572,10 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
     }
 
     private static Map<String, Object> parseExternalPublication(byte[] bytes) {
-        // Reuse only the strict JSON reader, not the CSI identity or protocol validators.
+        // Reuse only the strict JSON reader, not the protocol validators.
         Map<String, Object> response;
         try {
-            response = ManagedCsiFilesProtocol.parse(bytes, EXTERNAL_PUBLICATION_LIMIT);
+            response = ManagedContextProtocol.parseCanonical(bytes, EXTERNAL_PUBLICATION_LIMIT);
         } catch (RuntimeException invalid) {
             throw protocol("External publication response is invalid.", invalid);
         }
@@ -1427,6 +1427,14 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                 "tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId()), TOOL_REQUEST_LIMIT_BYTES);
         return post(runtime.getLease(), ManagedMcpProtocol.DEFINITIONS_PATH, request, TOOL_RESULT_LIMIT_BYTES)
                 .thenApply(ManagedMcpProtocol::definitions);
+    }
+
+    @Override
+    public CompletionStage<Void> reclaimMcp(RuntimeLease lease, RuntimeSession session) {
+        byte[] request = encodeToolRequest(Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId()), TOOL_REQUEST_LIMIT_BYTES);
+        return post(lease, ManagedMcpProtocol.RECLAIM_PATH, request, TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(ignored -> null);
     }
 
     public CompletionStage<Map<String, Object>> installExtensionPackage(RuntimeBindingRecord runtime,

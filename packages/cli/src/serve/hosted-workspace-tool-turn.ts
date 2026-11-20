@@ -10410,20 +10410,14 @@ export class HostedWorkspaceToolTurn {
           questions: hostedQuestions(call.args),
         }
       : {
-          ...(continuationRef
-            ? {
-                v: 3 as const,
-                continuationRef,
-                ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
-                  ? { inputRef }
-                  : {}),
-              }
-            : HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
-              ? { v: 2 as const, inputRef }
-              : { v: 1 as const }),
+          v: 3 as const,
           ...identity,
           policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
           options: HOSTED_APPROVAL_OPTIONS,
+          ...(continuationRef ? { continuationRef } : {}),
+          ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
+            ? { inputRef }
+            : {}),
           ...(requiresHumanDecision
             ? { requiresHumanDecision: true as const }
             : {}),

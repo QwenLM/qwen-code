@@ -57,6 +57,7 @@ public final class ToolPublicationStore {
     private final RuntimeBindingRepository bindings;
     private final Capacity capacity;
     private final ToolPublicationCapacityStore quotas;
+    private final ToolPublicationEvidence evidence;
     private final DataSource transactionSource;
 
     private enum Access {
@@ -83,6 +84,7 @@ public final class ToolPublicationStore {
         this.bindings = Objects.requireNonNull(bindings);
         this.capacity = Objects.requireNonNull(capacity);
         this.quotas = new ToolPublicationCapacityStore(jdbc, capacity);
+        this.evidence = new ToolPublicationEvidence(jdbc, sessions, this);
         this.transactionSource = manager instanceof DataSourceTransactionManager nativeManager
                 ? nativeManager.getDataSource() : null;
     }
@@ -140,8 +142,10 @@ public final class ToolPublicationStore {
         });
     }
 
-    JsonNode producerBindingLocked(String scope, String publicationId, String publicationToken) {
-        return producerBindingLocked(scope, publicationId, publicationToken, Access.DISPATCH).binding();
+    private ProducerBinding producerGrantLocked(String scope, String publicationId,
+            String publicationToken) {
+        return producerBindingWithHashLocked(scope, publicationId,
+                ToolPublicationContract.tokenHash(publicationToken), null, Access.DISPATCH);
     }
 
     private ProducerBinding producerGrantLocked(String scope, String publicationId,
@@ -226,11 +230,8 @@ public final class ToolPublicationStore {
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
         var head = jdbc.query(
-                                "SELECT workspace_id, state, storage_version, writer_id, writer_generation, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_live, recovery_status, activation_epoch, journal_revision, activation_id, activation_phase, activation_event_epoch, activation_expires_at, activation_head_revision FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                                "SELECT workspace_id, state, writer_id, writer_generation, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_live, recovery_status, activation_epoch, journal_revision, activation_id, activation_phase, activation_event_epoch, activation_expires_at, activation_head_revision FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session()).getFirst();
-        require(((Number) head.get("storage_version")).intValue() >= 1
-                && ((Number) head.get("storage_version")).intValue() <= com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED,
-                "Managed Session storage version is unsupported.");
         var current = jdbc.query(
                                 "SELECT token_hash, state, expires_at, binding_digest,"
                                     + " binding_json, tenant_id, workspace_id, session_id, CASE"

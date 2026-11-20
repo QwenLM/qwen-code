@@ -20,6 +20,7 @@ import stripJsonComments from 'strip-json-comments';
 import type { ChannelPlugin } from '@qwen-code/channel-base';
 import {
   registerPlugin,
+  supportedChannelCatalog,
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
 import {
@@ -1255,6 +1256,25 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('accepts inject as a channel and group dispatch mode', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        dispatchMode: 'inject',
+        groups: { '*': { dispatchMode: 'inject' } },
+      },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      dispatchMode: 'inject',
+      groups: { '*': { dispatchMode: 'inject' } },
+    });
+  });
+
   it.each([
     ['blockStreaming', 'on', 'off'],
     ['blockStreamingChunk', { minChars: 400 }, { minChars: 100 }],
@@ -2430,6 +2450,80 @@ describe('WorkspaceChannelSettingsStore', () => {
         'Channel field "interactiveCards.questionCard.legacyFlag" is not manageable.',
     });
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(beforeRejectedWrite);
+  });
+
+  it('manages cardTemplateId on a dingtalk channel (H5e R1-7)', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret"
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    // Before the field was declared this upsert threw "cardTemplateId is not
+    // manageable"; declaring it in the plugin lets an editor enable cards.
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        cardTemplateId: 'tpl.schema',
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+    expect(next.channels['bot']?.['cardTemplateId']).toBe('tpl.schema');
+
+    // The descriptor is exposed to management UIs / settings-API clients.
+    const catalog = await supportedChannelCatalog();
+    const dingtalk = catalog.find((entry) => entry.type === 'dingtalk');
+    expect(
+      dingtalk?.fields.some(
+        (field) => field.key === 'cardTemplateId' && field.kind === 'string',
+      ),
+    ).toBe(true);
+
+    // A changed value upserts too (manageable, not a preserved unknown key).
+    const again = await store.upsert('bot', {
+      expectedRevision: next.revision,
+      config: {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        cardTemplateId: 'tpl-2.schema',
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+    expect(again.channels['bot']?.['cardTemplateId']).toBe('tpl-2.schema');
+
+    // envResolvable like clientId/clientSecret: a per-deployment environment
+    // reference upserts and is kept (R2-3). Without the flag this throws
+    // "does not support environment references".
+    expect(
+      dingtalk?.fields.find((field) => field.key === 'cardTemplateId')
+        ?.envResolvable,
+    ).toBe(true);
+    await withEnv(
+      { DINGTALK_CARD_TEMPLATE_ID: 'tpl-resolved.schema' },
+      async () => {
+        const ref = await store.upsert('bot', {
+          expectedRevision: again.revision,
+          config: {
+            type: 'dingtalk',
+            clientId: 'client-id',
+            cardTemplateId: '$DINGTALK_CARD_TEMPLATE_ID',
+          },
+          secrets: { clientSecret: { operation: 'preserve' } },
+        });
+        // The reference is accepted (without envResolvable the upsert throws
+        // "does not support environment references") and resolves in the
+        // returned snapshot.
+        expect(ref.channels['bot']?.['cardTemplateId']).toBe(
+          'tpl-resolved.schema',
+        );
+      },
+    );
   });
 
   it('rejects an unchanged reserved nested key instead of preserving it', async () => {

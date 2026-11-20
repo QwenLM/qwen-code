@@ -57,13 +57,13 @@ Qwen Daemon 会部署在多台机器上作为长驻服务。当 Daemon 长时间
 
 ### 字段定义
 
-| 字段               | 类型             | 语义                                                                              |
-| ------------------ | ---------------- | --------------------------------------------------------------------------------- |
-| `activePrompts`    | `number`         | 当前 `promptActive === true` 的 session 计数                                      |
-| `connectedClients` | `number`         | 当前活跃 SSE 连接数（已有 `activeSseCount`）                                      |
-| `channelAlive`     | `boolean`        | agent 子进程是否存活（已有 `bridge.isChannelLive()`）                             |
-| `lastActivityAt`   | `string \| null` | 最后一次 prompt 开始或完成的 ISO 时间戳；daemon 启动后从未有过 prompt 时为 `null` |
-| `idleSinceMs`      | `number \| null` | `Date.now() - lastActivityAt`；无活动记录时为 `null`                              |
+| 字段               | 类型             | 语义                                                                                                                                                                                                                                                                                                   |
+| ------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `activePrompts`    | `number`         | 当前 `promptActive === true` 的 session 计数                                                                                                                                                                                                                                                           |
+| `connectedClients` | `number`         | 当前活跃 SSE 连接数（已有 `activeSseCount`）。**已被取代**：自 [sse-unified-admission-occupancy](sse-unified-admission-occupancy.md) 起为全局长连接流占用（每个 SSE 表面 + ACP SSE/WS），并增发 `connectedClientsMax` 与到达 listener 的 `listenerConnectedClients` / `listenerConnectedClientsMax` 对 |
+| `channelAlive`     | `boolean`        | agent 子进程是否存活（已有 `bridge.isChannelLive()`）                                                                                                                                                                                                                                                  |
+| `lastActivityAt`   | `string \| null` | 最后一次 prompt 开始或完成的 ISO 时间戳；daemon 启动后从未有过 prompt 时为 `null`                                                                                                                                                                                                                      |
+| `idleSinceMs`      | `number \| null` | `Date.now() - lastActivityAt`；无活动记录时为 `null`                                                                                                                                                                                                                                                   |
 
 ### "活动" 的定义
 
@@ -168,6 +168,9 @@ const healthHandler = (req: Request, res: Response): void => {
       pendingPermissions: bridge.pendingPermissionCount,
       // 新增
       activePrompts: bridge.activePromptCount,
+      // 历史草图：现实现为 getSseOccupancy().total（全局聚合），并配对
+      // connectedClientsMax 与 listenerConnectedClients/Max——见
+      // sse-unified-admission-occupancy.md。
       connectedClients: getActiveSseCount(),
       channelAlive: bridge.isChannelLive(),
       lastActivityAt:

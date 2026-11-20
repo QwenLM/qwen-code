@@ -559,4 +559,58 @@ class RuntimeExecutionDispatcherTest {
                     scheduler, renewalScheduler, closed);
         }
     }
+
+    @Test
+    void anExternalShellDispatchPassesTheFilesGate() {
+        var fixture = new Fixture();
+        // Bind the external Shell placement: same provisioner, session
+        // isolation and storage identity as files, but the Shell digest.
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST, "session");
+        var request = new RuntimeProvisionRequest(scope, "harness", "external-workspace", "workspace");
+        when(fixture.binding.getRequest()).thenReturn(request);
+        when(fixture.binding.getBindingId()).thenReturn("binding");
+        when(fixture.binding.getGeneration()).thenReturn(1L);
+        when(fixture.prepared.isCancelRequested()).thenReturn(false);
+        // The test premise: the placement is admitted as an external Shell.
+        assertTrue(WorkspaceExecutionProfile.isExternalWorkspaceRequest(request),
+                "The request must be an external Workspace");
+        assertTrue(WorkspaceExecutionProfile.isExternalShellRequest(request),
+                "The request must be an external Shell");
+        // A Tool v3 Shell dispatch carries the publication grant and names
+        // run_shell_command — the exact shape the files gate used to refuse.
+        Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "turn",
+                "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+        when(fixture.prepared.getReference()).thenReturn(reference);
+        Map<String, Object> payload = Map.of("toolName", "run_shell_command",
+                "input", Map.of("command", "printf hi"));
+        // The capture map the dispatcher derives from the grant's binding.
+        var grant = new com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant(
+                "pub-1", "token", "http://127.0.0.1:1",
+                Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "runtime"),
+                        "turnId", "turn", "executionCallId", "execution", "bindingGeneration", 1L),
+                System.currentTimeMillis() + 60_000);
+        // The executing record carries the Shell dispatch's own reference;
+        // settle synchronously so the dispatch never reaches result polling.
+        when(fixture.executing.getReference()).thenReturn(reference);
+        Map<String, Object> settled = Map.of("state", "settled",
+                "result", Map.of("executionStatus", "not_started"));
+        when(fixture.transport.executeV3(eq(fixture.lease), eq(fixture.session), eq(reference),
+                eq(payload), any())).thenReturn(CompletableFuture.completedFuture(settled));
+
+        try {
+            fixture.dispatcher.beginDispatch(fixture.context, fixture.prepared, payload, grant);
+            // The dispatch reached the transport, not the files-gate refusal.
+            verify(fixture.transport).executeV3(eq(fixture.lease), eq(fixture.session), eq(reference),
+                    eq(payload), any());
+            // The synchronous settle completes the dispatch before
+            // beginDispatch returns, so the outcome — not the membership —
+            // is the assertion.
+            verify(fixture.state).settleExecution(fixture.executing,
+                    Map.of("executionStatus", "not_started"));
+        } catch (RuntimeException failure) {
+            throw new AssertionError("The files gate refused the Shell dispatch: "
+                    + failure.getMessage(), failure);
+        }
+    }
 }

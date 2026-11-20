@@ -133,6 +133,10 @@ public final class ExternalShellPublicationProducer
             ToolExecutionRecord execution, RuntimePublicationGrant grant, String channelId,
             Map<String, Object> result) {
         try {
+            JsonNode envelope = JSON.valueToTree(result);
+            // The envelope alone decides whether this capture can ever finish,
+            // so a doomed drain refuses before any block is moved or published.
+            requireCompleteCapture(envelope);
             long revision = revision(binding);
             JsonNode key = key(grant);
             String publicationId = grant.publicationId();
@@ -153,13 +157,20 @@ public final class ExternalShellPublicationProducer
             }
             return moved
                     .thenCompose(counts -> CompletableFuture.supplyAsync(() -> {
-                        publishResult(key, publicationId, token, identity, result, facts, counts);
+                        publishResult(key, publicationId, token, identity, envelope, facts, counts);
                         return counts;
                     }, worker))
                     .thenCompose(counts -> acknowledge(lease, binding, revision, channelId, counts));
         } catch (RuntimeException invalid) {
             return CompletableFuture.failedFuture(invalid);
         }
+    }
+
+    private static void requireCompleteCapture(JsonNode envelope) {
+        JsonNode capture = envelope.path("capture");
+        require(capture.isObject() && "complete".equals(capture.path("captureStatus").asText())
+                && !"not_started".equals(envelope.path("executionStatus").asText()),
+                "External Shell capture is not complete");
     }
 
     /**
@@ -278,13 +289,9 @@ public final class ExternalShellPublicationProducer
      * faithful — a mismatch refuses instead of finishing.
      */
     private void publishResult(JsonNode key, String publicationId, String token,
-            JsonNode identity, Map<String, Object> result, Map<String, JsonNode> facts,
+            JsonNode identity, JsonNode envelope, Map<String, JsonNode> facts,
             Map<String, Long> segments) {
-        JsonNode envelope = JSON.valueToTree(result);
-        JsonNode capture = envelope.path("capture");
-        require(capture.isObject() && "complete".equals(capture.path("captureStatus").asText())
-                && !"not_started".equals(envelope.path("executionStatus").asText()),
-                "External Shell capture is not complete");
+        requireCompleteCapture(envelope);
         ArrayNode contents = JSON.createArrayNode();
         for (String stream : STREAMS) {
             Long count = segments.get(stream);
@@ -460,12 +467,6 @@ public final class ExternalShellPublicationProducer
                     pause();
                     continue;
                 }
-                if (!retryable(refused) && !RESUMABLE.contains(refused.getCode())
-                        && !"SUCCEEDED".equals(status.path("state").asText())) {
-                    // A terminal refusal that still has a row is the store's
-                    // answer about that operation, not a transport hiccup.
-                    throw refused;
-                }
             }
             String state = status.path("state").asText();
             if ("SUCCEEDED".equals(state)) {
@@ -481,18 +482,25 @@ public final class ExternalShellPublicationProducer
                 pause();
                 continue;
             }
-            if ("EXPIRED".equals(state) && recoveries < 3) {
+            if ("EXPIRED".equals(state)) {
+                // A permanently expired operation is terminal once the recovery
+                // budget is spent; looping would spin to the observation
+                // deadline and report a timeout instead of the real failure.
+                if (recoveries >= 3) {
+                    throw new ManagedAgentException(409,
+                            "managed_tool_publication_operation_expired",
+                            "Publication operation stayed expired after its recovery budget");
+                }
                 recoveries++;
                 try {
-                    status = publications.recoverOperation(key, publicationId, token, operationId);
+                    publications.recoverOperation(key, publicationId, token, operationId);
                 } catch (ManagedAgentException refused) {
                     if (!retryable(refused)) {
                         throw refused;
                     }
                     recoveries--;
                     pause();
-                    JsonNode observed = observe(key, publicationId, token, operationId, deadline);
-                    status = observed == null ? status : observed;
+                    observe(key, publicationId, token, operationId, deadline);
                 }
                 continue;
             }
@@ -560,7 +568,7 @@ public final class ExternalShellPublicationProducer
         }
         var registered = registrations.find(binding.getRequest().getScope().getTenantId(),
                 binding.getRequest().getStorageId());
-        if (registered.isEmpty() || registered.get().ephemeral()) {
+        if (registered.isEmpty()) {
             throw new RuntimeBrokerException(409, "external_shell_publication_unavailable",
                     "External Shell capture requires durable registered storage.", false);
         }

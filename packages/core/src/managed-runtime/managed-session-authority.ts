@@ -58,7 +58,6 @@ import {
   MANAGED_SESSION_FORMAT_VERSION,
   MANAGED_SESSION_HEADER_SUBTYPE,
   MANAGED_SESSION_LIMITS,
-  MANAGED_SESSION_MINIMUM_READER,
   ManagedSessionRecordError,
   ManagedSessionWritesStoppedError,
   assertManagedSessionChildContinuationEnabled,
@@ -722,7 +721,6 @@ export class LocalManagedSessionAuthority {
       }
       header = parseManagedSessionHeader({
         formatVersion: MANAGED_SESSION_FORMAT_VERSION,
-        minimumReader: MANAGED_SESSION_MINIMUM_READER,
         sessionKey: options.sessionKey,
         engine: 'managed',
         definitionRef: options.create.definitionRef,
@@ -3506,6 +3504,9 @@ export class LocalManagedSessionAuthority {
           (event.kind === 'context.compacted' &&
             (!extension ||
               event.payload['compactionId'] !== maintenance.operationId)) ||
+          // A wake source is admitted during maintenance: the pump defers
+          // its turn until compaction settles, so refusing it would stall a
+          // delivery every sibling source parks instead.
           (event.kind === 'input.accepted' &&
             !isChildNotificationSource(source) &&
             ![
@@ -3514,6 +3515,7 @@ export class LocalManagedSessionAuthority {
               'channel',
               'session_message',
               'loop',
+              'pr_event',
             ].includes(String(source)))
         )
           throw new ManagedSessionConflictError(

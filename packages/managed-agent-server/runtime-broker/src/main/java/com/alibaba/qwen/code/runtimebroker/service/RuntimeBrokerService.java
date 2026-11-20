@@ -52,6 +52,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.sameLease;
@@ -94,6 +95,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     private final HarnessSessionResolver sessionResolver;
     private RuntimeExtensionCommandVerifier extensionCommandVerifier;
+    private volatile boolean mcpParking;
     private final RuntimeProvisioner provisioner;
     private final RuntimeTransport transport;
     private final RuntimeBindingRepository bindingRepository;
@@ -536,6 +538,81 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     public String runtimeProvisionerKind(RuntimeSessionRecord record) {
         return bindingRegistry.runtimeProvisionerKind(record);
+    }
+
+    /** Lets Harnesses park MCP owners; only a deployment that reclaims them may call this. */
+    public void enableMcpParking() {
+        mcpParking = true;
+    }
+
+    /** External storage has one holder, so a parked owner would exclude every rival. */
+    public boolean mcpParkable(RuntimeSessionRecord record) {
+        RuntimeBindingRecord binding = mcpParking ? bindingRepository.findById(record.getBindingId()) : null;
+        return binding != null && binding.getRequest().isManagedContext()
+                && !WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest());
+    }
+
+    @Override
+    public CompletionStage<Boolean> reclaimParkedMcp(String bindingId, long generation,
+            String runtimeSessionId, BooleanSupplier parked) {
+        requireOpen(closed);
+        RuntimeBindingRecord binding = bindingRepository.findById(bindingId);
+        BindingContext live = binding == null || binding.getGeneration() != generation
+                ? null : bindingRegistry.matchingLiveBinding(binding);
+        RuntimeSessionRecord saved = live == null
+                ? null : sessionRepository.findById(binding.getRequest().getScope(), runtimeSessionId);
+        if (saved == null || saved.getState() != RuntimeSessionRecord.State.READY
+                || !bindingId.equals(saved.getBindingId()) || saved.getRuntimeGeneration() != generation) {
+            return CompletableFuture.completedFuture(false);
+        }
+        CompletableFuture<SessionContext> adopted = new CompletableFuture<>();
+        var existing = bindingRegistry.registerSession(runtimeSessionId, adopted);
+        if (existing == null) {
+            safeStage(() -> executionRecovery.scanExecutions(
+                    new SessionContext(saved.getSession(), binding, live.lease()), saved, null))
+                    .whenComplete((context, error) -> {
+                        if (error == null) {
+                            adopted.complete(context);
+                        } else {
+                            bindingRegistry.removeSession(runtimeSessionId, adopted);
+                            adopted.completeExceptionally(unwrap(error));
+                        }
+                    });
+        }
+        return (existing == null ? adopted : existing).thenCompose(context -> context.binding().sameIdentity(binding)
+                ? reclaimParkedMcp(context, parked) : CompletableFuture.completedFuture(false));
+    }
+
+    // Connections close before the mount is handed back, so a stdio server
+    // never writes to storage it no longer holds. A successor's acquire
+    // replaces this claim, which makes the handback refuse.
+    private CompletionStage<Boolean> reclaimParkedMcp(SessionContext context, BooleanSupplier parked) {
+        String claim = UUID.randomUUID().toString();
+        String previous;
+        context.lock();
+        try {
+            previous = context.mountClaim();
+            context.mountClaim(claim);
+        } finally {
+            context.unlock();
+        }
+        CompletionStage<Boolean> reclaimed = !parked.getAsBoolean()
+                ? CompletableFuture.completedFuture(false)
+                : safeStage(() -> transport.reclaimMcp(context.lease(), context.session())).thenCompose(ignored ->
+                        !parked.getAsBoolean() ? CompletableFuture.completedFuture(false)
+                                : executionRecovery.settleUnprovenBackgroundRows(context, false)
+                                        .thenCompose(settled -> executionRecovery.releaseMountAfterSweep(context, claim,
+                                                context.session().getRuntimeSessionId())));
+        return reclaimed.whenComplete((released, error) -> {
+            context.lock();
+            try {
+                if (!Boolean.TRUE.equals(released) && claim.equals(context.mountClaim())) {
+                    context.mountClaim(previous);
+                }
+            } finally {
+                context.unlock();
+            }
+        });
     }
 
     public CompletionStage<RuntimeSessionRecord> acquire(

@@ -248,6 +248,8 @@ import type {
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionRecapResult,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
@@ -1728,6 +1730,8 @@ export class DaemonClient {
     if (range) params.set('range', range);
     if (options?.all) params.set('all', '1');
     if (options?.search) params.set('search', options.search);
+    if (options?.excludeRefs?.length)
+      params.set('exclude', options.excludeRefs.join(','));
     const qs = params.toString();
     return await this.jsonRequest<DaemonGitLog>(
       `/workspace/git/log${qs ? `?${qs}` : ''}`,
@@ -4914,6 +4918,33 @@ export class DaemonClient {
     );
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/recap');
     return (await res.json()) as DaemonSessionRecapResult;
+  }
+
+  /**
+   * Ask a live session's Mods for a transcript row over REST. Check for
+   * `session_mod_rows` in `capabilities.features` before calling. The daemon
+   * waits for the row's `ui.render` hooks, which can take as long as a model
+   * call. `signal` aborts only the local fetch.
+   */
+  async askSessionModRow(
+    sessionId: string,
+    row: DaemonModRow,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonModRowAnswer> {
+    const res = await this._fetch(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mod-row`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify(row),
+        signal: opts?.signal,
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/mod-row');
+    return (await res.json()) as DaemonModRowAnswer;
   }
 
   async *generateSessionContent(
@@ -8225,6 +8256,8 @@ export class DaemonClient {
     sessionId: string,
     metadata: {
       displayName?: string;
+      /** Best-effort initial title for a session without a custom title. */
+      initialDisplayName?: string;
       pr?: Omit<DaemonSessionPrInfo, 'issues'>;
     },
     clientId?: string,
@@ -8907,6 +8940,8 @@ export class WorkspaceDaemonClient {
     if (range) params.set('range', range);
     if (options?.all) params.set('all', '1');
     if (options?.search) params.set('search', options.search);
+    if (options?.excludeRefs?.length)
+      params.set('exclude', options.excludeRefs.join(','));
     if (options?.sessionId != null) params.set('sessionId', options.sessionId);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
@@ -10010,6 +10045,17 @@ export class WorkspaceDaemonClient {
           : {}),
       },
       opts?.clientId,
+    );
+  }
+
+  setVisionBridgeSettings(
+    model: string,
+    timeoutMs: number,
+  ): Promise<DaemonSettingUpdateResult> {
+    return this.post(
+      '/settings/vision-bridge',
+      'POST /workspaces/:workspace/settings/vision-bridge',
+      { model, timeoutMs },
     );
   }
 
