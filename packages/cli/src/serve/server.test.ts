@@ -30424,6 +30424,7 @@ describe('createServeApp', () => {
           JSON.parse(await fsp.readFile(sidecarPath, 'utf8')),
         ).toMatchObject({
           workspaceCwd: repo,
+          carriedFrom: realpathSync(repo),
           worktreeBranch: '',
           originalHeadCommit: baseCommit,
           worktreeBase: baseCommit,
@@ -30561,6 +30562,25 @@ describe('createServeApp', () => {
             return null;
           }
         };
+        await fsp.writeFile(
+          path.join(siblingPath, 'session-carry.txt'),
+          'sibling-carry\n',
+        );
+        const routedCarryEntry = {
+          path: 'session-carry.txt',
+          hash: (
+            await execFileAsync(
+              'git',
+              ['hash-object', '--no-filters', '--', 'session-carry.txt'],
+              { cwd: siblingPath },
+            )
+          ).stdout.trim(),
+          executable:
+            ((await fsp.stat(path.join(siblingPath, 'session-carry.txt')))
+              .mode &
+              0o100) !==
+            0,
+        };
         const createWorktreeCalls: unknown[][] = [];
         mockWt.impl = (cwd?: string) => ({
           isGitRepository: async () => true,
@@ -30586,6 +30606,7 @@ describe('createServeApp', () => {
             return {
               success: true,
               worktree: { slug, path: worktreePath, branch: '' },
+              carriedEntries: [routedCarryEntry],
             };
           },
         });
@@ -30661,6 +30682,8 @@ describe('createServeApp', () => {
         expect(sidecar.originalHeadCommit).toBe(rootHead);
         expect(sidecar.worktreeBase).toBe(siblingHead);
         expect(sidecar.originalCwd).toBe(repo);
+        expect(sidecar.carriedFrom).toBe(realpathSync(siblingPath));
+        expect(sidecar.carriedEntries).toEqual([routedCarryEntry]);
       } finally {
         mockWt.impl = undefined;
         mockWt.readSidecar = undefined;
