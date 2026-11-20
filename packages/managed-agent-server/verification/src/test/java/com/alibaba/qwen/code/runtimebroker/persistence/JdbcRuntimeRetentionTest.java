@@ -138,10 +138,9 @@ class JdbcRuntimeRetentionTest {
                 + " VALUES (?, ?, ?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-harness"),
                 "other-tenant", "other-harness", "other-harness");
-        fixture.execute("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id)"
-                + " VALUES (?, ?, ?, ?, ?, ?)",
+        fixture.execute("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, fence_operation_id)"
+                + " VALUES (?, ?, ?, ?)",
                 RuntimeAdmissionFences.storageAliasKey("other-tenant", "other-storage"),
-                JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-storage"),
                 "other-tenant", "other-storage", UUID.randomUUID().toString());
 
         var total = fixture.complete(1, NO_REFERENCES);

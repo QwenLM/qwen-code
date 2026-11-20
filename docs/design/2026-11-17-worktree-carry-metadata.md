@@ -2,7 +2,7 @@
 
 [English](2026-11-17-worktree-carry-metadata.md) | [简体中文](2026-11-17-worktree-carry-metadata.zh-CN.md)
 
-- Status: implemented in this PR (D1–D4); P6 U4/U5 remain tracked in #17237
+- Status: D1–D4 merged in [#17533](https://github.com/QwenLM/qwen-code/pull/17533) as squash commit [`17217d136a75a3070143cbded6de6b467039368c`](https://github.com/QwenLM/qwen-code/commit/17217d136a75a3070143cbded6de6b467039368c); P6 U4/U5 and P7 remain tracked in [#17237](https://github.com/QwenLM/qwen-code/issues/17237)
 - Builds on: `2026-11-14-web-shell-codex-worktree-parity.md` (D3 dirty carry, D6 handoff, D7 snapshots)
 - Tracks: #17237 "Carry metadata for the reaper (R9-6, deferred from #17228)"
 - Related: #17228 review comments 6900008905 / 4579730709
@@ -257,9 +257,31 @@ deliverable.
 
 - P6 retention sweep (U4) and restore-on-reopen (U5), design D7: the
   count-based `worktree.maxRetained` sweep and the affordance that reads the
-  snapshot back. Snapshot-before-delete (U3) **ships in this PR** (D4); the
+  snapshot back. Snapshot-before-delete (U3) **shipped in #17533** (D4); the
   sweep and the restore reader are the remaining P6 units. Until U5 lands, the
   archive is keyed by `sessionId` beside the sidecar (the chats dir, or its
   `archive/` subdir for archived sessions) and named in the cleanup log; until
   U4 lands, nothing prunes it.
 - P7 configurable worktree root (`worktree.root`).
+
+## Delivery and verification evidence
+
+#17533 was squash-merged on 2026-11-20 at 08:46:56 UTC. Its verified PR head was `cfea959835ae3e1b2623c14dbef4cf54586dea04`; the mainline squash commit was `17217d136a75a3070143cbded6de6b467039368c`.
+
+The final real-process verification exercised actual Git and filesystem operations through HTTP against isolated daemon instances on Linux with Node 24.22.1 and Git 2.39.5. Each scenario had its own fixtures and checked the real transcript and resulting filesystem state:
+
+| Scenario                 | Checks passed |
+| ------------------------ | ------------: |
+| `legacy-hidden-deletion` |         18/18 |
+| `legacy-ordinary-sparse` |         15/15 |
+| `injected-generic-error` |         13/13 |
+| `injected-stdin-epipe`   |         13/13 |
+| `rebase-pending`         |         14/14 |
+| `rebase-quit-clean`      |         15/15 |
+| **Total**                |     **88/88** |
+
+An independent raw-evidence audit passed **27/27** checks. The full build, bundle, root typecheck, targeted tests and scoped ESLint also passed on the verified PR head; the lint exclusion was limited to generated SDK JavaDoc output. The offline fixtures made no external model calls. These results do not claim coverage of every Git, OS, sparse-index or Unicode/provider combination.
+
+See the [final verification report](https://github.com/QwenLM/qwen-code/pull/17533#issuecomment-7033889550) and [independent post-merge closeout](https://github.com/QwenLM/qwen-code/pull/17533#issuecomment-7034945521). Product CI for the squash commit finished successfully in [run 44705284375](https://github.com/QwenLM/qwen-code/actions/runs/44705284375); its completed Linux build, test and lint jobs are separate from the runtime matrix above, and its skipped conditional jobs do not add coverage.
+
+Deferred U4/U5/P7 work and coverage suggestions, including evaluation of the serialized archive-writing safeguard, remain scoped to #17237. A coverage suggestion is not evidence that the current safeguard is broken and does not by itself justify enabling parallel archive writing.
