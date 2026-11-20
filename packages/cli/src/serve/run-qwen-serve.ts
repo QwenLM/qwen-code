@@ -3796,6 +3796,19 @@ async function runQwenServeImpl(
               'code' in retryErr &&
               (retryErr as { code?: unknown }).code === 'EEXIST'
             ) {
+              // The locked exclusive-create check rethrows EEXIST for a live
+              // holder that acquired the lease after the last read, carrying
+              // that record out. Recover the holder identity so the boot gate
+              // latches on a real holder; only an unidentifiable owner is the
+              // transient starting race. Re-read as a fallback in case the
+              // carrier was lost in transit.
+              const holder =
+                (retryErr as { channelServiceHolder?: ServiceInfo })
+                  .channelServiceHolder ??
+                channelServicePidfile.readServiceInfo();
+              if (holder) {
+                throw channelServicePidfileConflictError(holder);
+              }
               throw channelServiceStartingConflictError();
             }
             throw retryErr;
@@ -5162,9 +5175,11 @@ async function runQwenServeImpl(
     names: readonly string[],
   ): Promise<void> => {
     if (channelControlDraining) throw daemonDrainingError();
-    // Defense in depth: the registration hook already skips before its
-    // once-per-run mark while the decline stands; this keeps any other caller
-    // from re-admitting what boot refused.
+    // Backstop, currently redundant: the sole caller (the registration hook)
+    // already skips before its once-per-run mark while the decline stands, so
+    // this branch is unreachable today. It is kept intentionally so a future
+    // second caller cannot re-admit what boot refused; the hook's skip — not
+    // this throw — is the enforcement point the tests pin.
     if (channelHostingDeclinedByConflict) {
       throw Object.assign(
         new Error(
@@ -10630,7 +10645,7 @@ async function runQwenServeImpl(
                     ? `workspace=${snapshot.workspaceCwd}, `
                     : '';
                 daemonLog.warn(
-                  `channel worker exited (${workspacePrefix}state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
+                  `channel worker exited (${workspacePrefix}state=${snapshot.state}, childPid=${snapshot.pid ?? 'unknown'}, ` +
                     `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'}, ` +
                     `error=${snapshot.error ?? 'none'}, restartCount=${snapshot.restartCount ?? 0}, ` +
                     `nextRestartAt=${snapshot.nextRestartAt ?? 'none'}, ` +

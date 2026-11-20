@@ -129,6 +129,10 @@ function makeWorker(snapshot: ChannelWorkerSnapshot) {
 
 function makePerWorkspaceWorkerFactory() {
   const workers = new Map<string, ReturnType<typeof makeWorker>>();
+  const exitCallbacks = new Map<
+    string,
+    (snapshot: ChannelWorkerSnapshot) => void
+  >();
   const factory = vi.fn((opts: CreateChannelWorkerSupervisorOptions) => {
     const channels =
       opts.selection.mode === 'names' ? [...opts.selection.names] : [];
@@ -137,14 +141,18 @@ function makePerWorkspaceWorkerFactory() {
       state: 'running',
       channels,
       requestedChannels: channels,
+      pid: 40000 + workers.size,
     });
     worker.start.mockImplementation(async () => {
       opts.onReady?.(worker.snapshot());
     });
+    if (opts.onExit) {
+      exitCallbacks.set(opts.workspace, opts.onExit);
+    }
     workers.set(opts.workspace, worker);
     return worker;
   });
-  return { factory, workers };
+  return { factory, workers, exitCallbacks };
 }
 
 function makePidfileDeps() {
@@ -242,23 +250,24 @@ describe('issue #17479 B.2: boot channel downgrade vs late workspace registratio
       removeById: vi.fn().mockResolvedValue(true),
       removeByIds: vi.fn().mockResolvedValue(1),
     } as unknown as WorkspaceRegistrationStore;
-    const { factory, workers } = makePerWorkspaceWorkerFactory();
+    const { factory, workers, exitCallbacks } = makePerWorkspaceWorkerFactory();
     return {
       primary,
       secondary,
       factory,
       workers,
+      exitCallbacks,
       headers: {
         Authorization: 'Bearer secret',
         'Content-Type': 'application/json',
       },
-      start: () =>
+      start: (workspaces?: string[]) =>
         runQwenServe(
           {
             port: 0,
             hostname: '127.0.0.1',
             mode: 'http-bridge',
-            workspace: primary,
+            workspace: workspaces ?? primary,
             token: 'secret',
             serveWebShell: false,
           },
@@ -296,7 +305,6 @@ describe('issue #17479 B.2: boot channel downgrade vs late workspace registratio
     });
   }
 
-  // The registration hook skips a declined restore before consuming the
   // renderCtx JSON.stringify-quotes values containing whitespace or '=', so a
   // TMPDIR with a space renders workspaceCwd="…"; match the rendered form so
   // the assertions pass under any temporary directory.
@@ -304,6 +312,7 @@ describe('issue #17479 B.2: boot channel downgrade vs late workspace registratio
     return /[\s=]/.test(value) ? JSON.stringify(value) : value;
   }
 
+  // The registration hook skips a declined restore before consuming the
   // workspace's once-per-run mark; the skip log is the deterministic settle
   // marker for the absence assertions below.
   async function waitForDeclineSkip(workspace: string) {
@@ -492,6 +501,63 @@ describe('issue #17479 B.2: boot channel downgrade vs late workspace registratio
           }),
         ),
       );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('latches the gate when the reservation retry hits a live holder', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-17479-liveholder-')),
+    );
+    const pidfile = makePidfileDeps();
+    // A competing holder acquires the lease after the last pre-reservation
+    // read: both boot reads see nothing and the exclusive create hits EEXIST
+    // twice, but the locked retry check now sees a LIVE holder. The boot gate
+    // must latch on that real holder, not treat it as the transient race. The
+    // holder releases before registration, so a missed latch would let the
+    // registering workspace start a worker (the reported lease race).
+    pidfile.readServiceInfo
+      .mockReturnValueOnce(null) // boot pre-reservation read
+      .mockReturnValueOnce(null) // read after the first EEXIST
+      .mockReturnValueOnce(HOLDER) // locked retry check recovers the holder
+      .mockReturnValue(null); // holder released by registration time
+    pidfile.reserveServeServiceInfo
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+      })
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+      });
+    const daemon = makeDowngradedDaemon(pidfile);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(written).toContain('Continuing without channels.');
+      // The decline names the real holder, not the transient "already
+      // starting" race — the gate latched on a live holder.
+      expect(written).toContain(`PID ${HOLDER.pid}`);
+      expect(written).not.toContain('already starting');
+      expect(daemon.factory).not.toHaveBeenCalled();
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      // The holder has released, but the real-holder decline latched the gate:
+      // the refused workspace skips and no worker starts.
+      await waitForDeclineSkip(daemon.secondary);
+      expect(daemon.factory).not.toHaveBeenCalled();
+      // Only the two boot reservation attempts ran; the gate skipped the
+      // restore before any runtime reservation.
+      expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledTimes(2);
     } finally {
       await handle.close();
     }
@@ -740,6 +806,57 @@ describe('issue #17479 B.2: boot channel downgrade vs late workspace registratio
         .find((line) => line.endsWith('daemon started'));
       expect(boot).toBeDefined();
       expect(boot).not.toContain('port=');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('records the worker pid as childPid in multi-workspace ready and exit records', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-17479-childpid-')),
+    );
+    const pidfile = makePidfileDeps(); // no holder: boot hosts both workspaces
+    const daemon = makeDowngradedDaemon(pidfile);
+    const handle = await daemon.start([daemon.primary, daemon.secondary]);
+
+    try {
+      await handle.runtimeReady;
+      const logPath = path.join(tmpDir!, 'debug', 'daemon', 'daemon.log');
+      // Both boot workspaces host a worker; each ready record carries the
+      // worker pid as childPid and exactly one lowercase daemon pid= key (the
+      // capital-P childPid is not a second pid=). Reverting the call site to
+      // ctx.pid would let stripIdentityCtx drop the worker pid silently.
+      await vi.waitFor(() => {
+        const ready = fs
+          .readFileSync(logPath, 'utf8')
+          .split('\n')
+          .filter((line) => line.includes('channel worker ready'));
+        expect(ready.length).toBeGreaterThanOrEqual(2);
+        for (const line of ready) {
+          expect(line).toContain('childPid=');
+          expect(line.match(/pid=/g)).toHaveLength(1);
+        }
+      });
+
+      // Trigger a worker exit; the exit record also names the worker childPid,
+      // not a second daemon-meaning pid= key.
+      const secondaryKey = canonicalizeWorkspace(daemon.secondary);
+      const worker = daemon.workers.get(secondaryKey);
+      const exit = daemon.exitCallbacks.get(secondaryKey);
+      expect(worker).toBeDefined();
+      expect(exit).toBeDefined();
+      exit!({ ...worker!.snapshot(), state: 'exited' });
+      await vi.waitFor(() => {
+        const exited = fs
+          .readFileSync(logPath, 'utf8')
+          .split('\n')
+          .filter((line) => line.includes('channel worker exited'));
+        expect(exited.length).toBeGreaterThanOrEqual(1);
+        for (const line of exited) {
+          expect(line).toContain('childPid=');
+          expect(line.match(/pid=/g)).toHaveLength(1);
+        }
+      });
     } finally {
       await handle.close();
     }

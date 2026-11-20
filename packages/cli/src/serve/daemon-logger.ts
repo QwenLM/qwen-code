@@ -210,7 +210,7 @@ function formatDaemonLogLine(args: BuildDaemonLogRecordArgs): string {
   const identityStr =
     args.pid === undefined
       ? ''
-      : `pid=${args.pid}${args.port === undefined ? '' : ` port=${args.port}`} `;
+      : renderIdentityPrefix({ pid: args.pid, port: args.port });
   const traceStr = renderTraceContext(args.traceContext);
   const ctxStr = renderCtx(stripIdentityCtx(args.ctx));
   return `${ts} [${args.level}] [DAEMON] ${identityStr}${traceStr}${ctxStr}${args.message}\n${renderErr(args.err)}`;
