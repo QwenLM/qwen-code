@@ -103,7 +103,7 @@ jobs:
       github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name != github.repository &&
       (github.event.action != 'review_requested' ||
-       github.event.requested_reviewer.login == 'qwen-code-review-bot')
+       github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot'))
     permissions:
       contents: 'read'
       pull-requests: 'read'
@@ -229,11 +229,11 @@ jobs:
     # the requested reviewer can reach review-pr, so the human-requested
     # siblings must skip here instead of each spending a runner. KEEP IN
     # SYNC with the review_requested clauses in precheck-pr.if and
-    # authorize.if, and with the bot_login constant below.
+    # authorize.if, and with the bot_login expression below.
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.action == 'review_requested' &&
-      github.event.requested_reviewer.login == 'qwen-code-review-bot'
+      github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot')
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions: {}
     outputs:
@@ -242,7 +242,7 @@ jobs:
       - name: 'Set review constants'
         id: 'values'
         run: |-
-          echo "bot_login=qwen-code-review-bot" >> "$GITHUB_OUTPUT"
+          echo "bot_login=${{ vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot' }}" >> "$GITHUB_OUTPUT"
 
   delay-automatic-review:
     needs: ['authorize']
@@ -339,7 +339,7 @@ jobs:
        needs.precheck-pr.outputs.decision == 'allow_triage') &&
       (github.event_name != 'pull_request_target' ||
        github.event.action != 'review_requested' ||
-       github.event.requested_reviewer.login == 'qwen-code-review-bot') &&
+       github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot')) &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.command == 'resolve') ||
