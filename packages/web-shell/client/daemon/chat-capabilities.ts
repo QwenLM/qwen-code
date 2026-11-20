@@ -202,6 +202,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   workspace_archived_session_export: ['sessionOps'],
   workspace_session_live_state: [],
   workspace_session_live_state_batch: [],
+  restart_recovery: [],
   workspace_session_metadata: ['sessionOps'],
   session_worktree_persistence_v1: [],
   session_worktree_reset_v1: [],

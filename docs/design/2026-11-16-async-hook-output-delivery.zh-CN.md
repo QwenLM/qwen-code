@@ -2,7 +2,7 @@
 
 [English](2026-11-16-async-hook-output-delivery.md) | [简体中文](2026-11-16-async-hook-output-delivery.zh-CN.md)
 
-- **状态**：本改动已在 `LlmClient` 请求路径上实现。把能力台账 L11 行从 `missing` 移到 `differs`：模型轮经 `LlmClient.sendMessageStream` 发送的入口，输出能送达模型；ACP 默认 legacy 轮次经会话自有 chat 发送、尚未 drain，故该入口的交付是 follow-up，由 #17284 承载。
+- **状态**：本改动已在 `LlmClient` 请求路径上实现。把能力台账 L11 行从 `missing` 移到 `differs`：模型轮经 `LlmClient.sendMessageStream` 发送的入口，输出能送达模型；ACP 默认 legacy 轮次经会话自有 chat 发送，该入口的交付由 follow-up #17890 补齐（在 #17284 跟踪）。resume 溯源与显示投影仍是 follow-up。
 - **日期**：2026-11-16，基于 `main` `27681123f719`。
 - **相关**：[agent loop 能力台账](2026-11-15-loop-capability-ledger.zh-CN.md)（L11）；[统一 agent loop](2026-10-23-unified-agent-loop.zh-CN.md)；follow-up #17284；同步对应物 `hooks/user-prompt-submit-context.ts`。
 
@@ -14,7 +14,7 @@
 
 在组装外出请求时 drain 待交付的异步输出，并作为一个带标签的上下文 part 追加，使其在下一轮请求送达模型。
 
-- **交付点**：`LlmClient.sendMessageStream` 的 `requestToSend` 组装处——在 UserPromptSubmit hook 上下文回执之后、IDE 上下文合并与 system-reminders 前置之前。它位于 Goal 准入与 hook 窗口结算块之下游（不触碰它们的任何契约），并在 send 及其 chat 内自动压缩之上游，因此压缩阈值看到的尾部与 provider 将看到的一致——契合 1.0「压缩前 drain」的意图。它覆盖到达该组装处的每种轮次类型。模型轮即主会话 `LlmClient` 的入口能到达它——headless 与 Ink（含它们的统一循环默认开启态，此时共享轮的 source 就是 `LlmClient`），以及 opting-in 统一循环的 ACP；ACP 默认 legacy 轮次经会话自有 chat 发送（`Session.ts` → `chat.sendMessageStream`），从不进入本方法，故其异步输出在那里仍被丢弃——这是 follow-up，而非相对基线的回归（基线在任何入口都不交付）。`getHookSystem` 以防御方式读取（`getHookSystem?.()`，helper 内 `getPendingAsyncOutput?.()`），因此缺少该方法的 config 或 hook-system 替身降级为「无可交付」而非抛错。
+- **交付点**：`LlmClient.sendMessageStream` 的 `requestToSend` 组装处——在 UserPromptSubmit hook 上下文回执之后、IDE 上下文合并与 system-reminders 前置之前。它位于 Goal 准入与 hook 窗口结算块之下游（不触碰它们的任何契约），并在 send 及其 chat 内自动压缩之上游，因此压缩阈值看到的尾部与 provider 将看到的一致——契合 1.0「压缩前 drain」的意图。它覆盖到达该组装处的每种轮次类型。模型轮即主会话 `LlmClient` 的入口能到达它——headless 与 Ink（含它们的统一循环默认开启态，此时共享轮的 source 就是 `LlmClient`），以及 opting-in 统一循环的 ACP；ACP 默认 legacy 轮次经会话自有 chat 发送（`Session.ts` → `chat.sendMessageStream`），从不进入本方法；其异步输出改由会话自有的发送 wrapper 交付（follow-up #17890），而非经本方法。`getHookSystem` 以防御方式读取（`getHookSystem?.()`，helper 内 `getPendingAsyncOutput?.()`），因此缺少该方法的 config 或 hook-system 替身降级为「无可交付」而非抛错。
 - **放置保持同步回执末位**：当 UserPromptSubmit 上下文回执是末位 part 时，异步 part 被插到它*之前*（`appendAsyncHookContextPart`），而非追加到它之后。回执契约的 resume 半侧（`restoreUserPromptSubmitContextReceipt`）、遗留转录投影剥离与 session-title 剥离都只在末位识别同步块；异步 part 尾随它会在共现轮次（同一请求里同步上下文 + 异步输出）静默破坏它们，丢失同步块的 resume 溯源并在 resume 后二次注入其上下文。无末位同步回执时异步 part 直接追加。
 - **线上顺序保持指令末位**：异步信封已登记到注入上下文分类器——`isAsyncHookContextPartText`（紧邻 `hooks/async-hook-context.ts` 的标签常量）被 OR 进 `isInjectedPromptContext`（`core/prompt-context-order.ts`），因此 `movePromptContextAheadOfUserText` 在线上副本里把该块前移到用户指令之前，与其他注入块一致。否则裸标签会被当作调用方自有文本，线条目将以 hook 输出结尾。只重排线上副本；splice 所依赖的存储历史放置不受影响。
 - **所有权门控 drain**：并发 `/btw` 侧问经同一 client 运行，不得消费正在运行那一轮的待交付块。其首发带 `isConcurrentSideQuery`，但其工具结果续传**不带标志**到达，故仅按标志的门仍会放行该续传成为消费者。因此 client 记录每个带标志侧问首发的 prompt id（`concurrentSideQueryPromptIds`），drain 在 `isConcurrentSideQuery === true` 或该 send 是 prompt id 属于已记录侧问 id 的 `ToolResult` 时跳过。其余所有 `ToolResult` 都 drain：归属轮的续传，以及以全新 prompt id 首发 `ToolResult` 的中断续跑轮（`continue_last_turn`）。侧问由 client 自行发起的续传——阻塞 Stop hook 与 stop-policy 发送，它们是 `Hook` 类型、经 `hostContinuationOptions` 重建 options——会带上该标志，因此同样被拒；归属轮自身的这类续传不带标志、继续 drain。探索预算 prompt id（`ownsExplorationBudget`）刻意**不**作判别依据：它只在 `startsInteraction` 时认领，故 `ToolResult` 首发的轮次——无论预算 id 未被认领（全新 client）还是来自被中断轮的陈旧值——都会被拒绝并静默丢块，重新引入本改动要修复的那类静默丢失。已记录的侧问 id 是唯一能把侧问续传与合法 `ToolResult` 首发轮区分开的信号。该记录保留至 client 生命周期结束：仍在等待续传的侧问即使在新主轮开始之后也必须保持被拒（若在新主轮处清空，迟到的续传就会 drain 走新主轮的块）；prompt id 逐轮唯一，故已记录的 id 不会被合法复用。这是刻意收窄的：它不是 Cron、ACP、后台会话或重绑定的通用 hook/epoch 权威模型，那些仍是 follow-up。
@@ -26,7 +26,7 @@
 ## 范围
 
 - **在内**：待交付异步 hook 输出面向模型的交付（L11），在 `LlmClient` 请求路径上：drain、格式化/包裹 helper、请求组装处的单一调用点、线上顺序分类器登记、带变异见证的单测。
-- **在外（follow-up）**：(1) ACP 默认 legacy 轮次自有的组装处——它经会话 chat 而非 `LlmClient` 发送，故需同样的 drain/append 对（复用 helper）才能在那里交付；(2) 异步标签的显示投影与 resume 溯源。同步上下文会从用户可见的转录投影中隐藏、并在 resume 时经其回执重新盖章；异步块作为带标签 part 交付，但尚未接入 `projectUserTranscriptForDisplay`，因此目前按面向模型的文本投影。把它隐藏并赋予 resume 溯源，是与「输出送达模型」不同的另一关注点，留给 follow-up。
+- **在外（follow-up）**：(1) ACP 默认 legacy 轮次自有的组装处——它经会话 chat 而非 `LlmClient` 发送；同样的 drain/append 对（复用 helper）已由 #17890 在那里加上；(2) 异步标签的显示投影与 resume 溯源。同步上下文会从用户可见的转录投影中隐藏、并在 resume 时经其回执重新盖章；异步块作为带标签 part 交付，但尚未接入 `projectUserTranscriptForDisplay`，因此目前按面向模型的文本投影。把它隐藏并赋予 resume 溯源，是与「输出送达模型」不同的另一关注点，留给 follow-up。
 
 ## 验证
 

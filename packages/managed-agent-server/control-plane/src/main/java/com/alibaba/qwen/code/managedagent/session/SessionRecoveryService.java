@@ -174,7 +174,13 @@ public class SessionRecoveryService {
             boolean wakeProven = !head.wakePending()
                     && head.wakeHeadRevision() != null
                     && head.wakeHeadRevision().equals(head.journalRevision());
-            if ("released".equals(head.activationPhase()) && wakeProven
+            // A clean suspension stamped this revision after proving every
+            // pending wake input unattempted (docs/design/2026-11-19-managed-
+            // control-plane-wake-seal-stamp.md §3.3). Any acquisition clears
+            // the stamp, so a refused load's seal never inherits it.
+            boolean sealStamped = head.journalRevision() != null
+                    && head.journalRevision().equals(head.wakeSealRevision());
+            if ("released".equals(head.activationPhase()) && (wakeProven || sealStamped)
                     && !recovery.hasUnsettledWork(session.tenantId(), session.sessionId())) {
                 return view("ready", "ready", turn, true, false, false);
             }

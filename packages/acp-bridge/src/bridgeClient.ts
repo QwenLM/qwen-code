@@ -40,6 +40,7 @@ import {
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
+  MID_TURN_GOAL_HANDOFF_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -94,10 +95,6 @@ import {
   parseSessionSource,
   SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from './session-source.js';
-// Narrowed from the concrete `MultiClientPermissionMediator` to the
-// sub-interface this class actually uses (`request` only). Structural
-// typing lets the bridge factory pass the full mediator instance
-// without a cast; test stubs only need to fake the `request` method.
 import type { PermissionMediator } from './permission.js';
 import type {
   PermissionRequestRecord,
@@ -743,8 +740,14 @@ export interface BridgeClientSessionEntry {
    * `SessionEntry.settledMidTurnMessageIds`.
    */
   settledMidTurnMessageIds: string[];
+  /** Drains that took messages and have not answered the child yet. */
+  midTurnDrainsAnswering?: number;
+  /** A send-now request held until those drains have answered. */
+  sendNowAfterDrains?: () => void;
   /** Complete prompts waiting behind the currently running prompt. */
   pendingPromptList: PendingPromptEntry[];
+  /** Tail of the session's prompt FIFO, including prompts not yet dispatched. */
+  promptQueue?: Promise<void>;
   /**
    * True while a child-driven Goal turn is running. Set by the
    * `_qwencode/start_turn` notification and cleared by the matching
@@ -753,6 +756,9 @@ export interface BridgeClientSessionEntry {
    * that never cross the bridge's `session/prompt` RPC boundary.
    */
   goalTurnActive?: boolean;
+  goalTurnId?: string;
+  /** Goal preempted by an RPC prompt, still owed its terminal event. */
+  retiringGoalTurnId?: string;
   backgroundTurn?: BackgroundNotificationTurn;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
@@ -869,6 +875,19 @@ interface PendingTeammatePermission {
   bindingId: number;
   /** Teammate that asked, when the child identified one. */
   teammateName?: string;
+}
+
+export function clearGoalTurn(
+  entry: Pick<
+    BridgeClientSessionEntry,
+    'sessionId' | 'goalTurnActive' | 'goalTurnId'
+  >,
+  mediator: Pick<PermissionMediator, 'cancelForPrompt'>,
+): void {
+  const turnId = entry.goalTurnId;
+  entry.goalTurnActive = false;
+  delete entry.goalTurnId;
+  if (turnId) mediator.cancelForPrompt(entry.sessionId, turnId);
 }
 
 /**
@@ -1145,14 +1164,25 @@ export class BridgeClient implements Client {
       !appClientId &&
       params.toolCall?._meta?.['workflowApproval'] === true &&
       params.toolCall._meta?.['backgroundWorkflowApproval'] === true;
+    // `explicitBackgroundTurn` was already parsed above with the session-scoped
+    // guard: a teammate approval owns its own binding and must not be routed
+    // through the leader's background turn.
     const usesPrompt =
       !appClientId && !backgroundWorkflowApproval && !sessionOwned;
-    const backgroundTurn = usesPrompt
-      ? (explicitBackgroundTurn ??
-        (entry.promptActive ? undefined : entry.backgroundTurn))
-      : undefined;
+    const goalTurnId = usesPrompt ? params._meta?.['goalTurnId'] : undefined;
+    if (
+      goalTurnId !== undefined &&
+      (typeof goalTurnId !== 'string' || goalTurnId !== entry.goalTurnId)
+    ) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+    const backgroundTurn =
+      usesPrompt && !goalTurnId
+        ? (explicitBackgroundTurn ??
+          (entry.promptActive ? undefined : entry.backgroundTurn))
+        : undefined;
     const permissionPromptId = usesPrompt
-      ? (backgroundTurn?.turnId ?? entry.activePromptId)
+      ? (goalTurnId ?? backgroundTurn?.turnId ?? entry.activePromptId)
       : undefined;
     // A session-scoped (teammate) approval still has a prompt originator to
     // answer to: it was the leader prompt that put the team in motion. Clear
@@ -1160,7 +1190,7 @@ export class BridgeClient implements Client {
     // `designated` policy.
     let permissionOriginator =
       appClientId ??
-      (backgroundWorkflowApproval || backgroundTurn
+      (backgroundWorkflowApproval || backgroundTurn || goalTurnId
         ? undefined
         : entry.activePromptOriginatorClientId);
     const workflowOriginatorClientId =
@@ -1808,6 +1838,24 @@ export class BridgeClient implements Client {
     if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
       return this.handleTodoStopGuardContinuationClaim(params);
     }
+    if (method === MID_TURN_GOAL_HANDOFF_METHOD) {
+      const sessionId = params['sessionId'];
+      if (typeof sessionId !== 'string' || !this.ownsSession(sessionId))
+        return {};
+      const entry = this.resolveEntry(sessionId);
+      if (!entry) return {};
+      // A prompt admitted during settlement can take the tail before the
+      // queued correction is promoted. Keep waiting through that promotion.
+      let current: Promise<void> | undefined;
+      do {
+        current = entry.promptQueue;
+        await current;
+      } while (
+        entry.promptQueue !== current &&
+        this.resolveEntry(sessionId) === entry
+      );
+      return {};
+    }
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
       throw RequestError.methodNotFound(method);
     }
@@ -1842,6 +1890,26 @@ export class BridgeClient implements Client {
     // Capture ownership before attachment I/O can yield to the next turn.
     const promptId = requestedPromptId ?? currentTurnMetadata(entry).promptId;
     const queuedBefore = [...entry.midTurnMessageQueue];
+    // A send-now request that arrives while this drain resolves attachments
+    // waits for its answer, so the child never sees the request ahead of a
+    // drain that did not take that request's messages.
+    entry.midTurnDrainsAnswering = (entry.midTurnDrainsAnswering ?? 0) + 1;
+    const answered = () => {
+      entry.midTurnDrainsAnswering = (entry.midTurnDrainsAnswering ?? 1) - 1;
+      const sendNow = entry.sendNowAfterDrains;
+      if (entry.midTurnDrainsAnswering > 0 || !sendNow) return;
+      // Keep the request revocable until the drain answer is written.
+      setImmediate(() => {
+        if (
+          entry.sendNowAfterDrains !== sendNow ||
+          (entry.midTurnDrainsAnswering ?? 0) > 0
+        ) {
+          return;
+        }
+        delete entry.sendNowAfterDrains;
+        sendNow();
+      });
+    };
     // A send-now drain takes only the user's own messages: queue-only steering
     // keeps its tool-boundary delivery and the settle path its caller drives.
     const drained =
@@ -1942,6 +2010,7 @@ export class BridgeClient implements Client {
       writeStderrLine(
         `[mid-turn] session=${JSON.stringify(entry.sessionId)} drain failed, requeued ${drained.length} message(s): ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
       );
+      answered();
       throw error;
     }
     // Queue-only entries are private coordinator steering, not UI transcript.
@@ -1986,6 +2055,7 @@ export class BridgeClient implements Client {
           : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} echo frame dropped (bus closed); reconciliation required`,
       );
     }
+    answered();
     return { messages, items, hasQueuedPrompt };
   }
 
@@ -2889,7 +2959,14 @@ export class BridgeClient implements Client {
       }
       const entry = this.resolveEntry(sessionId);
       if (!entry || !this.ownsSession(sessionId)) return;
+      const turnId = params['turnId'];
+      const goalTurnId =
+        typeof turnId === 'string' && turnId.length > 0 && turnId.length <= 256
+          ? turnId
+          : undefined;
+      if (entry.goalTurnId !== goalTurnId) clearGoalTurn(entry, this.mediator);
       entry.goalTurnActive = true;
+      entry.goalTurnId = goalTurnId;
       this.onGoalTurnStart?.(sessionId);
       return;
     }
@@ -2900,10 +2977,14 @@ export class BridgeClient implements Client {
       if (!entry || !this.ownsSession(sessionId)) return;
       const reason = params['reason'];
       const source = params['source'];
+      const turnId = params['turnId'];
+      const retiringGoal =
+        typeof turnId === 'string' && turnId === entry.retiringGoalTurnId;
       // A malformed Goal terminal must not pin future loads to live replay
       // or strand the queue when its turn_complete cannot be published.
-      if (source === 'goal') {
-        entry.goalTurnActive = false;
+      if (source === 'goal' && !retiringGoal) {
+        if (turnId !== entry.goalTurnId) return;
+        clearGoalTurn(entry, this.mediator);
         this.onAutomaticTurnEnded?.(sessionId);
       }
       if (
@@ -2923,6 +3004,7 @@ export class BridgeClient implements Client {
         ) {
           return;
         }
+        if (retiringGoal) delete entry.retiringGoalTurnId;
         entry.events.publish({
           type: 'turn_complete',
           promptId,
@@ -2930,7 +3012,6 @@ export class BridgeClient implements Client {
         });
         return;
       }
-      const turnId = params['turnId'];
       if (turnId !== undefined) {
         if (
           typeof turnId !== 'string' ||
