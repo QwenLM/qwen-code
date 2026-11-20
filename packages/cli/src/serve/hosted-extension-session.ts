@@ -637,6 +637,9 @@ export class HostedExtensionSession {
           this.session.resources,
           entry.contributions,
         ),
+        ...(entry.degradedComponents?.length
+          ? { degradedComponents: entry.degradedComponents }
+          : {}),
       })),
     );
     this.callbacks.validate(

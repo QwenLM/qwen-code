@@ -21,7 +21,10 @@ import type {
   SlashMenuState,
 } from '../hooks/useComposerCore';
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
-import { MODEL_SHEET_QUERY } from '../hooks/useIsTouchComposer';
+import {
+  MODEL_SHEET_QUERY,
+  TOUCH_COMPOSER_QUERY,
+} from '../hooks/useIsTouchComposer';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import styles from './ChatEditor.module.css';
 import type { VoiceButtonHandle } from '../voice/VoiceButton';
@@ -492,6 +495,7 @@ interface ChatEditorRenderProps
   onCancel?: () => void;
   currentModel?: string;
   modelControlsDisabled?: boolean;
+  modelRefresh?: ComponentProps<typeof ChatEditor>['modelRefresh'];
   availableModels?: Array<{ id: string; label?: string }>;
   unavailableModels?: readonly WebShellUnavailableModel[];
   mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
@@ -4570,6 +4574,30 @@ describe('ChatEditor toolbar popovers', () => {
     }
   });
 
+  it('refreshes only the local catalog each time the model popover opens', () => {
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    const refreshLocal = vi.fn().mockResolvedValue(undefined);
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+      modelRefresh: { refresh, refreshLocal, refreshing: false },
+    });
+    const openButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    )!;
+
+    act(() => openButton.click());
+    expect(refreshLocal).toHaveBeenCalledTimes(1);
+    expect(refresh).not.toHaveBeenCalled();
+
+    act(() => openButton.click());
+    expect(refreshLocal).toHaveBeenCalledTimes(1);
+
+    act(() => openButton.click());
+    expect(refreshLocal).toHaveBeenCalledTimes(2);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
   it('opens a searchable model popover and selects the filtered model', () => {
     const onSelectModel = vi.fn();
     const container = renderChatEditor({
@@ -5148,6 +5176,31 @@ describe('ChatEditor model picker host content', () => {
     );
   }
 
+  // A real coarse-pointer device matches both queries: the sheet's own query
+  // and the raw pointer check the touch sizing is gated on. The file-level
+  // afterEach never resets matchMedia, so every caller must restore.
+  function mockCoarsePointerMedia({ coarse = true } = {}) {
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches:
+            query === MODEL_SHEET_QUERY ||
+            (coarse && query === TOUCH_COMPOSER_QUERY),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    return () =>
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+  }
+
   function filter(query: string) {
     const search = document.querySelector<HTMLInputElement>(
       '[data-web-shell-toolbar-popover] input[type="search"]',
@@ -5472,14 +5525,7 @@ describe('ChatEditor model picker host content', () => {
   });
 
   it('opens the model picker as a bottom sheet on coarse pointers', async () => {
-    const media = vi.mocked(window.matchMedia).mockImplementation(
-      (query: string) =>
-        ({
-          matches: query === MODEL_SHEET_QUERY,
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-        }) as unknown as MediaQueryList,
-    );
+    const restoreMedia = mockCoarsePointerMedia();
     try {
       const onSelectModel = vi.fn();
       const props: ChatEditorRenderProps = {
@@ -5605,26 +5651,86 @@ describe('ChatEditor model picker host content', () => {
         );
       });
     } finally {
-      media.mockImplementation(
-        () =>
-          ({
-            matches: false,
-            addEventListener: vi.fn(),
-            removeEventListener: vi.fn(),
-          }) as unknown as MediaQueryList,
-      );
+      restoreMedia();
+    }
+  });
+
+  it('gives the sheet search field a touch height and a 16px floor', () => {
+    const restoreMedia = mockCoarsePointerMedia();
+    try {
+      const container = renderChatEditor({
+        visibleToolbarActions: ['model'],
+        currentModel: modelA.id,
+        availableModels: [modelA, modelB],
+      });
+      open(container);
+      const sheet = document.querySelector('[data-web-shell-model-sheet]')!;
+      expect(sheet).not.toBeNull();
+      const search = sheet.querySelector<HTMLInputElement>(
+        'input[type="search"]',
+      )!;
+      expect(search).not.toBeNull();
+      // Whole tokens, not substrings: 'md:h-11' contains 'h-11' but leaves
+      // the phone at the primitive's h-8.
+      const tokens = search.className.split(/\s+/);
+      expect(tokens).toContain('h-11');
+      // The shared Input shrinks to text-sm at md, which a landscape tablet
+      // still matches; iOS zooms the page below 16px.
+      expect(tokens).toContain('md:text-base');
+      expect(search.getAttribute('autocapitalize')).toBe('off');
+      expect(search.getAttribute('autocorrect')).toBe('off');
+      expect(search.getAttribute('enterkeyhint')).toBe('search');
+      expect(search.getAttribute('spellcheck')).toBe('false');
+    } finally {
+      restoreMedia();
+    }
+  });
+
+  it('leaves the desktop popover search field at its default size', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: modelA.id,
+      availableModels: [modelA, modelB],
+    });
+    open(container);
+    const search = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-toolbar-popover] input[type="search"]',
+    )!;
+    expect(search).not.toBeNull();
+    const tokens = search.className.split(/\s+/);
+    expect(tokens).not.toContain('h-11');
+    expect(tokens).not.toContain('md:text-base');
+    expect(search.getAttribute('enterkeyhint')).toBeNull();
+  });
+
+  it('keeps the compact field when the sheet stands in for a narrow desktop window', () => {
+    // MODEL_SHEET_QUERY also matches (max-width: 639px), so a mouse-driven
+    // narrow window gets the sheet without being a touch device.
+    const restoreMedia = mockCoarsePointerMedia({ coarse: false });
+    try {
+      const container = renderChatEditor({
+        visibleToolbarActions: ['model'],
+        currentModel: modelA.id,
+        availableModels: [modelA, modelB],
+      });
+      open(container);
+      const sheet = document.querySelector('[data-web-shell-model-sheet]')!;
+      expect(sheet).not.toBeNull();
+      const search = sheet.querySelector<HTMLInputElement>(
+        'input[type="search"]',
+      )!;
+      const tokens = search.className.split(/\s+/);
+      expect(tokens).not.toContain('h-11');
+      expect(tokens).not.toContain('md:text-base');
+      expect(search.getAttribute('enterkeyhint')).toBeNull();
+      expect(search.getAttribute('spellcheck')).toBeNull();
+    } finally {
+      restoreMedia();
     }
   });
 
   it('keeps the mode picker as a popover on coarse pointers', () => {
-    const media = vi.mocked(window.matchMedia).mockImplementation(
-      (query: string) =>
-        ({
-          matches: query === MODEL_SHEET_QUERY,
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-        }) as unknown as MediaQueryList,
-    );
+    const restoreMedia = mockCoarsePointerMedia();
     try {
       const container = renderChatEditor({
         visibleToolbarActions: ['approvalMode'],
@@ -5641,26 +5747,12 @@ describe('ChatEditor model picker host content', () => {
         document.querySelector('[data-web-shell-mode-popover]'),
       ).not.toBeNull();
     } finally {
-      media.mockImplementation(
-        () =>
-          ({
-            matches: false,
-            addEventListener: vi.fn(),
-            removeEventListener: vi.fn(),
-          }) as unknown as MediaQueryList,
-      );
+      restoreMedia();
     }
   });
 
   it('keeps the bottom sheet open when interacting with host overlays', async () => {
-    const media = vi.mocked(window.matchMedia).mockImplementation(
-      (query: string) =>
-        ({
-          matches: query === MODEL_SHEET_QUERY,
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-        }) as unknown as MediaQueryList,
-    );
+    const restoreMedia = mockCoarsePointerMedia();
     try {
       const hostAction = vi.fn();
       const mountHeader = vi.fn<
@@ -5776,14 +5868,7 @@ describe('ChatEditor model picker host content', () => {
         ).toBeNull();
       });
     } finally {
-      media.mockImplementation(
-        () =>
-          ({
-            matches: false,
-            addEventListener: vi.fn(),
-            removeEventListener: vi.fn(),
-          }) as unknown as MediaQueryList,
-      );
+      restoreMedia();
     }
   });
 });

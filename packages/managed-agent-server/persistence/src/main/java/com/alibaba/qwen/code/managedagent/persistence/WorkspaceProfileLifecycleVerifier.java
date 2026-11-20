@@ -88,6 +88,13 @@ public class WorkspaceProfileLifecycleVerifier {
         if (WorkspaceToolProfiles.MCP.equals(profile)) {
             return;
         }
+        // D3: ordinary files has no Shell capture/publication/monitor; its
+        // close invariants are the settled executions and owed file history
+        // already verified above, so it settles like MCP. External-files keeps
+        // v1 and never reaches this v2 resource phase.
+        if (WorkspaceToolProfiles.FILES.equals(profile)) {
+            return;
+        }
         if (!WorkspaceToolProfiles.isPublicShell(profile)) {
             unsettled();
         }

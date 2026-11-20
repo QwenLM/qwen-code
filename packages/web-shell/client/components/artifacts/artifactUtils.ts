@@ -236,7 +236,7 @@ const IMAGE_MIME_TYPES: Readonly<Record<string, string>> = {
   webp: 'image/webp',
 };
 
-const MAX_WORKSPACE_FILE_BLOB_BYTES = 100 * 1024 * 1024;
+export const MAX_WORKSPACE_FILE_BLOB_BYTES = 100 * 1024 * 1024;
 const WORKSPACE_FILE_BLOB_CHUNK_BYTES = 256 * 1024;
 
 export function normalizeArtifactMimeType(mimeType?: string): string {
@@ -268,6 +268,12 @@ export function getReviewDownloadMimeType(value: string): string {
   return /\.html?$/i.test(value) ? 'text/html' : 'text/markdown';
 }
 
+interface WorkspaceFileBlobStat {
+  sizeBytes: number;
+  modifiedMs: number;
+  type?: string;
+}
+
 export async function readWorkspaceFileAsBlob(
   readFileBytes: (
     filePath: string,
@@ -281,9 +287,8 @@ export async function readWorkspaceFileAsBlob(
   filePath: string,
   mimeType: string,
   options: {
-    statFile: (
-      filePath: string,
-    ) => Promise<{ sizeBytes: number; modifiedMs: number; type?: string }>;
+    statFile: (filePath: string) => Promise<WorkspaceFileBlobStat>;
+    initialStat?: WorkspaceFileBlobStat;
     isCancelled?: () => boolean;
     maxBytes?: number;
   },
@@ -295,7 +300,7 @@ export async function readWorkspaceFileAsBlob(
       throw new Error('File loading was cancelled.');
     }
   };
-  const initialStat = await options.statFile(filePath);
+  const initialStat = options.initialStat ?? (await options.statFile(filePath));
   const checkUnchanged = (sizeBytes: number, modifiedMs: number) => {
     if (
       sizeBytes !== initialStat.sizeBytes ||

@@ -142,7 +142,7 @@ public enum ManagedSchemaProjection {
                     + "selected_approval_mode, approval_revision, is_plan_enabled, permission_rules_json, public_child_agents_version, harness_instance_id, "
                     + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state"),
     SESSION_HEAD(
-            "tenant_id, workspace_id, session_id, storage_version, state, writer_generation, "
+            "tenant_id, workspace_id, session_id, has_activity_diagnostics, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
                     + "committed_sequence, last_commit_digest, activation_epoch, "
                     + "latest_checkpoint_resource_id, compacted_through_revision, packed_through_revision, recovery_status, "
@@ -150,7 +150,7 @@ public enum ManagedSchemaProjection {
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "
                     + "phase, operation_id, claim_generation, claim_lease_until, is_wake_pending, "
-                    + "wake_head_revision, wake_retry_at, is_wake_scan_pending, cleanup_head_revision"),
+                    + "wake_head_revision, wake_retry_at, wake_seal_revision, is_wake_scan_pending, cleanup_head_revision"),
     SESSION_JOURNAL_TX(
             "tenant_id, workspace_id, session_id, journal_revision, command_key_hash, "
                     + "transaction_id, operation, command_id, content_digest, first_sequence, "
@@ -166,7 +166,7 @@ public enum ManagedSchemaProjection {
                     + "hook_ordinal, hook_definition_hash, record_kind, state, action_id, action_version, "
                     + "decision_receipt_id, decision_digest, prompt_id, turn_id, options_json"),
     STORAGE(
-            "alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key, "
+            "alias_key, tenant_id, storage_id, physical_key, "
                     + "registration_state, storage_kind, registration_revision, registration_json, "
                     + "fence_operation_id, mount_revision, gmt_create, gmt_modified"),
     STORAGE_OWNER(
@@ -174,10 +174,10 @@ public enum ManagedSchemaProjection {
                     + "tenant_id, storage_id, mount_revision, mount_state, mount_operation_id, "
                     + "mount_completed_operation_id, mount_root, mount_host_id, mount_device, mount_inode, "
                     + "mount_birth_time, mount_registration_id, storage_kind, "
-                    + "maintenance_id, maintenance_generation, physical_key, "
+                    + "maintenance_id, maintenance_generation, "
                     + "member_count"),
     TENANT_GUARD(
-            "tenant_key, tenant_id, guard_domain"),
+            "tenant_id, guard_domain"),
     TOOL_EXECUTION(
             "execution_call_id_hash, execution_call_id, idempotency_key_hash, idempotency_key, "
                     + "binding_id, runtime_generation, harness_session_id, runtime_session_id, "

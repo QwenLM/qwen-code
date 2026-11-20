@@ -3065,6 +3065,10 @@ describe('createDaemonSessionActions', () => {
       expect(onSessionCreated).toHaveBeenCalledExactlyOnceWith(
         'session-b',
         undefined,
+        expect.objectContaining({
+          sessionId: 'session-b',
+          updateMetadata: expect.any(Function),
+        }),
       );
       expect(attachSession).toHaveBeenCalledOnce();
       expect(submitPrompt).toHaveBeenCalledOnce();
@@ -3346,7 +3350,11 @@ describe('createDaemonSessionActions', () => {
     });
     expect(nextSession.detach).not.toHaveBeenCalled();
     expect(onSessionAllocated).toHaveBeenCalledWith('session-b');
-    expect(onSessionCreated).toHaveBeenCalledWith('session-b', nextSession);
+    expect(onSessionCreated).toHaveBeenCalledWith(
+      'session-b',
+      nextSession,
+      nextSession,
+    );
     expect(attachSession).not.toHaveBeenCalled();
     expect(clearSession).not.toHaveBeenCalled();
     expect(sessionRef.current).toBeUndefined();

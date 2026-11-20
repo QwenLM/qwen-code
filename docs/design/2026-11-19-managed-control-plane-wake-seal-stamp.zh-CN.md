@@ -2,7 +2,7 @@
 
 [English](2026-11-19-managed-control-plane-wake-seal-stamp.md) | [简体中文](2026-11-19-managed-control-plane-wake-seal-stamp.zh-CN.md)
 
-状态：提案，实现前设计。日期：2026-11-19。本文是 [Phase 3 控制面 wake 设计](2026-11-19-managed-control-plane-wake.zh-CN.md)（#17805）的补充设计，基于 `main` 的 `adca3e7ddc` 核对。它把该设计的 3a wake 调度机制——提交路径维护的 head 到期提示、独立的到期分发器、以及控制面对未尝试证明的冷态重导——替换为挂起中的 writer 在 seal 时写入的一个戳。它不改变 3b、纯被动的 wake 动词、§4.3 的 seal 时未尝试证明，也不改变加载计数不变量。§5 列出它取代的全部父设计章节。
+状态：已接受，实现中。日期：2026-11-19。本文是 [Phase 3 控制面 wake 设计](2026-11-19-managed-control-plane-wake.zh-CN.md)（#17805）的补充设计，基于 `main` 的 `adca3e7ddc` 核对。它把该设计的 3a wake 调度机制——提交路径维护的 head 到期提示、独立的到期分发器、以及控制面对未尝试证明的冷态重导——替换为挂起中的 writer 在 seal 时写入的一个戳。它不改变 3b、纯被动的 wake 动词、§4.3 的 seal 时未尝试证明，也不改变加载计数不变量。§5 列出它取代的全部父设计章节。
 
 ## 1. 问题
 
@@ -25,7 +25,7 @@
 `ma_session_head` 新增一个可空列 `wake_seal_revision`：一次正常挂起 seal 该 head 并认证其 wake 投影时的 journal revision。
 
 - **获取 writer。** 递增 generation 的 writer 获取（`JournalWriterLifecycle.java:288`）同时写入 `wake_seal_revision = NULL`，并把 `wake_retry_at` 上限压到「当前时间加一个认领延迟」（`LEAST(wake_retry_at, NOW + RETRY_MS)`）。任何新 writer——一次 wake、一次用户请求、一次随后拒载的加载——都会使之前的戳失效。这个上限去掉已写入的远期到期时间，因此一个 writer 接受了立即输入后崩溃时，兜底按今天的节奏恢复它；它从不降低认领刚设置的延迟，因此一次持续拒载的加载仍按认领节奏重试，而不是每次扫描都重试。
-- **挂起 seal。** `/writers:seal`（`http-managed-session-store.ts:2947`；`SealWriterRequest`，`ManagedSessionStoreModels.java:164`）新增可选的 `wake` 对象 `{revision, pending, dueAt}`，只有挂起 teardown 发送（`hosted-harness-session.ts:5124`）。Harness 在 seal 之前立即在已提交前缀上重新计算泵会挑选的内容：`pending` 表示是否还有可投递的 wake 输入；有当前到期的输入时 `dueAt` 为 `0`，否则为最早的 deferred `notBefore`。seal 的 UPDATE（`JournalWriterLifecycle.java:399`）已经受 writer token 与 generation 围栏保护，另外要求 `journal_revision = revision`，并写入 `wake_seal_revision = revision`、`is_wake_pending = pending`、`wake_head_revision = revision`，有 pending 时再写入 `wake_retry_at = dueAt`。revision 不一致时 seal 被拒绝；teardown 把它当作失败的步骤，每次精确重试都重新计算戳，并在现有上限处升级。
+- **挂起 seal。** `/writers:seal`（`http-managed-session-store.ts:2947`；`SealWriterRequest`，`ManagedSessionStoreModels.java:164`）新增可选的 `wake` 对象 `{revision, pending, dueAt}`，只有挂起 teardown 发送（`hosted-harness-session.ts:5124`）。Harness 在 seal 之前立即在已提交前缀上重新计算泵会挑选的内容：`pending` 表示是否还有可投递的 wake 输入；有当前到期的输入时 `dueAt` 为 `0`，否则为最早的 deferred `notBefore`。seal 的 UPDATE（`JournalWriterLifecycle.java:399`）已经受 writer token 与 generation 围栏保护，另外要求 `journal_revision = revision`，并写入 `wake_seal_revision = revision`、`is_wake_pending = pending`、`wake_head_revision = revision`，有 pending 时再写入 `wake_retry_at = dueAt`。`revision` 由 Harness 的 store 客户端从它的 writer grant 中填入。revision 不一致时 seal 被拒绝（`409 managed_session_wake_stamp_stale`）；teardown 把它当作失败的步骤，每次精确重试都重新计算戳，并在现有上限处升级。
 - 其他所有 seal——拒载时的 `managed.close()`、裸 `writers:seal`、所有权释放——都不发送戳，而它们之前的 writer 获取已经清掉了任何更早的戳。
 
 这个戳是权威的：它由写 journal 的同一个 authority、基于完整前缀、在 head 锁下、于精确的 revision 写入；它不会过时，因为在下一次获取清掉它之前没有任何提交。
@@ -42,17 +42,19 @@
 
 ### 3.3 恢复视图
 
-`ready` 分支把 `wakeProven`（`SessionRecoveryService.java:147`）替换为 `wake_seal_revision == journal_revision`；其他守卫保持不变：writer 已 seal、activation 已释放、activation 投影为当前、无未结算工作。
+`ready` 分支在 `wakeProven`（`SessionRecoveryService.java:147`）之外新增接受 `wake_seal_revision == journal_revision`；其他守卫保持不变：writer 已 seal、activation 已释放、activation 投影为当前、无未结算工作。保留 `wakeProven` 是因为没有该能力的 Harness 不发送戳，否则它的正常挂起将不再报告 `ready`；对带 pending 输入的 head，`wakeProven` 仍不可能成立，所以带戳的 pending head 只能经由戳变为 `ready`。
+
+戳这一分支没有 session 种类或压缩方面的守卫，因此它把 `ready` 扩展到了基于扫描的证明所不覆盖的范围（恢复视图补充设计 §3）：带戳的子 Session 与公开 Session 一样报告 `ready`。这一扩展是有意的，因为 writer 的认证不依赖扫描资格。压缩只在已删除的 head 上运行，所以对 `ACTIVE` Session 而言，压缩过的 journal 不会走到这一分支。
 
 只有正常挂起会写入这个戳，并且是在按输入的未尝试证明之后；每次获取都会清掉它，所以拒载的 seal 永远无法继承更早的戳；任何提交都会改变 `journal_revision`。这正是恢复视图补充设计 §2 要求的正向证明，只读一个列，读路径上没有 journal 重放，也没有消息正文读取。附带效果：没有 pending 的挂起在 seal 之后立即报告 `ready`，而不必等兜底下一次证明。
 
 ### 3.4 transport 通知
 
-父设计 §4.2 的到期复核保留，改为 wake 围栏中的一个 head 列条件（`TransportWakeActivator.java:125-139`）：`wake_seal_revision = journal_revision` 且 `wake_retry_at > NOW` 的 head，其下一次尝试已由兜底在 `wake_retry_at` 负责，所以丢弃该通知。动词保持被动，与父设计一致。
+父设计 §4.2 的到期复核保留，改为 wake 围栏中的一个 head 列条件（`TransportWakeActivator.java:125-139`）：满足 `wake_seal_revision = journal_revision AND (is_wake_pending = 0 OR wake_retry_at > NOW)` 的 head，要么没有可投递的输入，要么其下一次尝试已由兜底在 `wake_retry_at` 负责，所以丢弃该通知（`NOT_DUE`）。由于戳认证的是整个投影，`is_wake_pending = 0` 这一分支与未来到期分支同样安全，它覆盖的是延迟到 seal 之后才到达、而对应输入已经结算的通知。到期的带戳 head 收到通知时，与围栏放行的其他通知一样，通过兜底所用的被动 `recoverForWake` 加载（父设计 §4.2 第 3 步）；它不再走主动的 `activateForWake`，后者的接管加载可能驱动已崩溃 Session 的 Runtime 恢复。
 
 ### 3.5 发布
 
-只有当控制面公告 wake-dispatch 能力（`qwen.managed-agent.wake-dispatch.enabled`，默认关闭；沿用父设计的配置键）时，Harness 才放宽 `pendingInputs` 门（父设计 §4.3）并发送戳；控制面只在兜底运行的地方公告该能力。关闭它会停止新的放宽挂起；已带戳的 head 仍由兜底在到期时投递，没有 §3.2 分支的控制面则通过普通证明投递它们。因此 3a 不需要回滚排序；父设计的生产者/消费者排序只适用于 3b 的 staging。
+只有当控制面公告 wake-dispatch 能力（`qwen.managed-agent.wake-dispatch.enabled`，默认关闭；沿用父设计的配置键）时，Harness 才放宽 `pendingInputs` 门（父设计 §4.3）并发送戳；控制面只在兜底运行的地方公告该能力。公告方式是在 `writers:acquire` 和 `writers:renew` 返回的 writer grant 中带上 `wakeDispatch: true`，与 `activationLeaseRenewal` 并列：签发 grant 的 Store 正是消费戳的 Store，兜底在该 Store 启用的地方都会运行，旧版 Harness 会忽略这个字段。放宽后的门只放行延后到期且未尝试过的 wake 输入：不归 wake 所有、或已有 transcript 尝试的输入保留其现有的恢复职责（与所有权释放使用的判断相同）；已到期的输入应由泵立即执行；已停止 run 的消息输入要等 relay 的停止来结算，而停止标记不是持久化的。因此 §7 中第 (c)、(d) 项那样的到期戳或停止消息戳，只会来自在门的最后一次检查与 seal 之间提交的输入。关闭它会停止新的放宽挂起；已带戳的 head 仍由兜底在到期时投递，没有 §3.2 分支的控制面则通过普通证明投递它们。因此 3a 不需要回滚排序；父设计的生产者/消费者排序只适用于 3b 的 staging。
 
 ## 4. 决策
 
@@ -97,7 +99,8 @@
 - **到期分发无需重放**：到 `T` 时带戳 head 经被动 `recoverForWake` 加载，journal 读取为零；无戳的崩溃 head 走现有证明路径。
 - **子 Session 失效**：父 run 已终止或已请求停止的带戳子 Session，其提示被清除且不加载。
 - **恢复视图**：(a) 带一个未尝试 deferred 输入的正常挂起在 seal 之后立即返回 `nextTurnAllowed=true`；(b) 带一个已尝试输入且拒载的不是 `ready`；(c) 正常挂起之后、一次未提交就拒载的加载不是 `ready`，因为该次获取清掉了戳。
-- **transport**：对一小时后到期的带戳 head，延迟到达的通知在 `T` 之前引起零次冷启动。
+- **transport**：延迟到达的通知，(a) 对一小时后到期的带戳 head，在 `T` 之前引起零次冷启动；(b) 对 `pending=0` 的带戳 head 不引起冷启动；(c) 对已到期、或戳的 revision 较旧的带戳 head，照现有方式加载。
+- **子 Session 范围**：兜底扫描在到期时选中带戳的子 Session，恢复视图对正常带戳的子 Session 报告 `ready`。
 - **回滚**：在带戳挂起之后关闭该能力，每个输入仍在到期时恰好投递一次。
 - **MySQL**：戳、获取上限和兜底分支通过 MySQL 8.4 上选定的 `mysql-integration` 用例；仅有 H2 不构成验收。
 
@@ -106,10 +109,12 @@
 取代父设计 §10 第 1–3 项。
 
 1. 兜底扫描周期、页大小和暂时性拒绝的重试延迟，由 §6 选定。
-2. `writers:seal` 上 `wake` 字段的确切形状，以及能力如何向 Harness 公告。
+2. 已解决：`writers:seal` 接受 `wake: {revision, pending, dueAt}`，能力随 writer grant 下发（§3.5）。
 3. 崩溃路径是否也应在完整的仅 deferred 证明之后，把 `wake_retry_at` 设为最早的 deferred `notBefore`，以去掉其 30 s 重新认领。3a 不需要它。
 
 ## 9. 关闭的评审事项
 
 - **父设计 §9 的 head 提示未知态验收测量的是一条不会执行的路径**（合并后提出）：未知态已不存在，该判据撤回。
 - **不入缓存时兜底的稳态重放成本**（合并后针对父设计 §4.1 提出）：不入缓存规则撤回，带戳 head 在到期前从不被重放（§1 第 1 项、§7）。
+- **transport 丢弃条件漏掉了 `pending=0` 的带戳 head**（合并后针对 §3.4 提出）：条件新增 `is_wake_pending = 0` 分支，§7 新增对应验收。
+- **戳把 `ready` 扩展到基于扫描的证明所不覆盖的 head**（合并后针对 §3.3 提出）：§3.3 写明这一扩展，§7 新增子 Session 范围验收。

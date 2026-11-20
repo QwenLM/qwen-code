@@ -48,8 +48,9 @@ class SessionLifecycleProtocolChoiceTest {
 
         assertThat(service.admitPublic("tenant", "actor", "key", "session", OperationKind.CLOSE).id())
                 .isEqualTo("operation");
+        // D3: ordinary files closes on v2 (external-files keeps v1).
         verify(store).beginWorkspaceLifecycle(eq("tenant"), eq("session"), eq(OperationKind.CLOSE), eq("actor"),
-                anyString(), eq("key"), eq("digest"), eq(supported), eq(activeLifecycle ? 1 : 0));
+                anyString(), eq("key"), eq("digest"), eq(supported), eq(activeLifecycle ? 2 : 0));
     }
 
     private static SessionRecord session(String status, String toolProfile) {

@@ -1432,6 +1432,76 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
+    void aLostGenerationsAbandonedExecutionStaysReadableWithoutAdoption() {
+        // #17542: the escape hatch the Harness takeover relies on. A loss-only
+        // reclaim abandons the generation's executions but cannot release the
+        // binding (writer-stop is unproven), so acquire keeps refusing
+        // runtime_broker_runtime_lost. The status route must still answer the
+        // terminally abandoned record from the durable ledger without an
+        // adopted Session, so a passive load can settle the park instead of
+        // parking forever; re-provisioning still waits for writer-stop proof.
+        Fixture fixture = new Fixture();
+        var bindings = fixture.bindings;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
+        var provisioner = new DurableProvisioner();
+        String bindingId;
+        try (RuntimeBrokerService service = service(provisioner,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            RuntimeSessionRecord session = service
+                    .acquire("harness", "lost-session", "bootstrap")
+                    .toCompletableFuture().join();
+            bindingId = session.getBindingId();
+            ToolExecutionRecord execution = executions.findOrCreate(
+                    ToolExecutionRecord.prepared("call", "key", bindingId,
+                            session.getRuntimeGeneration(), "harness",
+                            "lost-session", "turn", "call", "digest",
+                            Map.of("sessionId", "lost-session",
+                                    "promptId", "turn", "callId", "call",
+                                    "argsDigest", "digest")));
+            RuntimeBindingRecord claimed = bindings.claimOperation(bindingId,
+                    "recovery", Duration.ofMinutes(1));
+            RuntimeBindingRecord lost = bindings.compareAndSet(claimed,
+                    claimed.withRecoveryEvidence(RuntimeRecoveryContract.evidence(
+                            claimed, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                            null, Instant.now()));
+            bindings.recoverLost(sessions, executions, lost);
+            // The real loss path (invalidateBinding / the reconcile loop)
+            // releases its operation claim; do the same so a replacement
+            // Broker can claim the reclaim rather than meet a live claim.
+            bindings.releaseOperation(bindingId, "recovery",
+                    claimed.getOperationGeneration());
+            assertEquals(ToolExecutionRecord.State.ABANDONED,
+                    executions.findByExecutionCallId(
+                            execution.getExecutionCallId()).getState());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    bindings.findById(bindingId).getState());
+        }
+
+        // A replacement Broker process holds no in-memory Session for the lost
+        // generation; the durable record must still answer the status read.
+        DurableProvisioner replacement = new DurableProvisioner();
+        replacement.notFoundOnce = true;
+        try (RuntimeBrokerService service = service(replacement,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-two")) {
+            ToolExecutionRecord read = service
+                    .getExecution("harness", "lost-session", "call")
+                    .toCompletableFuture().join();
+            assertEquals(ToolExecutionRecord.State.ABANDONED, read.getState());
+            // No replacement may be provisioned without writer-stop proof.
+            Exception lost = assertThrows(Exception.class,
+                    () -> service.acquire("harness", "lost-session", "bootstrap")
+                            .toCompletableFuture().join());
+            assertEquals("runtime_broker_runtime_lost",
+                    brokerFailure(lost).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    bindings.findById(bindingId).getState());
+        }
+    }
+
+    @Test
     void aReplacedBrokerConfirmsAPreparedCancellationAfterAdoptingTheSession() {
         Fixture fixture = new Fixture();
         var bindings = fixture.bindings;
