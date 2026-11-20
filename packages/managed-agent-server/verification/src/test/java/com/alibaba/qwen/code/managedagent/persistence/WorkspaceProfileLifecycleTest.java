@@ -56,8 +56,10 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @ParameterizedTest
+    // D3: FILES joins the v2 settlement witnesses — its verifyResources branch
+    // settles like MCP (no Shell capture/publication/monitor).
     @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3,
-            WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP})
+            WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP, WorkspaceToolProfiles.FILES})
     void closesWithoutResourcesAndDeletesAtomicallyWithPrivateRetirement(String profile) {
         var f = fixture();
         var op = admit(f, profile, OperationKind.DELETE);
@@ -140,7 +142,8 @@ class WorkspaceProfileLifecycleTest {
         f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "expired", 60_000L)));
         f.jdbc.update("UPDATE ma_session_head SET writer_lease_until = 0");
-        f.jdbc.update("UPDATE ma_session SET tool_profile = ?", protocol == 2 ? WorkspaceToolProfiles.SHELL : WorkspaceToolProfiles.FILES);
+        // D3: ordinary files is v2 now; external-files keeps the v1 witness.
+        f.jdbc.update("UPDATE ma_session SET tool_profile = ?", protocol == 2 ? WorkspaceToolProfiles.SHELL : WorkspaceToolProfiles.EXTERNAL_FILES);
         f.transactions.execute(ignored -> f.store.beginWorkspaceLifecycle("tenant", f.session, OperationKind.CLOSE,
                 "owner", "a".repeat(64), "close", "digest", true, protocol));
         assertThat(f.jdbc.queryForObject("SELECT writer_lease_until FROM ma_session_head", Long.class)).isZero();
@@ -203,8 +206,11 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @Test
-    void filesV1DrainingStillRejectsAnExpiredWriter() {
+    void externalFilesV1DrainingStillRejectsAnExpiredWriter() {
         var f = fixture();
+        // D3: ordinary files moved to v2; external-files keeps the v1 draining
+        // path, so the expired-writer witness rides external-files now.
+        f.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.EXTERNAL_FILES);
         var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 60_000L)));

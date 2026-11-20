@@ -402,6 +402,7 @@ type ChatEditorTestProps = {
   isPreparing?: boolean;
   cancelArmed?: boolean;
   disabled?: boolean;
+  submitDisabled?: boolean;
   dialogOpen?: boolean;
   onToggleShortcuts?: () => void;
   reasoning?: {
@@ -553,6 +554,7 @@ const {
   rootWorkspaceVoice,
   qualifiedWorkspaceVoice,
   qualifiedSetWorkspaceSetting,
+  qualifiedSetVisionBridgeSettings,
   sessionCatalogController,
   mockReleaseDetachedWebTerminal,
   mockReleaseWebTerminal,
@@ -581,8 +583,11 @@ const {
   const rootWorkspaceVoice = vi.fn();
   const qualifiedWorkspaceVoice = vi.fn();
   const qualifiedSetWorkspaceSetting = vi.fn();
+  const qualifiedSetVisionBridgeSettings = vi.fn();
   const runtimeStop = vi.fn();
   const workspaceClient = {
+    getRestartRecoveries: vi.fn(),
+    continueRestartRecoveries: vi.fn(),
     sendToSubSession: vi.fn(),
     runtimeStopOptions: vi.fn(),
     liveSetupStatus: vi
@@ -607,6 +612,7 @@ const {
       workspaceSettings: qualifiedWorkspaceSettings,
       workspaceVoice: qualifiedWorkspaceVoice,
       setWorkspaceSetting: qualifiedSetWorkspaceSetting,
+      setVisionBridgeSettings: qualifiedSetVisionBridgeSettings,
     })),
     sessionStatus: vi.fn(() =>
       Promise.resolve({ workspaceCwd: '/tmp/project' }),
@@ -1111,6 +1117,11 @@ const {
       },
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
+        setValue: (
+          scope: 'workspace' | 'user',
+          key: string,
+          value: unknown,
+        ) => Promise<unknown>;
       } | null,
       artifactPanelExtra: null as ReactNode,
       captureArtifactPanelOnly: false,
@@ -1200,6 +1211,7 @@ const {
     rootWorkspaceVoice,
     qualifiedWorkspaceVoice,
     qualifiedSetWorkspaceSetting,
+    qualifiedSetVisionBridgeSettings,
     sessionCatalogController: {
       invalidateWorkspace: vi.fn(),
       refreshWorkspace: vi.fn(),
@@ -1758,9 +1770,7 @@ vi.mock('./components/messages/SettingsMessage', async () => {
   const React = await import('react');
   return {
     SettingsMessage: (props: {
-      settingsState: {
-        settings: DaemonSettingDescriptor[];
-      };
+      settingsState: NonNullable<typeof testState.latestSettingsState>;
       initialCategory?: string;
       presentation?: WebShellSettingsOptions;
       onSubDialog?: (key: string, scope: 'user' | 'workspace') => void;
@@ -13145,6 +13155,59 @@ async function flush(): Promise<void> {
   });
 }
 
+describe('App restart recovery', () => {
+  beforeEach(() => {
+    mockConnection.capabilities.features = ['restart_recovery'];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/work/secondary', trusted: true },
+      ],
+    };
+    mockWorkspace.client.getRestartRecoveries.mockReset().mockResolvedValue({
+      workspaces: [
+        {
+          workspace: '/work/secondary',
+          workspaceId: 'secondary',
+          cwd: '/work/secondary',
+          v: 1,
+          items: [
+            {
+              sessionId: 'recovery-session',
+              lastActivityAt: '2026-11-18T00:00:00.000Z',
+              interruption: 'daemon_shutdown',
+            },
+          ],
+          truncated: false,
+        },
+      ],
+    });
+  });
+
+  it('scans only the locked workspace', async () => {
+    const { container } = renderApp({
+      lockedWorkspaceCwd: '/work/secondary',
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockWorkspace.client.getRestartRecoveries).toHaveBeenCalled();
+      });
+    });
+    expect(
+      mockWorkspace.client.getRestartRecoveries,
+    ).toHaveBeenCalledExactlyOnceWith({
+      workspaces: ['/work/secondary'],
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(container.textContent).toContain(
+          '1 task interrupted by a restart',
+        );
+      });
+    });
+  });
+});
+
 async function clickSubmit(container: HTMLElement): Promise<void> {
   await act(async () => {
     container
@@ -13760,6 +13823,8 @@ beforeEach(() => {
     voiceWorkspaceStatus('/work/secondary'),
   );
   qualifiedSetWorkspaceSetting.mockReset();
+  qualifiedSetVisionBridgeSettings.mockReset();
+  qualifiedSetVisionBridgeSettings.mockResolvedValue({ requiresRestart: true });
   qualifiedSetWorkspaceSetting.mockResolvedValue({
     key: 'voiceModel',
     scope: 'workspace',
@@ -31229,6 +31294,12 @@ describe('App session callbacks', () => {
   it('names a new session from a short first prompt', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.displayName = undefined;
+    const titleWrite = deferred<{ displayName: string }>();
+    const updateMetadata = vi.fn(() => titleWrite.promise);
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'session-1',
+      updateMetadata,
+    });
     renderApp();
     await flush();
 
@@ -31239,22 +31310,10 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
     });
 
-    expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
-      '修复登录按钮在移动端错位',
-    );
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      mockSessionActions.attachSession.mock.invocationCallOrder[0],
-    );
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(mockSessionActions.sendPrompt.mock.invocationCallOrder[0]);
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      sessionCatalogController.sessionCreated.mock.invocationCallOrder[0],
-    );
+    expect(updateMetadata).toHaveBeenCalledExactlyOnceWith({
+      initialDisplayName: '修复登录按钮在移动端错位',
+    });
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
     expect(
       sessionCatalogController.setPendingSessionTitle,
     ).toHaveBeenCalledWith(
@@ -31265,14 +31324,9 @@ describe('App session callbacks', () => {
     expect(
       sessionCatalogController.setPendingSessionTitle.mock
         .invocationCallOrder[0],
-    ).toBeLessThan(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    );
-    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
-      '/workspace',
-      'session-1',
-      '修复登录按钮在移动端错位',
-    );
+    ).toBeLessThan(updateMetadata.mock.invocationCallOrder[0]);
+    await act(async () => titleWrite.resolve({ displayName: '已手动改名' }));
+    expect(sessionCatalogController.renamed).not.toHaveBeenCalled();
   });
 
   it('leaves a long first prompt to the automatic session title', async () => {
@@ -31370,7 +31424,7 @@ describe('App session callbacks', () => {
     );
     // Naming goes through the created client, not the current-session action.
     expect(detachedClient.updateMetadata).toHaveBeenCalledWith({
-      displayName: 'run while I am away',
+      initialDisplayName: 'run while I am away',
     });
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
@@ -32038,7 +32092,8 @@ describe('App session callbacks', () => {
     });
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(editorFocus).not.toHaveBeenCalled();
-    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+    expect(testState.latestChatEditorProps?.submitDisabled).toBe(true);
     expect(testState.latestChatEditorProps?.onSubmit('must stay on A')).toBe(
       false,
     );
@@ -32052,6 +32107,7 @@ describe('App session callbacks', () => {
       await load.promise;
     });
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(testState.latestChatEditorProps?.submitDisabled).toBe(false);
     expect(editorFocus).toHaveBeenCalledOnce();
   });
 
@@ -49772,6 +49828,203 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="fallbacks-confirm"]'),
     ).toBeNull();
+  });
+
+  it('writes only the timeout for the primary workspace', async () => {
+    mockConnection.workspaceCwd = '/workspace';
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/model --timeout 90000ms --vision';
+    await clickSubmit(container);
+    await flush();
+    expect(settingsSetValue.mock.calls).toEqual([
+      ['workspace', 'visionBridgeTimeoutMs', 90_000],
+    ]);
+    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
+  });
+
+  it('uses the secondary workspace for the vision picker, timeout command and settings panel', async () => {
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      features: ['workspace_qualified_rest_core', 'workspace_settings'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const timeoutSetting: DaemonSettingDescriptor = {
+      key: 'visionBridgeTimeoutMs',
+      type: 'integer',
+      label: 'Vision Bridge Timeout (ms)',
+      category: 'Model',
+      requiresRestart: true,
+      default: undefined,
+      values: { effective: 30_000, workspace: 30_000 },
+    };
+    const modelSetting: DaemonSettingDescriptor = {
+      key: 'visionModel',
+      type: 'string',
+      label: 'Vision Model',
+      category: 'Model',
+      requiresRestart: false,
+      default: '',
+      values: { effective: 'primary-vl', workspace: 'primary-vl' },
+    };
+    testState.settings = [timeoutSetting, modelSetting];
+    qualifiedWorkspaceSettings.mockResolvedValue({
+      v: 1,
+      settings: [
+        { ...timeoutSetting, values: { effective: 90_000, workspace: 90_000 } },
+        {
+          ...modelSetting,
+          values: { effective: 'secondary-vl', workspace: 'secondary-vl' },
+        },
+      ],
+    });
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/model --vision --timeout 60';
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspace.client.workspaceById).toHaveBeenCalledWith(
+      'secondary',
+    );
+    expect(qualifiedSetWorkspaceSetting).toHaveBeenCalledWith(
+      'workspace',
+      'visionBridgeTimeoutMs',
+      60_000,
+    );
+
+    testState.prompt = '/model --vision';
+    await clickSubmit(container);
+    await flush();
+    const picker = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-select"]',
+    );
+    expect(picker?.getAttribute('data-current-model-id')).toBe('secondary-vl');
+    await act(async () => picker?.click());
+    expect(qualifiedSetWorkspaceSetting).toHaveBeenCalledWith(
+      'workspace',
+      'visionModel',
+      'fast-model-x',
+    );
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      testState.latestSettingsState?.settings.find(
+        (setting) => setting.key === 'visionBridgeTimeoutMs',
+      )?.values.effective,
+    ).toBe(90_000);
+    expect(
+      testState.latestSettingsState?.settings.find(
+        (setting) => setting.key === 'visionModel',
+      )?.values.workspace,
+    ).toBe('secondary-vl');
+    await testState.latestSettingsState?.setValue(
+      'workspace',
+      'visionBridgeTimeoutMs',
+      120_000,
+    );
+    expect(qualifiedSetWorkspaceSetting).toHaveBeenCalledWith(
+      'workspace',
+      'visionBridgeTimeoutMs',
+      120_000,
+    );
+    expect(settingsSetValue).not.toHaveBeenCalled();
+  });
+
+  it('keeps the standalone User timeout editor without borrowing a workspace value', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    testState.settings = [
+      {
+        key: 'visionBridgeTimeoutMs',
+        type: 'integer',
+        label: 'Vision Bridge Timeout (ms)',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined,
+        values: { effective: 30_000, user: 45_000, workspace: 30_000 },
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+    const settingsButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="open-sidebar-settings"]',
+    );
+    expect(settingsButton).not.toBeNull();
+    await act(async () => settingsButton?.click());
+    await flush();
+    const state = testState.latestSettingsState;
+    expect(state).not.toBeNull();
+    expect(
+      state?.settings.find((setting) => setting.key === 'visionBridgeTimeoutMs')
+        ?.values,
+    ).toEqual({ effective: 45_000, user: 45_000 });
+    await state?.setValue('user', 'visionBridgeTimeoutMs', 60_000);
+    expect(settingsSetValue.mock.calls).toEqual([
+      ['user', 'visionBridgeTimeoutMs', 60_000],
+    ]);
+    expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
+  });
+
+  it('sends a model and timeout together in one request without a fallback on failure', async () => {
+    mockConnection.workspaceCwd = '/workspace';
+    const client = {
+      ...mockWorkspace.client.workspaceByCwd(),
+      setVisionBridgeSettings: qualifiedSetVisionBridgeSettings,
+    };
+    mockWorkspace.client.workspaceByCwd.mockReturnValue(client);
+    mockWorkspace.client.workspaceByCwd.mockClear();
+    qualifiedSetVisionBridgeSettings.mockRejectedValueOnce(
+      new Error('write failed'),
+    );
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/model --vision qwen-vl --timeout 45';
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/workspace',
+    );
+    expect(qualifiedSetVisionBridgeSettings.mock.calls).toEqual([
+      ['qwen-vl', 45_000],
+    ]);
+    expect(settingsSetValue).not.toHaveBeenCalled();
+    expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
+  });
+
+  it.each([
+    '/model --vision qwen-vl --timeout 1.5',
+    '/model --vision --timeout 60 --timeout abc',
+    '/model --vision --timeout 60 --global',
+    '/model --vision qwen-vl --timeout 60 --',
+    '/model --vision --timeout=60',
+    '/model --voice --timeout 60',
+  ])('rejects %s without writing', async (prompt) => {
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    settingsSetValue.mockClear();
+    testState.prompt = prompt;
+    await clickSubmit(container);
+    await flush();
+    expect(settingsSetValue).not.toHaveBeenCalled();
+    expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
+    expect(qualifiedSetVisionBridgeSettings).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringMatching(/^Invalid /),
+    );
+    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
   });
 
   it('does not close a command-launched fast picker when its setting is excluded', async () => {

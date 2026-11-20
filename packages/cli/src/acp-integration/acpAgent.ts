@@ -12661,7 +12661,11 @@ class QwenAgent implements Agent {
       }
       case SERVE_CONTROL_EXT_METHODS.sessionTitle: {
         const sessionId = params['sessionId'];
-        const displayName = params['displayName'];
+        const initial =
+          params['displayName'] === undefined &&
+          params['initialDisplayName'] !== undefined;
+        const displayName =
+          params[initial ? 'initialDisplayName' : 'displayName'];
         const titleSource = params['titleSource'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
@@ -12683,11 +12687,15 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const source =
-          titleSource === 'auto' ? ('auto' as const) : ('manual' as const);
+          initial || titleSource === 'auto'
+            ? ('auto' as const)
+            : ('manual' as const);
         const recording = session.getConfig().getChatRecordingService();
         let ok = false;
         if (recording) {
-          ok = await recording.recordCustomTitle(displayName, source);
+          ok = initial
+            ? await recording.recordInitialTitle(displayName)
+            : await recording.recordCustomTitle(displayName, source);
         }
         return { sessionId, displayName, titleSource: source, persisted: ok };
       }

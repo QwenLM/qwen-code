@@ -213,9 +213,9 @@ public class JdbcManagedExtensionRecordStore
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.STATS, "latest");
     }
 
-    boolean rebuildActivityBatch(String tenant, String workspace, String session, long version, long revision, long sequence, String digest,
+    boolean rebuildActivityBatch(String tenant, String workspace, String session, boolean hasActivityDiagnostics, long revision, long sequence, String digest,
             Function<String, StoredResource> resources) {
-        return activityDiagnostics.rebuildBatch(tenant, workspace, session, version, revision, sequence, digest, resources);
+        return activityDiagnostics.rebuildBatch(tenant, workspace, session, hasActivityDiagnostics, revision, sequence, digest, resources);
     }
 
     public String diagnosticCommittedSequence(String tenantId, String sessionId) {
@@ -1567,6 +1567,15 @@ public class JdbcManagedExtensionRecordStore
                     projection.definitionRevision(), deliveryTarget,
                     deliveryState, projection.startedAt(),
                     projection.settledAt(), scopeKey, recordKey);
+        }
+        if (domain.equals("automation_run")) {
+            boolean terminal = taskKind != null
+                    && Set.of("completed", "failed", "cancelled").contains(projection.state());
+            jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = ?"
+                            + " WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?"
+                            + " AND session_id = ? AND run_id = ?",
+                    terminal ? 1 : 0, tenantId, record.get("scheduleId").textValue(),
+                    record.get("occurrenceKey").textValue(), sessionId, recordId);
         }
         if (domain.equals("schedule")) {
             new JdbcAutomationLedgerStore(jdbc).projectSchedule(tenantId, workspaceId,
