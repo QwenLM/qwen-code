@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from inspect import Parameter, Signature, iscoroutinefunction, signature
