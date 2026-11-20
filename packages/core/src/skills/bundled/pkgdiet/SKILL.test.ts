@@ -57,6 +57,19 @@ describe('bundled pkgdiet skill', () => {
     );
     expect(body).toContain('published by the skill author (om-tajne)');
 
+    // Configuration Scope Limitation (R7-1)
+    expect(body).toContain('## Configuration Scope Limitation');
+    expect(normalizedBody).toContain('SystemDefaults');
+    expect(normalizedBody).toContain('QWEN_CODE_SYSTEM_DEFAULTS_PATH');
+    expect(normalizedBody).toContain('--mcp-config');
+    expect(normalizedBody).toContain('session-injected (ACP/IDE)');
+    expect(normalizedBody).toContain(
+      'The pkgdiet allowlist (command, args, cwd validation) is applied only to the **user scope** entry',
+    );
+    expect(normalizedBody).toContain(
+      "system-level, CLI-flag (`--mcp-config`), or session-injected (ACP/IDE) source that is outside this skill's inspection reach",
+    );
+
     // Bootstrap checks, policy filters, allowlist, and whole entry inspection
     expect(normalizedBody).toContain(
       'Inspect session policy filters, configured MCP servers, and tool availability',

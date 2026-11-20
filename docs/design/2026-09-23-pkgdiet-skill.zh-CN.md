@@ -34,6 +34,7 @@
 - **会话策略过滤前置校验**：引导阶段排查 `mcp.allowed` 与 `mcp.excluded`，确认 `pkgdiet` 未被全局配置策略禁用后再行注册。
 - **白名单身份校验**：用户级配置按白名单比对：仅允许包含 `command`、`args` 与工作区外的独立 `cwd`，且命令与参数严格匹配 `npx` 及 `["-y", "pkgdiet@2.0.0", "mcp"]`。任何多余字段（`env`、`headers`、`trust`、`timeout` 等）均视为不匹配并拒绝执行。
 - **不受信的作用域隔离**：任何来源于项目或工作区作用域（`.mcp.json`、`.qwen/settings.json`）的 `pkgdiet` 条目均视为不受信。工作区条目可通过 `"${QWEN_CODE_CLI:-qwen}" mcp remove --scope project pkgdiet` 移除；`.mcp.json` 条目须手动编辑对应文件。
+- **配置作用域限制**：白名单校验仅作用于用户作用域（user scope）条目（`$QWEN_HOME/settings.json` 或 `~/.qwen/settings.json`）。SystemDefaults（`system-defaults.json` 或 `QWEN_CODE_SYSTEM_DEFAULTS_PATH`）、系统作用域（`/etc/qwen-code/settings.json` 等）、CLI 标志（`--mcp-config`）以及 ACP/IDE 会话注入的 MCP 服务均不在本技能的可检查与校验范围内。若服务处于活跃状态但无法在三个可读作用域中找到配置条目，将向用户告警该条目可能来源于系统级、CLI 标志或会话注入等不可读来源。
 - **评估器源地址完整性**：引导阶段执行 `npm config get registry` 并要求输出必须严格为 `https://registry.npmjs.org/`。重定向源被视为身份不匹配（identity mismatch）并终止注册。
 - **配置还原保证**：若 `$QWEN_HOME/settings.json`（或 `~/.qwen/settings.json`）中已存在旧的用户级配置，其完整配置对象在写入前被记录；若注册命令退出码非零，完整还原该对象；若连通性重试超时，保留配置并引导用户重启。
 - **有限重试探测**：连通性检查增加有界重试以容纳冷启动下载。若仍未连通，标记为已注册未运行，通过 `mcp list` 查看连接状态并建议在终端直接执行命令查看 stderr。

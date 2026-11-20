@@ -19,17 +19,19 @@ This skill registers the PkgDiet MCP server to evaluate requested npm packages a
 
 ## Configuration Scope Limitation
 
-Qwen Code merges MCP server configuration from five sources in priority order:
+Qwen Code merges MCP server configuration from settings tiers, project files, CLI flags, and session injections:
 
-| Scope | File location | Checked by this skill |
-|---|---|---|
-| SystemDefaults | Built-in compiled defaults | No — not user-editable |
-| System | `/etc/qwen-code/settings.json` | No — see note below |
-| User | `$QWEN_HOME/settings.json` (or `~/.qwen/settings.json`) | Yes — allowlist applied |
-| Workspace | `.qwen/settings.json` in the project root | Yes — treated as untrusted |
-| Project | `.mcp.json` in the project root | Yes — treated as untrusted |
+| Scope            | Source location                                                                    | Checked by this skill          |
+| ---------------- | ---------------------------------------------------------------------------------- | ------------------------------ |
+| SystemDefaults   | `<system settings dir>/system-defaults.json` (or `QWEN_CODE_SYSTEM_DEFAULTS_PATH`) | No — operator-managed defaults |
+| System           | `<system settings dir>/settings.json` (`/etc/qwen-code/settings.json`, etc.)       | No — administrator-managed     |
+| User             | `$QWEN_HOME/settings.json` (or `~/.qwen/settings.json`)                            | Yes — allowlist applied        |
+| Workspace        | `.qwen/settings.json` in the project root                                          | Yes — treated as untrusted     |
+| Project          | `.mcp.json` in the project root                                                    | Yes — treated as untrusted     |
+| CLI flag         | `--mcp-config <path>` command-line option                                          | No — CLI-flag source           |
+| Session-injected | ACP/IDE session initialization parameters                                          | No — runtime session source    |
 
-> **Known limitation:** The pkgdiet allowlist (command, args, cwd validation) is applied only to the **user scope** entry. A `pkgdiet` server registered at the **System scope** (`/etc/qwen-code/settings.json`) or injected via the `--mcp-config` CLI flag bypasses this check. If you operate in a managed or multi-user environment where system-level settings are controlled by an administrator, verify that no `pkgdiet` entry exists in `/etc/qwen-code/settings.json` before activating this skill. This skill cannot read or validate system-scope entries.
+> **Known limitation:** The pkgdiet allowlist (command, args, cwd validation) is applied only to the **user scope** entry (`$QWEN_HOME/settings.json` or `~/.qwen/settings.json`). A `pkgdiet` server registered at the **SystemDefaults** scope, **System scope** (`/etc/qwen-code/settings.json`), injected via the `--mcp-config` CLI flag, or injected via **session runtime (ACP/IDE)** bypasses this check. If you operate in a managed, IDE-integrated, or multi-user environment where non-user settings or session sources are present, verify that no unexpected `pkgdiet` entry is configured before activating this skill. This skill cannot read or validate SystemDefaults, system-scope, CLI-flag, or session-injected entries.
 
 ## Bootstrap
 
@@ -38,7 +40,7 @@ Before proceeding, you must verify the configuration and ask the user for consen
 1. Inspect session policy filters, configured MCP servers, and tool availability:
    - Check session MCP policy filters (`mcp.allowed`, `mcp.excluded`, or disabled MCP servers). If `pkgdiet` is suppressed by policy, halt, inform the user that `pkgdiet` is suppressed by `mcp.allowed` or `mcp.excluded` configuration policy, and name the configuration policy change needed instead of proceeding.
    - Check if the `check_dependency` tool is already reachable (served by `pkgdiet`, registered name `mcp__pkgdiet__check_dependency` or `tool_search` result with `serverName === 'pkgdiet'`).
-   - If an entry named `pkgdiet` is already configured, inspect the configuration tiers (project `.mcp.json`, workspace `.qwen/settings.json`, and user settings at `$QWEN_HOME/settings.json` when `QWEN_HOME` is set, otherwise `~/.qwen/settings.json`). Note: System-scope (`/etc/qwen-code/settings.json`) and SystemDefaults entries cannot be read by this skill; if the server appears active but no entry is found in the three readable tiers, warn the user that the entry may originate from a system-level or CLI-flag source that is outside this skill's inspection reach:
+   - If an entry named `pkgdiet` is already configured, inspect the configuration tiers (project `.mcp.json`, workspace `.qwen/settings.json`, and user settings at `$QWEN_HOME/settings.json` when `QWEN_HOME` is set, otherwise `~/.qwen/settings.json`). Note: SystemDefaults, System-scope (`/etc/qwen-code/settings.json`), CLI-flag (`--mcp-config`), and session-injected (ACP/IDE) entries cannot be read or validated by this skill; if the server appears active but no entry is found in the three readable tiers, warn the user that the entry may originate from a system-level, CLI-flag (`--mcp-config`), or session-injected (ACP/IDE) source that is outside this skill's inspection reach:
      - If a `pkgdiet` entry originates in project or workspace scope, treat it as untrusted: report the entry and declaring file, and stop. Explain that removing a workspace `.qwen/settings.json` entry can be done via `"${QWEN_CODE_CLI:-qwen}" mcp remove --scope project pkgdiet`, while a project `.mcp.json` entry must be edited or removed directly from that file.
      - If the entry is in user scope (`$QWEN_HOME/settings.json` when `QWEN_HOME` is set, otherwise `~/.qwen/settings.json`), inspect the entry against an allowlist: it must contain only allowed keys (`command`, `args`, and `cwd`), `command` must be `npx`, `args` must match `["-y", "pkgdiet@2.0.0", "mcp"]`, and `cwd` must specify an explicit non-project `cwd` outside the project workspace. If it differs or contains extraneous keys (such as `env`, `headers`, `url`, `httpUrl`, `tcp`, `oauth`, `trust`, `timeout`, `includeTools`, `excludeTools`), report the entry, warn the user, and stop. Offer `"${QWEN_CODE_CLI:-qwen}" mcp remove --scope user pkgdiet` as the remediation and require a restart before the guardrail is used.
      - If the user-scope entry matches whole and `check_dependency` is reachable, skip to Instructions.
