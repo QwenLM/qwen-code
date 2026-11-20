@@ -778,6 +778,125 @@ describe('LoopDetectionService', () => {
     });
   });
 
+  describe('Repetitive Thoughts Detection on streamed reasoning deltas', () => {
+    // OpenAI-compatible providers stream reasoning token by token as
+    // thought events with an empty subject. The repetition rule must judge
+    // whole segments of reasoning, never the arbitrary stream deltas.
+    const LOOP_SENTENCE =
+      'Let me check the example configuration file once more. ';
+
+    const chunkBy = (text: string, size: number): string[] => {
+      const out: string[] = [];
+      for (let i = 0; i < text.length; i += size) {
+        out.push(text.slice(i, i + size));
+      }
+      return out;
+    };
+    const chunkByWord = (text: string): string[] => text.match(/\S+\s*/g) ?? [];
+    const chunkBySentence = (text: string): string[] =>
+      text.match(/[^.!?]+[.!?]\s*/g) ?? [text];
+
+    const feedDeltas = (deltas: string[]): boolean => {
+      let fired = false;
+      for (const delta of deltas) {
+        if (add(thoughtEvent('', delta))) fired = true;
+      }
+      // The turn ends: a trailing partial segment is judged too.
+      if (add({ type: LlmEventType.Finished } as ServerLlmStreamEvent)) {
+        fired = true;
+      }
+      return fired;
+    };
+
+    it('does not treat a number streamed digit by digit as a loop', () => {
+      service.reset('');
+      expect(feedDeltas(['The limit is ', '1', '0', '0', '0', ' items.'])).toBe(
+        false,
+      );
+      expectNotLogged('repetitive_thoughts');
+    });
+
+    it('does not treat a long run of identical digit deltas as a loop', () => {
+      service.reset('');
+      expect(feedDeltas(['Total: ', '1', '0', '0', '0', '0', '0', '0'])).toBe(
+        false,
+      );
+      expectNotLogged('repetitive_thoughts');
+    });
+
+    it('does not treat consecutive whitespace-only deltas as a loop', () => {
+      service.reset('');
+      expect(feedDeltas(['First part.', ' ', ' ', ' ', 'Second part.'])).toBe(
+        false,
+      );
+      expect(feedDeltas(['\n', '\n', '\n', '\n'])).toBe(false);
+      expectNotLogged('repetitive_thoughts');
+    });
+
+    const chunkings: Array<[string, (text: string) => string[]]> = [
+      ['1 char', (t) => chunkBy(t, 1)],
+      ['per word', chunkByWord],
+      ['per sentence', chunkBySentence],
+      ['whole text', (t) => [t]],
+    ];
+
+    it.each(chunkings)(
+      'still detects the same sentence repeated 3 times (%s deltas)',
+      (_name, chunk) => {
+        service.reset('');
+        // A distinct opener keeps the chunk-hash detectors out of play: only
+        // the whole-segment thought rule can fire on three short repeats.
+        const text = 'Starting the review. ' + LOOP_SENTENCE.repeat(3);
+        expect(feedDeltas(chunk(text))).toBe(true);
+        expectLogged('repetitive_thoughts');
+      },
+    );
+
+    it('keeps the per-event rule for thoughts that carry a subject', () => {
+      service.reset('');
+      run(3, () => addThought('Plan', 'Inspect the migration script.'));
+      expectLogged('repetitive_thoughts');
+    });
+
+    it('does not carry buffered reasoning across a reset', () => {
+      service.reset('');
+      add(thoughtEvent('', LOOP_SENTENCE + LOOP_SENTENCE + 'Unfinished'));
+      service.reset('');
+      add(thoughtEvent('', ' tail. '));
+      expect(add({ type: LlmEventType.Finished } as ServerLlmStreamEvent)).toBe(
+        false,
+      );
+      expectNotLogged('repetitive_thoughts');
+    });
+
+    it('flushes a pending segment when a tool call arrives', () => {
+      service.reset('');
+      add(thoughtEvent('', LOOP_SENTENCE + LOOP_SENTENCE));
+      add(
+        thoughtEvent(
+          '',
+          'Let me check the example configuration file once more.',
+        ),
+      );
+      expect(addTool('read_file', { path: '/tmp/example-1000/file.txt' })).toBe(
+        true,
+      );
+      expectLogged('repetitive_thoughts');
+    });
+
+    it('force-flushes an unbounded segment without sentence ends', () => {
+      service.reset('');
+      // No sentence terminators: the buffer must stay bounded and the
+      // detector must not throw or fire on distinct text.
+      let fired = false;
+      for (let i = 0; i < 40; i++) {
+        const words = Array.from({ length: 100 }, (_, j) => `w${i}x${j}`);
+        fired = add(thoughtEvent('', words.join(' ') + ' ')) || fired;
+      }
+      expect(fired).toBe(false);
+    });
+  });
+
   describe('Long verbatim repetition loops (issue #1775)', () => {
     // The report shows one ~300-char analysis block chanted verbatim many
     // times without the turn halting: far longer than the clustered chunk
