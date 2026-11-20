@@ -131,7 +131,7 @@ describe('document export budgets', () => {
     ).toBe(60_000);
   });
 
-  it('widens the ceiling on every CI runner that measured the overruns', () => {
+  it('widens the ceiling on CI regardless of runner class', () => {
     // The lane that runs this gate maps only TMPDIR into the step, so
     // RUNNER_ENVIRONMENT is absent there on the ARM64 pool and on
     // ubuntu-latest alike. Keying the tier on it left the 3x headroom inert
