@@ -76,7 +76,15 @@ them rather than at the end of the document.
   harness ran. With `--context <snapshot>` the expected head comes from that
   host-held file instead of the artifact's writable `context.json`, and an
   unusable snapshot is a hard exit 1, not a warning: the artifact directory is
-  writable by the PR code the round just ran.
+  writable by the PR code the round just ran. The trust refusal is root-aware
+  (a filesystem trust root — `/` or a Windows drive root — contains every path
+  and is rejected as a usage error), refuses a context inside the PR-writable
+  tree, and refuses a hard link retaining a second name. Because a path outside
+  the tree and a single link still do not prove the host wrote the file,
+  `--context-sha256 <digest>` binds the content: `prepare` prints the sha256 of
+  the snapshot it writes host-side, the skill holds it outside the clone and
+  passes it, and the checker refuses a byte mismatch. Without the digest the
+  checker discloses that provenance rests on the path/link checks alone.
 - `scripts/verify-pr-guard.mjs` owns both halves of the pre-publish guard.
   `--pr <n> --repo <owner>/<repo> --snapshot <file>` fetches the head, the PR
   state and all three comment lists with `--paginate`, and writes the file only

@@ -149,6 +149,13 @@ export interface WebShellDaemonScenario {
   /** Response for `GET /workspaces/:cwd/git/branches`. */
   gitBranches?: unknown;
   /**
+   * When true, a plain `POST .../git/checkout` (no stash/force in the body)
+   * answers 409 dirty_working_tree; the stash resolution answers 200 with a
+   * kept stash entry, the force resolution answers 200. Exercises the
+   * branch picker's checkout resolution panel.
+   */
+  gitCheckoutDirty?: boolean;
+  /**
    * Remotes served by `GET /workspaces/:cwd/git/remotes`. The add/remove
    * routes mutate this array in place so later reads see earlier writes.
    */
@@ -450,26 +457,39 @@ export function createWebShellDaemonScenario(
     ...(overrides.mcp ?? {}),
   };
 
-  const sessions = overrides.sessions ?? [
-    {
-      sessionId,
-      workspaceCwd,
-      createdAt: now,
-      updatedAt: now,
-      displayName,
-      clientCount: 1,
-      hasActivePrompt: false,
-    },
-    {
-      sessionId: 'previous-session',
-      workspaceCwd,
-      createdAt: now,
-      updatedAt: now,
-      displayName: 'Previous Session',
-      clientCount: 0,
-      hasActivePrompt: false,
-    },
-  ];
+  // Clone the caller-supplied collections that routes mutate in place:
+  // sessions here, standaloneSessions, midTurnMessages and gitRemotes below,
+  // and goalsByWorkspace. gitRemotes counts because materializeRemotes hands
+  // the array itself to the add/remove routes, which splice and push it.
+  // Notification-path cases mutate these after install, and without the clone
+  // that mutation would reach the caller's fixture and leak into every later
+  // case sharing it. installMockDaemon still holds the scenario itself by
+  // reference, so those mutations stay visible to routes. allocatedSessions is
+  // factory-owned, and whole-field reassignments (capabilities, channels,
+  // providers, pairing*, workspaceOrder, goalSnapshot) replace the reference
+  // rather than writing into the caller's value, so neither needs a clone.
+  const sessions = structuredClone(
+    overrides.sessions ?? [
+      {
+        sessionId,
+        workspaceCwd,
+        createdAt: now,
+        updatedAt: now,
+        displayName,
+        clientCount: 1,
+        hasActivePrompt: false,
+      },
+      {
+        sessionId: 'previous-session',
+        workspaceCwd,
+        createdAt: now,
+        updatedAt: now,
+        displayName: 'Previous Session',
+        clientCount: 0,
+        hasActivePrompt: false,
+      },
+    ],
+  );
 
   return {
     workspaceCwd,
@@ -496,7 +516,7 @@ export function createWebShellDaemonScenario(
     sessions,
     workspaceOrder: overrides.workspaceOrder ?? [],
     workspaceOrderSaveError: overrides.workspaceOrderSaveError,
-    standaloneSessions: overrides.standaloneSessions ?? [],
+    standaloneSessions: structuredClone(overrides.standaloneSessions ?? []),
     standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
     sessionCatalogVersion: overrides.sessionCatalogVersion ?? {
@@ -517,7 +537,10 @@ export function createWebShellDaemonScenario(
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
     gitBranches: overrides.gitBranches,
-    gitRemotes: overrides.gitRemotes,
+    gitCheckoutDirty: overrides.gitCheckoutDirty,
+    gitRemotes: overrides.gitRemotes
+      ? structuredClone(overrides.gitRemotes)
+      : undefined,
     gitDiff: overrides.gitDiff,
     gitLog: overrides.gitLog,
     btwAnswer: overrides.btwAnswer,
@@ -530,7 +553,7 @@ export function createWebShellDaemonScenario(
       ? structuredClone(overrides.goalsByWorkspace)
       : undefined,
     allocatedSessions: [],
-    midTurnMessages: overrides.midTurnMessages ?? [],
+    midTurnMessages: structuredClone(overrides.midTurnMessages ?? []),
     branch: overrides.branch,
   };
 }
@@ -2056,7 +2079,32 @@ async function handleDaemonRoute(
     const action = path.replace(/\/$/, '').split('/').pop();
     if (action === 'commit') {
       await json(route, { sha: 'abc1234', subject: 'test commit' });
-    } else if (action === 'checkout' || action === 'branch') {
+    } else if (action === 'checkout') {
+      const checkoutBody = (body ?? {}) as Record<string, unknown>;
+      if (
+        scenario.gitCheckoutDirty &&
+        checkoutBody['stash'] !== true &&
+        checkoutBody['force'] !== true
+      ) {
+        await json(
+          route,
+          {
+            error: 'dirty_working_tree',
+            message:
+              'error: Your local changes to the following files would be overwritten by checkout:\n\ta.txt\nPlease commit your changes or stash them before you switch branches.\nAborting',
+          },
+          409,
+        );
+        return;
+      }
+      await json(route, {
+        branch: 'feat/demo',
+        detached: false,
+        ...(checkoutBody['stash'] === true
+          ? { stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0' }
+          : {}),
+      });
+    } else if (action === 'branch') {
       await json(route, { branch: 'feat/demo', detached: false });
     } else {
       await json(route, { success: true, output: '' });
@@ -2317,7 +2365,10 @@ async function handleDaemonRoute(
       return;
     }
     const summary = scenario.sessions[index];
-    const displayName = readStringField(body, 'displayName');
+    const initialDisplayName = readStringField(body, 'initialDisplayName');
+    const displayName =
+      readStringField(body, 'displayName') ??
+      (summary.displayName?.trim() ? undefined : initialDisplayName);
     const prInput = getRecordValue(body, 'pr');
     let prs = summary.prs ?? [];
     if (prInput !== undefined) {
@@ -2398,7 +2449,11 @@ async function handleDaemonRoute(
     };
     await json(route, {
       sessionId,
-      ...(displayName !== undefined ? { displayName } : {}),
+      ...(displayName !== undefined
+        ? { displayName }
+        : initialDisplayName !== undefined
+          ? { displayName: summary.displayName }
+          : {}),
       prs,
     });
     return;

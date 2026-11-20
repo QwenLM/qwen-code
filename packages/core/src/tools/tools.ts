@@ -666,6 +666,9 @@ export interface ToolResult {
    */
   artifacts?: ToolArtifact[];
 
+  /** The tool returned a failure result. Its body is in llmContent. */
+  isError?: boolean;
+
   /**
    * If this property is present, the tool call is considered a failure.
    */
@@ -1202,6 +1205,8 @@ export interface ToolExecuteConfirmationDetails {
   hideAlwaysAllow?: boolean;
   command: string;
   rootCommand: string;
+  /** Plain-text approval details for clients that render tool call content. */
+  approvalText?: string;
   /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
   permissionRules?: string[];
   /**

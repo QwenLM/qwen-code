@@ -31,6 +31,16 @@ const steps = job.steps;
 const WIPE = 'Wipe stale workspace except the shared .git before checkout';
 const wipe = steps.find((s) => s.name === WIPE);
 
+describe('trigger paths', () => {
+  it('covers the canonical SDK capability registry', () => {
+    const parsed = parse(workflow);
+    const trigger = parsed.on ?? parsed[true];
+    expect(trigger.pull_request.paths).toContain(
+      'packages/sdk-typescript/src/daemon/capabilities.ts',
+    );
+  });
+});
+
 // Runs the real wipe script under the runner's shell flags: this job sets
 // `defaults.run.shell: bash`, which GitHub Actions executes with
 // `-eo pipefail`, so the exec tests must reproduce that instead of hiding
