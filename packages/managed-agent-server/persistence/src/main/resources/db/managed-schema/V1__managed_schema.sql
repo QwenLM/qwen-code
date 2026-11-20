@@ -624,14 +624,12 @@ CREATE TABLE ma_artifact (
 CREATE INDEX idx_ma_artifact_page ON ma_artifact (scope_key, creation_sequence, artifact_id);
 
 CREATE TABLE ma_memory_store (
-    store_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and MemoryStore identity.',
     owner_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and actor identity enforcing one personal Store.',
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
     memory_store_id VARBINARY(512) NOT NULL COMMENT 'Opaque personal MemoryStore identity.',
     owner_actor_key VARBINARY(2732) NOT NULL COMMENT 'Authenticated owner actor identity.',
     namespace VARCHAR(128) NOT NULL COMMENT 'Opaque provider user_id selected only by the server.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Creation time in Unix epoch milliseconds.',
-    CONSTRAINT uk_ma_memory_store_key UNIQUE (store_key),
     CONSTRAINT uk_ma_memory_store_identity UNIQUE (tenant_id, memory_store_id),
     CONSTRAINT uk_ma_memory_store_owner UNIQUE (owner_key),
     CONSTRAINT uk_ma_memory_store_namespace UNIQUE (namespace),

@@ -44,7 +44,7 @@ class ManagedSchemaTest {
             Map.entry("ma_output_capture", List.of("scope_key", "publication_id")),
             Map.entry("ma_artifact", List.of("artifact_id")),
             Map.entry("ma_request_receipt", List.of("receipt_key")),
-            Map.entry("ma_memory_store", List.of("store_key")),
+            Map.entry("ma_memory_store", List.of("tenant_id", "memory_store_id")),
             Map.entry("ma_memory_entry", List.of("entry_key")),
             Map.entry("ma_side_query", List.of("query_key")),
             Map.entry("ma_operation", List.of("operation_key")),
