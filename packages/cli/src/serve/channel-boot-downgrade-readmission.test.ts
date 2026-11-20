@@ -311,6 +311,9 @@ describe('issue #17479 B.2: boot channel downgrade vs late workspace registratio
       expect(skip).toContain(
         `workspaceCwd=${canonicalizeWorkspace(workspace)}`,
       );
+      // The skip restates the boot decline reason (the conflicting holder's
+      // PID) so it stays diagnosable after the boot warn rotates out.
+      expect(skip).toContain('PID 9999');
     });
   }
 

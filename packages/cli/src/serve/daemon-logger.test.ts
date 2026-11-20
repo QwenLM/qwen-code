@@ -252,7 +252,7 @@ describe('daemon log identity attribution', () => {
     );
   });
 
-  it('keeps caller ctx pid in the tee alongside the daemon identity', async () => {
+  it('renders one identity key per meaning and keeps the worker pid readable as childPid', async () => {
     const stderr: string[] = [];
     const logger = await createLogger({
       boundWorkspace: '/w',
@@ -261,10 +261,61 @@ describe('daemon log identity attribution', () => {
       stderr: (s) => stderr.push(s),
     });
     logger.setPort(4170);
-    logger.info('channel worker ready', { pid: 4242 });
-    expect(stderr.at(-1)).toContain(
-      '[DAEMON] pid=1 port=4170 pid=4242 channel worker ready',
+    // A stray caller `pid`/`port` must not produce a second, conflicting key;
+    // the worker pid travels as childPid and stays readable in both sinks.
+    logger.info('channel worker ready', {
+      pid: 4242,
+      port: 9999,
+      childPid: 4242,
+    });
+    const tee = stderr.at(-1) ?? '';
+    expect(tee).toContain(
+      '[DAEMON] pid=1 port=4170 childPid=4242 channel worker ready',
     );
+    expect(tee.match(/pid=/g)).toHaveLength(1);
+    expect(tee.match(/port=/g)).toHaveLength(1);
+    await logger.flush();
+    const file = readFileSync(logger.getLogPath(), 'utf8')
+      .split('\n')
+      .find((line) => line.endsWith('channel worker ready'));
+    expect(file).toContain(
+      'pid=1 port=4170 childPid=4242 channel worker ready',
+    );
+    expect(file?.match(/pid=/g)).toHaveLength(1);
+    expect(file?.match(/port=/g)).toHaveLength(1);
+  });
+
+  it('carries the daemon identity on the bare write-failure diagnostic', async () => {
+    const stderr: string[] = [];
+    let failAppends = false;
+    const logger = await createLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: (s) => stderr.push(s),
+      fs: {
+        ...fsPromises,
+        appendFile: async (...args) => {
+          if (failAppends) {
+            throw Object.assign(new Error('disk gone'), { code: 'EIO' });
+          }
+          return fsPromises.appendFile(...args);
+        },
+      },
+    });
+    // Let the boot record land, bind the port, then fail a runtime write so the
+    // diagnostic carries the late-bound port too.
+    logger.setPort(4170);
+    failAppends = true;
+    logger.info('trigger a write');
+    await logger.flush();
+    // The write-failure line bypasses the tee; it must still be attributable
+    // to this daemon in a shared sink (the line an operator greps for).
+    const failure = stderr.find((line) =>
+      line.includes('daemon log write failed'),
+    );
+    expect(failure).toBeDefined();
+    expect(failure).toContain('pid=1 port=4170');
   });
 });
 
@@ -764,7 +815,11 @@ describe('initDaemonLogger bounded storage', () => {
       'runId=22222222222222222222222222222222 pid=22 second run',
     );
     expect(content).not.toContain('spoofed');
-    expect(stderr.join('\n')).toContain('pid=999 runId=spoofed first run');
+    // Both sinks reserve the identity keys for the daemon prefix: a caller
+    // cannot spoof runId/pid into either the file record or the tee.
+    expect(stderr.join('\n')).toContain('[DAEMON] pid=11 first run');
+    expect(stderr.join('\n')).not.toContain('spoofed');
+    expect(stderr.join('\n')).not.toContain('pid=999');
   });
 
   it('truncates a file record on a UTF-8 boundary without truncating stderr', async () => {

@@ -4416,6 +4416,10 @@ async function runQwenServeImpl(
   // the very channels boot refused (#17479). Cleared only by a selection that
   // commits, like the operator stop above.
   let channelHostingDeclinedByConflict = false;
+  // The boot warn naming the conflicting holder rotates out on a long-running
+  // daemon; keep the sanitized reason so every later skip restates it instead
+  // of leaving the operator unable to tell a recorded decision from a bug.
+  let channelDeclineReason: string | undefined;
   const reportConfiguredChannelStartupFailure = (error: unknown): void => {
     const message = sanitizeLogText(
       redactLogCredentials(
@@ -5161,7 +5165,9 @@ async function runQwenServeImpl(
     if (channelHostingDeclinedByConflict) {
       throw Object.assign(
         new Error(
-          'Channel service hosting was declined at boot because another instance held the channel-service lease. Commit an explicit channel selection or restart the daemon to host channels here.',
+          `Channel service hosting was declined at boot because another instance held the channel-service lease.${
+            channelDeclineReason ? ` ${channelDeclineReason}` : ''
+          } Commit an explicit channel selection or restart the daemon to host channels here.`,
         ),
         { code: 'channel_service_conflict' },
       );
@@ -8736,7 +8742,7 @@ async function runQwenServeImpl(
           // registers again (#17479).
           daemonLog.info(
             'skipping serve.channels for a workspace registered after boot: channel hosting was declined at boot',
-            { workspaceCwd },
+            { workspaceCwd, reason: channelDeclineReason },
           );
           return;
         }
@@ -9890,6 +9896,12 @@ async function runQwenServeImpl(
         (error as { code?: unknown }).code === 'channel_service_conflict'
       ) {
         channelHostingDeclinedByConflict = true;
+        channelDeclineReason = sanitizeLogText(
+          redactLogCredentials(
+            error instanceof Error ? error.message : String(error),
+          ),
+          512,
+        );
       }
       removeCurrentServePidfile();
       opts.channelSelection = undefined;
@@ -10601,7 +10613,7 @@ async function runQwenServeImpl(
                 if (workspaceInputs.length > 1) {
                   daemonLog.info('channel worker ready', {
                     workspace: snapshot.workspaceCwd,
-                    pid: snapshot.pid,
+                    childPid: snapshot.pid,
                     channels: snapshot.channels,
                   });
                 }

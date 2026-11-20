@@ -173,6 +173,38 @@ interface BuildDaemonLogRecordArgs extends BuildDaemonLogLineArgs {
   traceContext?: DaemonTraceContext;
 }
 
+// The daemon's own log identity, shared by reference so the late-bound port
+// (set once listening) reaches every stderr line — including the bare
+// diagnostics that bypass the tee — without each sink keeping its own copy.
+interface DaemonLogIdentity {
+  pid: number;
+  port?: number;
+}
+
+function renderIdentityPrefix(identity: DaemonLogIdentity): string {
+  return identity.port === undefined
+    ? `pid=${identity.pid} `
+    : `pid=${identity.pid} port=${identity.port} `;
+}
+
+// Identity keys belong to the daemon prefix, never to caller context: a
+// worker pid travels as `childPid`, so a stray `pid`/`port`/`runId` in ctx
+// must not produce a second, conflicting key in either sink.
+const IDENTITY_CTX_KEYS: ReadonlySet<string> = new Set([
+  'runId',
+  'pid',
+  'port',
+]);
+
+function stripIdentityCtx(
+  ctx: DaemonLogContext | undefined,
+): DaemonLogContext | undefined {
+  if (!ctx) return undefined;
+  return Object.fromEntries(
+    Object.entries(ctx).filter(([key]) => !IDENTITY_CTX_KEYS.has(key)),
+  );
+}
+
 function formatDaemonLogLine(args: BuildDaemonLogRecordArgs): string {
   const ts = args.now.toISOString();
   const identityStr =
@@ -180,7 +212,7 @@ function formatDaemonLogLine(args: BuildDaemonLogRecordArgs): string {
       ? ''
       : `pid=${args.pid}${args.port === undefined ? '' : ` port=${args.port}`} `;
   const traceStr = renderTraceContext(args.traceContext);
-  const ctxStr = renderCtx(args.ctx);
+  const ctxStr = renderCtx(stripIdentityCtx(args.ctx));
   return `${ts} [${args.level}] [DAEMON] ${identityStr}${traceStr}${ctxStr}${args.message}\n${renderErr(args.err)}`;
 }
 
@@ -194,13 +226,7 @@ function buildDaemonFileLogLine(
   pid: number,
   port?: number,
 ): string {
-  const callerCtx = args.ctx
-    ? Object.fromEntries(
-        Object.entries(args.ctx).filter(
-          ([key]) => key !== 'runId' && key !== 'pid',
-        ),
-      )
-    : undefined;
+  const callerCtx = stripIdentityCtx(args.ctx);
   const traceStr = renderTraceContext(args.traceContext);
   const ctxStr = renderCtx(callerCtx);
   const portStr = port === undefined ? '' : ` port=${port}`;
@@ -396,13 +422,12 @@ function statusSnapshot(
 
 function createStderrOnlyLogger(input: {
   runId: string;
-  pid: number;
+  identity: DaemonLogIdentity;
   daemonId: string;
   now: () => Date;
   stderr: (line: string) => void;
   issues: ReadonlySet<DaemonLogIssue>;
 }): DaemonLogger {
-  let port: number | undefined;
   const tee = (
     level: DaemonLogLevel,
     message: string,
@@ -418,8 +443,8 @@ function createStderrOnlyLogger(input: {
         ctx,
         err,
         traceContext,
-        pid: input.pid,
-        port,
+        pid: input.identity.pid,
+        port: input.identity.port,
       }).trimEnd(),
     );
   };
@@ -429,7 +454,7 @@ function createStderrOnlyLogger(input: {
     error: (message, err, ctx) => tee('ERROR', message, ctx, err ?? undefined),
     raw: () => {},
     setPort: (value) => {
-      port = value;
+      input.identity.port = value;
     },
     getLogPath: () => '',
     getDaemonId: () => input.daemonId,
@@ -1041,7 +1066,7 @@ function createConcreteLogger(input: {
   family: DaemonLogFamily;
   state: FileSinkState;
   runId: string;
-  pid: number;
+  identity: DaemonLogIdentity;
   daemonId: string;
   now: () => Date;
   monotonicNow: () => number;
@@ -1059,7 +1084,6 @@ function createConcreteLogger(input: {
   let dropSummaryPending = false;
   let acceptingFileRecords = true;
   let closePromise: Promise<void> | undefined;
-  let port: number | undefined;
 
   const markDropped = (bytes: number, queueOverflow = false) => {
     droppedRecords += 1;
@@ -1069,7 +1093,7 @@ function createConcreteLogger(input: {
       if (!overflowEpisode) {
         overflowEpisode = true;
         input.stderr(
-          'qwen serve: daemon log queue limit reached; dropping file copies until capacity recovers',
+          `${renderIdentityPrefix(input.identity)}qwen serve: daemon log queue limit reached; dropping file copies until capacity recovers`,
         );
       }
     }
@@ -1267,8 +1291,8 @@ function createConcreteLogger(input: {
           ctx: { droppedRecords: records, droppedBytes: bytes },
         },
         input.runId,
-        input.pid,
-        port,
+        input.identity.pid,
+        input.identity.port,
       ),
       input.policy.maxRecordBytes,
     );
@@ -1358,8 +1382,8 @@ function createConcreteLogger(input: {
         ctx,
         err,
         traceContext,
-        pid: input.pid,
-        port,
+        pid: input.identity.pid,
+        port: input.identity.port,
       }).trimEnd(),
     );
     submitFileRecord(
@@ -1367,8 +1391,8 @@ function createConcreteLogger(input: {
         buildDaemonFileLogLine(
           { level, message, now: timestamp, ctx, err, traceContext },
           input.runId,
-          input.pid,
-          port,
+          input.identity.pid,
+          input.identity.port,
         ),
         input.policy.maxRecordBytes,
       ),
@@ -1415,15 +1439,15 @@ function createConcreteLogger(input: {
               now: input.now(),
             },
             input.runId,
-            input.pid,
-            port,
+            input.identity.pid,
+            input.identity.port,
           ),
           input.policy.maxRecordBytes,
         ),
       );
     },
     setPort: (value) => {
-      port = value;
+      input.identity.port = value;
     },
     getLogPath: () => input.family.activePath,
     getDaemonId: () => input.daemonId,
@@ -1480,6 +1504,7 @@ export async function initDaemonLogger(
   opts: InitDaemonLoggerOptions,
 ): Promise<DaemonLogger> {
   const pid = opts.pid ?? process.pid;
+  const identity: DaemonLogIdentity = { pid };
   const now = opts.now ?? (() => new Date());
   const monotonicNow = opts.monotonicNow ?? (() => performance.now());
   const stderr = opts.stderr ?? writeStderrLine;
@@ -1494,7 +1519,9 @@ export async function initDaemonLogger(
     if (warned.has(key)) return;
     warned.add(key);
     try {
-      stderr(message);
+      // Bare diagnostics bypass the tee, so they carry the identity here —
+      // the write-failure line is the one an operator greps in a shared sink.
+      stderr(`${renderIdentityPrefix(identity)}${message}`);
     } catch {
       // Internal diagnostics must not bypass lease cleanup paths.
     }
@@ -1503,7 +1530,7 @@ export async function initDaemonLogger(
   if (isOptedOut()) {
     return createStderrOnlyLogger({
       runId,
-      pid,
+      identity,
       daemonId: computeDaemonId(pid),
       now,
       stderr,
@@ -1524,7 +1551,7 @@ export async function initDaemonLogger(
     );
     return createStderrOnlyLogger({
       runId,
-      pid,
+      identity,
       daemonId: computeDaemonId(pid),
       now,
       stderr,
@@ -1599,7 +1626,7 @@ export async function initDaemonLogger(
         family,
         state,
         runId,
-        pid,
+        identity,
         daemonId: computeDaemonId(pid),
         now,
         monotonicNow,
@@ -1796,7 +1823,7 @@ export async function initDaemonLogger(
       });
       return createStderrOnlyLogger({
         runId,
-        pid,
+        identity,
         daemonId: computeDaemonId(pid),
         now,
         stderr,
@@ -1848,7 +1875,7 @@ export async function initDaemonLogger(
     );
     return createStderrOnlyLogger({
       runId,
-      pid,
+      identity,
       daemonId: computeDaemonId(pid),
       now,
       stderr,
