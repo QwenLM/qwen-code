@@ -325,6 +325,49 @@ describe('POST /sessions/recovery/continue', () => {
     expect(onSessionRestored).not.toHaveBeenCalled();
   });
 
+  it('does not notify the PR-watch drain before continuation admission', async () => {
+    const onSessionRestored = vi.fn();
+    const fixture = makeFixture(true, true, onSessionRestored);
+    fixture.seed([inFlight('p1', Date.now())]);
+    let releaseAdmission!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    vi.mocked(fixture.bridge.continueSession).mockImplementationOnce(
+      async () => {
+        await admission;
+        return {
+          accepted: true,
+          interruption: 'interrupted_prompt',
+          promptId: 'prompt-1',
+        };
+      },
+    );
+
+    const pending = request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture))
+      .then((response) => response);
+    await vi.waitFor(() =>
+      expect(fixture.bridge.continueSession).toHaveBeenCalledOnce(),
+    );
+    // A watch notification can admit its own prompt once the restore is live.
+    // It must not race the user's continuation, which has not been admitted yet.
+    expect(onSessionRestored).not.toHaveBeenCalled();
+    releaseAdmission();
+    const response = await pending;
+
+    expect(response.body.results[0].status).toBe('accepted');
+    expect(onSessionRestored).toHaveBeenCalledOnce();
+    const continuedOrder = vi.mocked(fixture.bridge.continueSession).mock
+      .invocationCallOrder[0]!;
+    const notifiedOrder = onSessionRestored.mock.invocationCallOrder[0]!;
+    const detachedOrder = vi.mocked(fixture.bridge.detachClient).mock
+      .invocationCallOrder[0]!;
+    expect(notifiedOrder).toBeGreaterThan(continuedOrder);
+    expect(detachedOrder).toBeGreaterThan(notifiedOrder);
+  });
+
   it('does not restore or schedule a new drain for an already live session', async () => {
     const onSessionRestored = vi.fn();
     const fixture = makeFixture(true, true, onSessionRestored);
@@ -448,7 +491,8 @@ describe('POST /sessions/recovery/continue', () => {
   });
 
   it('requires confirmation before continuing a tool turn', async () => {
-    const fixture = makeFixture();
+    const onSessionRestored = vi.fn();
+    const fixture = makeFixture(true, true, onSessionRestored);
     fixture.seed([inFlight('p1', Date.now())]);
     vi.mocked(fixture.bridge.getSessionContextStatus).mockResolvedValue({
       sessionId: fixture.sessionId,
@@ -466,6 +510,7 @@ describe('POST /sessions/recovery/continue', () => {
       kind: 'interrupted_turn',
       code: 'tool_turn',
     });
+    expect(onSessionRestored).not.toHaveBeenCalled();
     expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
     expect(fixture.bridge.detachClient).toHaveBeenCalledWith(
       'restored',
@@ -1218,7 +1263,8 @@ describe('POST /sessions/recovery/continue', () => {
   });
 
   it('reports a continuation the bridge refuses to admit', async () => {
-    const fixture = makeFixture();
+    const onSessionRestored = vi.fn();
+    const fixture = makeFixture(true, true, onSessionRestored);
     fixture.seed([inFlight('p1', Date.now())]);
     vi.mocked(fixture.bridge.continueSession).mockResolvedValueOnce({
       accepted: false,
@@ -1234,6 +1280,7 @@ describe('POST /sessions/recovery/continue', () => {
       kind: 'interrupted_prompt',
       interruption: 'none',
     });
+    expect(onSessionRestored).not.toHaveBeenCalled();
   });
 
   it.each([

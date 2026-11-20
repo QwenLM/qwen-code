@@ -11895,20 +11895,6 @@ export function registerSessionRoutes(
                 code: 'hidden_session',
               };
             }
-            if (restoredSessionId !== undefined) {
-              try {
-                deps.onSessionRestored?.({
-                  runtime,
-                  workspaceCwd: runtime.workspaceCwd,
-                  sessionId: restoredSessionId,
-                });
-              } catch (err) {
-                daemonLog?.warn(
-                  `session restored hook failed for ${restoredSessionId}: ${String(err)}`,
-                );
-              }
-            }
-
             const context = await runtime.bridge.getSessionContextStatus(
               requested.sessionId,
             );
@@ -11981,6 +11967,21 @@ export function registerSessionRoutes(
                 kind: recovery.kind,
                 interruption: result.interruption,
               };
+            }
+            if (restoredSessionId !== undefined) {
+              try {
+                // A waking drain can admit its own prompt, so the requested
+                // continuation must already be admitted before we notify it.
+                deps.onSessionRestored?.({
+                  runtime,
+                  workspaceCwd: runtime.workspaceCwd,
+                  sessionId: restoredSessionId,
+                });
+              } catch (err) {
+                daemonLog?.warn(
+                  `session restored hook failed for ${restoredSessionId}: ${String(err)}`,
+                );
+              }
             }
             return {
               ...base,
