@@ -16,6 +16,13 @@
 
 执行尝试日志（2026-11-20，经授权硬推）：曾以定向脚本尝试 trio（278 列 DDL raw→VARCHAR + helper/`actorKey` 绑定→String）。编译暴露约 40 处 ripple，横跨 contracts records/接口（`StoreModels`、`ManagedToolResultStore`）、persistence stores 与 control-plane；泛化 `getBytes(`→`getString(` regex 还误伤了摘要计算（`String.getBytes(UTF_8)`），证明绑定迁移必须逐点编译器引导、绝不能泛化 regex。该尝试已回退到增量 1 绿基线；未推送红代码。故剩余批次=对 ripple 的一次编译器引导人工 pass，加上下述删哈希/重建/游标/生成列/CHECK/meta-test 工作。
 
+### 安全绑定迁移配方（编译器引导，禁泛化 regex）
+
+- `byte[]`→`String` 变量名白名单：`actorKey`、`ownerActorKey`、`owner`、`creator`、`actor`。**绝不改 bare `key`**（crypto 签名/bracket key 是 byte[]，如 `RuntimeBrokerBracketKeyBindingTest` 的 `Arrays.fill`）；绝不改用于摘要/签名的 `getBytes`。第二次会话内尝试证实：白名单 pass 后主代码可编译，但 verification 测试源（约 56 文件）仍需迁移，且 bare-`key` 替换会坏 crypto key。
+- 中心 helper：`JdbcRepositorySupport.setIdentity`→`setString`；`ManagedSchemaRows.identity`→`getString`；`ManagedWorkspaceRegistry.actorKey`→返回 String；`ManagedReceipts.actorScope(String)`→`Base64(actor.getBytes(UTF_8))`；`UNATTRIBUTED`→`""`；`ManagedRuntimeRetentionGuard.identity`→`return value`。
+- 语义修复由编译错误驱动：身份行读取 `getBytes`→`getString`；`return x.getBytes(UTF_8)`→`return x`；`actor.length==0`→`isEmpty()`；byte[]/String 条件表达式；`Arrays.equals`→`Objects.equals`；`List<byte[]>`→`List<String>`；`queryForObject byte[].class`→`String.class`；测试 `containsExactly`/`fill` 身份值→String。
+- 循环：白名单类型脚本（主+verification 测试）→`test-compile`→人工修所列语义点→重复至编译绿→广谱 H2→双 Checkstyle→提交。
+
 ## 执行顺序
 
 1. **DDL（V1 原地）。** 文本身份 `VARBINARY` 转 `VARCHAR` 预算，逐列 NO PAD collation 以 MySQL 可执行注释 `/*!80000 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin */` 表达（H2 忽略；plain 子句在 `NOT NULL DEFAULT`/生成列处会语法报错）；二进制载荷（`record_bytes`、`object_key`、`capture_object_key`）保持 `VARBINARY`。删 60 个 "Hashed" 列及同族派生身份键（`physical_key`、`storage_key`、`holder_key`、`*_resource_key`、`import_key`、`runtime_binding_key`、`execution_storage_key`、`source_record_key`、`delivery_key`、`result_operation_key`、`deletion_operation_key`）。保留 32 个内容摘要列与 git-sha `VARCHAR(64)` 列。在原始列上重建所有用到被删键的唯一键/索引；删 `ma_session.uk_ma_session_scope`（与 PK 冗余）。在原始 scope 列上重定义两个生成列（`ma_request_receipt.decision_scope_key`、`ma_side_query.active_slot`）；在原始列上重写三个 CHECK（`ck_ma_resource_capture`、`ck_ma_ref_binding`、`ck_ma_storage_registered`）。

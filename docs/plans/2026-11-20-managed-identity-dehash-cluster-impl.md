@@ -41,6 +41,25 @@ compiler-guided, never by broad regex. The attempt was reverted to the green inc
 no red code was pushed. The remaining batch is therefore a single compiler-guided manual pass over
 the ripple plus the hash-drop/rebuild/cursor/generated/CHECK/meta-test work below.
 
+### Safe bind-migration recipe (compiler-guided, no broad regex)
+
+- Variable-name whitelist for `byte[]`→`String`: `actorKey`, `ownerActorKey`, `owner`, `creator`,
+  `actor`. **Never bare `key`** (crypto signing/bracket keys are `byte[]`, e.g.
+  `RuntimeBrokerBracketKeyBindingTest` `Arrays.fill`); never rewrite `getBytes` used for
+  digests/signatures. A second in-session attempt confirmed main code compiles after the whitelist
+  pass but verification test sources (~56 files) still need migration, and bare-`key` replacement
+  corrupts crypto keys.
+- Central helpers: `JdbcRepositorySupport.setIdentity`→`setString`;
+  `ManagedSchemaRows.identity`→`getString`; `ManagedWorkspaceRegistry.actorKey`→return String;
+  `ManagedReceipts.actorScope(String)`→`Base64(actor.getBytes(UTF_8))`; `UNATTRIBUTED`→`""`;
+  `ManagedRuntimeRetentionGuard.identity`→`return value`.
+- Semantic fixes driven by compile errors: identity row reads `getBytes`→`getString`;
+  `return x.getBytes(UTF_8)`→`return x`; `actor.length==0`→`isEmpty()`; byte[]/String conditionals;
+  `Arrays.equals`→`Objects.equals`; `List<byte[]>`→`List<String>`; `queryForObject byte[].class`→
+  `String.class`; test `containsExactly`/`fill` on identity values→String.
+- Loop: whitelist type script (main + verification tests) → `test-compile` → manually fix the listed
+  semantic sites → repeat until compile green → broad H2 → double Checkstyle → commit.
+
 ## Execution order
 
 1. **DDL (V1 in place).** Convert text-identity `VARBINARY` to `VARCHAR` budgets with per-column
