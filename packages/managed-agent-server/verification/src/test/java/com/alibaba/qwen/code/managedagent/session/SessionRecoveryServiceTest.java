@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.RecoveryStatus;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -208,6 +209,46 @@ class SessionRecoveryServiceTest {
         assertThat(recovery.nextTurnAllowed()).isFalse();
     }
 
+    @Test
+    void aNonTerminalSourceKeyEventIsNotNativeSettlement() {
+        turn("COMPLETED", null);
+        jdbc.update("INSERT INTO ma_public_event VALUES ('tenant', 'session', 'turn', 'SESSION', 0, 'boot:epoch:7')");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("operator_required");
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @Test
+    void anotherTurnsNativeTerminalDoesNotSettleTheLatestTurn() {
+        turn("COMPLETED", null);
+        jdbc.update("INSERT INTO ma_public_event VALUES ('tenant', 'session', 'other-turn', 'SESSION', 1, 'boot:epoch:7')");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("operator_required");
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"throw", "foreign"})
+    void anUnreadableOwnerStatusWithANativeTerminalIsNotReadiness(String mode) {
+        turn("COMPLETED", null);
+        terminalEvent("boot:epoch:7");
+        when(harness.cachedRecoveryAttachment("tenant", "session"))
+                .thenReturn(new HarnessConnector.Attachment("boot"));
+        if ("throw".equals(mode)) {
+            when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                    .thenThrow(new IllegalStateException("unavailable"));
+        } else {
+            when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                    .thenReturn(new RecoveryStatus("ready", null, "another-prompt", true, true, true));
+        }
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("operator_required");
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"turn", "runtime", "cleanup"})
     void aNativeTerminalThatStillOwesDurableWorkIsNotReady(String obligation) {
@@ -275,6 +316,21 @@ class SessionRecoveryServiceTest {
         var pool = new ManagedAgentException(503, "harness_pool_unavailable", "No owner");
         doThrow(pool).when(harness).recheckRecoveryCleanup("tenant", "session", "private-prompt");
         assertThatThrownBy(() -> service.recheck("tenant", "actor", "session", "turn")).isSameAs(pool);
+    }
+
+    @Test
+    void aTerminalCleanupDeclineIsNotARetriableUnavailable() {
+        turn("FAILED", "failure");
+        when(harness.recheckRecoveryCleanup("tenant", "session", "private-prompt"))
+                .thenThrow(new HostedHarnessRecoveryDeclinedException(
+                        HostedHarnessRecoveryDeclinedException.REASON_PUBLIC_CHILD_UNSUPPORTED));
+        assertThatThrownBy(() -> service.recheck("tenant", "actor", "session", "turn"))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("hosted_turn_recovery_declined");
+                    assertThat(error.getCause())
+                            .isInstanceOf(HostedHarnessRecoveryDeclinedException.class);
+                });
     }
 
     @Test

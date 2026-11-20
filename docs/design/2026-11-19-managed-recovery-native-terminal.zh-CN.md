@@ -2,7 +2,7 @@
 
 [English](2026-11-19-managed-recovery-native-terminal.md) | [简体中文](2026-11-19-managed-recovery-native-terminal.zh-CN.md)
 
-状态：提案。#17538 与 #17543 已在同一 PR 中实现；#17542 在此分析，留给后续处理。日期：2026-11-19。本文把[挂起恢复视图](2026-11-18-managed-suspension-recovery-view.zh-CN.md)从已 seal 的 head 推广到活跃 head。不改 schema、不新增 Harness 动词、不改 OpenAPI。
+状态：提案。#17538 与 #17543 已在同一 PR 中实现；#17542 在此分析，留给后续处理。日期：2026-11-19。本文把[挂起恢复视图](2026-11-18-managed-suspension-recovery-view.zh-CN.md)从已 seal 的 head 推广到活跃 head。不改 schema、不新增 Harness 动词；OpenAPI 仅改描述（§4 的 recheck 错误码）。
 
 ## 1. 问题
 
@@ -26,8 +26,9 @@ Harness 只从 journal 投影公开终态事件。`turn_complete` 与 `turn_erro
 
 ## 3. 视图契约变更（#17538）
 
-`inspect()` 保留所有现有分支及其顺序。在读取活证据之后新增一个分支，**仅在本副本没有活证据时**（`evidence == null`）生效：
+`inspect()` 保留所有现有分支及其顺序。在读取活证据之后新增一个分支，**仅在本副本没有活证据**（`evidence == null`）**且不持有缓存的 recovery attachment 时**生效：
 
+- 本副本不持有缓存的 recovery attachment（`cachedRecoveryAttachment == null`，纯进程内缓存读取）。owner 副本上抛异常或回应别的 prompt 的状态读取是"读不到证据"，不是"没有证据"，仍走保守分支；
 - 最新 Turn 不处于活跃状态；
 - head 为 `ACTIVE`，即活的 journal；已 seal 的 head 保留挂起证明及其已记录的残余；
 - 该 Turn 拥有持久原生终态（§2）；
@@ -44,7 +45,8 @@ Harness 只从 journal 投影公开终态事件。`turn_complete` 与 `turn_erro
 ## 4. Recheck 变更（#17543）
 
 - `recheck` 通过同一视图确定目标。拥有持久原生终态且没有未完成义务的 Turn 因此是 `ready`，`recheck` 在联系任何 Harness 之前就直接返回它。这回应了 issue 的主要期望：持久状态证明 Turn 已终态时，recheck 从持久状态结清。
-- 没有任何 Hosted Harness 能服务的冷清理 recheck，现在以 `503 recovery_runtime_unavailable` 失败。这覆盖 `recheckRecoveryCleanup` 所有非 `ManagedAgentException` 的失败，这类失败过去以无错误码的错误出现。有错误码的拒绝原样透传，包括 pool 的 `503 harness_pool_unavailable`。`409 recovery_recheck_unavailable` 保持契约含义：recheck 已运行，但工作不符合条件。
+- 没有任何 Hosted Harness 能服务的冷清理 recheck，现在以 `503 recovery_runtime_unavailable` 失败。这覆盖 `recheckRecoveryCleanup` 除下述类型化终止拒绝之外所有非 `ManagedAgentException` 的失败，这类失败过去以无错误码的错误出现。有错误码的拒绝原样透传，包括 pool 的 `503 harness_pool_unavailable`。`409 recovery_recheck_unavailable` 保持契约含义：recheck 已运行，但工作不符合条件。
+- 类型化的终止拒绝（`HostedHarnessRecoveryDeclinedException`）映射为 `409 hosted_turn_recovery_declined`，并保留原拒绝作为 cause。拒绝是终局的——重试永远改变不了它——因此不能披上上面那个可重试的 `503`。public 与 WebShell 两处 recheck 描述都写明这两个错误码；这就是那次仅改描述的 OpenAPI 变更，版本 1.123.0。
 - 清理债务的 recheck 仍依赖 Harness，issue 允许这一点。
 
 ## 5. #17542 的分析与后续
@@ -63,8 +65,8 @@ Broker 已有 `LOST` generation 与有界的 drain 轮次（`RuntimeBindingProvi
 ## 6. 实现形态
 
 - `SessionRecoveryRepository.hasNativeTerminal(tenantId, sessionId, turnId)`，在 `JdbcSessionRecoveryRepository` 中实现为一条针对 `ma_public_event` 的 `EXISTS`。
-- `SessionRecoveryService.inspect()`：§3 的兜底分支。
-- `SessionRecoveryService.recheck()`：两处清理调用都经过 `recheckCleanup`，后者实施 §4 的 `503` 映射并记录原始失败，因为 API 映射 `ManagedAgentException` 时不会记录其 cause。
+- `SessionRecoveryService.inspect()`：§3 的兜底分支，以缓存 attachment 读取为闸门。
+- `SessionRecoveryService.recheck()`：两处清理调用都经过 `recheckCleanup`，后者实施 §4 的 `503` 映射、把类型化终止拒绝映射为 `409 hosted_turn_recovery_declined`，并记录原始失败，因为 API 映射 `ManagedAgentException` 时不会记录其 cause。
 - 开销：在没有活证据的副本上，最新 Turn 不活跃且处于活跃 head 的 Session 读取，现在会额外执行那条带索引的 `EXISTS`；它成立时，还会执行现有的 `hasUnsettledWork` 语句。
 
 ## 7. 验证
@@ -77,16 +79,20 @@ Broker 已有 `LOST` generation 与有界的 drain 轮次（`RuntimeBindingProvi
 - owner 的活证据（`cleanup_pending`）仍优先于原生终态；
 - 缺少 wake 证明的已 seal head，即使有原生终态也保持非 ready；
 - 对原生终态 recheck 时返回 `ready`，且不调用 `recheckRecoveryCleanup`；
-- Harness 不可达时返回 `503 recovery_runtime_unavailable`，有错误码的 pool 拒绝原样透传。
+- Harness 不可达时返回 `503 recovery_runtime_unavailable`，有错误码的 pool 拒绝原样透传；
+- 带 source key 但非终态的行（`is_terminal = 0`），以及属于别的 Turn 的原生终态，都不能结清最新 Turn；
+- owner 副本的状态读取抛异常或回应别的 prompt 时，即使存在原生终态也保持非 ready：缓存 attachment 否决该分支；
+- 清理 recheck 遇到类型化终止拒绝时返回 `409 hosted_turn_recovery_declined`，而不是可重试的 `503`。
 
-尚欠：在真实 MySQL 上确认 `ma_public_event` 查询走 `idx_ma_event_turn` 的执行计划，以及在双副本环境中证明读取稳定。
+尚欠：在真实 MySQL 上确认 `ma_public_event` 查询走 `idx_ma_event_turn` 的执行计划，以及在双副本环境中证明读取稳定。`EXISTS` 按 `sequence_id` 升序扫过该 Turn 的行，而终态位于结清批次末尾；已达成一致的最小改写是 `ORDER BY sequence_id DESC LIMIT 1`（同一索引反向扫描；负例仍走全量），由该计划检查决定采纳或量化后再定。
 
 ## 8. 验收标准
 
 - 在活跃 head 上，Harness 已结清的 Turn 在没有未完成持久义务时，从每个副本读取都报告 `ready` / `nextTurnAllowed = true`。摘要与恢复接口一致。
 - SQL 写入的终态从不被当作原生结清。
 - owner 副本的活证据以及所有 sealed-head 分支保持不变。
-- 对持久已结清 Turn 的 recheck 不加载 Session 即返回 `ready`；Harness 不可达时返回带错误码的 `503`。
+- owner 副本的状态读取失败从不授予 readiness，即使存在原生终态。
+- 对持久已结清 Turn 的 recheck 不加载 Session 即返回 `ready`；Harness 不可达时返回带错误码的 `503`，类型化终止拒绝返回带错误码的 `409`。
 
 ## 9. 残余问题
 
@@ -94,4 +100,5 @@ Broker 已有 `LOST` generation 与有界的 drain 轮次（`RuntimeBindingProvi
 - 没有独立 `ma_turn` 行、只存在于 journal 中的待处理输入，对持久分支不可见。若 Harness 需要先处理它，下一次提交会走 Harness 的正常准入，与 owner 早一刻回答 `ready` 的情形完全相同。
 - 该分支不重放 journal，因此"更新的原生终态之后不会残留更早的待结清输入"这一判断依赖 §3 所述的 Harness 准入与加载保护，而非对 journal 的证明。若这一假设不成立，非 owner 副本会回答 `ready` 而 owner 回答 `inputs_unsettled`。该视图只控制能否发送，本身从不准入任何工作：下一次提交仍要经过 coordinator 与 Harness 自身的准入保护。
 - 有些非 ready 判定在 owner Harness 内部计算，持久分支一个都不读取：Turn 结束后的 file-history 工作（`cleanup_pending` / `file_history_pending`）、待处理的 file-history 撤销、未就绪的 continuation、扩展恢复，以及已停止的写入。这些状态成立期间，owner 会根据 live evidence 报告它们，而非 owner 副本会回答 `ready`。与上一条相同，该视图只控制能否发送：下一次提交仍要经过 coordinator 与 Harness 自身的准入。
+- 冷副本对持久已结清 Turn 的 recheck 直接返回 `ready`，不再尝试清理（§4）。改动前，同一个 POST 可以把 cleanup-only 加载路由到 placement owner，推进 owner-only 的清理债务；这个驱动能力被有意放弃，因为尝试它会打破本设计赖以成立的"不加载 Session"保证。清理仍有其他驱动者：owner 自身的恢复仍读取它的活证据（该分支在那里永不生效），而 `REFERENCED` 的 `HOSTED_CLEANUP` 债务是持久的，每个副本的 `hasUnsettledWork` 都能看到。作为上一条 owner-only 残余在 recheck 侧的对应物，接受这一取舍。
 - #17542 仍未解决（§5）。

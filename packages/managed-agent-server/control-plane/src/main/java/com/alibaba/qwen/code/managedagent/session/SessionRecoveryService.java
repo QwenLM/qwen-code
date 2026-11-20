@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.RecoveryStatus;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -103,6 +104,12 @@ public class SessionRecoveryService {
             return harness.recheckRecoveryCleanup(tenantId, sessionId, promptId);
         } catch (ManagedAgentException refusal) {
             throw refusal;
+        } catch (HostedHarnessRecoveryDeclinedException decline) {
+            // A typed decline is terminal: the retriable 503 below would
+            // invite clients to retry a refusal that never changes.
+            throw new ManagedAgentException(409, HostedHarnessRecoveryDeclinedException.CODE,
+                    "The Hosted Harness declined this recovery cleanup: " + decline.getReason(),
+                    decline);
         } catch (RuntimeException unavailable) {
             // The API maps a ManagedAgentException without logging its cause.
             LOG.warn("Managed recovery cleanup recheck unavailable tenant={} session={}",
@@ -177,9 +184,12 @@ public class SessionRecoveryService {
         // the Session, so a replica without that attachment reads nothing,
         // and that absence proves nothing. A live head whose latest Turn
         // carries the Harness's own journaled terminal and owes no durable
-        // work is ready from every replica.
+        // work is ready from every replica. The cached-attachment guard keeps
+        // a failed or foreign-prompt status read on the owning replica from
+        // masquerading as that absence: unreadable evidence is not no evidence.
         if (evidence == null && !active && turn != null && head != null
                 && "ACTIVE".equals(head.journalState())
+                && harness.cachedRecoveryAttachment(session.tenantId(), session.sessionId()) == null
                 && recovery.hasNativeTerminal(session.tenantId(), session.sessionId(), turn.turnId())
                 && !recovery.hasUnsettledWork(session.tenantId(), session.sessionId())) {
             return view("ready", "ready", turn, true, false, false);

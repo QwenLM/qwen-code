@@ -2,7 +2,7 @@
 
 [English](2026-11-19-managed-recovery-native-terminal.md) | [简体中文](2026-11-19-managed-recovery-native-terminal.zh-CN.md)
 
-Status: proposal, implemented for #17538 and #17543 in the same PR; #17542 is analysed here and deferred to a follow-up. Date: 2026-11-19. It extends the [suspension recovery view](2026-11-18-managed-suspension-recovery-view.md) from sealed heads to live heads. No schema change, no new Harness verb, no OpenAPI change.
+Status: proposal, implemented for #17538 and #17543 in the same PR; #17542 is analysed here and deferred to a follow-up. Date: 2026-11-19. It extends the [suspension recovery view](2026-11-18-managed-suspension-recovery-view.md) from sealed heads to live heads. No schema change, no new Harness verb; the OpenAPI change is description-only (the recheck error codes of §4).
 
 ## 1. Problem
 
@@ -26,8 +26,9 @@ This is the "durable native terminal" the recheck contract already requires befo
 
 ## 3. View contract change (#17538)
 
-`inspect()` keeps every existing arm and order. After it reads live evidence, one arm is added. It applies **only when this replica has no live evidence** (`evidence == null`):
+`inspect()` keeps every existing arm and order. After it reads live evidence, one arm is added. It applies **only when this replica has no live evidence** (`evidence == null`) **and holds no cached recovery attachment**:
 
+- the replica holds no cached recovery attachment (`cachedRecoveryAttachment == null`, a pure in-process cache read). A status read that throws or answers for a foreign prompt on the owning replica is unreadable evidence, not absence of evidence, and keeps the conservative arms;
 - the latest Turn is not active;
 - the head is `ACTIVE`, meaning a live journal; sealed heads keep the suspension proof and its documented residuals;
 - the Turn has a durable native terminal (§2);
@@ -44,7 +45,8 @@ Decisions:
 ## 4. Recheck change (#17543)
 
 - `recheck` resolves its target through the same view. A Turn with a durable native terminal and no owed work is therefore `ready`, and `recheck` returns it before contacting any Harness. This answers the issue's main expectation: recheck settles from durable state when durable state proves the Turn terminal.
-- A cold cleanup recheck that no Hosted Harness can serve now fails with `503 recovery_runtime_unavailable`. This covers every non-`ManagedAgentException` failure of `recheckRecoveryCleanup`, which used to surface as an uncoded error. Coded refusals pass through unchanged, including the pool's `503 harness_pool_unavailable`. `409 recovery_recheck_unavailable` keeps its contract meaning: the recheck ran, and the work is ineligible.
+- A cold cleanup recheck that no Hosted Harness can serve now fails with `503 recovery_runtime_unavailable`. This covers every non-`ManagedAgentException` failure of `recheckRecoveryCleanup` except the typed terminal decline below; such failures used to surface as an uncoded error. Coded refusals pass through unchanged, including the pool's `503 harness_pool_unavailable`. `409 recovery_recheck_unavailable` keeps its contract meaning: the recheck ran, and the work is ineligible.
+- A typed terminal decline (`HostedHarnessRecoveryDeclinedException`) maps to `409 hosted_turn_recovery_declined`, with the decline kept as the cause. A decline is permanent — retrying never changes it — so it must not wear the retriable `503` above. Both recheck descriptions (public and WebShell) name the two codes; this is the description-only OpenAPI change, version 1.123.0.
 - Cleanup-debt rechecks stay Harness-bound, as the issue allows.
 
 ## 5. #17542 analysis and follow-up
@@ -63,8 +65,8 @@ Either option must keep the duplicate-execution guard: never settle while the ol
 ## 6. Implementation shape
 
 - `SessionRecoveryRepository.hasNativeTerminal(tenantId, sessionId, turnId)`, implemented in `JdbcSessionRecoveryRepository` as one `EXISTS` over `ma_public_event`.
-- `SessionRecoveryService.inspect()`: the fallback arm of §3.
-- `SessionRecoveryService.recheck()`: both cleanup calls go through `recheckCleanup`, which applies the `503` mapping of §4 and logs the original failure, because the API maps a `ManagedAgentException` without logging its cause.
+- `SessionRecoveryService.inspect()`: the fallback arm of §3, guarded by the cached-attachment read.
+- `SessionRecoveryService.recheck()`: both cleanup calls go through `recheckCleanup`, which applies the `503` mapping of §4, maps a typed terminal decline to `409 hosted_turn_recovery_declined`, and logs the original failure, because the API maps a `ManagedAgentException` without logging its cause.
 - Cost: on a replica without live evidence, a Session read whose inactive latest Turn sits on a live head now also runs the indexed `EXISTS`. When that holds, the read also runs the existing `hasUnsettledWork` statement.
 
 ## 7. Validation
@@ -77,16 +79,20 @@ H2 unit cases in `SessionRecoveryServiceTest`:
 - live owner evidence (`cleanup_pending`) still wins over a native terminal;
 - a sealed head without its wake proof stays not-ready even with a native terminal;
 - recheck of a native terminal returns `ready` without calling `recheckRecoveryCleanup`;
-- an unreachable Harness yields `503 recovery_runtime_unavailable`, and a coded pool refusal passes through.
+- an unreachable Harness yields `503 recovery_runtime_unavailable`, and a coded pool refusal passes through;
+- a source-keyed row that is not terminal (`is_terminal = 0`), and a native terminal belonging to another Turn, do not settle the latest Turn;
+- an owning replica whose status read throws or answers for a foreign prompt stays not-ready even with a native terminal: the cached attachment vetoes the arm;
+- a typed terminal decline of the cleanup recheck returns `409 hosted_turn_recovery_declined`, not the retriable `503`.
 
-Still owed: a real-MySQL check of the `ma_public_event` query plan through `idx_ma_event_turn`, and a two-replica stack showing stable reads.
+Still owed: a real-MySQL check of the `ma_public_event` query plan through `idx_ma_event_turn`, and a two-replica stack showing stable reads. The `EXISTS` scans the Turn's rows in `sequence_id` ascending order while the terminal sits at the end of the settlement batch; the agreed minimal rewrite is `ORDER BY sequence_id DESC LIMIT 1` (same index, reverse scan; the negative case still scans fully), to be adopted or quantified by that plan check.
 
 ## 8. Acceptance
 
 - On a live head, a Turn the Harness settled reports `ready` / `nextTurnAllowed = true` from every replica when no durable work is owed. The summary and the recovery endpoint agree.
 - A SQL-authored terminal is never treated as native settlement.
 - The owner replica's live evidence and every sealed-head arm are unchanged.
-- Recheck of a durably settled Turn returns `ready` without loading the Session, and an unreachable Harness yields a coded `503`.
+- A status-read failure on the owning replica never grants readiness, even with a native terminal.
+- Recheck of a durably settled Turn returns `ready` without loading the Session, an unreachable Harness yields a coded `503`, and a typed terminal decline yields a coded `409`.
 
 ## 9. Residuals
 
@@ -94,4 +100,5 @@ Still owed: a real-MySQL check of the `ma_public_event` query plan through `idx_
 - A journal-only pending input without its own `ma_turn` row is invisible to the durable arm. If the Harness has to process it first, the next submit meets the Harness's normal admission, exactly as if the owner had answered `ready` a moment earlier.
 - The arm does not replay the journal, so the claim that no earlier input remains pending behind a newer native terminal rests on the Harness's admission and load guards in §3, not on a proof over the journal. If that assumption fails, a non-owner replica answers `ready` while the owner answers `inputs_unsettled`. The view only gates sending and never admits work itself: the next submit still goes through the coordinator and the Harness's own admission guards.
 - Some non-ready verdicts are computed inside the owning Harness, and the durable arm reads none of them: post-Turn file-history work (`cleanup_pending` / `file_history_pending`), a pending file-history undo, an unready continuation, extension recovery, and stopped writes. While one of them holds, the owner reports it from live evidence, but a non-owner replica answers `ready`. As above, the view only gates sending: the next submit still goes through the coordinator and the Harness's own admission.
+- A cold recheck of a durably settled Turn returns `ready` without attempting cleanup (§4). Before this change the same POST could route a cleanup-only load to the placement owner and advance owner-only cleanup debt; that drive is deliberately given up, because attempting it would break the no-load guarantee this design exists to provide. Cleanup keeps its other drivers: the owner's own recovery still reads its live evidence (the arm never fires there), and `REFERENCED` `HOSTED_CLEANUP` debt is durable, so every replica's `hasUnsettledWork` sees it. Accepted as the recheck-side counterpart of the owner-only residual above.
 - #17542 remains open (§5).
