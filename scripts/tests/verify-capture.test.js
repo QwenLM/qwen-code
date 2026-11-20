@@ -114,23 +114,68 @@ describe('verify-capture helper', () => {
       expect(isPng(out)).toBe(true);
     }));
 
-  it('resolves @xterm/headless and sharp from cwd when executed from an isolated directory (/trusted-scripts mount)', () =>
+  it('refuses cwd modules by default when executed from an isolated directory and resolves them only with --allow-cwd-modules', () =>
     withDir((dir) => {
       const isolatedDir = path.join(dir, 'trusted-scripts');
       mkdirSync(isolatedDir, { recursive: true });
       const isolatedScript = path.join(isolatedDir, 'verify-capture.mjs');
       copyFileSync(HELPER, isolatedScript);
-      const out = path.join(dir, 'isolated.png');
-      const res = spawnSync(
+
+      const plantedCwd = path.join(dir, 'pr-work');
+      for (const pkg of ['@xterm/headless', 'sharp']) {
+        const pkgDir = path.join(plantedCwd, 'node_modules', pkg);
+        mkdirSync(pkgDir, { recursive: true });
+        writeFileSync(
+          path.join(pkgDir, 'index.js'),
+          `process.stderr.write('FAKE-${pkg.toUpperCase()}-LOADED\\n');\nmodule.exports = {};\n`,
+        );
+      }
+
+      const denied = spawnSync(
         process.execPath,
-        [isolatedScript, '--out', out, '--cols', '40'],
+        [isolatedScript, '--out', path.join(dir, 'denied.png'), '--cols', '40'],
+        {
+          cwd: plantedCwd,
+          encoding: 'utf8',
+          input: `${ESC}[32mPASS${ESC}[0m isolated\n`,
+        },
+      );
+      expect(denied.status).toBe(1);
+      expect(denied.stderr).not.toContain('FAKE-@XTERM/HEADLESS-LOADED');
+      expect(denied.stderr).not.toContain('FAKE-SHARP-LOADED');
+      expect(denied.stderr).toContain("Cannot find module '@xterm/headless'");
+
+      const deniedRepoCwd = spawnSync(
+        process.execPath,
+        [
+          isolatedScript,
+          '--out',
+          path.join(dir, 'denied2.png'),
+          '--cols',
+          '40',
+        ],
         {
           cwd: repoRoot,
           encoding: 'utf8',
           input: `${ESC}[32mPASS${ESC}[0m isolated\n`,
         },
       );
-      expect(res.status).toBe(0);
+      expect(deniedRepoCwd.status).toBe(1);
+      expect(deniedRepoCwd.stderr).toContain(
+        "Cannot find module '@xterm/headless'",
+      );
+
+      const out = path.join(dir, 'isolated.png');
+      const allowed = spawnSync(
+        process.execPath,
+        [isolatedScript, '--allow-cwd-modules', '--out', out, '--cols', '40'],
+        {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          input: `${ESC}[32mPASS${ESC}[0m isolated\n`,
+        },
+      );
+      expect(allowed.status).toBe(0);
       expect(isPng(out)).toBe(true);
     }));
 

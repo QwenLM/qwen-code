@@ -170,35 +170,60 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
 ## 涉及文件
 
 - `scripts/verify-pr-watch-state.mjs` —— 移除 `parseArgs` 强制；HELP 真实回退；
-  `completeRound` 返回解析目录；非 inconclusive 的 null 目录完成给警告。
+  `completeRound` 返回解析目录；非 inconclusive 的 null 目录完成给警告；后续
+  #17371 闭合补入 `recordDelivery`（gate 预记入 `deferredHeads`）与
+  `restartRound`（`--restart`，单锁原子替换死轮次且拒绝不高于当前轮次的
+  `--round`）。
+- `scripts/verify-pr-watch-gate.mjs` —— 后续 #17371 闭合补入 `deliverGateOutput`
+  与 `resolveDeliveryRoot`（在 stdout 唤醒模型前先按脚本所在 git worktree 预记
+  `resync` `headSha`，绝不回退到 `cwd`，锁/损坏/repo 异常时 fail-open），以及
+  `resetWatchCursor`（`--release --reset-cursor`，先读出末次 `headSha` 并删除游
+  标、再释放 claim，兼顾所有权与 `autofix-pr` 保护）。
+- `scripts/verify-capture.mjs` —— 当脚本旁缺失 `@xterm/headless` 或 `sharp`
+  时提供显式 `--allow-cwd-modules` 回退开关（默认拒绝从 `cwd` 加载，防止隔离的
+  `/trusted-scripts` 副本误执行 PR 可写树中的依赖）。
 - `.qwen/skills/verify-pr/SKILL.md` —— watch prompt + 手动复验顺序；start 后
-  prepare 失败的恢复。
+  prepare 失败的恢复；`--restart`、停止/迁移 `--release --reset-cursor` 与宿主克
+  隆截屏指引。
 - `scripts/tests/qwen-triage-workflow.test.js` —— 命令/顺序钉。
-- `scripts/tests/verify-pr-watch-state.test.js` —— 提前注册见证。
-- `docs/design/verify-pr-register-ahead-of-prepare.md` + `.zh-CN.md` —— 本文档。
+- `scripts/tests/verify-pr-watch-state.test.js` —— 提前注册与 `recordDelivery` /
+  `--restart` 见证。
+- `scripts/tests/verify-pr-watch-gate.test.js` —— pre-delivery、默认根解析与
+  `--release --reset-cursor` 见证。
+- `scripts/tests/verify-capture.test.js` —— 隔离挂载下拒绝 `cwd` 模块及
+  `--allow-cwd-modules` 显式开关见证。
+- `docs/design/verify-pr-register-ahead-of-prepare.md` + `.zh-CN.md` —— 本文档
+  （并同步 `docs/design/verify-pr-watch.md` + `.zh-CN.md`）。
 
 ## 范围边界
 
-- 仅注册顺序与 `--start` 参数要求。watch-gate 所有权/游标、去重/defer/release
-  语义、信任边界检查（R17-1，已由 #17375 闭合）均不变。
-- below-Critical 延后项（D17-4…14、R5-2、第 7/8 轮 deferred）仍由 #17371 跟踪；
-  本改动不触碰。
+- 最初的 PR #17185 仅调整注册顺序与 `--start` 参数要求，保持 watch-gate 所有权/游
+  标、去重/defer 与 release 语义不变；本文档记录的后续闭合改动在此基础上扩展了
+  watch-gate 与 watch-state 助手，专门闭合 #17371 的三条 watch 活性残余（及
+  `verify-capture.mjs` 的显式 cwd 依赖开关）。
+- 信任边界检查（R17-1，已由 #17375 闭合）及剩余 below-Critical 延后项（D17-4…14、
+  R5-2、第 7/8 轮 deferred）不在本改动范围内。
 
 ## 待决问题
 
 - 无阻塞项。活性收益是可观测/可恢复性：投递后在 prepare 被杀的 head 现在留下
   在飞标记，操作者或下一次 head move 可恢复，而非消失。此前由 #17371 跟踪的
-  三条残余现已在代码层闭合：
-  1. `scripts/verify-pr-watch-gate.mjs`（`deliverGateOutput` → `scripts/verify-pr-watch-state.mjs`
-     中的 `recordDelivery`）会在打印 `resync` 事件唤醒模型之前，先把投递的
-     `headSha` 预记入 `deferredHeads`，从而闭合「投递→`--start`」之间的静默
-     丢弃窗口（`startRound` 会按保留的 `seq` 将该条目晋升为在飞）。
+  三条残余现已按如下边界闭合：
+  1. `scripts/verify-pr-watch-gate.mjs`（`deliverGateOutput` + `resolveDeliveryRoot`
+     → `scripts/verify-pr-watch-state.mjs` 中的 `recordDelivery`）在向 stdout 输
+     出 `resync` 事件唤醒模型之前，先把投递的 `headSha` 预记入 `deferredHeads`
+     （`startRound` 按保留的 `seq` 将该条目晋升为在飞）。该预登记刻意采用
+     **fail-open**：若状态锁被占用、`repo` 不匹配、状态文件损坏或孤立脚本不在
+     git worktree 内（绝不回退写进 `cwd`），闸门会在 stderr 记录警告并仍投递该事件，
+     避免因瞬时状态故障吞掉已经被游标消费的事件。
   2. `scripts/verify-pr-watch-gate.mjs --release --reset-cursor`（`resetWatchCursor`）
-     在确认当前 PR 由 `verify-pr` 声明所有权且不存在 `autofix-pr-<n>-state.json`
-     时，同时清理所有权声明与 `autofix-pr-<n>-gate.json` 探针游标，支持既有
-     `verify-pr` watch 的就地迁移，同时禁止误删其他消费者的游标。
+     在删除前读取并汇报探针游标的末次 `headSha`，先删除 `autofix-pr-<n>-gate.json`
+     再移除 `verify-pr` 所有权声明（保证 unlink 失败时 claim 留存以便重试），且仅在
+     `verify-pr` 声明存在且不存在 `autofix-pr-<n>-state.json` 时执行，支持干净停
+     止与既有 `verify-pr` watch 的就地迁移，同时禁止误删其他消费者的游标。
   3. `scripts/verify-pr-watch-state.mjs --restart --head <oid> [--from-round <r>] --round <r+1>`
-     （`restartRound`）在单次状态锁内原子替换死轮次的在飞标记，消除 `--release`
-     与 `--start` 之间失去记录的窗口（原有的 `--release` 后接 `--start` 仍保留
-     兼容；watch 仅在 head move 时唤醒，故*最后一个* head 上被杀的轮次仍需等待
-     新 move，或手动执行 `--restart` / `--release` + `--start`）。
+     （`restartRound`）在单次状态锁内原子替换死轮次的在飞标记并拒绝任何
+     `--round <= entry.round` 的回退（同时兼容升级 `round: null` 的旧版标记），
+     消除 `--release` 与 `--start` 之间失去记录的窗口（原有的 `--release` 后接
+     `--start` 仍保留兼容；watch 仅在 head move 时唤醒，故*最后一个* head 上被杀
+     的轮次仍需等待新 move，或手动执行 `--restart` / `--release` + `--start`）。

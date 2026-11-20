@@ -243,40 +243,71 @@ existing dead-round recovery (`--release` for a round that died after
 
 - `scripts/verify-pr-watch-state.mjs` — `parseArgs` requirement removed; HELP
   real fallback; `completeRound` returns the resolved dir; a non-inconclusive
-  null-dir completion warns.
+  null-dir completion warns; later #17371 closure adds `recordDelivery` (gate
+  pre-delivery into `deferredHeads`) and `restartRound` (`--restart`, atomic
+  dead-round replacement requiring a strictly higher `--round`).
+- `scripts/verify-pr-watch-gate.mjs` — later #17371 closure adds
+  `deliverGateOutput` + `resolveDeliveryRoot` (pre-records `resync` `headSha`
+  from the script's git worktree without cwd fallback before stdout emission,
+  failing open on state lock/corrupt/repo errors) and `resetWatchCursor`
+  (`--release --reset-cursor`, cursor-first unlink with `headSha` reporting and
+  ownership/`autofix-pr` guards).
+- `scripts/verify-capture.mjs` — opt-in `--allow-cwd-modules` fallback when
+  `@xterm/headless` or `sharp` is absent next to the script (refuses `cwd`
+  resolution by default so isolated `/trusted-scripts` copies never execute
+  PR-controlled `node_modules`).
 - `.qwen/skills/verify-pr/SKILL.md` — watch prompt + manual re-verification
-  ordering; prepare-failure-after-start recovery.
+  ordering; prepare-failure-after-start recovery; `--restart`, stop/migration
+  `--release --reset-cursor`, and host-clone capture guidance.
 - `scripts/tests/qwen-triage-workflow.test.js` — command/ordering pins.
-- `scripts/tests/verify-pr-watch-state.test.js` — registration-ahead witnesses.
-- `docs/design/verify-pr-register-ahead-of-prepare.md` + `.zh-CN.md` — this doc.
+- `scripts/tests/verify-pr-watch-state.test.js` — registration-ahead and
+  `recordDelivery` / `--restart` witnesses.
+- `scripts/tests/verify-pr-watch-gate.test.js` — pre-delivery, default root,
+  and `--release --reset-cursor` witnesses.
+- `scripts/tests/verify-capture.test.js` — isolated-mount cwd module
+  refusal and opt-in `--allow-cwd-modules` test.
+- `docs/design/verify-pr-register-ahead-of-prepare.md` + `.zh-CN.md` — this doc
+  (`docs/design/verify-pr-watch.md` + `.zh-CN.md` synced alongside).
 
 ## Scope boundaries
 
-- Only the registration ordering and the `--start` argument requirement. The
-  watch-gate ownership/cursor, the dedup/defer/release semantics, and the
-  trust-boundary checks (R17-1, closed by #17375) are unchanged.
-- The below-Critical deferred items (D17-4…14, R5-2, round-7/8 deferred) stay
-  tracked in #17371; not touched here.
+- The initial PR #17185 change covered registration ordering and `--start`
+  argument relaxation while leaving watch-gate ownership/cursor, dedup/defer,
+  and release semantics untouched. The follow-up closure recorded below extends
+  `verify-pr-watch-gate.mjs` and `verify-pr-watch-state.mjs` specifically to
+  address the three #17371 watch liveness residuals (and `verify-capture.mjs`'s
+  opt-in cwd dependency resolution).
+- Trust-boundary checks (R17-1, closed by #17375) and the remaining
+  below-Critical deferred items (D17-4…14, R5-2, round-7/8 deferred) stay
+  out of scope here.
 
 ## Open questions
 
 - None blocking. The liveness gain is observability/recoverability: a head
   delivered then killed in prepare now leaves an in-flight marker an operator
   or the next head move can recover, instead of vanishing. The three residuals
-  formerly tracked in #17371 are now closed in code:
-  1. `scripts/verify-pr-watch-gate.mjs` (`deliverGateOutput` → `recordDelivery`
-     in `scripts/verify-pr-watch-state.mjs`) pre-records every delivered
-     `resync` `headSha` into `deferredHeads` before printing the event to wake
-     the model, closing the delivery-to-`--start` silent-drop window (`startRound`
-     promotes that entry at its preserved `seq`).
+  formerly tracked in #17371 are now closed as follows:
+  1. `scripts/verify-pr-watch-gate.mjs` (`deliverGateOutput` + `resolveDeliveryRoot`
+     → `recordDelivery` in `scripts/verify-pr-watch-state.mjs`) pre-records a
+     delivered `resync` `headSha` into `deferredHeads` before writing stdout to
+     wake the model (`startRound` promotes that entry at its preserved `seq`).
+     By design, pre-recording is **fail-open** so a transient state failure
+     never suppresses an already-consumed cursor event: when the state lock is
+     held, on a `repo` mismatch, on a corrupt state file, or when an isolated
+     script copy has no git worktree root (it never falls back to `cwd`), the
+     gate logs a warning on stderr and still emits the event unrecorded.
   2. `scripts/verify-pr-watch-gate.mjs --release --reset-cursor`
-     (`resetWatchCursor`) removes both the `verify-pr` ownership claim and the
-     `autofix-pr-<n>-gate.json` probe cursor when `verify-pr` owns the claim
-     and `autofix-pr-<n>-state.json` is absent, enabling in-place migration of
+     (`resetWatchCursor`) reads and reports the probe cursor's last `headSha`,
+     unlinks `autofix-pr-<n>-gate.json` **before** removing the `verify-pr`
+     ownership claim (so a failed unlink preserves ownership for retry), and
+     refuses whenever `autofix-pr-<n>-state.json` exists or the cursor lacks a
+     `verify-pr` claim, enabling clean stop teardown and in-place migration of
      existing `verify-pr` watches without allowing cross-consumer cursor removal.
   3. `scripts/verify-pr-watch-state.mjs --restart --head <oid> [--from-round <r>] --round <r+1>`
      (`restartRound`) atomically replaces a dead round's in-flight marker under
-     one state lock, eliminating the unregistered window between `--release` and
-     `--start`. (`--release` followed by `--start` remains supported, and a watch
-     only wakes on head moves, so a killed round on the _last_ head still awaits
-     a new move or a manual `--restart` / `--release` + `--start`.)
+     one state lock and rejects any `--round <= entry.round` (while still
+     upgrading legacy `round: null` markers), eliminating the unregistered
+     window between `--release` and `--start`. (`--release` followed by
+     `--start` remains supported, and a watch only wakes on head moves, so a
+     killed round on the _last_ head still awaits a new move or a manual
+     `--restart` / `--release` + `--start`.)

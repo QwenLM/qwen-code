@@ -1035,9 +1035,10 @@ export function restartRound(
         path: statePath(stateRoot, pr),
       };
     }
-    if (entry.round != null && entry.round === round) {
+    if (entry.round != null && round <= entry.round) {
       return {
-        sameRound: true,
+        sameRound: round === entry.round,
+        staleRound: round < entry.round,
         recordedRound: entry.round,
         path: statePath(stateRoot, pr),
       };
@@ -1201,8 +1202,8 @@ function parseArgs(argv) {
   ) {
     throw new Error(`--from-round must be a positive integer\n\n${HELP}`);
   }
-  if (out.restart && out.fromRound !== null && out.fromRound === out.round) {
-    throw new Error(`--round must differ from --from-round\n\n${HELP}`);
+  if (out.restart && out.fromRound !== null && out.round <= out.fromRound) {
+    throw new Error(`--round must be greater than --from-round\n\n${HELP}`);
   }
   // --artifact-dir is optional on --start: registration runs ahead of prepare
   // (R17-2), before the directory exists. The directory is recorded at
@@ -1406,9 +1407,9 @@ function main(argv) {
         );
         return 3;
       }
-      if (result.sameRound) {
+      if (result.sameRound || result.staleRound) {
         process.stderr.write(
-          `verify-pr watch-state: PR ${args.pr} head ${args.head} is already in flight as round ${result.recordedRound}; pass a new --round\n`,
+          `verify-pr watch-state: PR ${args.pr} head ${args.head} is already in flight as round ${result.recordedRound}; pass a --round greater than ${result.recordedRound}\n`,
         );
         return 3;
       }

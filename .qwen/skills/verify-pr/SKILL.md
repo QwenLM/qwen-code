@@ -745,10 +745,18 @@ Build the task in this order and stop at the first failure:
    make room; the claim guard forbids it. To migrate this PR's own `verify-pr`
    watch in place after `cron_delete`, run
    `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor`
-   (which requires the `verify-pr` ownership claim and refuses when
-   `autofix-pr` state exists) and re-run steps 3–4. When a `resync` event
-   fires, the gate pre-records its `headSha` in `deferredHeads` before waking
-   the model, closing the delivery-to-`--start` window.
+   (which unlinks the cursor before releasing the `verify-pr` ownership claim,
+   prints the cursor's last `headSha`, and refuses when `autofix-pr` state
+   exists) and re-run steps 3–4 — if the PR head moved during migration,
+   register the live head with `--start` because a fresh cursor's first tick
+   records the current head as its baseline without emitting an event. If an
+   earlier plain `--release` already removed `verify-pr-watch-<n>.owner.json`
+   and stranded `.qwen/tmp/autofix-pr-<n>-gate.json`, confirm no `autofix-pr`
+   watch is active (`.qwen/tmp/autofix-pr-<n>-state.json` is absent) and remove
+   `.qwen/tmp/autofix-pr-<n>-gate.json` in `<clone>`'s main worktree before
+   re-running steps 3–4. When a `resync` event fires, the gate pre-records its
+   `headSha` in `deferredHeads` before waking the model whenever the state lock
+   and state file allow it.
 
 The prompt consumes the gate's JSON and nothing else. On
 `head_moved_externally`, take `headSha` and run the round for that sha.
@@ -884,10 +892,12 @@ refused (exit 1), never silently rewritten: inspect or remove it before the
 next round.
 
 On `action: "stop"` (merged or closed), delete the task with `cron_delete`,
-drop the claim with
-`node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`, and stop
-watching; drop it too when task creation fails. Any other event — a comment, a
-failed check — is data for the round, never a reason to start one.
+drop the claim and probe cursor with
+`node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor`
+(so reopening the PR later does not run into a stranded cursor), and stop
+watching; drop the claim (and any created cursor with `--release --reset-cursor`
+once `autofix-pr` state is absent) when task creation fails. Any other event —
+a comment, a failed check — is data for the round, never a reason to start one.
 
 The probe's cursor lives under the **clone's main worktree**
 (`.qwen/tmp/autofix-pr-<n>-gate.json`), not the worktree a round runs in. One
@@ -2437,9 +2447,13 @@ workflow globs). It must contain:
   # or pipe:  my-harness | node scripts/verify-capture.mjs --out …/02-matrix.png
   ```
 
-  In the local container recipe, run the trusted copy instead
-  (`node /trusted-scripts/verify-capture.mjs --out …`, which resolves
-  `@xterm/headless` and `sharp` from the `/work` working tree).
+  In the local container recipe, run the helper from the host's trusted
+  clone (for example, pipe `docker exec` output into
+  `node <trusted-clone>/scripts/verify-capture.mjs --out …`) so
+  `@xterm/headless` and `sharp` resolve from `<trusted-clone>/node_modules`
+  rather than the PR-writable `/work` tree; an isolated copy of
+  `verify-capture.mjs` outside a checkout refuses to load modules from
+  `process.cwd()` unless `--allow-cwd-modules` is explicitly passed.
 
   It runs the command, parses its ANSI through `@xterm/headless`, and
   rasterises the cell grid with `sharp` — the 16 base ANSI colours and bold

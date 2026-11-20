@@ -3748,19 +3748,22 @@ describe('#17371 recordDelivery and --restart', () => {
     expect(wrongFrom.status).toBe(3);
     expect(wrongFrom.stderr).toMatch(/refusing a stale restart/);
 
-    // Same round as live marker -> exit 3.
-    const sameRound = run(root, [
-      '16866',
-      '--restart',
-      '--head',
-      HEAD,
-      '--round',
-      '11',
-      '--repo',
-      'o/r',
-    ]);
-    expect(sameRound.status).toBe(3);
-    expect(sameRound.stderr).toMatch(/already in flight as round 11/);
+    // Same or lower round as live marker -> exit 3, marker unchanged.
+    for (const staleOrSame of ['11', '10']) {
+      const res = run(root, [
+        '16866',
+        '--restart',
+        '--head',
+        HEAD,
+        '--round',
+        staleOrSame,
+        '--repo',
+        'o/r',
+      ]);
+      expect(res.status).toBe(3);
+      expect(res.stderr).toMatch(/already in flight as round 11/);
+      expect(readState(root, 16866).inFlightHeads[0].round).toBe(11);
+    }
 
     // Foreign repo -> exit 3.
     const foreign = run(root, [
@@ -3809,6 +3812,16 @@ describe('#17371 recordDelivery and --restart', () => {
         '11',
         '--round',
         '11',
+      ],
+      [
+        '16866',
+        '--restart',
+        '--head',
+        HEAD,
+        '--from-round',
+        '11',
+        '--round',
+        '10',
       ],
       ['16866', '--restart', '--head', HEAD],
     ]) {

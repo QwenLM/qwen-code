@@ -39,10 +39,13 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
 - Task shape: cron every 2 minutes; gate = `node
 <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli
 <absolute qwen>`; `recurring: true`, `durable: true`, `sessionMode:
-"current"`. The wrapper runs the probe and forwards only `resync` (head
-  moved) and `stop`; a comment or a failed check yields `action: "fix"` and is
-  dropped, because the scheduler hands every non-empty gate output to the
-  model and the prompt cannot un-start the turn.
+"current"`. The wrapper runs the probe, forwards only `resync` (head moved) and
+  `stop`, and pre-records a delivered `resync` `headSha` into `deferredHeads`
+  under the watch-state lock before printing output (failing open on
+  lock/repo/corrupt-state errors or when run from a non-worktree copy outside a
+  clone, never falling back to `cwd`); a comment or a failed check yields
+  `action: "fix"` and is dropped, because the scheduler hands every non-empty
+  gate output to the model and the prompt cannot un-start the turn.
 - The prompt consumes what the wrapper forwards: `head_moved_externally` → run
   the round for that sha; `stop` (merged/closed) → delete the task and stop.
 - The wrapper's `--check` refuses to install when `.qwen/tmp` already holds
@@ -51,7 +54,7 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   `stop` the first one needs.
 - Dedupe lives in a state file (`.qwen/tmp/verify-pr-watch-<n>.json`), owned
   by `scripts/verify-pr-watch-state.mjs` (`--start` / `--complete` /
-  `--release`) since PR #17185 — rounds no longer hand-write the JSON, whose
+  `--release` / `--restart`) since PR #17185 — rounds no longer hand-write the JSON, whose
   completion write two consecutive rounds on PR #16866 skipped, leaving the
   file two heads stale. The file holds three lists, `verifiedHeads`,
   `inFlightHeads` and `deferredHeads`, each entry carrying its own head,
@@ -171,8 +174,9 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   retried recovery of a dead round must not delete the live marker of a
   newer round that restarted the same head. Under one-round-per-PR the
   blocking marker may belong to a different head than the one being
-  started: recovery releases the head the refusal names. This mirrors the
-  gate's recovery for a dead claim.
+  started: recovery releases the head the refusal names. `--restart --head <oid> [--from-round <r>] --round <r+1>`
+  atomically replaces a dead round's in-flight marker under one lock acquisition (rejecting any `--round <= entry.round`) without an unregistered gap. This mirrors the
+  gate's recovery for a dead claim, and `--release --reset-cursor` unlinks the probe cursor before releasing ownership (reporting its last `headSha`) when stopping cleanly or migrating an existing watch.
 
 ## Design decisions
 
@@ -217,10 +221,11 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
 
 - `.qwen/skills/verify-pr/SKILL.md` — the `--watch` contract and its guardrails.
 - `scripts/verify-pr-watch-gate.mjs` — the gate wrapper: forwards only `resync`
-  and `stop`, and refuses to install over another consumer's probe state.
+  and `stop`, pre-records delivered `resync` heads into `deferredHeads` before emit,
+  supports cursor-reset release (`--release --reset-cursor`), and refuses to install over another consumer's probe state.
 - `scripts/verify-pr-watch-state.mjs` — the state file's owner since PR #17185:
   per-head `verifiedHeads`/`inFlightHeads`/`deferredHeads` lists, atomic
-  writes, UTC stamps, and the `--start` / `--complete` / `--release`
+  writes, UTC stamps, gate pre-delivery registration, and the `--start` / `--complete` / `--release` / `--restart`
   contract.
 - `scripts/tests/verify-pr-watch-state.test.js` — the dedup, completion,
   release and migration cases, including the concurrent-head witnesses.

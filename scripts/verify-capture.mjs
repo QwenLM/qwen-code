@@ -29,10 +29,11 @@
  *   some-harness | node scripts/verify-capture.mjs --out evidence/02-matrix.png
  *
  * Options:
- *   --out <path>     required; parent dirs are created
- *   --cols <n>       terminal width  (default 100)
- *   --rows <n>       max rows kept   (default 40, trailing blanks trimmed)
- *   --title <text>   caption drawn above the output
+ *   --out <path>          required; parent dirs are created
+ *   --cols <n>            terminal width  (default 100)
+ *   --rows <n>            max rows kept   (default 40, trailing blanks trimmed)
+ *   --title <text>        caption drawn above the output
+ *   --allow-cwd-modules   resolve @xterm/headless and sharp from cwd on miss
  *
  * Exit codes: 0 on a written PNG, 1 on usage or render failure. The captured
  * command's own exit code is reported on stderr but does NOT fail the capture —
@@ -46,18 +47,20 @@ import { dirname, resolve } from 'node:path';
 
 const scriptRequire = createRequire(import.meta.url);
 
-function loadDependency(id) {
+function loadDependency(id, allowCwdModules = false) {
+  let resolvedPath;
   try {
-    return scriptRequire(id);
+    resolvedPath = scriptRequire.resolve(id);
   } catch (error) {
-    if (error?.code !== 'MODULE_NOT_FOUND') throw error;
-    return createRequire(resolve(process.cwd(), 'package.json'))(id);
+    if (error?.code !== 'MODULE_NOT_FOUND' || !allowCwdModules) throw error;
+    const cwdRequire = createRequire(resolve(process.cwd(), 'package.json'));
+    return cwdRequire(cwdRequire.resolve(id));
   }
+  return scriptRequire(resolvedPath);
 }
 
-// xterm's headless build is CommonJS; a named ESM import of `Terminal` throws.
-const { Terminal } = loadDependency('@xterm/headless');
-const sharp = loadDependency('sharp');
+let Terminal;
+let sharp;
 
 // The 16 ANSI colours as xterm reports them from getFgColor()/getBgColor().
 const ANSI = [
@@ -88,13 +91,19 @@ const FONT_SIZE = 14;
 function usage(message) {
   process.stderr.write(`verify-capture: ${message}\n`);
   process.stderr.write(
-    'usage: verify-capture.mjs --out <png> [--cols n] [--rows n] [--title s] [-- cmd ...]\n',
+    'usage: verify-capture.mjs --out <png> [--cols n] [--rows n] [--title s] [--allow-cwd-modules] [-- cmd ...]\n',
   );
   process.exit(1);
 }
 
 function parseArgs(argv) {
-  const opts = { cols: 100, rows: 40, out: '', title: '' };
+  const opts = {
+    cols: 100,
+    rows: 40,
+    out: '',
+    title: '',
+    allowCwdModules: false,
+  };
   const cmd = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -119,6 +128,9 @@ function parseArgs(argv) {
         break;
       case '--title':
         opts.title = next();
+        break;
+      case '--allow-cwd-modules':
+        opts.allowCwdModules = true;
         break;
       default:
         usage(`unknown option ${arg}`);
@@ -298,6 +310,9 @@ async function render(raw, opts) {
 
 const { opts, cmd } = parseArgs(process.argv.slice(2));
 try {
+  // xterm's headless build is CommonJS; a named ESM import of `Terminal` throws.
+  ({ Terminal } = loadDependency('@xterm/headless', opts.allowCwdModules));
+  sharp = loadDependency('sharp', opts.allowCwdModules);
   await render(collectOutput(cmd), opts);
 } catch (error) {
   process.stderr.write(`verify-capture: ${error?.message ?? error}\n`);

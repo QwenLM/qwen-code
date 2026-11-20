@@ -29,6 +29,7 @@
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   unlinkSync,
@@ -107,33 +108,69 @@ export function extractDeliveredHead(text) {
 }
 
 /**
+ * Resolves the state root for gate pre-delivery from the script's own clone
+ * (or an explicit `--state-root`), refusing to fall back to `process.cwd()`.
+ */
+export function resolveDeliveryRoot(
+  stateRoot = null,
+  scriptClone = SCRIPT_CLONE,
+) {
+  if (stateRoot) {
+    return { root: resolve(stateRoot), reason: null };
+  }
+  const scriptRoot = mainWorktree(scriptClone);
+  if (isGitWorktree(scriptRoot)) {
+    return { root: scriptRoot, reason: null };
+  }
+  return { root: null, reason: `${scriptRoot} is not a git worktree` };
+}
+
+/**
  * Filters probe output and pre-records a delivered `resync` head in
- * `deferredHeads` before waking the model. Fail-open on state lock/I/O errors
- * so a transient contention never suppresses an already-consumed cursor event.
+ * `deferredHeads` before emitting output to wake the model. Fail-open on state
+ * lock/I/O errors so a transient contention never suppresses an
+ * already-consumed cursor event.
  */
 export function deliverGateOutput(
   text,
-  { stateRoot = null, pr = null, repo = null } = {},
+  {
+    stateRoot = null,
+    skipReason = null,
+    pr = null,
+    repo = null,
+    emit = null,
+  } = {},
 ) {
   const kept = filterGateOutput(text);
   const head = extractDeliveredHead(kept);
-  if (head && stateRoot && Number.isInteger(pr) && pr > 0) {
-    try {
-      const res = recordDelivery(stateRoot, { pr, head, repo });
-      if (res?.repoMismatch) {
+  if (head && Number.isInteger(pr) && pr > 0) {
+    if (!stateRoot) {
+      if (skipReason) {
         process.stderr.write(
-          `verify-pr watch: pre-delivery skipped for ${head} (state belongs to ${res.recordedRepo}${repo ? `, not ${repo}` : ''})\n`,
-        );
-      } else if (res?.locked) {
-        process.stderr.write(
-          `verify-pr watch: pre-delivery skipped for ${head} (state lock held)\n`,
+          `verify-pr watch: pre-delivery skipped for ${head} (${skipReason}; pass --state-root <trusted main worktree>)\n`,
         );
       }
-    } catch (error) {
-      process.stderr.write(
-        `verify-pr watch: could not pre-record delivered head ${head}: ${error.message}\n`,
-      );
+    } else {
+      try {
+        const res = recordDelivery(stateRoot, { pr, head, repo });
+        if (res?.repoMismatch) {
+          process.stderr.write(
+            `verify-pr watch: pre-delivery skipped for ${head} (state belongs to ${res.recordedRepo}${repo ? `, not ${repo}` : ''})\n`,
+          );
+        } else if (res?.locked) {
+          process.stderr.write(
+            `verify-pr watch: pre-delivery skipped for ${head} (state lock held)\n`,
+          );
+        }
+      } catch (error) {
+        process.stderr.write(
+          `verify-pr watch: could not pre-record delivered head ${head}: ${error.message}\n`,
+        );
+      }
     }
+  }
+  if (kept !== '' && typeof emit === 'function') {
+    emit(kept);
   }
   return kept;
 }
@@ -217,9 +254,11 @@ export function releaseOwnership(stateRoot, prNumber) {
 
 /**
  * Releases a `verify-pr` ownership claim and its probe gate cursor so a
- * `verify-pr` watch can be migrated/re-created in place. Refuses when an
- * `autofix-pr` prepared state file exists or when a gate cursor exists without
- * a `verify-pr` claim.
+ * `verify-pr` watch can be stopped cleanly or migrated/re-created in place.
+ * Unlinks the cursor before releasing the claim so an unlink failure keeps
+ * ownership intact for retry, reads the cursor's last `headSha` before
+ * unlinking, and refuses when an `autofix-pr` prepared state file exists or
+ * when a gate cursor exists without a `verify-pr` claim.
  */
 export function resetWatchCursor(stateRoot, prNumber) {
   const tmp = join(stateRoot, '.qwen', 'tmp');
@@ -234,17 +273,40 @@ export function resetWatchCursor(stateRoot, prNumber) {
     if (existsSync(gateFile)) {
       return { ok: false, reason: 'unclaimed-cursor', conflict: gateFile };
     }
-    return { ok: true, released: false, cursorRemoved: false };
+    return {
+      ok: true,
+      released: false,
+      cursorRemoved: false,
+      cursorHead: null,
+    };
   }
-  const released = releaseOwnership(stateRoot, prNumber);
+  let cursorHead = null;
+  try {
+    if (lstatSync(gateFile, { throwIfNoEntry: false })?.isFile()) {
+      const parsed = JSON.parse(readFileSync(gateFile, 'utf8'));
+      if (typeof parsed?.headSha === 'string' && parsed.headSha.trim() !== '') {
+        cursorHead = parsed.headSha.trim();
+      }
+    }
+  } catch {
+    // Missing or unreadable cursor still proceeds to unlink; omit head note.
+  }
   let cursorRemoved = false;
   try {
     unlinkSync(gateFile);
     cursorRemoved = true;
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    if (error.code !== 'ENOENT') {
+      return {
+        ok: false,
+        reason: 'cursor-unlink-failed',
+        conflict: gateFile,
+        error: error.message,
+      };
+    }
   }
-  return { ok: true, released, cursorRemoved };
+  const released = releaseOwnership(stateRoot, prNumber);
+  return { ok: true, released, cursorRemoved, cursorHead };
 }
 
 /** Every file that blocks installation: probe state plus a live claim. */
@@ -324,14 +386,22 @@ function main() {
         const detail =
           res.reason === 'autofix-state'
             ? `PR ${args.pr} has prepared autofix-pr state (${res.conflict}); refusing to reset another consumer's cursor`
-            : `PR ${args.pr} has a probe cursor (${res.conflict}) with no verify-pr claim; refusing to reset a cursor this watch did not claim`;
+            : res.reason === 'cursor-unlink-failed'
+              ? `PR ${args.pr} failed to remove probe cursor (${res.conflict}): ${res.error}`
+              : `PR ${args.pr} has a probe cursor (${res.conflict}) with no verify-pr claim; refusing to reset a cursor this watch did not claim (if a prior plain --release orphaned it, confirm no autofix-pr watch is active and remove ${res.conflict} manually)`;
         process.stderr.write(`verify-pr watch: ${detail}\n`);
         process.exit(3);
       }
       const parts = [
         res.released ? `released PR ${args.pr}` : `no claim for PR ${args.pr}`,
       ];
-      if (res.cursorRemoved) parts.push('removed probe cursor');
+      if (res.cursorRemoved) {
+        parts.push(
+          res.cursorHead
+            ? `removed probe cursor (last head ${res.cursorHead})`
+            : 'removed probe cursor',
+        );
+      }
       process.stderr.write(`verify-pr watch: ${parts.join('; ')}\n`);
       return;
     }
@@ -379,21 +449,14 @@ function main() {
     // failure must not look like a quiet tick.
     process.exit(probe.status ?? 1);
   }
-  let deliveryRoot = args.stateRoot ? resolve(args.stateRoot) : null;
-  if (!deliveryRoot) {
-    const scriptRoot = mainWorktree(SCRIPT_CLONE);
-    deliveryRoot = isGitWorktree(scriptRoot)
-      ? scriptRoot
-      : isGitWorktree(root)
-        ? root
-        : null;
-  }
-  const kept = deliverGateOutput(probe.stdout ?? '', {
-    stateRoot: deliveryRoot,
+  const delivery = resolveDeliveryRoot(args.stateRoot);
+  deliverGateOutput(probe.stdout ?? '', {
+    stateRoot: delivery.root,
+    skipReason: delivery.reason,
     pr: args.pr,
     repo: args.repo,
+    emit: (line) => process.stdout.write(`${line}\n`),
   });
-  if (kept !== '') process.stdout.write(`${kept}\n`);
 }
 
 if (isEntryPoint(import.meta.url, process.argv[1])) {

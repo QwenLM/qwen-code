@@ -6,6 +6,7 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -30,6 +31,7 @@ import {
   ownershipPath,
   releaseOwnership,
   resetWatchCursor,
+  resolveDeliveryRoot,
 } from '../../scripts/verify-pr-watch-gate.mjs';
 import {
   readState,
@@ -39,6 +41,15 @@ import {
 
 const GATE_SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-watch-gate.mjs', import.meta.url),
+);
+const STATE_SCRIPT = fileURLToPath(
+  new URL('../../scripts/verify-pr-watch-state.mjs', import.meta.url),
+);
+const CHECK_SCRIPT = fileURLToPath(
+  new URL('../../scripts/verify-pr-check.mjs', import.meta.url),
+);
+const ENTRY_POINT_LIB = fileURLToPath(
+  new URL('../../scripts/lib/entry-point.js', import.meta.url),
 );
 
 let tmpDirs = [];
@@ -246,23 +257,29 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
     expect(extractDeliveredHead('not json')).toBeNull();
   });
 
-  it('pre-records resync headSha in deferredHeads and promotes on startRound', () => {
+  it('pre-records resync headSha with repo in deferredHeads BEFORE emit and promotes on startRound', () => {
     const root = makeRoot();
     const moved = JSON.stringify({
       headSha: HEAD,
       action: 'resync',
       events: [{ type: 'head_moved_externally', sha: HEAD }],
     });
+    let stateAtEmit = null;
     expect(
       deliverGateOutput(moved, {
         stateRoot: root,
         pr: 123,
         repo: 'QwenLM/qwen-code',
+        emit: (line) => {
+          expect(line).toBe(moved);
+          stateAtEmit = readState(root, 123);
+        },
       }),
     ).toBe(moved);
-    const preState = readState(root, 123);
-    expect(preState.deferredHeads.map((e) => e.head)).toEqual([HEAD]);
-    const preSeq = preState.deferredHeads[0].seq;
+    expect(stateAtEmit).not.toBeNull();
+    expect(stateAtEmit.repo).toBe('QwenLM/qwen-code');
+    expect(stateAtEmit.deferredHeads.map((e) => e.head)).toEqual([HEAD]);
+    const preSeq = stateAtEmit.deferredHeads[0].seq;
     expect(preSeq).toBe(1);
 
     const started = startRound(root, {
@@ -299,7 +316,7 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
     expect(existsSync(statePath(root, 123))).toBe(false);
   });
 
-  it('still returns kept output if state file is corrupt or lock is held', () => {
+  it('still returns kept output and leaves corrupt or locked state unmutated', () => {
     const moved = JSON.stringify({
       headSha: HEAD,
       action: 'resync',
@@ -315,6 +332,7 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
         repo: 'QwenLM/qwen-code',
       }),
     ).toBe(moved);
+    expect(readFileSync(statePath(corruptRoot, 123), 'utf8')).toBe('{corrupt');
 
     const lockedRoot = makeRoot();
     mkdirSync(join(lockedRoot, '.qwen', 'tmp'), { recursive: true });
@@ -326,10 +344,11 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
         repo: 'QwenLM/qwen-code',
       }),
     ).toBe(moved);
+    expect(existsSync(statePath(lockedRoot, 123))).toBe(false);
   });
 
   it.skipIf(process.platform === 'win32')(
-    'pre-records delivered resync head through the gate CLI',
+    'pre-records delivered resync head and repo through the gate CLI',
     () => {
       const root = makeRoot();
       const cli = join(root, 'stub-qwen');
@@ -352,9 +371,80 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
       ]);
       expect(res.status).toBe(0);
       expect(res.stdout.trim()).toBe(moved);
-      expect(readState(root, 123).deferredHeads.map((e) => e.head)).toEqual([
-        HEAD,
-      ]);
+      const saved = readState(root, 123);
+      expect(saved.repo).toBe('QwenLM/qwen-code');
+      expect(saved.deferredHeads.map((e) => e.head)).toEqual([HEAD]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'resolves default delivery root from the script git worktree and never falls back to cwd',
+    () => {
+      const stageScripts = (targetRoot) => {
+        const scriptsDir = join(targetRoot, 'scripts');
+        const libDir = join(scriptsDir, 'lib');
+        mkdirSync(libDir, { recursive: true });
+        copyFileSync(GATE_SCRIPT, join(scriptsDir, 'verify-pr-watch-gate.mjs'));
+        copyFileSync(
+          STATE_SCRIPT,
+          join(scriptsDir, 'verify-pr-watch-state.mjs'),
+        );
+        copyFileSync(CHECK_SCRIPT, join(scriptsDir, 'verify-pr-check.mjs'));
+        copyFileSync(ENTRY_POINT_LIB, join(libDir, 'entry-point.js'));
+        return join(scriptsDir, 'verify-pr-watch-gate.mjs');
+      };
+
+      const moved = JSON.stringify({
+        headSha: HEAD,
+        action: 'resync',
+        events: [{ type: 'head_moved_externally', sha: HEAD }],
+      });
+
+      // Script inside its own git repo, cwd elsewhere -> writes in script's repo.
+      const cloneRoot = makeRoot();
+      expect(spawnSync('git', ['init', cloneRoot]).status).toBe(0);
+      const cloneGate = stageScripts(cloneRoot);
+      const otherCwd = makeRoot();
+      expect(spawnSync('git', ['init', otherCwd]).status).toBe(0);
+      const cliA = join(otherCwd, 'stub-qwen');
+      writeFileSync(cliA, `#!/usr/bin/env bash\nprintf '%s\\n' '${moved}'\n`, {
+        mode: 0o755,
+      });
+      const resA = spawnSync(
+        process.execPath,
+        [cloneGate, '123', '--repo', 'QwenLM/qwen-code', '--cli', cliA],
+        { cwd: otherCwd, encoding: 'utf8' },
+      );
+      expect(resA.status).toBe(0);
+      expect(resA.stdout.trim()).toBe(moved);
+      expect(
+        readState(cloneRoot, 123).deferredHeads.map((e) => e.head),
+      ).toEqual([HEAD]);
+      expect(existsSync(statePath(otherCwd, 123))).toBe(false);
+
+      // Script outside any git repo (/trusted-scripts layout), cwd inside a
+      // git repo -> never writes shadow state into cwd; warns on stderr.
+      const nonGitRoot = makeRoot();
+      const isolatedGate = stageScripts(nonGitRoot);
+      const cwdGit = makeRoot();
+      expect(spawnSync('git', ['init', cwdGit]).status).toBe(0);
+      expect(resolveDeliveryRoot(null, nonGitRoot)).toMatchObject({
+        root: null,
+      });
+      const cliB = join(nonGitRoot, 'stub-qwen');
+      writeFileSync(cliB, `#!/usr/bin/env bash\nprintf '%s\\n' '${moved}'\n`, {
+        mode: 0o755,
+      });
+      const resB = spawnSync(
+        process.execPath,
+        [isolatedGate, '123', '--repo', 'QwenLM/qwen-code', '--cli', cliB],
+        { cwd: cwdGit, encoding: 'utf8' },
+      );
+      expect(resB.status).toBe(0);
+      expect(resB.stdout.trim()).toBe(moved);
+      expect(resB.stderr).toContain('pre-delivery skipped');
+      expect(resB.stderr).toContain('is not a git worktree');
+      expect(existsSync(statePath(cwdGit, 123))).toBe(false);
     },
   );
 });
@@ -365,14 +455,30 @@ describe('resetWatchCursor and --release --reset-cursor', () => {
       encoding: 'utf8',
     });
 
-  it('removes both ownership claim and probe cursor so --check --claim succeeds', () => {
+  it('removes both ownership claim and probe cursor, reports last headSha, and tolerates an absent cursor', () => {
     const root = makeRoot();
+    expect(
+      runGateCli(['123', '--check', '--claim', '--state-root', root]).status,
+    ).toBe(0);
+
+    // Ordinary first-migration path: claim exists with no cursor yet -> ENOENT tolerated.
+    const ordinaryReset = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--state-root',
+      root,
+    ]);
+    expect(ordinaryReset.status).toBe(0);
+    expect(existsSync(ownershipPath(root, 123))).toBe(false);
+
+    // Re-claim with an active probe cursor -> reset reports cursor headSha and clears both.
     expect(
       runGateCli(['123', '--check', '--claim', '--state-root', root]).status,
     ).toBe(0);
     const [gateName] = ownedStateFiles(123);
     const gateFile = join(root, '.qwen', 'tmp', gateName);
-    writeFileSync(gateFile, '{"headSha":"abc"}');
+    writeFileSync(gateFile, '{"headSha":"abc1234"}');
 
     // Claim and cursor both exist; --check blocks re-install before reset.
     expect(runGateCli(['123', '--check', '--state-root', root]).status).toBe(3);
@@ -385,12 +491,36 @@ describe('resetWatchCursor and --release --reset-cursor', () => {
       root,
     ]);
     expect(reset.status).toBe(0);
-    expect(reset.stderr).toContain('removed probe cursor');
+    expect(reset.stderr).toContain('removed probe cursor (last head abc1234)');
     expect(existsSync(ownershipPath(root, 123))).toBe(false);
     expect(existsSync(gateFile)).toBe(false);
     expect(
       runGateCli(['123', '--check', '--claim', '--state-root', root]).status,
     ).toBe(0);
+  });
+
+  it('keeps the ownership claim intact when cursor unlink fails', () => {
+    const root = makeRoot();
+    claimOwnership(root, 123);
+    const [gateName] = ownedStateFiles(123);
+    const gateDir = join(root, '.qwen', 'tmp', gateName);
+    mkdirSync(gateDir, { recursive: true });
+
+    const res = resetWatchCursor(root, 123);
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe('cursor-unlink-failed');
+    expect(existsSync(ownershipPath(root, 123))).toBe(true);
+
+    const cliRes = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--state-root',
+      root,
+    ]);
+    expect(cliRes.status).toBe(3);
+    expect(cliRes.stderr).toContain('failed to remove probe cursor');
+    expect(existsSync(ownershipPath(root, 123))).toBe(true);
   });
 
   it('refuses when autofix-pr state exists or cursor has no verify-pr claim', () => {
