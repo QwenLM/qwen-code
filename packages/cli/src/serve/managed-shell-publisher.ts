@@ -503,7 +503,14 @@ export class ManagedShellPublisherRegistry
             }
           }
         }
-        res.json({ ...PREFIX, sessionId, installed: true });
+        res.json({
+          ...PREFIX,
+          sessionId,
+          installed: true,
+          // Phase 3b: tells the Harness this worker owns the background
+          // capture and Monitor policy, so it bypasses its own loop.
+          ...(this.observation.enabled ? { observation: true } : {}),
+        });
       },
       handleManagedRuntimeJsonError,
     );

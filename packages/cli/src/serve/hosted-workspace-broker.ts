@@ -457,13 +457,23 @@ export class HostedWorkspaceBroker {
     }
   }
 
-  async registerPublisher(publisher: {
-    url: string;
-    token: string;
-  }): Promise<string> {
+  /** Phase 3b: set by the latest registerPublisher when the worker signals
+   * it owns the background capture and Monitor policy. */
+  observationOwned = false;
+
+  async registerPublisher(
+    publisher: {
+      url: string;
+      token: string;
+    },
+    writerGeneration?: number,
+  ): Promise<string> {
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:publisher`,
-      { publisher },
+      {
+        publisher,
+        ...(writerGeneration !== undefined ? { writerGeneration } : {}),
+      },
     );
     const generation = response['bindingGeneration'];
     if (
@@ -474,6 +484,7 @@ export class HostedWorkspaceBroker {
     ) {
       throw new Error('Runtime did not install the original Shell publisher.');
     }
+    this.observationOwned = response['observation'] === true;
     return generation;
   }
 
