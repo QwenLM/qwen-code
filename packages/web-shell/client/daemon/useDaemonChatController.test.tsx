@@ -268,4 +268,43 @@ describe('useDaemonChatController', () => {
     });
     expect(harness.submitPermission).not.toHaveBeenCalled();
   });
+
+  it('does not establish an approval answered after its request was superseded', async () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    // a1 leaves the pending set without an answer: superseded, no decision.
+    harness.pendingPermissions = [];
+    forceRerender!();
+    const result = await controller!.respondApproval('a1', 'submit');
+    expect(result.admission).toBe('accepted');
+    forceRerender!();
+    expect(
+      controller!.operations.find((op) => op.kind === 'approval')?.state,
+    ).toBe('unsettled');
+  });
+
+  it('keeps the approval/question arrays stable across an unchanged pending set', () => {
+    harness.pendingPermissions = [
+      permissionBlock('a1'),
+      permissionBlock('q1', { questions: true }),
+    ];
+    mountReact(<Probe />);
+    const approvals = controller!.pendingApprovals;
+    const questions = controller!.pendingQuestions;
+    forceRerender!();
+    expect(controller!.pendingApprovals).toBe(approvals);
+    expect(controller!.pendingQuestions).toBe(questions);
+  });
+
+  it('keeps the transcript readable under a connection error with a live session', () => {
+    harness.connection.error = 'session_writer_conflict';
+    mountReact(<Probe />);
+    expect(controller!.transcriptState).toBe('ready');
+  });
+
+  it('reports loading while the transcript loads', () => {
+    harness.connection.loadingTranscript = true;
+    mountReact(<Probe />);
+    expect(controller!.transcriptState).toBe('loading');
+  });
 });
