@@ -3166,6 +3166,59 @@ describe('gitCommit', () => {
     expect(git(dir, 'status', '--porcelain', 'old.txt')).toContain('D');
   });
 
+  it('refuses a path an occupant recreates after the guards ran', async () => {
+    // The occupancy guards read the worktree before staging; `git commit --`
+    // then reads the worktree again. Anything written in between — the agent
+    // shell and a build both write here — replaces the staged deletion with a
+    // modification carrying the occupant's bytes. A second selected file keeps
+    // `add -A` running, which is the window; a writer hooked there stands in
+    // for the race.
+    const dir = makeRepo();
+    commitFile(dir, 'a.txt', 'content\n', 'add a');
+    commitFile(dir, 'keep.txt', 'plain\n', 'add keep');
+    git(dir, 'rm', '-q', 'a.txt');
+    write(dir, { 'keep.txt': 'edited\n' });
+    const env = gitShim(hermeticEnv(), [
+      {
+        match: '"add -A"*',
+        before: `printf 'OCCUPANT\\n' > "${path.join(dir, 'a.txt')}"`,
+      },
+    ]);
+
+    await expect(
+      gitCommit(dir, 'remove a', { paths: ['a.txt', 'keep.txt'] }, env),
+    ).rejects.toThrow(
+      /is staged for deletion, but a file now sits at that path/,
+    );
+
+    expect(git(dir, 'show', 'HEAD:a.txt')).toBe('content\n');
+  });
+
+  it('refuses a rename pre-image an occupant recreates after the guards ran', async () => {
+    // Same window, reached through a staged rename rather than a plain
+    // deletion: `old.txt` is already out of both index and worktree when the
+    // guards run, and the occupant lands before `commit --` reads it.
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'aaaa\nbbbb\ncccc\ndddd\neeee\n', 'add old');
+    git(dir, 'config', 'status.renames', 'false');
+    git(dir, 'mv', 'old.txt', 'new.txt');
+    write(dir, { 'new.txt': 'zzzz\nyyyy\nxxxx\nwwww\nvvvv\n' });
+    const env = gitShim(hermeticEnv(), [
+      {
+        match: '"add -A"*',
+        before: `printf 'OCCUPANT\\n' > "${path.join(dir, 'old.txt')}"`,
+      },
+    ]);
+
+    await expect(
+      gitCommit(dir, 'rename file', { paths: ['old.txt', 'new.txt'] }, env),
+    ).rejects.toThrow(/a file now sits at the old path/);
+
+    expect(git(dir, 'show', 'HEAD:old.txt')).toBe(
+      'aaaa\nbbbb\ncccc\ndddd\neeee\n',
+    );
+  });
+
   it.skipIf(process.platform === 'win32')(
     'accepts a git-legal root-level name that starts with a drive-like prefix',
     async () => {

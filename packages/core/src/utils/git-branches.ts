@@ -2292,12 +2292,12 @@ export async function gitCommit(
         );
       }
       // `commit -- <path>` takes the working-tree content of every path it
-      // names, so a rename's pre-image is already staged and does not need to
-      // be named; only paths that still exist are named, which keeps whatever
-      // now sits at an old path out of the commit — unless the index itself
-      // holds the change for the path (a staged deletion, a staged rename's
-      // pre-image), where `commit -- <path>` records the index state and no
-      // worktree content is read.
+      // names, so none of these may be named: a rename's pre-image and a
+      // staged deletion are already in the index and `commit` records them
+      // from there — naming them would also fetch whatever now sits at that
+      // path. Only paths that still exist in the worktree are named, and a
+      // path that exists nowhere is dropped, since the commit would have
+      // nothing to read.
       const root = (
         await runGit(cwd, ['rev-parse', '--show-toplevel'], env)
       ).trim();
@@ -2308,6 +2308,22 @@ export async function gitCommit(
           indexRenamedOld.has(p) ||
           !fs.existsSync(path.join(root || cwd, ...p.split('/'))),
       );
+      // The guards in `resolveCommitPaths` read the worktree before staging,
+      // and `commit --` reads it again below. Anything written in between — the
+      // agent shell and a build both write here — would be published in place
+      // of the deletion the user selected. Re-assert the same guards against
+      // the `stagedNow` view, last thing before the commit, to narrow that
+      // window to the few operations below.
+      for (const pair of stagedNow.renamed) {
+        refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.newPath);
+      }
+      for (const deleted of indexDeleted) {
+        if (lstatOrNull(root || cwd, deleted) !== null) {
+          throw new Error(
+            `cannot commit: ${deleted} is staged for deletion, but a file now sits at that path`,
+          );
+        }
+      }
       await runGit(
         cwd,
         ['commit', '-m', message, '--', ...literalPathspecs(commitPaths)],
