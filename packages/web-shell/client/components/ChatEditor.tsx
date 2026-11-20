@@ -3883,7 +3883,10 @@ export const ChatEditor = memo(
                 activeId={currentModel}
                 onOpenChange={(open) => {
                   setModelDropdownOpen(open);
-                  if (open) setModeDropdownOpen(false);
+                  if (open) {
+                    setModeDropdownOpen(false);
+                    void modelRefresh?.refreshLocal?.();
+                  }
                 }}
                 onSelect={handleModelSelect}
                 itemTooltipMount={mountUnavailableModelTooltip}
