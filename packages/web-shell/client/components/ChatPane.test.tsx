@@ -1715,6 +1715,30 @@ describe('ChatPane', () => {
     );
   });
 
+  it('read-only allows tool approvals and hides queue mutations', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    queuedPromptsMock = [
+      {
+        id: 1,
+        text: 'queued next',
+        midTurnState: 'queued',
+        midTurnMessageId: '1',
+      },
+    ];
+    render({ readOnly: true });
+    expect(latestChatEditorProps).toBeUndefined();
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(testid('pane-queue')).toBeNull();
+  });
+
+  it('read-only keeps the stopped status without offering resume', () => {
+    connectionState.runtimeStopped = true;
+    render({ readOnly: true });
+    const stopped = testid('workspace-runtime-stopped');
+    expect(stopped).not.toBeNull();
+    expect(stopped?.querySelector('button')).toBeNull();
+  });
+
   it('opens a pane monitor in the shared right panel', async () => {
     connectionState.capabilities = {
       features: ['session_monitor_tool_correlation'],
@@ -4081,6 +4105,24 @@ describe('ChatPane', () => {
     expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
   });
 
+  it('keeps a named sub-session approval pending when switching to yolo', async () => {
+    pendingPermission = {
+      id: 'perm-sub-session',
+      toolName: 'create_sub_session',
+      toolKind: 'other',
+      options: [{ id: 'allow-1', label: 'Allow once', kind: 'allow_once' }],
+      rawInput: { workspace: '/repos/b' },
+    };
+    render();
+    await act(async () => {
+      testid('pane-pick-mode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: false });
+    expect(submitPermission).not.toHaveBeenCalled();
+  });
+
   it('resolves host at mention providers through a pane ChatEditor', () => {
     renderRealChatEditor = true;
     const atProviders = [
@@ -4254,6 +4296,27 @@ it('requires an explicit resume for a stopped pane', async () => {
   expect(loadSession).toHaveBeenCalledWith('stopped', {
     sessionContext: { kind: 'workspace', cwd: '/workspace' },
   });
+});
+
+it('keeps the pane editor available while deferring sends until history loads', async () => {
+  connectionState.loadingTranscript = true;
+  render();
+
+  expect(latestChatEditorProps?.disabled).toBe(false);
+  expect(latestChatEditorProps?.submitDisabled).toBe(true);
+  expect(latestOnSubmit!('pane draft')).toBe(false);
+  expect(sendPrompt).not.toHaveBeenCalled();
+
+  connectionState.loadingTranscript = false;
+  rerender();
+  expect(latestChatEditorProps?.submitDisabled).toBe(false);
+  await act(async () => {
+    latestOnSubmit!('pane draft');
+  });
+  expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(
+    'pane draft',
+    expect.objectContaining({ submittedPrompt: 'pane draft' }),
+  );
 });
 
 it('fences pane submits while the runtime is stopped and says why', async () => {

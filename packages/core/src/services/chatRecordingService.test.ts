@@ -78,6 +78,10 @@ import {
   SessionWriterUnavailableError,
   type SessionWriterLease,
 } from './session-writer-lease.js';
+import {
+  deleteSessionGoalSidecar,
+  writeSessionGoalSidecar,
+} from './session-goal-sidecar.js';
 import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
@@ -190,6 +194,15 @@ vi.mock('node:crypto', () => ({
   })),
 }));
 vi.mock('../utils/jsonl-utils.js');
+// The goal sidecar does real fs/promises I/O; this suite mocks the sync fs
+// surface instead. Mock only the mutations (the projection stays real) so
+// the journal-hook cases can assert calls and inject failures.
+vi.mock('./session-goal-sidecar.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-goal-sidecar.js')>()),
+  // The original implementation survives the suite's restoreAllMocks.
+  writeSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+  deleteSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+}));
 
 const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
@@ -971,6 +984,37 @@ describe('ChatRecordingService', () => {
       expect(cold).toBeDefined();
       expect('deliveredTurn' in (cold as object)).toBe(false);
     });
+
+    it('persists teammateTurn only on a Teammate notification record (R17-1)', async () => {
+      // Producer guard for the teammateTurn stamp: the resume Prompts seed
+      // counts notification records bearing it, so the argument must survive
+      // recordNotification -> recordNotificationLike -> createNotificationRecord
+      // -> appendRecord. A cold background notification stays unmarked.
+      svc.recordNotification(
+        [{ text: 'teammate finished' }],
+        'Teammate finished',
+        undefined,
+        undefined,
+        /* deliveredTurn */ true,
+        /* teammateTurn */ true,
+      );
+      svc.recordNotification(
+        [{ text: 'background notification' }],
+        'Background',
+        undefined,
+        undefined,
+        /* deliveredTurn */ true,
+        /* teammateTurn */ false,
+      );
+
+      const [teammate, background] = await flushedAll();
+      expect(teammate).toMatchObject({
+        subtype: 'notification',
+        teammateTurn: true,
+      });
+      expect(background).toMatchObject({ subtype: 'notification' });
+      expect('teammateTurn' in (background as object)).toBe(false);
+    });
   });
 
   describe('recordBranchCheckpointTransaction', () => {
@@ -1266,6 +1310,102 @@ describe('ChatRecordingService', () => {
         },
       });
       expect(svc.getTranscriptCursor()).toEqual({ recordId: 'goal-record' });
+    });
+
+    describe('goal sidecar projection', () => {
+      const sidecarPath =
+        '/test/project/root/.gemini/projects/test-project/chats/test-session-id.goal.json';
+      let emitSessionGoalChanged: ReturnType<typeof vi.fn>;
+
+      beforeEach(() => {
+        vi.mocked(writeSessionGoalSidecar).mockClear();
+        vi.mocked(writeSessionGoalSidecar).mockResolvedValue(undefined);
+        vi.mocked(deleteSessionGoalSidecar).mockClear();
+        vi.mocked(deleteSessionGoalSidecar).mockResolvedValue(undefined);
+        emitSessionGoalChanged = vi.fn();
+        vi.mocked(mockConfig.getSessionService).mockReturnValue({
+          emitSessionGoalChanged,
+        } as unknown as ReturnType<Config['getSessionService']>);
+      });
+
+      const settle = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      };
+
+      it('writes the projection after the journal append and marks the catalog', async () => {
+        await svc.recordGoalState('goal-record', goalPayload);
+        await settle();
+
+        expect(writeSessionGoalSidecar).toHaveBeenCalledWith(sidecarPath, {
+          v: 1,
+          goalId: 'goal-1',
+          status: 'active',
+          objective: 'ship it',
+          updatedAt: 100,
+        });
+        expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).toHaveBeenCalledWith('test-session-id');
+      });
+
+      it('deletes the projection when the goal is cleared', async () => {
+        await svc.recordGoalState('goal-record', {
+          ...goalPayload,
+          cause: 'clear',
+          snapshot: { ...goalPayload.snapshot, goal: null },
+        });
+        await settle();
+
+        expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(sidecarPath);
+        expect(writeSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).toHaveBeenCalledWith('test-session-id');
+      });
+
+      it('a sidecar failure never fails the journal', async () => {
+        vi.mocked(writeSessionGoalSidecar).mockRejectedValueOnce(
+          new Error('disk full'),
+        );
+
+        const record = await svc.recordGoalState('goal-record', goalPayload);
+        await settle();
+
+        expect(record.uuid).toBe('goal-record');
+        expect(emitSessionGoalChanged).not.toHaveBeenCalled();
+      });
+
+      it('does not touch the projection when the journal append fails', async () => {
+        // The projection refresh runs only after the strict append resolves;
+        // a failed append must leave the sidecar and the catalog clock alone.
+        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+          new Error('disk full'),
+        );
+
+        await expect(
+          svc.recordGoalState('goal-record', goalPayload),
+        ).rejects.toThrow('disk full');
+        await settle();
+
+        expect(writeSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).not.toHaveBeenCalled();
+      });
+
+      it('skips the projection for managed logs', async () => {
+        // Managed logs own their metadata; the guard must short-circuit
+        // before any sidecar mutation or catalog mark.
+        const managed = new ChatRecordingService(mockConfig, undefined, true);
+        managed.bindManagedSink({
+          logSize: () => 0,
+        } as unknown as Parameters<ChatRecordingService['bindManagedSink']>[0]);
+
+        managed.refreshGoalProjection(goalPayload.snapshot.goal);
+        await settle();
+
+        expect(writeSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(deleteSessionGoalSidecar).not.toHaveBeenCalled();
+        expect(emitSessionGoalChanged).not.toHaveBeenCalled();
+      });
     });
 
     it('restores the persisted cursor when a queued append fails', async () => {

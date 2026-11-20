@@ -10,10 +10,6 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
-vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  DAEMON_APPROVAL_MODES: ['plan', 'default', 'auto', 'yolo'],
-}));
-
 const { ApprovalModeDialog } = await import('./ApprovalModeDialog');
 
 let container: HTMLDivElement | null = null;
@@ -65,7 +61,13 @@ describe('ApprovalModeDialog', () => {
 
   it('opens with the highlight on the current mode and confirms on Enter', () => {
     const onSelect = vi.fn();
-    mount(<ApprovalModeDialog currentMode="default" onSelect={onSelect} />);
+    mount(
+      <ApprovalModeDialog
+        currentMode="default"
+        onSelect={onSelect}
+        availableModes={['default', 'auto', 'yolo']}
+      />,
+    );
 
     expect(activeDescendant()).toBe('mode-opt-0');
 
@@ -89,12 +91,24 @@ describe('ApprovalModeDialog', () => {
   });
 
   it('re-syncs the highlight when the current mode changes while open', () => {
-    mount(<ApprovalModeDialog currentMode="default" onSelect={vi.fn()} />);
+    mount(
+      <ApprovalModeDialog
+        currentMode="default"
+        onSelect={vi.fn()}
+        availableModes={['default', 'auto', 'yolo']}
+      />,
+    );
     expect(activeDescendant()).toBe('mode-opt-0');
 
     // Another client sharing the session flips approval mode while the dialog
     // is open: the highlight (and Enter's target) must follow.
-    rerender(<ApprovalModeDialog currentMode="yolo" onSelect={vi.fn()} />);
+    rerender(
+      <ApprovalModeDialog
+        currentMode="yolo"
+        onSelect={vi.fn()}
+        availableModes={['default', 'auto', 'yolo']}
+      />,
+    );
     expect(activeDescendant()).toBe('mode-opt-2');
   });
 

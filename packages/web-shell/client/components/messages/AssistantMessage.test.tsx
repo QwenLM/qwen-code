@@ -6,6 +6,8 @@ import TurndownService from 'turndown';
 import { WebShellCustomizationProvider } from '../../customization';
 import { getTranslator, I18nProvider } from '../../i18n';
 import { getSelectedReplyContent } from '../../utils/selectionClipboard';
+import { getSelectedReplyText as getTranscriptSelectedReplyText } from '../../utils/selectionClipboard.transcript-stub';
+import type { SessionContentGenerator } from './AssistantMessage';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import styles from './AssistantMessage.module.css';
 import {
@@ -29,6 +31,10 @@ const {
   formatThinkingDuration,
   getThinkingSummaryKey,
 } = await import('./AssistantMessage');
+const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+const { ModAssistantMessage, ModReplyRowsProvider } = await import(
+  './ModAssistantMessage'
+);
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
@@ -43,7 +49,7 @@ afterEach(() => {
 
 function render(
   node: ReactNode,
-  language: 'en' | 'zh-CN' = 'en',
+  language: 'en' | 'zh-CN' | 'zh-TW' = 'en',
   renderMode: TranscriptRenderMode = 'interactive',
   documentExpanded = true,
 ): HTMLElement {
@@ -168,6 +174,42 @@ describe('AssistantMessage thinking logic', () => {
     const container = renderCompletedThinking(999, 'zh-CN');
 
     expect(container.textContent).toContain('思考片刻');
+  });
+
+  it('offers the zh-TW thought translation and asks for Traditional Chinese', async () => {
+    const prompts: string[] = [];
+    const generateContent: SessionContentGenerator = async function* (prompt) {
+      prompts.push(prompt);
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'r1',
+        seq: 0,
+        text: '譯文',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'r1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 1,
+        outputTokens: 1,
+      };
+    };
+    const container = render(
+      <ThinkingMessage
+        content="zh-TW thought to translate"
+        timestamp={0}
+        generateContent={generateContent}
+      />,
+      'zh-TW',
+    );
+    const button =
+      container.querySelector<HTMLButtonElement>('button[title="翻譯"]');
+    expect(button).not.toBeNull();
+    await act(async () => button?.click());
+    expect(prompts[0]).toContain('into Traditional Chinese');
   });
 
   it('keeps the duration while thinking is running', () => {
@@ -674,6 +716,154 @@ describe('AssistantMessage markdown tables', () => {
   });
 });
 
+describe('AssistantMessage Mod rows', () => {
+  const answered = (text: string, isFirstOfReply = true) =>
+    vi.fn(async () => ({
+      status: 'answered' as const,
+      props: { text, isFirstOfReply },
+    }));
+
+  it("draws the Mods' rewrite of a complete reply and copies the original", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    try {
+      const ask = answered('**你好**', false);
+      const content = '**Hello**';
+      const container = render(
+        <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+          <ModReplyRowsProvider
+            messages={[
+              { id: 'earlier', role: 'assistant', content: 'Earlier' },
+              { id: 'reply', role: 'assistant', content },
+            ]}
+          >
+            <ModAssistantMessage
+              messageId="reply"
+              content={content}
+              showFooterActions
+            />
+          </ModReplyRowsProvider>
+        </ModRowAskerContext.Provider>,
+      );
+      await act(async () => {});
+      expect(ask).toHaveBeenCalledWith({
+        component: 'AssistantMessage',
+        props: { text: '**Hello**', isFirstOfReply: false },
+      });
+      const body = container.querySelector(`.${styles.content}`)!;
+      expect(body.textContent).toBe('你好');
+      expect(container.querySelector('[hidden]')?.textContent).toBe('Hello');
+      for (const [label, expected] of [
+        ['Copy content', 'Hello'],
+        ['Copy Markdown source', '**Hello**'],
+      ]) {
+        await act(async () =>
+          container
+            .querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!
+            .click(),
+        );
+        expect(writeText).toHaveBeenLastCalledWith(expected);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('falls back to the raw source when the original is only a blocked image', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    try {
+      const ask = answered('rewritten', false);
+      const content = '![](https://example.com/a.png)';
+      const container = render(
+        <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+          <ModReplyRowsProvider
+            messages={[{ id: 'reply', role: 'assistant', content }]}
+          >
+            <ModAssistantMessage
+              messageId="reply"
+              content={content}
+              showFooterActions
+            />
+          </ModReplyRowsProvider>
+        </ModRowAskerContext.Provider>,
+      );
+      await act(async () => {});
+      // The hidden document-mode copy source renders the fallback chip; its
+      // text must not defeat the empty-extraction raw-markdown fallback.
+      expect(container.querySelector('[hidden]')?.textContent).toBe(
+        'Failed to load',
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Copy content"]',
+          )!
+          .click(),
+      );
+      expect(writeText).toHaveBeenLastCalledWith(content);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('asks for a reply only once it is complete and on screen, and keeps the answer off it', async () => {
+    const observers: Array<
+      (entries: Array<{ isIntersecting: boolean }>) => void
+    > = [];
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(
+          callback: (entries: Array<{ isIntersecting: boolean }>) => void,
+        ) {
+          observers.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    try {
+      const ask = answered('你好');
+      const asker = new ModRowAsker(ask);
+      const reply = (isStreaming: boolean) => (
+        <ModRowAskerContext.Provider value={asker}>
+          <ModReplyRowsProvider
+            messages={[{ id: 'reply', role: 'assistant', content: 'Hello' }]}
+          >
+            <ModAssistantMessage
+              messageId="reply"
+              content="Hello"
+              isStreaming={isStreaming}
+            />
+          </ModReplyRowsProvider>
+        </ModRowAskerContext.Provider>
+      );
+      render(reply(true));
+      expect(observers).toHaveLength(0);
+      const container = render(reply(false));
+      const body = () =>
+        container.querySelector(`.${styles.content}`)!.textContent;
+      act(() => observers[0]!([{ isIntersecting: false }]));
+      expect(ask).not.toHaveBeenCalled();
+      await act(async () => observers[0]!([{ isIntersecting: true }]));
+      expect(ask).toHaveBeenCalledOnce();
+      expect(body()).toBe('你好');
+      act(() => observers[0]!([{ isIntersecting: false }]));
+      expect(body()).toBe('你好');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('draws a reply as it is without a Mod row asker', () => {
+    const container = render(<AssistantMessage content="Hello" />);
+    expect(container.querySelector(`.${styles.content}`)!.textContent).toBe(
+      'Hello',
+    );
+  });
+});
+
 describe('AssistantMessage Markdown copy', () => {
   it.each([
     ['en', 'Copy content', 'Copy Markdown source'],
@@ -781,6 +971,30 @@ describe('AssistantMessage Markdown copy', () => {
       await act(async () => button.click());
       expect(writeText).toHaveBeenCalledWith(content);
       expect(writeText).not.toHaveBeenCalledWith('');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('copies the raw source when the read-only transcript extracts an empty string', async () => {
+    vi.spyOn(
+      await import('../../utils/selectionClipboard'),
+      'getSelectedReplyText',
+    ).mockImplementation(getTranscriptSelectedReplyText);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    try {
+      const content = '![diagram](https://example.com/diagram.png)';
+      const container = render(
+        <AssistantMessage content={content} showFooterActions />,
+        'en',
+        'readonly',
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy content"]',
+      )!;
+      await act(async () => button.click());
+      expect(writeText).toHaveBeenCalledWith(content);
     } finally {
       vi.unstubAllGlobals();
     }

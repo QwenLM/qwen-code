@@ -133,17 +133,13 @@ export function mergeHeaders(
 ): Record<string, string> {
   if (!initHeaders) return transportHeaders;
 
-  const merged = { ...transportHeaders };
-  if (initHeaders instanceof Headers) {
-    initHeaders.forEach((value, key) => {
-      merged[key] = value;
-    });
-  } else if (Array.isArray(initHeaders)) {
-    for (const [key, value] of initHeaders) {
-      merged[key] = value;
-    }
-  } else {
-    Object.assign(merged, initHeaders);
-  }
-  return merged;
+  const merged = new Headers(transportHeaders);
+  new Headers(initHeaders).forEach((value, key) => {
+    merged.set(key, value);
+  });
+  const headers: Record<string, string> = {};
+  merged.forEach((value, key) => {
+    headers[key] = value;
+  });
+  return headers;
 }

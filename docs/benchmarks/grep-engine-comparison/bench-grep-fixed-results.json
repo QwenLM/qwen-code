@@ -1,0 +1,230 @@
+{
+  "repo": "qwen-code working tree (15,134 searchable corpus entries at measurement time; tracked plus untracked, so a commit SHA alone does not pin it)",
+  "commit": "9f223d508aa35d61543f00e40d92f84248fd3f99 (PR #17530 head when measured)",
+  "date": "2026-11-17T05:18:39.832Z",
+  "engines": {
+    "git": "2.50.1 (Apple Git-155)",
+    "grep": "BSD grep 2.6.0-FreeBSD",
+    "rg": "ripgrep 15.0.0"
+  },
+  "cpu": "Apple M4, 10 cores",
+  "note": "main fallback strategies FIXED (git-aware corpus); preview rg unchanged. Measured argv for 'main:system-grep FIXED' (bench-grep-fixed.mjs, mirroring grepOverFileList): grep -n -H -E --null --ignore-case -e P -- <corpus batched at 128KiB>. The --ignore-case was added by the harness to normalize against git grep and the rg -i group; at measurement time the shipped scoped argv did NOT pass it, which is why the original report's parity claim needed qualifying. During review the flag was added to the shipped argv too, so 50572 now IS the shipped behaviour and matches strategy 1's 50567 modulo binary handling (see report.html section 3(2)). Supplementary re-measurement of 2026-11-17 on this PR's worktree with the then-shipped argv (no -i; corpus 15197 entries vs 15134 here, the tree having since gained files; 8 batches): 47796 matches in 3689ms of grep time, versus 50690 matches in 6884ms with --ignore-case. Note the grep implementation matters for binary files: BSD grep writes 'Binary file <path> matches' to stdout while GNU grep writes it to stderr, so these counts are not portable to Linux. The harness corpus was the raw ls-files output; the lstat filter added during review dropped 0 of the 15197 entries in that re-measurement. 'main:JS-fallback FIXED' needs no case caveat: the JS strategy really does use new RegExp(pattern, 'i'). Its files-searched figure counts readFile calls, not enumeration - the globStream walk still traverses the whole tree (37071 entries yielded on this worktree against a 15197-entry corpus).",
+  "results": [
+    {
+      "pattern": "common word",
+      "strategy": "main:git-grep (strategy 1, unchanged)",
+      "median_ms": 666.6,
+      "min_ms": 633.8,
+      "max_ms": 771.6,
+      "samples": [771.6, 691.3, 655.7, 666.6, 633.8],
+      "matches": 50567,
+      "stdout_bytes": 5679260
+    },
+    {
+      "pattern": "common word",
+      "strategy": "main:system-grep FIXED (git-aware file list)",
+      "median_ms": 7386.9,
+      "min_ms": 7334.6,
+      "max_ms": 7479.9,
+      "samples": [7334.6, 7479.9, 7386.9, 7389.1, 7363.8],
+      "matches": 50572,
+      "stdout_bytes": 5679770,
+      "files_searched": 15134
+    },
+    {
+      "pattern": "common word",
+      "strategy": "main:JS-fallback FIXED (git-aware filter)",
+      "median_ms": 6532.5,
+      "min_ms": 6323.4,
+      "max_ms": 6677.4,
+      "samples": [6677.4, 6323.4, 6532.5],
+      "matches": 50734,
+      "stdout_bytes": 0,
+      "files_searched": 15134
+    },
+    {
+      "pattern": "common word",
+      "strategy": "preview:rg files_with_matches (default)",
+      "median_ms": 236.9,
+      "min_ms": 235.9,
+      "max_ms": 246.4,
+      "samples": [246.4, 240.6, 236.2, 235.9, 236.9],
+      "matches": 7147,
+      "stdout_bytes": 412988
+    },
+    {
+      "pattern": "common word",
+      "strategy": "preview:rg content --json",
+      "median_ms": 143.3,
+      "min_ms": 138.6,
+      "max_ms": 169.6,
+      "samples": [138.6, 143.3, 140.4, 153.1, 169.6],
+      "matches": 47678,
+      "stdout_bytes": 16234790
+    },
+    {
+      "pattern": "common word",
+      "strategy": "preview:rg content --json -i (normalized)",
+      "median_ms": 146.4,
+      "min_ms": 139.8,
+      "max_ms": 335.3,
+      "samples": [141.6, 146.4, 139.8, 165.2, 335.3],
+      "matches": 50567,
+      "stdout_bytes": 17125797
+    },
+    {
+      "pattern": "common word",
+      "strategy": "preview:rg files -i (normalized)",
+      "median_ms": 241.6,
+      "min_ms": 236.6,
+      "max_ms": 251,
+      "samples": [236.6, 239.2, 241.9, 241.6, 251],
+      "matches": 7228,
+      "stdout_bytes": 418510
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "main:git-grep (strategy 1, unchanged)",
+      "median_ms": 2066.1,
+      "min_ms": 2031,
+      "max_ms": 2147.4,
+      "samples": [2037.2, 2139.3, 2031, 2066.1, 2147.4],
+      "matches": 114,
+      "stdout_bytes": 16049
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "main:system-grep FIXED (git-aware file list)",
+      "median_ms": 11292.1,
+      "min_ms": 10778,
+      "max_ms": 11438.8,
+      "samples": [10778, 11292.1, 11438.8, 11282.2, 11293.7],
+      "matches": 114,
+      "stdout_bytes": 16049,
+      "files_searched": 15134
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "main:JS-fallback FIXED (git-aware filter)",
+      "median_ms": 6709.9,
+      "min_ms": 6637.2,
+      "max_ms": 7285.8,
+      "samples": [6709.9, 6637.2, 7285.8],
+      "matches": 114,
+      "stdout_bytes": 0,
+      "files_searched": 15134
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "preview:rg files_with_matches (default)",
+      "median_ms": 139.1,
+      "min_ms": 138.9,
+      "max_ms": 149,
+      "samples": [138.9, 139.1, 141.4, 149, 139.1],
+      "matches": 32,
+      "stdout_bytes": 1776
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "preview:rg content --json",
+      "median_ms": 138.1,
+      "min_ms": 135.5,
+      "max_ms": 140.9,
+      "samples": [138.1, 135.6, 139.2, 135.5, 140.9],
+      "matches": 114,
+      "stdout_bytes": 49455
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "preview:rg content --json -i (normalized)",
+      "median_ms": 144.4,
+      "min_ms": 139,
+      "max_ms": 242,
+      "samples": [242, 174.2, 139, 142.1, 144.4],
+      "matches": 114,
+      "stdout_bytes": 49457
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "preview:rg files -i (normalized)",
+      "median_ms": 139.8,
+      "min_ms": 138.2,
+      "max_ms": 143.9,
+      "samples": [142.3, 138.2, 139.8, 143.9, 138.5],
+      "matches": 32,
+      "stdout_bytes": 1776
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "main:git-grep (strategy 1, unchanged)",
+      "median_ms": 385.2,
+      "min_ms": 376.4,
+      "max_ms": 421,
+      "samples": [376.4, 397.7, 421, 385.2, 384.2],
+      "matches": 0,
+      "stdout_bytes": 0
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "main:system-grep FIXED (git-aware file list)",
+      "median_ms": 5687.8,
+      "min_ms": 5423.5,
+      "max_ms": 5734.6,
+      "samples": [5734.6, 5721.8, 5687.8, 5618.4, 5423.5],
+      "matches": 0,
+      "stdout_bytes": 0,
+      "files_searched": 15134
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "main:JS-fallback FIXED (git-aware filter)",
+      "median_ms": 5475.9,
+      "min_ms": 5423.6,
+      "max_ms": 5521.8,
+      "samples": [5521.8, 5423.6, 5475.9],
+      "matches": 0,
+      "stdout_bytes": 0,
+      "files_searched": 15134
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "preview:rg files_with_matches (default)",
+      "median_ms": 143.6,
+      "min_ms": 139.7,
+      "max_ms": 193.6,
+      "samples": [193.6, 142, 139.7, 152.5, 143.6],
+      "matches": 0,
+      "stdout_bytes": 0
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "preview:rg content --json",
+      "median_ms": 139.9,
+      "min_ms": 139.3,
+      "max_ms": 144.4,
+      "samples": [142.3, 139.3, 139.9, 139.7, 144.4],
+      "matches": 0,
+      "stdout_bytes": 278
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "preview:rg content --json -i (normalized)",
+      "median_ms": 169.7,
+      "min_ms": 139.4,
+      "max_ms": 179.3,
+      "samples": [144.7, 139.4, 169.7, 179.3, 169.9],
+      "matches": 0,
+      "stdout_bytes": 278
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "preview:rg files -i (normalized)",
+      "median_ms": 139.4,
+      "min_ms": 134.9,
+      "max_ms": 142.8,
+      "samples": [134.9, 142.8, 139.4, 138.6, 142.2],
+      "matches": 0,
+      "stdout_bytes": 0
+    }
+  ]
+}

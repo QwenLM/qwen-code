@@ -114,6 +114,12 @@ export interface TeamSinkDeps {
     params: RequestPermissionRequest,
     signal: AbortSignal,
   ) => Promise<RequestPermissionResponse>;
+  /**
+   * Applies the host's switch-to-Default choice to the shared session. A
+   * teammate's scheduler owns only its child-local Config, so the session
+   * half must happen on the host before the resumed tool body runs.
+   */
+  readonly switchToDefaultMode: () => Promise<void>;
 }
 
 /**
@@ -303,6 +309,19 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
             .respond(ToolConfirmationOutcome.Cancel)
             .catch((respondError) => swallow(respondError, 'Cancel'));
           return;
+        }
+        if (
+          outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault &&
+          !signal.aborted
+        ) {
+          // Keep the original outcome for the teammate scheduler, which
+          // normalizes it and switches its own derived Config. The session
+          // half happens first so a later tool-body rejection cannot skip it.
+          try {
+            await deps.switchToDefaultMode();
+          } catch (error) {
+            swallow(error, 'switch to default');
+          }
         }
         // Past this point the host *has* answered, so a rejection from
         // `respond` is the resumed tool body failing, not an unanswered

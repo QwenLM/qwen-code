@@ -947,6 +947,17 @@ export class JavaManagedAgentClient {
     return this.post<ManagedArtifactPage>('/artifacts/query', request, signal);
   }
 
+  listWorkspaceArtifacts(
+    request: { workspaceId: string; cursor?: string; limit?: number },
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedArtifactPage>(
+      '/workspaces/artifacts/query',
+      request,
+      signal,
+    );
+  }
+
   getArtifact(sessionId: string, artifactId: string, signal?: AbortSignal) {
     return this.post<ManagedArtifactResponse>(
       '/artifacts/get',

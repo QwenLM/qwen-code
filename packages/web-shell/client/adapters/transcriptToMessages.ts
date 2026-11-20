@@ -13,7 +13,7 @@ import {
   QWEN_AGENT_MESSAGE_META_KEY,
 } from '@qwen-code/sdk/daemon';
 import type {
-  DaemonInputAnnotation,
+  DaemonBackgroundTurn,
   DaemonLoopStop,
   QwenAgentMessageMeta,
   DaemonTranscriptBlock,
@@ -57,7 +57,6 @@ type DaemonPermissionTranscriptBlock = Extract<
 type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
   meta?: {
     source?: unknown;
-    inputAnnotations?: unknown;
   };
 };
 
@@ -150,10 +149,21 @@ function collectBackgroundTaskUpdates(
     if (
       !turn ||
       completed ||
-      ('parentToolCallId' in block && block.parentToolCallId) ||
-      tasksByExecution.has(turn.turnId)
+      ('parentToolCallId' in block && block.parentToolCallId)
     )
       continue;
+    if (tasksByExecution.has(turn.turnId)) {
+      // A paginated transcript can keep the turn and its notification after
+      // the earlier completion block has scrolled out of the window.
+      if (
+        source === 'background_notification' &&
+        taskId === turn.taskId &&
+        task?.['fromSession']
+      ) {
+        tasksByExecution.set(turn.turnId, task);
+      }
+      continue;
+    }
     lastConsumedTaskIndex.set(turn.taskId, index);
     automaticTaskIds.add(turn.taskId);
     const result = latestTasks.get(turn.taskId);
@@ -566,7 +576,7 @@ export function transcriptBlocksToDaemonMessages(
   // message instead of being appended to text that appeared before the tool.
   let needsNewContentMessage = false;
   let previousPromptId: string | undefined;
-  const backgroundResultMarkers = new Set<string>();
+  const backgroundTurns = new Map<string, DaemonBackgroundTurn>();
   const loadedToolIds = new Set(
     blocks.flatMap((block) =>
       block.kind === 'tool' ? [block.toolCallId] : [],
@@ -604,9 +614,10 @@ export function transcriptBlocksToDaemonMessages(
     const blockMeta = getRecord(
       (block as ExtendedDaemonTextTranscriptBlock).meta,
     );
-    const backgroundTurn = parseDaemonBackgroundTurn(
-      block.backgroundTurn ?? blockMeta?.['backgroundTurn'],
-    );
+    const backgroundTurn =
+      parseDaemonBackgroundTurn(
+        block.backgroundTurn ?? blockMeta?.['backgroundTurn'],
+      ) ?? (block.promptId ? backgroundTurns.get(block.promptId) : undefined);
     const blockTeammate = teammateOfAgent(
       (block as DaemonTextTranscriptBlock).agent,
     );
@@ -652,11 +663,13 @@ export function transcriptBlocksToDaemonMessages(
         block.kind === 'status' && block.source === 'background_task_completed'
       ) &&
       !('parentToolCallId' in block && block.parentToolCallId) &&
-      !backgroundResultMarkers.has(backgroundTurn.turnId)
+      !backgroundTurns.has(backgroundTurn.turnId)
     ) {
-      backgroundResultMarkers.add(backgroundTurn.turnId);
+      backgroundTurns.set(backgroundTurn.turnId, backgroundTurn);
       const turnTeammate = teammateByTask.get(
-        (backgroundTurn as { taskId?: string }).taskId ?? '',
+        'taskId' in backgroundTurn && typeof backgroundTurn.taskId === 'string'
+          ? backgroundTurn.taskId
+          : '',
       );
       messages.push({
         id: `background-turn:${backgroundTurn.turnId}`,
@@ -761,9 +774,8 @@ export function transcriptBlocksToDaemonMessages(
           (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
         );
         const source = getString(meta, 'source');
-        const inputAnnotations = Array.isArray(meta?.inputAnnotations)
-          ? (meta.inputAnnotations as DaemonInputAnnotation[])
-          : undefined;
+        const sentFrom = textBlock.meta?.sourceAnnotation;
+        const inputAnnotations = textBlock.meta?.inputAnnotations;
         const images = textBlock.images?.map((img) => ({
           data: img.data,
           mimeType: img.mimeType || 'image/*',
@@ -800,7 +812,8 @@ export function transcriptBlocksToDaemonMessages(
           timestamp: blockTime,
           sourceBlockIds: [block.id],
           ...(source ? { source } : {}),
-          ...(inputAnnotations ? { inputAnnotations } : {}),
+          ...(inputAnnotations?.length ? { inputAnnotations } : {}),
+          ...(sentFrom ? { sentFrom } : {}),
           ...(agentMessage ? { agentMessage } : {}),
           ...(agentMessage?.author
             ? {
@@ -824,6 +837,7 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'assistant': {
         const textBlock = block as DaemonTextTranscriptBlock;
+        const { parentToolCallId } = textBlock;
         const notice = classifyAssistantSystemNotice(textBlock);
         if (notice) {
           currentAssistantIdx = null;
@@ -845,6 +859,7 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
         const meta = getRecord(textBlock.meta);
+        const source = getString(meta, 'source');
         const reportedArtifacts = readReportedArtifacts(meta ?? undefined);
         if (notice?.source === 'vision_bridge_notice') {
           messages.push({
@@ -900,7 +915,7 @@ export function transcriptBlocksToDaemonMessages(
           });
           break;
         }
-        const agentMessage = textBlock.parentToolCallId
+        const agentMessage = parentToolCallId
           ? undefined
           : agentMessageOfBlock(textBlock, meta);
         if (agentMessage?.kind === 'agent_message') {
@@ -935,8 +950,8 @@ export function transcriptBlocksToDaemonMessages(
         }
         if (!textBlock.text && !textBlock.usage) break;
 
-        const parentSubAgent = textBlock.parentToolCallId
-          ? toolsByCallId.get(textBlock.parentToolCallId)
+        const parentSubAgent = parentToolCallId
+          ? toolsByCallId.get(parentToolCallId)
           : undefined;
         if (parentSubAgent) {
           appendSubContent(parentSubAgent, textBlock.text, block.id);
@@ -984,6 +999,10 @@ export function transcriptBlocksToDaemonMessages(
                   : `${block.id}-t-${messages.length}`,
                 role: 'assistant',
                 content: seg.text,
+                ...(source ? { source } : {}),
+                ...(parentToolCallId ? { parentToolCallId } : {}),
+                isStreaming: textBlock.streaming,
+                ...(backgroundTurn ? { backgroundTurn } : {}),
                 timestamp: blockTime,
                 sourceBlockIds: [block.id],
               });
@@ -1016,13 +1035,19 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
 
-        const target =
+        const previousAssistant =
           currentAssistantIdx !== null
             ? messages[currentAssistantIdx]
             : undefined;
+        const target =
+          previousAssistant?.role === 'assistant' &&
+          previousAssistant.parentToolCallId === parentToolCallId
+            ? previousAssistant
+            : undefined;
         if (
           target &&
-          target.role === 'assistant' &&
+          (target.source === 'slash_command') ===
+            (source === 'slash_command') &&
           !needsNewContentMessage &&
           textBlock.segmentId === undefined &&
           !isTextBlockEmpty(textBlock)
@@ -1053,7 +1078,10 @@ export function transcriptBlocksToDaemonMessages(
             id: block.id,
             role: 'assistant',
             content: textBlock.text,
+            ...(source ? { source } : {}),
+            ...(parentToolCallId ? { parentToolCallId } : {}),
             ...(reportedArtifacts.length ? { reportedArtifacts } : {}),
+            ...(backgroundTurn ? { backgroundTurn } : {}),
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
             sourceBlockIds: [block.id],
@@ -1065,7 +1093,7 @@ export function transcriptBlocksToDaemonMessages(
           currentAssistantIdx = messages.length - 1;
           currentThinkingIdx = null;
           needsNewContentMessage = false;
-        } else if (textBlock.usage && target && target.role === 'assistant') {
+        } else if (textBlock.usage && target) {
           const usage = mergeAssistantUsage(target.usage, textBlock.usage);
           messages[currentAssistantIdx!] = {
             ...target,
@@ -1433,6 +1461,7 @@ export function transcriptBlocksToDaemonMessages(
           retryable:
             errorBlock.source === 'turn_error' &&
             isRetryableTurnErrorKind(errorKind),
+          ...(backgroundTurn ? { backgroundTurn } : {}),
           timestamp: blockTime,
           sourceBlockIds: [block.id],
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
@@ -1449,6 +1478,7 @@ export function transcriptBlocksToDaemonMessages(
           content: promptCancelledText,
           variant: 'info',
           source: 'prompt_cancelled',
+          ...(backgroundTurn ? { backgroundTurn } : {}),
           ...(block.elapsedMs !== undefined
             ? { data: { elapsedMs: block.elapsedMs } }
             : {}),

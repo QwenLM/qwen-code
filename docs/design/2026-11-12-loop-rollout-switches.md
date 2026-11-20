@@ -68,7 +68,7 @@ The Linux matrix gains a third `agent-loop` value, `kernel`, and the OpenTUI job
 
 1. the environment variable, when it addresses that surface;
 2. the explicit setting (`experimental.unifiedAgentLoop` / `experimental.eventBusAgentLoop`), when set;
-3. the surface's built-in default — `true` for headless, the Ink TUI and AgentCore, `false` for every other surface; each rollout PR flips one surface's default and only that surface's.
+3. the surface's built-in default — `true` for headless, ACP, the Ink TUI and AgentCore, `false` for every other surface; each rollout PR flips one surface's default and only that surface's.
 
 **Surface identifiers.** `headless`, `acp`, `ink`, `opentui`, `agent-core`, `speculation`, `hosted`. They name the loop entry points, not the packages: the Ink TUI is `ink`, the OpenTUI renderer is `opentui`, subagents on AgentCore are `agent-core`, and the Hosted Harness is `hosted` — it opens model rounds only, while its journaled tool dispatch stays in `hosted-harness-model.ts`.
 

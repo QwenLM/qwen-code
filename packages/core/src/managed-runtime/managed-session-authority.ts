@@ -58,7 +58,6 @@ import {
   MANAGED_SESSION_FORMAT_VERSION,
   MANAGED_SESSION_HEADER_SUBTYPE,
   MANAGED_SESSION_LIMITS,
-  MANAGED_SESSION_MINIMUM_READER,
   ManagedSessionRecordError,
   ManagedSessionWritesStoppedError,
   assertManagedSessionChildContinuationEnabled,
@@ -459,6 +458,9 @@ export interface OpenManagedSessionAuthorityOptions {
   readonly retainVerifiedResources?: boolean;
 }
 
+/** How long resume waits for a settle answer before its one extra read. */
+const UNSETTLED_RESUME_BUDGET_MS = 30_000;
+
 /**
  * The semantic authority for one Managed Session. It validates complete
  * transactions, then gives them to one journal handle; the selected store owns
@@ -496,16 +498,17 @@ export class LocalManagedSessionAuthority {
   };
   /**
    * The transaction whose append outcome the journal has not settled yet.
-   * While it is held the log is not dead: the next append asks the journal
-   * whether these records landed and applies them here if they did, so a
-   * writer lease that lapsed under an outage can re-attest instead of
-   * fencing the Session for good.
+   * While it is held the log is not dead: resume asks the journal whether
+   * these exact bytes landed and, when the head has not moved, submits them
+   * again under the same command. A writer lease that lapsed under an outage
+   * can re-attest instead of fencing the Session for good.
    */
   private unsettledAppend:
     | {
         readonly key: string;
         readonly marker: ManagedSessionCommitMarker;
         readonly events: readonly ManagedSessionEvent[];
+        readonly records: readonly unknown[];
         readonly branches: ReadonlySet<string>;
         readonly lastRecordUuid: string;
         readonly extension?: {
@@ -718,7 +721,6 @@ export class LocalManagedSessionAuthority {
       }
       header = parseManagedSessionHeader({
         formatVersion: MANAGED_SESSION_FORMAT_VERSION,
-        minimumReader: MANAGED_SESSION_MINIMUM_READER,
         sessionKey: options.sessionKey,
         engine: 'managed',
         definitionRef: options.create.definitionRef,
@@ -3502,6 +3504,9 @@ export class LocalManagedSessionAuthority {
           (event.kind === 'context.compacted' &&
             (!extension ||
               event.payload['compactionId'] !== maintenance.operationId)) ||
+          // A wake source is admitted during maintenance: the pump defers
+          // its turn until compaction settles, so refusing it would stall a
+          // delivery every sibling source parks instead.
           (event.kind === 'input.accepted' &&
             !isChildNotificationSource(source) &&
             ![
@@ -3510,6 +3515,7 @@ export class LocalManagedSessionAuthority {
               'channel',
               'session_message',
               'loop',
+              'pr_event',
             ].includes(String(source)))
         )
           throw new ManagedSessionConflictError(
@@ -3616,18 +3622,20 @@ export class LocalManagedSessionAuthority {
         cause instanceof ManagedSessionAppendUnsettledError &&
         this.journal.settleAppend !== undefined
       ) {
-        // The store can prove the outcome later from its durable head, so keep
-        // the exact attempt instead of fencing a journal whose writer lease a
-        // recoverable outage lapsed.
+        // The store can prove the outcome from its durable head, so keep the
+        // exact bytes. Resume submits them again when the head has not moved;
+        // re-encoding would mint a new record digest and conflict with a
+        // commit that lands after this acknowledgement was lost.
         this.unsettledAppend = {
           key,
           marker,
           events,
+          records,
           branches,
           lastRecordUuid,
           ...(extension === undefined ? {} : { extension }),
         };
-        throw cause;
+        return await this.resumeUnsettledAppend();
       }
       // Records may already be on disk, so the sequences this transaction
       // claimed are spent whether or not the marker landed.
@@ -3696,15 +3704,31 @@ export class LocalManagedSessionAuthority {
 
   /**
    * Resolves the append the journal could not acknowledge. `landed` applies
-   * those records here, `absent` drops them, and an unsettled answer keeps the
-   * attempt so the next append asks again. Any other failure proves the log
-   * cannot be trusted and fences it for good.
+   * those records here. `absent` submits the same bytes once: the head not
+   * having moved is not proof the holder rolled back, and dropping the batch
+   * would fence the next commit if that holder then lands. An unsettled
+   * answer keeps the attempt so the next append asks again. A definite
+   * rejection drops the batch without stopping the writer. Other failures
+   * prove the log cannot be trusted and fence it for good.
    */
   private async settleUnsettledAppend(): Promise<void> {
-    const pending = this.unsettledAppend!;
+    if (this.unsettledAppend === undefined) return;
+    try {
+      await this.resumeUnsettledAppend();
+    } catch (cause) {
+      if (!(cause instanceof ManagedSessionCommitRejectedError)) throw cause;
+    }
+  }
+
+  private async resumeUnsettledAppend(): Promise<ManagedSessionCommitReceipt> {
+    const pending = this.unsettledAppend;
+    if (pending === undefined || this.journal.settleAppend === undefined) {
+      throw new ManagedSessionRecordError('no unsettled append to resume.');
+    }
+    const deadline = this.now() + UNSETTLED_RESUME_BUDGET_MS;
     let outcome: 'landed' | 'absent';
     try {
-      outcome = await this.journal.settleAppend!();
+      outcome = await this.settleUntilKnown(deadline);
     } catch (cause) {
       if (cause instanceof ManagedSessionAppendUnsettledError) throw cause;
       this.unsettledAppend = undefined;
@@ -3712,16 +3736,47 @@ export class LocalManagedSessionAuthority {
         cause instanceof Error ? cause : new Error(String(cause));
       throw cause;
     }
+    if (outcome === 'absent') {
+      try {
+        await this.journal.appendTransaction(pending.records);
+      } catch (cause) {
+        if (cause instanceof ManagedSessionAppendUnsettledError) throw cause;
+        this.unsettledAppend = undefined;
+        if (cause instanceof ManagedSessionCommitRejectedError) throw cause;
+        this.writeFailure =
+          cause instanceof Error ? cause : new Error(String(cause));
+        throw cause;
+      }
+    }
     this.unsettledAppend = undefined;
-    if (outcome === 'landed') {
-      this.applyCommitted(
-        pending.key,
-        pending.marker,
-        pending.events,
-        pending.branches,
-        pending.lastRecordUuid,
-        pending.extension,
-      );
+    return this.applyCommitted(
+      pending.key,
+      pending.marker,
+      pending.events,
+      pending.branches,
+      pending.lastRecordUuid,
+      pending.extension,
+    );
+  }
+
+  private async settleUntilKnown(
+    deadline: number,
+  ): Promise<'landed' | 'absent'> {
+    let extraRead = true;
+    for (;;) {
+      try {
+        return await this.journal.settleAppend!();
+      } catch (cause) {
+        if (!(cause instanceof ManagedSessionAppendUnsettledError)) {
+          throw cause;
+        }
+        if (this.now() >= deadline) {
+          if (!extraRead) throw cause;
+          extraRead = false;
+          continue;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
     }
   }
 
@@ -3743,6 +3798,14 @@ export class LocalManagedSessionAuthority {
     readonly leaseDurationMs: number;
     readonly subject?: ManagedSessionSubject;
   }): Promise<{ activationId: string; epoch: number }> {
+    // Settlement can land a pending install and advance the epoch; settle
+    // first so the epoch assigned below is the one the log will expect.
+    if (
+      this.unsettledAppend !== undefined ||
+      this.unsettledActivationRenewal !== undefined
+    ) {
+      await this.settlePendingAppend();
+    }
     // The install's command identity is its activation ID, so a repeated ID
     // would replay the earlier receipt without appending, and the epoch below
     // would name an activation the log never recorded. Refuse it before the

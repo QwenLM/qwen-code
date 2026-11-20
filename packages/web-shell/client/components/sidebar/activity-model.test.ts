@@ -73,6 +73,24 @@ describe('activity model', () => {
       'unread',
     );
     expect(activityState(entry('error', { hasTurnError: true }))).toBe('error');
+    // The monitor shape: background work the daemon grades idle is still
+    // active, and the Activity archive confirmation reads this same predicate.
+    expect(
+      activityState(
+        entry('monitor', {
+          hasRunningBackgroundTasks: true,
+          activeWorkState: 'idle',
+        }),
+      ),
+    ).toBe('active');
+    expect(
+      activityState(
+        entry('finished', {
+          hasRunningBackgroundTasks: false,
+          activeWorkState: 'idle',
+        }),
+      ),
+    ).toBe('idle');
   });
 
   it('uses only the shared in-memory completion flag, not historical timestamps', () => {
@@ -147,6 +165,36 @@ describe('activity model', () => {
         scheduled: true,
       }),
     ).toBe(true);
+  });
+
+  it('can include child sessions without relaxing other eligibility rules', () => {
+    expect(
+      isActivityEligible(
+        entry('child', { parentSessionId: 'parent' }),
+        defaults,
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      isActivityEligible(
+        entry('scheduled-child', {
+          parentSessionId: 'parent',
+          sourceType: 'scheduled_task',
+        }),
+        defaults,
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      isActivityEligible(
+        entry('voice-child', {
+          parentSessionId: 'parent',
+          sourceId: 'realtime_voice:call',
+        }),
+        defaults,
+        true,
+      ),
+    ).toBe(false);
   });
 
   it('uses seven calendar days only for recent and deduplicates sections', () => {
