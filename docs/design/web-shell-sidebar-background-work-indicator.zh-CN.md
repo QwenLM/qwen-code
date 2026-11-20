@@ -42,7 +42,7 @@
 - 会话已不再 live（被关闭、被回收，或 daemon 重启后）而 detached 后台 shell 仍在
   跑。shell 注册表是纯内存的，因此客户端根本拿不到
   `hasRunningBackgroundTasks`。证据：远端某会话的 shell pid 已存活约 26 小时，
-  但它不在 live-state 里，目录行也没有后台字段。
+  但它不在 live-state 里，目录行也没有后台字段。跟踪于 #17819。
 - 重新评定 Session Overview 面板卡片的等级。「仅后台」会话在那里仍读作 `idle`，
   从而保持面板的排序与显示状态不变；它的两个破坏性卡片动作另行加闸（见下），
   因为只靠该等级会把它们放出来。

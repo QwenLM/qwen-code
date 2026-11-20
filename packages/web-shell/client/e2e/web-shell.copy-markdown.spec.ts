@@ -23,6 +23,63 @@ const plainContent =
 const content =
   '## Markdown example\n\nCopy **formatted text** and [a link](https://example.com).\n\n- First item\n- Second item\n\n```ts\nconst answer = 42;\n```';
 
+test('a Mod rewrite preserves both original reply copy formats', async ({
+  page,
+  context,
+}, info) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  const scenario = createWebShellDaemonScenario({
+    events: [
+      userTextEvent('Show a Markdown example.', { id: 1 }),
+      assistantTextEvent(content, { id: 2 }),
+      turnCompleteEvent('copy-mod-row', { id: 3 }),
+    ],
+  });
+  scenario.capabilities.features.push('session_mod_rows');
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(info.project.use.baseURL),
+  });
+  await page.route(
+    `**/session/${scenario.sessionId}/mod-row`,
+    async (route) => {
+      expect(route.request().postDataJSON()).toEqual({
+        component: 'AssistantMessage',
+        props: { text: content, isFirstOfReply: true },
+      });
+      await route.fulfill({
+        json: {
+          status: 'answered',
+          props: { text: '## Rewritten reply', isFirstOfReply: true },
+        },
+      });
+    },
+  );
+  await page.goto(`/session/${scenario.sessionId}?lang=en`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({
+      sessionId: scenario.sessionId,
+      replayedCount: scenario.events.length,
+    }),
+  );
+
+  const row = page.locator('[data-web-shell-message-row]').filter({
+    has: page.getByRole('heading', { name: 'Rewritten reply' }),
+  });
+  await expect(row).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Markdown example' }),
+  ).toHaveCount(0);
+  await row.getByRole('button', { name: 'Copy content', exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(plainContent);
+  await row.getByRole('button', { name: 'Copy Markdown source' }).click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(content);
+});
+
 for (const language of ['en', 'zh-CN'] as const) {
   for (const theme of ['light', 'dark'] as const) {
     test(`assistant footer copies complete Markdown beside Copy (${language}, ${theme})${language === 'en' && theme === 'light' ? ' @smoke' : ''}`, async ({

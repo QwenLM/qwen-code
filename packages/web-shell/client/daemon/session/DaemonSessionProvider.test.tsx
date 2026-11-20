@@ -27,6 +27,7 @@ import {
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
 import { SessionRecoveryBanner } from '../../components/SessionRecoveryBanner.js';
+import { ModRowAskerContext } from '../../components/messages/mod-rows.js';
 import type { McpAppDisplay } from '../../components/messages/McpApp.js';
 import {
   GeneratedUiInstanceStore,
@@ -38,6 +39,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonEvent,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonSessionContextStatus,
   NonBlockingPromptAccepted,
   DaemonSseConnectReason,
@@ -52,7 +55,9 @@ import {
   DaemonCapabilityMissingError,
   DaemonHttpError,
   DaemonStandaloneCreationOutcomeUnknownError,
+  createDaemonTranscriptStore,
   estimateDaemonTranscriptBlockBytes,
+  normalizeDaemonEvent,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from '@qwen-code/sdk/daemon';
 import {
@@ -113,6 +118,7 @@ interface MockSession {
   replayPartial?: boolean;
   replayError?: string;
   eventEpoch?: string;
+  askModRow?: (row: DaemonModRow) => Promise<DaemonModRowAnswer>;
   session?: Record<string, unknown>;
   client?: MockClient;
   lastEventId?: number;
@@ -677,6 +683,56 @@ describe('DaemonSessionProvider', () => {
       if (signal?.aborted) resolve();
       else signal?.addEventListener('abort', () => resolve(), { once: true });
     });
+
+  it('discards Mod row answers and unhooked state when a saved session reopens', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_mod_rows'],
+    });
+    const beforeClose = vi.fn(async () => ({ status: 'unhooked' as const }));
+    const afterReopen = vi.fn(async () => ({
+      status: 'answered' as const,
+      props: { text: 'Rewritten' },
+    }));
+    sdkMocks.sessions.push(createMockSession({ askModRow: beforeClose }));
+    let current: ContextType<typeof ModRowAskerContext>;
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      current = useContext(ModRowAskerContext);
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const row: DaemonModRow = {
+      component: 'AssistantMessage',
+      props: { text: 'Original', isFirstOfReply: true },
+    };
+    const before = requireActions(current);
+    before.watch(row, () => {});
+    await flushPromises();
+    expect(beforeClose).toHaveBeenCalledWith(row);
+
+    await act(async () => requireActions(actions).clearSession());
+    expect(current).toBeUndefined();
+    sdkMocks.sessions.push(
+      createMockSession({ eventEpoch: 'epoch-2', askModRow: afterReopen }),
+    );
+    let reload!: Promise<void>;
+    act(() => {
+      reload = requireActions(actions).loadSession('session-1');
+    });
+    await act(async () => {
+      await reload;
+      await flushPromises();
+    });
+
+    const reopened = requireActions(current);
+    expect(reopened).not.toBe(before);
+    reopened.watch(row, () => {});
+    await flushPromises();
+    expect(afterReopen).toHaveBeenCalledWith(row);
+    expect(reopened.answer(row)).toEqual({ text: 'Rewritten' });
+  });
 
   it.each(['request', 'tool'] as const)(
     'bridges trajectory replay and metadata-only events on the existing subscription (%s)',
@@ -24243,6 +24299,144 @@ describe('DaemonSessionProvider', () => {
     expect(notices.at(-1)).toBeUndefined();
   });
 
+  it.each(['count', 'bytes'])(
+    'keeps loading older records by reclaiming replayed Mod log %s capacity',
+    async (limit) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_transcript_pagination'],
+      });
+      const sessionId = 'session-paged-with-mod-logs';
+      const modLogText = (id: number) => `log ${id} while generating an answer`;
+      const compactedReplay: DaemonEvent[] = [
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Recent answer' },
+            _meta: {
+              'qwen.session.recordId': 'record-1',
+              qwenTranscript: { sourceRecordIds: ['record-1'] },
+            },
+          },
+        },
+        ...[1, 2, 3].map(
+          (id): DaemonEvent => ({
+            v: 1,
+            id,
+            type: 'mod_log',
+            data: { sessionId, plugin: 'mod', text: modLogText(id) },
+          }),
+        ),
+      ];
+      const replayStore = createDaemonTranscriptStore();
+      replayStore.dispatch(
+        compactedReplay.flatMap((event) => normalizeDaemonEvent(event)),
+      );
+      const replay = replayStore.getSnapshot();
+      const byteCap =
+        replay.retainedBytes -
+        estimateDaemonTranscriptBlockBytes(replay.blocks[1]!);
+      const session = createMockSession({
+        sessionId,
+        historyHasMore: true,
+        lastEventId: 3,
+        replaySnapshot: { compactedReplay, liveJournal: [] },
+      });
+      sdkMocks.sessions.push(session);
+      const page = (recordId: string, content: string, hasMore: boolean) => ({
+        v: 1,
+        sessionId,
+        events: [
+          {
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: content },
+              _meta: {
+                'qwen.session.recordId': recordId,
+                qwenTranscript: { sourceRecordIds: [recordId] },
+              },
+            },
+          },
+        ],
+        hasMore,
+      });
+      sdkMocks.getSessionTranscriptPage
+        .mockResolvedValueOnce(page('record-0', 'Older prompt', true))
+        .mockResolvedValueOnce(page('record-before', 'Oldest prompt', false));
+      let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+      let state: ReturnType<typeof useDaemonTranscriptState> | undefined;
+
+      function Harness() {
+        history = useDaemonTranscriptHistory();
+        state = useDaemonTranscriptState();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        historyPageSize: 25,
+        maxBlocks: limit === 'count' ? 3 : 8,
+        maxRetainedBytes: limit === 'bytes' ? byteCap : undefined,
+      });
+
+      expect(state?.blocks).toMatchObject([
+        { kind: 'assistant', text: 'Recent answer' },
+        { kind: 'status', text: `[Mod mod] ${modLogText(2)}` },
+        { kind: 'status', text: `[Mod mod] ${modLogText(3)}` },
+      ]);
+      if (limit === 'bytes') expect(state?.retainedBytes).toBe(byteCap);
+      expect(history).toMatchObject({ hasMore: true, capacityReached: false });
+
+      await act(async () => {
+        await history?.loadMore();
+        await flushPromises();
+      });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+        1,
+        sessionId,
+        { beforeRecordId: 'record-1', limit: 25, clientId: session.clientId },
+      );
+      expect(state?.blocks).toMatchObject([
+        { kind: 'user', text: 'Older prompt' },
+        { kind: 'assistant', text: 'Recent answer' },
+        { kind: 'status', text: `[Mod mod] ${modLogText(3)}` },
+      ]);
+      expect(history).toMatchObject({ hasMore: true, capacityReached: false });
+
+      await act(async () => {
+        await history?.loadMore();
+        await flushPromises();
+      });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+        2,
+        sessionId,
+        { beforeRecordId: 'record-0', limit: 25, clientId: session.clientId },
+      );
+      expect(state?.blocks).toMatchObject([
+        { kind: 'user', text: 'Oldest prompt' },
+        { kind: 'user', text: 'Older prompt' },
+        { kind: 'assistant', text: 'Recent answer' },
+      ]);
+      expect(state!.blockIndexById).toEqual(
+        Object.fromEntries(
+          state!.blocks.map((block, index) => [block.id, index]),
+        ),
+      );
+      expect(state!.retainedBytes).toBe(
+        state!.blocks.reduce(
+          (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+          0,
+        ),
+      );
+      expect(state?.lastEventId).toBe(3);
+      expect(history?.hasMore).toBe(false);
+    },
+  );
+
   it('trims an oversized initial replay to the block cap and re-anchors older pagination', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
@@ -24529,7 +24723,11 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
-  it.each(['same anchor', 'older prefix'] as const)(
+  it.each([
+    'same anchor',
+    'older prefix',
+    'same anchor with Mod logs',
+  ] as const)(
     'reopens a rejected history page after authoritative rewind with %s',
     async (replacement) => {
       sdkMocks.capabilities.mockResolvedValue({
@@ -24559,14 +24757,29 @@ describe('DaemonSessionProvider', () => {
         chunk(id, 'user_message_chunk', `${name}-user`),
         chunk(id + 1, 'agent_message_chunk', `${name}-answer`),
       ];
+      const sessionId = 'rewind-capacity';
+      const withModLogs = replacement === 'same anchor with Mod logs';
+      const modLogs = (firstId: number): DaemonEvent[] =>
+        withModLogs
+          ? ['first', 'second'].map((text, index) => ({
+              v: 1,
+              id: firstId + index,
+              type: 'mod_log',
+              data: { sessionId, plugin: 'mod', text },
+            }))
+          : [];
       const rewind = createDeferred<void>();
-      const prefixName = replacement === 'same anchor' ? 'root' : 'earlier';
-      const prefix = turn(50, prefixName);
+      const prefixName = replacement === 'older prefix' ? 'earlier' : 'root';
+      const prefix = [...turn(50, prefixName), ...modLogs(52)];
       const session = createMockSession({
-        sessionId: 'rewind-capacity',
+        sessionId,
         historyHasMore: true,
         replaySnapshot: {
-          compactedReplay: [...turn(1, 'root'), ...turn(3, 'target')],
+          compactedReplay: [
+            ...turn(1, 'root'),
+            ...modLogs(3),
+            ...turn(5, 'target'),
+          ],
           liveJournal: [],
         },
         async *events(opts) {
@@ -24576,7 +24789,7 @@ describe('DaemonSessionProvider', () => {
             id: 100,
             type: 'session_rewound',
             data: {
-              sessionId: 'rewind-capacity',
+              sessionId,
               promptId: 'native-target',
               targetTurnIndex: 1,
               filesChanged: [],
@@ -24619,6 +24832,7 @@ describe('DaemonSessionProvider', () => {
       expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
         `${prefixName}-user`,
         `${prefixName}-answer`,
+        ...(withModLogs ? [undefined, undefined] : []),
       ]);
       expect(history).toMatchObject({ capacityReached: false, hasMore: true });
       await act(async () => {
@@ -24631,7 +24845,13 @@ describe('DaemonSessionProvider', () => {
           expect.objectContaining({ beforeRecordId: `${prefixName}-user` }),
         ]),
       );
-      expect(blocks).toHaveLength(4);
+      expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
+        'older-page-user',
+        'older-page-answer',
+        `${prefixName}-user`,
+        `${prefixName}-answer`,
+        ...(withModLogs ? [undefined] : []),
+      ]);
     },
   );
 
@@ -28200,6 +28420,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     replayPartial: opts.replayPartial ?? false,
     replayError: opts.replayError,
     eventEpoch: opts.eventEpoch ?? 'epoch-1',
+    askModRow: opts.askModRow,
     session:
       opts.session ??
       ({
