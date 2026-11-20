@@ -78,6 +78,12 @@ context, mcp, hooks, settings`）；拒绝是运行时策略门，不是编译�
 - bundle parser 接受 `degradedComponents` 作为包视图可选键，校验取值（`{mcp,
 hooks}` 内无重复成员），并归一化为规范顺序。
 - harness `prepare()` 把该字段从每个 prepared 包拷贝进发布的 bundle 包视图。
+- 工具 profile 准入门判断的是实际将被服务的内容：无 `stage` 时，两个 prepare
+  调用点（新鲜与 exact re-prepare）都校验去掉惰性 `mcpServers`/`hooks` 后的
+  视图，使混合包在所有准入扩展配置的 profile 上都能 prepare 并上报降级——
+  包括 `hosted-workspace-mcp/1`（唯一能携带扩展配置的非 shell profile）。带
+  `stage` 时门禁仍看完整 contributions。漂移比对仍用完整编译产物，
+  `preparedView()` 仍是上报列表的唯一生产者。
 
 ### Java 上报
 
@@ -96,7 +102,8 @@ false` 对每个服务 snapshot 的公开与 WebShell 扩展管理操作保持�
   类型从仓库根重新生成
   （`npm run generate:managed-agent-api --workspace=packages/web-shell`），并新增
   提交降级 active bundle 的契约用例，使 `ManagedAgentApiContractTest` 对降级响应
-  做 schema 校验——缺少该 schema 属性时门禁必红。
+  做 schema 校验——缺少该 schema 属性时门禁必红。契约 `info.version` 按仓库
+  契约版本守卫要求推进（`1.123.0` → `1.124.0`）。
 - `ManagedExtensionProtocol.response()` 不变：它本就透传包级字段，TS harness 在
   接收时校验 pins。
 - 本地 harness 管理 snapshot（`GET /session/:id/extensions/management`）刻意不
@@ -120,14 +127,23 @@ false` 对每个服务 snapshot 的公开与 WebShell 扩展管理操作保持�
   随降级组件一起惰性。它们继续作为数据加载；不设单独标记。
 - **D5 — 不新增能力 digest 或模式。** content-only 生产接线属 #17424 范围；本
   变更让运行时契约在现有形态内优雅降级，使后续接线落地无需协议分叉。
+- **D6 — 准入前降级，而非准入后。** 工具 profile 门禁的存在意义是拒绝会话
+  profile 无法监督的进程执行。content-only 中没有任何执行，若仍判断惰性组件
+  就会在 `hosted-workspace-mcp/1` 上重演整包失败——恰是准入的非 shell 群体。
+  因此两个 prepare 调用点校验被服务内容视图（去掉惰性组件），staged 运行时
+  保持严格门禁；上报列表仍仅在 `preparedView()` 推导。
 
 ## 约束
 
 - bundle inline 容量 64 KiB
   （`managedSessionInlineResourceBytes('managed-extension-config-bundle')`）。
-  实测 worst case（32 包全部降级 `["mcp","hooks"]`、96 条 MCP 选择、16 条 base
-  pin、32 条 effective pin、最宽身份）：65107 字节 ≤ 65536，余量 429 字节。
-  worst-case 字节测试 fixture 必须纳入新字段。
+  实测各形状（32 包全部降级 `["mcp","hooks"]`、96 条 MCP 选择、16 条 base
+  pin、最宽身份）：不含 `settingsRevision` 且带 32 条 effective pin 时
+  65107 字节 ≤ 65536（余量 429 字节）；全选项合成最坏情况再给每个包 pin 加
+  `settingsRevision`，达 66259 字节 > 65536——发布期容量守卫对该角落 fail-closed
+  拒绝，属既有机制（同形状不含降级时为 65075 字节，在上限内）。content-only
+  可达最坏情况的 effective MCP 列表恒为空，实测 57812 字节，在上限内。两个
+  边界均由字节测试钉住；#17424 接线落地前须重测。
 - prepare 结果 8 MiB 上限不受影响。
 - `ManagedExtensionProtocol` 中 prepare 操作（请求方向）的闭键集不变。
 
@@ -135,21 +151,27 @@ false` 对每个服务 snapshot 的公开与 WebShell 扩展管理操作保持�
 
 - worst-case 字节余量薄（429 字节）：未来任何 bundle 新字段必须重跑字节预算
   测试。缓解：更新后的 worst-case fixture 钉住它。
-- 版本偏斜：旧 TS harness 解析新 bundle 会拒绝未知包视图键。harness 与运行时
-  同在一个 CLI 二进制发布；已提交 bundle 只会被相同或更新的 harness 重新解析
-  （恢复从 pins re-prepare，不从包视图）。Java 读取方容忍该字段。
+- 版本偏斜：旧 TS harness 解析新 bundle 会拒绝未知包视图键——恢复也不例外，
+  因为 `prepareRuntime` 先经同一个闭合 bundle parser 加载基线，再投影 pins。
+  真实缓解是 harness 与运行时同在一个 CLI 二进制发布，会话的已提交 bundle
+  只会被相同或更新的 harness 重新解析；回滚的二进制无法恢复降级 bundle。
+  Java 读取方容忍该字段。将此记为 #17424 接线的迁移注记（降级 bundle 不支持
+  跨版本降级恢复）。
 - 降级包的 hook 静默不运行是预期语义；显式上报是对运维意外的缓解。
 
 ## 验证计划
 
-- 单元（TS）：core parser 接受/校验/归一化与更新后的 worst-case 字节测试；
-  运行时测试覆盖降级推导、混合包成功、惰性 catalogs、exact re-prepare 与重启
-  确定性、带 `stage` 时无降级；harness 测试验证发布 bundle 携带该字段；
+- 单元（TS）：core parser 接受/校验/归一化（非法值表以不展开的数组行传参）、
+  字节预算测试与全选项/可达字节边界测试；运行时测试覆盖降级推导、混合包成功、
+  惰性 catalogs、exact re-prepare 与重启确定性、带 `stage` 时无降级、
+  `hosted-workspace-mcp/1` 准入前验收用例（移除准入视图必须抛 profile 错误）、
+  staged 运行时门禁保持严格；harness 测试验证发布 bundle 携带该字段；
   harness 级集成测试用无 stage 运行时在首个 Hosted 回合通过 skill 工具加载
   skills+hook 混合包。
 - 单元（Java）：`ManagedExtensionManagementServiceTest` —— snapshot 对 active
   降级 bundle 上报 map、其余情况省略、保持 pin 形状、归一规范顺序、畸形降级
-  字段（含显式 `null`）判 corrupt。
+  字段（含显式 `null`）判 corrupt、降级上报来自 active 祖先 bundle 而非
+  requested/pending bundle（双 bundle 用例）。
 - 契约门禁（Java）：`ManagedAgentApiContractTest`（含降级 active bundle 用例）、
   `SurfaceRegistryGateTest`、`SurfaceAdmissionAcceptanceTest`、
   `ManagedSurfaceCaptureTest`，加 CI 同款双 execution Checkstyle。
@@ -160,19 +182,23 @@ false` 对每个服务 snapshot 的公开与 WebShell 扩展管理操作保持�
 
 ## 验收标准
 
-1. content-only prepare 混合 skills+hook 包成功；skills、commands、agents、
-   context 正常服务；prepare 结果与已提交 bundle 上报
+1. content-only prepare 混合 skills+hook 包在所有准入扩展配置的 profile 上
+   成功，包括 `hosted-workspace-mcp/1`；skills、commands、agents、context
+   正常服务；prepare 结果与已提交 bundle 上报
    `degradedComponents: ["hooks"]`（声明 MCP 时再加 `"mcp"`）。
 2. hooks/MCP 保持惰性：catalogs 为空、`install` no-op、无进程 spawn。
 3. exact re-prepare 与重启恢复返回完全相同的视图；漂移校验保持绿。
 4. 带 `stage` 时不发射 `degradedComponents`，行为不变。
 5. 扩展 API snapshot 对 active 降级配置展示 `degradedComponents` map，其余情况
    省略；pin 数组形状不变。
-6. 含新字段的 worst-case bundle ≤ 64 KiB；字节测试更新且绿。
+6. 字节测试钉住文档化形状：不含 `settingsRevision` 的 worst case ≤ 64 KiB，
+   全选项合成最坏情况由发布期容量守卫 fail-closed 拒绝，content-only 可达
+   最坏情况在上限内。
 7. 已提交 bundle 中畸形降级字段（含显式 `null`）被 Java 读取点判 corrupt 拒绝；
    上报列表为规范顺序。
-8. 已发布 OpenAPI schema 声明该可选字段，WebShell 类型已重新生成，降级 active
-   bundle 契约用例对 snapshot 响应做 schema 校验（缺少 schema 属性时门禁必红）。
+8. 已发布 OpenAPI schema 声明该可选字段，`info.version` 推进过 base，WebShell
+   类型已重新生成，降级 active bundle 契约用例对 snapshot 响应做 schema 校验
+   （缺少 schema 属性时门禁必红）。
 
 ## 开放问题
 

@@ -601,4 +601,69 @@ describe('content-only component degradation', () => {
     expect(prepared.packages[0]!.degradedComponents).toBeUndefined();
     expect(deps.stage).toHaveBeenCalledOnce();
   });
+
+  it('degrades process components before profile admission on the mcp profile', async () => {
+    const deps = dependencies();
+    vi.mocked(deps.compile).mockResolvedValue(
+      contributionsWith({
+        mcpServers: { collector: { command: 'mcp.sh' } },
+        hooks: { PostToolUse: hookGroups },
+      }),
+    );
+    const runtime = new ManagedExtensionRuntime(deps);
+    const archive = await packageArchive('mcp-profile');
+    await runtime.cache.upload(archive.digest, Readable.from(archive.bytes));
+    const input = {
+      ...command(),
+      extensions: [
+        {
+          extensionId: 'mcp-profile',
+          packageRevision: 1,
+          packageDigest: archive.digest,
+        },
+      ],
+    };
+    const base = {
+      baseMcpServers: [],
+      baseHookCatalog: null,
+      toolProfile: 'hosted-workspace-mcp/1',
+    };
+    const prepared = await runtime.prepare('a', input, base);
+    expect(prepared.packages[0]!.degradedComponents).toEqual(['mcp', 'hooks']);
+    await runtime.activate('a', input.operationId);
+    const replayed = await runtime.prepare('a', input, base);
+    expect(JSON.stringify(replayed)).toBe(JSON.stringify(prepared));
+  });
+
+  it('keeps the profile gate strict for staged runtimes', async () => {
+    const deps: ManagedExtensionRuntimeDependencies = {
+      ...dependencies(),
+      stage: vi.fn(async () => ({ mcpServers: [], hookCatalog: null })),
+    };
+    vi.mocked(deps.compile).mockResolvedValue(
+      contributionsWith({ hooks: { PostToolUse: hookGroups } }),
+    );
+    const runtime = new ManagedExtensionRuntime(deps);
+    const archive = await packageArchive('staged-gate');
+    await runtime.cache.upload(archive.digest, Readable.from(archive.bytes));
+    const input = {
+      ...command(),
+      extensions: [
+        {
+          extensionId: 'staged-gate',
+          packageRevision: 1,
+          packageDigest: archive.digest,
+        },
+      ],
+    };
+    await expect(
+      runtime.prepare('a', input, {
+        baseMcpServers: [],
+        baseHookCatalog: null,
+        toolProfile: 'hosted-workspace-mcp/1',
+      }),
+    ).rejects.toThrow(
+      'Session profile does not admit extension Shell execution.',
+    );
+  });
 });

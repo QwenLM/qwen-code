@@ -92,6 +92,15 @@ Out of scope:
   canonical order.
 - The harness `prepare()` copies the field from each prepared package into the
   published bundle package view.
+- The tool-profile admission gate judges the content that will actually be
+  served: without `stage`, both prepare call sites (fresh and exact
+  re-prepare) validate a view with the inert `mcpServers`/`hooks` removed, so
+  a mixed package prepares and reports degradation on every profile that
+  admits extension configuration — including `hosted-workspace-mcp/1`, the
+  one non-shell profile that can carry it. With `stage`, the gate sees the
+  full contributions unchanged. The drift comparison still uses the full
+  compiled contributions, and `preparedView()` remains the single producer of
+  the reported list.
 
 ### Java surfacing
 
@@ -117,7 +126,9 @@ Out of scope:
   (`npm run generate:managed-agent-api --workspace=packages/web-shell`), and a
   contract case commits a degraded active bundle so
   `ManagedAgentApiContractTest` schema-validates the degraded response — the
-  gate fails without the schema property.
+  gate fails without the schema property. The contract's `info.version`
+  advances (`1.123.0` → `1.124.0`) as the repository's contract-version guard
+  requires for any document change.
 - `ManagedExtensionProtocol.response()` is unchanged: it already passes
   package fields through, and the TS harness validates pins on receipt.
 - The local harness management snapshot (`GET /session/:id/extensions/management`)
@@ -149,15 +160,29 @@ Out of scope:
 - **D5 — No new capability digest or mode.** Content-only production wiring is
   #17424's scope; this change makes the runtime contract degrade gracefully
   within the existing forms so that wiring can land without a protocol fork.
+- **D6 — Degrade before profile admission, not after.** The tool-profile gate
+  exists to refuse process execution the session profile cannot supervise.
+  In content-only nothing executes, so judging the inert components would
+  replay the whole-package failure on `hosted-workspace-mcp/1` — exactly the
+  admitted non-shell population. Both prepare call sites therefore validate
+  the served-content view (inert components removed) while staged runtimes
+  keep the strict gate; the reported list still derives solely in
+  `preparedView()`.
 
 ## Constraints
 
 - Bundle inline capacity is 64 KiB
   (`managedSessionInlineResourceBytes('managed-extension-config-bundle')`).
-  Measured worst case (32 packages all degraded with `["mcp","hooks"]`, 96 MCP
-  selection entries, 16 base pins, 32 effective pins, widest identities):
-  65107 bytes ≤ 65536, margin 429 bytes. The worst-case byte test fixture must
-  include the new field.
+  Measured shapes (32 packages all degraded with `["mcp","hooks"]`, 96 MCP
+  selection entries, 16 base pins, widest identities): without
+  `settingsRevision` and with 32 effective pins, 65107 bytes ≤ 65536 (margin
+  429 bytes); the fully-optioned synthetic worst case adds `settingsRevision`
+  on every package pin and reaches 66259 bytes > 65536 — the publish-time
+  capacity guard rejects that corner fail-closed, a pre-existing mechanism
+  (the same shape without degradation was 65075 bytes, inside the bound).
+  The reachable content-only worst case always has an empty effective MCP
+  list and measures 57812 bytes, inside the bound. Both boundaries are pinned
+  by the byte tests; re-measure before the #17424 wiring lands.
 - Prepare-result size limit (8 MiB) is unaffected.
 - The prepare operation's closed key set in `ManagedExtensionProtocol`
   (request direction) is unchanged.
@@ -167,24 +192,33 @@ Out of scope:
 - Thin worst-case byte margin (429 bytes): any future bundle field must re-run
   the byte-budget test. Mitigation: the updated worst-case fixture pins it.
 - Version skew: an old TS harness parsing a new bundle rejects the unknown
-  package-view key. Harness and runtime ship in one CLI binary; committed
-  bundles are only re-parsed by the same or newer harness (recovery re-prepares
-  from pins, not from package views). Java readers tolerate the field.
+  package-view key — recovery is not exempt, because `prepareRuntime` loads
+  the baseline through the same closed bundle parser before projecting pins.
+  The real mitigation is that harness and runtime ship in one CLI binary, so
+  a session's committed bundles are only re-parsed by the same or a newer
+  harness; a rolled-back binary cannot recover a degraded bundle. Java
+  readers tolerate the field. Record this as a migration note for the #17424
+  wiring (no cross-version downgrade recovery of degraded bundles).
 - A degraded package's hooks silently not running is the intended semantics;
   the explicit report is the mitigation against operator surprise.
 
 ## Validation plan
 
-- Unit (TS): core parser acceptance/validation/normalization and the updated
-  worst-case byte test; runtime tests for degradation derivation, mixed-package
-  success, inert catalogs, exact re-prepare and restart determinism, and
-  no-degradation with `stage`; harness test that the published bundle carries
-  the field; harness-level integration test loading a mixed skills+hook package
-  through the skill tool on the first Hosted turn with a stage-less runtime.
+- Unit (TS): core parser acceptance/validation/normalization (the invalid-value
+  table passes array rows unspread), the byte-budget test and the
+  fully-optioned/reachable byte-boundary test; runtime tests for degradation
+  derivation, mixed-package success, inert catalogs, exact re-prepare and
+  restart determinism, no-degradation with `stage`, the
+  `hosted-workspace-mcp/1` pre-admission acceptance case (removing the
+  admission view must throw the profile error), and the staged-runtime gate
+  staying strict; harness test that the published bundle carries the field;
+  harness-level integration test loading a mixed skills+hook package through
+  the skill tool on the first Hosted turn with a stage-less runtime.
 - Unit (Java): `ManagedExtensionManagementServiceTest` — snapshot surfaces the
   map for an active degraded bundle, omits it otherwise, keeps pin shapes,
-  normalizes canonical order, and rejects malformed degradation fields
-  (including explicit `null`) as corrupt.
+  normalizes canonical order, rejects malformed degradation fields (including
+  explicit `null`) as corrupt, and reports degradation from the active
+  ancestor bundle rather than the requested/pending bundle (two-bundle case).
 - Contract gates (Java): `ManagedAgentApiContractTest` (with the degraded
   active-bundle case), `SurfaceRegistryGateTest`,
   `SurfaceAdmissionAcceptanceTest`, `ManagedSurfaceCaptureTest`, plus the
@@ -197,10 +231,12 @@ Out of scope:
 
 ## Acceptance criteria
 
-1. Content-only prepare of a mixed skills+hook package succeeds; skills,
-   commands, agents, and context are served; the prepare result and the
-   committed bundle report `degradedComponents: ["hooks"]` (plus `"mcp"` when
-   MCP servers are declared).
+1. Content-only prepare of a mixed skills+hook package succeeds on every
+   profile that admits extension configuration, including
+   `hosted-workspace-mcp/1`; skills, commands, agents, and context are served;
+   the prepare result and the committed bundle report
+   `degradedComponents: ["hooks"]` (plus `"mcp"` when MCP servers are
+   declared).
 2. Hooks/MCP remain inert: catalogs empty, `install` a no-op, no process
    spawned.
 3. Exact re-prepare and restart recovery return the identical view; drift
@@ -208,15 +244,17 @@ Out of scope:
 4. With `stage`, no `degradedComponents` is emitted and behavior is unchanged.
 5. The extensions API snapshot shows the `degradedComponents` map for an active
    degraded configuration and omits it otherwise; pin array shapes unchanged.
-6. The worst-case bundle with the new field stays ≤ 64 KiB; the byte test is
-   updated and green.
+6. The byte tests pin the documented shapes: the without-`settingsRevision`
+   worst case stays ≤ 64 KiB, the fully-optioned synthetic worst case is
+   rejected fail-closed by the publish-time capacity guard, and the reachable
+   content-only worst case stays inside the bound.
 7. Malformed degradation fields in a committed bundle (including explicit
    `null`) are rejected as corrupt by the Java read site; the reported list is
    in canonical order.
-8. The published OpenAPI schema declares the optional field, the WebShell
-   types are regenerated, and the degraded active-bundle contract case
-   schema-validates the snapshot response (the gate fails without the schema
-   property).
+8. The published OpenAPI schema declares the optional field, `info.version`
+   advances past the base, the WebShell types are regenerated, and the
+   degraded active-bundle contract case schema-validates the snapshot
+   response (the gate fails without the schema property).
 
 ## Open questions
 

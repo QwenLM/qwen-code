@@ -18,6 +18,10 @@ import type { OperationGrant } from './managed-extension-record.js';
 // effective bundle - widest ids, revisions and digests, plus 32 package views,
 // 32 prepared pins and 16 base pins - stays inside the 64 KiB inline bound. The
 // bundle carries the retained array once, from independentMcpSelections.
+// Fully-optioned package pins (settingsRevision) plus per-package degradation
+// can push the synthetic worst case past the bound; the publish-time capacity
+// guard rejects that corner fail-closed, and the reachable content-only shape
+// (empty effective MCP list) stays inside - pinned by the byte-boundary test.
 export const MAX_MCP_SELECTION_ENTRIES = 96;
 
 export interface ManagedExtensionCommandControl {

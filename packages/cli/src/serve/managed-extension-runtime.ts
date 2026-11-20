@@ -291,7 +291,10 @@ export class ManagedExtensionRuntime {
             sessionId,
             base.packageManifests?.[pkg.pin.extensionId],
           );
-          validateExtensionToolProfile(contributions, base.toolProfile);
+          validateExtensionToolProfile(
+            this.admissionContributions(contributions),
+            base.toolProfile,
+          );
           if (
             JSON.stringify(contributions) !== JSON.stringify(pkg.contributions)
           )
@@ -354,7 +357,10 @@ export class ManagedExtensionRuntime {
             sessionId,
             base.packageManifests?.[pin.extensionId],
           );
-          validateExtensionToolProfile(contributions, base.toolProfile);
+          validateExtensionToolProfile(
+            this.admissionContributions(contributions),
+            base.toolProfile,
+          );
           packages[packages.length - 1] = { pin, assetRoot, contributions };
         }
       } catch (error) {
@@ -694,6 +700,16 @@ export class ManagedExtensionRuntime {
     )
       throw new Error('Extension asset path escapes its package.');
     return filename;
+  }
+
+  // Content-only runtimes never activate MCP or hooks, so the profile gate
+  // must judge the content that will actually be served, not the inert
+  // process components (#17714). Staged runtimes keep the full gate.
+  private admissionContributions(
+    contributions: ManagedPackageContributions,
+  ): ManagedPackageContributions {
+    if (this.dependencies.stage) return contributions;
+    return { ...contributions, mcpServers: {}, hooks: {} };
   }
 
   private preparedView(value: Prepared): ManagedExtensionPrepareResult {

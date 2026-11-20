@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -114,6 +115,60 @@ class ManagedExtensionManagementServiceTest {
         var service = serviceWithActiveBundle(bundleWithDegradation("[\"hooks\",\"mcp\"]"));
         assertThat(service.query("tenant", "actor", "session", null)
                 .path("degradedComponents").path("ext_mixed").toString()).isEqualTo("[\"mcp\",\"hooks\"]");
+    }
+
+    @Test
+    void snapshotReportsDegradationFromTheActiveBundleNotTheRequestedOne() {
+        var json = new ObjectMapper();
+        var store = mock(SessionPolicyStore.class);
+        var sessions = mock(ManagedAgentService.class);
+        var records = mock(ManagedExtensionRecordStore.class);
+        var packages = mock(ManagedExtensionPackageService.class);
+        var harness = mock(HarnessConnector.class);
+        var session = mock(SessionRecord.class);
+        var workspace = mock(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding.class);
+        when(session.workspace()).thenReturn(workspace);
+        when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(session);
+        when(packages.supported()).thenReturn(true);
+        when(harness.supportsSessionExtensions()).thenReturn(true);
+        String operation = java.util.UUID.randomUUID().toString();
+        var activeAncestor = json.createObjectNode().put("kind", "hosted-extension-config").put("phase", "active").put("mode", "apply")
+                .put("operationId", operation).put("configRevision", 1).put("previousConfigRevision", 0);
+        activeAncestor.putObject("bundleRef").put("resourceId", "bundle-a").put("kind", "managed-extension-config-bundle")
+                .put("schemaVersion", 1).put("byteLength", 0).put("digest", "a".repeat(64));
+        activeAncestor.putNull("previousRecordRef").putNull("error");
+        var committed = json.createObjectNode().put("kind", "hosted-extension-config").put("phase", "committed").put("mode", "apply")
+                .put("operationId", operation).put("configRevision", 2).put("previousConfigRevision", 1);
+        committed.putObject("bundleRef").put("resourceId", "bundle-b").put("kind", "managed-extension-config-bundle")
+                .put("schemaVersion", 1).put("byteLength", 0).put("digest", "a".repeat(64));
+        committed.putObject("previousRecordRef").put("resourceId", "record-a").put("kind", "managed-config_install")
+                .put("schemaVersion", 1).put("byteLength", 2).put("digest", "a".repeat(64));
+        committed.putNull("error");
+        when(records.currentMcpSettings("tenant", "session")).thenReturn(committed);
+        String activeBundle = bundleWithDegradation("[\"hooks\"]");
+        String requestedBundle = "{\"kind\":\"managed-extension-config-bundle\",\"formatVersion\":1,\"configRevision\":2,\"packages\":[{\"pin\":{\"extensionId\":\"ext_pending\",\"packageRevision\":1,\"packageDigest\":\""
+                + "c".repeat(64) + "\"},\"degradedComponents\":[\"mcp\"]}]}";
+        when(records.readCommittedResource(anyString(), anyString(), any())).thenAnswer(invocation -> {
+            JsonNode ref = invocation.getArgument(2);
+            String resourceId = ref.path("resourceId").asText();
+            if ("record-a".equals(resourceId)) {
+                byte[] recordBytes = activeAncestor.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                return new com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource(
+                        resourceId, "managed-config_install", 1, recordBytes.length,
+                        org.apache.commons.codec.digest.DigestUtils.sha256Hex(recordBytes), recordBytes);
+            }
+            byte[] bytes = ("bundle-b".equals(resourceId) ? requestedBundle : activeBundle)
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            return new com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource(
+                    resourceId, "managed-extension-config-bundle", 1, bytes.length,
+                    org.apache.commons.codec.digest.DigestUtils.sha256Hex(bytes), bytes);
+        });
+        var service = new ManagedExtensionManagementService(store, sessions, records, packages, json, harness);
+        var snapshot = service.query("tenant", "actor", "session", null);
+        assertThat(snapshot.path("degradedComponents").path("ext_mixed").toString()).isEqualTo("[\"hooks\"]");
+        assertThat(snapshot.path("degradedComponents").has("ext_pending")).isFalse();
+        assertThat(snapshot.path("extensions").get(0).path("extensionId").asText()).isEqualTo("ext_mixed");
+        assertThat(snapshot.path("requestedExtensions").get(0).path("extensionId").asText()).isEqualTo("ext_pending");
     }
 
     private ManagedExtensionManagementService serviceWithActiveBundle(String bundleJson) {
