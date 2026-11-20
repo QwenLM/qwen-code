@@ -71,6 +71,7 @@ function renderSidebar(
     | 'primaryNav'
     | 'hideProjectHeader'
     | 'collapsed'
+    | 'theme'
   >,
 ) {
   act(() => {
@@ -90,6 +91,8 @@ function renderSidebar(
             onNewSession={() => false}
             onLoadSession={vi.fn()}
             onError={() => {}}
+            theme="dark"
+            onThemeChange={() => {}}
             footer={{ items: ['version'] }}
             branding={branding}
             {...sessionProps}
@@ -363,6 +366,19 @@ describe('sidebar brand', () => {
     expect(mark?.querySelector('path')?.getAttribute('d')).toMatch(
       /^M12\.604 1\.34/,
     );
+  });
+
+  it('keeps the original blue mark in the light theme', () => {
+    renderSidebar(undefined, undefined, { theme: 'light' });
+
+    const mark = builtInMark();
+    expect(mark?.getAttribute('viewBox')).toBe('17.5 27.7 135.6 135.6');
+    expect(mark?.getAttribute('fill')).toBeNull();
+    expect(
+      Array.from(mark?.querySelectorAll('path') ?? [], (path) =>
+        path.getAttribute('fill'),
+      ),
+    ).toEqual(['#082DFF', '#082DFF', '#082DFF']);
   });
 
   it('renders the configured name', () => {
