@@ -4104,18 +4104,20 @@ esac`,
     ).toBe('${{ secrets.CI_BOT_PAT }}');
   });
 
-  it('serializes publish jobs per release tag', () => {
+  it('serializes publish jobs per npm channel', () => {
     // The pre-push re-validation below is only sound while at most one
-    // publish job pushes and publishes a given version at a time.
+    // publish job pushes and publishes on a given channel at a time.
     // The group must sit on the publish job — in-progress
-    // runs are never cancelled, and of queued same-tag runs only the
+    // runs are never cancelled, and of queued same-channel runs only the
     // latest survives, but whichever run reaches the push re-validates
-    // first — and it must be keyed by the computed tag, which only exists
-    // as a prepare output, plus is_dry_run, so a dry run (which ships
-    // nothing) never queues ahead of the real release for the same tag.
+    // first — and it must be keyed by the npm channel this run publishes to,
+    // which only exists as a prepare output, plus is_dry_run, so a dry run
+    // (which ships nothing) never queues ahead of the real release for the
+    // same channel. Channel rather than tag is deliberate: a newer version
+    // must not publish on the same channel while an older one resumes.
     // timeout-minutes bounds the hold a wedged publish (a stalled npm
     // publish or asset upload) keeps on the group: without it the GitHub
-    // default of 360 minutes leaves same-tag retries queued behind it,
+    // default of 360 minutes leaves same-channel retries queued behind it,
     // unable to run, fail, or notify.
     expect(workflow).toMatch(
       / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n(?: {6}#[^\n]*\n)* {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.npm_tag \}\}-\$\{\{ needs\.prepare\.outputs\.is_dry_run \}\}'\n {6}cancel-in-progress: false\n {4}timeout-minutes: 90\n {4}environment:\n {6}name: 'production-release'/,
