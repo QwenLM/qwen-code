@@ -132,11 +132,9 @@ describe('document export budgets', () => {
   });
 
   it('widens the ceiling on CI regardless of runner class', () => {
-    // The lane that runs this gate maps only TMPDIR into the step, so
-    // RUNNER_ENVIRONMENT is absent there on the ARM64 pool and on
-    // ubuntu-latest alike. Keying the tier on it left the 3x headroom inert
-    // and the 60s ceiling measured 64.5s (#17884). CI is the marker every
-    // runner class actually provides.
+    // Neither gate step maps RUNNER_ENVIRONMENT: ci.yml's smoke step sets only
+    // TMPDIR, e2e.yml's nightly step sets no env. CI is the marker both lanes
+    // are known to provide, and the one interactive/wait.ts already keys on.
     const budget = documentExportBudgetMs({ CI: 'true' });
     expect(budget).toBe(180_000);
     // Both runner classes, with and without the marker the lane never maps.
