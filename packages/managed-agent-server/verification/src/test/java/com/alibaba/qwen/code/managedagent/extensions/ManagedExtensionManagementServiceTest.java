@@ -80,4 +80,64 @@ class ManagedExtensionManagementServiceTest {
                     assertThat(error.getCode()).isEqualTo("extension_operation_not_found");
                 });
     }
+
+    @Test
+    void snapshotReportsActivePackageDegradationWithoutChangingPinShapes() {
+        var service = serviceWithActiveBundle(bundleWithDegradation("[\"hooks\"]"));
+        var snapshot = service.query("tenant", "actor", "session", null);
+        assertThat(snapshot.path("degradedComponents").path("ext_mixed").toString()).isEqualTo("[\"hooks\"]");
+        assertThat(snapshot.path("extensions").get(0).path("extensionId").asText()).isEqualTo("ext_mixed");
+        assertThat(snapshot.path("extensions").get(0).size()).isEqualTo(3);
+        assertThat(snapshot.path("requestedExtensions").get(0).size()).isEqualTo(3);
+    }
+
+    @Test
+    void snapshotOmitsDegradationWhenNothingDegraded() {
+        assertThat(serviceWithActiveBundle(bundleWithDegradation(null))
+                .query("tenant", "actor", "session", null).has("degradedComponents")).isFalse();
+        assertThat(serviceWithActiveBundle(bundleWithDegradation("[]"))
+                .query("tenant", "actor", "session", null).has("degradedComponents")).isFalse();
+    }
+
+    @Test
+    void snapshotRejectsMalformedDegradationAsCorrupt() {
+        for (String malformed : new String[] { "[\"skills\"]", "[\"hooks\",\"hooks\"]", "\"hooks\"", "[\"mcp\",\"hooks\",\"mcp\"]" }) {
+            var service = serviceWithActiveBundle(bundleWithDegradation(malformed));
+            assertThatThrownBy(() -> service.query("tenant", "actor", "session", null))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("session_config_corrupt"));
+        }
+    }
+
+    private ManagedExtensionManagementService serviceWithActiveBundle(String bundleJson) {
+        var json = new ObjectMapper();
+        var store = mock(SessionPolicyStore.class);
+        var sessions = mock(ManagedAgentService.class);
+        var records = mock(ManagedExtensionRecordStore.class);
+        var packages = mock(ManagedExtensionPackageService.class);
+        var harness = mock(HarnessConnector.class);
+        var session = mock(SessionRecord.class);
+        var workspace = mock(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding.class);
+        when(session.workspace()).thenReturn(workspace);
+        when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(session);
+        when(packages.supported()).thenReturn(true);
+        when(harness.supportsSessionExtensions()).thenReturn(true);
+        var active = json.createObjectNode().put("kind", "hosted-extension-config").put("phase", "active").put("mode", "apply")
+                .put("operationId", java.util.UUID.randomUUID().toString()).put("configRevision", 1).put("previousConfigRevision", 0);
+        active.putObject("bundleRef").put("resourceId", "bundle-1").put("kind", "managed-extension-config-bundle")
+                .put("schemaVersion", 1).put("byteLength", 0).put("digest", "a".repeat(64));
+        active.putNull("previousRecordRef").putNull("error");
+        when(records.currentMcpSettings("tenant", "session")).thenReturn(active);
+        byte[] bytes = bundleJson.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        when(records.readCommittedResource(anyString(), anyString(), any())).thenReturn(
+                new com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource(
+                        "bundle-1", "managed-extension-config-bundle", 1, bytes.length,
+                        org.apache.commons.codec.digest.DigestUtils.sha256Hex(bytes), bytes));
+        return new ManagedExtensionManagementService(store, sessions, records, packages, json, harness);
+    }
+
+    private static String bundleWithDegradation(String degradedJson) {
+        return "{\"kind\":\"managed-extension-config-bundle\",\"formatVersion\":1,\"configRevision\":1,\"packages\":[{\"pin\":{\"extensionId\":\"ext_mixed\",\"packageRevision\":1,\"packageDigest\":\""
+                + "b".repeat(64) + "\"}" + (degradedJson == null ? "" : ",\"degradedComponents\":" + degradedJson) + "}]}";
+    }
 }

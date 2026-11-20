@@ -181,6 +181,7 @@ describe('Managed extension apply commands', () => {
           byteLength: 4096,
           digest: 'a'.repeat(64),
         },
+        degradedComponents: ['mcp', 'hooks'],
       })),
       mcpServers: Array.from({ length: 32 }, (_, index) =>
         pin(widestId('live-', index)),
@@ -193,4 +194,62 @@ describe('Managed extension apply commands', () => {
       managedSessionInlineResourceBytes('managed-extension-config-bundle'),
     );
   });
+});
+
+describe('Managed extension package degradation', () => {
+  const packageView = (degraded?: unknown) => ({
+    pin,
+    assetRoot: `extension://${pin.extensionId}/`,
+    contributionsRef: {
+      resourceId: 'contributions-1',
+      kind: 'managed-extension-contributions',
+      schemaVersion: 1,
+      byteLength: 64,
+      digest: 'b'.repeat(64),
+    },
+    ...(degraded === undefined ? {} : { degradedComponents: degraded }),
+  });
+  const bundleWith = (packages: unknown[]) => ({
+    kind: 'managed-extension-config-bundle',
+    formatVersion: 1,
+    configRevision: 1,
+    executionMode: 'developer-process-group',
+    mcpRevision: 0,
+    independentMcpSelections: [],
+    baseMcpServers: [],
+    baseHookCatalog: null,
+    packages,
+    mcpServers: [],
+    hookCatalog: null,
+  });
+
+  it('normalizes degraded components to canonical order', () => {
+    const bundle = parseManagedExtensionEffectiveBundle(
+      bundleWith([packageView(['hooks', 'mcp'])]),
+    );
+    expect(bundle.packages[0]!.degradedComponents).toEqual(['mcp', 'hooks']);
+    expect(
+      parseManagedExtensionEffectiveBundle(bundleWith([packageView(['hooks'])]))
+        .packages[0]!.degradedComponents,
+    ).toEqual(['hooks']);
+  });
+
+  it('omits the field for packages without degradation', () => {
+    const bundle = parseManagedExtensionEffectiveBundle(
+      bundleWith([packageView()]),
+    );
+    expect(bundle.packages[0]!.degradedComponents).toBeUndefined();
+    expect(JSON.stringify(bundle)).not.toContain('degradedComponents');
+  });
+
+  it.each([['skills'], ['mcp', 'mcp'], ['mcp', 'hooks', 'mcp'], 'mcp', [null]])(
+    'rejects invalid degradation %j',
+    (degraded) => {
+      expect(() =>
+        parseManagedExtensionEffectiveBundle(
+          bundleWith([packageView(degraded)]),
+        ),
+      ).toThrow(/degradation/u);
+    },
+  );
 });

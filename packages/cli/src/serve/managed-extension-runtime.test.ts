@@ -394,3 +394,211 @@ it('retains an unknown stop for the active original owner until evidence arrives
     runtime.reconcile('a', input.operationId, 0, 1),
   ).resolves.toMatchObject({ state: 'stopped' });
 });
+
+describe('content-only component degradation', () => {
+  const skill = {
+    name: 'review',
+    description: 'Review changes',
+    body: 'Follow PINNED_REVIEW_INSTRUCTIONS.',
+    assetDirectory: 'skills/review',
+    model_invocable: true,
+    user_invocable: true,
+  };
+  const hookGroups = [{ hooks: [{ type: 'command', command: 'collect.sh' }] }];
+
+  async function packageArchive(name: string) {
+    const source = path.join(temporary, name);
+    await fs.mkdir(source, { recursive: true });
+    await fs.writeFile(path.join(source, 'asset.txt'), name);
+    const archive = path.join(temporary, `${name}.tgz`);
+    await tar.c({ file: archive, cwd: source, gzip: true }, ['asset.txt']);
+    const bytes = await fs.readFile(archive);
+    return {
+      digest: createHash('sha256').update(bytes).digest('hex'),
+      bytes,
+    };
+  }
+
+  function contributionsWith(process: {
+    mcpServers?: Record<string, unknown>;
+    hooks?: Record<string, unknown>;
+  }) {
+    return {
+      skills: [skill],
+      commands: [],
+      agents: [],
+      context: [],
+      mcpServers: process.mcpServers ?? {},
+      hooks: process.hooks ?? {},
+      settings: [],
+    };
+  }
+
+  it('loads a mixed skills+hook package and reports hooks as degraded', async () => {
+    const deps = dependencies();
+    vi.mocked(deps.compile).mockResolvedValue(
+      contributionsWith({ hooks: { PostToolUse: hookGroups } }),
+    );
+    const runtime = new ManagedExtensionRuntime(deps);
+    const archive = await packageArchive('mixed');
+    await runtime.cache.upload(archive.digest, Readable.from(archive.bytes));
+    const input = {
+      ...command(),
+      extensions: [
+        {
+          extensionId: 'mixed',
+          packageRevision: 1,
+          packageDigest: archive.digest,
+        },
+      ],
+    };
+    const prepared = await runtime.prepare('a', input);
+    expect(prepared.packages[0]!.degradedComponents).toEqual(['hooks']);
+    expect(prepared.packages[0]!.contributions.skills).toEqual([skill]);
+    expect(prepared.mcpServers).toEqual([]);
+    expect(prepared.hookCatalog).toBeNull();
+    await runtime.activate('a', input.operationId);
+    expect(deps.install).toHaveBeenCalledOnce();
+    expect(
+      vi.mocked(deps.install).mock.calls[0]![1][0]!.contributions.hooks,
+    ).toEqual({ PostToolUse: hookGroups });
+    expect(await runtime.readAsset('a', 1, 'mixed', 'asset.txt')).toEqual({
+      path: 'asset.txt',
+      content: 'mixed',
+    });
+  });
+
+  it('reports mcp and hooks degradation in canonical order', async () => {
+    const deps = dependencies();
+    vi.mocked(deps.compile).mockResolvedValue(
+      contributionsWith({
+        mcpServers: { collector: { command: 'mcp.sh' } },
+        hooks: { PostToolUse: hookGroups },
+      }),
+    );
+    const runtime = new ManagedExtensionRuntime(deps);
+    const archive = await packageArchive('both');
+    await runtime.cache.upload(archive.digest, Readable.from(archive.bytes));
+    const input = {
+      ...command(),
+      extensions: [
+        {
+          extensionId: 'both',
+          packageRevision: 1,
+          packageDigest: archive.digest,
+        },
+      ],
+    };
+    const prepared = await runtime.prepare('a', input);
+    expect(prepared.packages[0]!.degradedComponents).toEqual(['mcp', 'hooks']);
+  });
+
+  it('reports mcp-only degradation without hooks', async () => {
+    const deps = dependencies();
+    vi.mocked(deps.compile).mockResolvedValue(
+      contributionsWith({ mcpServers: { collector: { command: 'mcp.sh' } } }),
+    );
+    const runtime = new ManagedExtensionRuntime(deps);
+    const archive = await packageArchive('mcp-only');
+    await runtime.cache.upload(archive.digest, Readable.from(archive.bytes));
+    const input = {
+      ...command(),
+      extensions: [
+        {
+          extensionId: 'mcp-only',
+          packageRevision: 1,
+          packageDigest: archive.digest,
+        },
+      ],
+    };
+    const prepared = await runtime.prepare('a', input);
+    expect(prepared.packages[0]!.degradedComponents).toEqual(['mcp']);
+  });
+
+  it('omits degradation for pure content packages and isolates it per package', async () => {
+    const deps = dependencies();
+    vi.mocked(deps.compile).mockImplementation(async (_root, pin) =>
+      pin.extensionId === 'mixed'
+        ? contributionsWith({ hooks: { PostToolUse: hookGroups } })
+        : contributionsWith({}),
+    );
+    const runtime = new ManagedExtensionRuntime(deps);
+    const pure = await packageArchive('pure');
+    const mixed = await packageArchive('mixed');
+    await runtime.cache.upload(pure.digest, Readable.from(pure.bytes));
+    await runtime.cache.upload(mixed.digest, Readable.from(mixed.bytes));
+    const input = {
+      ...command(),
+      extensions: [
+        {
+          extensionId: 'pure',
+          packageRevision: 1,
+          packageDigest: pure.digest,
+        },
+        {
+          extensionId: 'mixed',
+          packageRevision: 1,
+          packageDigest: mixed.digest,
+        },
+      ],
+    };
+    const prepared = await runtime.prepare('a', input);
+    expect(prepared.packages[0]!.degradedComponents).toBeUndefined();
+    expect(prepared.packages[1]!.degradedComponents).toEqual(['hooks']);
+    await runtime.activate('a', input.operationId);
+    expect(await runtime.status('a')).toMatchObject({ revision: 1 });
+  });
+
+  it('reproduces the degraded view through exact re-prepare and restart', async () => {
+    const deps = dependencies();
+    vi.mocked(deps.compile).mockResolvedValue(
+      contributionsWith({ hooks: { PostToolUse: hookGroups } }),
+    );
+    const runtime = new ManagedExtensionRuntime(deps);
+    const archive = await packageArchive('replay');
+    await runtime.cache.upload(archive.digest, Readable.from(archive.bytes));
+    const input = {
+      ...command(),
+      extensions: [
+        {
+          extensionId: 'replay',
+          packageRevision: 1,
+          packageDigest: archive.digest,
+        },
+      ],
+    };
+    const original = await runtime.prepare('a', input);
+    await runtime.activate('a', input.operationId);
+    const replayed = await runtime.prepare('a', input);
+    expect(JSON.stringify(replayed)).toBe(JSON.stringify(original));
+    const restarted = new ManagedExtensionRuntime(deps);
+    const recovered = await restarted.prepare('a', input);
+    expect(JSON.stringify(recovered)).toBe(JSON.stringify(original));
+  });
+
+  it('does not degrade when a stage dependency is present', async () => {
+    const deps: ManagedExtensionRuntimeDependencies = {
+      ...dependencies(),
+      stage: vi.fn(async () => ({ mcpServers: [], hookCatalog: null })),
+    };
+    vi.mocked(deps.compile).mockResolvedValue(
+      contributionsWith({ hooks: { PostToolUse: hookGroups } }),
+    );
+    const runtime = new ManagedExtensionRuntime(deps);
+    const archive = await packageArchive('staged');
+    await runtime.cache.upload(archive.digest, Readable.from(archive.bytes));
+    const input = {
+      ...command(),
+      extensions: [
+        {
+          extensionId: 'staged',
+          packageRevision: 1,
+          packageDigest: archive.digest,
+        },
+      ],
+    };
+    const prepared = await runtime.prepare('a', input);
+    expect(prepared.packages[0]!.degradedComponents).toBeUndefined();
+    expect(deps.stage).toHaveBeenCalledOnce();
+  });
+});

@@ -372,15 +372,6 @@ export class ManagedExtensionRuntime {
       const catalogs = this.dependencies.stage
         ? await this.dependencies.stage(sessionId, command, packages, base)
         : { mcpServers: [], hookCatalog: null };
-      if (
-        !this.dependencies.stage &&
-        packages.some(
-          (entry) =>
-            Object.keys(entry.contributions.mcpServers).length ||
-            Object.keys(entry.contributions.hooks).length,
-        )
-      )
-        throw new Error('Extension process components are unsupported.');
       const prepared: Prepared = {
         ownerJournalId: this.dependencies.ownerJournalId ?? 'in-memory',
         command,
@@ -712,7 +703,18 @@ export class ManagedExtensionRuntime {
       expectedRevision: value.command.expectedRevision,
       revision: value.command.expectedRevision + 1,
       executionMode: this.dependencies.executionMode,
-      packages: value.packages,
+      packages: value.packages.map((pkg) => {
+        if (this.dependencies.stage) return pkg;
+        const degradedComponents = (['mcp', 'hooks'] as const).filter(
+          (component) =>
+            Object.keys(
+              component === 'mcp'
+                ? pkg.contributions.mcpServers
+                : pkg.contributions.hooks,
+            ).length > 0,
+        );
+        return degradedComponents.length ? { ...pkg, degradedComponents } : pkg;
+      }),
       mcpServers: value.mcpServers,
       hookCatalog: value.hookCatalog,
     };
