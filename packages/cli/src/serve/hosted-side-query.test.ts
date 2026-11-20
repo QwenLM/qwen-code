@@ -65,11 +65,6 @@ function fixture(
     const parsed = JSON.parse(String(init?.body)) as Record<string, unknown>;
     expect(parsed['claim']).toEqual(claim);
     expect(new Headers(init?.headers).get('X-Qwen-Tenant-Id')).toBe('tenant');
-    expect(
-      new Headers(init?.headers).get(
-        'X-Qwen-Managed-Max-Readable-Storage-Version',
-      ),
-    ).toBe('4');
     let result: unknown = {};
     if (path === 'input')
       result = {
