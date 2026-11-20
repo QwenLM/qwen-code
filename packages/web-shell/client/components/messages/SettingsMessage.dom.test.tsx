@@ -63,6 +63,7 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  vi.unstubAllGlobals();
 });
 
 function render(node: ReactNode): HTMLElement {
@@ -318,6 +319,67 @@ async function chooseLightTheme(container: HTMLElement): Promise<void> {
   if (!option) throw new Error('Light theme option not found');
   await act(async () => option.click());
 }
+
+describe('SettingsMessage notification permissions', () => {
+  it.each([
+    ['denied', false, true],
+    ['unavailable', false, true],
+    ['denied', true, false],
+    ['unavailable', true, false],
+    ['default', false, false],
+    ['granted', false, false],
+  ] as const)(
+    '%s with enabled=%s has disabled=%s',
+    (permission, enabled, disabled) => {
+      const setEnabled = vi.fn(async () => {});
+      browserNotificationsStub.current = {
+        enabled,
+        permission,
+        pending: false,
+        persistent: true,
+        error: false,
+        setEnabled,
+        refreshPermission: vi.fn(),
+        syncLanguage: vi.fn(),
+        requestPermissionOnce: vi.fn(),
+      };
+      const container = renderPanel(makeState([], vi.fn()), {
+        initialCategory: 'UI',
+      });
+      const toggle = switchButton(container);
+      expect(toggle.disabled).toBe(disabled);
+      act(() => toggle.click());
+      if (disabled) expect(setEnabled).not.toHaveBeenCalled();
+      else expect(setEnabled).toHaveBeenCalledWith(!enabled);
+    },
+  );
+
+  it.each(['denied', 'unavailable'] as const)(
+    'shows a browser alternative for desktop %s permission',
+    (permission) => {
+      vi.stubGlobal('__TAURI__', { core: { invoke: vi.fn() } });
+      browserNotificationsStub.current = {
+        enabled: false,
+        permission,
+        pending: false,
+        persistent: true,
+        error: false,
+        setEnabled: vi.fn(async () => {}),
+        refreshPermission: vi.fn(),
+        syncLanguage: vi.fn(),
+        requestPermissionOnce: vi.fn(),
+      };
+      const container = renderPanel(makeState([], vi.fn()), {
+        initialCategory: 'UI',
+      });
+      expect(container.textContent).toContain(
+        'Run qwen serve --port 4170 --open',
+      );
+      expect(container.textContent).not.toContain('browser site settings');
+      expect(switchButton(container).disabled).toBe(true);
+    },
+  );
+});
 
 describe('SettingsMessage initialCategory', () => {
   function daemonSetting(): DaemonSettingDescriptor {
