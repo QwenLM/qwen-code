@@ -4,6 +4,9 @@
 
 状态：已实现。
 
+[立即发送不再等待工具](2026-11-19-send-now-never-waits.zh-CN.md) 修改了本文
+「工具调用开始后不打断」的决策和「正在运行的工具永远不被打断」的保证。
+
 ## 问题
 
 回合运行期间用户输入的消息走 `POST /session/:id/mid-turn-message`。daemon 把它

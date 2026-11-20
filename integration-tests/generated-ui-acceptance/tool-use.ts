@@ -8,9 +8,10 @@ import { SHOW_TOOL, messageText, type RecordedRequest } from './harness.js';
 
 function isViewError(content: unknown): boolean {
   const text = messageText(content);
+  if (text.startsWith('VIEW_ERROR: ')) return true;
+
   const marker = ' with response: ';
-  // The OpenAI converter flattens the tool result. The MCP error wrapper still
-  // carries the original isError flag and content in its serialized response.
+  // Older recordings wrap the error result, including its content and isError.
   if (
     !text.startsWith(
       "MCP tool 'generated_ui_show' reported tool error for function call: ",
