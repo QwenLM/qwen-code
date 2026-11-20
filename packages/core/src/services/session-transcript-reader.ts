@@ -2013,14 +2013,22 @@ function pruneCacheByteBudget(oversizedClass: boolean): void {
   }
 }
 
-// Evicts older snapshots of the same transcript when a newer one cannot be
-// admitted: a superseded frozen prefix would otherwise hold the class budget
-// and force every page of the live snapshot to reparse the whole JSONL.
+// Evicts superseded snapshots of the same transcript when a newer one cannot
+// be admitted: a superseded frozen prefix would otherwise hold the class
+// budget and force every page of the live snapshot to reparse the whole
+// JSONL. Also evicts equal-size orphans — an in-place rewrite (mtime moved)
+// or equal-size replacement (identity changed) leaves the old entry
+// unreachable on every read path (the equal-size mtime guard, the identity
+// check and hasSnapshotSignature all reject it) yet still holding budget.
 // Frozen cursors to an evicted prefix rebuild on demand — eviction costs
-// latency, never correctness.
+// latency, never correctness. Cross-class eviction is deliberately absent:
+// freeing shared bytes does not admit an oversized index, and the class-full
+// refusal keeps resident indexes instead of thrashing between them.
 function evictSupersededSnapshots(
   filePath: string,
   snapshotSize: number,
+  lastUpdated: string,
+  fileIdentity: SessionTranscriptFileIdentity,
   oversizedClass: boolean,
 ): boolean {
   const sharedBudget = getIndexCacheMaxBytes();
@@ -2028,9 +2036,14 @@ function evictSupersededSnapshots(
   for (const [key, entry] of indexCache) {
     const value = entry.value;
     if (!value || !entry.byteSize) continue;
-    if (value.filePath !== filePath || value.snapshotSize >= snapshotSize) {
-      continue;
-    }
+    if (value.filePath !== filePath) continue;
+    const superseded = value.snapshotSize < snapshotSize;
+    const orphaned =
+      value.snapshotSize === snapshotSize &&
+      (value.lastUpdated !== lastUpdated ||
+        value.fileIdentity.dev !== fileIdentity.dev ||
+        value.fileIdentity.ino !== fileIdentity.ino);
+    if (!superseded && !orphaned) continue;
     if (entry.byteSize > sharedBudget !== oversizedClass) continue;
     indexCache.delete(key);
     debugLogger.debug(`index cache evicted superseded snapshot ${key}`);
@@ -2651,6 +2664,8 @@ async function getCachedIndex(params: {
         evictSupersededSnapshots(
           params.filePath,
           params.snapshotSize,
+          params.lastUpdated,
+          params.fileIdentity,
           oversized,
         )
       ) {
@@ -2856,7 +2871,8 @@ export async function readSessionTranscriptSnapshot(
 function offerFreshIndexToCache(index: TranscriptIndex): void {
   // Projected indexes are only built for a page request and their byte
   // estimate ignores `projectedRecords`. Caching one would both inflate the
-  // 64MB budget and serve wrapper-free pages from the physical-index cache.
+  // cache's byte budget and serve wrapper-free pages from the physical-index
+  // cache.
   if (index.projectedRecords !== undefined) return;
   pruneCache();
   const key = makeCacheKey(
@@ -2883,7 +2899,13 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
     classBudget
   ) {
     if (
-      evictSupersededSnapshots(index.filePath, index.snapshotSize, oversized)
+      evictSupersededSnapshots(
+        index.filePath,
+        index.snapshotSize,
+        index.lastUpdated,
+        index.fileIdentity,
+        oversized,
+      )
     ) {
       classBytes = getIndexCacheBytesByClass();
     }
@@ -3047,11 +3069,18 @@ function estimateManagedProjectionBytes(projection: {
   readonly records: ChatRecord[];
   readonly titleInfo: { title?: string; source?: 'auto' | 'manual' };
 }): number {
-  return (
+  // Fold per record rather than stringifying the whole history at once: a
+  // single giant JSON string would transiently allocate hundreds of MiB on
+  // the event loop for a large managed session. Same UTF-16 caliber as the
+  // index and hook estimates; the omitted array brackets/commas are
+  // negligible against the bodies.
+  let bytes =
     INDEX_CONTAINER_BASE_BYTES +
-    estimateStringBytes(JSON.stringify(projection.records)) +
-    estimateStringBytes(JSON.stringify(projection.titleInfo))
-  );
+    estimateStringBytes(JSON.stringify(projection.titleInfo));
+  for (const record of projection.records) {
+    bytes += estimateStringBytes(JSON.stringify(record));
+  }
+  return bytes;
 }
 
 // A restore projection can be decoded while its index is not yet cached and
@@ -4362,22 +4391,12 @@ export class SessionTranscriptReader {
         } else if (!managedProjections.has(index)) {
           // A concurrent page may have decoded and retained the projection
           // while this read was decoding; it is already accounted then.
-          const projectionBytes = estimateManagedProjectionBytes(projection);
-          const entryOversized =
-            (cachedEntry.byteSize ?? 0) > getIndexCacheMaxBytes();
-          const classBytes = getIndexCacheBytesByClass();
-          const classBudget = entryOversized
-            ? getIndexCacheOversizedMaxBytes()
-            : getIndexCacheMaxBytes();
-          if (
-            (entryOversized ? classBytes.oversized : classBytes.shared) +
-              projectionBytes <=
-            classBudget
-          ) {
-            managedProjections.set(index, projection);
-            cachedEntry.byteSize =
-              (cachedEntry.byteSize ?? 0) + projectionBytes;
-          }
+          // Set first, then let the shared admission helper account or drop
+          // (it deletes from the WeakMap when the bodies do not fit). The
+          // has() guard above keeps the helper's unconditional byte add from
+          // double-counting an already-accounted projection.
+          managedProjections.set(index, projection);
+          accountManagedProjection(index, cachedEntry);
         }
       }
       return [...projection.records];
@@ -4653,7 +4672,11 @@ export class SessionTranscriptReader {
     // A cached index is keyed by the frozen mtime, so an equal-size in-place
     // rewrite would otherwise serve new bytes under the old snapshot; the
     // segment uuid check only catches rewrites of the selected records.
-    // Mirrors readTurnIndexSnapshot; pure appends (size grew) stay readable.
+    // Same invariant as readTurnIndexSnapshot and hasSnapshotSignature
+    // (allowAppend); kept inline to reuse the stats already taken, keep the
+    // graded warn, and let a missing file propagate ENOENT rather than fold
+    // into a rewrite error (hasSnapshotSignature returns false on ENOENT).
+    // Pure appends (size grew) stay readable.
     const frozenLastUpdated = cursor?.lastUpdated ?? snapshot?.lastUpdated;
     if (
       frozenLastUpdated !== undefined &&

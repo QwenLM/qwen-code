@@ -3546,6 +3546,230 @@ describe('SessionTranscriptReader', () => {
     expect(projectionReads.count).toBe(1);
   });
 
+  it('evicts an equal-size rewrite orphan to admit the live snapshot when the class is full', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 1);
+    const raw = await fs.readFile(filePath, 'utf8');
+    const rewritten = raw.replace(
+      '"text":"large transcript 5"',
+      '"text":"LARGE transcript 5"',
+    );
+    expect(Buffer.byteLength(rewritten, 'utf8')).toBe(
+      Buffer.byteLength(raw, 'utf8'),
+    );
+    await fs.writeFile(filePath, rewritten, 'utf8');
+    const stats = await fs.stat(filePath);
+    await fs.utimes(filePath, stats.atime, new Date(stats.mtimeMs + 1000));
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      oldBytes,
+    );
+  });
+
+  it('evicts a superseded shared-class prefix of the same file', async () => {
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const v1Bytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const v2Bytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - v1Bytes;
+    expect(v2Bytes).toBeGreaterThan(v1Bytes);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    // Both snapshots stay shared-class; together they exceed the budget.
+    setSessionTranscriptIndexCacheMaxBytesForTest(v2Bytes + 1);
+    await readAfter(reader, oldState, { limit: 1 });
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(v2Bytes);
+  });
+
+  it('does not evict a shared prefix of the same file when admitting an oversized snapshot', async () => {
+    const reader = newReader();
+    const filePath = await writeRecords(chain('hello', 'reply'));
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const sharedBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await writeRecords(
+      linear(
+        'large-',
+        0,
+        19,
+        null,
+        (i) => `large transcript ${i}`,
+        otherSessionId,
+      ),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const largeBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - sharedBytes;
+    await appendRecords(
+      filePath,
+      ...linear('grow-', 0, 19, 'a1', (i) => `grown ${i}`),
+    );
+    // Calibrate under the default budget: the grown small-file index must fit
+    // the oversized cap alone (so admission reaches the class-total eviction
+    // branch, not the single-entry cap) while the other file's index fills it.
+    await reader.readPage(sessionId, { limit: 1 });
+    const newBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize -
+      sharedBytes -
+      largeBytes;
+    expect(newBytes).toBeGreaterThan(0);
+    expect(newBytes).toBeGreaterThan(largeBytes);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheMaxBytesForTest(sharedBytes);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(newBytes + 1);
+    await readAfter(reader, oldState, { limit: 1 });
+    await reader.readPage(otherSessionId, { limit: 1 });
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      sharedBytes + largeBytes,
+    );
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      sharedBytes + largeBytes,
+    );
+    const oldPage = await readAfter(reader, oldState, { limit: 1 });
+    expect(uuids(oldPage.records)).toEqual(['a1']);
+  });
+
+  it('evicts a superseded prefix when a restore-built index is offered under a full class budget', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const newBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(newBytes + 1);
+    await readAfter(reader, oldState, { limit: 1 });
+    const builds = countBuilds(filePath);
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      newBytes,
+    );
+  });
+
+  it('accounts a restore-offered Managed projection against the index budget class', async () => {
+    const file = await writeRawTranscript('');
+    const sessionKey = localManagedSessionKey(workspaceDir, sessionId);
+    const store = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: runtimeDir,
+      sessionKey,
+    });
+    const lease = await LocalManagedSessionAuthority.acquireWriter({
+      runtimeBaseDir: runtimeDir,
+      sessionId,
+      transcriptPath: file,
+    });
+    const reference = {
+      resourceId: 'test-ref',
+      kind: 'test',
+      schemaVersion: 1,
+      byteLength: 4,
+      digest: 'e'.repeat(64),
+    };
+    const authority = await LocalManagedSessionAuthority.open({
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
+      sessionKey,
+      cwd: workspaceDir,
+      version: 'test',
+      resources: store,
+      create: {
+        definitionRef: reference,
+        rootSnapshotRef: reference,
+        createdBy: 'daemon',
+      },
+    });
+    const projection = new ManagedSessionMessageProjection(authority, store);
+    const bigText = 'x'.repeat(256 * 1024);
+    const items = [
+      record('u1', null, 'short prompt'),
+      record('a1', 'u1', 'short reply'),
+      record('u2', 'a1', bigText),
+    ];
+    try {
+      for (const item of items)
+        await projection.commit(
+          {
+            operation: 'commitMessage',
+            commandId: item.uuid,
+            sessionKey,
+            contentDigest: 'e'.repeat(64),
+          },
+          { record: item },
+          { class: 'trusted_entry' },
+        );
+    } finally {
+      await authority.close();
+    }
+
+    const reader = newReader();
+    await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+    const physicalBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    expect(physicalBytes).toBeGreaterThan(0);
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      physicalBytes + 1024,
+    );
+    // Clear so the restore offer does not early-return on an existing key.
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    projectionReads.count = 0;
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    expect(projectionReads.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      physicalBytes,
+    );
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(2);
+
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+    projectionReads.count = 0;
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    expect(projectionReads.count).toBe(1);
+    expect(
+      getSessionTranscriptIndexCacheStatsForTest().byteSize,
+    ).toBeGreaterThan(physicalBytes + bigText.length);
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(1);
+  });
+
   it('accounts for retained projection hints in the cache byte estimate', async () => {
     const reader = newReader();
     const estimateFor = async (targetSessionId: string, suffix: string) => {
