@@ -13,10 +13,14 @@ import {
   it,
   vi,
 } from 'vitest';
+import * as nodeConstants from 'node:constants';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
+import { execFileSync } from 'node:child_process';
+import { Storage } from '../config/storage.js';
+import * as debugLogger from './debugLogger.js';
 import {
   _getFileLockCountForTest,
   _recoverObjectsFromLine,
@@ -54,6 +58,64 @@ afterEach(() => {
 
 const tmpPath = (prefix: string) =>
   path.join(tmpRoot, `${prefix}-${Math.random().toString(36).slice(2)}.jsonl`);
+
+async function withDebugLog(
+  sessionId: string,
+  fileOutputEnabled: boolean,
+  run: (logPath: string) => Promise<void>,
+): Promise<void> {
+  const previousDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
+  process.env['QWEN_DEBUG_LOG_FILE'] = fileOutputEnabled ? '1' : '0';
+  Storage.setRuntimeBaseDir(tmpRoot);
+  debugLogger.resetDebugLoggingState();
+  debugLogger.setDebugLogSession({ getSessionId: () => sessionId });
+  try {
+    await run(Storage.getDebugLogPath(sessionId));
+  } finally {
+    debugLogger.setDebugLogSession(null);
+    debugLogger.resetDebugLoggingState();
+    Storage.setRuntimeBaseDir(null);
+    if (previousDebugLogFile === undefined) {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+    } else {
+      process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFile;
+    }
+  }
+}
+
+function tailWarnings(logPath: string, filePath?: string): string[] {
+  if (!fs.existsSync(logPath)) return [];
+  return fs
+    .readFileSync(logPath, 'utf8')
+    .split('\n')
+    .filter(
+      (line) =>
+        line.includes('Cannot inspect JSONL tail') &&
+        (filePath === undefined || line.includes(filePath)),
+    );
+}
+
+let debugMarkerSequence = 0;
+
+async function flushDebugSink(
+  logPath: string,
+  label: string,
+  sessionId?: string,
+): Promise<void> {
+  const marker = `debug sink marker ${label} ${++debugMarkerSequence}`;
+  const logger = debugLogger.createDebugLogger('JSONL_TEST');
+  if (sessionId === undefined) {
+    logger.warn(marker);
+  } else {
+    debugLogger.runWithDebugLogSession({ getSessionId: () => sessionId }, () =>
+      logger.warn(marker),
+    );
+  }
+  await vi.waitFor(() => {
+    expect(fs.existsSync(logPath)).toBe(true);
+    expect(fs.readFileSync(logPath, 'utf8')).toContain(marker);
+  });
+}
 
 describe('append lock lifetime', () => {
   it('releases locks after writing distinct files', async () => {
@@ -645,6 +707,971 @@ describe('reader resource cleanup', () => {
 // (chatRecordingService, sessionService) mock these entirely, so flush:true or
 // atomicWriteFileSync wiring regressions would otherwise go undetected.
 describe('writeLine / writeLineSync / write', () => {
+  describe.each([
+    { name: 'writeLine', append: writeLine },
+    { name: 'writeLineSync', append: writeLineSync },
+  ])('$name', ({ name, append }) => {
+    const tailProbeFlags =
+      nodeConstants.O_RDONLY | (nodeConstants.O_NONBLOCK ?? 0);
+    const denyTailProbe = (error: Error) => {
+      if (name === 'writeLine') {
+        const open = fs.promises.open.bind(fs.promises);
+        return vi
+          .spyOn(fs.promises, 'open')
+          .mockImplementation(async (...args) => {
+            if (args[1] === tailProbeFlags) throw error;
+            return open(...args);
+          });
+      }
+      const openSync = fs.openSync.bind(fs);
+      return vi.spyOn(fs, 'openSync').mockImplementation((...args) => {
+        if (args[1] === tailProbeFlags) throw error;
+        return openSync(...args);
+      });
+    };
+    const trackDebugAppends = (
+      logPath: string,
+      beforeDebugAppend?: () => void,
+    ) => {
+      const appendFile = fs.promises.appendFile.bind(fs.promises);
+      const attempts: Array<Promise<boolean>> = [];
+      const spy = vi.spyOn(fs.promises, 'appendFile').mockImplementation(((
+        ...args: Parameters<typeof fs.promises.appendFile>
+      ) => {
+        if (args[0] !== logPath) {
+          return appendFile(...args);
+        }
+        beforeDebugAppend?.();
+        const attempt = appendFile(...args);
+        attempts.push(
+          attempt.then(
+            () => true,
+            () => false,
+          ),
+        );
+        return attempt;
+      }) as typeof fs.promises.appendFile);
+      return { spy, attempts };
+    };
+    const settleDelivery = async (attempt: Promise<boolean>) => {
+      const delivered = await attempt;
+      // The logger reports completion through another promise link; yield once
+      // so its callback updates the dedupe state before the next append.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return delivered;
+    };
+
+    it.each([
+      {
+        condition: 'file output is disabled',
+        fileOutputEnabled: false,
+        suppressSession: false,
+      },
+      {
+        condition: 'session logging is suppressed',
+        fileOutputEnabled: true,
+        suppressSession: true,
+      },
+    ])(
+      'does not resolve a debug session when $condition',
+      async ({ fileOutputEnabled, suppressSession }) => {
+        const sessionId = `jsonl-tail-log-lazy-${name}-${fileOutputEnabled}`;
+        await withDebugLog(sessionId, fileOutputEnabled, async () => {
+          const file = tmpFile('{"existing":');
+          const sessionLookup = vi
+            .spyOn(debugLogger, 'getActiveDebugSessionLogPath')
+            .mockImplementation(() => {
+              throw new Error('unexpected debug session lookup');
+            });
+          const spy = denyTailProbe(
+            Object.assign(new Error('read denied'), { code: 'EACCES' }),
+          );
+
+          try {
+            const appendRecord = () => append(file, { next: true });
+            if (suppressSession) {
+              await debugLogger.runWithoutDebugLogSession(appendRecord);
+            } else {
+              await appendRecord();
+            }
+
+            expect(sessionLookup).not.toHaveBeenCalled();
+            expect(
+              spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+            ).toHaveLength(1);
+            expect(fs.readFileSync(file, 'utf8')).toBe(
+              '{"existing":\n{"next":true}\n',
+            );
+          } finally {
+            spy.mockRestore();
+            sessionLookup.mockRestore();
+          }
+        });
+      },
+    );
+
+    it('keeps at-most-once warnings for legacy logger mocks', async () => {
+      const file = tmpFile('{"existing":');
+      const logPath = tmpPath('legacy-logger-log');
+      const warn = vi.fn();
+      const probeSpy = denyTailProbe(
+        Object.assign(new Error('read denied'), { code: 'EACCES' }),
+      );
+      vi.doMock('./debugLogger.js', () => ({
+        createDebugLogger: () => ({
+          isEnabled: () => true,
+          warn,
+        }),
+        getActiveDebugSessionLogPath: () => logPath,
+        isDebugLogFileEnabled: () => true,
+      }));
+      vi.resetModules();
+
+      try {
+        const isolated = await import('./jsonl-utils.js');
+        for (let index = 0; index < 2; index++) {
+          if (name === 'writeLine') {
+            await isolated.writeLine(file, { index });
+          } else {
+            isolated.writeLineSync(file, { index });
+          }
+        }
+        expect(warn).toHaveBeenCalledOnce();
+        expect(warn.mock.calls[0]?.[0]).toContain('Cannot inspect JSONL tail');
+        expect(fs.readFileSync(file, 'utf8')).toBe(
+          '{"existing":\n{"index":0}\n\n{"index":1}\n',
+        );
+      } finally {
+        probeSpy.mockRestore();
+        vi.doUnmock('./debugLogger.js');
+        vi.resetModules();
+      }
+    });
+
+    it('deduplicates warnings while the first delivery is pending', async () => {
+      await withDebugLog(
+        `jsonl-tail-pending-${name}`,
+        true,
+        async (logPath) => {
+          const file = tmpFile('{"existing":');
+          const probeSpy = denyTailProbe(
+            Object.assign(new Error('read denied'), { code: 'EACCES' }),
+          );
+          const appendFile = fs.promises.appendFile.bind(fs.promises);
+          let resolvePending = () => {};
+          const pending = new Promise<void>((resolve) => {
+            resolvePending = resolve;
+          });
+          let holdWarning = true;
+          const appendSpy = vi
+            .spyOn(fs.promises, 'appendFile')
+            .mockImplementation(async (...args) => {
+              if (args[0] === logPath && holdWarning) {
+                holdWarning = false;
+                await pending;
+              }
+              return appendFile(...args);
+            });
+
+          try {
+            if (name === 'writeLine') {
+              await append(file, { index: 0 });
+              await vi.waitFor(() => {
+                expect(holdWarning).toBe(false);
+              });
+              await append(file, { index: 1 });
+            } else {
+              append(file, { index: 0 });
+              append(file, { index: 1 });
+              await vi.waitFor(() => {
+                expect(holdWarning).toBe(false);
+              });
+            }
+            expect(tailWarnings(logPath, file)).toHaveLength(0);
+
+            resolvePending();
+            await vi.waitFor(() => {
+              expect(tailWarnings(logPath, file)).toHaveLength(1);
+            });
+            await flushDebugSink(logPath, `pending-${name}`);
+            expect(tailWarnings(logPath, file)).toHaveLength(1);
+          } finally {
+            resolvePending();
+            appendSpy.mockRestore();
+            probeSpy.mockRestore();
+          }
+        },
+      );
+    });
+
+    it('warns once at a healthy debug sink after the initial sink fails', async () => {
+      const sessionId = `jsonl-tail-log-sink-${name}`;
+      await withDebugLog(sessionId, true, async () => {
+        const file = tmpFile('{"partial":');
+        const spy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+
+        try {
+          const blockedRuntime = tmpPath('blocked-runtime');
+          fs.writeFileSync(blockedRuntime, 'not a directory');
+          Storage.setRuntimeBaseDir(blockedRuntime);
+          const blockedLog = Storage.getDebugLogPath(sessionId);
+
+          await append(file, { stage: 'blocked' });
+          await vi.waitFor(() => {
+            expect(debugLogger.isDebugLoggingDegraded()).toBe(true);
+          });
+          expect(tailWarnings(blockedLog, file)).toHaveLength(0);
+
+          const healthyRuntime = path.join(tmpRoot, `healthy-runtime-${name}`);
+          Storage.setRuntimeBaseDir(healthyRuntime);
+          const healthyLog = Storage.getDebugLogPath(sessionId);
+          await append(file, { stage: 'healthy' });
+          await vi.waitFor(() => {
+            expect(tailWarnings(healthyLog, file)).toHaveLength(1);
+          });
+
+          await append(file, { stage: 'deduplicated' });
+          const marker = 'healthy debug sink settled';
+          debugLogger.createDebugLogger('JSONL_TEST').warn(marker);
+          await vi.waitFor(() => {
+            expect(fs.existsSync(healthyLog)).toBe(true);
+            expect(fs.readFileSync(healthyLog, 'utf8')).toContain(marker);
+          });
+          expect(tailWarnings(healthyLog, file)).toHaveLength(1);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"stage":"blocked"}\n\n' +
+              '{"stage":"healthy"}\n\n{"stage":"deduplicated"}\n',
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    it('warns once after the blocked sink recovers at the same path', async () => {
+      const sessionId = `jsonl-tail-log-same-sink-${name}`;
+      await withDebugLog(sessionId, true, async () => {
+        const file = tmpFile('{"partial":');
+        const denySpy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+        const runtime = tmpPath('same-sink-runtime');
+        fs.writeFileSync(runtime, 'not a directory');
+        Storage.setRuntimeBaseDir(runtime);
+        const logPath = Storage.getDebugLogPath(sessionId);
+        const { spy: appendSpy, attempts } = trackDebugAppends(logPath);
+
+        try {
+          await append(file, { stage: 'blocked' });
+          await vi.waitFor(() => {
+            expect(debugLogger.isDebugLoggingDegraded()).toBe(true);
+            expect(attempts).toHaveLength(1);
+          });
+          await settleDelivery(attempts[0]);
+          expect(tailWarnings(logPath, file)).toHaveLength(0);
+
+          fs.unlinkSync(runtime);
+          fs.mkdirSync(runtime);
+          expect(Storage.getDebugLogPath(sessionId)).toBe(logPath);
+
+          await append(file, { stage: 'recovered' });
+          await vi.waitFor(() => {
+            expect(attempts).toHaveLength(2);
+          });
+          await settleDelivery(attempts[1]);
+          expect(tailWarnings(logPath, file)).toHaveLength(1);
+
+          const marker = `${name}: positive sink health control`;
+          debugLogger.createDebugLogger('JSONL_TEST').warn(marker);
+          await vi.waitFor(() => {
+            expect(fs.readFileSync(logPath, 'utf8')).toContain(marker);
+          });
+          await settleDelivery(attempts[2]);
+
+          await append(file, { stage: 'deduplicated' });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(attempts).toHaveLength(3);
+          expect(tailWarnings(logPath, file)).toHaveLength(1);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"stage":"blocked"}\n\n' +
+              '{"stage":"recovered"}\n\n{"stage":"deduplicated"}\n',
+          );
+        } finally {
+          appendSpy.mockRestore();
+          denySpy.mockRestore();
+        }
+      });
+    });
+
+    it('reports delivery when the debug directory recovers before the append', async () => {
+      const sessionId = `jsonl-tail-log-dir-recovery-${name}`;
+      await withDebugLog(sessionId, true, async () => {
+        const file = tmpFile('{"partial":');
+        const runtime = tmpPath('dir-recovery-runtime');
+        fs.writeFileSync(runtime, 'not a directory');
+        Storage.setRuntimeBaseDir(runtime);
+        const logPath = Storage.getDebugLogPath(sessionId);
+        let recovered = false;
+        const { spy: appendSpy, attempts } = trackDebugAppends(logPath, () => {
+          if (recovered) return;
+          recovered = true;
+          fs.unlinkSync(runtime);
+          fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        });
+        const denySpy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+
+        try {
+          await append(file, { stage: 'blocked' });
+          await vi.waitFor(() => {
+            expect(debugLogger.isDebugLoggingDegraded()).toBe(true);
+            expect(attempts).toHaveLength(1);
+          });
+          expect(await settleDelivery(attempts[0])).toBe(true);
+          expect(tailWarnings(logPath, file)).toHaveLength(1);
+
+          await append(file, { stage: 'deduplicated' });
+          await flushDebugSink(logPath, `dir-recovery-${name}`);
+          expect(attempts).toHaveLength(2);
+          expect(tailWarnings(logPath, file)).toHaveLength(1);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"stage":"blocked"}\n\n' +
+              '{"stage":"deduplicated"}\n',
+          );
+        } finally {
+          appendSpy.mockRestore();
+          denySpy.mockRestore();
+        }
+      });
+    });
+
+    it('bounds tail diagnostics at three attempts for a broken sink', async () => {
+      const sessionId = `jsonl-tail-log-attempt-bound-${name}`;
+      await withDebugLog(sessionId, true, async () => {
+        const logPath = Storage.getDebugLogPath(sessionId);
+        fs.mkdirSync(logPath, { recursive: true });
+        const file = tmpFile('{"partial":');
+        const denySpy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+        const { spy: appendSpy, attempts } = trackDebugAppends(logPath);
+
+        try {
+          for (let index = 0; index < 3; index++) {
+            await append(file, { index });
+            await vi.waitFor(() => {
+              expect(attempts).toHaveLength(index + 1);
+            });
+            await settleDelivery(attempts[index]);
+          }
+          expect(await Promise.all(attempts)).toEqual([false, false, false]);
+          expect(debugLogger.isDebugLoggingDegraded()).toBe(true);
+
+          for (let index = 3; index < 6; index++) {
+            await append(file, { index });
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(attempts).toHaveLength(3);
+          }
+
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"index":0}\n\n{"index":1}\n\n{"index":2}\n\n' +
+              '{"index":3}\n\n{"index":4}\n\n{"index":5}\n',
+          );
+        } finally {
+          appendSpy.mockRestore();
+          denySpy.mockRestore();
+        }
+      });
+    });
+
+    it.each(['EACCES', 'EPERM'])(
+      'restores the record boundary after an %s tail-read denial',
+      async (code) => {
+        const file = tmpFile('{"existing":true}');
+        const error = Object.assign(new Error('read denied'), { code });
+        const spy = denyTailProbe(error);
+
+        try {
+          await append(file, { next: true });
+          expect(
+            spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+          ).toHaveLength(1);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"existing":true}\n{"next":true}\n',
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it('restores the record boundary when the read probe is temporarily unavailable', async () => {
+      const file = tmpFile('{"existing":true}');
+      const error = Object.assign(new Error('temporarily unavailable'), {
+        code: 'EAGAIN',
+      });
+      const spy = denyTailProbe(error);
+
+      try {
+        await append(file, { next: true });
+        expect(
+          spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+        ).toHaveLength(1);
+        expect(fs.readFileSync(file, 'utf8')).toBe(
+          '{"existing":true}\n{"next":true}\n',
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it.each([
+      { platform: 'win32', shouldAppend: true },
+      { platform: 'linux', shouldAppend: false },
+    ] as const)(
+      '$platform EBUSY tail-probe handling',
+      async ({ platform, shouldAppend }) => {
+        const original = '{"existing":true}';
+        const file = tmpFile(original);
+        const error = Object.assign(new Error('sharing violation'), {
+          code: 'EBUSY',
+        });
+        const platformSpy = vi
+          .spyOn(process, 'platform', 'get')
+          .mockReturnValue(platform);
+        const spy = denyTailProbe(error);
+
+        try {
+          const result = Promise.resolve().then(() =>
+            append(file, { next: true }),
+          );
+          if (shouldAppend) {
+            await result;
+            expect(fs.readFileSync(file, 'utf8')).toBe(
+              '{"existing":true}\n{"next":true}\n',
+            );
+          } else {
+            await expect(result).rejects.toBe(error);
+            expect(fs.readFileSync(file, 'utf8')).toBe(original);
+          }
+          expect(
+            spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+          ).toHaveLength(1);
+        } finally {
+          spy.mockRestore();
+          platformSpy.mockRestore();
+        }
+      },
+    );
+
+    it('restores the record boundary under the Node permission model', async () => {
+      const file = tmpFile('{"existing":true}');
+      const error = Object.assign(new Error('read denied'), {
+        code: 'ERR_ACCESS_DENIED',
+        permission: 'FileSystemRead',
+      });
+      const spy = denyTailProbe(error);
+
+      try {
+        await append(file, { next: true });
+        expect(
+          spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+        ).toHaveLength(1);
+        expect(fs.readFileSync(file, 'utf8')).toBe(
+          '{"existing":true}\n{"next":true}\n',
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('rethrows other probe failures without changing the file', async () => {
+      const original = '{"existing":true}';
+      const file = tmpFile(original);
+      const error = Object.assign(new Error('read failed'), { code: 'EIO' });
+      const spy = denyTailProbe(error);
+
+      try {
+        await expect(
+          Promise.resolve().then(() => append(file, { next: true })),
+        ).rejects.toBe(error);
+        expect(
+          spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+        ).toHaveLength(1);
+        expect(fs.readFileSync(file, 'utf8')).toBe(original);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('rethrows a non-read permission denial without changing the file', async () => {
+      const original = '{"existing":true}';
+      const file = tmpFile(original);
+      const error = Object.assign(new Error('write denied'), {
+        code: 'ERR_ACCESS_DENIED',
+        permission: 'FileSystemWrite',
+      });
+      const spy = denyTailProbe(error);
+
+      try {
+        await expect(
+          Promise.resolve().then(() => append(file, { next: true })),
+        ).rejects.toBe(error);
+        expect(fs.readFileSync(file, 'utf8')).toBe(original);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it.each([
+      { name: 'empty', original: '', expected: '\n{"next":true}\n' },
+      {
+        name: 'newline-terminated',
+        original: '{"existing":true}\n',
+        expected: '{"existing":true}\n\n{"next":true}\n',
+      },
+    ])(
+      'uses a conservative separator for an unreadable $name file',
+      async ({ original, expected }) => {
+        const file = tmpFile(original);
+        const error = Object.assign(new Error('read denied'), {
+          code: 'EACCES',
+        });
+        const spy = denyTailProbe(error);
+
+        try {
+          await append(file, { next: true });
+          expect(fs.readFileSync(file, 'utf8')).toBe(expected);
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it('warns once for each denied path and keeps new files silent', async () => {
+      const sessionId = `jsonl-tail-probe-${name}`;
+      await withDebugLog(sessionId, true, async (logPath) => {
+        const files = [tmpFile('{"first":'), tmpFile('{"second":')];
+        const error = Object.assign(new Error('read denied'), {
+          code: 'EACCES',
+        });
+        const newFile = tmpPath('new-file');
+        await append(newFile, { first: true });
+        expect(fs.readFileSync(newFile, 'utf8')).toBe('{"first":true}\n');
+        const spy = denyTailProbe(error);
+
+        try {
+          for (const [index, file] of files.entries()) {
+            await append(file, { next: index });
+            await vi.waitFor(() => {
+              expect(tailWarnings(logPath, file)).toHaveLength(1);
+            });
+          }
+          for (const [index, file] of files.entries()) {
+            await append(file, { repeated: index });
+          }
+          await flushDebugSink(logPath, `denied-path-${name}`);
+
+          expect(tailWarnings(logPath)).toHaveLength(2);
+          expect(tailWarnings(logPath, files[0])).toHaveLength(1);
+          expect(tailWarnings(logPath, files[1])).toHaveLength(1);
+          expect(tailWarnings(logPath, newFile)).toHaveLength(0);
+          expect(
+            spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+          ).toHaveLength(4);
+          expect(fs.readFileSync(files[0], 'utf8')).toBe(
+            '{"first":\n{"next":0}\n\n{"repeated":0}\n',
+          );
+          expect(fs.readFileSync(files[1], 'utf8')).toBe(
+            '{"second":\n{"next":1}\n\n{"repeated":1}\n',
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    it('warns once per debug session for the same denied path', async () => {
+      const sessionA = `jsonl-tail-log-session-a-${name}`;
+      const sessionB = `jsonl-tail-log-session-b-${name}`;
+      await withDebugLog(sessionA, true, async (logPathA) => {
+        const logPathB = Storage.getDebugLogPath(sessionB);
+        const file = tmpFile('{"partial":');
+        const error = Object.assign(new Error('read denied'), {
+          code: 'EACCES',
+        });
+        const spy = denyTailProbe(error);
+        const appendFor = (sessionId: string, record: unknown) =>
+          debugLogger.runWithDebugLogSession(
+            { getSessionId: () => sessionId },
+            () => append(file, record),
+          );
+
+        try {
+          await appendFor(sessionA, { write: 'a1' });
+          await vi.waitFor(() => {
+            expect(tailWarnings(logPathA, file)).toHaveLength(1);
+          });
+          await appendFor(sessionA, { write: 'a2' });
+          await flushDebugSink(logPathA, `session-a-${name}`, sessionA);
+          expect(tailWarnings(logPathA, file)).toHaveLength(1);
+          expect(tailWarnings(logPathB, file)).toHaveLength(0);
+
+          await appendFor(sessionB, { write: 'b1' });
+          await vi.waitFor(() => {
+            expect(tailWarnings(logPathB, file)).toHaveLength(1);
+          });
+          await appendFor(sessionB, { write: 'b2' });
+          await flushDebugSink(logPathB, `session-b-${name}`, sessionB);
+
+          expect(tailWarnings(logPathA, file)).toHaveLength(1);
+          expect(tailWarnings(logPathB, file)).toHaveLength(1);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"write":"a1"}\n\n{"write":"a2"}\n\n' +
+              '{"write":"b1"}\n\n{"write":"b2"}\n',
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    it('defers dedup until session and file logging are both enabled', async () => {
+      const sessionId = `jsonl-tail-log-activation-${name}`;
+      await withDebugLog(sessionId, true, async (logPath) => {
+        const withoutSession = tmpFile('{"session":');
+        const withoutFileOutput = tmpFile('{"output":');
+        const error = Object.assign(new Error('read denied'), {
+          code: 'EACCES',
+        });
+        const spy = denyTailProbe(error);
+
+        try {
+          debugLogger.setDebugLogSession(null);
+          await append(withoutSession, { inactive: true });
+          debugLogger.setDebugLogSession({ getSessionId: () => sessionId });
+          await append(withoutSession, { active: true });
+          await vi.waitFor(() => {
+            expect(tailWarnings(logPath, withoutSession)).toHaveLength(1);
+          });
+          await append(withoutSession, { deduplicated: true });
+          await flushDebugSink(logPath, `activation-session-${name}`);
+          expect(tailWarnings(logPath, withoutSession)).toHaveLength(1);
+
+          process.env['QWEN_DEBUG_LOG_FILE'] = '0';
+          await append(withoutFileOutput, { disabled: true });
+          process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+          await append(withoutFileOutput, { enabled: true });
+          await vi.waitFor(() => {
+            expect(tailWarnings(logPath, withoutFileOutput)).toHaveLength(1);
+          });
+          await flushDebugSink(logPath, `activation-output-${name}`);
+
+          expect(tailWarnings(logPath)).toHaveLength(2);
+          expect(tailWarnings(logPath, withoutSession)).toHaveLength(1);
+          expect(tailWarnings(logPath, withoutFileOutput)).toHaveLength(1);
+          expect(
+            spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+          ).toHaveLength(5);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    it('warns again for an evicted path after exceeding the cache bound', async () => {
+      const sessionId = `jsonl-tail-log-bound-${name}`;
+      await withDebugLog(sessionId, true, async (logPath) => {
+        const files = Array.from({ length: 129 }, () => tmpFile(''));
+        const error = Object.assign(new Error('read denied'), {
+          code: 'EACCES',
+        });
+        const spy = denyTailProbe(error);
+
+        try {
+          for (const [index, file] of files.entries()) {
+            await append(file, { index });
+          }
+          await vi.waitFor(() => {
+            expect(tailWarnings(logPath)).toHaveLength(files.length);
+          });
+          await append(files[0], { evicted: true });
+          await vi.waitFor(() => {
+            expect(tailWarnings(logPath)).toHaveLength(files.length + 1);
+          });
+
+          expect(tailWarnings(logPath, files[0])).toHaveLength(2);
+          expect(tailWarnings(logPath, files[1])).toHaveLength(1);
+          expect(
+            spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+          ).toHaveLength(files.length + 1);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    it.runIf(process.platform !== 'win32')(
+      'matches the native append outcome for a real FIFO',
+      async () => {
+        const fifo = tmpPath('fifo');
+        const record = Buffer.from('{"next":true}\n', 'utf8');
+        execFileSync('mkfifo', [fifo]);
+        const reader = fs.openSync(fifo, tailProbeFlags);
+        const drainRecord = () => {
+          const received = Buffer.alloc(record.length);
+          const bytesRead = fs.readSync(
+            reader,
+            received,
+            0,
+            received.length,
+            null,
+          );
+          expect(bytesRead).toBe(record.length);
+          expect(received).toEqual(record);
+        };
+        try {
+          let nativeError: NodeJS.ErrnoException | undefined;
+          try {
+            if (name === 'writeLine') {
+              await fs.promises.appendFile(fifo, record, { flush: true });
+            } else {
+              fs.appendFileSync(fifo, record, { flush: true });
+            }
+          } catch (error) {
+            nativeError = error as NodeJS.ErrnoException;
+          }
+          drainRecord();
+
+          const result = Promise.resolve().then(() =>
+            append(fifo, { next: true }),
+          );
+          if (nativeError) {
+            await expect(result).rejects.toMatchObject({
+              code: nativeError.code,
+            });
+          } else {
+            await expect(result).resolves.toBeUndefined();
+          }
+          drainRecord();
+        } finally {
+          fs.closeSync(reader);
+        }
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'delimits a torn file created after a missing-path stat',
+      async () => {
+        const file = tmpPath('created-after-missing-stat');
+        const createAfterStat = () => {
+          fs.writeFileSync(file, '{"old":');
+        };
+        const statSpy =
+          name === 'writeLine'
+            ? (() => {
+                const stat = fs.promises.stat.bind(fs.promises);
+                return vi
+                  .spyOn(fs.promises, 'stat')
+                  .mockImplementation(async (...args) => {
+                    try {
+                      return await stat(...args);
+                    } catch (error) {
+                      if (args[0] === file) createAfterStat();
+                      throw error;
+                    }
+                  });
+              })()
+            : (() => {
+                const stat = fs.statSync.bind(fs);
+                return vi
+                  .spyOn(fs, 'statSync')
+                  .mockImplementation((...args) => {
+                    try {
+                      return stat(...args);
+                    } catch (error) {
+                      if (args[0] === file) createAfterStat();
+                      throw error;
+                    }
+                  });
+              })();
+
+        try {
+          await append(file, { next: true });
+          expect(statSpy).toHaveBeenCalledWith(file);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"old":\n{"next":true}\n',
+          );
+        } finally {
+          statSpy.mockRestore();
+        }
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'delimits a torn file that replaces a non-regular path after stat',
+      async () => {
+        const file = tmpPath('type-replaced-after-stat');
+        fs.mkdirSync(file);
+        const replaceAfterStat = () => {
+          fs.rmdirSync(file);
+          fs.writeFileSync(file, '{"old":');
+        };
+        const statSpy =
+          name === 'writeLine'
+            ? (() => {
+                const stat = fs.promises.stat.bind(fs.promises);
+                return vi
+                  .spyOn(fs.promises, 'stat')
+                  .mockImplementation(async (...args) => {
+                    const stats = await stat(...args);
+                    if (args[0] === file) replaceAfterStat();
+                    return stats;
+                  });
+              })()
+            : (() => {
+                const stat = fs.statSync.bind(fs);
+                return vi
+                  .spyOn(fs, 'statSync')
+                  .mockImplementation((...args) => {
+                    const stats = stat(...args);
+                    if (args[0] === file) replaceAfterStat();
+                    return stats;
+                  });
+              })();
+
+        try {
+          await append(file, { next: true });
+          expect(statSpy).toHaveBeenCalledWith(file);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"old":\n{"next":true}\n',
+          );
+        } finally {
+          statSpy.mockRestore();
+        }
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'does not open a FIFO just to inspect its tail',
+      async () => {
+        const fifo = tmpPath('fifo-no-probe');
+        execFileSync('mkfifo', [fifo]);
+        const reader = fs.openSync(fifo, tailProbeFlags);
+        const asyncStatSpy = vi.spyOn(fs.promises, 'stat');
+        const syncStatSpy = vi.spyOn(fs, 'statSync');
+        const probeSpy = denyTailProbe(new Error('unexpected FIFO probe'));
+        const appendSpy =
+          name === 'writeLine'
+            ? vi.spyOn(fs.promises, 'appendFile').mockImplementation(() => {
+                throw new Error('append without probe');
+              })
+            : vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {
+                throw new Error('append without probe');
+              });
+
+        try {
+          await expect(
+            Promise.resolve().then(() => append(fifo, { next: true })),
+          ).rejects.toThrow('append without probe');
+          expect(
+            probeSpy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+          ).toHaveLength(0);
+          expect(
+            (name === 'writeLine' ? asyncStatSpy : syncStatSpy).mock.calls,
+          ).toContainEqual([fifo]);
+          expect(appendSpy).toHaveBeenCalledOnce();
+        } finally {
+          appendSpy.mockRestore();
+          probeSpy.mockRestore();
+          asyncStatSpy.mockRestore();
+          syncStatSpy.mockRestore();
+          fs.closeSync(reader);
+        }
+      },
+    );
+
+    it('closes the append descriptor when fstat fails', async () => {
+      const file = tmpPath('append-stat-fails');
+      const error = Object.assign(new Error('fstat failed'), { code: 'EIO' });
+      const fstatSync = fs.fstatSync.bind(fs);
+      let descriptor: number | undefined;
+
+      if (name === 'writeLine') {
+        const open = fs.promises.open.bind(fs.promises);
+        let writer: fs.promises.FileHandle | undefined;
+        const openSpy = vi
+          .spyOn(fs.promises, 'open')
+          .mockImplementation(async (...args) => {
+            const handle = await open(...args);
+            if (args[0] === file && args[1] === 'a') {
+              writer = handle;
+              descriptor = handle.fd;
+              vi.spyOn(handle, 'stat').mockRejectedValue(error);
+              vi.spyOn(handle, 'close');
+            }
+            return handle;
+          });
+
+        try {
+          await expect(append(file, { next: true })).rejects.toMatchObject({
+            code: 'EIO',
+          });
+          expect(writer?.close).toHaveBeenCalledOnce();
+          expect(writer?.fd).toBe(-1);
+        } finally {
+          openSpy.mockRestore();
+          if (writer && writer.fd >= 0) await writer.close();
+        }
+      } else {
+        const openSync = fs.openSync.bind(fs);
+        const openSpy = vi
+          .spyOn(fs, 'openSync')
+          .mockImplementation((...args) => {
+            const result = openSync(...args);
+            if (args[0] === file && args[1] === 'a') descriptor = result;
+            return result;
+          });
+        const fstatSpy = vi
+          .spyOn(fs, 'fstatSync')
+          .mockImplementation((...args) => {
+            if (args[0] === descriptor) throw error;
+            return fstatSync(...args);
+          });
+        const closeSpy = vi.spyOn(fs, 'closeSync');
+
+        try {
+          await expect(
+            Promise.resolve().then(() => append(file, { next: true })),
+          ).rejects.toMatchObject({ code: 'EIO' });
+          expect(closeSpy).toHaveBeenCalledWith(descriptor);
+          let closeError: unknown;
+          try {
+            fstatSync(descriptor!);
+          } catch (error) {
+            closeError = error;
+          }
+          expect(closeError).toMatchObject({ code: 'EBADF' });
+        } finally {
+          fstatSpy.mockRestore();
+          closeSpy.mockRestore();
+          openSpy.mockRestore();
+        }
+      }
+    });
+
+    it('does not prepend a newline to an existing empty file', async () => {
+      const file = tmpFile('');
+
+      await append(file, { empty: true });
+
+      expect(fs.readFileSync(file, 'utf8')).toBe('{"empty":true}\n');
+    });
+  });
+
   it('writeLine round-trips through read() with flush:true appended records', async () => {
     const file = tmpPath('wl');
     await writeLine(file, { kind: 'a', n: 1 });
@@ -664,6 +1691,28 @@ describe('writeLine / writeLineSync / write', () => {
     );
   });
 
+  it('writeLine preserves the next record after an interrupted append', async () => {
+    const parent = { uuid: 'parent' };
+    const file = tmpFile(
+      `${JSON.stringify(parent)}\n{"uuid":"partial","sessionId":"sess`,
+    );
+    const next = { uuid: 'next', parentUuid: 'parent' };
+
+    await writeLine(file, next);
+    await writeLine(file, { uuid: 'last', parentUuid: 'next' });
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(
+      `${JSON.stringify(parent)}\n{"uuid":"partial","sessionId":"sess\n` +
+        '{"uuid":"next","parentUuid":"parent"}\n' +
+        '{"uuid":"last","parentUuid":"next"}\n',
+    );
+    await expect(read(file)).resolves.toEqual([
+      parent,
+      next,
+      { uuid: 'last', parentUuid: 'next' },
+    ]);
+  });
+
   it('writeLineSync appends well-formed records with trailing newlines', () => {
     const file = tmpPath('wls');
     writeLineSync(file, { sync: true, i: 0 });
@@ -671,6 +1720,20 @@ describe('writeLine / writeLineSync / write', () => {
 
     expect(fs.readFileSync(file, 'utf8')).toBe(
       '{"sync":true,"i":0}\n{"sync":true,"i":1}\n',
+    );
+  });
+
+  it('writeLineSync preserves the next record after an interrupted append', () => {
+    const file = tmpFile(
+      '{"uuid":"parent"}\n{"uuid":"partial","sessionId":"sess',
+    );
+    const next = { uuid: 'next', parentUuid: 'parent' };
+
+    writeLineSync(file, next);
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(
+      '{"uuid":"parent"}\n{"uuid":"partial","sessionId":"sess\n' +
+        '{"uuid":"next","parentUuid":"parent"}\n',
     );
   });
 

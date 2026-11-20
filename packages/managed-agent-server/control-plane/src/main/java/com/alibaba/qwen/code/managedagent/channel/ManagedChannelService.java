@@ -1044,7 +1044,7 @@ public class ManagedChannelService {
         }
     }
 
-    private static ManagedAgentException translate(HarnessFailure error) {
+    static ManagedAgentException translate(HarnessFailure error) {
         if (!(error instanceof HarnessHttpFailure http)) {
             // A generation clash or dropped connection is transient for the
             // adapter: the same retryable envelope an HTTP refusal takes.

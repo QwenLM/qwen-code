@@ -2,6 +2,8 @@
 
 [English](output-speed-full-request.md) | [简体中文](output-speed-full-request.zh-CN.md)
 
+> 之后的[从请求发出开始计算 TTFT](ttft-from-request-dispatch.zh-CN.md)把 TTFT 起点从构建请求之前移到请求发出时，因此下文的时间从发出请求时开始。输出速度规则不变。
+
 ## 状态与范围
 
 已为 #16714 实现。本次修改 CLI `/stats` 和 Web Shell Token Usage 计算输出速度（TPS）的方式，TTFT、生成时间和记录的事件保持不变。它修订了[按模型的生成计时](model-generation-timing.zh-CN.md)中关于输出速度的规则（D2、D5），以及[Token 用量趋势](token-usage-trend.zh-CN.md)的速度视图。spinner 旁的实时 tokens/s 估算和 managed 诊断面板不在范围内。

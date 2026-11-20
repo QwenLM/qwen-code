@@ -77,6 +77,12 @@ public interface RuntimeTransport {
                 "managed_extension_unavailable", "Extension metadata controls are unavailable.", false));
     }
 
+    /** Closes a parked owner's idle MCP connections; refused while it has pending work. */
+    public default CompletionStage<Void> reclaimMcp(RuntimeLease lease, RuntimeSession session) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_mcp_management_unavailable", "Runtime MCP reclamation is unavailable.", false));
+    }
+
     public default CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
                 "managed_mcp_management_unavailable", "Runtime MCP definitions are unavailable.", false));

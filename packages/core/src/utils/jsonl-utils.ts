@@ -21,13 +21,18 @@
  * - exists() - Checks if file exists and is non-empty
  */
 
+import * as nodeConstants from 'node:constants';
 import fs from 'node:fs';
 import path from 'node:path';
 import { atomicWriteFileSync } from './atomicFileWrite.js';
 import readline from 'node:readline';
 import { finished } from 'node:stream/promises';
 import { Mutex } from 'async-mutex';
-import { createDebugLogger } from './debugLogger.js';
+import {
+  createDebugLogger,
+  getActiveDebugSessionLogPath,
+  isDebugLogFileEnabled,
+} from './debugLogger.js';
 
 const debugLogger = createDebugLogger('JSONL');
 
@@ -440,13 +445,119 @@ export async function read<T = unknown>(
  * hot-path write (chat session JSONL appends).
  */
 const ensuredDirs = new Set<string>();
+interface TailDiagnosticEntry {
+  attempts: number;
+  pending: boolean;
+  retained: boolean;
+}
+const diagnosedTailReadFailures = new Map<string, TailDiagnosticEntry>();
+const MAX_DIAGNOSED_TAIL_READ_FAILURES = 128;
+const MAX_TAIL_DIAGNOSTIC_DELIVERY_ATTEMPTS = 3;
+// Tail inspection deliberately keeps its own short-lived handle per append:
+// it checks the record boundary left by an interrupted append, and staying
+// separate from the append/fsync path keeps this bugfix focused. Merging the
+// two onto one handle is an independent performance change.
+const tailProbeFlags = nodeConstants.O_RDONLY | (nodeConstants.O_NONBLOCK ?? 0);
+
+function reportUninspectableTail(
+  diagnosticKey: string,
+  filePath: string,
+  error: unknown,
+): void {
+  const previous = diagnosedTailReadFailures.get(diagnosticKey);
+  // An in-flight write already covers this key; a retained one needs no
+  // repeat, and a permanently broken sink must not be retried forever.
+  if (previous?.retained || previous?.pending) return;
+  if (previous && previous.attempts >= MAX_TAIL_DIAGNOSTIC_DELIVERY_ATTEMPTS) {
+    return;
+  }
+
+  const entry: TailDiagnosticEntry = {
+    attempts: (previous?.attempts ?? 0) + 1,
+    pending: true,
+    retained: false,
+  };
+  if (
+    !previous &&
+    diagnosedTailReadFailures.size >= MAX_DIAGNOSED_TAIL_READ_FAILURES
+  ) {
+    const oldest = diagnosedTailReadFailures.keys().next().value;
+    if (oldest !== undefined) diagnosedTailReadFailures.delete(oldest);
+  }
+  diagnosedTailReadFailures.set(diagnosticKey, entry);
+
+  const message = `Cannot inspect JSONL tail in ${filePath}; appending with a conservative newline separator:`;
+  const warnWithDelivery = debugLogger.warnWithDelivery;
+  if (warnWithDelivery) {
+    warnWithDelivery.call(
+      debugLogger,
+      (delivered) => {
+        // A stale completion must not replace state owned by a newer attempt.
+        if (diagnosedTailReadFailures.get(diagnosticKey) !== entry) return;
+        entry.pending = false;
+        entry.retained = delivered;
+      },
+      message,
+      error,
+    );
+    return;
+  }
+
+  // Compatibility loggers cannot report delivery, so preserve the previous
+  // at-most-once best-effort diagnostic instead of retrying blindly.
+  debugLogger.warn(message, error);
+  entry.pending = false;
+  entry.retained = true;
+}
+
+function canAppendWithoutTailInspection(
+  filePath: string,
+  error: unknown,
+): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT') return true;
+
+  // Node --permission reports a read denial with its own structured error.
+  const readDeniedByPermissionModel =
+    code === 'ERR_ACCESS_DENIED' &&
+    (error as { permission?: string }).permission === 'FileSystemRead';
+  // Windows can reject the read handle for a sharing violation while still
+  // allowing the append handle.
+  const windowsSharingViolation =
+    code === 'EBUSY' && process.platform === 'win32';
+  // A Linux file lease can reject the nonblocking read probe while the
+  // normal blocking append succeeds after the lease is released.
+  const temporarilyUnavailable = code === 'EAGAIN';
+  if (
+    code !== 'EACCES' &&
+    code !== 'EPERM' &&
+    !readDeniedByPermissionModel &&
+    !windowsSharingViolation &&
+    !temporarilyUnavailable
+  ) {
+    return false;
+  }
+
+  // Preserve append-only files when the tail cannot be read, but expose that
+  // tail inspection was skipped without flooding every subsequent line.
+  if (!debugLogger.isEnabled() || !isDebugLogFileEnabled()) return true;
+  const debugLogPath = getActiveDebugSessionLogPath();
+  if (debugLogPath === null) return true;
+  reportUninspectableTail(
+    JSON.stringify([filePath, debugLogPath]),
+    filePath,
+    error,
+  );
+  return true;
+}
 
 /**
- * Test-only: clear the per-directory mkdir cache. Needed when tests mutate
- * fs state at the same directory path across cases.
+ * Test-only: clear the per-write caches. Needed when tests mutate fs state at
+ * the same paths across cases.
  */
 export function _resetEnsuredDirsCacheForTest(): void {
   ensuredDirs.clear();
+  diagnosedTailReadFailures.clear();
 }
 
 /**
@@ -467,15 +578,72 @@ export async function writeLine(
         await fs.promises.mkdir(dir, { recursive: true });
         ensuredDirs.add(dir);
       }
+      let prefix = '';
+      let existing: fs.promises.FileHandle | undefined;
+      let appendHandle: fs.promises.FileHandle | undefined;
+      let appendHandleReady = false;
+      try {
+        const fileStats = await fs.promises.stat(filePath);
+        if (fileStats.isFile()) {
+          existing = await fs.promises.open(filePath, tailProbeFlags);
+          const stats = await existing.stat();
+          if (stats.isFile() && stats.size > 0) {
+            const lastByte = Buffer.allocUnsafe(1);
+            const { bytesRead } = await existing.read(
+              lastByte,
+              0,
+              1,
+              stats.size - 1,
+            );
+            prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
+          }
+        } else {
+          // Inspect and write through the same append-only handle. A read
+          // probe is unnecessary here and could consume a FIFO's payload.
+          appendHandle = await fs.promises.open(filePath, 'a');
+          existing = appendHandle;
+          const stats = await appendHandle.stat();
+          appendHandleReady = true;
+          if (stats.isFile() && stats.size > 0) prefix = '\n';
+        }
+      } catch (error) {
+        if (!canAppendWithoutTailInspection(filePath, error)) {
+          throw error;
+        }
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          appendHandle = await fs.promises.open(filePath, 'a');
+          existing = appendHandle;
+          const stats = await appendHandle.stat();
+          appendHandleReady = true;
+          if (stats.isFile() && stats.size > 0) prefix = '\n';
+        } else {
+          prefix = '\n';
+        }
+      } finally {
+        // Only a validated writer stays open for the append below.
+        if (!appendHandleReady) await existing?.close();
+      }
+      const openAppender = appendHandleReady ? appendHandle : undefined;
       // flush:true fsyncs after each line so a process killed mid-write
       // doesn't leave a glued `}{` record on disk (closes #3681). On
       // Node v22/v24 strace shows string + utf8 + flush:true does fsync
       // correctly; passing a Buffer is forward-compat insurance against
       // any future C++ fast path that might bypass JS-side flush logic
       // for the string case, with no behavior delta on tested versions.
-      await fs.promises.appendFile(filePath, Buffer.from(line, 'utf8'), {
-        flush: true,
-      });
+      // FileHandle.appendFile does not honor flush:true on this path;
+      // explicitly match the per-record fsync below it.
+      try {
+        await fs.promises.appendFile(
+          openAppender ?? filePath,
+          Buffer.from(prefix + line, 'utf8'),
+          {
+            flush: true,
+          },
+        );
+        await openAppender?.sync();
+      } finally {
+        await openAppender?.close();
+      }
     });
   } finally {
     if (fileLocks.get(filePath) === lock && !lock.isLocked()) {
@@ -509,7 +677,66 @@ export function writeLineSync(filePath: string, data: unknown): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.appendFileSync(filePath, Buffer.from(line, 'utf8'), { flush: true });
+  let prefix = '';
+  let descriptor: number | undefined;
+  let appendDescriptor: number | undefined;
+  let appendDescriptorReady = false;
+  try {
+    const fileStats = fs.statSync(filePath);
+    if (fileStats.isFile()) {
+      descriptor = fs.openSync(filePath, tailProbeFlags);
+      const stats = fs.fstatSync(descriptor);
+      if (stats.isFile() && stats.size > 0) {
+        const lastByte = Buffer.allocUnsafe(1);
+        const bytesRead = fs.readSync(
+          descriptor,
+          lastByte,
+          0,
+          1,
+          stats.size - 1,
+        );
+        prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
+      }
+    } else {
+      // Inspect and write through the same append-only handle. A read probe
+      // is unnecessary here and could consume a FIFO's payload.
+      appendDescriptor = fs.openSync(filePath, 'a');
+      descriptor = appendDescriptor;
+      const stats = fs.fstatSync(appendDescriptor);
+      appendDescriptorReady = true;
+      if (stats.isFile() && stats.size > 0) prefix = '\n';
+    }
+  } catch (error) {
+    if (!canAppendWithoutTailInspection(filePath, error)) {
+      throw error;
+    }
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      appendDescriptor = fs.openSync(filePath, 'a');
+      descriptor = appendDescriptor;
+      const stats = fs.fstatSync(appendDescriptor);
+      appendDescriptorReady = true;
+      if (stats.isFile() && stats.size > 0) prefix = '\n';
+    } else {
+      prefix = '\n';
+    }
+  } finally {
+    // Only a validated writer stays open for the append below.
+    if (!appendDescriptorReady && descriptor !== undefined) {
+      fs.closeSync(descriptor);
+    }
+  }
+  const openAppender = appendDescriptorReady ? appendDescriptor : undefined;
+  try {
+    fs.appendFileSync(
+      openAppender ?? filePath,
+      Buffer.from(prefix + line, 'utf8'),
+      {
+        flush: true,
+      },
+    );
+  } finally {
+    if (openAppender !== undefined) fs.closeSync(openAppender);
+  }
 }
 
 /**
