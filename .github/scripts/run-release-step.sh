@@ -187,6 +187,18 @@ case "${step}" in
       # pushed the branch, so the per-package skip never got to run.
       remote_branch="$(git ls-remote --heads origin "refs/heads/${release_branch_name}")"
       if [[ -n "${remote_branch}" ]]; then
+        # A newer stable may have shipped since this run started. Resuming
+        # would publish the remaining packages under the old version and
+        # move latest back to it, while the already-published packages keep
+        # pointing at the newer release.
+        if [[ "${NPM_TAG}" == "latest" ]]; then
+          current_latest="$(npm view @qwen-code/qwen-code dist-tags.latest 2>/dev/null || true)"
+          if [[ -n "${current_latest}" && "${current_latest}" != "${RELEASE_VERSION}" ]]; then
+            echo "::error::npm latest is ${current_latest}, past ${RELEASE_VERSION}. Resuming this run would regress the dist-tag; recover the remaining packages manually."
+            echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+        fi
         git fetch --no-tags origin "refs/heads/${release_branch_name}"
         release_commit="$(git rev-parse FETCH_HEAD)"
         if [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "${release_commit}^{tree}")" ]]; then
@@ -194,6 +206,7 @@ case "${step}" in
           exit 1
         fi
         git switch --detach "${release_commit}"
+        echo "reused_commit=true" >> "${GITHUB_OUTPUT}"
         echo "::notice::Reusing ${release_branch_name} at ${release_commit}; published npm versions will be skipped."
         exit 0
       fi
@@ -287,6 +300,10 @@ case "${step}" in
     ;;
 
   create-github-release)
+    if gh release view "${RELEASE_TAG}" --json tagName --jq .tagName >/dev/null 2>&1; then
+      echo "::notice::Release ${RELEASE_TAG} already exists; skipping creation."
+      exit 0
+    fi
     prerelease_flag=""
     if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
       prerelease_flag="--prerelease"

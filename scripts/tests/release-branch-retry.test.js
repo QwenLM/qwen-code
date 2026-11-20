@@ -79,6 +79,7 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
           BRANCH_NAME: 'release/v1.2.3',
           RELEASE_TAG: 'v1.2.3',
           RELEASE_VERSION: '1.2.3',
+          NPM_TAG: 'latest',
           IS_DRY_RUN: 'false',
           CI_BOT_PAT: '',
           GITHUB_OUTPUT: join(directory, 'output'),
@@ -98,4 +99,76 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
       }
     },
   );
+
+  it('refuses to resume when npm latest has moved past the release version', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'release-branch-retry-'));
+    directories.push(directory);
+    const checkout = join(directory, 'checkout');
+    const remote = join(directory, 'remote.git');
+    const bin = join(directory, 'bin');
+    mkdirSync(checkout);
+    mkdirSync(bin);
+    const git = (...args) => {
+      const result = spawnSync('git', args, {
+        cwd: checkout,
+        encoding: 'utf8',
+        env: { ...process.env, HUSKY: '0', GIT_CONFIG_NOSYSTEM: '1' },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+
+    git('init');
+    git('config', 'user.name', 'Release test');
+    git('config', 'user.email', 'release@example.test');
+    git('config', 'commit.gpgsign', 'false');
+    git('config', 'core.hooksPath', '/dev/null');
+    for (const file of [
+      'package.json',
+      'pnpm-lock.yaml',
+      'packages/example/package.json',
+      'packages/channels/example/package.json',
+      'integrations/example/package.json',
+      'integrations/example/qwen-extension.json',
+    ]) {
+      mkdirSync(dirname(join(checkout, file)), { recursive: true });
+      writeFileSync(join(checkout, file), '{}\n');
+    }
+    git('add', '.');
+    const trailer = 'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>';
+    git('commit', '-m', `Release\n\n${trailer}`);
+    const original = git('rev-parse', 'HEAD');
+    git('init', '--bare', remote);
+    git('remote', 'add', 'origin', remote);
+    git('push', 'origin', 'HEAD:refs/heads/release/v1.2.3');
+    git('commit', '--allow-empty', '-m', `Retry\n\n${trailer}`);
+
+    // Stub npm to report a newer latest; stub gh for auth setup.
+    writeFileSync(join(bin, 'npm'), '#!/bin/sh\necho "1.2.4"\n', {
+      mode: 0o755,
+    });
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const result = spawnSync('bash', [script, 'push-release-branch'], {
+      cwd: checkout,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        HUSKY: '0',
+        BRANCH_NAME: 'release/v1.2.3',
+        RELEASE_TAG: 'v1.2.3',
+        RELEASE_VERSION: '1.2.3',
+        NPM_TAG: 'latest',
+        IS_DRY_RUN: 'false',
+        CI_BOT_PAT: '',
+        GITHUB_OUTPUT: join(directory, 'output'),
+      },
+    });
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stdout).toContain('npm latest is 1.2.4');
+    expect(result.stdout).toContain('regress the dist-tag');
+    expect(git('ls-remote', 'origin', 'refs/heads/release/v1.2.3')).toBe(
+      `${original}\trefs/heads/release/v1.2.3`,
+    );
+  });
 });
