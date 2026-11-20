@@ -4342,7 +4342,7 @@ try {
       );
       const privateHead = runMysql(
         mysqlPort,
-        `SELECT storage_version, latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+        `SELECT has_activity_diagnostics, latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
       ).split('\t');
       const checkpoint = JSON.parse(
         runMysql(
@@ -4351,7 +4351,7 @@ try {
         ),
       );
       if (
-        privateHead[0] !== '4' ||
+        privateHead[0] !== '1' ||
         checkpoint.continuation?.phase !== 'await_action' ||
         checkpoint.approval?.requestId !== originalApprovalId
       ) {
@@ -4378,7 +4378,7 @@ try {
         options: originalApprovalOptions,
         plan: originalApprovalPlan,
         originalRuntime: runtime,
-        storageVersion: Number(privateHead[0]),
+        activityDiagnostics: privateHead[0] === '1',
         checkpointPhase: checkpoint.continuation.phase,
         executionCount,
         physicalFileExists: existsSync(inflightSideEffect),
@@ -6983,7 +6983,7 @@ try {
             // activation renewal the live writer journals.
             head: runMysql(
               mysqlPort,
-              `SELECT state, storage_version, writer_generation, HEX(writer_id), HEX(latest_checkpoint_resource_id), compacted_through_revision, recovery_status, recovery_detail_code FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+              `SELECT state, has_activity_diagnostics, writer_generation, HEX(writer_id), HEX(latest_checkpoint_resource_id), compacted_through_revision, recovery_status, recovery_detail_code FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
               probeMs,
             ),
             // Every journal transaction except those renewals, by writer

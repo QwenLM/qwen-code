@@ -142,7 +142,7 @@ public enum ManagedSchemaProjection {
                     + "selected_approval_mode, approval_revision, is_plan_enabled, permission_rules_json, public_child_agents_version, harness_instance_id, "
                     + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state"),
     SESSION_HEAD(
-            "tenant_id, workspace_id, session_id, storage_version, state, writer_generation, "
+            "tenant_id, workspace_id, session_id, has_activity_diagnostics, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
                     + "committed_sequence, last_commit_digest, activation_epoch, "
                     + "latest_checkpoint_resource_id, compacted_through_revision, packed_through_revision, recovery_status, "
