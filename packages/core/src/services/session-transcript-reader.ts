@@ -2060,13 +2060,17 @@ function pruneCacheByteBudget(oversizedClass: boolean): void {
   }
 }
 
-// A snapshot of the same file that the live one supersedes: a different
-// byte length in either direction — a smaller prefix left by an append, or
-// a longer prefix of a shortened transcript whose frozen cursors the size
-// guard rejects — or an equal-size orphan an in-place rewrite (mtime moved)
-// or equal-size replacement (identity changed) left unreachable on every
-// read path (the equal-size mtime guard, the identity check and
-// hasSnapshotSignature all reject it).
+// A snapshot of the same file that the incoming one supersedes. The order
+// is temporal, not by size: a strictly older snapshot is reclaimable in
+// either size direction (a smaller prefix left by an append, or a longer
+// prefix of a shortened transcript whose frozen cursors the size guard
+// rejects), while a frozen-prefix read must never reclaim the live newer
+// index. At equal mtime only a smaller entry is reclaimable (the incoming
+// larger one is the live append); a larger entry at equal mtime is the
+// live index a frozen-prefix read must leave alone. Equal-size,
+// equal-mtime entries at a different identity are orphans an equal-size
+// replacement left unreachable on every read path (the identity check
+// and hasSnapshotSignature reject them).
 function isSupersededSnapshot(
   value: TranscriptIndex,
   filePath: string,
@@ -2075,11 +2079,16 @@ function isSupersededSnapshot(
   fileIdentity: SessionTranscriptFileIdentity,
 ): boolean {
   if (value.filePath !== filePath) return false;
-  if (value.snapshotSize !== snapshotSize) return true;
+  // ISO-8601 UTC strings compare chronologically.
+  if (value.lastUpdated < lastUpdated) return true;
+  if (value.lastUpdated === lastUpdated && value.snapshotSize < snapshotSize) {
+    return true;
+  }
   return (
-    value.lastUpdated !== lastUpdated ||
-    value.fileIdentity.dev !== fileIdentity.dev ||
-    value.fileIdentity.ino !== fileIdentity.ino
+    value.snapshotSize === snapshotSize &&
+    value.lastUpdated === lastUpdated &&
+    (value.fileIdentity.dev !== fileIdentity.dev ||
+      value.fileIdentity.ino !== fileIdentity.ino)
   );
 }
 
@@ -2837,16 +2846,11 @@ async function getCachedIndex(params: {
         oversized,
       );
     }
-    const entry: CacheEntry = {
+    indexCache.set(key, {
       value,
       byteSize,
       expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
-    };
-    indexCache.set(key, entry);
-    // A concurrent page may have decoded and attached a projection to this
-    // index object while the build was pending; account or drop it here too,
-    // so admission never leaves retained bodies off-budget.
-    accountManagedProjection(value, entry);
+    });
     pruneCache();
     return value;
   })();

@@ -27,7 +27,10 @@ import {
   writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
-import { setSessionTranscriptIndexBuildCompleteHookForTest } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import {
+  setSessionTranscriptIndexBuildCompleteHookForTest,
+  setSessionTranscriptIndexCacheMaxBytesForTest,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import {
   InvalidRewindTargetError,
   SessionBusyError,
@@ -5956,6 +5959,9 @@ describe('multi-workspace session dispatch', () => {
       setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
         if (builtPath === transcriptPath) builds++;
       });
+      // A 1-byte shared budget lands the index in the oversized class, so
+      // the reuse pinned here is the oversized-class retention of #17889.
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
       try {
         await request(app)
           .get(
@@ -5975,6 +5981,7 @@ describe('multi-workspace session dispatch', () => {
         expect(repeat.body.events).toHaveLength(1);
       } finally {
         setSessionTranscriptIndexBuildCompleteHookForTest(() => {});
+        setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
       }
     });
   });
