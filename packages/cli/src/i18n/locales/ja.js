@@ -7,6 +7,53 @@
 // Japanese translations for Qwen Code CLI
 
 export default {
+  user: 'ユーザー',
+  assistant: 'アシスタント',
+  thinking: '思考',
+  task: 'タスク',
+  compaction: '圧縮',
+  info: '情報',
+  warning: '警告',
+  retry: '再試行',
+  'stop-hook': '停止フック',
+  'away-recap': '離席の要約',
+  'user-shell': 'ユーザーコマンド',
+  advisor: 'アドバイザー',
+  'arena-agent': 'アリーナエージェント',
+  'arena-session': 'アリーナセッション',
+  goal: '目標',
+  'Protected input': '保護された入力',
+  'Focused input. Cursor: {{position}}':
+    '入力にフォーカス。カーソル：{{position}}',
+  'Unfocused input.': '入力にフォーカスなし。',
+  'Focused Prompt: {{value}}': 'フォーカス中のプロンプト：{{value}}',
+  'Prompt: {{value}}': 'プロンプト：{{value}}',
+  'Focused Input: {{value}}': 'フォーカス中の入力：{{value}}',
+  'Input: {{value}}': '入力：{{value}}',
+  'Placeholder: {{value}}': 'プレースホルダー：{{value}}',
+  'Cursor: {{position}}': 'カーソル：{{position}}',
+  'Selected {{value}}': '選択済み {{value}}',
+  'Disabled {{value}}': '無効 {{value}}',
+  'Focused Toggle on: {{value}}': 'フォーカス中、オン：{{value}}',
+  'Focused Toggle off: {{value}}': 'フォーカス中、オフ：{{value}}',
+  'Toggle on: {{value}}': 'オン：{{value}}',
+  'Toggle off: {{value}}': 'オフ：{{value}}',
+  'Conversation cleared.': '会話を消去しました。',
+  '{{role}}: {{value}}': '{{role}}：{{value}}',
+  'Revision {{value}}': '修正 {{value}}',
+  Dialog: 'ダイアログ',
+  'Dialog closed. Focus: prompt.':
+    'ダイアログを閉じました。フォーカス：プロンプト。',
+  'Dialog closed.': 'ダイアログを閉じました。',
+  'Waiting for confirmation': '確認待ち',
+  'Working. Escape to cancel.': '処理中。Escape でキャンセル。',
+  'History items {{start}}-{{end}} of {{total}}':
+    '履歴 {{start}}-{{end}} / {{total}} 件。',
+  'Worktree: {{value}}': 'ワークツリー: {{value}}',
+  'Workflow mode: on': 'ワークフローモード: オン',
+  'Workflow mode: on (unavailable)': 'ワークフローモード: オン（利用不可）',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+上下または PageUp/PageDown で履歴を読み、Ctrl+Home/End で最初/最新へ移動。',
   'Generated UI': 'Generated UI（生成 UI）',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     '対応するローカルセッションで内蔵 Generated UI を有効にします。変更を適用するには対象のセッションを再起動してください。',
@@ -67,6 +114,7 @@ export default {
   'submit a bug report': 'バグレポートを送信',
   Model: 'モデル',
   'Fast Model': '高速モデル',
+  'Agent Loop': 'エージェントループ',
   Sandbox: 'サンドボックス',
   'Session ID': 'セッションID',
   'Base URL': 'Base URL',
@@ -855,6 +903,8 @@ export default {
     '圧縮サマリーが切り詰められたため、チャット履歴を圧縮できませんでした',
   'Could not compress chat history due to an API error.':
     'API エラーのため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because it is too large for the context window.':
+    'チャット履歴がコンテキストウィンドウに収まらないため、圧縮できませんでした',
   // Directory
   'Configuration is not available.': '設定が利用できません',
   'Please provide at least one path to add.':

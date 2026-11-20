@@ -10,6 +10,8 @@ import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
 import * as path from 'node:path';
+import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { TLSSocket } from 'node:tls';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
@@ -27,6 +29,8 @@ import type {
   DaemonPerfSnapshot,
   DaemonStartupSnapshot,
 } from './daemon-status.js';
+import { resolveSseAdmissionCaps } from './daemon-status.js';
+import { getSseOccupancy } from './sse-occupancy.js';
 import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
@@ -48,6 +52,7 @@ import {
   MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import { gzipJsonResponses } from './gzip-response.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import {
   CredentialStore,
@@ -112,6 +117,8 @@ import {
 } from './web-shell-static.js';
 import { mountMcpAppSandbox } from './mcp-app-sandbox.js';
 import {
+  forwardManagedTerminalUpgrade,
+  isManagedTerminalUpgradePath,
   mountManagedLocalWeb,
   type ManagedLocalWebOptions,
 } from './managed-local-web.js';
@@ -176,7 +183,10 @@ import {
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
-import { registerGoalsRoutes } from './routes/goals.js';
+import {
+  registerGoalsRoutes,
+  registerWorkspaceQualifiedGoalsRoutes,
+} from './routes/goals.js';
 import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
 import { registerSessionAgentSquadRoutes } from './routes/session-agent-squads.js';
 import {
@@ -192,6 +202,7 @@ import {
   collectBoundSessionIds,
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
+  type KeepaliveSessionResumeRequest,
 } from './scheduled-task-keepalive.js';
 import {
   registerWorkspaceDiagnosticStatusRoutes,
@@ -286,6 +297,7 @@ import {
   deleteDaemonSessionIfOrphan,
   SessionArchiveCoordinator,
 } from './server/session-archive.js';
+import { restoreSessionCore } from './server/session-restore.js';
 import {
   installSelfOriginStripMiddleware,
   installRemoteSelfOriginMiddleware,
@@ -948,6 +960,10 @@ export function createServeApp(
     tokenConfigured,
     requireAuth: opts.requireAuth === true,
   });
+  // Unified admission caps for every long-lived stream surface
+  // (issue #17554): one aggregate budget plus per-listener clamps, resolved
+  // once and threaded through each surface's route deps.
+  const sseAdmissionCaps = resolveSseAdmissionCaps(opts);
   let runtimeStopReady = false;
   let runtimeStopsClosing = false;
   const scheduledActivity = new WeakMap<WorkspaceRuntime, () => boolean>();
@@ -1149,6 +1165,11 @@ export function createServeApp(
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
   const acpHttpEnabledAtBoot =
     opts.profile !== 'hosted-harness' && resolveAcpHttpEnabled(daemonEnvAtBoot);
+  if (deps.managedLocalWeb && !acpHttpEnabledAtBoot) {
+    throw new Error(
+      'Managed local Web Terminal requires the ACP WebSocket dispatcher; unset QWEN_SERVE_ACP_HTTP=0.',
+    );
+  }
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
   // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
   // Shell page itself (`/live/web`) on every platform; the native macOS Host
@@ -2399,7 +2420,8 @@ export function createServeApp(
   const healthRoutes = createHealthRoutes({
     opts,
     workspaceRegistry,
-    getActiveSseCount,
+    getStreamOccupancy: getSseOccupancy,
+    sseAdmissionCaps,
     getRateLimiter: () => rateLimiter,
   });
   if (healthRoutes.exposeHealthPreAuth) {
@@ -2609,6 +2631,14 @@ export function createServeApp(
 
   installJsonBodyParser(app);
 
+  // Gzip JSON API responses for clients that negotiate it (#6181). Mounted
+  // after authenticate + rate limiter on purpose: auth/rate-limit rejections
+  // are tiny bodies from (possibly unauthenticated) callers and must not pay
+  // a compression tax. Web Shell session loads stream multi-megabyte
+  // transcript JSON — the wrapper compresses those while leaving SSE, static
+  // assets, and attachment downloads untouched (see gzip-response.ts).
+  app.use(gzipJsonResponses());
+
   const hostedHarness =
     opts.profile === 'hosted-harness'
       ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
@@ -2640,6 +2670,7 @@ export function createServeApp(
       hostedHarness,
       primaryBoundWorkspace,
       broker,
+      { sseAdmissionCaps, daemonLog },
     );
     stopHostedPackagePreparation = registerHostedPackagePreparation(
       app,
@@ -2828,6 +2859,7 @@ export function createServeApp(
     getAcpHandle: () => acpHandleRef.current,
     getRateLimiter: () => rateLimiter,
     getRestSseActive: getActiveSseCount,
+    getStreamOccupancy: getSseOccupancy,
     currentServeFeatures,
     getSupportedDeviceFlowProviders,
     deviceFlowRegistry,
@@ -3205,6 +3237,8 @@ export function createServeApp(
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
+    sseAdmissionCaps,
+    daemonLog,
   });
   mountWorkspaceQualifiedAgentsRoutes(app, {
     workspaceRegistry,
@@ -3466,6 +3500,7 @@ export function createServeApp(
       persistSetting: async (...args) => {
         await persistSetting(...args);
       },
+      persistSettings: deps.persistSettings,
       invalidateServeFeaturesCache,
     });
     // Experimental paired engines put managed sessions on a second ACP child
@@ -3669,6 +3704,7 @@ export function createServeApp(
     mutate,
     sendBridgeError,
     daemonLog,
+    sseAdmissionCaps,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
     promptDeadlineMs: opts.promptDeadlineMs,
     sessionShellCommandEnabled,
@@ -3938,6 +3974,12 @@ export function createServeApp(
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
+  // The qualified listing lets a multi-workspace Web Shell aggregate every
+  // registered project's goals, not just the primary's.
+  registerWorkspaceQualifiedGoalsRoutes(app, {
+    workspaceRegistry,
+    conversationRuntimeActivity,
+  });
 
   // The primary workspace's /autofix-pr watches, read from the clone's files
   // (as `qwen autofix-pr status` lists them). Read-only.
@@ -4018,6 +4060,8 @@ export function createServeApp(
       agentTokenBudgetFor,
       daemonLoopbackBaseUrl,
       standaloneSessionService: () => standaloneSessionService,
+      sseAdmissionCaps,
+      daemonLog,
     });
     // Squads: a leader agent that coordinates member agents in a session.
     registerSessionAgentSquadRoutes(app, {
@@ -4050,6 +4094,44 @@ export function createServeApp(
   // embeds that call createServeApp neither spawn sessions on boot nor hold a
   // heartbeat timer (both would read the bound workspace's real tasks file).
   if (deps.manageScheduledTaskSessions) {
+    const restoreScheduledSession = async (
+      runtime: WorkspaceRuntime,
+      request: KeepaliveSessionResumeRequest,
+    ) => {
+      const generation = workspaceRegistry.getManagedEntryByWorkspaceId(
+        runtime.workspaceId,
+      )?.current;
+      if (generation?.runtime !== runtime) {
+        throw new WorkspaceGenerationClosedError();
+      }
+      const assertOpen = () => generation.guard.assertOpen();
+      assertOpen();
+      const result = await restoreSessionCore({
+        action: 'resume',
+        runtime,
+        workspaceCwd: runtime.workspaceCwd,
+        sessionId: request.sessionId,
+        archiveCoordinator,
+        requestedSessionIdAdmission,
+        assertRuntimeGenerationOpen: assertOpen,
+        daemonLog,
+        materializeLiveConversationDirectory: undefined,
+        historyPageSize: undefined,
+        liveReplayMode: undefined,
+        compactedReplayMode: undefined,
+        clientId: undefined,
+        approvalMode: undefined,
+        restoreSource: {
+          sourceType: request.sourceType,
+          sourceId: request.sourceId,
+        },
+        isCancelled: () => runtimeStopsClosing,
+      });
+      if (result.kind !== 'restored') {
+        throw new Error('Scheduled session restore was cancelled');
+      }
+      return result.session;
+    };
     const registerScheduledTaskAuthorizations = (
       workspaceCwd: string,
       tasks: readonly DurableCronTask[],
@@ -4088,6 +4170,8 @@ export function createServeApp(
       void runWithWorkspaceRuntimeStorage(runtime, () =>
         rehydrateScheduledTaskSessions({
           bridge: runtime.bridge,
+          restoreSession: (request) =>
+            restoreScheduledSession(runtime, request),
           boundWorkspace: runtime.workspaceCwd,
           loadTimeoutMs: scheduledTaskRestoreTimeoutMs,
           onTasksRead: (tasks) =>
@@ -4129,6 +4213,7 @@ export function createServeApp(
       if (keepaliveStops.has(runtime.workspaceCwd)) return;
       const keepalive = startScheduledTaskKeepalive({
         bridge: runtime.bridge,
+        restoreSession: (request) => restoreScheduledSession(runtime, request),
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
         reviveTimeoutMs: scheduledTaskRestoreTimeoutMs,
@@ -4187,11 +4272,16 @@ export function createServeApp(
     workspaceRegistry,
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
+    admissionCaps: sseAdmissionCaps,
     sendBridgeError,
     virtualSubagentSessions,
     resolveSubagentSessionRuntime,
     conversationRuntimeActivity,
   });
+
+  const managedLocalJava = deps.managedLocalWeb
+    ? new URL(deps.managedLocalWeb.javaUrl)
+    : undefined;
 
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`
   // alongside the REST surface, sharing this same `bridge` instance.
@@ -4204,6 +4294,7 @@ export function createServeApp(
     enabled: acpHttpEnabledAtBoot,
     boundWorkspace: primaryBoundWorkspace,
     daemonEnv: daemonEnvAtBoot,
+    sseAdmissionCaps,
     // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
     // mounts a per-runtime ACP dispatcher for each registered workspace.
     workspaceRegistry,
@@ -4262,6 +4353,26 @@ export function createServeApp(
     // activate only when the flag is on and a registry is supplied.
     cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
     ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
+    ...(managedLocalJava
+      ? {
+          managedTerminalUpgrade: {
+            matches: isManagedTerminalUpgradePath,
+            forward: (
+              req: IncomingMessage,
+              socket: Duplex,
+              head: Buffer,
+              tracked: Set<Duplex>,
+            ) =>
+              forwardManagedTerminalUpgrade(
+                managedLocalJava,
+                req,
+                socket,
+                head,
+                tracked,
+              ),
+          },
+        }
+      : {}),
     // Browser captures audio and streams raw PCM here; the daemon transcribes
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
     // listener's loopback/CSRF/bearer checks.

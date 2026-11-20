@@ -138,7 +138,7 @@ fake Harness of `ManagedAgentServerIntegrationTest` and its own in-memory H2
 database. The two classes load separate Spring contexts, and each context's
 dispatcher polls its database, so a shared database would let one test's
 dispatcher claim the other's Turns. It uses the test-scoped
-`com.networknt:json-schema-validator` (1.5.9, Jackson 2 like Spring Boot 3.5)
+`com.networknt:json-schema-validator` (2.0.0, Jackson 2 like Spring Boot 3.5)
 with JSON Schema 2020-12 and format assertions enabled. Schemas are addressed
 by JSON Pointer into the spec, so `$ref` resolves inside the one file.
 

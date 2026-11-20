@@ -2790,7 +2790,9 @@ describe('ShellTool', () => {
       /** Settles a shell fallback with 'done' and asserts the model sees it. */
       const expectShellDone = async (resultPromise: Promise<ToolResult>) => {
         resolveShellExecution({ output: 'done' });
-        expect((await resultPromise).llmContent).toContain('Output: done');
+        expect((await resultPromise).llmContent).toContain(
+          'Output (stdout and stderr combined): done',
+        );
       };
 
       it('renders a qualifying sed -i command as an edit confirmation', async () => {
@@ -3585,8 +3587,27 @@ describe('ShellTool', () => {
       });
       expectText(
         result.llmContent,
-        ['Error: wrapped command failed'],
+        ['Execution Error: wrapped command failed'],
         ['pgrep'],
+      );
+    });
+
+    it('labels the output as combined streams apart from the execution error', async () => {
+      const result = await runFg('node probe.cjs', {
+        output: 'EXPECTED_FAILURE',
+        exitCode: 7,
+      });
+
+      expect(result.llmContent).toBe(
+        [
+          'Command: node probe.cjs',
+          'Directory: (root)',
+          'Output (stdout and stderr combined): EXPECTED_FAILURE',
+          'Execution Error: (none)',
+          'Exit Code: 7',
+          'Signal: (none)',
+          'Process Group PGID: 12345',
+        ].join('\n'),
       );
     });
 
@@ -4246,7 +4267,9 @@ describe('ShellTool', () => {
           message: expect.stringContaining('Exit Code: 3'),
           type: ToolErrorType.SHELL_EXECUTE_ERROR,
         });
-        expect(result.error?.message).toContain(output || 'Output: (empty)');
+        expect(result.error?.message).toContain(
+          output || 'Output (stdout and stderr combined): (empty)',
+        );
         expect(result.returnDisplay).toMatchObject({
           type: 'shell_result',
           version: 1,
@@ -4282,7 +4305,9 @@ describe('ShellTool', () => {
       });
 
       expect(result.error).toBeUndefined();
-      expect(result.llmContent).toContain('Output: completed');
+      expect(result.llmContent).toContain(
+        'Output (stdout and stderr combined): completed',
+      );
       expect(result.returnDisplay).toEqual({
         type: 'shell_result',
         version: 1,

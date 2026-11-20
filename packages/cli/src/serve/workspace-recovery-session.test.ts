@@ -104,7 +104,6 @@ function fixture(
     head: {
       ...KEY,
       state: 'SEALED',
-      storageVersion: 1,
       writerId: 'writer',
       writerGeneration: 1,
       writerLeaseUntil: null,
@@ -383,8 +382,6 @@ async function hostedModelFixture(
   } finally {
     await session.close();
   }
-  if (options.diagnostics)
-    f.source.head = { ...f.source.head, storageVersion: 3 };
   const attempts = session.authority
     .eventsInSequenceRange(1, session.authority.committedSequence)
     .filter((event) => event.kind === 'model.attempt');
@@ -442,7 +439,6 @@ async function diagnosticResourceFixture(kind: string) {
       },
     });
   });
-  f.source.head = { ...f.source.head, storageVersion: 3 };
   return { ...f, diagnosticRef: diagnosticRef! };
 }
 
@@ -1391,10 +1387,9 @@ describe('verifyRecoverySession', () => {
   });
 
   it.each(Object.values(MANAGED_MODEL_STATISTICS_KINDS))(
-    'verifies committed diagnostic resource %s at storage version 3',
+    'verifies committed diagnostic resource %s',
     async (kind) => {
       const f = await diagnosticResourceFixture(kind);
-      expect(f.source.head.storageVersion).toBe(3);
       expect(f.diagnosticRef.kind).toBe(kind);
       await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
         fileHistory: 'not_captured',
@@ -1923,6 +1918,7 @@ describe('verifyRecoverySession', () => {
     { toolProfile: 'hosted-workspace-files/1' },
     { toolProfile: 'hosted-workspace-files/2' },
     { toolProfile: 'hosted-workspace-files/3' },
+    { toolProfile: 'hosted-workspace-external-files/1' },
     { toolProfile: 'hosted-workspace-files/4' },
     { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-shell/3', captureBytes: 1024 },
@@ -1948,6 +1944,31 @@ describe('verifyRecoverySession', () => {
     await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
       /unsupported Hosted profile|invalid frozen Hosted definition/u,
     );
+  });
+
+  it.each([
+    { hookCatalog: {} },
+    { agentDefinition: {} },
+    { sessionSkillsRef: {} },
+    { initialSelection: {} },
+    { lineage: {} },
+    { childWorkspaces: true },
+    { planMode: true },
+  ])('refuses excluded external file recovery options: %j', async (extra) => {
+    const f = fixture({
+      toolProfile: 'hosted-workspace-external-files/1',
+      ...extra,
+    });
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'unsupported Hosted profile',
+    );
+  });
+
+  it('does not admit external files into migration', async () => {
+    const f = fixture({ toolProfile: 'hosted-workspace-external-files/1' });
+    await expect(
+      verifyRecoverySession(f.source, f.io, 'migration'),
+    ).rejects.toThrow('unsupported migration profile');
   });
 
   it('rejects changed bytes even when the stored transaction metadata was not changed', async () => {
@@ -2230,11 +2251,7 @@ it('restores committed execution diagnostic source resources', async () => {
       message: { role: 'model', parts: [{ text: 'done' }] },
     });
   });
-  const source = {
-    ...f.source,
-    head: { ...f.source.head!, storageVersion: 4 },
-  };
-  await expect(verifyRecoverySession(source, f.io)).resolves.toBeDefined();
+  await expect(verifyRecoverySession(f.source, f.io)).resolves.toBeDefined();
   const diagnostics = [...f.resources.keys()].filter(
     (id) => f.refs.get(id)?.kind === 'managed-execution-diagnostics',
   );

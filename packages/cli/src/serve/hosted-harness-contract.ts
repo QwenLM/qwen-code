@@ -8,12 +8,17 @@ import { randomUUID } from 'node:crypto';
 import type { Application, RequestHandler } from 'express';
 import { markAccessLogError } from './server/access-log.js';
 import type { HostedHarnessCapabilities } from './types.js';
+import {
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+  HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
+} from './hosted-workspace-profiles.js';
 
 export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
   'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST';
 export const HOSTED_LIFECYCLE_V2_PROFILES_ENV =
   'QWEN_HOSTED_LIFECYCLE_V2_PROFILES';
 const LIFECYCLE_V2_PROFILES = [
+  'hosted-workspace-files/1',
   'hosted-workspace-shell/1',
   'hosted-workspace-shell/3',
   'hosted-workspace-shell/4',
@@ -38,7 +43,8 @@ export function createHostedHarnessContract(
   capabilityDigest: string,
   bootId: string = randomUUID(),
   lifecycleV2Profiles: readonly string[] = (
-    process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'
+    process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ??
+    'hosted-workspace-files/1,hosted-workspace-shell/1'
   )
     .split(',')
     .filter(Boolean),
@@ -112,6 +118,8 @@ export function createHostedHarnessContract(
       // is committed, so a client may bound a stream by its silence.
       'event-keepalive/1',
       'web-fetch/1',
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+      HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
     ]),
   });
 }

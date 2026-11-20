@@ -44,11 +44,13 @@ public class JdbcTransportConsumerStore
 
     public Optional<WakeFence> wakeFence(String tenantId, String sessionId) {
         record Row(String status, String workspaceId, String state,
-                long committedSequence, Timestamp leaseUntil) {
+                long committedSequence, Timestamp leaseUntil, boolean stamped,
+                boolean wakePending, long wakeRetryAt) {
         }
         List<Row> rows = jdbc.query(
                         "SELECT s.status, h.workspace_id, h.state, h.committed_sequence,"
-                            + " h.writer_lease_until FROM ma_session s JOIN ma_session_head h ON"
+                            + " h.writer_lease_until, h.journal_revision, h.wake_seal_revision,"
+                            + " h.is_wake_pending, h.wake_retry_at FROM ma_session s JOIN ma_session_head h ON"
                             + " h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id ="
                             + " s.tenant_id AND h.session_id = s.session_id AND h.head_kind ="
                             + " 'MANAGED_SESSION' WHERE s.tenant_id = ? AND s.session_id = ? AND"
@@ -57,7 +59,11 @@ public class JdbcTransportConsumerStore
                         result.getString("workspace_id"),
                         result.getString("state"),
                         result.getLong("committed_sequence"),
-                        ManagedSchemaTime.timestamp(result, "writer_lease_until")),
+                        ManagedSchemaTime.timestamp(result, "writer_lease_until"),
+                        Long.valueOf(result.getLong("journal_revision"))
+                                .equals(result.getObject("wake_seal_revision", Long.class)),
+                        result.getInt("is_wake_pending") != 0,
+                        result.getLong("wake_retry_at")),
                 ManagedSchemaKeys.key(tenantId), ManagedSchemaKeys.key(sessionId), tenantId, sessionId);
         if (rows.isEmpty()) {
             return Optional.empty();
@@ -66,11 +72,14 @@ public class JdbcTransportConsumerStore
         // Live exactly as hasLiveWriter decides it: an ACTIVE journal under a
         // lease unexpired by database time. Sealing keeps the lease column, and
         // a SEALED journal is re-acquirable at once, so it holds no writer.
+        Timestamp now = databaseNow();
         boolean live = "ACTIVE".equals(row.state())
                 && row.leaseUntil() != null
-                && row.leaseUntil().after(databaseNow());
+                && row.leaseUntil().after(now);
+        boolean backstopOwned = row.stamped()
+                && (!row.wakePending() || row.wakeRetryAt() > now.getTime());
         return Optional.of(new WakeFence(row.status(), row.workspaceId(),
-                row.state(), row.committedSequence(), live));
+                row.state(), row.committedSequence(), live, backstopOwned));
     }
 
     /**
@@ -116,7 +125,6 @@ public class JdbcTransportConsumerStore
      */
     public boolean claimWake(String tenantId, String sessionId,
             long sequence) {
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         return jdbc.update(
                         "UPDATE ma_event_stream SET wake_covered_sequence = ? WHERE tenant_id = ?"
                             + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"

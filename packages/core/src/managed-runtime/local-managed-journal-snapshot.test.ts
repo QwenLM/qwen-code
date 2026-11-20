@@ -600,7 +600,7 @@ describe('local native journal snapshots', () => {
               : f.input.contentRef;
       await f.first.authority.close();
       const before = await fs.readFile(f.transcriptPath);
-      expect(before.includes('managed-session/1')).toBe(true);
+      expect(before.includes('managed_session_header_v1')).toBe(true);
       expect(before.includes(LOCAL_MANAGED_SNAPSHOT_BASE)).toBe(false);
       const resourcePath = path.join(
         f.resources.sessionRoot,

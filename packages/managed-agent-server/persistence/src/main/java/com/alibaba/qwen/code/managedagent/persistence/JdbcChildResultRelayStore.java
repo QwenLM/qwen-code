@@ -47,52 +47,6 @@ public class JdbcChildResultRelayStore
      * landed (no submission mark, no harness epoch) is a pre-admission
      * failure, never proof that a Runtime binding ever existed. */
 
-    /**
-     * The child Session kinds — the {@code task_kind} values the relay
-     * discovery page and the close cascade both act on (#13803): one SQL
-     * list, so a third kind joins both queries or neither.
-     */
-    private static final String CHILD_SESSION_KINDS_SQL =
-            "('child_agent', 'workflow')";
-
-    // delivery_state is null on the shell kind, and the relay drives the
-    // two child Session kinds (`child_agent` and `workflow`, the latter
-    // since the workflow runtime slice of #13803); the ledger join drops
-    // every row whose classification is terminal (delivered, orphaned or
-    // given up), because the bounded discovery set is for work still
-    // owed — accumulated terminal rows would otherwise starve the
-    // fleet-wide scan behind an ORDER BY gmt_create LIMIT. The
-    // eligibility halves apply to both delivery arms: an unfiltered
-    // accepted/consumed arm lets backed-off or foreign-leased rows squat
-    // every slot of the bounded page, so a newer due launch is never
-    // reached. A lease hides a row from other workers, never from its
-    // claimant (claim() lets that owner continue immediately, and the
-    // five-second heartbeat would otherwise wait out the thirty-second
-    // lease). A record whose delivery already advanced (the consumer
-    // raced ahead) owes its ledger the owed-work walk no matter which
-    // intermediate state an interruption left it in — a watching or
-    // delivering row owes mark_accepted/close/classify; a binding row
-    // whose settle committed (and whose close_debt write then failed) is
-    // owed exactly the same retention, so the arm admits every
-    // non-terminal state. The cancelled arm is the same debt: the
-    // FAILED/CANCELLED arm's fail commit moves delivery to `cancelled`
-    // while the close admission may still be owed, and this page is the
-    // only thing that can ever drive that admission again. `close_debt`
-    // rides the same arm: the parent's settlement commits first so
-    // quota never waits on a host's close capability, and the ledger
-    // row keeps the retained close admission discoverable until a
-    // capable scan discharges it.
-    // Debts sort after every other due row: they accumulate one per
-    // finished child where close is unavailable, and ahead of the page
-    // they would keep a newer launch from ever being reached.
-    private static final String PENDING_SQL =
-            "SELECT pending.tenant_id, pending.session_id, pending.record_id, pending.revision, pending.delivery_state, pending.record_resource_id FROM ("
-                    + " SELECT r.tenant_id, r.session_id, r.record_id, r.revision, r.delivery_state, r.record_resource_id,"
-                    + " 0 AS priority, r.gmt_create FROM ma_session_record r LEFT JOIN ma_operation l"
-                    + " ON l.scope_key = r.session_scope_key AND l.operation_id = r.record_id"
-                    + " AND l.operation_kind = 'CHILD_SESSION_START' WHERE r.domain = 'child_run'"
-                    + " AND r.task_kind IN " + CHILD_SESSION_KINDS_SQL + " AND NOT EXISTS (SELECT 1 FROM ma_operation c WHERE c.scope_key = r.session_scope_key AND c.operation_id = r.record_id AND c.operation_kind = 'CHILD_SESSION_CLOSE') AND ((r.delivery_state IN ('planned', 'accepting', 'unknown') AND (l.state IS NULL OR l.state NOT IN ('done', 'orphaned', 'unknown'))) OR (r.delivery_state IN ('accepted', 'consumed', 'cancelled') AND l.state NOT IN ('done', 'orphaned', 'unknown'))) AND (l.available_at IS NULL OR l.available_at <= ?) AND (l.claim_until IS NULL OR l.claim_until <= ? OR l.claim_owner = ?) UNION ALL SELECT o.tenant_id, o.session_id, o.operation_id AS record_id, COALESCE(r.revision, 0) AS revision, COALESCE(r.delivery_state, 'accepted') AS delivery_state, r.record_resource_id, 1 AS priority, o.gmt_create FROM ma_operation o LEFT JOIN ma_session_record r ON r.session_scope_key = o.scope_key AND r.domain = 'child_run' AND r.record_id = o.operation_id WHERE o.operation_kind = 'CHILD_SESSION_CLOSE' AND o.state = 'close_debt' AND o.available_at <= ? AND (o.claim_until IS NULL OR o.claim_until <= ? OR o.claim_owner = ?) ) pending ORDER BY pending.priority, pending.gmt_create, pending.session_id, pending.record_id LIMIT ?";
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final JdbcTemplate jdbc;
@@ -117,12 +71,12 @@ public class JdbcChildResultRelayStore
      * parked ahead, never leased to another worker — the scanning worker's
      * own claim stays visible, so the heartbeat can fire on time. */
     public List<PendingChild> findPendingChildren(String workerId, long now, int limit) {
-        return jdbc.query(PENDING_SQL, (result, row) -> new PendingChild(
+        return jdbc.query(ChildResultRelayQueries.PENDING_SQL, (result, row) -> new PendingChild(
                 result.getString("tenant_id"), result.getString("session_id"),
                 result.getString("record_id"), result.getLong("revision"),
                 result.getString("delivery_state"),
-                result.getString("record_resource_id")), now, now, workerId,
-                now, now, workerId, limit);
+                result.getString("record_resource_id")), now, now, workerId, limit,
+                now, now, workerId, limit, limit);
     }
 
     /** The record's delivery state as committed NOW, for the worker that
@@ -587,7 +541,7 @@ public class JdbcChildResultRelayStore
                         + " FROM ma_session_record"
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_run' AND delivery_state IS NOT NULL"
-                        + " AND task_kind IN " + CHILD_SESSION_KINDS_SQL
+                        + " AND task_kind IN " + ChildResultRelayQueries.CHILD_SESSION_KINDS_SQL
                         + " AND task_state NOT IN ('completed', 'failed',"
                         + " 'cancelled')"
                         + " ORDER BY gmt_create, record_id",
