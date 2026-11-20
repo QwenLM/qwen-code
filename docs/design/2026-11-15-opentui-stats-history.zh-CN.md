@@ -2,6 +2,12 @@
 
 [English](2026-11-15-opentui-stats-history.md) | [简体中文](2026-11-15-opentui-stats-history.zh-CN.md)
 
+## 验证记录——2026-11-20（验证报告跟进）
+
+本轮以纯测试改动回应head `8916672b`上的2026-11-19验证报告。报告认为范围分支的`monthRef.current = 0`是冗余防御的note被证伪：逐渲染回同步在一次持键突发的各键之间不会运行，因此从已翻页的月份（且有三个可用月份）出发，尾随的月份键会读到陈旧ref，除非范围分支重置它；报告里相同的突发读数并未覆盖能区分该写入的情形——从已翻页的月份出发且有三个可用月份。新增的已提交用例钉住该突发——先翻到最旧月份，再在同一键盘批内循环范围四次并翻页一次——移除该ref写入时变红（`1 failed | 21 passed`，帧仍显示`Token Trend  Sep 2026 →`）；该写入保留。idle-suspension用例对的冷打开teardown现在在`finally`中运行，因此变红的正文断言不再跳过它：把teardown状态故意置错后，有`finally`时该用例对暴露teardown的状态错误，没有它时被跳过的teardown复现drain用例的两次release污染；`204`钉扎不变。窄宽度热力图超宽（R1-1）按下文声明留在follow-up队列。构建、类型检查与lint通过，改动文件通过Prettier检查；原生历史套件通过22项，历史hook与stats服务套件通过29项，hosted-harness文件全部859项通过。
+
+A–D组公开leg、几何重放与OpenTUI集成leg本轮未重跑（本轮未改动生产代码）；合入验收前需重跑。
+
 ## 验证记录——2026-11-19（验证门禁修复）
 
 本轮合入`origin/main`（`457656e0`）并修复确定性门禁的拒绝项；该拒绝是`packages/cli`套件红灯，而非stats缺陷：hosted-harness的idle-suspension用例对把冷打开的会话留活，于是该会话的idle定时器在下一个用例期间触发，并通过下一个用例的prototype级Broker mock排空它自己的MCP配置，使drain用例数到两次release而不是一次。该用例现在对冷打开的会话做终态关闭，从而解除定时器。该缺陷属于main而非本移植：失败测试的import闭包共1793个模块，不含本PR改动的任何源码文件。合并后的树上构建、类型检查、lint、i18n语言包门禁与格式检查均通过。相关CLI套件通过140项测试（stats服务、原生历史、历史hook、对话框frame、对话框挂载、Settings）与125项（i18n、Ink stats标签页）；区间基准在`TZ=Etc/GMT+12`下通过19项；修复后的hosted-harness文件全部859项通过。teardown有见证：把竞态窗口放宽后，去掉终态关闭该用例对变红，保留则保持绿。

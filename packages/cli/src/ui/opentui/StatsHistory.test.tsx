@@ -560,6 +560,32 @@ describe('native historical statistics', () => {
     expect(heatmapWindow()).toBe(current);
   });
 
+  it('resets the paged month inside a held-key range burst', () => {
+    // One act() is one held-key burst: no re-render resyncs monthRef between
+    // keys, so the reset must come from the range branch's ref write. Three
+    // months keep the clamp from hiding a stale offset.
+    const data = report();
+    data.heatmap['2026-10-16'] = 512;
+    data.tokensPerDay.push({ date: '2026-10-16', model: 'alpha', tokens: 512 });
+    mock.data = data;
+    const view = render(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
+    act(() => {
+      press('tab');
+      press('h');
+      press('h');
+    });
+    expect(view.container.textContent).toContain('Sep 2026');
+    act(() => {
+      press('r');
+      press('r');
+      press('r');
+      press('r');
+      press('h');
+    });
+    expect(mock.range).toBe('all');
+    expect(view.container.textContent).toContain('Oct 2026');
+  });
+
   it('pages months with the arrow keys the hint advertises', () => {
     const view = render(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
     const trend = () =>
