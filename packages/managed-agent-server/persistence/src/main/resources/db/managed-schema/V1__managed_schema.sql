@@ -1175,10 +1175,9 @@ CREATE TABLE ma_storage_owner (
 CREATE INDEX idx_ma_storage_owner_binding ON ma_storage_owner (binding_id, runtime_generation, storage_key);
 
 CREATE TABLE ma_tenant_guard (
-    tenant_key CHAR(64) NOT NULL COMMENT 'Hashed tenant identity used for indexed lookup.',
-    tenant_id VARBINARY(2048) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Readable lock scope: tenant identity or an explicit cross-tenant/host sentinel.',
     guard_domain VARCHAR(32) NOT NULL COMMENT 'Lock domain: runtime_placement or output_publication.',
-    CONSTRAINT pk_ma_tenant_guard PRIMARY KEY (tenant_key, guard_domain),
+    CONSTRAINT pk_ma_tenant_guard PRIMARY KEY (tenant_id, guard_domain),
     CONSTRAINT ck_ma_guard_domain CHECK ((CASE guard_domain WHEN 'runtime_placement' THEN 17 WHEN 'output_publication' THEN 18 ELSE -1 END = CHAR_LENGTH(guard_domain))),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT uk_ma_tenant_guard_id UNIQUE (id)
