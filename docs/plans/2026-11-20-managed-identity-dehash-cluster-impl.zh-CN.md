@@ -14,6 +14,8 @@
 
 因此：单分支、转换期间暂红、仅在全绿时 commit+push。
 
+执行尝试日志（2026-11-20，经授权硬推）：曾以定向脚本尝试 trio（278 列 DDL raw→VARCHAR + helper/`actorKey` 绑定→String）。编译暴露约 40 处 ripple，横跨 contracts records/接口（`StoreModels`、`ManagedToolResultStore`）、persistence stores 与 control-plane；泛化 `getBytes(`→`getString(` regex 还误伤了摘要计算（`String.getBytes(UTF_8)`），证明绑定迁移必须逐点编译器引导、绝不能泛化 regex。该尝试已回退到增量 1 绿基线；未推送红代码。故剩余批次=对 ripple 的一次编译器引导人工 pass，加上下述删哈希/重建/游标/生成列/CHECK/meta-test 工作。
+
 ## 执行顺序
 
 1. **DDL（V1 原地）。** 文本身份 `VARBINARY` 转 `VARCHAR` 预算，逐列 NO PAD collation 以 MySQL 可执行注释 `/*!80000 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin */` 表达（H2 忽略；plain 子句在 `NOT NULL DEFAULT`/生成列处会语法报错）；二进制载荷（`record_bytes`、`object_key`、`capture_object_key`）保持 `VARBINARY`。删 60 个 "Hashed" 列及同族派生身份键（`physical_key`、`storage_key`、`holder_key`、`*_resource_key`、`import_key`、`runtime_binding_key`、`execution_storage_key`、`source_record_key`、`delivery_key`、`result_operation_key`、`deletion_operation_key`）。保留 32 个内容摘要列与 git-sha `VARCHAR(64)` 列。在原始列上重建所有用到被删键的唯一键/索引；删 `ma_session.uk_ma_session_scope`（与 PK 冗余）。在原始 scope 列上重定义两个生成列（`ma_request_receipt.decision_scope_key`、`ma_side_query.active_slot`）；在原始列上重写三个 CHECK（`ck_ma_resource_capture`、`ck_ma_ref_binding`、`ck_ma_storage_registered`）。

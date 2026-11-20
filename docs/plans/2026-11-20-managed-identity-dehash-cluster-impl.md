@@ -32,6 +32,15 @@ ma_session.creator_actor_key)`), so converting one table breaks joins until all 
 
 Therefore: one branch, temporarily red during conversion, commit+push only when fully green.
 
+Execution attempt log (2026-11-20, hard push authorized): the trio (DDL raw→VARCHAR on 278 columns
+plus helper/`actorKey` bind→String) was attempted with targeted scripts. Compilation exposed a
+~40-site ripple across contracts records/interfaces (`StoreModels`, `ManagedToolResultStore`),
+persistence stores and control-plane; a broad `getBytes(`→`getString(` regex additionally corrupted
+digest computations (`String.getBytes(UTF_8)`), proving the bind migration must be done per-site
+compiler-guided, never by broad regex. The attempt was reverted to the green increment-1 baseline;
+no red code was pushed. The remaining batch is therefore a single compiler-guided manual pass over
+the ripple plus the hash-drop/rebuild/cursor/generated/CHECK/meta-test work below.
+
 ## Execution order
 
 1. **DDL (V1 in place).** Convert text-identity `VARBINARY` to `VARCHAR` budgets with per-column
