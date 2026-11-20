@@ -10,8 +10,8 @@
 
 ## 目标
 
-Codex 保留最近的托管 worktree，且清理时绝不丢失工作：归档/删除 chat 会在移除前
-快照其 worktree，重开提供恢复，保留清扫保留最近 N 个。今日含 dirty 搬运状态的托管
+Codex 保留最近的托管 worktree，且清理时绝不丢失工作：归档保留 chat 的 checkout
+及其可逆 sidecar 绑定，删除在移除前快照其 worktree，重开提供恢复，保留清扫保留最近 N 个。今日含 dirty 搬运状态的托管
 会话 worktree 被 `worktreeHasWork` 门永久保留（R9-6 让*仅含搬运*的 checkout 可被
 回收，但含真实会话工作的 checkout 仍拒绝删除）。P6 对托管会话 worktree 以「先快照
 再删除」取代该拒绝，使清理把 work 保存在归档中，而非搁置 checkout。
@@ -117,7 +117,10 @@ skip-worktree 路径上的暂存编辑或新增、暂停的 merge/rebase/cherry-
 稀疏例外通过 `git sparse-checkout check-rules` 区分合法省略与规则包含路径上的异常 S
 所隐藏的删除意图。规则排除本身还不够：实体化 S 在 `sparse.expectFilesOutsideOfPatterns=true`
 让 status 保持为空时，仍可能藏有编辑内容。只有 leaf 确实不存在、且最近存在祖先为目录时才豁免；
-其他路径与探测失败都保留 checkout。`ls-files` 与 `ls-files --stage` 仅关闭已知的
+Git 不支持 `check-rules` 时，将索引副本的索引和工作树同时重定向到私有临时目录，
+执行 `sparse-checkout reapply` 重算标记。只有重算后保留的 S 路径集合与原集合完全一致时才例外，
+规则包含路径上手工设置的 S 不能借此隐藏 tracked 删除。其他路径、回退失败与其它探测失败均保留 checkout。
+`ls-files` 与 `ls-files --stage` 仅关闭已知的
 稀疏索引展开提示，其他 stderr 仍保留失败关闭行为。无法从 UTF-8 输出可靠还原原始索引字节的路径同样保留，
 不用替代字符猜测其规则归属。
 每对归档按捕获时刻唯一命名（`<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`，
@@ -163,8 +166,9 @@ Web Shell 呈现入口（chat 头/会话概览）。i18n。同一 session 前缀
 
 ## 验收（P6 整体）
 
-- 在包含 U4/U5（由 #17237 跟踪）的完整 P6 流程中，归档/删除 chat 在移除前
-  快照其 worktree，重开提供恢复，清扫保留最近 15（缺省）。
+- 在包含 U4/U5（由 #17237 跟踪）的完整 P6 流程中，归档保留 chat 的 checkout
+  及其可逆 sidecar 绑定，删除在移除前快照其 worktree，重开提供恢复，清扫保留最近 15
+  （缺省）。
 - dirty 托管会话 worktree 在快照后删除（不再永久保留）；快照保真恢复 commit+dirty+
   untracked 内容及 tracked 删除。对搬运路径的会话改动被快照，绝不裸删（R9-6 内容感知门）。
 - 工具/agent worktree 保留现有拒绝语义。

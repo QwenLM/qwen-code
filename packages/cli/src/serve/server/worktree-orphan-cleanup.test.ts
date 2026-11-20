@@ -39,6 +39,7 @@ const sourceHashGate = vi.hoisted(() => ({
 }));
 const digestReadFailure = vi.hoisted(() => ({
   active: undefined as { source: string; remaining: number } | undefined,
+  afterCapture: undefined as { source: string; remaining: number } | undefined,
 }));
 const carriedSourceVerification = vi.hoisted(() => ({
   active: undefined as { source: string; afterCheck: () => void } | undefined,
@@ -80,6 +81,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       ...args: Parameters<typeof actual.captureWorktreeSnapshot>
     ) => {
       const result = await actual.captureWorktreeSnapshot(...args);
+      if (digestReadFailure.afterCapture) {
+        digestReadFailure.active = digestReadFailure.afterCapture;
+        digestReadFailure.afterCapture = undefined;
+      }
       return captureInconsistent.active
         ? { ...result, checkoutMatchesCapture: false }
         : result;
@@ -186,6 +191,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
   afterEach(() => {
     sourceHashGate.active = undefined;
     digestReadFailure.active = undefined;
+    digestReadFailure.afterCapture = undefined;
     carriedSourceVerification.active = undefined;
     captureInconsistent.active = false;
     fs.rmSync(repoParent, { recursive: true, force: true });
@@ -520,20 +526,9 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
       const before = await checkoutChangeDigestForTesting(plan.lockKey);
       expect(before).not.toBeNull();
       let fault!: { source: string; remaining: number };
-      let sourceStarted!: () => void;
-      let releaseSource!: () => void;
       if (point === 'final') {
-        new Promise<void>((resolve) => {
-          sourceStarted = resolve;
-        });
-        const resume = new Promise<void>((resolve) => {
-          releaseSource = resolve;
-        });
-        sourceHashGate.active = {
-          source: plan.lockKey,
-          started: sourceStarted,
-          resume,
-        };
+        fault = { source: plan.lockKey, remaining: 1 };
+        digestReadFailure.afterCapture = fault;
       }
       const stderrSpy = vi
         .spyOn(process.stderr, 'write')
@@ -541,13 +536,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
       const cleanup = executeWorktreeCleanup(plan);
       let incidentLog = '';
       try {
-        if (point === 'final') {
-          await sourceStarted;
-          sourceHashGate.active = undefined;
-          fault = { source: plan.lockKey, remaining: 1 };
-          digestReadFailure.active = fault;
-          releaseSource();
-        } else {
+        if (point !== 'final') {
           fault = {
             source: plan.lockKey,
             remaining: point === 'both' ? 2 : 1,
@@ -556,9 +545,9 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
         }
         await cleanup;
       } finally {
-        if (point === 'final') releaseSource();
         sourceHashGate.active = undefined;
         digestReadFailure.active = undefined;
+        digestReadFailure.afterCapture = undefined;
         incidentLog = stderrSpy.mock.calls
           .map((call) => String(call[0]))
           .join('');
@@ -1400,12 +1389,23 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
           Buffer.concat([Buffer.from('S '), relative, Buffer.from('\0')]),
         ),
       ).toBe(true);
-      expect(
-        execFileSync('git', ['sparse-checkout', 'check-rules', '-z'], {
+      let rules: Buffer;
+      try {
+        rules = execFileSync('git', ['sparse-checkout', 'check-rules', '-z'], {
           cwd: plan.lockKey,
           input: Buffer.from(`${relative.toString('utf8')}\0`, 'utf8'),
-        }),
-      ).toHaveLength(0);
+        });
+      } catch (error) {
+        if (
+          String((error as { stderr?: unknown }).stderr).includes(
+            "unknown subcommand: `check-rules'",
+          )
+        ) {
+          ctx.skip();
+        }
+        throw error;
+      }
+      expect(rules).toHaveLength(0);
       expect(
         execFileSync('git', ['status', '--porcelain'], {
           cwd: plan.lockKey,
@@ -1449,6 +1449,79 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     expect(await checkoutChangeDigestForTesting(plan.lockKey)).toBe(before);
     expect(archives(plan.sessionId)).toHaveLength(0);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps legacy Git hidden deletions but collects ordinary sparse omissions',
+    async () => {
+      fs.mkdirSync(path.join(repoRoot, 'cone'));
+      fs.writeFileSync(path.join(repoRoot, 'cone', 'a.txt'), 'a\n');
+      fs.mkdirSync(path.join(repoRoot, 'other'));
+      fs.writeFileSync(path.join(repoRoot, 'other', 'b.txt'), 'b\n');
+      fs.writeFileSync(path.join(repoRoot, 'victim.txt'), 'delete-intent\n');
+      git(repoRoot, 'add', '.');
+      git(repoRoot, 'commit', '-qm', 'legacy sparse fixtures', '--no-verify');
+      const hidden = await planFor('legacy-sparse-hidden-deletion');
+      const ordinary = await planFor('legacy-ordinary-sparse');
+      for (const plan of [hidden, ordinary]) {
+        git(plan.lockKey, 'sparse-checkout', 'init', '--cone');
+        git(plan.lockKey, 'sparse-checkout', 'set', 'cone');
+        expect(fs.existsSync(path.join(plan.lockKey, 'other', 'b.txt'))).toBe(
+          false,
+        );
+      }
+      git(
+        hidden.lockKey,
+        'update-index',
+        '--skip-worktree',
+        '--',
+        'victim.txt',
+      );
+      fs.unlinkSync(path.join(hidden.lockKey, 'victim.txt'));
+      expect(
+        execFileSync('git', ['status', '--porcelain'], {
+          cwd: hidden.lockKey,
+          encoding: 'utf8',
+        }),
+      ).toBe('');
+
+      const bin = fs.mkdtempSync(path.join(repoParent, 'legacy-git-'));
+      fs.writeFileSync(
+        path.join(bin, 'git'),
+        `#!${process.execPath}\nconst { spawnSync } = require('node:child_process');\nif (process.argv.includes('check-rules')) {\n  process.stderr.write("error: unknown subcommand: \`check-rules'\\n");\n  process.exit(129);\n}\nconst child = spawnSync('git', process.argv.slice(2), {\n  env: { ...process.env, PATH: process.env.QWEN_R15_REAL_PATH },\n  stdio: 'inherit',\n});\nif (child.error) process.exit(127);\nprocess.exit(child.status ?? 1);\n`,
+        { mode: 0o755 },
+      );
+      const originalPath = process.env['PATH'];
+      const before = await checkoutChangeDigestForTesting(hidden.lockKey);
+      try {
+        process.env['QWEN_R15_REAL_PATH'] = originalPath;
+        process.env['PATH'] = `${bin}${path.delimiter}${originalPath ?? ''}`;
+        await executeWorktreeCleanup(hidden);
+        expect(fs.existsSync(hidden.lockKey)).toBe(true);
+        expect(fs.existsSync(path.join(hidden.lockKey, 'victim.txt'))).toBe(
+          false,
+        );
+        expect(await checkoutChangeDigestForTesting(hidden.lockKey)).toBe(
+          before,
+        );
+        expect(archives(hidden.sessionId)).toHaveLength(0);
+
+        await executeWorktreeCleanup(ordinary);
+        expect(fs.existsSync(ordinary.lockKey)).toBe(false);
+        expect(archives(ordinary.sessionId)).toHaveLength(0);
+      } finally {
+        delete process.env['QWEN_R15_REAL_PATH'];
+        if (originalPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = originalPath;
+      }
+      expect(
+        execFileSync(
+          'git',
+          ['ls-files', '-v', '--', 'victim.txt', 'other/b.txt'],
+          { cwd: hidden.lockKey, encoding: 'utf8' },
+        ),
+      ).toBe('S other/b.txt\nS victim.txt\n');
+    },
+  );
 
   it('preserves an edited out-of-cone S path that became materialized (R11-2)', async () => {
     fs.mkdirSync(path.join(repoRoot, 'cone'));

@@ -13,7 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -30,6 +30,7 @@ import {
   WorktreeDirtyCarryConflictError,
   carriedOverlayStillHeldBySource,
   computeCarriedIdentities,
+  hasHiddenIndexBit,
   worktreeHasPendingGitOperation,
   worktreeHasPopulatedGitlink,
   worktreeHasWork,
@@ -204,7 +205,7 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     );
   });
 
-  it.each(['MERGE_AUTOSTASH', 'REBASE_HEAD', 'CHERRY_PICK_HEAD'])(
+  it.each(['MERGE_AUTOSTASH', 'CHERRY_PICK_HEAD'])(
     'detects the %s pending-operation marker',
     async (marker) => {
       const worktree = await create(`pending-${marker.toLowerCase()}`);
@@ -220,6 +221,73 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
       );
     },
   );
+
+  it('requires a pause directory with a REBASE_HEAD marker', async () => {
+    const worktree = await create('pending-rebase-marker');
+    const gitDir = git(worktree.path, 'rev-parse', '--git-dir');
+    const marker = path.resolve(worktree.path, gitDir, 'REBASE_HEAD');
+    const pause = path.resolve(worktree.path, gitDir, 'rebase-merge');
+    await fs.writeFile(marker, 'pending-state\n');
+    await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+      false,
+    );
+    await fs.mkdir(pause);
+    await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+      true,
+    );
+    await fs.rm(pause, { recursive: true });
+    await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+      false,
+    );
+  });
+
+  it('accepts a clean checkout after git rebase --quit', async () => {
+    await fs.writeFile(path.join(repoRoot, 'README.md'), 'parent\n');
+    git(repoRoot, 'add', 'README.md');
+    git(repoRoot, 'commit', '-qm', 'parent', '--no-verify');
+    const worktree = await create('rebase-quit');
+    await fs.writeFile(path.join(worktree.path, 'README.md'), 'feature\n');
+    git(worktree.path, 'add', 'README.md');
+    git(worktree.path, 'commit', '-qm', 'feature', '--no-verify');
+    await fs.writeFile(path.join(repoRoot, 'README.md'), 'upstream\n');
+    git(repoRoot, 'add', 'README.md');
+    git(repoRoot, 'commit', '-qm', 'upstream', '--no-verify');
+
+    expect(gitOk(worktree.path, 'rebase', 'main')).toBe(false);
+    expect(git(worktree.path, 'rebase', '--quit')).toBe('');
+    git(
+      worktree.path,
+      'restore',
+      '--source=HEAD',
+      '--staged',
+      '--worktree',
+      '.',
+    );
+    git(worktree.path, 'clean', '-fd');
+    expect(git(worktree.path, 'status', '--porcelain')).toBe('');
+    const gitDir = git(worktree.path, 'rev-parse', '--git-dir');
+    expect(existsSync(path.resolve(worktree.path, gitDir, 'REBASE_HEAD'))).toBe(
+      true,
+    );
+    for (const pause of ['rebase-merge', 'rebase-apply', 'sequencer']) {
+      expect(existsSync(path.resolve(worktree.path, gitDir, pause))).toBe(
+        false,
+      );
+    }
+    await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+      false,
+    );
+    await expect(worktreeHasWork(worktree.path)).resolves.toBe(false);
+    await expect(
+      buildWorktreeSnapshotMeta(worktree.path, {
+        sessionId: 'rebase-quit',
+        slug: 'rebase-quit',
+        baseCommit: git(worktree.path, 'rev-parse', 'HEAD'),
+      }),
+    ).resolves.toMatchObject({
+      dirty: { tracked: 0, untracked: 0, deleted: [] },
+    });
+  });
 
   it.each(['rebase-apply', 'sequencer'])(
     'detects the %s paused-operation directory',
@@ -2245,6 +2313,141 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     );
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'keeps probe failures distinct from an unsupported check-rules command',
+    async () => {
+      await fs.mkdir(path.join(repoRoot, 'cone'));
+      await fs.mkdir(path.join(repoRoot, 'other'));
+      await fs.writeFile(path.join(repoRoot, 'cone', 'a.txt'), 'a\n');
+      await fs.writeFile(path.join(repoRoot, 'other', 'b.txt'), 'b\n');
+      await fs.writeFile(path.join(repoRoot, 'victim.txt'), 'delete-intent\n');
+      git(repoRoot, 'add', '.');
+      git(repoRoot, 'commit', '-qm', 'sparse capability', '--no-verify');
+      const result = await new GitWorktreeService(repoRoot).createUserWorktree(
+        'sparse-unsupported-git',
+        'main',
+      );
+      expect(result.success).toBe(true);
+      const worktree = result.worktree!;
+      git(worktree.path, 'sparse-checkout', 'init', '--cone');
+      git(worktree.path, 'sparse-checkout', 'set', 'cone');
+      expect(existsSync(path.join(worktree.path, 'other', 'b.txt'))).toBe(
+        false,
+      );
+      expect(git(worktree.path, 'ls-files', '-v', '--', 'other/b.txt')).toMatch(
+        /^S /,
+      );
+      expect(
+        git(
+          worktree.path,
+          'config',
+          '--type=bool',
+          '--get',
+          'core.sparseCheckout',
+        ),
+      ).toBe('true');
+      await expect(worktreeHasWork(worktree.path)).resolves.toBe(false);
+
+      const bin = path.join(repoParent, 'legacy-git-bin');
+      await fs.mkdir(bin);
+      await fs.writeFile(
+        path.join(bin, 'git'),
+        `#!${process.execPath}\nconst { spawnSync } = require('node:child_process');\nif (process.argv.includes('check-rules')) {\n  process.stderr.write(process.env.QWEN_R15_GENERIC_ERROR === '1' ? 'fatal: arbitrary check-rules probe failure\\n' : "error: unknown subcommand: \`check-rules'\\n");\n  process.exit(1);\n}\nconst child = spawnSync('git', process.argv.slice(2), {\n  env: { ...process.env, PATH: process.env.QWEN_R15_REAL_PATH },\n  stdio: 'inherit',\n});\nif (child.error) {\n  process.stderr.write(String(child.error));\n  process.exit(127);\n}\nprocess.exit(child.status ?? 1);\n`,
+      );
+      await fs.chmod(path.join(bin, 'git'), 0o755);
+      const originalPath = process.env['PATH'];
+      try {
+        process.env['QWEN_R15_REAL_PATH'] = originalPath;
+        process.env['PATH'] = `${bin}${path.delimiter}${originalPath ?? ''}`;
+        process.env['QWEN_R15_GENERIC_ERROR'] = '1';
+        await expect(worktreeHasWork(worktree.path)).resolves.toBe(true);
+        delete process.env['QWEN_R15_GENERIC_ERROR'];
+        await expect(worktreeHasWork(worktree.path)).resolves.toBe(false);
+
+        git(
+          worktree.path,
+          'update-index',
+          '--skip-worktree',
+          '--',
+          'victim.txt',
+        );
+        await fs.rm(path.join(worktree.path, 'victim.txt'));
+        const indexPath = path.resolve(
+          worktree.path,
+          git(worktree.path, 'rev-parse', '--git-path', 'index'),
+        );
+        const before = await fs.readFile(indexPath);
+        expect(existsSync(path.join(worktree.path, 'other', 'b.txt'))).toBe(
+          false,
+        );
+        await expect(worktreeHasWork(worktree.path)).resolves.toBe(true);
+        expect(git(worktree.path, 'status', '--porcelain')).toBe('');
+        expect(
+          git(worktree.path, 'ls-files', '-v', '--', 'victim.txt'),
+        ).toMatch(/^S /);
+        expect(await fs.readFile(indexPath)).toEqual(before);
+        expect(existsSync(path.join(worktree.path, 'victim.txt'))).toBe(false);
+      } finally {
+        delete process.env['QWEN_R15_GENERIC_ERROR'];
+        delete process.env['QWEN_R15_REAL_PATH'];
+        if (originalPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = originalPath;
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects an empty check-rules response after a stdin failure',
+    async () => {
+      const paths = Array.from(
+        { length: 4096 },
+        (_, index) => `not-sparse/${'x'.repeat(120)}${index}`,
+      );
+      const input = `${paths.join('\0')}\0`;
+      expect(input.length).toBeGreaterThan(64 * 1024);
+      const listing = Buffer.from(
+        `${paths.map((item) => `S ${item}`).join('\0')}\0`,
+      ).toString('base64');
+      const bin = path.join(repoParent, 'stdin-error-git');
+      await fs.mkdir(bin);
+      await fs.writeFile(
+        path.join(bin, 'git'),
+        `#!${process.execPath}\nif (process.argv.includes('check-rules')) {\n  process.stdin.destroy();\n  setTimeout(() => process.exit(0), 50);\n} else if (process.argv.includes('ls-files')) {\n  process.stdout.write('${listing}', 'base64');\n} else if (process.argv.includes('config')) {\n  process.stdout.write('true\\n');\n} else {\n  process.exit(86);\n}\n`,
+        { mode: 0o755 },
+      );
+      const originalPath = process.env['PATH'];
+      process.env['PATH'] = `${bin}${path.delimiter}${originalPath ?? ''}`;
+      try {
+        let stdinError: NodeJS.ErrnoException | undefined;
+        await new Promise<void>((resolve, reject) => {
+          const child = execFile(
+            'git',
+            ['sparse-checkout', 'check-rules', '-z'],
+            { cwd: repoRoot, encoding: 'utf8' },
+            (error) => {
+              try {
+                expect(error).toBeNull();
+                expect(stdinError?.code).toBe('EPIPE');
+                resolve();
+              } catch (assertion) {
+                reject(assertion);
+              }
+            },
+          );
+          child.stdin?.on('error', (error) => {
+            stdinError = error;
+          });
+          child.stdin?.end(input);
+        });
+        await expect(hasHiddenIndexBit(repoRoot)).resolves.toBe(true);
+      } finally {
+        // The oversized test record lives in the fake script, not the environment.
+        if (originalPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = originalPath;
+      }
+    },
+  );
+
   it('a clean sparse-checkout worktree is not stranded by skip-worktree (R1-5)', async () => {
     await fs.mkdir(path.join(repoRoot, 'cone'));
     await fs.mkdir(path.join(repoRoot, 'other'));
@@ -2326,7 +2529,7 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     expect(meta.dirty).toEqual({ tracked: 0, untracked: 1, deleted: [] });
   });
 
-  it('allows a legacy shared sparse configuration without worktreeConfig', async () => {
+  it('allows a legacy shared sparse configuration without worktreeConfig', async (ctx) => {
     await fs.mkdir(path.join(repoRoot, 'cone'));
     await fs.writeFile(path.join(repoRoot, 'cone', 'a.txt'), 'a\n');
     await fs.mkdir(path.join(repoRoot, 'other'));
@@ -2356,12 +2559,23 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     );
     expect(scoped.status).not.toBe(0);
     expect(scoped.stderr).toContain('worktreeConfig');
-    expect(
-      execFileSync('git', ['sparse-checkout', 'check-rules', '-z'], {
+    let rules: Buffer;
+    try {
+      rules = execFileSync('git', ['sparse-checkout', 'check-rules', '-z'], {
         cwd: wt,
         input: 'other/b.txt\0',
-      }),
-    ).toHaveLength(0);
+      });
+    } catch (error) {
+      if (
+        String((error as { stderr?: unknown }).stderr).includes(
+          "unknown subcommand: `check-rules'",
+        )
+      ) {
+        ctx.skip();
+      }
+      throw error;
+    }
+    expect(rules).toHaveLength(0);
     await expect(worktreeHasWork(wt)).resolves.toBe(false);
   });
 

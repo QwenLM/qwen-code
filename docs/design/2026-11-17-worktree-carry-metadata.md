@@ -2,7 +2,7 @@
 
 [English](2026-11-17-worktree-carry-metadata.md) | [简体中文](2026-11-17-worktree-carry-metadata.zh-CN.md)
 
-- Status: proposed (first deliverable of #17237)
+- Status: implemented in this PR (D1–D4); P6 U4/U5 remain tracked in #17237
 - Builds on: `2026-11-14-web-shell-codex-worktree-parity.md` (D3 dirty carry, D6 handoff, D7 snapshots)
 - Tracks: #17237 "Carry metadata for the reaper (R9-6, deferred from #17228)"
 - Related: #17228 review comments 6900008905 / 4579730709
@@ -95,7 +95,11 @@ to its checkout top before comparing (a session `/cd`'d below the top records
 a subdirectory, while the overlay paths are repo-relative); a gone or
 unreadable source fails the resolution and is refused — including an
 all-deletions overlay, whose absent paths would otherwise masquerade as
-"still absent" (round-6).
+"still absent" (round-6). When the managed checkout is known, the resolved
+source top must also resolve to the SAME repository: its realpath-normalized
+`rev-parse --git-common-dir` must equal the managed worktree's. A source whose
+own `.git` was removed must not be allowed to discover an enclosing checkout
+and satisfy the comparison with a different repository (the R5-14 decoy).
 
 ### D2 — Writers persist the overlay
 
@@ -132,8 +136,18 @@ always refuses. Skip-worktree (`S`) is exempt only for a genuinely absent,
 excluded path in a sparse checkout: the leaf must return ENOENT below a
 directory ancestor, and `sparse-checkout check-rules` must exclude it. A
 materialized `S` path, an in-scope hidden deletion, an unreadable path or a
-non-directory ancestor still refuses. The prepared-worktree gate calls this
-same predicate instead of maintaining a separate sparse carve-out. The
+non-directory ancestor still refuses. When Git explicitly reports an
+unsupported `check-rules` subcommand, copy the worktree index into a private
+temporary directory and run `sparse-checkout reapply` with both its index and
+work-tree redirected there. Git, rather than a local pattern approximation,
+recomputes the authoritative flags without changing the original index,
+configuration or checkout. A sparse omission is exempt only when the remaining
+`S` set is exactly the original set: an `S` that disappeared identifies an
+included path whose original bit may have hidden a deletion. Unexpected flags,
+input failures and all other command failures (including unsupported
+`reapply`) retain the checkout. The prepared-worktree
+gate calls this same predicate instead of maintaining a separate sparse
+carve-out. The
 `ls-files` probes suppress only the named sparse-index expansion advice; other
 stderr remains fail-closed. When `carriedEntries` is
 present, the probe is a single collapsed `status --porcelain
@@ -218,9 +232,9 @@ deliverable.
   authorize deletion. A final populated-gitlink probe also preserves the
   checkout when a submodule is initialized during capture: its object store
   lives outside the checkout root and neither the archive nor removal retains
-  it. Its clean-sparse
-  carve-out is limited to absent paths actually excluded by Git's own sparse
-  rules; materialized S paths and unexpected in-scope deletions are refused.
+  it. When `check-rules` is available, its clean-sparse carve-out is limited
+  to absent paths actually excluded by Git's own sparse rules; materialized S
+  paths and unexpected in-scope deletions are refused.
   Only the named sparse-index expansion advice is suppressed, never other
   stderr. Paths whose original index bytes cannot be recovered from UTF-8
   output also preserve.

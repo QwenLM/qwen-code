@@ -2334,6 +2334,11 @@ describe('deleteDaemonSessions worktree cleanup', () => {
         .readdirSync(path.dirname(archivedSidecar))
         .filter((name) => name.endsWith('.worktree-snapshot.tar.gz')),
     ).toEqual([]);
+    expect(
+      fs
+        .readdirSync(path.dirname(service.getWorktreeSessionPath(sessionId)))
+        .filter((name) => name.endsWith('.worktree-snapshot.tar.gz')),
+    ).toEqual([]);
 
     const unarchived = await unarchiveDaemonSessions({
       sessionIds: [sessionId],
@@ -2377,6 +2382,11 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     expect(
       fs
         .readdirSync(path.dirname(archivedSidecar))
+        .filter((name) => name.endsWith('.worktree-snapshot.tar.gz')),
+    ).toEqual([]);
+    expect(
+      fs
+        .readdirSync(path.dirname(service.getWorktreeSessionPath(sessionId)))
         .filter((name) => name.endsWith('.worktree-snapshot.tar.gz')),
     ).toEqual([]);
 

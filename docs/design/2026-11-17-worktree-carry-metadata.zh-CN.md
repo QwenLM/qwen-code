@@ -2,7 +2,7 @@
 
 [English](2026-11-17-worktree-carry-metadata.md) | [简体中文](2026-11-17-worktree-carry-metadata.zh-CN.md)
 
-- 状态：提议（#17237 的首个交付项）
+- 状态：本 PR 实现 D1–D4；P6 U4/U5 继续由 #17237 跟踪。
 - 基于：`2026-11-14-web-shell-codex-worktree-parity.md`（D3 dirty 携带、D6 handoff、D7 快照）
 - 跟踪：#17237「Carry metadata for the reaper (R9-6, deferred from #17228)」
 - 关联：#17228 评审评论 6900008905 / 4579730709
@@ -72,7 +72,10 @@ branch-worktree 路由与 handoff 从会话自己的检出捕获 dirty 状态（
 正是正确检出。非字符串值像其他字段一样使 sidecar 判为损坏。搬迁写入随 sidecar 其余
 字段一并保留它。校验先把记录路径解析到其检出顶（会话 `/cd` 到顶之下时记录的是子目录，
 而覆盖层路径相对仓库根）；源已消失或不可读时解析失败即拒绝——包括全删除覆盖层，否则其
-缺席路径会在已不存在的源里伪装成「仍缺席」（round-6）。
+缺席路径会在已不存在的源里伪装成「仍缺席」（round-6）。已知托管 checkout 时，
+源检出顶还必须解析到同一个仓库：双方 `rev-parse --git-common-dir` 经 realpath 规范化后
+必须一致。源检出自身的 `.git` 被移除时，不允许通过向上发现落到外层 checkout，
+并以另一个仓库的相同字节满足比较（R5-14 的诱饵情形）。
 
 ### D2 — 写入方持久化覆盖层
 
@@ -100,8 +103,14 @@ null-hash 删除，常规文件分批哈希）。计算失败使 `carriedEntries
 （core 保留清扫、legacy sidecar、无携带创建）也受保护。assume-unchanged（小写标签，
 sparse-checkout 从不设置）恒拒绝。skip-worktree（`S`）仅在属于稀疏检出、叶路径
 返回 ENOENT 且最近的现存祖先是目录、并被 `sparse-checkout check-rules` 排除时才豁免。
-已物化的 `S` 路径、规则内的隐藏删除、不可读路径和非目录祖先仍然拒绝；准备好 worktree
-回滚门调用同一谓词，不再维护另一套 sparse 豁免。`ls-files` 探针仅关闭指定的稀疏索引
+已物化的 `S` 路径、规则内的隐藏删除、不可读路径和非目录祖先仍然拒绝。
+当 Git 明确报告不支持 `check-rules` 子命令时，把工作树索引复制到私有临时目录，
+使用显式重定向的索引和工作树执行 `sparse-checkout reapply`。由 Git 按原始稀疏规则
+重算权威标记，而不在本地近似解析规则，也不改变原索引、配置或检出。只有重算后
+保留的 `S` 集合与原集合完全一致时才豁免稀疏省略；原来被豁免的 `S` 消失表示此路径
+属于规则内，其原标记可能隐藏了 tracked 删除。意外标记、输入失败及其他命令错误
+（包括不支持 `reapply`）一律保留检出。准备好 worktree 回滚门调用同一谓词，
+不再维护另一套 sparse 豁免。`ls-files` 探针仅关闭指定的稀疏索引
 展开提示，其它 stderr 仍失败关闭。存在 `carriedEntries` 时，探针是单一折叠的
 `status --porcelain --untracked-files=all --ignored=matching -z`（非 ignored 的 untracked
 文件保持文件级使搬运路径精确匹配；ignored 条目折叠为目录，即基础谓词的几何，使大
@@ -156,8 +165,8 @@ archive/unarchive 绑定。删除先校验 ownership，在会话记录已删除�
   捕获期间新设置的 index bit 及随后编辑即使不进入 status，也不能授权删除。
   最后的 populated-gitlink 探测还在捕获期间初始化 submodule 时保留检出：对象库位于检出根之外，
   归档与删除都不保留它。
-  clean-sparse 例外仅限 Git 当前 sparse-checkout 规则实际排除且确实不存在的路径；
-  实体化的 S 与规则内隐藏的删除意图都继续保护。
+  支持 `check-rules` 时，clean-sparse 例外仅限 Git 当前 sparse-checkout 规则实际排除
+  且确实不存在的路径；实体化的 S 与规则内隐藏的删除意图都继续保护。
   `ls-files` 只关闭特定的稀疏索引展开提示，其他 stderr 仍按失败关闭处理。
   无法从 UTF-8 输出可靠还原的原始索引路径也保留 checkout。
   保护路径的大小写变体在 tar 启动前拒绝捕获。

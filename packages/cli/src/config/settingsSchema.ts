@@ -4918,13 +4918,12 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: 15,
         description:
-          'The most recent Web Shell session worktrees kept per repository. ' +
-          'A retention sweep will snapshot and delete the oldest beyond this ' +
-          'limit (active sessions and pinned chats will always be protected). ' +
-          'Deleting a chat snapshots its worktree before removal; ' +
-          'reopening the chat will offer restore. Set to 0 to disable ' +
-          'count-based auto-deletion. Does not affect tool/agent worktrees, ' +
-          'which keep their existing cleanup semantics.',
+          'Reserved for the future worktree retention sweep tracked in ' +
+          '#17237. This value is not yet applied. Deleting a chat snapshots ' +
+          'its worktree before removal when capture is required. The ' +
+          'retention sweep and restore-on-reopen are not implemented in this ' +
+          'slice. Does not affect tool/agent worktrees, which keep their ' +
+          'existing cleanup semantics.',
         showInDialog: false,
       },
     },

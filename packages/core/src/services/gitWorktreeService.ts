@@ -7,6 +7,7 @@
 import nodeFs from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { randomBytes, randomInt } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { execFile, execSync } from 'node:child_process';
@@ -330,9 +331,11 @@ export async function carriedOverlayStillHeldBySource(
  * unexpected S on an included path can hide a tracked deletion. An exempt
  * path must also be genuinely absent, so a materialized S path is never
  * waived. Refusing every S would instead strand legitimate sparse omissions.
- * Pins the worktree's own `.git` (no upward discovery) and is fail-closed:
- * only the named sparse-index expansion advice is suppressed; any other
- * stderr output counts as hidden.
+ * Older Git without `check-rules` recomputes the index flags in a private
+ * copy via `sparse-checkout reapply`. All other probe failures remain
+ * fail-closed. Pins the worktree's own `.git` (no upward
+ * discovery): only the named sparse-index expansion advice is suppressed;
+ * any other stderr output counts as hidden.
  */
 /**
  * Only an ENOENT leaf below a directory ancestor is a genuine omission.
@@ -374,6 +377,94 @@ async function isPathProvablyAbsent(
     const parent = path.dirname(ancestor);
     if (parent === ancestor) return false;
     ancestor = parent;
+  }
+}
+
+async function legacySparseOmissionMayHideWork(
+  worktreePath: string,
+  omitted: ReadonlySet<string>,
+): Promise<boolean> {
+  const probeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-sparse-'));
+  const index = path.join(probeDir, 'index');
+  const privateWorktree = path.join(probeDir, 'worktree');
+  try {
+    const indexPath = (
+      await runGit(worktreePath, [
+        ...NO_EXEC_CONFIG,
+        'rev-parse',
+        '--git-path',
+        'index',
+      ])
+    ).trim();
+    await fs.mkdir(privateWorktree);
+    await fs.copyFile(
+      path.resolve(worktreePath, indexPath),
+      index,
+      fsConstants.COPYFILE_EXCL,
+    );
+    // reapply also cleans stale sparse directories. Redirect both its index
+    // and work-tree to private files, including any directory removals.
+    const env = {
+      ...gitEnv(),
+      GIT_INDEX_FILE: index,
+      GIT_WORK_TREE: privateWorktree,
+    };
+    const reapplied = await execFileAsync(
+      'git',
+      [
+        ...NO_EXEC_CONFIG,
+        '-c',
+        'submodule.recurse=false',
+        '--no-optional-locks',
+        'sparse-checkout',
+        'reapply',
+      ],
+      {
+        cwd: worktreePath,
+        env,
+        timeout: 30_000,
+        maxBuffer: 64 * 1024 * 1024,
+        encoding: 'utf8',
+      },
+    );
+    if (reapplied.stderr.trim().length > 0) return true;
+    const listed = await execFileAsync(
+      'git',
+      [
+        ...NO_EXEC_CONFIG,
+        '-c',
+        'advice.sparseIndexExpanded=false',
+        '--no-optional-locks',
+        'ls-files',
+        '-v',
+        '-z',
+      ],
+      {
+        cwd: worktreePath,
+        env,
+        timeout: 30_000,
+        maxBuffer: 64 * 1024 * 1024,
+        encoding: 'utf8',
+      },
+    );
+    if (listed.stderr.trim().length > 0) return true;
+    const remaining = new Set<string>();
+    for (const entry of listed.stdout.split('\0')) {
+      const tag = entry[0];
+      if (/[a-z]/.test(tag ?? '')) return true;
+      if (tag !== 'S') continue;
+      const relativePath = entry.slice(2);
+      if (relativePath.includes('\uFFFD') || !omitted.has(relativePath)) {
+        return true;
+      }
+      remaining.add(relativePath);
+    }
+    // A disappeared S means Git considers that path included, so the
+    // original bit may have hidden a tracked deletion rather than an
+    // ordinary sparse omission.
+    return remaining.size !== omitted.size;
+  } finally {
+    await fs.rm(probeDir, { recursive: true, force: true });
   }
 }
 
@@ -446,6 +537,8 @@ export async function hasHiddenIndexBit(
       // Git's rules, not merely core.sparseCheckout=true, decide whether an
       // omitted path is legitimate. A hand-set S on an included path can
       // hide a tracked deletion from status and both cleanup digests.
+      let unsupported = false;
+      let stdinError: unknown;
       const included = await new Promise<{
         stdout: string;
         stderr: string;
@@ -467,14 +560,28 @@ export async function hasHiddenIndexBit(
             encoding: 'utf8',
           },
           (error, stdout, stderr) => {
-            if (error) reject(error);
+            if (error && stderr.includes("unknown subcommand: `check-rules'")) {
+              unsupported = true;
+              resolve({ stdout, stderr });
+            } else if (error) reject(error);
+            else if (stdinError !== undefined) reject(stdinError);
             else resolve({ stdout, stderr });
           },
         );
         child.on('error', reject);
-        child.stdin?.on('error', reject);
+        // An unsupported command can close stdin before its real stderr
+        // arrives. Keep other input failures for that completion handler.
+        child.stdin?.on('error', (error) => {
+          stdinError = error;
+        });
         child.stdin?.end(`${omitted.join('\0')}\0`);
       });
+      if (unsupported) {
+        return await legacySparseOmissionMayHideWork(
+          worktreePath,
+          skipWorktree,
+        );
+      }
       if (included.stderr.trim().length > 0) return true;
       const includedPaths = new Set(included.stdout.split('\0'));
       for (const rel of skipWorktree) {
@@ -499,10 +606,12 @@ export async function hasHiddenIndexBit(
  * Checked are pseudo-ref files (MERGE_AUTOSTASH, MERGE_HEAD, REBASE_HEAD,
  * CHERRY_PICK_HEAD, REVERT_HEAD, BISECT_START) AND the pause DIRECTORIES
  * (rebase-merge, rebase-apply, sequencer) — rebase `break`/`exec` and `git am`
- * carry their state only in these directories. All paths resolve through one
- * `rev-parse --git-dir` (the real admin dir of a linked worktree), so an
- * in-progress operation reads as pending even on linked worktrees.
- * Fail-closed: a read error counts as pending.
+ * carry their state only in these directories. REBASE_HEAD can outlive
+ * `rebase --quit`, so it alone does not prove a pause: require a pause
+ * directory too. All paths resolve through one `rev-parse --git-dir` (the
+ * real admin dir of a linked worktree), so an in-progress operation reads as
+ * pending even on linked worktrees. Fail-closed: a read error counts as
+ * pending.
  */
 export async function worktreeHasPendingGitOperation(
   worktreePath: string,
@@ -524,6 +633,22 @@ export async function worktreeHasPendingGitOperation(
     for (const rel of [...files, ...pauseDirs]) {
       try {
         await fs.access(path.join(root, rel));
+        if (rel === 'REBASE_HEAD') {
+          const paused = await Promise.all(
+            pauseDirs.map(async (dir) => {
+              try {
+                await fs.access(path.join(root, dir));
+                return true;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                  throw error;
+                }
+                return false;
+              }
+            }),
+          );
+          if (!paused.includes(true)) continue;
+        }
         return true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;

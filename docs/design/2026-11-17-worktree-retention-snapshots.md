@@ -11,8 +11,9 @@
 ## Goal
 
 Codex keeps the most recent managed worktrees and never loses work on cleanup:
-archiving/deleting a chat snapshots its worktree before removal, reopening
-offers restore, and a retention sweep keeps the most recent N. Today a managed
+archiving preserves a chat's checkout and reversible sidecar binding, deleting
+snapshots its worktree before removal, reopening offers restore, and a
+retention sweep keeps the most recent N. Today a managed
 session worktree with dirty carried state is preserved forever by the
 `worktreeHasWork` gate (R9-6 lets a _carried-only_ checkout be collected, but a
 checkout with genuine session work still refuses deletion). P6 replaces that
@@ -180,7 +181,11 @@ legitimate omission from an unexpected S hiding a deletion in an included
 path. Exclusion alone is insufficient: a present S path may hide edited
 bytes when `sparse.expectFilesOutsideOfPatterns=true` keeps status empty,
 so only an actual absent path is exempt. Its leaf must be absent and its
-nearest existing ancestor must be a directory. Other paths or probe
+nearest existing ancestor must be a directory. On Git without `check-rules`,
+a private index copy is reapplied with both its index and work-tree redirected
+to a temporary private directory. Only the identical remaining set of S
+paths authorizes an exemption, so an included path with a hand-set S cannot
+hide a tracked deletion. Other paths, fallback failures, and other probe
 failures preserve the checkout. `ls-files` and `ls-files --stage` suppress
 only the known sparse-index expansion advice, not other stderr. Path bytes
 that cannot be recovered reliably from UTF-8 output also preserve, rather
@@ -250,9 +255,10 @@ older valid-looking archive.
 
 ## Acceptance (P6 overall)
 
-- In the complete P6 flow including U4/U5 (tracked in #17237), archiving/deleting
-  a chat snapshots its worktree before removal, reopening offers restore, and
-  the sweep keeps the most recent 15 (default).
+- In the complete P6 flow including U4/U5 (tracked in #17237), archiving
+  preserves a chat's checkout and reversible sidecar binding, deleting
+  snapshots its worktree before removal, reopening offers restore, and the
+  sweep keeps the most recent 15 (default).
 - A dirty managed session worktree is deleted after snapshot (no permanent
   preserve); the snapshot restores commits + dirty + untracked content and
   tracked deletions faithfully. A session change to a carried path is

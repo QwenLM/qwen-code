@@ -283,11 +283,18 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       },
     });
     expect(members.size).toBe(2);
-    expect(members.get('left-hardlink.bin')?.type).toBe('File');
-    const hardlink = members.get('right-hardlink.bin');
-    expect(hardlink?.type).toBe('Link');
-    expect(path.posix.normalize(hardlink?.linkpath ?? '')).toBe(
-      'left-hardlink.bin',
+    const fileName =
+      members.get('left-hardlink.bin')?.type === 'File'
+        ? 'left-hardlink.bin'
+        : 'right-hardlink.bin';
+    const linkName =
+      fileName === 'left-hardlink.bin'
+        ? 'right-hardlink.bin'
+        : 'left-hardlink.bin';
+    expect(members.get(fileName)?.type).toBe('File');
+    expect(members.get(linkName)?.type).toBe('Link');
+    expect(path.posix.normalize(members.get(linkName)?.linkpath ?? '')).toBe(
+      fileName,
     );
 
     const restored = await restoreOverHead(
@@ -406,6 +413,25 @@ describe('worktreeSnapshotService (P6 U1)', () => {
           meta: meta(),
         }),
       ).rejects.toThrow('non-regular filesystem entry');
+      await expect(fs.readdir(snapshotDir)).rejects.toThrow();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a FIFO and cleans the archive created before its arrival',
+    async () => {
+      captureTiming.afterCreate = async () => {
+        await expect(fs.readdir(snapshotDir)).resolves.toHaveLength(1);
+        execFileSync('mkfifo', [path.join(worktree, 'late-pipe')]);
+      };
+      await expect(
+        captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        }),
+      ).rejects.toThrow('non-regular filesystem entry');
+      await expect(fs.readdir(snapshotDir)).resolves.toEqual([]);
     },
   );
 
@@ -1899,11 +1925,7 @@ describe('worktreeSnapshotService (P6 U1)', () => {
         },
       }),
     ).rejects.toThrow();
-    await expect(
-      fs.access(
-        path.join(snapshotDir, 'session-snap.worktree-snapshot.tar.gz'),
-      ),
-    ).rejects.toThrow();
+    await expect(fs.readdir(snapshotDir)).rejects.toThrow();
   });
 
   // F5: the meta builder must not execute a repository-configured fsmonitor
