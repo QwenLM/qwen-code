@@ -39,6 +39,16 @@ import {
   WEBHOOK_LIMIT,
 } from './managed-state.js';
 
+// Ceiling for the cap-fill cases (R3-4, R2-1, R1-20): each drives hundreds of
+// fsync-backed state writes, so disk latency decides the runtime. Measured
+// per-write latency swung from ~1.6ms to ~17ms minutes apart, and ~39ms per
+// write outlasts the old flat 30s (#17558, #17834); 120s is 4x that worst case.
+// It outranks the autofix lane's --testTimeout=60000, so a hang runs to 120s,
+// not 60s. Each case pins ctx.task.timeout to this constant so a dropped or
+// altered argument fails there, not in CI. The argument stays a literal: an
+// identifier there makes prettier expand the whole call.
+const FILL_CEILING = 120_000;
+
 const CONFIG = {
   type: 'dingtalk',
   clientId: 'robot-app',
@@ -412,13 +422,8 @@ describe('managed DingTalk adapter inbound', () => {
     await adapter.disconnect();
   });
 
-  // The fill drives 780 fsync-backed state writes, so disk latency decides the
-  // runtime: the same sequence measured 1.6ms and 14ms per write minutes apart
-  // on one host, and 38ms per write outlasts the old flat 30s (#17558). No timer
-  // or network wait here, so a generous ceiling costs no fail-fast.
   it('a webhook-less frame admitted on the cache refreshes recency (R3-4)', async (ctx) => {
-    // Pin the ceiling: a dropped third argument must fail here, not in CI.
-    expect(ctx.task.timeout).toBe(120_000);
+    expect(ctx.task.timeout).toBe(FILL_CEILING);
     const { adapter, fake } = await connectedAdapter();
     const hook = (session: string): string =>
       `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
@@ -867,13 +872,8 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
-  // The fill drives 773 fsync-backed state writes, so disk latency decides the
-  // runtime: the same sequence measured 1.8ms and 17.2ms per write minutes
-  // apart on one host, and 38.8ms per write outlasts the old flat 30s (#17834).
-  // No timer or network wait here, so a generous ceiling costs no fail-fast.
   it('keeps the recent window loadable at the shared cap (R2-1)', async (ctx) => {
-    // Pin the ceiling: a dropped third argument must fail here, not in CI.
-    expect(ctx.task.timeout).toBe(120_000);
+    expect(ctx.task.timeout).toBe(FILL_CEILING);
     const cwd = tempCwd();
     const first = await connectedAdapter(cwd);
     // Drive one past the recent cap; the writer must slice to the same cap the
@@ -966,12 +966,8 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
-  // Same per-frame fsync fill as R3-4 and R2-1 above, so the disk latency that
-  // broke their flat 30s ceiling breaks this one too (#17834). No timer or
-  // network wait here, so a generous ceiling costs no fail-fast.
   it('evicts the least-recently-seen webhook, not the first-inserted (R1-20)', async (ctx) => {
-    // Pin the ceiling: a dropped third argument must fail here, not in CI.
-    expect(ctx.task.timeout).toBe(120_000);
+    expect(ctx.task.timeout).toBe(FILL_CEILING);
     const { adapter, plane, fake } = await connectedAdapter();
     const hook = (session: string): string =>
       `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
