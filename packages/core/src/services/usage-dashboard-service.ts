@@ -144,18 +144,32 @@ export type UsageDayModelTable = TokenUsageDailyByModel;
  * ledger covers **replaced** by the ledger's counters.
  *
  * Replacing rather than adding is what keeps one run from being counted twice —
- * the same requests exist in both sources. Days the ledger does not cover keep
- * the session-record attribution, which preserves history from before the ledger
- * existed and the behavior of a user with usage statistics disabled.
+ * the same requests exist in both sources. A record is dropped when its run's
+ * day span touches ANY ledger-covered day, not just its end day: a run that
+ * spends on D and exits after midnight on D+1 would otherwise leave a full-run
+ * copy on D+1 while the ledger already counted those responses on D. Records
+ * with no ledger overlap at all keep the session-record attribution, which
+ * preserves history from before the ledger existed and the behavior of a user
+ * with usage statistics disabled.
  */
 export function buildUsageDayTable(
   records: UsageSummaryRecord[],
   ledgerDaily?: TokenUsageDailyByModel,
 ): UsageDayModelTable {
   const table: UsageDayModelTable = new Map();
+  // Sorted once so each record's span check can stop at the first day past it.
+  const ledgerDays = ledgerDaily ? [...ledgerDaily.keys()].sort() : [];
+  const touchesLedger = (startDay: string, endDay: string): boolean => {
+    for (const day of ledgerDays) {
+      if (day > endDay) return false;
+      if (day >= startDay) return true;
+    }
+    return false;
+  };
   for (const r of records) {
     if (!r.models) continue;
     const day = localDateKey(r.timestamp);
+    if (touchesLedger(localDateKey(r.startTime), day)) continue;
     let byModel = table.get(day);
     if (!byModel) {
       byModel = new Map();
@@ -251,9 +265,27 @@ function buildHeatmap(
 }
 
 /**
- * Per-day tokens + session counts over `[startMs, endMs]`, on a continuous day
- * axis (zero-filled) so the daily line/bar charts have no gaps. Tokens come from
- * the day table; session counts stay session-granular.
+ * Sessions whose end day falls in `[startKey, endKey]`. Day keys, not the
+ * millisecond bounds: tokens are whole-local-day, so counting sessions by ms
+ * would let the boundary day report tokens with zero sessions beside them.
+ */
+function countSessionsInWindow(
+  records: UsageSummaryRecord[],
+  startKey: string,
+  endKey: string,
+): number {
+  let sessions = 0;
+  for (const r of records) {
+    const day = localDateKey(r.timestamp);
+    if (day >= startKey && day <= endKey) sessions++;
+  }
+  return sessions;
+}
+
+/**
+ * Per-day tokens + session counts on a continuous day axis (zero-filled) so the
+ * daily line/bar charts have no gaps. Both sides use day keys, so a day never
+ * shows tokens with zero sessions.
  */
 function buildDaily(
   table: UsageDayModelTable,
@@ -263,7 +295,6 @@ function buildDaily(
 ): UsageDailyPoint[] {
   const sessionByDay = new Map<string, number>();
   for (const r of records) {
-    if (r.timestamp < startMs || r.timestamp > endMs) continue;
     const key = localDateKey(r.timestamp);
     sessionByDay.set(key, (sessionByDay.get(key) ?? 0) + 1);
   }
@@ -346,7 +377,7 @@ export function buildUsageDashboard(
     cachedTokens,
     thoughtsTokens,
     requests,
-    sessions: report.sessionCount,
+    sessions: countSessionsInWindow(records, rangeStartKey, todayKey),
     toolCalls: report.tools.totalCalls,
     linesAdded: report.files.linesAdded,
     linesRemoved: report.files.linesRemoved,
@@ -404,6 +435,27 @@ export interface UsageDashboardSources {
 }
 
 /**
+ * Loads the ledger for a window, degrading to an empty table when it cannot be
+ * read. The loader itself rethrows every non-ENOENT error so a half-read month
+ * can never pass as a complete one; the decision to keep the surface usable
+ * belongs here, at the composition point. An unreadable ledger then leaves the
+ * record-derived attribution in place — the pre-ledger behavior — instead of
+ * blanking tiles whose own source loaded fine.
+ */
+export async function loadLedgerOrEmpty(
+  sinceLocalDate: string,
+): Promise<TokenUsageDailyByModel> {
+  try {
+    return await loadTokenUsageDailyByModel(sinceLocalDate);
+  } catch (error) {
+    debugLogger.warn(
+      `usage ledger unreadable, falling back to session-record attribution: ${error}`,
+    );
+    return new Map();
+  }
+}
+
+/**
  * Load both dashboard sources: the session history (for sessions, tool calls,
  * changed lines and skills) and the per-request ledger's per-day counters (for
  * everything token-bearing). Read-only. The session history can be I/O heavy on
@@ -413,7 +465,7 @@ export interface UsageDashboardSources {
 export async function loadUsageDashboardSources(): Promise<UsageDashboardSources> {
   const [records, ledgerDaily] = await Promise.all([
     loadUsageHistoryWithLive(),
-    loadTokenUsageDailyByModel(
+    loadLedgerOrEmpty(
       localDateKey(Date.now() - LEDGER_WINDOW_DAYS * MS_PER_DAY),
     ),
   ]);

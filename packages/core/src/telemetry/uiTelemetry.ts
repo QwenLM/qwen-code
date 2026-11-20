@@ -576,6 +576,9 @@ export class UiTelemetryService extends EventEmitter {
     sessionId?: string,
   ): void {
     this.#accumulateSkillInvocation(this.#metrics, skillName, success);
+    // Skill invocations are never replayed from a transcript, so every one of
+    // them belongs to this run and must reach the persisted counters too.
+    this.#accumulateSkillInvocation(this.#liveMetrics, skillName, success);
 
     if (sessionId && !this.#closedSessions.has(sessionId)) {
       if (!this.#sessionMetrics.has(sessionId)) {

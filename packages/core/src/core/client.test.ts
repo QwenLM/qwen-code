@@ -347,6 +347,7 @@ const mockUiTelemetryService = vi.hoisted(() => ({
   reset: vi.fn(),
   resetSession: vi.fn(),
   addEvent: vi.fn(),
+  addReplayedEvent: vi.fn(),
 }));
 const mockLogMemoryRecallDelivery = vi.hoisted(() => vi.fn());
 const mockInteractionTelemetry = vi.hoisted(() => ({
@@ -1307,9 +1308,11 @@ describe('Gemini Client (client.ts)', () => {
       expect(
         mockConfig.getToolRegistry().syncReviewedDeclarations,
       ).toHaveBeenCalledWith(apiHistory);
-      const { resetSession, addEvent } = uiTelemetryService;
+      const { resetSession, addReplayedEvent } = uiTelemetryService;
       expect(resetSession).toHaveBeenCalledWith('test-session-id');
-      expect(addEvent).toHaveBeenCalledWith(uiEvent, 'test-session-id');
+      // Projected history is replayed, so it must not reach the live counters
+      // that cross-session usage persists.
+      expect(addReplayedEvent).toHaveBeenCalledWith(uiEvent, 'test-session-id');
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
       expect(skill.restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(
         apiHistory,

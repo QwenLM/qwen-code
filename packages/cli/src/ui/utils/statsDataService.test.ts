@@ -18,18 +18,16 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     loadUsageHistory: vi.fn(),
     // Default: no ledger coverage, so records drive every field. Without this
     // the real loader would read the developer's own ~/.qwen/usage.
-    loadTokenUsageDailyByModel: vi.fn(async () => new Map()),
+    loadLedgerOrEmpty: vi.fn(async () => new Map()),
   };
 });
 
-import {
-  loadUsageHistory,
-  loadTokenUsageDailyByModel,
-} from '@qwen-code/qwen-code-core';
+import { loadUsageHistory, loadLedgerOrEmpty } from '@qwen-code/qwen-code-core';
 import {
   loadStatsData,
   getPreviousRangeBounds,
   computeDelta,
+  _resetStatsLedgerCacheForTest,
 } from './statsDataService.js';
 
 const mockedLoadUsageHistory = vi.mocked(loadUsageHistory);
@@ -300,6 +298,7 @@ describe('computeDelta', () => {
 describe('loadStatsData - new fields', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetStatsLedgerCacheForTest();
   });
 
   it('returns delta as null for range "all"', async () => {
@@ -501,6 +500,7 @@ describe('loadStatsData - new fields', () => {
 describe('loadStatsData — per-request ledger accounting', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetStatsLedgerCacheForTest();
   });
 
   const dayKey = (ms: number) => {
@@ -535,7 +535,7 @@ describe('loadStatsData — per-request ledger accounting', () => {
   it('replaces a ledger-covered day instead of adding the record copy', async () => {
     const now = Date.now();
     mockedLoadUsageHistory.mockResolvedValue([makeRecord({ timestamp: now })]);
-    vi.mocked(loadTokenUsageDailyByModel).mockResolvedValue(
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
       new Map([
         [
           dayKey(now),
@@ -567,7 +567,7 @@ describe('loadStatsData — per-request ledger accounting', () => {
     const now = Date.now();
     const yesterday = now - DAY;
     mockedLoadUsageHistory.mockResolvedValue([makeRecord({ timestamp: now })]);
-    vi.mocked(loadTokenUsageDailyByModel).mockResolvedValue(
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
       new Map([
         [dayKey(yesterday), ledgerDay({ requests: 4, inputTokens: 1000 })],
         [dayKey(now), ledgerDay({ requests: 2, inputTokens: 330 })],
@@ -599,7 +599,7 @@ describe('loadStatsData — per-request ledger accounting', () => {
       makeRecord({ sessionId: 't', timestamp: todayTs }),
       makeRecord({ sessionId: 'y', timestamp: yesterdayTs }),
     ]);
-    vi.mocked(loadTokenUsageDailyByModel).mockResolvedValue(
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
       new Map([
         [dayKey(yesterdayTs), ledgerDay({ requests: 4, inputTokens: 1000 })],
         [dayKey(todayTs), ledgerDay({ requests: 2, inputTokens: 330 })],
@@ -618,7 +618,7 @@ describe('loadStatsData — per-request ledger accounting', () => {
     mockedLoadUsageHistory.mockResolvedValue([
       makeRecord({ sessionId: 'old', timestamp: old }),
     ]);
-    vi.mocked(loadTokenUsageDailyByModel).mockResolvedValue(
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
       new Map([[dayKey(now), ledgerDay({ requests: 1, inputTokens: 70 })]]),
     );
 
@@ -628,5 +628,43 @@ describe('loadStatsData — per-request ledger accounting', () => {
     expect(result.heatmap[dayKey(old)]).toBe(1550);
     expect(result.heatmap[dayKey(now)]).toBe(70);
     expect(reportTokens(result.report)).toBe(1620);
+  });
+
+  it('streams the ledger once across repeated opens of the same window', async () => {
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({ timestamp: Date.now() }),
+    ]);
+
+    await loadStatsData('all');
+    await loadStatsData('all');
+
+    expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds the delta when only the ledger covers the previous window', async () => {
+    const now = new Date();
+    const todayStart = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    ).getTime();
+    const todayTs = Math.max(todayStart, now.getTime() - 1000);
+    const yesterdayTs = todayStart - 12 * 60 * 60 * 1000;
+    // A run killed before exit writes no record, so the previous window exists
+    // only in the ledger.
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({ sessionId: 't', timestamp: todayTs }),
+    ]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
+      new Map([
+        [dayKey(yesterdayTs), ledgerDay({ requests: 4, inputTokens: 1000 })],
+        [dayKey(todayTs), ledgerDay({ requests: 2, inputTokens: 330 })],
+      ]),
+    );
+
+    const result = await loadStatsData('today');
+
+    expect(result.delta).not.toBeNull();
+    expect(result.delta?.tokens).toBeCloseTo(-67);
   });
 });

@@ -436,6 +436,34 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   };
 }
 
+/**
+ * The exit path's usage write. It must bill only what this run spent: a resume
+ * replays the conversation's history into the display aggregate, and persisting
+ * that would charge every later run for the whole conversation again.
+ *
+ * `sessionStartTime` comes from uiTelemetryService so it stays correct after
+ * `/clear` resets the session. Exported so the invariant is testable without
+ * driving the whole startup flow.
+ */
+export function persistRunUsageOnExit(config: Config): void {
+  try {
+    const metrics = uiTelemetryService.getLiveMetrics();
+    const hasActivity = Object.values(metrics.models).some(
+      (m) => m.api.totalRequests > 0,
+    );
+    if (!hasActivity) return;
+    persistSessionUsage({
+      sessionId: config.getSessionId(),
+      startTime: uiTelemetryService.getSessionStartTime(),
+      endTime: new Date(),
+      project: config.getProjectRoot(),
+      metrics,
+    });
+  } catch {
+    // Best-effort — don't block shutdown
+  }
+}
+
 export async function main() {
   profileCheckpoint('main_entry');
   // First thing, before any child can be spawned: an inherited messaging
@@ -1254,26 +1282,7 @@ export async function main() {
 
     // Persist session usage for cross-session reports (must run before
     // config.shutdown() which clears telemetry state).
-    // sessionStartTime is read from uiTelemetryService so it stays correct
-    // after /clear resets the session (reset() updates the internal timestamp).
-    registerCleanup(() => {
-      try {
-        const metrics = uiTelemetryService.getLiveMetrics();
-        const hasActivity = Object.values(metrics.models).some(
-          (m) => m.api.totalRequests > 0,
-        );
-        if (!hasActivity) return;
-        persistSessionUsage({
-          sessionId: config.getSessionId(),
-          startTime: uiTelemetryService.getSessionStartTime(),
-          endTime: new Date(),
-          project: config.getProjectRoot(),
-          metrics,
-        });
-      } catch {
-        // Best-effort — don't block shutdown
-      }
-    });
+    registerCleanup(() => persistRunUsageOnExit(config));
 
     registerCleanup(() => config.shutdownExecutionEnvironments(), {
       first: true,

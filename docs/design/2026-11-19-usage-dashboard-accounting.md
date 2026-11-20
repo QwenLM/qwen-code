@@ -109,7 +109,8 @@ explicitly left the local-`today` window semantics out of scope.
   inside the selected window.
 - One run contributes once, regardless of resume / clear / branch.
 - Keep the dashboard read-only and keep warm loads sub-second.
-- Leave the sessions / requests / tool-calls / changes / skills tiles intact.
+- Leave the sessions / tool-calls / changes / skills tiles intact. Requests and
+  latency deliberately move to the ledger with the rest of the token counters.
 
 ## Scope boundaries
 
@@ -119,8 +120,10 @@ explicitly left the local-`today` window semantics out of scope.
   `usageHistoryService`'s record marker and reduction, and the TUI cross-session
   view (`statsDataService.loadStatsData`).
 - Out of scope: the `/stats` session view, whose cumulative resumed-history
-  semantics are intentional; the ledger and usage-record schemas; migrating
-  records already on disk; cost billing; the replay cache's scan bounds.
+  semantics are intentional; the ledger record schema and a usage-record version
+  bump or migration; migrating records already on disk; cost billing; the replay
+  cache's scan bounds. One optional, additive record flag (`runScoped`) is in
+  scope and is not a schema version change.
 
 ## Implemented solution (Option A)
 
@@ -155,9 +158,11 @@ and `LlmClient.initialize()`'s restore-runtime branch — feeds only the display
 aggregate and the session bucket. `getLiveMetrics()` is what the two persist
 callers (`/clear` and the process-exit cleanup) now write.
 
-- No subtraction and no schema change: the live counter is built by the same
-  accumulator, so with no replay it is field-for-field identical to the display
-  aggregate and every existing record shape is unchanged.
+- No subtraction and no schema version bump or migration: the live counter is
+  built by the same accumulator, so with no replay it is field-for-field identical
+  to the display aggregate. The only record-shape addition is the optional
+  `runScoped` flag described in the next section, which every existing reader
+  already ignores safely.
 - `reset()` clears it, so each `/clear` segment bills only itself.
 - `UiTelemetryReplaySnapshot` carries it, so an aborted swap restores it too and
   cannot leave the live counter inflated by an abandoned replay.
@@ -232,7 +237,8 @@ than a fabricated attribution.
   would reproduce the original inflation.
 - **Uncovered days keep the session-record attribution.** This preserves heatmap
   history from before the ledger existed, and the behavior of a user who has usage
-  statistics disabled (empty ledger -> unchanged legacy numbers).
+  statistics disabled (an empty ledger leaves those days record-derived). The only
+  exception is the window boundary day, which the next bullet measures moving.
 - **Calendar-day windows.** Day buckets cannot be split by hour, so `today`, `week`
   and `month` select whole local days (`today` is unchanged; `week` and `month`
   include the full boundary day instead of the hours after a rolling `now - N*24h`).
@@ -291,8 +297,9 @@ than a fabricated attribution.
   and delta previously filtered by millisecond bounds; the boundary day is now
   whole, matching the dashboard.
 - Records written before this change stay inflated, so other consumers of
-  `loadUsageHistory` (notably the TUI cross-session view) still see the old
-  numbers for that history. Only newly written records are correct.
+  `loadUsageHistory` that this PR does not convert (for example the per-project
+  token column and the pre-repair fallback window) still show the old numbers for
+  that history. Only newly written records are correct.
 - The live counter is process-wide, like the display aggregate it mirrors, so a
   long-lived process that switches sessions without `/clear` still attributes its
   total to the last session id. That is pre-existing behavior, unchanged here.

@@ -10,14 +10,56 @@ import {
   getTimeRangeBounds,
   buildUsageDayTable,
   sumUsageWindowByModel,
-  loadTokenUsageDailyByModel,
+  loadLedgerOrEmpty,
   localDateKey,
   modelTokens,
   type AggregatedReport,
   type TimeRange,
+  type TokenUsageDailyByModel,
   type UsageDayModelTable,
   type UsageSummaryRecord,
 } from '@qwen-code/qwen-code-core';
+
+/**
+ * The ledger is streamed per requested start day, and the dialog re-runs this
+ * loader on every open and every range cycle. Without a cache each of those
+ * parses every month file — seconds on the large histories this view targets.
+ * Same 60 s window the daemon route uses, keyed by start day rather than range
+ * name because the load reaches back over the previous range too.
+ */
+const LEDGER_CACHE_TTL_MS = 60_000;
+const ledgerCache = new Map<
+  string,
+  { promise: Promise<TokenUsageDailyByModel>; settledAt: number | null }
+>();
+
+/** Test-only: drop the cached ledger between cases. */
+export function _resetStatsLedgerCacheForTest(): void {
+  ledgerCache.clear();
+}
+
+function loadLedgerCached(
+  sinceLocalDate: string,
+): Promise<TokenUsageDailyByModel> {
+  const now = Date.now();
+  const hit = ledgerCache.get(sinceLocalDate);
+  if (
+    hit &&
+    (hit.settledAt === null || now - hit.settledAt < LEDGER_CACHE_TTL_MS)
+  ) {
+    return hit.promise;
+  }
+  const entry: {
+    promise: Promise<TokenUsageDailyByModel>;
+    settledAt: number | null;
+  } = { promise: loadLedgerOrEmpty(sinceLocalDate), settledAt: null };
+  ledgerCache.set(sinceLocalDate, entry);
+  // A pending load is shared regardless of age, so concurrent opens coalesce.
+  void entry.promise.then(() => {
+    if (ledgerCache.get(sinceLocalDate) === entry) entry.settledAt = Date.now();
+  });
+  return entry.promise;
+}
 
 export interface StatsData {
   report: AggregatedReport;
@@ -288,9 +330,7 @@ export async function loadStatsData(
     start.getTime(),
     prevBounds?.start.getTime() ?? start.getTime(),
   );
-  const ledgerDaily = await loadTokenUsageDailyByModel(
-    localDateKey(earliestMs),
-  );
+  const ledgerDaily = await loadLedgerCached(localDateKey(earliestMs));
   const table = buildUsageDayTable(records, ledgerDaily);
 
   applyTokenWindow(
@@ -321,15 +361,17 @@ export async function loadStatsData(
         r.timestamp >= prevBounds.start.getTime() &&
         r.timestamp < prevBounds.end.getTime(),
     );
-    if (prevFiltered.length > 0) {
+    const prevStartKey = localDateKey(prevBounds.start.getTime());
+    // `end` is exclusive, so the window's last day is the one before it.
+    const prevEndKey = localDateKey(prevBounds.end.getTime() - 1);
+    // A run killed before exit writes no record, so the ledger alone can cover
+    // the previous window. Gate on either source, not on records only.
+    const ledgerCoversPrev = [...ledgerDaily.keys()].some(
+      (day) => day >= prevStartKey && day <= prevEndKey,
+    );
+    if (prevFiltered.length > 0 || ledgerCoversPrev) {
       const previousReport = aggregateUsage(prevFiltered, 'all');
-      applyTokenWindow(
-        previousReport,
-        table,
-        localDateKey(prevBounds.start.getTime()),
-        // `end` is exclusive, so the window's last day is the one before it.
-        localDateKey(prevBounds.end.getTime() - 1),
-      );
+      applyTokenWindow(previousReport, table, prevStartKey, prevEndKey);
       delta = computeDelta(report, previousReport);
     }
   }

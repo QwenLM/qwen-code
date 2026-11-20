@@ -1809,8 +1809,17 @@ describe('UiTelemetryService live usage accounting', () => {
     service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 's');
     service.addEvent(apiError('m', 3, 'boom'), 's');
     service.addEvent(toolEvent(fakeToolEvent('read_file', true, 100)), 's');
+    // Skills reach the metrics through their own entry point, not #record, and
+    // are never replayed — they must land in the persisted counters too.
+    service.recordSkillInvocation('review', true, 's');
 
     expect(service.getLiveMetrics()).toEqual(service.getMetrics());
+    expect(service.getLiveMetrics().skills?.totalCalls).toBe(1);
+    expect(service.getLiveMetrics().skills?.byName['review']).toEqual({
+      count: 1,
+      success: 1,
+      fail: 0,
+    });
   });
 
   it('clears live usage on reset', () => {

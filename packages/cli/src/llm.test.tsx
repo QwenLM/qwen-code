@@ -26,23 +26,27 @@ import { join } from 'node:path';
 import {
   createNonInteractivePromptId,
   main,
+  persistRunUsageOnExit,
   registerLspHotReload,
   setupUncaughtExceptionHandler,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
 } from './llm.js';
+import {
+  persistSessionUsage,
+  uiTelemetryService,
+  EVENT_API_RESPONSE,
+
+  ApprovalMode,
+  InputFormat,
+  OutputFormat,
+  Storage} from '@qwen-code/qwen-code-core';
 import { startInteractiveUI } from './ui/startInteractiveUI.js';
 import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
-import {
-  ApprovalMode,
-  InputFormat,
-  OutputFormat,
-  Storage,
-} from '@qwen-code/qwen-code-core';
 import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
@@ -168,6 +172,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     registerSession: (...args: unknown[]) => mockRegisterSession(...args),
+    // The exit-persist test must not write to the developer's own ~/.qwen.
+    persistSessionUsage: vi.fn(),
   };
 });
 
@@ -5321,5 +5327,60 @@ describe('startInteractiveUI', () => {
       await vi.advanceTimersByTimeAsync(90_000);
       expect(performCheck.mock.calls.length).toBe(afterCleanup);
     });
+  });
+});
+
+describe('persistRunUsageOnExit', () => {
+  const config = {
+    getSessionId: () => 'exit-session',
+    getProjectRoot: () => '/exit/project',
+  } as unknown as Config;
+  const apiResponseEvent = (tokens: number) => ({
+    'event.name': EVENT_API_RESPONSE,
+    'event.timestamp': new Date().toISOString(),
+    response_id: `r-${tokens}`,
+    model: 'm',
+    duration_ms: 1,
+    input_token_count: tokens,
+    output_token_count: 0,
+    cached_content_token_count: 0,
+    thoughts_token_count: 0,
+    total_token_count: tokens,
+    prompt_id: 'exit-session',
+  });
+
+  beforeEach(() => {
+    uiTelemetryService.reset();
+    vi.mocked(persistSessionUsage).mockClear();
+  });
+
+  it('writes nothing for a run whose only traffic was replayed', () => {
+    uiTelemetryService.addReplayedEvent(apiResponseEvent(1000), 'exit-session');
+
+    persistRunUsageOnExit(config);
+
+    expect(persistSessionUsage).not.toHaveBeenCalled();
+  });
+
+  it('persists only this run after a resume replayed history', () => {
+    uiTelemetryService.addReplayedEvent(apiResponseEvent(1000), 'exit-session');
+    uiTelemetryService.addEvent(apiResponseEvent(5), 'exit-session');
+
+    persistRunUsageOnExit(config);
+
+    expect(persistSessionUsage).toHaveBeenCalledTimes(1);
+    const arg = vi.mocked(persistSessionUsage).mock.calls[0]?.[0] as {
+      sessionId: string;
+      metrics: {
+        models: Record<
+          string,
+          { api: { totalRequests: number }; tokens: { prompt: number } }
+        >;
+      };
+    };
+    expect(arg.sessionId).toBe('exit-session');
+    expect(arg.metrics.models['m']!.api.totalRequests).toBe(1);
+    // The replayed 1000 tokens never reached the persisted counters.
+    expect(arg.metrics.models['m']!.tokens.prompt).toBe(5);
   });
 });

@@ -400,6 +400,68 @@ describe('loadUsageDashboard', () => {
     expect(week.heatmap[dayKey(yesterday)]?.tokens).toBe(600);
   });
 
+  it('counts a boundary-day session beside its tokens instead of reporting zero', () => {
+    const now = Date.now();
+    // 00:00:00.001 local on the day the 30-day window starts: inside the day
+    // window, outside the rolling millisecond window.
+    const boundary = new Date(now - 30 * MS_PER_DAY);
+    boundary.setHours(0, 0, 0, 1);
+    const records = [
+      rec({
+        sessionId: 'boundary',
+        timestamp: boundary.getTime(),
+        model: { requests: 1, inputTokens: 500, totalTokens: 500 },
+      }),
+    ];
+
+    const dash = buildUsageDashboard(records, { range: 'month' });
+
+    expect(dash.summary.totalTokens).toBe(500);
+    expect(dash.summary.sessions).toBe(1);
+    expect(dash.daily[0]).toEqual({
+      date: dayKey(boundary.getTime()),
+      tokens: 500,
+      sessions: 1,
+    });
+  });
+
+  it('drops a run whose span touches a ledger day even if it ends on an uncovered day', () => {
+    const now = Date.now();
+    const yesterday = now - MS_PER_DAY;
+    // Spent yesterday, exited after midnight: the record carries the whole run
+    // on today's timestamp while the ledger already counted it yesterday.
+    const records = [
+      {
+        ...rec({
+          sessionId: 'cross-midnight',
+          timestamp: now,
+          model: { requests: 6, inputTokens: 600, totalTokens: 600 },
+        }),
+        startTime: yesterday,
+      },
+    ];
+    const ledger: TokenUsageDailyByModel = new Map([
+      [
+        dayKey(yesterday),
+        ledgerDay('qwen-max', { requests: 6, inputTokens: 600 }),
+      ],
+    ]);
+
+    const week = buildUsageDashboard(records, { range: 'week' }, ledger);
+    expect(week.summary.totalTokens).toBe(600);
+    expect(week.summary.requests).toBe(6);
+    expect(week.heatmap[dayKey(yesterday)]?.tokens).toBe(600);
+    expect(week.heatmap[dayKey(now)]).toBeUndefined();
+
+    const today = buildUsageDashboard(records, { range: 'today' }, ledger);
+    expect(today.summary.totalTokens).toBe(0);
+    expect(today.summary.requests).toBe(0);
+
+    // With no ledger at all the record still supplies its tokens.
+    const noLedger = buildUsageDashboard(records, { range: 'week' });
+    expect(noLedger.summary.totalTokens).toBe(600);
+  });
+
   it('keeps session-record tokens for days the ledger does not cover', () => {
     const now = Date.now();
     const old = now - 40 * MS_PER_DAY;
