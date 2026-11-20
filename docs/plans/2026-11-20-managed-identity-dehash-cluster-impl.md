@@ -49,14 +49,23 @@ the ripple plus the hash-drop/rebuild/cursor/generated/CHECK/meta-test work belo
   digests/signatures. A second in-session attempt confirmed main code compiles after the whitelist
   pass but verification test sources (~56 files) still need migration, and bare-`key` replacement
   corrupts crypto keys.
+- **`List<byte[]>`, `byte[].class`, `Arrays.equals` are NOT safe global replacements**: binary
+  payload columns (`inline_bytes`, `record_bytes`) legitimately use `List<byte[]>`,
+  `byte[].class` and `Arrays.equals(byte[],byte[])`. A third in-session attempt showed global
+  replacement of these corrupts binary-payload reads (e.g. `SELECT inline_bytes … byte[].class`
+  became `String.class`). Convert them only at identity-read sites, manually;
+  `Arrays.equals`→`Objects.equals` on binary payloads silently breaks content equality. Only the
+  var-name whitelist, `setBytes(x.getBytes(…))`→`setString(x, …)`, and helper signatures are safe
+  globally; everything else is per-site compiler-guided.
 - Central helpers: `JdbcRepositorySupport.setIdentity`→`setString`;
   `ManagedSchemaRows.identity`→`getString`; `ManagedWorkspaceRegistry.actorKey`→return String;
   `ManagedReceipts.actorScope(String)`→`Base64(actor.getBytes(UTF_8))`; `UNATTRIBUTED`→`""`;
   `ManagedRuntimeRetentionGuard.identity`→`return value`.
 - Semantic fixes driven by compile errors: identity row reads `getBytes`→`getString`;
   `return x.getBytes(UTF_8)`→`return x`; `actor.length==0`→`isEmpty()`; byte[]/String conditionals;
-  `Arrays.equals`→`Objects.equals`; `List<byte[]>`→`List<String>`; `queryForObject byte[].class`→
-  `String.class`; test `containsExactly`/`fill` on identity values→String.
+  **identity-site only** `Arrays.equals`→`Objects.equals`, `List<byte[]>`→`List<String>`,
+  `queryForObject byte[].class`→`String.class`; test `containsExactly`/`fill` on identity
+  values→String.
 - Loop: whitelist type script (main + verification tests) → `test-compile` → manually fix the listed
   semantic sites → repeat until compile green → broad H2 → double Checkstyle → commit.
 
