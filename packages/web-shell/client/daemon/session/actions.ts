@@ -415,6 +415,13 @@ export function getConnectionAfterSessionClear(
     // sessionId), which also makes the effect's canReuseSessionMetadata
     // check refetch fresh data for the next session.
     delete next.supportedCommands;
+    if (
+      preserveWorkspaceMetadata &&
+      next.workflowStatusUnknown &&
+      next.commands
+    ) {
+      next.commands = getVisibleSessionCommands(next);
+    }
     delete next.workflowStatusUnknown;
     delete next.context;
     delete next.reasoning;

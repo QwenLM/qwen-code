@@ -2152,6 +2152,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         }
         if (disposed || abort.signal.aborted) return;
         const availabilityGeneration = availabilityRef.current?.getGeneration();
+        const isFullResync = nextSseConnectReason === 'state_resync';
+        const shouldKeepWorkflowRecovery = (
+          current: DaemonConnectionState,
+          target: DaemonSessionClient,
+        ) =>
+          isFullResync &&
+          current.sessionId === target.sessionId &&
+          current.sessionContext?.kind === 'workspace' &&
+          current.sessionContext.cwd === target.workspaceCwd;
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
         let loadingRequestedSession = false;
@@ -2851,7 +2860,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       ? current.commands
                       : getVisibleSessionCommands(current),
                   workflowStatusUnknown:
-                    workflowModeSessionRef.current === nextSession
+                    workflowModeSessionRef.current === nextSession ||
+                    (workspaceScoped &&
+                      shouldKeepWorkflowRecovery(current, nextSession))
                       ? current.workflowStatusUnknown
                       : undefined,
                   supportedCommands:
@@ -3586,9 +3597,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             workflowMode: reuseWorkflowMode ? current.workflowMode : undefined,
             workflowModeStatus: 'syncing',
             workflowModePending: false,
-            workflowStatusUnknown: reuseWorkflowMode
-              ? current.workflowStatusUnknown
-              : undefined,
+            workflowStatusUnknown:
+              reuseWorkflowMode ||
+              (activeWorkspaceScoped &&
+                shouldKeepWorkflowRecovery(current, activeSession))
+                ? current.workflowStatusUnknown
+                : undefined,
             supportedCommands: reuseWorkflowMode
               ? current.supportedCommands
               : undefined,
@@ -4085,12 +4099,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               return;
             }
             workflowRecoveryStarted = true;
-            const { commands, skills } = connectionRef.current;
             for (
               let attempt = 1;
               needsWorkflowRecovery(connectionRef.current);
               attempt++
             ) {
+              const { commands, skills } = connectionRef.current;
               const status = await withActionTimeout(
                 activeSession.supportedCommands(),
                 'Refresh commands after replay timed out',

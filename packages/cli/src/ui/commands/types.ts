@@ -505,6 +505,9 @@ export interface SlashCommand {
    */
   workflowName?: string;
 
+  /** The unsuffixed `workflow.<name>` for denylist matching only. */
+  workflowAliasBase?: string;
+
   /** Parsed skill metadata for skill-backed commands. Used by ACP clients. */
   skillDetail?: {
     name: string;

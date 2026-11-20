@@ -23965,6 +23965,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'User',
       'permissions.allow',
       ['ShellTool(git status', 'ShellTool(npm test)'],
+      undefined,
+      { throwOnWriteFailure: true },
     );
 
     mockConnectionState.resolve();
@@ -23985,6 +23987,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'User',
       'permissions.allow',
       ['ShellTool(git status)'],
+      undefined,
+      { throwOnWriteFailure: true },
     );
     expect(result).toMatchObject({
       user: expect.anything(),
@@ -24077,10 +24081,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       throw new Error('Unreadable workspace settings');
     });
 
-    await agent.extMethod('qwen/permissions/setRules', {
-      scope: 'user',
-      ruleType: 'deny',
-      rules: ['Workflow'],
+    const replaceDenyRules = () =>
+      agent.extMethod('qwen/permissions/setRules', {
+        scope: 'user',
+        ruleType: 'deny',
+        rules: ['Workflow'],
+      });
+    await expect(replaceDenyRules()).resolves.toMatchObject({
+      liveSyncIncomplete: true,
+      user: { rules: { deny: ['Workflow'] } },
     });
 
     expect(permissionManager.addPersistentRule).toHaveBeenCalledWith(
@@ -24089,11 +24098,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
     expect(permissionManager.removePersistentRule).not.toHaveBeenCalled();
 
-    await agent.extMethod('qwen/permissions/setRules', {
-      scope: 'user',
-      ruleType: 'deny',
-      rules: ['Workflow'],
-    });
+    await expect(replaceDenyRules()).resolves.not.toHaveProperty(
+      'liveSyncIncomplete',
+    );
 
     expect(permissionManager.removePersistentRule).toHaveBeenCalledWith(
       'ReadFile',
@@ -24103,6 +24110,72 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it.each([
+    [SettingScope.User, SettingScope.Workspace, 'user', 'workspace'],
+    [SettingScope.Workspace, SettingScope.User, 'workspace', 'user'],
+  ] as const)(
+    'removes a retained live grant when its last scope is removed (%s first)',
+    async (firstScope, lastScope, first, last) => {
+      const settings = makeCoreSettings();
+      settings.setValue(firstScope, 'permissions.allow', ['ReadFile']);
+      const config = await setupSessionMocks('test-session-id');
+      const liveRules = new Set(['ReadFile']);
+      Object.assign(config, {
+        getPermissionManager: () => ({
+          removePersistentRule: (rule: string) => liveRules.delete(rule),
+        }),
+        storage: { ...config.storage, getProjectRoot: () => '/tmp' },
+      });
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        settings.setValue(lastScope, 'permissions.allow', ['ReadFile']);
+        const clear = (scope: string) =>
+          agent.extMethod('qwen/permissions/setRules', {
+            cwd: '/tmp',
+            scope,
+            ruleType: 'allow',
+            rules: [],
+          });
+
+        await clear(first);
+        expect(liveRules.has('ReadFile')).toBe(true);
+        await clear(last);
+        expect(liveRules.has('ReadFile')).toBe(false);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('does not update live permissions when persistence fails', async () => {
+    const settings = makeCoreSettings();
+    const config = await setupSessionMocks('test-session-id');
+    const addPersistentRule = vi.fn();
+    Object.assign(config, {
+      getPermissionManager: () => ({ addPersistentRule }),
+    });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      vi.mocked(settings.setValue).mockImplementationOnce(() => {
+        throw new Error('Cannot save settings');
+      });
+      await expect(
+        agent.extMethod('qwen/permissions/setRules', {
+          scope: 'user',
+          ruleType: 'deny',
+          rules: ['ReadFile'],
+        }),
+      ).rejects.toThrow('Cannot save settings');
+      expect(addPersistentRule).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it.each([

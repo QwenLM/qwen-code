@@ -7449,6 +7449,35 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
+  it('does not retain unconfirmed Workflow commands in a new chat', async () => {
+    const session = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        commands: [
+          commandInfo('help'),
+          commandInfo('saved-workflow', 'workflow-command'),
+          commandInfo('skill', 'skill'),
+        ],
+        skills: ['skill'],
+        workflowStatusUnknown: true,
+      },
+      session,
+    });
+
+    await actions.clearSession();
+
+    expect(getConnection().sessionId).toBeUndefined();
+    expect(getConnection().workflowStatusUnknown).toBeUndefined();
+    expect(getConnection().commands?.map(({ name }) => name)).toEqual([
+      'help',
+      'skill',
+    ]);
+    expect(getConnection().skills).toEqual(['skill']);
+  });
+
   it('drops the connection session context through the real clearSession action', async () => {
     const session = createMockSession('session-a');
     const { actions, getConnection } = createActionsHarness({

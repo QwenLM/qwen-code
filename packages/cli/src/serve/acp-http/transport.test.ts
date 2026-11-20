@@ -67,6 +67,7 @@ import {
 } from '../fs/index.js';
 import {
   WorkspacePermissionRulesSessionRequiredError,
+  WorkspacePermissionSyncIncompleteError,
   WorkspaceSettingsPartialPersistError,
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
@@ -8828,39 +8829,51 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
-  it('maps _qwen/workspace/permissions/set missing live session to INVALID_PARAMS', async () => {
-    const setSpy = vi
-      .spyOn(fakeWorkspace, 'setWorkspacePermissionRules')
-      .mockRejectedValueOnce(
-        new WorkspacePermissionRulesSessionRequiredError(),
-      );
-    const connId = await initialize();
-    const connStream = await openStream(connId);
-    const got = takeFrames(connStream, 1);
-    await new Promise((r) => setTimeout(r, 50));
-    await post(connId, {
-      jsonrpc: '2.0',
-      id: 218,
-      method: '_qwen/workspace/permissions/set',
-      params: {
-        scope: 'workspace',
-        ruleType: 'deny',
-        rules: ['Read(.env)'],
-      },
-    });
-    const frames = (await got) as Array<{
-      id: number;
-      error?: { code: number; data?: { errorKind?: string } };
-    }>;
-    expect(frames[0]).toMatchObject({
-      id: 218,
-      error: {
-        code: -32602,
-        data: { errorKind: 'permission_session_required' },
-      },
-    });
-    setSpy.mockRestore();
-  });
+  it.each([
+    [
+      new WorkspacePermissionRulesSessionRequiredError(),
+      -32602,
+      'permission_session_required',
+    ],
+    [
+      new WorkspacePermissionSyncIncompleteError(),
+      -32603,
+      'permission_sync_incomplete',
+    ],
+  ])(
+    'maps _qwen/workspace/permissions/set errors: %s',
+    async (failure, code, errorKind) => {
+      const setSpy = vi
+        .spyOn(fakeWorkspace, 'setWorkspacePermissionRules')
+        .mockRejectedValueOnce(failure);
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 218,
+        method: '_qwen/workspace/permissions/set',
+        params: {
+          scope: 'workspace',
+          ruleType: 'deny',
+          rules: ['Read(.env)'],
+        },
+      });
+      const frames = (await got) as Array<{
+        id: number;
+        error?: { code: number; data?: { errorKind?: string } };
+      }>;
+      expect(frames[0]).toMatchObject({
+        id: 218,
+        error: {
+          code,
+          data: { errorKind },
+        },
+      });
+      setSpy.mockRestore();
+    },
+  );
 
   it('dispatches _qwen/workspace/voice', async () => {
     const connId = await initialize();

@@ -68,10 +68,11 @@ export class CommandService {
    *   interface. Built-in commands should come first, followed by FileCommandLoader.
    * @param signal An AbortSignal to cancel the loading process.
    * @param disabledNames Optional set of command names to exclude. Matched
-   *   case-insensitively against the final (post-rename) command name, and for a
-   *   skill or saved workflow against its authored name as well. Intended
-   *   for settings- or flag-driven denylists that gate the CLI surface (see
-   *   `slashCommands.disabled` and `--disabled-slash-commands`).
+   *   case-insensitively against the final (post-rename) command name, a skill
+   *   or saved workflow's authored name, and a renamed saved workflow's
+   *   unsuffixed alias. Intended for settings- or flag-driven denylists that
+   *   gate the CLI surface (see `slashCommands.disabled` and
+   *   `--disabled-slash-commands`).
    * @returns A promise that resolves to a new, fully initialized `CommandService` instance.
    */
   static async create(
@@ -148,7 +149,12 @@ export class CommandService {
           name = `${alias}${suffix}`;
         }
         occupiedNames.add(name);
-        commandMap.set(name, { ...cmd, name, workflowName: cmd.name });
+        commandMap.set(name, {
+          ...cmd,
+          name,
+          workflowName: cmd.name,
+          workflowAliasBase: alias,
+        });
       }
     }
 

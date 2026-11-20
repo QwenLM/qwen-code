@@ -185,6 +185,7 @@ import type {
 } from '../workspace-service/types.js';
 import {
   WorkspacePermissionRulesSessionRequiredError,
+  WorkspacePermissionSyncIncompleteError,
   WorkspaceSettingsPartialPersistError,
 } from '../workspace-service/types.js';
 import type {
@@ -3924,6 +3925,16 @@ export class AcpDispatcher {
               { scope, ruleType, rules },
             );
           } catch (err) {
+            if (err instanceof WorkspacePermissionSyncIncompleteError) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INTERNAL_ERROR, err.message, {
+                    errorKind: err.code,
+                  }),
+                );
+              }
+              return;
+            }
             if (
               err instanceof WorkspacePermissionRulesSessionRequiredError &&
               id !== undefined

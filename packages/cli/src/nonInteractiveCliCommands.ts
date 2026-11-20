@@ -508,9 +508,8 @@ export const handleSlashCommand = async (
   // nor stay silent when it is: a skill command's registry name carries the
   // extension prefix while an existing `slashCommands.disabled` entry may hold
   // the bare authored name.
-  const isDisabled = (
-    cmd: Pick<SlashCommand, 'name' | 'altNames' | 'skillDetail'>,
-  ) => commandRestrictionNames(cmd).some((name) => disabledNameSet.has(name));
+  const isDisabled = (cmd: SlashCommand) =>
+    commandRestrictionNames(cmd).some((name) => disabledNameSet.has(name));
 
   // Load the full command set (unfiltered by the denylist) so that the
   // fallback existence check below can distinguish a disabled command from a

@@ -7910,19 +7910,24 @@ class QwenAgent implements Agent {
     settingsCwd: string,
     requestSettings: LoadedSettings,
     strict = false,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const workflowChanges: Array<{ session: Session; wasEnabled: boolean }> =
       [];
     const errors: unknown[] = [];
+    const otherScope =
+      settingScope === SettingScope.User
+        ? SettingScope.Workspace
+        : SettingScope.User;
     const effectiveRulesByWorkspace = new Map<
       string,
-      PermissionRuleSet | undefined
+      | { rules: PermissionRuleSet; otherScopeRules: PermissionRuleSet }
+      | undefined
     >();
     const getEffectiveRules = (workspace: string) => {
       if (effectiveRulesByWorkspace.has(workspace)) {
         return effectiveRulesByWorkspace.get(workspace);
       }
-      let rules: PermissionRuleSet | undefined;
+      let effective: ReturnType<typeof effectiveRulesByWorkspace.get>;
       try {
         const workspaceTrusted =
           settingScope === SettingScope.Workspace
@@ -7932,11 +7937,9 @@ class QwenAgent implements Agent {
                 undefined,
                 workspace,
               ).isTrusted ?? false);
-        const { merged } = readLiveSettingsSnapshot(
-          workspace,
-          workspaceTrusted,
-        );
-        rules = readPermissionRuleSet(merged);
+        const snapshot = readLiveSettingsSnapshot(workspace, workspaceTrusted);
+        const { merged } = snapshot;
+        const rules = readPermissionRuleSet(merged);
         rules.allow.push(
           ...normalizeDisabledToolList(merged.tools?.allowed),
           ...(this.argv.allowedTools ?? []),
@@ -7945,15 +7948,23 @@ class QwenAgent implements Agent {
           ...normalizeDisabledToolList(merged.tools?.exclude),
           ...(this.argv.excludeTools ?? []),
         );
+        const otherScopeRules = readPermissionRuleSet(
+          otherScope === SettingScope.User
+            ? snapshot.user?.settings
+            : workspaceTrusted
+              ? snapshot.workspace?.settings
+              : undefined,
+        );
+        effective = { rules, otherScopeRules };
       } catch (error) {
-        if (strict) errors.push(error);
+        errors.push(error);
         debugLogger.warn(
           'Could not read permission rules for a live session:',
           error,
         );
       }
-      effectiveRulesByWorkspace.set(workspace, rules);
-      return rules;
+      effectiveRulesByWorkspace.set(workspace, effective);
+      return effective;
     };
     for (const session of this.sessions.values()) {
       const config = session.getConfig();
@@ -8000,13 +8011,26 @@ class QwenAgent implements Agent {
             // Preserve existing restrictions if their other sources can't be read.
             if (effective || (!strict && ruleType === 'allow')) {
               const retained = new Set(
-                effective?.[ruleType].map((rule) => rule.trim()),
+                effective?.rules[ruleType].map((rule) => rule.trim()),
+              );
+              const otherSources = new Map(
+                effective?.otherScopeRules[ruleType].map((rule) => [
+                  rule.trim(),
+                  rule,
+                ]),
               );
               for (const rule of removed) {
                 const normalized = rule.trim();
                 if (!retained.has(normalized)) {
                   while (pm.removePersistentRule(normalized, ruleType)) {
                     // Different settings entries can parse to the same string.
+                  }
+                } else {
+                  const source = otherSources.get(normalized);
+                  if (source !== undefined) {
+                    const rules = (applied[otherScope] ??=
+                      readPermissionRuleSet(undefined))[ruleType];
+                    if (!rules.includes(source)) rules.push(source);
                   }
                 }
               }
@@ -8032,7 +8056,7 @@ class QwenAgent implements Agent {
               error instanceof Error ? error.message : String(error)
             }`,
           );
-          if (strict) errors.push(error);
+          errors.push(error);
         }
       }
     }
@@ -8049,16 +8073,17 @@ class QwenAgent implements Agent {
             'Failed to reconcile the live Workflow tool:',
             error,
           );
-          if (strict) errors.push(error);
+          errors.push(error);
         }
       }),
     );
-    if (errors.length > 0) {
+    if (strict && errors.length > 0) {
       throw new AggregateError(
         errors,
         'Could not synchronize permission rules for all live sessions',
       );
     }
+    return errors.length === 0;
   }
 
   private cancelDisabledWorkflowRuns(session: Session): void {
@@ -15996,18 +16021,24 @@ class QwenAgent implements Agent {
           throw error;
         }
 
-        settings.setValue(settingScope, `permissions.${ruleType}`, rules);
-        await this.syncLivePermissionManagers(
+        settings.setValue(
+          settingScope,
+          `permissions.${ruleType}`,
+          rules,
+          undefined,
+          { throwOnWriteFailure: true },
+        );
+        const liveSyncComplete = await this.syncLivePermissionManagers(
           before,
           readPermissionRuleSet(settings.forScope(settingScope).settings),
           settingScope,
           settingsCwd,
           settings,
         );
-        return buildPermissionSettings(settings) as unknown as Record<
-          string,
-          unknown
-        >;
+        return {
+          ...buildPermissionSettings(settings),
+          ...(!liveSyncComplete && { liveSyncIncomplete: true }),
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload: {
         if (

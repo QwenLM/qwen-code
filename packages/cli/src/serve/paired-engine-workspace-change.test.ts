@@ -41,6 +41,7 @@ class EngineAgent {
   constructor(
     private readonly engine: BridgeExecutionEngine,
     private readonly acknowledge: () => boolean,
+    private readonly localSyncIncomplete = false,
   ) {}
 
   async initialize(): Promise<InitializeResponse> {
@@ -77,7 +78,12 @@ class EngineAgent {
       case SERVE_CONTROL_EXT_METHODS.sessionClose:
         return { closed: true };
       case 'qwen/permissions/setRules':
-        return { allow: [], ask: [], deny: params['rules'] };
+        return {
+          allow: [],
+          ask: [],
+          deny: params['rules'],
+          ...(this.localSyncIncomplete && { liveSyncIncomplete: true }),
+        };
       case SERVE_CONTROL_EXT_METHODS.workspaceReload:
         return {
           env: { updatedKeys: [], removedKeys: [] },
@@ -131,8 +137,11 @@ describe('paired Bridge workspace changes through the workspace routes', () => {
     await rm(workspaceCwd, { recursive: true, force: true });
   });
 
-  async function harness(managedAcknowledges: boolean) {
-    const legacy = new EngineAgent('legacy', () => true);
+  async function harness(
+    managedAcknowledges: boolean,
+    localSyncIncomplete = false,
+  ) {
+    const legacy = new EngineAgent('legacy', () => true, localSyncIncomplete);
     const managed = new EngineAgent('managed', () => managedAcknowledges);
     let selected: BridgeExecutionEngine = 'managed';
     const paired = createAcpSessionBridge({
@@ -174,6 +183,36 @@ describe('paired Bridge workspace changes through the workspace routes', () => {
       });
     return { paired, legacy, managed, managedSession, post, prompt };
   }
+
+  it.each([true, false])(
+    'reports a saved but incomplete Legacy sync (Managed acknowledges=%s)',
+    async (managedAcknowledges) => {
+      const { paired, managed, post } = await harness(
+        managedAcknowledges,
+        true,
+      );
+      const published = vi.spyOn(paired, 'publishWorkspaceEvent');
+      const response = await post('/workspace/permissions', {
+        scope: 'user',
+        ruleType: 'deny',
+        rules: [],
+      });
+
+      expect(managed.changes).toHaveLength(1);
+      expect(published).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          type: 'settings_changed',
+          data: { key: 'permissions.deny', scope: 'user', value: [] },
+        }),
+      );
+      expect(response.status).toBe(409);
+      expect(response.body).toEqual({
+        code: 'permission_sync_incomplete',
+        error:
+          'Permission rules were saved but could not be applied to all live sessions.',
+      });
+    },
+  );
 
   it('delivers a new deny rule to live Managed sessions', async () => {
     const { managed, managedSession, post, prompt } = await harness(true);

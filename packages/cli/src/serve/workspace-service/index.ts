@@ -69,7 +69,10 @@ import {
   loadTrustedFolders,
   TrustLevel,
 } from '../../config/trustedFolders.js';
-import { buildPermissionSettings } from '../../config/permission-settings.js';
+import {
+  buildPermissionSettings,
+  type QwenPermissionSettings,
+} from '../../config/permission-settings.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
   buildWorkspaceVoiceStatus,
@@ -90,6 +93,7 @@ import {
 
 import {
   WorkspacePermissionRulesSessionRequiredError,
+  WorkspacePermissionSyncIncompleteError,
   WorkspaceSkillNotFoundError,
   WorkspaceSettingsPartialPersistError,
   WorkspaceTrustGrantIneffectiveError,
@@ -953,8 +957,13 @@ export function createDaemonWorkspaceService(
     ) {
       assertActiveGeneration();
       const key = `permissions.${request.ruleType}`;
+      type ChildPermissionResult = QwenPermissionSettings & {
+        liveSyncIncomplete?: boolean;
+      };
+      let result: ChildPermissionResult;
+      let bridgePartial: WorkspaceChangePartiallyAppliedError | undefined;
       try {
-        const result = await invokeWorkspaceCommand(
+        result = await invokeWorkspaceCommand<ChildPermissionResult>(
           'qwen/permissions/setRules',
           {
             cwd: boundWorkspace,
@@ -963,32 +972,30 @@ export function createDaemonWorkspaceService(
             rules: request.rules,
           },
         );
-        assertActiveGeneration();
-        publishWorkspaceEvent({
-          type: 'settings_changed',
-          data: { key, value: request.rules, scope: request.scope },
-          originatorClientId: ctx.originatorClientId,
-        });
-        return result as ReturnType<typeof buildPermissionSettings>;
       } catch (err) {
         if (
           err instanceof WorkspaceChangePartiallyAppliedError &&
           err.result !== undefined
         ) {
-          // Saved but not applied everywhere: observers still need the change.
-          assertActiveGeneration();
-          publishWorkspaceEvent({
-            type: 'settings_changed',
-            data: { key, value: request.rules, scope: request.scope },
-            originatorClientId: ctx.originatorClientId,
-          });
+          bridgePartial = err;
+          result = err.result as ChildPermissionResult;
+        } else if (err instanceof SessionNotFoundError) {
+          throw new WorkspacePermissionRulesSessionRequiredError();
+        } else {
           throw err;
         }
-        if (!(err instanceof SessionNotFoundError)) {
-          throw err;
-        }
-        throw new WorkspacePermissionRulesSessionRequiredError();
       }
+      assertActiveGeneration();
+      publishWorkspaceEvent({
+        type: 'settings_changed',
+        data: { key, value: request.rules, scope: request.scope },
+        originatorClientId: ctx.originatorClientId,
+      });
+      if (result?.liveSyncIncomplete === true) {
+        throw new WorkspacePermissionSyncIncompleteError(bridgePartial);
+      }
+      if (bridgePartial) throw bridgePartial;
+      return result;
     },
 
     async setWorkspaceVoiceSettings(

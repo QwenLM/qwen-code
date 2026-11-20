@@ -235,12 +235,15 @@ describe('SavedWorkflowLoader', () => {
     expect(
       parseSlashCommand('/workflow.workflows1', commands).commandToExecute,
     ).toEqual(custom);
-    expect(
-      parseSlashCommand('/workflow.workflows2', commands).commandToExecute,
-    ).toMatchObject({
+    const { commandToExecute: workflow } = parseSlashCommand(
+      '/workflow.workflows2',
+      commands,
+    );
+    expect(workflow).toMatchObject({
       source: 'workflow-command',
       workflowName: 'workflows',
     });
+    expect(workflow?.altNames ?? []).not.toContain('workflow.workflows');
 
     for (const disabledName of ['workflows', 'workflow.workflows2']) {
       const disabled = await CommandService.create(
@@ -253,6 +256,13 @@ describe('SavedWorkflowLoader', () => {
       ).toBe(false);
       expect(disabled.getCommands()).toContainEqual(custom);
     }
+
+    const disabledByStableAlias = await CommandService.create(
+      loaders,
+      signal,
+      new Set([' Workflow.Workflows ']),
+    );
+    expect(disabledByStableAlias.getCommands()).toEqual([workflowsCommand]);
   });
 
   it('keeps custom precedence over a built-in name that a saved workflow also uses', async () => {

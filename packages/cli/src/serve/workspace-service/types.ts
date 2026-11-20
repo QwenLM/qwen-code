@@ -401,6 +401,18 @@ export class WorkspacePermissionRulesSessionRequiredError extends Error {
   }
 }
 
+export class WorkspacePermissionSyncIncompleteError extends Error {
+  readonly code = 'permission_sync_incomplete';
+
+  constructor(cause?: unknown) {
+    super(
+      'Permission rules were saved but could not be applied to all live sessions.',
+      { cause },
+    );
+    this.name = 'WorkspacePermissionSyncIncompleteError';
+  }
+}
+
 /**
  * A trust grant wrote its rule but the decision did not change: an
  * equal-depth DO_NOT_TRUST rule under an alias spelling of the same

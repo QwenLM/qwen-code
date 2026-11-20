@@ -17,7 +17,10 @@ import {
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
-import { WorkspacePermissionRulesSessionRequiredError } from '../workspace-service/types.js';
+import {
+  WorkspacePermissionRulesSessionRequiredError,
+  WorkspacePermissionSyncIncompleteError,
+} from '../workspace-service/types.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -164,6 +167,10 @@ export function registerWorkspacePermissionsRoutes(
         );
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
+        if (err instanceof WorkspacePermissionSyncIncompleteError) {
+          res.status(409).json({ error: err.message, code: err.code });
+          return;
+        }
         if (err instanceof WorkspacePermissionRulesSessionRequiredError) {
           res.status(409).json({
             error:
@@ -296,6 +303,10 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
         res.status(200).json(liveResponse);
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
+        if (err instanceof WorkspacePermissionSyncIncompleteError) {
+          res.status(409).json({ error: err.message, code: err.code });
+          return;
+        }
         if (err instanceof WorkspacePermissionRulesSessionRequiredError) {
           res.status(409).json({
             error:

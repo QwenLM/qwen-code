@@ -30,16 +30,20 @@ import { skillRestrictionNames } from '@qwen-code/qwen-code-core';
  * one side learns about a spelling the other does not.
  */
 export function commandRestrictionNames(
-  cmd: Pick<SlashCommand, 'name' | 'altNames' | 'skillDetail' | 'workflowName'>,
+  cmd: Pick<
+    SlashCommand,
+    'name' | 'altNames' | 'skillDetail' | 'workflowName' | 'workflowAliasBase'
+  >,
 ): string[] {
   const names = cmd.skillDetail
     ? skillRestrictionNames(cmd.skillDetail)
     : [cmd.name.trim().toLowerCase()];
   return [
     ...names,
-    // An extension workflow renamed on a collision still answers to the name
-    // its extension documents.
     ...(cmd.workflowName ? [cmd.workflowName.trim().toLowerCase()] : []),
+    ...(cmd.workflowAliasBase
+      ? [cmd.workflowAliasBase.trim().toLowerCase()]
+      : []),
     ...(cmd.altNames ?? []).map((name) => name.trim().toLowerCase()),
   ];
 }
