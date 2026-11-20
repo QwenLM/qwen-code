@@ -19722,6 +19722,19 @@
               "$ref": "#/components/schemas/ManagedExtensionPackagePin"
             }
           },
+          "degradedComponents": {
+            "type": "object",
+            "maxProperties": 32,
+            "additionalProperties": {
+              "type": "array",
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": ["mcp", "hooks"]
+              }
+            }
+          },
           "operation": {
             "$ref": "#/components/schemas/ManagedExtensionApplyOperation"
           },

@@ -101,11 +101,29 @@ Out of scope:
   field is present only when at least one active package is degraded.
   `extensions` and `requestedExtensions` keep their bare-pin shapes; no
   existing consumer breaks.
-- The new read site validates defensively in house style: the field must be an
-  array of unique strings within `{mcp, hooks}`; a malformed committed bundle
+- The new read site validates defensively in house style and mirrors the TS
+  parser: the field must be an array of unique strings within `{mcp, hooks}`
+  (an explicit `null` is corrupt, matching the parser), and the reported list
+  is normalized to canonical `['mcp', 'hooks']` order so the API boundary is
+  deterministic regardless of committed order; a malformed committed bundle
   is `corrupt()`.
+- The published OpenAPI contract declares the field:
+  `ManagedExtensionManagementSnapshot` gains an optional `degradedComponents`
+  object (`maxProperties: 32`, values arrays of `mcp`/`hooks` with
+  `maxItems: 2`, `uniqueItems: true`), keeping the schema
+  `additionalProperties: false` honest for every public and WebShell
+  extension-management operation that serves the snapshot. WebShell types are
+  regenerated from the repository root
+  (`npm run generate:managed-agent-api --workspace=packages/web-shell`), and a
+  contract case commits a degraded active bundle so
+  `ManagedAgentApiContractTest` schema-validates the degraded response — the
+  gate fails without the schema property.
 - `ManagedExtensionProtocol.response()` is unchanged: it already passes
   package fields through, and the TS harness validates pins on receipt.
+- The local harness management snapshot (`GET /session/:id/extensions/management`)
+  is intentionally unchanged: the Java-side snapshot is the deployment-facing
+  reporting surface. Aligning the local surface is deferred to the
+  content-only wiring work (#17424) if that surface needs the report.
 
 ## Design decisions and rationale
 
@@ -164,8 +182,13 @@ Out of scope:
   the field; harness-level integration test loading a mixed skills+hook package
   through the skill tool on the first Hosted turn with a stage-less runtime.
 - Unit (Java): `ManagedExtensionManagementServiceTest` — snapshot surfaces the
-  map for an active degraded bundle, omits it otherwise, keeps pin shapes, and
-  rejects malformed degradation fields as corrupt.
+  map for an active degraded bundle, omits it otherwise, keeps pin shapes,
+  normalizes canonical order, and rejects malformed degradation fields
+  (including explicit `null`) as corrupt.
+- Contract gates (Java): `ManagedAgentApiContractTest` (with the degraded
+  active-bundle case), `SurfaceRegistryGateTest`,
+  `SurfaceAdmissionAcceptanceTest`, `ManagedSurfaceCaptureTest`, plus the
+  CI-equivalent dual-execution Checkstyle.
 - Build/typecheck: `npm run build && npm run typecheck`; focused vitest per
   package; focused Maven tests for the changed Java module.
 - Full managed-server E2E (runtime jar + MySQL) is not required for this
@@ -187,8 +210,13 @@ Out of scope:
    degraded configuration and omits it otherwise; pin array shapes unchanged.
 6. The worst-case bundle with the new field stays ≤ 64 KiB; the byte test is
    updated and green.
-7. Malformed degradation fields in a committed bundle are rejected as corrupt
-   by the Java read site.
+7. Malformed degradation fields in a committed bundle (including explicit
+   `null`) are rejected as corrupt by the Java read site; the reported list is
+   in canonical order.
+8. The published OpenAPI schema declares the optional field, the WebShell
+   types are regenerated, and the degraded active-bundle contract case
+   schema-validates the snapshot response (the gate fails without the schema
+   property).
 
 ## Open questions
 

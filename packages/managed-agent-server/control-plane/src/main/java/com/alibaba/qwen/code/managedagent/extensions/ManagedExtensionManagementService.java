@@ -233,7 +233,7 @@ public class ManagedExtensionManagementService {
         ObjectNode degraded = json.createObjectNode();
         for (JsonNode entry : bundle.get("packages")) {
             JsonNode components = entry.get("degradedComponents");
-            if (components == null || components.isNull()) {
+            if (components == null) {
                 continue;
             }
             if (!components.isArray() || components.size() > 2) {
@@ -243,13 +243,17 @@ public class ManagedExtensionManagementService {
                 continue;
             }
             Set<String> seen = new HashSet<>();
-            ArrayNode list = degraded.putArray(entry.path("pin").path("extensionId").asText());
             for (JsonNode component : components) {
                 if (!component.isTextual() || !Set.of("mcp", "hooks").contains(component.asText())
                         || !seen.add(component.asText())) {
                     throw corrupt();
                 }
-                list.add(component.asText());
+            }
+            ArrayNode list = degraded.putArray(entry.path("pin").path("extensionId").asText());
+            for (String component : List.of("mcp", "hooks")) {
+                if (seen.contains(component)) {
+                    list.add(component);
+                }
             }
         }
         return degraded;

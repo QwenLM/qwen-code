@@ -85,10 +85,23 @@ hooks}` 内无重复成员），并归一化为规范顺序。
   `degradedComponents` 对象：以 `extensionId` 为键、包的降级列表为值，仅从
   **active** bundle 读取。至少一个 active 包降级时该字段才出现。`extensions` 与
   `requestedExtensions` 保持裸 pin 形状；现有消费方不受破坏。
-- 新读取点按仓库风格防御式校验：字段必须是 `{mcp, hooks}` 内无重复字符串的
-  数组；畸形已提交 bundle 判 `corrupt()`。
+- 新读取点按仓库风格防御式校验并与 TS parser 对齐：字段必须是 `{mcp, hooks}`
+  内无重复字符串的数组（显式 `null` 判 corrupt，与 parser 一致），上报列表归一
+  为规范顺序 `['mcp', 'hooks']`，使 API 边界无论提交顺序如何都确定；畸形已提交
+  bundle 判 `corrupt()`。
+- 已发布 OpenAPI 契约声明该字段：`ManagedExtensionManagementSnapshot` 增加可选
+  `degradedComponents` 对象（`maxProperties: 32`，值为 `mcp`/`hooks` 数组、
+  `maxItems: 2`、`uniqueItems: true`），使该 schema 的 `additionalProperties:
+false` 对每个服务 snapshot 的公开与 WebShell 扩展管理操作保持诚实。WebShell
+  类型从仓库根重新生成
+  （`npm run generate:managed-agent-api --workspace=packages/web-shell`），并新增
+  提交降级 active bundle 的契约用例，使 `ManagedAgentApiContractTest` 对降级响应
+  做 schema 校验——缺少该 schema 属性时门禁必红。
 - `ManagedExtensionProtocol.response()` 不变：它本就透传包级字段，TS harness 在
   接收时校验 pins。
+- 本地 harness 管理 snapshot（`GET /session/:id/extensions/management`）刻意不
+  变：Java 侧 snapshot 是部署方视角的上报表面。本地表面是否对齐留待 content-only
+  接线工作（#17424）按需决定。
 
 ## 设计决策与理由
 
@@ -135,7 +148,11 @@ hooks}` 内无重复成员），并归一化为规范顺序。
   harness 级集成测试用无 stage 运行时在首个 Hosted 回合通过 skill 工具加载
   skills+hook 混合包。
 - 单元（Java）：`ManagedExtensionManagementServiceTest` —— snapshot 对 active
-  降级 bundle 上报 map、其余情况省略、保持 pin 形状、畸形降级字段判 corrupt。
+  降级 bundle 上报 map、其余情况省略、保持 pin 形状、归一规范顺序、畸形降级
+  字段（含显式 `null`）判 corrupt。
+- 契约门禁（Java）：`ManagedAgentApiContractTest`（含降级 active bundle 用例）、
+  `SurfaceRegistryGateTest`、`SurfaceAdmissionAcceptanceTest`、
+  `ManagedSurfaceCaptureTest`，加 CI 同款双 execution Checkstyle。
 - 构建/类型检查：`npm run build && npm run typecheck`；按包跑聚焦 vitest；改动
   Java 模块跑聚焦 Maven 测试。
 - 本契约变更不需要完整 managed-server E2E（runtime jar + MySQL）；harness 级
@@ -152,7 +169,10 @@ hooks}` 内无重复成员），并归一化为规范顺序。
 5. 扩展 API snapshot 对 active 降级配置展示 `degradedComponents` map，其余情况
    省略；pin 数组形状不变。
 6. 含新字段的 worst-case bundle ≤ 64 KiB；字节测试更新且绿。
-7. 已提交 bundle 中畸形降级字段被 Java 读取点判 corrupt 拒绝。
+7. 已提交 bundle 中畸形降级字段（含显式 `null`）被 Java 读取点判 corrupt 拒绝；
+   上报列表为规范顺序。
+8. 已发布 OpenAPI schema 声明该可选字段，WebShell 类型已重新生成，降级 active
+   bundle 契约用例对 snapshot 响应做 schema 校验（缺少 schema 属性时门禁必红）。
 
 ## 开放问题
 

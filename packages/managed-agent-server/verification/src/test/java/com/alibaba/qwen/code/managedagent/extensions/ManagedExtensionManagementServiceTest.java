@@ -101,12 +101,19 @@ class ManagedExtensionManagementServiceTest {
 
     @Test
     void snapshotRejectsMalformedDegradationAsCorrupt() {
-        for (String malformed : new String[] { "[\"skills\"]", "[\"hooks\",\"hooks\"]", "\"hooks\"", "[\"mcp\",\"hooks\",\"mcp\"]" }) {
+        for (String malformed : new String[]{"[\"skills\"]", "[\"hooks\",\"hooks\"]", "\"hooks\"", "[\"mcp\",\"hooks\",\"mcp\"]", "null"}) {
             var service = serviceWithActiveBundle(bundleWithDegradation(malformed));
             assertThatThrownBy(() -> service.query("tenant", "actor", "session", null))
                     .isInstanceOfSatisfying(ManagedAgentException.class,
                             error -> assertThat(error.getCode()).isEqualTo("session_config_corrupt"));
         }
+    }
+
+    @Test
+    void snapshotNormalizesDegradationToCanonicalOrder() {
+        var service = serviceWithActiveBundle(bundleWithDegradation("[\"hooks\",\"mcp\"]"));
+        assertThat(service.query("tenant", "actor", "session", null)
+                .path("degradedComponents").path("ext_mixed").toString()).isEqualTo("[\"mcp\",\"hooks\"]");
     }
 
     private ManagedExtensionManagementService serviceWithActiveBundle(String bundleJson) {
