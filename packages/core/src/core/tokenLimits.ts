@@ -192,6 +192,12 @@ export function normalize(model: string): string {
   // the version parser and the limit tables agree on every alias shape.
   s = s.replace(/^(claude-[a-z]+-\d+(?:-\d+)?)\.(\d+)(?:\.\d+)*/, '$1-$2');
 
+  // Quantized Hugging Face builds name the method after the model
+  // (`Qwen2.5-72B-Instruct-AWQ`, `-GPTQ-Int4`, `GLM-4.5-Air-FP8`). Drop it
+  // first so the build gets its base model's catalog window rather than a
+  // broader family row (262K instead of Qwen2.5's 131K).
+  s = s.replace(/-(?:awq|fp8|gptq(?:-int[48])?)$/, '');
+
   // remove trailing build / date / revision suffixes:
   // - dates (e.g., -20250219), -v1, version numbers, 'latest', 'preview' etc.
   s = s.replace(/-preview/g, '');
