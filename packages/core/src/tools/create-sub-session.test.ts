@@ -145,6 +145,47 @@ describe('CreateSubSessionTool', () => {
     },
   );
 
+  it('re-evaluates a resolved workspace ask without re-resolving', async () => {
+    const permissions = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => ['create_sub_session(workspace:repo-a)'],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+    });
+    permissions.initialize();
+    const config = makeConfig();
+    config.getPermissionManager = () => permissions;
+    const resolveWorkspace = vi.fn().mockResolvedValue({
+      workspaceId: 'repo-a',
+      workspaceCwd: '/canonical/current repo',
+      workspaceGeneration: 'generation-a',
+      sameWorkspace: true,
+    });
+    config.getSubSessionWorkspaceResolver = () => resolveWorkspace;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/a',
+    });
+
+    await invocation.getDefaultPermission();
+    expect(invocation.requiresUserInteraction?.()).toBe(true);
+    await invocation.getDefaultPermission();
+    expect(invocation.requiresUserInteraction?.()).toBe(true);
+    permissions.removePersistentRule(
+      'create_sub_session(workspace:repo-a)',
+      'ask',
+    );
+    await invocation.getDefaultPermission();
+    expect(invocation.requiresUserInteraction?.()).toBe(false);
+    permissions.addPersistentRule(
+      'create_sub_session(workspace:repo-a)',
+      'ask',
+    );
+    await invocation.getDefaultPermission();
+    expect(invocation.requiresUserInteraction?.()).toBe(true);
+    expect(resolveWorkspace).toHaveBeenCalledTimes(1);
+  });
+
   it('requires AUTO review only for a named remote workspace', async () => {
     const tool = new CreateSubSessionTool(
       makeConfig(undefined, ApprovalMode.AUTO),
@@ -163,6 +204,22 @@ describe('CreateSubSessionTool', () => {
     );
   });
 
+  it('marks a remote automatic AUTO approval for daemon revalidation', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const invocation = new CreateSubSessionTool(
+      makeConfig(spawner, ApprovalMode.AUTO),
+    ).build({ prompt: 'do X', workspace: '/repos/b' });
+    await invocation.getDefaultPermission();
+    await invocation.execute(new AbortController().signal);
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b',
+      requiresAutoMode: true,
+    });
+  });
+
   it('keeps an explicitly named current workspace blocked in Plan mode', async () => {
     const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
     const invocation = new CreateSubSessionTool(
@@ -179,6 +236,24 @@ describe('CreateSubSessionTool', () => {
       error: { message: expect.stringContaining('one-time approval') },
     });
     expect(spawner).not.toHaveBeenCalled();
+  });
+
+  it('keeps the omitted-selector ordinary flow in Plan mode', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const invocation = new CreateSubSessionTool(
+      makeConfig(spawner, ApprovalMode.PLAN, true),
+    ).build({ prompt: 'do X' });
+    await invocation.getDefaultPermission();
+    expect(invocation.requiresUserInteraction?.()).toBe(false);
+    await expect(
+      invocation.getConfirmationDetails(new AbortController().signal),
+    ).resolves.toMatchObject({ type: 'info' });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+    });
   });
 
   it('does not start workspace resolution for an already-cancelled call', async () => {
@@ -245,6 +320,81 @@ describe('CreateSubSessionTool', () => {
       error: { message: expect.stringContaining('one-time approval') },
     });
     expect(spawner).not.toHaveBeenCalled();
+  });
+
+  it('rejects an automatic approval when the mode changes before execution', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const config = makeConfig(spawner, ApprovalMode.AUTO);
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/b',
+    });
+    await invocation.getDefaultPermission();
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    await confirmation.onAutoConfirm!(ApprovalMode.AUTO);
+    config.getApprovalMode = () => ApprovalMode.DEFAULT;
+
+    await expect(
+      invocation.execute(new AbortController().signal),
+    ).resolves.toMatchObject({
+      error: {
+        message: 'Approval mode changed before execution. Please retry.',
+        type: 'execution_denied',
+      },
+    });
+    expect(spawner).not.toHaveBeenCalled();
+  });
+
+  it('lets a human confirmation override an earlier automatic grant', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const config = makeConfig(spawner, ApprovalMode.AUTO);
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/b',
+    });
+    await invocation.getDefaultPermission();
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    await confirmation.onAutoConfirm!(ApprovalMode.AUTO);
+    config.getApprovalMode = () => ApprovalMode.DEFAULT;
+    await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b',
+    });
+  });
+
+  it('supports switching from AUTO to YOLO before execution', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const approvalMode = vi.fn().mockReturnValue(ApprovalMode.AUTO);
+    const config = makeConfig(spawner);
+    config.getApprovalMode = approvalMode;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/b',
+    });
+    await invocation.getDefaultPermission();
+    approvalMode.mockReturnValue(ApprovalMode.YOLO);
+    await expect(
+      invocation.execute(new AbortController().signal),
+    ).resolves.not.toMatchObject({
+      error: { message: expect.stringContaining('one-time approval') },
+    });
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b',
+      requiresYolo: true,
+    });
   });
 
   it('requires approval if YOLO ends while the named workspace resolves', async () => {
@@ -391,6 +541,37 @@ describe('CreateSubSessionTool', () => {
     expect(() => tool.build({ prompt: 'do X', workspace: 'a\nb' })).toThrow(
       /control characters/,
     );
+  });
+
+  it('does not label a same-workspace human approval as an automatic YOLO waiver', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const config = makeConfig(spawner, ApprovalMode.YOLO, true);
+    const permissions = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => ['create_sub_session(workspace:repo-b)'],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => ApprovalMode.YOLO,
+    });
+    permissions.initialize();
+    config.getPermissionManager = () => permissions;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/a',
+    });
+    await invocation.getDefaultPermission();
+    expect(invocation.requiresUserInteraction?.()).toBe(true);
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    expect(confirmation).toMatchObject({ type: 'info' });
+    await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    await invocation.execute(new AbortController().signal);
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/a',
+      workspaceGeneration: 'generation-b',
+    });
   });
 
   it('defaults to ask permission so delegated prompts face classifier review', async () => {

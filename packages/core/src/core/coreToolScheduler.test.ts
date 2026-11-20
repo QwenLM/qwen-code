@@ -57,7 +57,7 @@ import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
-import type { PermissionManager } from '../permissions/permission-manager.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import type {
   CompletedToolCall,
   ExecutingToolCall,
@@ -95,6 +95,7 @@ import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { IdeClient } from '../ide/ide-client.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
+import { CreateSubSessionTool } from '../tools/create-sub-session.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import type { ShellToolParams } from '../tools/shell.js';
@@ -1331,6 +1332,7 @@ describe('CoreToolScheduler', () => {
     toolsByName: Map<string, MockTool>;
     onPermissionPromptTerminalSequence?: (terminalSequence: string) => void;
     approvalMode?: ApprovalMode;
+    getApprovalMode?: () => ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     hookSystem?: { runtimeId?: string; firePermissionDeniedEvent: Mock };
@@ -1358,13 +1360,16 @@ describe('CoreToolScheduler', () => {
       promptId: string,
       fallbackOwner?: string,
     ) => string;
-    permissionManager?: {
-      isToolEnabled: (name: string) => Promise<boolean>;
-      findMatchingDenyRule: (ctx: unknown) => string | undefined;
-      hasRelevantRules?: (ctx: unknown) => boolean;
-      evaluate?: (ctx: unknown) => Promise<PermissionDecision>;
-      hasMatchingAskRule?: (ctx: unknown) => boolean;
-    };
+    permissionManager?: Pick<
+      PermissionManager,
+      'isToolEnabled' | 'findMatchingDenyRule'
+    > &
+      Partial<
+        Pick<
+          PermissionManager,
+          'hasRelevantRules' | 'hasMatchingAskRule' | 'evaluate'
+        >
+      >;
     deferredHiddenNames?: ReadonlySet<string>;
     includeToolSearch?: boolean;
     isToolExecutionAllowed?: (name: string) => boolean;
@@ -1407,7 +1412,9 @@ describe('CoreToolScheduler', () => {
             options.deferredHiddenNames?.has(name) ?? false,
         }),
         {
-          getApprovalMode: () => options.approvalMode ?? ApprovalMode.YOLO,
+          getApprovalMode:
+            options.getApprovalMode ??
+            (() => options.approvalMode ?? ApprovalMode.YOLO),
           setApprovalMode: options.setApprovalMode ?? vi.fn(),
           getPermissionsDeny: options.getPermissionsDeny ?? (() => undefined),
           getPermissionManager: () => options.permissionManager,
@@ -3537,6 +3544,166 @@ describe('CoreToolScheduler', () => {
       )?.status,
     ).toBe('awaiting_approval');
     expect(siblingExecute).not.toHaveBeenCalled();
+  });
+
+  it('retains AUTO review when an allowed pending invocation is rechecked', async () => {
+    const siblingPermission = vi.fn(
+      async (): Promise<PermissionDecision> => 'ask',
+    );
+    const siblingExecute = vi
+      .fn()
+      .mockResolvedValue(textResult('sibling executed'));
+    const siblingTool = askingTool({
+      name: ToolNames.CREATE_SUB_SESSION,
+      getDefaultPermission: siblingPermission,
+      requiresUserInteraction: () => false,
+      getConfirmationDetails: async () =>
+        infoConfirmation('Pending approval', 'Approve?'),
+      execute: siblingExecute,
+    });
+    const build = siblingTool.build.bind(siblingTool);
+    vi.spyOn(siblingTool, 'build').mockImplementation((params) => {
+      const invocation = build(params);
+      invocation.requiresAutoReviewOnAllow = () => true;
+      return invocation;
+    });
+    const firstTool = new MockTool({
+      name: 'ordinary_confirmation',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () =>
+        infoConfirmation('Ordinary approval', 'Approve?'),
+    });
+    let approvalMode = ApprovalMode.DEFAULT;
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => approvalMode,
+    });
+    permissionManager.initialize();
+    const { scheduler, onToolCallsUpdate } = await runToolBatch(
+      [firstTool, siblingTool],
+      ['ordinary-confirmation', 'resolved-ask-sibling'],
+      {
+        getApprovalMode: () => approvalMode,
+        permissionManager,
+      },
+    );
+    await vi.waitFor(() =>
+      expect(
+        new Set(
+          reportedCalls(onToolCallsUpdate)
+            .filter((call) => call.status === 'awaiting_approval')
+            .map((call) => call.request.callId),
+        ),
+      ).toEqual(new Set(['ordinary-confirmation', 'resolved-ask-sibling'])),
+    );
+    queueClassifierBlocks('Cross-workspace delegation denied');
+    approvalMode = ApprovalMode.AUTO;
+    permissionManager.addSessionAllowRule(siblingTool.name);
+    await autoApprovePendingTools(
+      scheduler,
+      new AbortController().signal,
+      'ordinary-confirmation',
+    );
+
+    expect(siblingPermission).toHaveBeenCalledTimes(2);
+    expect(runSideQueryMock).toHaveBeenCalled();
+    expect(siblingExecute).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(
+        reportedCalls(onToolCallsUpdate).findLast(
+          (call) => call.request.callId === 'resolved-ask-sibling',
+        )?.status,
+      ).toBe('error'),
+    );
+  });
+
+  it('keeps a resolved workspace ask parked during sibling re-evaluation', async () => {
+    const approvalMode = ApprovalMode.DEFAULT;
+    const targetToolName = ToolNames.CREATE_SUB_SESSION;
+    const spawner = vi.fn(async () => ({ sessionId: 'child-id' }));
+    const resolveWorkspace = vi.fn().mockResolvedValue({
+      workspaceId: 'repo-a-id',
+      workspaceCwd: '/repo-a',
+      workspaceGeneration: 'generation-a',
+      sameWorkspace: true,
+    });
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => approvalMode,
+    });
+    permissionManager.initialize();
+    const config = {
+      getApprovalMode: () => approvalMode,
+      getPermissionManager: () => permissionManager,
+      getSubSessionSpawner: () => spawner,
+      getSubSessionWorkspaceResolver: () => resolveWorkspace,
+      getTargetDir: () => '/repo-a',
+    } as unknown as Config;
+    const realTargetTool = new CreateSubSessionTool(
+      config,
+    ) as unknown as MockTool;
+    const firstTool = new MockTool({
+      name: 'ordinary_confirmation',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () =>
+        infoConfirmation('Ordinary approval', 'Approve?'),
+    });
+    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([
+        [firstTool.name, firstTool],
+        [realTargetTool.name, realTargetTool],
+      ]),
+      getApprovalMode: () => approvalMode,
+      permissionManager,
+    });
+    await scheduler.schedule(
+      [
+        toolRequest('ordinary-confirmation', firstTool.name, {}, 'p'),
+        toolRequest(
+          'resolved-ask-sibling',
+          realTargetTool.name,
+          { prompt: 'delegate', workspace: 'current-alias' },
+          'p',
+        ),
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() =>
+      expect(
+        new Set(
+          reportedCalls(onToolCallsUpdate)
+            .filter((call) => call.status === 'awaiting_approval')
+            .map((call) => call.request.callId),
+        ),
+      ).toEqual(new Set(['ordinary-confirmation', 'resolved-ask-sibling'])),
+    );
+    expect(
+      reportedCalls(onToolCallsUpdate).findLast(
+        (call) => call.request.callId === 'resolved-ask-sibling',
+      )?.status,
+    ).toBe('awaiting_approval');
+    permissionManager.addPersistentRule(targetToolName, 'allow');
+    permissionManager.addPersistentRule(
+      `${targetToolName}(workspace:repo-a-id)`,
+      'ask',
+    );
+    await autoApprovePendingTools(
+      scheduler,
+      new AbortController().signal,
+      'ordinary-confirmation',
+    );
+
+    expect(resolveWorkspace).toHaveBeenCalledTimes(1);
+    expect(spawner).not.toHaveBeenCalled();
+    expect(
+      reportedCalls(onToolCallsUpdate).findLast(
+        (call) => call.request.callId === 'resolved-ask-sibling',
+      )?.status,
+    ).toBe('awaiting_approval');
   });
 
   it('dispatches legacy tool names through their canonical registered tools', async () => {
@@ -6007,6 +6174,142 @@ describe('CoreToolScheduler', () => {
     expect(execute).toHaveBeenCalledOnce();
   });
 
+  it('rejects an automatic workspace grant if the mode changes at the execution guard', async () => {
+    let approvalMode = ApprovalMode.AUTO;
+    const spawn = vi.fn(async () => ({ sessionId: 'child-id' }));
+    const toolName = ToolNames.CREATE_SUB_SESSION;
+    const subtools: AnyDeclarativeTool[] = [];
+    const registry = makeToolRegistry(undefined, {
+      getTool: () => subtools[0],
+      ensureTool: async () => subtools[0],
+      getToolByName: () => subtools[0],
+      getTools: () => subtools,
+      getAllTools: () => subtools,
+      getAllToolNames: () => [toolName],
+    });
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [toolName],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => approvalMode,
+    });
+    permissionManager.initialize();
+    const resolveWorkspace = vi.fn().mockResolvedValue({
+      workspaceId: 'repo-b-id',
+      workspaceCwd: '/repo-b',
+      workspaceGeneration: 'generation-b',
+      sameWorkspace: false,
+    });
+    const guardEvents: string[] = [];
+    let markGuardEntered!: () => void;
+    let releaseGuard!: () => void;
+    const guardEntered = new Promise<void>((resolve) => {
+      markGuardEntered = resolve;
+    });
+    const guardRelease = new Promise<void>((resolve) => {
+      releaseGuard = resolve;
+    });
+    const guard = vi.fn(async () => {
+      guardEvents.push(`invocation-guard-enter:${approvalMode}`);
+      markGuardEntered();
+      await guardRelease;
+      guardEvents.push(`invocation-guard-release:${approvalMode}`);
+      return { allowed: true };
+    });
+    const config = makeSchedulerConfig(registry, {
+      getApprovalMode: () => approvalMode,
+      getPermissionManager: () => permissionManager,
+      getSubSessionSpawner: () => spawn,
+      getSubSessionWorkspaceResolver: () => resolveWorkspace,
+      getMessageBus: () => permissionRequestHookBus({ behavior: 'allow' }),
+      getDisableAllHooks: () => false,
+      hasHooksForEvent: () => true,
+      getAutoModeDenialState: () => ({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 20,
+        totalUnavailable: 0,
+      }),
+      setAutoModeDenialState: vi.fn(),
+      getAutoModeSettings: () => ({}),
+      getToolInvocationGuard: () => guard,
+      getWorkspaceContext: () => ({ isPathWithinWorkspace: () => false }),
+      getCwd: () => '/repo-a',
+      getTargetDir: () => '/repo-a',
+      ...INTERACTIVE_CLI,
+    });
+    subtools.push(new CreateSubSessionTool(config));
+    const { scheduler, onAllToolCallsComplete } =
+      schedulerWithCallbacks(config);
+
+    const scheduling = scheduler.schedule(
+      [
+        toolRequest(
+          'late-workspace-grant',
+          toolName,
+          { prompt: 'delegate', workspace: 'repo-b-id' },
+          'late-grant-prompt',
+        ),
+      ],
+      new AbortController().signal,
+    );
+    await guardEntered;
+    guardEvents.push('external-mode-change:auto->default');
+    approvalMode = ApprovalMode.DEFAULT;
+    releaseGuard();
+    await scheduling;
+    await vi.waitFor(() =>
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+    );
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(resolveWorkspace).toHaveBeenCalledTimes(1);
+    expect(guard).toHaveBeenCalledOnce();
+    expect(guardEvents).toEqual([
+      'invocation-guard-enter:auto',
+      'external-mode-change:auto->default',
+      'invocation-guard-release:default',
+    ]);
+    const [call] = firstBatch<CompletedToolCall>(onAllToolCallsComplete);
+    expect(call.status).toBe('error');
+    expect(call.response).toMatchObject({
+      errorType: ToolErrorType.EXECUTION_DENIED,
+      executionStatus: 'error',
+      error: {
+        message: 'Approval mode changed before execution. Please retry.',
+      },
+    });
+  });
+
+  it('consumes AUTO review for allowed invocations in the main scheduler path', async () => {
+    const execute = vi.fn().mockResolvedValue(textResult('must not execute'));
+    const tool = askingTool({ execute });
+    const build = tool.build.bind(tool);
+    vi.spyOn(tool, 'build').mockImplementation((params) => {
+      const invocation = build(params);
+      invocation.requiresAutoReviewOnAllow = () => true;
+      return invocation;
+    });
+    queueClassifierBlocks('Cross-workspace delegation denied');
+    const harness = autoScheduler(tool, {
+      permissionManager: {
+        isToolEnabled: async () => true,
+        findMatchingDenyRule: () => undefined,
+        hasRelevantRules: () => true,
+        hasMatchingAskRule: () => false,
+        evaluate: async () => 'allow',
+      },
+    });
+
+    await scheduleAndSettle(
+      harness,
+      toolRequest('auto-review-for-allowed', tool.name, {}, 'prompt-review'),
+    );
+
+    expect(runSideQueryMock).toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('skips PermissionDenied hooks when hooks are disabled', async () => {
     queueClassifierBlocks('dangerous shell command');
     const hookSystem = permissionDeniedHooks();
@@ -6100,6 +6403,77 @@ describe('CoreToolScheduler', () => {
     expect(setAutoModeDenialState).toHaveBeenCalledWith(denialState());
     expect(execute).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    { finalMode: ApprovalMode.AUTO, expectExecution: true },
+    { finalMode: ApprovalMode.DEFAULT, expectExecution: false },
+    { finalMode: ApprovalMode.YOLO, expectExecution: false },
+  ])(
+    'revalidates an automatic hook approval after switching to $finalMode',
+    async ({ finalMode, expectExecution }) => {
+      let approvalMode = ApprovalMode.AUTO;
+      let permissionRequestReached = false;
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const tool = askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails('Delegate remotely', 'create', 'create', onConfirmSpy),
+          ),
+        execute,
+      });
+      const build = tool.build.bind(tool);
+      vi.spyOn(tool, 'build').mockImplementation((params) => {
+        const invocation = build(params);
+        invocation.requiresAutoReviewOnAllow = () => true;
+        return invocation;
+      });
+      const messageBus = hookBus(async (request) => {
+        if (request.eventName === 'PermissionRequest') {
+          permissionRequestReached = true;
+          approvalMode = finalMode;
+          return hookResponse('mode-revalidation', {
+            hookSpecificOutput: { decision: { behavior: 'allow' } },
+          });
+        }
+        return hookResponse(`${request.eventName}-hook`, {
+          decision: 'allow',
+        });
+      });
+      const harness = autoScheduler(tool, {
+        getApprovalMode: () => approvalMode,
+        messageBus,
+        disableHooks: false,
+        autoModeDenialState: denialState({ totalBlock: 20 }),
+      });
+
+      await scheduleAndSettle(
+        harness,
+        shellRequest('mode-revalidation', 'delegate'),
+      );
+
+      expect(permissionRequestReached).toBe(true);
+      expect(onConfirmSpy).toHaveBeenCalledTimes(expectExecution ? 1 : 0);
+      expect(execute).toHaveBeenCalledTimes(expectExecution ? 1 : 0);
+      const [call] = firstBatch<CompletedToolCall>(
+        harness.onAllToolCallsComplete,
+      );
+      if (expectExecution) {
+        expect(call.status).toBe('success');
+      } else {
+        expect(call.response).toMatchObject({
+          errorType: ToolErrorType.EXECUTION_DENIED,
+          executionStatus: 'not_started',
+          error: {
+            message: 'Approval mode changed before confirmation. Please retry.',
+          },
+        });
+        expect(call.status).toBe('error');
+      }
+    },
+  );
 
   it('does not let a PermissionRequest hook allow waive a destructive-command escalation', async () => {
     // Counterpart to the test above. The escalation shares its reason code with

@@ -23590,6 +23590,15 @@ describe('Session', () => {
         launches: true,
       },
       {
+        label: 'ask rule on resolved workspace ID in YOLO',
+        mode: ApprovalMode.YOLO,
+        selector: '/repo-b',
+        askRule: 'repo-b-id',
+        noAllow: true,
+        asks: true,
+        launches: true,
+      },
+      {
         label: 'omitted workspace',
         mode: ApprovalMode.DEFAULT,
         local: true,
@@ -23751,6 +23760,9 @@ describe('Session', () => {
             ...(!local && mode === ApprovalMode.YOLO && !asks
               ? { requiresYolo: true }
               : {}),
+            ...(!local && !sameWorkspace && mode === ApprovalMode.AUTO && !asks
+              ? { requiresAutoMode: true }
+              : {}),
             completion: 'first-turn',
           });
           if (asks) {
@@ -23789,6 +23801,15 @@ describe('Session', () => {
         launches: false,
         modeAfterClassification: ApprovalMode.DEFAULT,
       },
+      {
+        label:
+          'automatic grant cannot execute after changing mode at the guard',
+        replacement: false,
+        initialMode: ApprovalMode.YOLO,
+        shouldBlock: false,
+        launches: false,
+        changeBeforeExecution: ApprovalMode.DEFAULT,
+      },
     ])(
       '$label',
       async ({
@@ -23797,6 +23818,7 @@ describe('Session', () => {
         shouldBlock,
         launches,
         modeAfterClassification,
+        changeBeforeExecution,
       }) => {
         const toolName = core.ToolNames.CREATE_SUB_SESSION;
         const args = {
@@ -23852,6 +23874,13 @@ describe('Session', () => {
           .spyOn(core, 'evaluateAutoMode')
           .mockImplementation(async () => {
             if (modeAfterClassification) await classificationGate;
+            if (changeBeforeExecution) {
+              return {
+                via: 'fallback' as const,
+                reason: 'classifier_unavailable' as const,
+                message: 'Test classifier unavailable',
+              };
+            }
             return {
               via: 'classifier' as const,
               shouldBlock,
@@ -23861,6 +23890,13 @@ describe('Session', () => {
               durationMs: 0,
             };
           });
+        const invocationGuard = changeBeforeExecution
+          ? vi.fn(async () => {
+              approvalMode = changeBeforeExecution;
+              return { allowed: true };
+            })
+          : undefined;
+        mockConfig.getToolInvocationGuard = vi.fn(() => invocationGuard);
         vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
           shouldProceed: true,
         });
@@ -23920,10 +23956,16 @@ describe('Session', () => {
           expect(spawn).toHaveBeenCalledExactlyOnceWith({
             ...args,
             workspaceGeneration: 'generation-b',
+            ...(!replacement && approvalMode === ApprovalMode.AUTO
+              ? { requiresAutoMode: true }
+              : {}),
             completion: 'first-turn',
           });
         } else {
           expect(spawn).not.toHaveBeenCalled();
+        }
+        if (changeBeforeExecution) {
+          expect(invocationGuard).toHaveBeenCalledOnce();
         }
         expect(mockClient.requestPermission).not.toHaveBeenCalled();
       },

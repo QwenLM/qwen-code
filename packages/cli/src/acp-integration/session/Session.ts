@@ -4416,6 +4416,7 @@ export class Session implements SessionContext {
                 workspace: req.workspace,
                 workspaceGeneration: req.workspaceGeneration,
                 ...(req.requiresYolo ? { requiresYolo: true } : {}),
+                ...(req.requiresAutoMode ? { requiresAutoMode: true } : {}),
               }
             : {}),
           ...(req.sessionId ? { sessionId: req.sessionId } : {}),
@@ -19124,9 +19125,15 @@ export class Session implements SessionContext {
                           },
                         );
                       }
-                      await confirmationDetails.onConfirm(
-                        ToolConfirmationOutcome.ProceedOnce,
-                      );
+                      if (confirmationDetails.onAutoConfirm) {
+                        await confirmationDetails.onAutoConfirm(
+                          confirmationApprovalMode,
+                        );
+                      } else {
+                        await confirmationDetails.onConfirm(
+                          ToolConfirmationOutcome.ProceedOnce,
+                        );
+                      }
                       const hookConfirmationCancellation =
                         cancelBeforeExecutionIfAborted(toolName);
                       if (hookConfirmationCancellation) {

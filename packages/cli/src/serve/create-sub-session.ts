@@ -2348,7 +2348,13 @@ export function createSubSessionLauncher(
     info: CreateSubSessionInfo,
     byPerson: boolean,
   ): Promise<CreateSubSessionResult> => {
-    const { workspace, workspaceGeneration, requiresYolo, ...local } = info;
+    const {
+      workspace,
+      workspaceGeneration,
+      requiresYolo,
+      requiresAutoMode,
+      ...local
+    } = info;
     const report = outgoingReport(info.callerSessionId);
     if (workspace === undefined)
       return run(local, undefined, undefined, byPerson, report);
@@ -2365,10 +2371,13 @@ export function createSubSessionLauncher(
     }
     const isLocal = target.launcher === launcher;
     const callerApproval =
-      !isLocal || requiresYolo
+      !isLocal || requiresYolo || requiresAutoMode
         ? await readApprovalMode(bridge, info.callerSessionId)
         : undefined;
     if (requiresYolo && callerApproval?.mode !== ApprovalMode.YOLO) {
+      throw new Error('A named workspace requires one-time approval.');
+    }
+    if (requiresAutoMode && callerApproval?.mode !== ApprovalMode.AUTO) {
       throw new Error('A named workspace requires one-time approval.');
     }
     const assertTargetCurrent = () => {

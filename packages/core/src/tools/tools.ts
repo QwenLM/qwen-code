@@ -5,6 +5,7 @@
  */
 
 import type { ToolOutputSize } from './tool-output-size.js';
+import type { ApprovalMode } from '../config/approval-mode.js';
 import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
 import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
@@ -1283,6 +1284,11 @@ export type ToolCallConfirmationDetails = (
 ) & {
   /** Explains why an AUTO-mode call was routed to manual confirmation. */
   autoModeFallback?: AutoModeFallbackConfirmation;
+  /**
+   * Called instead of onConfirm for an automatic permission grant. This lets
+   * tools distinguish it from an explicit human approval at execution time.
+   */
+  onAutoConfirm?: (approvalMode: ApprovalMode) => Promise<void>;
 };
 
 export interface ToolPlanConfirmationDetails {

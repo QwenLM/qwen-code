@@ -115,6 +115,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
 > {
   private destination?: SubSessionWorkspaceBinding;
   private approvedDestination?: SubSessionWorkspaceBinding;
+  private automaticApprovalMode?: ApprovalMode;
   private permissionApprovalMode?: ApprovalMode;
   private requestedWorkspaceAsk = false;
 
@@ -207,7 +208,19 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       destination.sameWorkspace &&
       this.config.getApprovalMode() !== ApprovalMode.PLAN
     ) {
-      return super.getConfirmationDetails(abortSignal);
+      const confirmation = await super.getConfirmationDetails(abortSignal);
+      return {
+        ...confirmation,
+        onConfirm: async (outcome, payload) => {
+          this.automaticApprovalMode = undefined;
+          this.approvedDestination =
+            outcome === ToolConfirmationOutcome.ProceedOnce ||
+            outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault
+              ? destination
+              : undefined;
+          await confirmation.onConfirm(outcome, payload);
+        },
+      };
     }
     return {
       type: 'exec',
@@ -223,7 +236,12 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       // A tool-wide rule cannot record which workspace the user approved.
       hideAlwaysAllow: true,
       permissionRules: [],
+      onAutoConfirm: async (approvalMode) => {
+        this.approvedDestination = destination;
+        this.automaticApprovalMode = approvalMode;
+      },
       onConfirm: async (outcome) => {
+        this.automaticApprovalMode = undefined;
         this.approvedDestination =
           outcome === ToolConfirmationOutcome.ProceedOnce ||
           outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault
@@ -237,30 +255,43 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     abortSignal?: AbortSignal,
   ): Promise<SubSessionWorkspaceBinding> {
     abortSignal?.throwIfAborted();
-    if (this.destination) return this.destination;
+    if (this.destination) {
+      this.assertWorkspaceAllowed(this.destination);
+      this.updateRequestedWorkspaceAsk(this.destination);
+      return this.destination;
+    }
     const resolveWorkspace = this.config.getSubSessionWorkspaceResolver();
     if (!resolveWorkspace) throw new Error(DAEMON_ONLY_MESSAGE);
     const destination = await resolveWorkspace(this.params.workspace!);
     abortSignal?.throwIfAborted();
     this.assertWorkspaceAllowed(destination);
-    const permissions = this.config.getPermissionManager?.();
-    if (permissions) {
-      for (const workspace of [
-        destination.workspaceCwd,
-        destination.workspaceId,
-      ]) {
-        const context = buildPermissionCheckContext(
-          ToolNames.CREATE_SUB_SESSION,
-          { ...this.params, workspace },
-          this.config.getTargetDir?.() ?? '',
-        );
-        if (permissions.hasMatchingAskRule(context)) {
-          this.requestedWorkspaceAsk = true;
-        }
-      }
-    }
+    this.updateRequestedWorkspaceAsk(destination);
     this.destination = destination;
     return destination;
+  }
+
+  private updateRequestedWorkspaceAsk(
+    destination: SubSessionWorkspaceBinding,
+  ): void {
+    const permissions = this.config.getPermissionManager?.();
+    if (!permissions) {
+      this.requestedWorkspaceAsk = false;
+      return;
+    }
+    const selectors = new Set([
+      this.params.workspace,
+      destination.workspaceCwd,
+      destination.workspaceId,
+    ]);
+    this.requestedWorkspaceAsk = [...selectors].some((workspace) => {
+      if (workspace === undefined) return false;
+      const context = buildPermissionCheckContext(
+        ToolNames.CREATE_SUB_SESSION,
+        { ...this.params, workspace },
+        this.config.getTargetDir?.() ?? '',
+      );
+      return permissions.hasMatchingAskRule(context);
+    });
   }
 
   private assertWorkspaceAllowed(
@@ -332,6 +363,27 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
           approvedDestination === undefined &&
           approvalMode === ApprovalMode.YOLO &&
           autoApproved;
+        const requiresAutoMode =
+          this.params.workspace !== undefined &&
+          this.destination?.sameWorkspace !== true &&
+          !requiresYolo &&
+          (this.automaticApprovalMode === ApprovalMode.AUTO ||
+            (approvedDestination === undefined &&
+              autoApproved &&
+              approvalMode === ApprovalMode.AUTO));
+        const automaticApprovalMode = this.automaticApprovalMode;
+        if (
+          automaticApprovalMode !== undefined &&
+          automaticApprovalMode !== approvalMode
+        ) {
+          this.approvedDestination = undefined;
+          this.automaticApprovalMode = undefined;
+          throw new StructuredToolError(
+            'Approval mode changed before execution. Please retry.',
+            ToolErrorType.EXECUTION_DENIED,
+          );
+        }
+        this.automaticApprovalMode = undefined;
         if (this.params.workspace !== undefined && !destination) {
           throw new Error('A named workspace requires one-time approval.');
         }
@@ -347,6 +399,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
                 workspace: this.params.workspace,
                 workspaceGeneration: destination?.workspaceGeneration,
                 ...(requiresYolo ? { requiresYolo: true } : {}),
+                ...(requiresAutoMode ? { requiresAutoMode: true } : {}),
               }
             : {}),
           ...(this.params.sessionId
@@ -476,7 +529,8 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
         'Set `workspace` to run the sub-session in another workspace ' +
         "registered with this daemon, with that workspace's own instructions, " +
         'skills and settings. A selector for the current workspace follows ' +
-        'the ordinary permission flow. Cross-workspace calls need one-time ' +
+        'the ordinary permission flow; explicitly named workspaces stay ' +
+        'blocked in Plan mode. Cross-workspace calls need one-time ' +
         'approval in default/auto-edit, use the classifier in auto, and are ' +
         'auto-approved in yolo; deny and explicit ask rules still apply. ' +
         'Both workspaces must be trusted; an unknown name is refused with ' +

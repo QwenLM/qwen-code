@@ -77,7 +77,7 @@ and `auto-edit`. `auto` sends the call through its classifier even when a legacy
 allow rule matches, while `yolo` auto-approves it. Deny rules apply to the
 selector, registered path, and workspace ID; deny rules still take precedence.
 An explicit ask rule takes the same identities and still requires a one-time
-human decision. Plan mode remains read-only.
+human decision. An explicitly named workspace stays blocked in Plan mode.
 
 A manual cross-workspace confirmation shows the resolved path and full prompt
 and is tied to that runtime generation. Automatic paths consume the cached
@@ -90,8 +90,29 @@ runtime at launch, the caller must request approval again. Existing permanent
 grants continue to apply to calls that omit the selector. In `yolo` mode the
 tool resolves the selector itself when the call runs, so the deny rules and the
 generation check still apply. The tool checks the calling mode again after
-resolution. The daemon verifies that a call without one-time approval is still
-in `yolo` and checks the caller's approval revision again before dispatch. A
+resolution. For a call requiring AUTO review, both the ACP permission host and
+the unified-agent-loop Core scheduler compare the current mode with the one used
+for the automatic decision immediately before their automatic `ProceedOnce`. A
+changed mode rejects the stale automatic grant as not started, rather than
+recording it as a manual one-time destination approval. Automatic grants also
+carry the mode that authorized them and are checked again immediately before
+execution, after other asynchronous guards. A later mode change refuses to
+spawn instead of preserving that automated decision as a one-time manual
+approval. An actual human `ProceedOnce` clears that automated provenance and
+keeps its one-time approval. Same-workspace human confirmations record that
+approval too rather than looking indistinguishable from automatic YOLO.
+Remote automatic AUTO launches also carry
+`requiresAutoMode` through the bridge. The launcher rechecks the caller's live
+approval mode and rejects that request if AUTO is no longer effective. A real
+human approval carries no such requirement, while YOLO keeps its existing
+waiver checks. Later permission-flow
+evaluations on the same invocation reuse the cached binding without another
+workspace query, but re-check the current ask and deny rules against the
+selector and its registered path and ID. Live rule additions and removals
+therefore change the approval decision without treating a permission-rule
+update as a runtime-generation update. The daemon verifies
+that a call without one-time approval is still in `yolo` and checks the caller's
+approval revision again before dispatch. A
 workspace settings reload invalidates existing approval checks on the affected
 ACP channel and blocks new checks until the reload request settles.
 
@@ -182,8 +203,9 @@ they chose. Two top-level sessions can prompt each other back and forth with
 `sent`, bounded only by the caps.
 
 **Approval.** A follow-up that names a workspace goes through everything step
-1 requires for that workspace, including one-time approval outside `yolo`.
-The confirmation identifies the target session. The launcher compares both
+1 requires for that workspace: one-time approval in `default` and `auto-edit`,
+the classifier in `auto`, and a `yolo` waiver that deny and explicit ask rules
+still override. A required human confirmation identifies the target session. The launcher compares both
 sessions' approval modes. A follow-up in the same workspace follows the tool's
 ordinary permission flow, including the caller's current-workspace and
 classifier rules above. Cross-workspace follow-ups follow those same modes and
@@ -415,9 +437,12 @@ and any pending notification.
 
 - Unit: resolution by absolute path and id, refusal of unknown and untrusted
   targets and callers, the depth gate, target-bridge dispatch, caller-bridge
-  notification delivery, named-workspace confirmation despite legacy grants,
-  the current-runtime selector's ordinary permission flow, mandatory AUTO
-  classification after legacy grants and replacements, no confirmation while
+  notification delivery, destination confirmation under `default` and
+  `auto-edit`, the current-runtime selector's ordinary permission flow,
+  mandatory AUTO classification after legacy grants and replacements, live
+  permission-rule updates evaluated against cached destination identities,
+  stale automatic grants rejected rather than recorded as manual one-time approval
+  on either ACP or the unified-agent-loop Core path, no confirmation while
   the caller stays in `yolo`, deny rules still applied, loss of YOLO during
   resolution or before dispatch, resolution-time cancellation, settings reload
   invalidation on control and secondary channels, live approval reads,

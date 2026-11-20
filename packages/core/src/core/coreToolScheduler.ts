@@ -4717,11 +4717,41 @@ export class CoreToolScheduler {
                     }
                     continue;
                   }
-                  await runInRequestGoalContext(reqInfo, () =>
-                    preparedConfirmationDetails.onConfirm(
-                      ToolConfirmationOutcome.ProceedOnce,
-                    ),
-                  );
+                  if (
+                    invocation.requiresAutoReviewOnAllow?.() === true &&
+                    this.config.getApprovalMode() !== approvalMode
+                  ) {
+                    this.setStatusInternal(
+                      reqInfo.callId,
+                      'error',
+                      createErrorResponse(
+                        reqInfo,
+                        new Error(
+                          'Approval mode changed before confirmation. Please retry.',
+                        ),
+                        ToolErrorType.EXECUTION_DENIED,
+                        'not_started',
+                      ),
+                    );
+                    setToolSpanFailure(
+                      toolSpan,
+                      TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                      TOOL_SPAN_STATUS_PERMISSION_DENIED,
+                    );
+                    this.finalizeToolSpan(reqInfo.callId);
+                    continue;
+                  }
+                  await runInRequestGoalContext(reqInfo, async () => {
+                    if (preparedConfirmationDetails.onAutoConfirm) {
+                      await preparedConfirmationDetails.onAutoConfirm(
+                        approvalMode,
+                      );
+                    } else {
+                      await preparedConfirmationDetails.onConfirm(
+                        ToolConfirmationOutcome.ProceedOnce,
+                      );
+                    }
+                  });
                   if (
                     this.cancelPreExecutionIfAborted(
                       reqInfo.callId,
