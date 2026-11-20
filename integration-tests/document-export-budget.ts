@@ -13,12 +13,12 @@
  * (#17158), 60.9s (#17203) and 64.5s (#17884). Those hosts get the same 3x
  * multiplier the interactive harness uses in `interactive/wait.ts`; GitHub-
  * hosted CI and local runs keep the tight 60s ceiling so a real regression
- * still fails fast. RUNNER_ENVIRONMENT is a runner default, so the tier reaches
- * both gate lanes — ci.yml's web_shell_e2e_smoke shard 1 and e2e.yml's nightly
- * browser-regression step — without either mapping it under `env:`. The gate
- * sets its per-case ceiling 30s above this budget, under the integration
- * suite's 5-minute testTimeout, so the budget assertion is always observed
- * before a case timeout.
+ * still fails fast. RUNNER_ENVIRONMENT is a runner default, so both gate steps
+ * read it without an `env:` mapping; ci.yml's web_shell_e2e_smoke shard 1 gets
+ * the tier only on the ARM64 pool, and e2e.yml's nightly browser-regression
+ * step is ubuntu-latest. The gate sets its per-case ceiling 30s above this
+ * budget, under the integration suite's 5-minute testTimeout, so the budget
+ * assertion is always observed before a case timeout.
  *
  * Pure and read at call time so the decision is pinned state-by-state with a
  * plain object instead of real time
