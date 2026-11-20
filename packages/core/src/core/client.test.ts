@@ -1469,7 +1469,17 @@ describe('Gemini Client (client.ts)', () => {
 
   describe('async hook output delivery (L11)', () => {
     beforeEach(() => {
-      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+      // Simulate the chat's successful history push so the async-block
+      // settlement (which keys off the push snapshot) sees the block delivered
+      // and does not retain it for the next send.
+      let pushes = 0;
+      vi.spyOn(client.getChat(), 'getUserContentPushCount').mockImplementation(
+        () => pushes,
+      );
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, pushes++);
+        return textTurn('ok');
+      });
     });
 
     /** Complete a background hook whose additionalContext is pending. */
@@ -1769,6 +1779,76 @@ describe('Gemini Client (client.ts)', () => {
       expect((parts.find(isAsyncHookPart) as Part).text).toContain(
         'owned hook output',
       );
+    });
+
+    it('a loop-detection exit before the drain leaves the block for the next send', async () => {
+      // The result-aware loop detection returns the turn before the drain site,
+      // so the get-and-clear block must not be consumed by the halted turn.
+      installAsyncOutput('survives loop detection');
+      const detector = (
+        client as unknown as {
+          loopDetector: {
+            recordToolResultByCallId: (...a: never[]) => boolean;
+          };
+        }
+      ).loopDetector;
+      const recordSpy = vi
+        .spyOn(detector, 'recordToolResultByCallId')
+        .mockReturnValue(true);
+      const events = await run(
+        [fnResponse('read_file', { ok: true }, 'call-loop')],
+        'prompt-loop',
+        { type: SendMessageType.ToolResult },
+      );
+      expect(events.some((e) => e.type === LlmEventType.LoopDetected)).toBe(
+        true,
+      );
+      recordSpy.mockReturnValue(false);
+      await run([{ text: 'next' }], 'prompt-loop-next', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('survives loop detection');
+    });
+
+    it('retains the block when the send exits before the push; the next send delivers it', async () => {
+      // A chat-side pre-push exit consumes the block at the drain but never
+      // pushes it; the push-snapshot settlement must retain it, not lose it.
+      installAsyncOutput('survives a pre-push exit');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-prepush', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('chat pre-push failure');
+      await run([{ text: 'second' }], 'prompt-after-prepush', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('survives a pre-push exit');
+    });
+
+    it('a retained block is not consumed by a side send', async () => {
+      installAsyncOutput('retained owned block');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-retain', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('chat pre-push failure');
+      // The side send is gated; it must not re-attach/consume the retained block.
+      await run([{ text: '/btw question' }], 'prompt-retain-side', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+      expect(getLastTurnRequestText()).not.toContain('retained owned block');
+      // The owning turn's next send still delivers it.
+      await run([{ text: 'owner next' }], 'prompt-retain', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('retained owned block');
     });
   });
 
