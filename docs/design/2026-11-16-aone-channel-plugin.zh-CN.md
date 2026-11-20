@@ -126,31 +126,39 @@ packages/channels/aone/
   `groups["*"].allowedUsers`，两条都没有时为**空列表**（谁都不准入）。
   **顶层** `allowedUsers`/`privatePolicy` 只作用于 DM 形态流量，本
   channel 从不产生；只配它们限制不了任何东西。`groupPolicy` 须为
-  `open`/`allowlist`/`pairing` 才会派发（否则 connect 告警）；插件自行
-  声明该字段、缺省 `open`，因为共享注入字段缺省 `disabled`，会让编辑器
-  创建的 channel 什么都不派发。管理界面按该缺省值播种 `groupPolicy`，
-  其共享 group-sender 字段**会**写 `groups["*"].senders` /
-  `groups["*"].allowedUsers`（channel 级），其 allowlist 成员字段也会
-  创建 `groups[<repo>]` 条目；它为本插件写不了的是逐仓库的**发送者
-  覆盖**（那种行只存在于 repository-only 类型 github/gitlab），所以
-  成员条目的 senders 回退到 channel 级的 `*` 策略。所以 UI 创建的
-  channel 只在操作者不动 Group senders 缺省值时才是宽松的。`connect()` 对**实际
-  open** 的监听仓库告警——open 发送者**且可达**：`groupPolicy: allowlist`
-  下，group 门会在 sender 门之前把没有 `groups` 条目的仓库拒为
-  `not_allowlisted`，所以这种仓库是死的、不是 open，会被排除出宽松
-  告警（逐仓库 allowlist 而无 `*` 条目同样是收紧的，不告警）。它单独
-  诊断死仓库：当**每个**监听仓库都没有条目时告警什么都不派发；当只有
-  **部分**没有条目（混合监听列表）时点名那些仓库，让操作者知道它们的
-  触发会被静默丢弃，而可达仓库仍正常告警。allowlist 下 `*` 是缺省
-  配置，不是通配准入。下方示例给出手写配置
+  `open`/`allowlist`/`pairing` 才会派发（否则 connect 告警）。Aone 由手写
+  `settings.json` 配置：它**不在** Web Shell 的 `SUPPORTED_CHANNEL_TYPES`
+  里，所以频道编辑器无法新建/编辑它，descriptor 的 `default: open`（为与
+  共享注入字段对齐而声明，后者缺省 `disabled`）永远不会播种编辑器草稿。
+  手写配置缺省 `groupPolicy` 会解析为 `disabled`、什么都不派发——connect
+  会大声告警，故须显式设置。共享的 group-sender/allowlist 成员编辑器
+  控件（`assignGroupSenders` 写 `groups["*"].senders`/`allowedUsers`；
+  `assignGroups` 创建 `groups[<repo>]` 条目）与 github/gitlab 专属的逐仓库
+  发送者行因此都不适用于本插件；操作者直接在配置里写 `groups`。
+  `connect()` 对每个监听仓库做**一次 posture 解析**（复现基类
+  `groupConfigFor` 的键匹配与 `senders`/`allowedUsers` 的 repo→`*`→空
+  回退链，空 allowlist 谁都不放行），诊断五种姿态：(1) 宽松——group 门
+  准入的仓库上是 open 发送者（allowlist 下无 `groups` 条目的仓库在
+  sender 门之前就被拒 `not_allowlisted`，故是死的、不是 open，被排除）；
+  (2) group 层死——allowlist 下**每个**监听仓库都无条目（什么都不派发）
+  或仅**部分**无条目（混合列表点名死仓库，让操作者知道其触发被静默
+  丢弃）；(3) sender 层死——可达仓库的生效 senders 为 `allowlist` 但解析
+  出的 `allowedUsers` 为空（每条事件都死于 `group_sender_denied` 而轮询
+  记 ok）；(4) pairing-open——`groupPolicy: pairing` 下 open 发送者按
+  **批准后**姿态告警，而非当前可达（群组需一次性批准）；(5)
+  pairing-sender-dead——pairing 下 `allowlist` 发送者而解析 `allowedUsers`
+  为空同样按批准后告警（仅按可达过滤的 sender-dead 会漏掉 pairing，因为
+  批准待定，但批准后空 allowlist 仍拒绝每个发送者）。allowlist 下
+  `*` 是缺省配置，不是通配准入。下方示例给出手写配置
   必须做的逐仓库收紧。`sessionScope` 缺省 `chat_thread`（每仓库+MR
   线程一个会话）。无 `token` 字段——a1 用 channel 主机上自己的登录态
   认证。
 
 ### 入站管线（`pollOnce`）
 
-每个配置仓库在各自的 try/catch 里轮询：某仓库失败则记录错误、写入一条
-持久的 `repo_failed` 台账事件（部分失败时本轮正常 resolve，base 循环
+每个配置仓库在各自的 try/catch 里轮询：某仓库失败则记录净化、有界的
+错误（a1 来源的 cause 不能伪造 stderr 行）、写入一条持久的 `repo_failed`
+台账事件（部分失败时本轮正常 resolve，base 循环
 自己的轮询记录会显示 ok，坏仓库否则不留任何状态页可见的痕迹），并
 **继续**本轮其余仓库。**仅当所有仓库都失败**时才重抛，让 base 循环
 记录失败轮并退避；**部分失败**正常完成本轮、保持配置的 `pollInterval`
@@ -174,7 +182,21 @@ packages/channels/aone/
    `--page` 上限 100），切片绝不跨越**窗口内**未抓取的缺口。该不变式
    以窗口为界：游标事件本身老化出 3 天窗口时（停机或排空慢于到达），
    遍历遇不到它而结束，游标跳过老化的 id——轮询在带着可派发事件恢复
-   时**记录这次跳跃**（空窗口的休眠仓库什么都没跳过，不告警）。
+   时**记录这次跳跃**并落持久 `cursor_aged_out` 台账事件（丢失是永久的；
+   轮询本身记 ok）。该诊断在遍历未命中游标、有可派发事件、且**上次完整
+   排空的轮询**早于窗口起点（`cursor.lastPoll`）时触发：这才是真实丢失——
+   上次完整观测以来的事件落到了窗口之外。涵盖停机与排水慢于到达两种情形。
+   lastPoll 在两处写入：首次观测基线，以及**完整排空且覆盖缺口**的轮询
+   （`fresh <= slice` 且 `fresh > 0` 或非 `agedOut`）的成功出口。安静仓库的
+   休眠空窗口会写入（非 agedOut）；停机的空窗口恢复轮询**不**写入（agedOut，
+   未观测到缺口，保持时刻陈旧供下个非空轮询诊断）；失败或封顶轮询绝不写入。
+   故慢性积压或停机恢复的仓库保留上次完整观测时刻，直到它早于窗口而丢失
+   被诊断。窗口内持续被轮询的仓库（lastPoll 新鲜）即使游标事件老化出窗口
+   也什么都没丢（安静间隙），近期空窗口基线（cursor 0）被正常填满——两者
+   都不是老化。按上次完整观测而非游标值或频道基线判定，也使成熟频道新增
+   的仓库（新鲜基线）不误报。空窗口的休眠仓库什么都没跳过，不告警。慢性
+   积压仓库每轮都重入该分支，故台账记录按不同陈旧时刻在**进程生命周期内**
+   去重（每进程每 episode 一条，而非每轮一条；重启会重记台账已有的 episode）。
    每仓库的切片至多派发**最旧的 100 条**（`DISPATCH_BUDGET`，通用且
    单调——500 条积压与 1200 条一样封顶 100；单轮最坏是 仓库数 × 100
    次派发）；余量在后续轮次排空。第 100 页仍满——超出平台可寻址
@@ -202,11 +224,17 @@ packages/channels/aone/
      相同的取舍）。
 
 游标形状（zod 校验，GitLab 模式）：
-`{ baselineAt: string, repos: Record<string, number> }`。`baselineAt` 是
+`{ baselineAt: string, repos: Record<string, number>, lastPoll?: Record<string, string> }`。`baselineAt` 是
 channel 创建时刻（ISO，必须可解析——不可解析的值会游标校验失败并重新基线化）。
 它是派发地板：创建时刻之前的事件绝不派发。没有这个地板，首轮看到**空**窗口的
 仓库会基线化到 id 0，下一轮就会把整个 3 天窗口当作「新」事件派发——形成历史
-积压。每仓库条目的存在性即「已初始化」状态，没有单独的标志位。
+积压。每仓库条目的存在性即「已初始化」状态，没有单独的标志位。`lastPoll`
+（可选，向后兼容此前写入的游标）记录每仓库上次**完整观测**时刻（ISO），
+用于区分真实老化（停机或排水慢于到达）与安静间隙。它在两处写入：首次观测
+基线，以及完整排空且覆盖缺口的轮询（`fresh <= slice` 且 `fresh > 0` 或
+非 `agedOut`）的成功出口。安静仓库的休眠空窗口写入（非 agedOut）；停机的
+空窗口恢复轮询不写入（agedOut，未观测到缺口，保持陈旧供下个非空轮询诊断）；
+失败或封顶轮询绝不写入。
 易漂移字段**响亮失败**：`createdAt` 解析失败、作者缺失、笔记正文不是
 字符串的事件按 fail-closed 跳过但**必须记日志**——否则载荷改名会在
 游标持续推进的同时静默哑掉整个 channel。bot 自身评论与非 MR 笔记是
@@ -265,8 +293,10 @@ descriptor 与 connect 间共享（GitHub `validateRepoFilterConfig` 模式）�
 - **a1 退出码会说谎**——每次读取都解析 JSON 形状；单仓库的权限错误
   （`SYSTEM_FORBIDDEN_ERROR`）被记录而非静默跳过；逐仓库隔离保证其余
   监听仓库按配置间隔继续轮询（仅全部失败才退避）。
-- **事件窗口丢失**——停机 > 3 天丢失更旧事件（v1 限制）；游标本身老化
-  时，恢复轮询记录这次跳跃。
+- **事件窗口丢失**——停机 > 3 天丢失更旧事件（v1 限制）；游标老化且上次
+  完整观测早于窗口（停机或排水慢于到达——非安静间隙）时，恢复轮询
+  记录这次跳跃并落持久 `cursor_aged_out` 台账事件（按陈旧时刻在进程生命
+  周期内去重）。
 - **洪水在 100–10 000 区间有界（逐仓库）**——每仓库切片每轮至多派发
   最旧 100 条（通用预算、单调），单轮最坏是 仓库数 × 100 次派发；更深
   的积压先走到窗口尾部，切片绝不跨越窗口内未抓取缺口，余量后续排空。
@@ -300,16 +330,30 @@ descriptor 与 connect 间共享（GitHub `validateRepoFilterConfig` 模式）�
   节奏、全部失败重抛）；view 负缓存含逐轮作用域（两轮重试）；空串与
   纯空白模板回落；createdAt/作者/正文漂移诊断（含作者**类型**漂移，
   不发公开错误评论）；宽松告警限定实际 open **且可达**的仓库（排除
-  allowlist 死仓库）+ 全死与混合死仓库诊断 + 大小写归一化的 groups
-  条目；兄弟字段类型漂移时的 senderName/chatId 回落；空串作者跳过；
-  部分失败的持久 repo_failed 台账记录（error 截断到 200 码点、单行
-  ——由台账写路径强制）；游标老化跳跃诊断（休眠仓库静默）；
-  descriptor groupPolicy 缺省；仓库路径小写化。变异见证：去重、逐仓库
-  隔离、溢出走尾、游标命中即停、剪枝保存、空白回落、部分失败节奏、
-  通用预算、平台上限、逐轮缓存清空、宽松告警、漂移诊断、午夜窗口、
-  老化诊断、作者类型守卫、持久失败记录、告警范围、死姿态告警、可达性
-  排除、混合死仓库点名、告警仓库点名、大小写归一化条目、senderName
-  回落、chatId 回落、空串作者守卫。
+  allowlist 死仓库）+ 全死与混合死仓库诊断（点名**每个**死仓库）+
+  sender 层死姿态（allowlist 发送者而解析 allowedUsers 为空，repo→`*`
+  回退）+ pairing-open 批准后告警 + pairing-sender-dead 批准后告警 +
+  大小写归一化的 groups 条目；兄弟
+  字段类型漂移时的 senderName/chatId 回落；空串作者跳过；部分失败的
+  持久 repo_failed 台账记录；四处 stderr 均净化有界（轮询失败、逐事件
+  派发、fetchView、不可解析 createdAt——不伪造日志行）；游标
+  老化跳跃诊断（按上次完整观测早于窗口判定——安静仓库与近期空基线
+  静默；失败、封顶或停机恢复空轮询不刷新 lastPoll，故停机与排水慢于到达
+  被诊断）+ 持久
+  cursor_aged_out 台账记录（按陈旧时刻在进程内去重，休眠仓库静默）；命中游标的
+  轮询不报老化；休眠空窗口轮询与含事件的排空轮询都推进 lastPoll；descriptor groupPolicy 缺省；仓库路径
+  小写化。变异见证：去重、逐仓库隔离、溢出走尾、游标命中即停、剪枝
+  保存、空白回落、部分失败节奏、通用预算、平台上限、逐轮缓存清空、
+  宽松告警、漂移诊断、午夜窗口、老化诊断、作者类型守卫、持久失败
+  记录、告警范围、死姿态告警、可达性排除、混合死仓库点名、告警仓库
+  点名、大小写归一化条目、senderName 回落、chatId 回落、空串作者
+  守卫、老化 lastPoll 判别、cursor_aged_out 记录、sender 层死告警、
+  allowedUsers `*` 回退、pairing-open 告警、stderr 净化、全死/混合
+  互斥、每个死仓库点名、pairing-sender-dead 告警、陈旧 cursor0 老化、
+  !reachedCursor 子句、逐事件 stderr 净化、fetchView stderr 净化、
+  失败轮询 lastPoll、安静仓库不报老化、成熟频道新鲜基线、createdAt
+  stderr 净化、排水慢于到达老化、cursor_aged_out 台账去重、休眠 lastPoll
+  stamp、空窗口停机恢复、含事件排空 lastPoll stamp、两 episode 台账去重。
 - 线上只读冒烟：真实 `a1 events repo middleware/tddl5` 拉取+解析，
   不派发、不写（环境变量门控）。
 - 全链路 E2E（PATH 上打桩 a1： canned whoami/events；comment create

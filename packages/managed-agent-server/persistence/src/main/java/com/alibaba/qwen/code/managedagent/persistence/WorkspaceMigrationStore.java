@@ -124,12 +124,11 @@ public final class WorkspaceMigrationStore {
                     "request_json", request.toString(), "state", "RETIRING",
                     "source_registration_json", JSON.valueToTree(source).toString(),
                     "target_registration_id", UUID.randomUUID().toString()));
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified)"
-                    + " VALUES (?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified)"
+                    + " VALUES (?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
                     + " gmt_modified = CASE WHEN fence_operation_id IS NULL THEN VALUES(gmt_modified) ELSE gmt_modified END,"
                     + " fence_operation_id = COALESCE(fence_operation_id, VALUES(fence_operation_id))",
                     RuntimeAdmissionFences.storageAliasKey(tenant, storage),
-                    RuntimeAdmissionFences.storageFenceKey(tenant), RuntimeAdmissionFences.storageFenceKey(storage),
                     tenant, storage, id);
             requireOwner();
         });
