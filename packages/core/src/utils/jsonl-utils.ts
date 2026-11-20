@@ -64,6 +64,21 @@ function getFileLock(filePath: string): Mutex {
   return fileLocks.get(filePath)!;
 }
 
+/**
+ * Determines whether a given character offset `recordStart` in a physical line
+ * can be the starting `{` of a recovered suffix JSON object.
+ *
+ * Scans lexical state from 0 to `recordStart` to verify:
+ * 1. String boundaries and escape sequences.
+ * 2. When outside a string (`!inString`), structural punctuation delimiters
+ *    (`[`, `,`, `:`) immediately preceding `recordStart` reject the candidate
+ *    (preventing candidate extraction from within arrays, comma-delimited
+ *    elements, or property values). Inside a string (`inString`), punctuation
+ *    rejection does not apply because commas and colons inside string literals
+ *    are character content, not syntax delimiters.
+ * 3. Inside a string (`inString`) or at top-level depth (`depth === 0`),
+ *    candidate suffix recovery is permitted.
+ */
 export function canStartRecoveredSuffix(
   line: string,
   recordStart: number,
@@ -118,6 +133,9 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
   let escape = false;
   let start = -1;
   let complete = true;
+  let lastNonWs = '';
+  const candidateSuffixStarts: number[] = [];
+
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (escape) {
@@ -125,8 +143,14 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
       continue;
     }
     if (inString) {
-      if (c === '\\') escape = true;
-      else if (c === '"') inString = false;
+      if (c === '\\') {
+        escape = true;
+      } else if (c === '"') {
+        inString = false;
+        lastNonWs = '"';
+      } else if (c === '{' && i > 0) {
+        candidateSuffixStarts.push(i);
+      }
       continue;
     }
     if (c === '"') {
@@ -135,8 +159,18 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
       continue;
     }
     if (c === '{') {
+      if (
+        i > 0 &&
+        depth === 0 &&
+        lastNonWs !== '[' &&
+        lastNonWs !== ',' &&
+        lastNonWs !== ':'
+      ) {
+        candidateSuffixStarts.push(i);
+      }
       if (depth === 0) start = i;
       depth++;
+      lastNonWs = '{';
     } else if (c === '}') {
       depth--;
       if (depth === 0 && start >= 0) {
@@ -155,8 +189,10 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
         depth = 0;
         start = -1;
       }
-    } else if (depth === 0 && !/\s/.test(c)) {
-      complete = false;
+      lastNonWs = '}';
+    } else if (!/\s/.test(c)) {
+      if (depth === 0) complete = false;
+      lastNonWs = c;
     }
   }
 
@@ -169,30 +205,33 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
   }
 
   // If a torn prefix or unparseable fragment prevented clean consumption,
-  // scan candidate open braces backwards from the end of the line for a complete
-  // suffix record using the canStartRecoveredSuffix rule.
-  let offset = line.length;
-  while (offset > 0) {
-    const candidate = line.lastIndexOf('{', offset - 1);
-    if (candidate <= 0) break;
-    if (canStartRecoveredSuffix(line, candidate)) {
-      try {
-        const parsed = JSON.parse(line.slice(candidate));
-        if (
-          parsed !== null &&
-          typeof parsed === 'object' &&
-          !Array.isArray(parsed)
-        ) {
-          return {
-            records: [...out, parsed as T],
-            complete: false,
-          };
-        }
-      } catch {
-        // Suffix was not valid JSON; try earlier candidate brace.
+  // walk recorded candidate open braces backwards from the end of the line
+  // to find a complete suffix record. Attempts are bounded to keep recovery
+  // linear even on brace-dense unclosed strings.
+  const MAX_SUFFIX_ATTEMPTS = 16;
+  let attempts = 0;
+  for (
+    let idx = candidateSuffixStarts.length - 1;
+    idx >= 0 && attempts < MAX_SUFFIX_ATTEMPTS;
+    idx--
+  ) {
+    attempts++;
+    const candidate = candidateSuffixStarts[idx];
+    try {
+      const parsed = JSON.parse(line.slice(candidate));
+      if (
+        parsed !== null &&
+        typeof parsed === 'object' &&
+        !Array.isArray(parsed)
+      ) {
+        return {
+          records: [...out, parsed as T],
+          complete: false,
+        };
       }
+    } catch {
+      // Suffix was not valid JSON; try earlier candidate brace.
     }
-    offset = candidate;
   }
 
   return {

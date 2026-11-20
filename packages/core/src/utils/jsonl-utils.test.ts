@@ -279,6 +279,21 @@ describe('_recoverObjectsFromLine', () => {
     expect(_recoverObjectsFromLine(line)).toEqual([]);
   });
 
+  it('bounds suffix recovery attempts on brace-dense torn lines', () => {
+    // 16,000 unclosed braces inside a torn string (~100-200 KB)
+    const braceDenseLine = '{"torn":"' + '{'.repeat(16000);
+    const parseSpy = vi.spyOn(JSON, 'parse');
+    try {
+      parseSpy.mockClear();
+      const result = _recoverObjectsFromLine(braceDenseLine);
+      expect(result).toEqual([]);
+      // Must not re-parse for every brace in the line (at most bounded attempts)
+      expect(parseSpy.mock.calls.length).toBeLessThanOrEqual(16);
+    } finally {
+      parseSpy.mockRestore();
+    }
+  });
+
   it('preserves complete: false when recovering suffix after torn prefix in parseLineTolerantWithIntegrity', () => {
     const tornLine =
       '{"backgroundTurn":{"taskId":"Explore_call","sess{"uuid":"c2fdde8f"}';
