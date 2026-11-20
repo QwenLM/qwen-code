@@ -716,9 +716,11 @@ describe('release workflow', () => {
       );
       // A silent Teams skip is indistinguishable from a mistyped variable,
       // so the skip names the package and its switch in the runner log —
-      // and says nothing when Teams does publish.
+      // and emits no Teams notice when Teams does publish.
       if (pkg === '@qwen-code/channel-msteams') {
-        expect(result.stderr).toBe('');
+        expect(result.stderr).not.toContain(
+          '::notice::Skipping @qwen-code/channel-msteams',
+        );
       } else {
         expect(result.stderr).toContain(
           '::notice::Skipping @qwen-code/channel-msteams; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true',

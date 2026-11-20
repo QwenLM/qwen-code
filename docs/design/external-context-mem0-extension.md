@@ -266,10 +266,9 @@ the package to the `release.yml` workflow in the `production-release`
 environment. The bootstrap should publish the version of a release that has
 already shipped with the package skipped — not an upcoming release version —
 and should not invent a second version line. Hand-publishing an upcoming
-version does not get the release refused: the version step probes this package
-too, finds that version on npm and increments past it, leaving the stray
-version on npm for good. A nightly instead fails the version step with a
-version conflict and files a failure issue. Future releases use trusted
+version does not get the release refused: for a stable release the version
+step probes this package too, finds that version on npm and increments past
+it, leaving the stray version on npm for good. Future releases use trusted
 publishing and require no npm token.
 
 When a service fits `DialectV1`, its administrator writes and validates a local

@@ -97,11 +97,10 @@ release skips them instead of failing to authenticate. Set a variable to
 `true` only after its bootstrap publish. Bootstrap at a version that has
 already shipped — the first release that ships with the package skipped — never
 at an upcoming one, and do not invent a second version line. Hand-publishing an
-upcoming version does not get the release refused: the version step probes
-every published package, finds that version on npm and increments past it,
-leaving the stray version on npm for good. A nightly instead fails the version
-step with a version conflict and files a failure issue. The push-time guard
-still keeps a partial release from being overwritten by a retry.
+upcoming version does not get the release refused: for a stable release the
+version step probes every published package, finds that version on npm and
+increments past it, leaving the stray version on npm for good. The push-time
+guard still keeps a partial release from being overwritten by a retry.
 
 ### Failure Handling
 
