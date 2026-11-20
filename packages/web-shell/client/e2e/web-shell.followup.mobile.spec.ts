@@ -267,8 +267,15 @@ test('mobile editing-row direction keys move the caret', async ({
   await textarea.fill('');
   await pushSuggestion(daemon, scenario.sessionId);
   await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
+  // Evidence shots share one focus state: unfocused, so the conditional
+  // hide-keyboard control is absent and no tap-hover tile lingers on a key.
+  await textarea.evaluate((el) => el.blur());
+  await page.mouse.move(0, 0);
+  await expect(
+    page.getByRole('button', { name: 'Hide keyboard', exact: true }),
+  ).toHaveCount(0);
   await page.screenshot({
-    path: testInfo.outputPath('followup-keys-row-v5.png'),
+    path: testInfo.outputPath('followup-keys-row-v6.png'),
   });
 });
 
@@ -344,8 +351,12 @@ test('mobile chip bar accepts in Simplified Chinese with caret keys only', async
     editingRow.locator('[data-web-shell-mobile-insert-slash]'),
   ).toHaveAttribute('aria-label', '插入斜杠');
   await expect(textarea).toHaveAttribute('placeholder', idlePlaceholder!);
+  // Same unfocused evidence state as the English key-row shot.
+  await expect(
+    page.getByRole('button', { name: '收起键盘', exact: true }),
+  ).toHaveCount(0);
   await page.screenshot({
-    path: testInfo.outputPath('followup-keys-row-zh-v5.png'),
+    path: testInfo.outputPath('followup-keys-row-zh-v6.png'),
   });
   await page.locator(FOLLOWUP_ACCEPT).tap();
   await expect(textarea).toHaveValue(ZH_SUGGESTION);
