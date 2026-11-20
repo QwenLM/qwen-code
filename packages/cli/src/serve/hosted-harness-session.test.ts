@@ -32543,6 +32543,7 @@ describe('Hosted Harness refusal reasons', () => {
       warn: vi.fn(),
       error: vi.fn(),
       raw: vi.fn(),
+      setPort: vi.fn(),
       getLogPath: () => '',
       getDaemonId: () => 'daemon:test',
       getStatus: () => ({

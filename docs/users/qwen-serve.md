@@ -1221,9 +1221,12 @@ active path:
 ${QWEN_RUNTIME_DIR or ~/.qwen}/debug/daemon/daemon.log
 ```
 
-Every file record includes a random per-start `runId` and the daemon PID. A
-successful stable owner also updates `debug/daemon/latest` to `daemon.log` on
-platforms that support symlinks. On macOS/Linux, follow rotation with:
+Every file record includes a random per-start `runId` and the daemon PID, and
+once the listener is up, the actual `port=` as well. Stderr tee lines carry
+`pid=` and, after listening, `port=` too, so daemons that share one log sink
+stay attributable line by line. A successful stable owner also updates
+`debug/daemon/latest` to `daemon.log` on platforms that support symlinks. On
+macOS/Linux, follow rotation with:
 
 ```bash
 tail -F ~/.qwen/debug/daemon/daemon.log

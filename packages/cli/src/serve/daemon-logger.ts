@@ -165,6 +165,8 @@ export interface BuildDaemonLogLineArgs {
   now: Date;
   ctx?: DaemonLogContext;
   err?: Error;
+  pid?: number;
+  port?: number;
 }
 
 interface BuildDaemonLogRecordArgs extends BuildDaemonLogLineArgs {
@@ -173,9 +175,13 @@ interface BuildDaemonLogRecordArgs extends BuildDaemonLogLineArgs {
 
 function formatDaemonLogLine(args: BuildDaemonLogRecordArgs): string {
   const ts = args.now.toISOString();
+  const identityStr =
+    args.pid === undefined
+      ? ''
+      : `pid=${args.pid}${args.port === undefined ? '' : ` port=${args.port}`} `;
   const traceStr = renderTraceContext(args.traceContext);
   const ctxStr = renderCtx(args.ctx);
-  return `${ts} [${args.level}] [DAEMON] ${traceStr}${ctxStr}${args.message}\n${renderErr(args.err)}`;
+  return `${ts} [${args.level}] [DAEMON] ${identityStr}${traceStr}${ctxStr}${args.message}\n${renderErr(args.err)}`;
 }
 
 export function buildDaemonLogLine(args: BuildDaemonLogLineArgs): string {
@@ -186,6 +192,7 @@ function buildDaemonFileLogLine(
   args: BuildDaemonLogRecordArgs,
   runId: string,
   pid: number,
+  port?: number,
 ): string {
   const callerCtx = args.ctx
     ? Object.fromEntries(
@@ -196,7 +203,8 @@ function buildDaemonFileLogLine(
     : undefined;
   const traceStr = renderTraceContext(args.traceContext);
   const ctxStr = renderCtx(callerCtx);
-  return `${args.now.toISOString()} [${args.level}] [DAEMON] runId=${runId} pid=${pid} ${traceStr}${ctxStr}${args.message}\n${renderErr(args.err)}`;
+  const portStr = port === undefined ? '' : ` port=${port}`;
+  return `${args.now.toISOString()} [${args.level}] [DAEMON] runId=${runId} pid=${pid}${portStr} ${traceStr}${ctxStr}${args.message}\n${renderErr(args.err)}`;
 }
 
 export interface DaemonLogger {
@@ -204,6 +212,9 @@ export interface DaemonLogger {
   warn(message: string, ctx?: DaemonLogContext): void;
   error(message: string, err?: Error | null, ctx?: DaemonLogContext): void;
   raw(line: string, level?: 'info' | 'warn' | 'error'): void;
+  // The listening port is only known after listen succeeds (ephemeral port 0,
+  // EADDRINUSE fallback), so it cannot be an init option.
+  setPort(port: number): void;
   getLogPath(): string;
   getDaemonId(): string;
   getStatus(): DaemonLoggerStatus;
@@ -385,11 +396,13 @@ function statusSnapshot(
 
 function createStderrOnlyLogger(input: {
   runId: string;
+  pid: number;
   daemonId: string;
   now: () => Date;
   stderr: (line: string) => void;
   issues: ReadonlySet<DaemonLogIssue>;
 }): DaemonLogger {
+  let port: number | undefined;
   const tee = (
     level: DaemonLogLevel,
     message: string,
@@ -405,6 +418,8 @@ function createStderrOnlyLogger(input: {
         ctx,
         err,
         traceContext,
+        pid: input.pid,
+        port,
       }).trimEnd(),
     );
   };
@@ -413,6 +428,9 @@ function createStderrOnlyLogger(input: {
     warn: (message, ctx) => tee('WARN', message, ctx),
     error: (message, err, ctx) => tee('ERROR', message, ctx, err ?? undefined),
     raw: () => {},
+    setPort: (value) => {
+      port = value;
+    },
     getLogPath: () => '',
     getDaemonId: () => input.daemonId,
     getStatus: () =>
@@ -1041,6 +1059,7 @@ function createConcreteLogger(input: {
   let dropSummaryPending = false;
   let acceptingFileRecords = true;
   let closePromise: Promise<void> | undefined;
+  let port: number | undefined;
 
   const markDropped = (bytes: number, queueOverflow = false) => {
     droppedRecords += 1;
@@ -1249,6 +1268,7 @@ function createConcreteLogger(input: {
         },
         input.runId,
         input.pid,
+        port,
       ),
       input.policy.maxRecordBytes,
     );
@@ -1338,6 +1358,8 @@ function createConcreteLogger(input: {
         ctx,
         err,
         traceContext,
+        pid: input.pid,
+        port,
       }).trimEnd(),
     );
     submitFileRecord(
@@ -1346,6 +1368,7 @@ function createConcreteLogger(input: {
           { level, message, now: timestamp, ctx, err, traceContext },
           input.runId,
           input.pid,
+          port,
         ),
         input.policy.maxRecordBytes,
       ),
@@ -1393,10 +1416,14 @@ function createConcreteLogger(input: {
             },
             input.runId,
             input.pid,
+            port,
           ),
           input.policy.maxRecordBytes,
         ),
       );
+    },
+    setPort: (value) => {
+      port = value;
     },
     getLogPath: () => input.family.activePath,
     getDaemonId: () => input.daemonId,
@@ -1476,6 +1503,7 @@ export async function initDaemonLogger(
   if (isOptedOut()) {
     return createStderrOnlyLogger({
       runId,
+      pid,
       daemonId: computeDaemonId(pid),
       now,
       stderr,
@@ -1496,6 +1524,7 @@ export async function initDaemonLogger(
     );
     return createStderrOnlyLogger({
       runId,
+      pid,
       daemonId: computeDaemonId(pid),
       now,
       stderr,
@@ -1767,6 +1796,7 @@ export async function initDaemonLogger(
       });
       return createStderrOnlyLogger({
         runId,
+        pid,
         daemonId: computeDaemonId(pid),
         now,
         stderr,
@@ -1818,6 +1848,7 @@ export async function initDaemonLogger(
     );
     return createStderrOnlyLogger({
       runId,
+      pid,
       daemonId: computeDaemonId(pid),
       now,
       stderr,

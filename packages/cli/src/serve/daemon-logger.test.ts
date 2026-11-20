@@ -168,6 +168,104 @@ describe('buildDaemonLogLine', () => {
         '  Plain: no stack\n',
     );
   });
+
+  it('renders pid and port identity when provided', () => {
+    expect(
+      buildDaemonLogLine({
+        level: 'INFO',
+        message: 'listening',
+        now: FIXED,
+        pid: 1234,
+        port: 4170,
+      }),
+    ).toBe(
+      '2026-05-26T03:14:15.926Z [INFO] [DAEMON] pid=1234 port=4170 listening\n',
+    );
+  });
+
+  it('renders pid alone when the port is not yet known', () => {
+    expect(
+      buildDaemonLogLine({
+        level: 'INFO',
+        message: 'starting',
+        now: FIXED,
+        pid: 1234,
+      }),
+    ).toBe('2026-05-26T03:14:15.926Z [INFO] [DAEMON] pid=1234 starting\n');
+  });
+});
+
+describe('daemon log identity attribution', () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), 'daemon-log-identity-'));
+  });
+  afterEach(() => {
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // Lease release may lag on some platforms; OS tmp cleanup owns it.
+    }
+  });
+
+  it('tees pid before the port is known and pid+port after setPort', async () => {
+    const stderr: string[] = [];
+    const logger = await createLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: (s) => stderr.push(s),
+    });
+    logger.info('before listen');
+    expect(stderr.at(-1)).toContain('[DAEMON] pid=1 before listen');
+    expect(stderr.at(-1)).not.toContain('port=');
+    logger.setPort(4170);
+    logger.info('after listen');
+    expect(stderr.at(-1)).toContain('[DAEMON] pid=1 port=4170 after listen');
+  });
+
+  it('file records gain port only after setPort, including raw lines', async () => {
+    const logger = await createLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+    });
+    logger.info('before listen');
+    await logger.flush();
+    logger.setPort(4170);
+    logger.info('after listen');
+    logger.raw('raw line', 'warn');
+    await logger.flush();
+    const lines = readFileSync(logger.getLogPath(), 'utf8').split('\n');
+    const before = lines.find((line) => line.endsWith('before listen'));
+    const after = lines.find((line) => line.endsWith('after listen'));
+    const raw = lines.find((line) => line.endsWith('raw line'));
+    expect(before).toMatch(
+      /\[INFO\] \[DAEMON\] runId=[0-9a-f]{32} pid=1 before listen\n?$/,
+    );
+    expect(before).not.toContain('port=');
+    expect(after).toMatch(
+      /\[INFO\] \[DAEMON\] runId=[0-9a-f]{32} pid=1 port=4170 after listen\n?$/,
+    );
+    expect(raw).toMatch(
+      /\[WARN\] \[DAEMON\] runId=[0-9a-f]{32} pid=1 port=4170 raw line\n?$/,
+    );
+  });
+
+  it('keeps caller ctx pid in the tee alongside the daemon identity', async () => {
+    const stderr: string[] = [];
+    const logger = await createLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: (s) => stderr.push(s),
+    });
+    logger.setPort(4170);
+    logger.info('channel worker ready', { pid: 4242 });
+    expect(stderr.at(-1)).toContain(
+      '[DAEMON] pid=1 port=4170 pid=4242 channel worker ready',
+    );
+  });
 });
 
 describe('initDaemonLogger opt-out', () => {
@@ -227,6 +325,22 @@ describe('initDaemonLogger opt-out', () => {
     for (const line of stderr) {
       expect(line).toContain(`[trace_id=${TRACE_ID} span_id=${SPAN_ID}]`);
     }
+  });
+
+  it('carries pid and port identity in stderr-only mode', async () => {
+    process.env['QWEN_DAEMON_LOG_FILE'] = 'off';
+    const stderr: string[] = [];
+    const logger = await createLogger({
+      boundWorkspace: '/tmp/ws',
+      pid: 7,
+      stderr: (line) => stderr.push(line),
+    });
+    logger.info('hello');
+    expect(stderr.at(-1)).toContain('[DAEMON] pid=7 hello');
+    expect(stderr.at(-1)).not.toContain('port=');
+    logger.setPort(4170);
+    logger.warn('there');
+    expect(stderr.at(-1)).toContain('[DAEMON] pid=7 port=4170 there');
   });
 });
 
@@ -413,7 +527,7 @@ describe('initDaemonLogger info/warn/error', () => {
       .split('\n')
       .find((line) => line.endsWith('request completed'));
     expect(getActiveSpan).toHaveBeenCalledOnce();
-    expect(stderrRecord).toContain(`[DAEMON] ${tracePrefix} route=`);
+    expect(stderrRecord).toContain(`[DAEMON] pid=1 ${tracePrefix} route=`);
     expect(fileRecord).toContain(
       `[DAEMON] runId=${logger.getStatus().runId} pid=1 ${tracePrefix} route=`,
     );
@@ -442,7 +556,7 @@ describe('initDaemonLogger info/warn/error', () => {
     logger.warn('still logged');
     await logger.flush();
 
-    expect(stderr.at(-1)).toContain('[WARN] [DAEMON] still logged');
+    expect(stderr.at(-1)).toContain('[WARN] [DAEMON] pid=1 still logged');
     expect(stderr.at(-1)).not.toContain('trace_id=');
     expect(readFileSync(logger.getLogPath(), 'utf8')).toContain(
       '[WARN] [DAEMON] runId=',
@@ -502,7 +616,7 @@ describe('initDaemonLogger info/warn/error', () => {
     logger.error('still logged');
     await logger.flush();
 
-    expect(stderr.at(-1)).toContain('[ERROR] [DAEMON] still logged');
+    expect(stderr.at(-1)).toContain('[ERROR] [DAEMON] pid=1 still logged');
     expect(stderr.at(-1)).not.toContain('trace_id=');
   });
 
@@ -866,6 +980,46 @@ describe('initDaemonLogger bounded storage', () => {
       `[trace_id=${TRACE_ID} span_id=${SPAN_ID}]`,
     );
     expect(getActiveSpan).toHaveBeenCalledTimes(6);
+  });
+
+  it('carries pid and port in the queue-loss summary after setPort', async () => {
+    let releaseAppend: (() => void) | undefined;
+    let blockAppends = false;
+    const gate = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
+    const logger = await createLogger({
+      boundWorkspace: '/w',
+      pid: 1,
+      baseDir: tmp,
+      stderr: () => {},
+      fs: {
+        ...fsPromises,
+        appendFile: async (...args) => {
+          if (blockAppends) await gate;
+          return fsPromises.appendFile(...args);
+        },
+      },
+      policy: {
+        maxBytes: 4 * 1024,
+        maxRecordBytes: 256,
+        maxPendingBytes: 400,
+      },
+    });
+    logger.setPort(4170);
+    blockAppends = true;
+    for (let i = 0; i < 5; i += 1) {
+      logger.info(`queued-${i}-${'x'.repeat(90)}`);
+    }
+    expect(logger.getStatus().droppedRecords).toBeGreaterThan(0);
+    releaseAppend?.();
+    await logger.flush();
+    logger.info('after-recovery');
+    await logger.flush();
+    const summaryLine = readFileSync(logger.getLogPath(), 'utf8')
+      .split('\n')
+      .find((line) => line.includes('daemon file log records dropped'));
+    expect(summaryLine).toContain('pid=1 port=4170');
   });
 
   it('attempts the final queue-loss summary during close', async () => {
