@@ -874,7 +874,9 @@ jobs:
         # restored artifacts were built for. When they match, the restored
         # dist/standalone is already correct and a rebuild would wipe it
         # (esbuild rmSync(dist)) without the archives step to regenerate it.
-        if: "${{ steps.push_release_branch.outputs.reused_commit == 'true' && steps.push_release_branch.outputs.reused_commit_sha != needs.build_release.outputs.release_commit }}"
+        # A skipped build_release has empty outputs, which would make the
+        # comparison below read `sha != ''` and fire a redundant full rebuild.
+        if: "${{ needs.build_release.result == 'success' && steps.push_release_branch.outputs.reused_commit == 'true' && steps.push_release_branch.outputs.reused_commit_sha != needs.build_release.outputs.release_commit }}"
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
