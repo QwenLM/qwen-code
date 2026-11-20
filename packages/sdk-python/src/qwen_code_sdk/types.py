@@ -102,9 +102,7 @@ class TimeoutOptions:
             # with the strict `JSON.parse`, which rejects the non-standard
             # `Infinity` literal — the session would die at startup.
             if not math.isfinite(raw):
-                raise ValueError(
-                    f"timeout.{name} must be a finite number of seconds"
-                )
+                raise ValueError(f"timeout.{name} must be a finite number of seconds")
             return float(raw)
 
         return cls(
