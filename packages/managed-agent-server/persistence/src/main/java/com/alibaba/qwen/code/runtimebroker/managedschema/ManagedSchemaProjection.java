@@ -18,6 +18,9 @@ public enum ManagedSchemaProjection {
     CHANNEL_INSTANCE(
             "tenant_id, channel_id, platform, account_id, account_generation, state, actor_id, "
                     + "workspace_id, cwd_relative, policy_json, gmt_create, gmt_modified"),
+    PR_WATCH_BINDING(
+            "tenant_id, channel_id, binding_id, owner, repo, pr_number, session_id, "
+                    + "events_json, gmt_create"),
     DELIVERY(
             "delivery_key, delivery_kind, tenant_id, channel_id, delivery_id, source_session_id, "
                     + "target_session_id, source_scope_key, source_record_key, source_revision, "
@@ -33,8 +36,8 @@ public enum ManagedSchemaProjection {
                     + "output_ranges_json, is_projection_pending, gmt_modified"),
     JOURNAL_PACK(
             "pack_id, session_scope_key, tenant_id, workspace_id, session_id, from_revision, "
-                    + "through_revision, manifest_resource_key, object_key, state, byte_length, sha256, "
-                    + "builder_id, gmt_create, gmt_modified"),
+                    + "through_revision, manifest_resource_key, object_key, state, is_put_closed, "
+                    + "active_from_revision, byte_length, sha256, builder_id, gmt_create, gmt_modified"),
     MESSAGE(
             "tenant_id, session_id, item_id, turn_id, item_type, item_role, item_status, "
                     + "attributes_json, first_sequence, last_sequence, gmt_create, gmt_modified, revision, "
@@ -95,8 +98,9 @@ public enum ManagedSchemaProjection {
                     + "canonical_cwd, capability_digest, isolation_class, isolation_key, provisioner_kind, "
                     + "storage_id, storage_alias_key, runtime_generation, binding_state, "
                     + "provision_request_id, provision_seed_ciphertext, is_provision_seeded, "
-                    + "credential_key_id, resource_handle_version, resource_handle_json, "
-                    + "loss_evidence_json, stop_evidence_json, runtime_instance_id, runtime_endpoint, "
+                    + "credential_key_id, resource_handle_version, is_recovery_candidate, "
+                    + "resource_handle_json, loss_evidence_json, stop_evidence_json, "
+                    + "runtime_instance_id, runtime_endpoint, "
                     + "runtime_lease_id, runtime_epoch, runtime_credential_ciphertext, "
                     + "runtime_credential_key_id, attestation_generation, is_drain_requested, "
                     + "operation_owner, operation_lease_until, operation_generation, record_version, "
@@ -120,8 +124,8 @@ public enum ManagedSchemaProjection {
                     + "gate_failures, gate_last_error"),
     SCHEDULE_OCCURRENCE(
             "tenant_id, schedule_id, occurrence_key, run_id, session_id, slot, trigger_kind, "
-                    + "outcome, reason, definition_revision, fence, attempts, next_retry_at, last_error, "
-                    + "gmt_create, gmt_modified"),
+                    + "outcome, is_run_terminal, reason, definition_revision, fence, attempts, "
+                    + "next_retry_at, last_error, gmt_create, gmt_modified"),
     SESSION(
             "tenant_id, session_id, agent_id, title, status, harness_boot_id, "
                     + "harness_event_epoch, harness_last_event_id, gmt_create, gmt_modified, version, "

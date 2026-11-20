@@ -268,19 +268,67 @@ describe('ScreenReaderOutputWriter (ink append-only parity)', () => {
     expect(writes).toEqual(['abcd\ne']);
   });
 
-  it('keeps TAB — it separates words in tool/model output (R3-6)', () => {
+  it('hard-wraps static output at the writer column width', () => {
+    const writes: string[] = [];
+    const writer = new ScreenReaderOutputWriter(
+      (chunk) => writes.push(chunk),
+      () => 4,
+    );
+    writer.appendStatic('abcdefgh');
+    expect(writes).toEqual(['abcd\nefgh\n']);
+  });
+
+  it('keeps TAB word separation in tool/model output (R3-6)', () => {
     const writes: string[] = [];
     const writer = new ScreenReaderOutputWriter((chunk) => writes.push(chunk));
     writer.appendStatic('NAME\tSIZE\nfoo\t10');
-    expect(writes).toEqual(['NAME\tSIZE\nfoo\t10\n']);
-    // The dynamic path hard-wraps via wrap-ansi, which expands tabs to the
-    // next tab stop — word separation survives either way, which is the
-    // point: deleting TAB outright fuses adjacent tokens.
+    // Both lanes hard-wrap via wrap-ansi (ink wraps its whole screen-reader
+    // output), which expands tabs to the next tab stop. Word separation is
+    // the point: deleting TAB outright fuses adjacent tokens.
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatch(/^NAME {2,}SIZE\nfoo {2,}10\n$/);
     const dynamicWrites: string[] = [];
     const dynamicWriter = new ScreenReaderOutputWriter((chunk) =>
       dynamicWrites.push(chunk),
     );
     dynamicWriter.updateDynamic('a\tb');
     expect(dynamicWrites[0]).toMatch(/^a {2,}b$/);
+  });
+});
+
+describe('ScreenReaderOutputWriter C1 boundary', () => {
+  const payloads = [
+    ['OSC clipboard', '\u009d52;c;QUFBQQ==\u009c'],
+    ['OSC title', '\u009d0;untrusted-title\u009c'],
+    ['DCS', '\u0090untrusted-body\u009c'],
+    ['APC', '\u009funtrusted-body\u009c'],
+    ['PM', '\u009euntrusted-body\u009c'],
+    ['SOS', '\u0098untrusted-body\u009c'],
+    ['standalone ST', 'left\u009cright'],
+    [
+      'every C1 code point',
+      String.fromCodePoint(
+        ...Array.from({ length: 32 }, (_, index) => 0x80 + index),
+      ),
+    ],
+  ] as const;
+
+  describe.each(['static', 'dynamic'] as const)('%s output', (mode) => {
+    it.each(payloads)(
+      'does not forward C1 controls from %s content',
+      (_name, payload) => {
+        const chunks: string[] = [];
+        const writer = new ScreenReaderOutputWriter((chunk) => {
+          chunks.push(chunk);
+        });
+        if (mode === 'static') writer.appendStatic(payload);
+        else writer.updateDynamic(payload);
+        const forwardedControls = Array.from(
+          chunks.join(''),
+          (character) => character.codePointAt(0)!,
+        ).filter((codePoint) => codePoint >= 0x80 && codePoint <= 0x9f);
+        expect(forwardedControls).toEqual([]);
+      },
+    );
   });
 });

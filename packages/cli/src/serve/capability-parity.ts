@@ -421,6 +421,7 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     evidence: 'surface:MCP_MANAGEMENT',
   },
   session_recap: NO_MANAGED_EQUIVALENT('no Managed recap route'),
+  session_mod_rows: NO_MANAGED_EQUIVALENT('no Managed Mod row route'),
   session_generation: NO_MANAGED_EQUIVALENT(
     'no Managed stateless generation route',
   ),
@@ -693,6 +694,20 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'STORE_WRITER_ACQUIRE',
   'STORE_WRITER_RENEW',
   'STORE_WRITER_SEAL',
+  // Internal channel-adapter surface: between the control plane and its trusted
+  // adapter deployment (tenant header + isolated internal listener), never a
+  // client capability. The PR-watch binding/injection routes are the same
+  // trusted-adapter surface for bound-session proactive delivery.
+  'CHANNEL_ADAPTER_REGISTER',
+  'CHANNEL_ADAPTER_DISCONNECT',
+  'CHANNEL_ADAPTER_INBOUND',
+  'CHANNEL_ADAPTER_DELIVERY_CLAIM',
+  'CHANNEL_ADAPTER_DELIVERY_RECEIPT',
+  'CHANNEL_ADAPTER_DELIVERY_RESEND',
+  'PR_WATCH_BINDING_CREATE',
+  'PR_WATCH_BINDING_LIST',
+  'PR_WATCH_BINDING_RETIRE',
+  'PR_WATCH_INJECT',
 ]);
 
 /**

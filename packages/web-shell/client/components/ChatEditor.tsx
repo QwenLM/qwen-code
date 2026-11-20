@@ -2009,6 +2009,7 @@ export const ChatEditor = memo(
       fileUploadDirectory,
       fileDropAction,
       composerVariant = 'default',
+      composerGlowEnabled = true,
       modelPicker,
     } = useWebShellCustomization();
     const [advancedMode, setAdvancedMode] = useState(false);
@@ -2784,16 +2785,13 @@ export const ChatEditor = memo(
       };
     }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
 
-    // editorViewRef is stable for the component's lifetime, so this effect
-    // runs once and the glow stays attached to the initial contentDOM; it
-    // re-attaches only if the view ref itself is replaced (CodeMirror
-    // recreates contentDOM on view swap, which is uncommon).
     useEffect(() => {
+      if (!composerGlowEnabled) return undefined;
       const glowRoot = containerRef.current;
       const inputEl = editorViewRef.current?.contentDOM;
       if (!glowRoot || !inputEl) return undefined;
       return attachComposerGlow(glowRoot, inputEl);
-    }, [editorViewRef]);
+    }, [composerGlowEnabled, editorViewRef]);
 
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -3341,24 +3339,18 @@ export const ChatEditor = memo(
           Number.parseFloat(getComputedStyle(toolbar).columnGap) || 0,
         );
         const toolbarWidth = Math.floor(toolbar.getBoundingClientRect().width);
-        const rightWidth = Math.ceil(
-          toolbarRight.getBoundingClientRect().width,
-        );
         const rightGap =
           Number.parseFloat(getComputedStyle(toolbarRight).columnGap) || 0;
         const toggle = widthToggleRef.current;
-        // Exclude the toggle so its own visibility cannot affect the result.
         const toggleSpace = toggle
           ? toggle.getBoundingClientRect().width + rightGap
           : 0;
-        setWidthToggleFits(
-          toolbarWidth - currentLeadingWidth - rightWidth + toggleSpace - gap >=
-            50,
-        );
         const availableWidth = getToolbarExpansionBudget({
           toolbarWidth,
           leadingWidth: currentLeadingWidth,
-          rightWidth,
+          rightWidth: Math.ceil(
+            toolbarRight.getBoundingClientRect().width - toggleSpace,
+          ),
           currentExpansionWidth,
           gap,
         });
@@ -3371,6 +3363,13 @@ export const ChatEditor = memo(
           // expanding so a collapsed/expanded pair cannot form a two-cycle.
           expansionMargin: items.length,
         });
+        // Give labels first use of the space so the toggle cannot evict them.
+        const nextExpansionWidth = items.reduce(
+          (total, item) =>
+            total + (itemVisibility[item.id] ? item.expansionWidth : 0),
+          0,
+        );
+        setWidthToggleFits(availableWidth - nextExpansionWidth >= 50);
         const next = {
           workspaceSelect: itemVisibility.workspaceSelect ?? false,
           workspace: itemVisibility.workspace ?? false,
@@ -4405,10 +4404,8 @@ export const ChatEditor = memo(
           onDragOver={handleUploadDragOver}
           onDragLeave={handleUploadDragLeave}
           onDropCapture={handleUploadDrop}
-          // Legacy marker from the pre-#8098 glow implementation; no CSS or
-          // script consumes it today, kept as-is to stay faithful to the
-          // restored original.
-          data-dac-glow
+          // Preserve the legacy marker for composers with the glow enabled.
+          data-dac-glow={composerGlowEnabled || undefined}
           onClick={(event) => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -4420,8 +4417,12 @@ export const ChatEditor = memo(
             core.focus();
           }}
         >
-          <div className={styles.dacAura} aria-hidden="true" />
-          <div className={styles.dacHalo} aria-hidden="true" />
+          {composerGlowEnabled && (
+            <>
+              <div className={styles.dacAura} aria-hidden="true" />
+              <div className={styles.dacHalo} aria-hidden="true" />
+            </>
+          )}
           {uploadEnabled && (
             <input
               ref={fileInputRef}
