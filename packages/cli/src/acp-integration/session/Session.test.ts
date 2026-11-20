@@ -29793,7 +29793,7 @@ describe('Session', () => {
     });
 
     describe('tool outcome telemetry (#4602 review)', () => {
-      it('records a soft tool failure (toolResult.error) as error, not success', async () => {
+      it.each([false, true])('failure (isError=%s)', async (isError) => {
         const logToolCallSpy = vi
           .spyOn(core, 'logToolCall')
           .mockImplementation(() => {});
@@ -29806,9 +29806,11 @@ describe('Session', () => {
             params: { path: '/tmp/test.txt' },
             getDefaultPermission: vi.fn().mockResolvedValue('allow'),
             execute: vi.fn().mockResolvedValue({
-              llmContent: 'nope',
+              llmContent: 'SLOT_CLOSED: Choose another slot.',
               returnDisplay: 'failed',
-              error: { message: 'tool blew up' },
+              ...(isError
+                ? { isError: true }
+                : { error: { message: 'tool blew up' } }),
               artifacts: [
                 {
                   title: 'Failure artifact',
@@ -29886,8 +29888,22 @@ describe('Session', () => {
           message: Part[];
         };
         expect(followUp.message[0].functionResponse?.response).toEqual({
-          error: 'nope',
+          error: 'SLOT_CLOSED: Choose another slot.',
         });
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            update: expect.objectContaining({
+              toolCallId: 'call-1',
+              _meta: expect.objectContaining({
+                toolLifecycle: expect.objectContaining({
+                  phase: 'ended',
+                  executionStatus: 'error',
+                  outcome: 'error',
+                }),
+              }),
+            }),
+          }),
+        );
         expect(
           followUp.message[0].functionResponse?.response,
         ).not.toHaveProperty('output');

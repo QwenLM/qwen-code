@@ -677,6 +677,9 @@ export interface ToolResult {
    */
   artifacts?: ToolArtifact[];
 
+  /** The tool returned a failure result. Its body is in llmContent. */
+  isError?: boolean;
+
   /**
    * If this property is present, the tool call is considered a failure.
    */

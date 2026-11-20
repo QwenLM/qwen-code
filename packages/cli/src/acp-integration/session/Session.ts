@@ -25,6 +25,7 @@ import {
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import {
+  getToolResultErrorMessage,
   INCOMPLETE_ARGS_EDIT_REJECTION,
   INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE,
   isToolCallConcurrencySafe,
@@ -19665,6 +19666,7 @@ export class Session implements SessionContext {
           };
 
           let toolResult: ToolResult;
+          let resultErrorMessage: string | undefined;
           let isExecutionTimeout = false;
           let parentAbortedAtExecutionSettle = false;
           let aborted = false;
@@ -19775,7 +19777,7 @@ export class Session implements SessionContext {
                   lifecycleActualStatus =
                     activeToolAbortSignal.aborted && !timeout
                       ? 'cancelled'
-                      : threw || result?.error
+                      : threw || result?.error || result?.isError === true
                         ? 'error'
                         : 'success';
                   if (lifecycleTerminalOutcome)
@@ -20002,13 +20004,15 @@ export class Session implements SessionContext {
               isExecutionTimeout =
                 toolResult.error?.type === ToolErrorType.EXECUTION_TIMEOUT;
               aborted = parentAbortedAtExecutionSettle && !isExecutionTimeout;
+              resultErrorMessage = getToolResultErrorMessage(toolResult);
+              const failed = resultErrorMessage !== undefined;
               executionStatus = aborted
                 ? 'cancelled'
-                : toolResult.error
+                : failed
                   ? 'error'
                   : 'success';
-              executionErrorType = toolResult.error
-                ? (toolResult.error.type ??
+              executionErrorType = failed
+                ? (toolResult.error?.type ??
                   (toolType === 'mcp'
                     ? ToolErrorType.MCP_TOOL_ERROR
                     : ToolErrorType.UNKNOWN))
@@ -20020,7 +20024,7 @@ export class Session implements SessionContext {
                   ? 'tool_cancelled'
                   : isExecutionTimeout
                     ? 'tool_timeout'
-                    : toolResult.error
+                    : failed
                       ? 'tool_error'
                       : undefined,
                 cancelled: aborted,
@@ -20101,9 +20105,10 @@ export class Session implements SessionContext {
 
           // Plan lifecycle tools change mode atomically inside execute(). Notify
           // only after successful execution and only when the actual mode changed.
+          const failed = resultErrorMessage !== undefined;
           if (
             (isEnterPlanModeTool || isExitPlanModeTool) &&
-            !toolResult.error &&
+            !failed &&
             this.config.getApprovalMode() !== approvalMode
           ) {
             await this.sendCurrentModeUpdateNotification();
@@ -20121,12 +20126,12 @@ export class Session implements SessionContext {
                 TOOL_EXECUTION_CANCELLED_MESSAGE,
                 TOOL_EXECUTION_CANCELLED_MESSAGE,
               )
-            : toolResult.error
+            : resultErrorMessage !== undefined
               ? convertToFunctionErrorResponse(
                   modelFacingToolName,
                   callId,
                   toolResult.llmContent,
-                  toolResult.error.message,
+                  resultErrorMessage,
                   this.config,
                 )
               : convertToFunctionResponse(
@@ -20137,16 +20142,10 @@ export class Session implements SessionContext {
                   this.config,
                 );
 
-          // A tool can fail "softly" by returning toolResult.error without
-          // throwing, and can be cancelled mid-flight. Compute the real outcome
-          // once and reflect it on hooks, the client-facing emitResult,
-          // logToolCall / recordToolResult / the tool span, instead of
-          // hardcoding success — otherwise failed/cancelled daemon/ACP tools
-          // are mislabeled as successful in telemetry, session replay, and the
-          // client UI.
+          // Keep the tool update, hooks, telemetry, and replay aligned.
           let status: 'success' | 'error' | 'cancelled' = aborted
             ? 'cancelled'
-            : toolResult.error
+            : failed
               ? 'error'
               : 'success';
           // ACP runs its own tool executor, so it must capture the policy
@@ -20190,7 +20189,7 @@ export class Session implements SessionContext {
             });
           }
 
-          if (isTrustedTodoWriteTool && !toolResult.error) {
+          if (isTrustedTodoWriteTool && !failed) {
             this.todoStopGuard.observeTodoWrite(
               toolResult.returnDisplay,
               this.config.getApprovalMode() !== ApprovalMode.PLAN,
@@ -20202,7 +20201,7 @@ export class Session implements SessionContext {
           if (
             hooksEnabledForTool &&
             messageBusForTool &&
-            !toolResult.error &&
+            !failed &&
             !aborted &&
             !nestedPermissionCancelled
           ) {
@@ -20275,7 +20274,7 @@ export class Session implements SessionContext {
           } else if (
             hooksEnabledForTool &&
             messageBusForTool &&
-            (toolResult.error || aborted)
+            (failed || aborted)
           ) {
             const isInterrupt = aborted;
             // Fire PostToolUseFailure hook when a tool errors or resolves after cancellation.
@@ -20285,7 +20284,7 @@ export class Session implements SessionContext {
                 toolUseId,
                 policyToolName,
                 args,
-                toolResult.error?.message ?? TOOL_EXECUTION_CANCELLED_MESSAGE,
+                resultErrorMessage ?? TOOL_EXECUTION_CANCELLED_MESSAGE,
                 isInterrupt,
                 permissionMode,
                 activeToolAbortSignal,
@@ -20376,8 +20375,8 @@ export class Session implements SessionContext {
           finishToolLifecycle(status);
           const succeeded = status === 'success';
           const responseError =
-            status === 'error' && toolResult.error
-              ? new Error(toolResult.error.message)
+            status === 'error'
+              ? new Error(resultErrorMessage)
               : status === 'cancelled'
                 ? new Error(cancelReason)
                 : undefined;
@@ -20454,7 +20453,7 @@ export class Session implements SessionContext {
               success: succeeded,
               ...(status === 'error'
                 ? {
-                    error: toolResult.error?.message,
+                    error: resultErrorMessage,
                     error_type: executionErrorType,
                   }
                 : {}),
@@ -20491,10 +20490,7 @@ export class Session implements SessionContext {
                 ? { visionBridgeNotice }
                 : {}),
               artifacts: settledArtifacts,
-              error:
-                status === 'error' && toolResult.error
-                  ? new Error(toolResult.error.message)
-                  : undefined,
+              error: status === 'error' ? responseError : undefined,
               errorType: status === 'error' ? executionErrorType : undefined,
             },
           });
@@ -20513,8 +20509,8 @@ export class Session implements SessionContext {
               }
             }
           }
-          if (status === 'error' && toolResult.error) {
-            spanError = toolResult.error.message;
+          if (status === 'error') {
+            spanError = resultErrorMessage;
           }
           return {
             parts: modelResponseParts,

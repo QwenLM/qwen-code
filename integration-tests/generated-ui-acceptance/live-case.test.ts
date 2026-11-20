@@ -117,8 +117,8 @@ describe('tool use across sessions', () => {
   const viewError =
     'VIEW_ERROR: The initial calculation updates "#absent", but no element has that id. Nothing was displayed. Correct the document and call generated_ui_show again with all five fields.';
 
-  it('counts a rejected view from an earlier session once', () => {
-    const rejected = mcpError(viewError);
+  it.each([toolResult, mcpError])('counts once (%s)', (format) => {
+    const rejected = format(viewError);
     expect(
       toolUse([
         request([{ role: 'user', content: 'first session' }, show, rejected]),

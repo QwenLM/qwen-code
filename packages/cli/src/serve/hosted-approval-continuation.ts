@@ -398,7 +398,7 @@ export async function readHostedApprovalContinuation(
           await readHostedQuestionDecision(session, action, options);
       }
       if (
-        (options.v !== 3 && options.v !== 4) ||
+        !options.continuationRef ||
         (questionBatch && options.v !== 4) ||
         options.functionCallId !== item.call.callId ||
         options.turnId !== promptId ||
@@ -521,7 +521,7 @@ export async function findHostedApprovalContinuation(
       !callIds.includes(options.functionCallId)
     )
       continue;
-    if (options.v !== 3 && options.v !== 4) return undefined;
+    if (!options.continuationRef) return undefined;
     approvalRef ??= options.continuationRef;
   }
   const planRef = batch
