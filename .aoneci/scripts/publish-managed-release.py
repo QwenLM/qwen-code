@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish one verified Managed release to Maven, OSS and the release manifest.
+"""Verify one Managed release, or publish it to Maven and OSS.
 
 Consumes the four CI artifacts produced by native_release, runtime_release and the
 Worker/Harness image jobs:
@@ -22,6 +22,11 @@ Ordering guarantees:
      and its SHA256 re-verified. SDK and MAS are both published to Maven. The release
      manifest, including immutable Worker/Harness image digests, is written last as
      the commit marker for the release.
+
+With --bundle-out, the script stops after verification and writes a release bundle
+manifest. This is the Aone CI mode: CI artifacts carry MAS/SDK and runtime, build-image
+has already pushed Worker/Harness, and authenticated Maven publication remains a
+separate manual operation.
 
 Credentials are read from the environment and are never printed, never put on a
 command line, and never embedded in an error message.
@@ -390,6 +395,8 @@ def main():
                         help="Directory containing harness-image.json")
     parser.add_argument("--expected-native-mode", choices=("package", "verify"),
                         help="Native producer mode that must match provenance")
+    parser.add_argument("--bundle-out", type=Path,
+                        help="verify the inputs and write a release bundle manifest without external writes")
     parser.add_argument("--repo", type=Path, default=Path("."),
                         help="qwen-code checkout (for resolve-oss-sts.sh fallback)")
     args = parser.parse_args()
@@ -409,6 +416,25 @@ def main():
             plan["runtimeProvenance"]),
     }
     print(f"verified release {args.release_id} at {args.source_sha}")
+
+    manifest = {
+        "releaseId": args.release_id,
+        "sourceRevision": args.source_sha,
+        "nativeMode": plan["nativeMode"],
+        "maven": {
+            "repository": MAVEN_REPO_URL,
+            "sdk": plan["sdkCoordinate"],
+            "server": plan["coordinate"],
+        },
+        "images": images,
+        "hashes": plan["hashes"],
+    }
+    if args.bundle_out:
+        args.bundle_out.parent.mkdir(parents=True, exist_ok=True)
+        args.bundle_out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        print(json.dumps(manifest, indent=2, sort_keys=True))
+        print(f"verified release bundle {args.bundle_out}")
+        return
 
     server_key = f"managedagent/java/qwen-managed-agent-server-{args.release_id}.jar"
     runtime_key = f"managedagent/runtime/{args.release_id}/qwen-runtime-{args.release_id}.tar.gz"
@@ -449,23 +475,14 @@ def main():
     oss_put(runtime_key, plan["runtimeTar"], access_key, secret, security_token)
     oss_verify(runtime_key, plan["hashes"]["runtimeTarSha256"], access_key, secret, security_token)
 
-    manifest = {
-        "releaseId": args.release_id,
-        "sourceRevision": args.source_sha,
+    manifest.update({
         "publishedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "bucket": BUCKET,
         "objects": {
             "serverJar": {"key": server_key, "sha256": plan["hashes"]["serverJarSha256"]},
             "runtime": {"key": runtime_key, "sha256": plan["hashes"]["runtimeTarSha256"]},
         },
-        "maven": {
-            "repository": MAVEN_REPO_URL,
-            "sdk": plan["sdkCoordinate"],
-            "server": plan["coordinate"],
-        },
-        "images": images,
-        "hashes": plan["hashes"],
-    }
+    })
     manifest_path = Path(tempfile.mkstemp(prefix="release-manifest-", suffix=".json")[1])
     try:
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
