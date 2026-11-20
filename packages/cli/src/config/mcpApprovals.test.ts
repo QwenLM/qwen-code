@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import { hashMcpServerConfig } from '@qwen-code/qwen-code-core';
 import {
+  LoadedMcpApprovals,
   loadMcpApprovals,
   getPendingGatedMcpServers,
   getPromptableMcpServers,
@@ -114,8 +115,23 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     const approvals = loadMcpApprovals();
     await expect(
       approvals.setState(projectRoot, 'slack', server, 'approved'),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(true);
     expect(approvals.getState(projectRoot, 'slack', server)).toBe('approved');
+  });
+
+  it('reports a failed write instead of only logging it', async () => {
+    // A directory at the target path makes the atomic write fail; callers that
+    // must persist before moving on (session `cd`) need the failure back.
+    const blockedPath = path.join(dir, 'blocked-target');
+    fs.mkdirSync(blockedPath);
+    const approvals = new LoadedMcpApprovals(
+      { path: blockedPath, config: {} },
+      [],
+    );
+
+    await expect(
+      approvals.setState(projectRoot, 'slack', server, 'approved'),
+    ).resolves.toBe(false);
   });
 
   it('recovers when the approvals file is not a JSON object', () => {
