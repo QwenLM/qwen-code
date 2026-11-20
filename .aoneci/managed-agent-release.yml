@@ -49,7 +49,7 @@ jobs:
             python3 -u .aoneci/scripts/build-managed-agent-native.py \
               --mode "$1" --release-id "$2" --source-sha "$3" --out "$4" 2>&1 |
               tee "$4/producer.log"
-          ' "${{ params.nativeGate }}" "${{ params.releaseId }}" "${{ params.sourceSha }}" .aone-output/native_release || code=$?
+          ' managed-release "${{ params.nativeGate }}" "${{ params.releaseId }}" "${{ params.sourceSha }}" .aone-output/native_release || code=$?
           echo "$code" > .aone-output/native_release/exit-code
       - uses: upload-artifact@1.1.4
         inputs:
