@@ -1,7 +1,9 @@
 # Managed /loop 延后评审钉子
 
-- 状态：提案
+- 状态：已合入 — [#17594](https://github.com/QwenLM/qwen-code/pull/17594)，squash `4612552f46`，2026-11-20T03:51:54Z（由 yiliang114 与 qqqys 批准）
 - 日期：2026-11-17
+- 合入 head 的验证：已折入十四轮评审与三轮独立验证。core 35/35、scripts 元 185/185、cli i18n 22/22、`ManagedLoopSkillTest` 19/19、core 邻近面 88 文件 / 4187 测试，且整栈重建后两条打包臂均绿——skill session `78f20402-0a2f-441d-9615-21b66959ad1a`，fire session `8d2a1796-8e93-4765-97c6-21ef29f1a4c1`、occurrenceKey `schedule:2026-11-19T19:28:00Z`（scheduled/fired/completed）。四项必需检查全部通过。下文记录承载每一条变异见证、每一次字节级还原与每一条 CI 归因。
+- 后续：[#17673](https://github.com/QwenLM/qwen-code/issues/17673)——六条开放加固项，含终结拼写 evasion 家族的「执行判定」接缝；[#17885](https://github.com/QwenLM/qwen-code/issues/17885)——windows-latest Java 车道的 argv 上限，属 main 自有、在此已归因。
 - 关联：[Managed loop skill 资产](2026-11-14-managed-loop-skill-asset.zh-CN.md)（#17272）、[skill E2E CI 接线](2026-11-14-managed-loop-skill-asset.zh-CN.md)（#17433、#17470）、[定时触发 E2E](2026-11-17-managed-loop-fire-e2e.zh-CN.md)（#17506）
 - English version: [2026-11-17-managed-loop-deferred-pins.md](2026-11-17-managed-loop-deferred-pins.md)
 
