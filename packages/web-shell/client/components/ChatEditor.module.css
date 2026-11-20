@@ -3252,6 +3252,22 @@
   margin-top: -8px;
 }
 
+/* The caret/slash keys flow inline with the editing row on normal widths.
+   Below 360px they take their own line so the workspace chip and the
+   hide-keyboard/expand controls keep sharing one row (the 240px acceptance). */
+.mobileEditingKeys {
+  display: contents;
+}
+
+@media (max-width: 360px) {
+  .mobileEditingKeys {
+    display: flex;
+    flex-basis: 100%;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+}
+
 .mobileEditingActions:has(.mobileContextRow) {
   align-items: flex-start;
   margin-top: 0;

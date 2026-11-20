@@ -5,10 +5,11 @@
  */
 
 // Touch follow-up suggestion acceptance. Runs under the `mobile-chromium`
-// (Pixel 7) and `mobile-webkit` (iPhone 13) projects, where the composer is
-// the plain-textarea backend: the suggestion renders as a single tappable
-// chip bar above the input in every variant — its content is its label, and
-// the editing row carries no follow-up key. Tapping the chip fills the
+// (Pixel 7) project only: `mobile-webkit` greps @smoke and these cases carry
+// no such tag, so WebKit coverage is not claimed here. The composer is the
+// plain-textarea backend: the suggestion renders as a single tappable chip
+// bar above the input in every variant — its content is its label, and the
+// editing row carries no follow-up-specific key. Tapping the chip fills the
 // textarea without submitting, matching desktop Tab; Send with an empty
 // input keeps submitting the suggestion directly.
 
@@ -279,6 +280,39 @@ test('mobile editing-row direction keys move the caret', async ({
   });
 });
 
+test('mobile editing keys share the row at 390px and own a line at 240px', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const caretUp = page.locator('[data-web-shell-mobile-caret-up]');
+  const expand = page.getByRole('button', {
+    name: 'Expand editor',
+    exact: true,
+  });
+  await expect(caretUp).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect
+    .poll(async () => {
+      const up = (await caretUp.boundingBox())!;
+      const exp = (await expand.boundingBox())!;
+      return Math.abs(up.y - exp.y) <= 1;
+    })
+    .toBe(true);
+  await page.setViewportSize({ width: 240, height: 844 });
+  await expect
+    .poll(async () => {
+      const up = (await caretUp.boundingBox())!;
+      const exp = (await expand.boundingBox())!;
+      return up.y > exp.y + 1;
+    })
+    .toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
+    240,
+  );
+});
+
 test('mobile right key accepts the visible suggestion', async ({
   page,
 }, testInfo) => {
@@ -293,6 +327,26 @@ test('mobile right key accepts the visible suggestion', async ({
   await rightKey.tap();
   await expect(textarea).toHaveValue(SUGGESTION);
   await expect(page.locator(FOLLOWUP_BAR)).toHaveCount(0);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile right key label and accept stay in sync on a typed prefix', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await pushSuggestion(daemon, scenario.sessionId);
+  await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
+  await textarea.fill('run');
+  // The chip hides on a non-empty draft, but the right key still accepts the
+  // completion, so its label must announce the accept, not caret movement.
+  await expect(page.locator(FOLLOWUP_BAR)).toHaveCount(0);
+  const rightKey = page.locator('[data-web-shell-mobile-caret-right]');
+  await expect(rightKey).toHaveAttribute('aria-label', 'Accept suggestion');
+  await rightKey.tap();
+  await expect(textarea).toHaveValue(SUGGESTION);
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 

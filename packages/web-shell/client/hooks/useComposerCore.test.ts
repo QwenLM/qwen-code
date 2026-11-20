@@ -35,6 +35,11 @@ describe('touch editing-key caret targets', () => {
   it('lands on empty lines with a zero column', () => {
     expect(computeCaretTarget('a\n\nb', 3, 3, 'up')).toBe(2);
   });
+
+  it('moves from the selection head (end), not its anchor, when active', () => {
+    expect(computeCaretTarget('aa\nbbb\ncc', 1, 5, 'up')).toBe(2);
+    expect(computeCaretTarget('aa\nbbb\ncc', 1, 5, 'down')).toBe(9);
+  });
 });
 
 describe('follow-up completion helpers', () => {

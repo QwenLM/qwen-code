@@ -36,7 +36,7 @@
 
 ## 验证
 
-- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):11/11 通过——chip 填入不发送、忽略、空输入直发、打字隐藏、前缀补全、编辑行不带 follow-up 专用键而 chip 接受(default 变体)、chip 可见时 placeholder 保持普通文案(单 surface)、光标上/下/右移动、→ 接受可见建议、字面斜杠插入,以及两条 zh-CN 用例钉住本地化 chip 文本、忽略标签与光标键标签并截中文 UI 图。composer-layout harness 为这些用例提供可选 `language` URL 参数;spec 会把取证截图写入其 test-results 输出目录。
+- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):11/11 通过——chip 填入不发送、忽略、空输入直发、打字隐藏、前缀补全、编辑行不带 follow-up 专用键而 chip 接受(default 变体)、chip 可见时 placeholder 保持普通文案(单 surface)、光标上/下/右移动、→ 接受可见建议、字面斜杠插入,以及两条 zh-CN 用例钉住本地化 chip 文本、忽略标签与光标键标签并截中文 UI 图。这些用例传 `?language=`,由 App 的 `getInitialLanguage` 直接读取(无需 harness prop);spec 会把取证截图写入其 test-results 输出目录。
 - `ChatEditor.test.tsx` mobile composer actions:单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)、accept/dismiss 接线、编辑键接线与 → 的动态 aria-label;`useComposerCore.test.ts` 钉行感知光标计算;合并后 head 上三个文件 398/398 通过。
 - web-shell `tsc --noEmit` 与改动文件 ESLint:干净。
 - 未覆盖:mobile-webkit / iOS 真机(本机缺 WebKit 运行库);软键盘弹起时新增行的高度挤压;iPad 外接键盘 Tab/→ 接受(后置)。

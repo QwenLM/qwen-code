@@ -74,6 +74,7 @@ import {
   getComposerTagDisplay,
   getComposerTagLabel,
   getComposerTagValue,
+  getFollowupCompletion,
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
 import {
@@ -4113,6 +4114,15 @@ export const ChatEditor = memo(
       core.followupState.suggestion
         ? core.followupState.suggestion
         : null;
+    // The right key accepts on a typed prefix too, so its label follows the
+    // same completion the key performs, not the empty-draft chip rule.
+    const touchFollowupCompletion =
+      core.mobileComposer && core.followupState?.isVisible
+        ? getFollowupCompletion(
+            core.mobileComposer.value,
+            core.followupState.suggestion,
+          )
+        : null;
 
     const primaryInput = (
       <>
@@ -4848,62 +4858,6 @@ export const ChatEditor = memo(
                 {!mobileContextRowVisible && (
                   <span className={styles.mobileEditingSpacer} />
                 )}
-                <button
-                  type="button"
-                  className={styles.toolBtn}
-                  disabled={disabled}
-                  aria-label={t('composerMobile.caretUp')}
-                  title={t('composerMobile.caretUp')}
-                  data-web-shell-mobile-caret-up
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => core.pressEditingKey('up')}
-                >
-                  <ArrowUpIcon />
-                </button>
-                <button
-                  type="button"
-                  className={styles.toolBtn}
-                  disabled={disabled}
-                  aria-label={t('composerMobile.caretDown')}
-                  title={t('composerMobile.caretDown')}
-                  data-web-shell-mobile-caret-down
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => core.pressEditingKey('down')}
-                >
-                  <ArrowDownIcon />
-                </button>
-                <button
-                  type="button"
-                  className={styles.toolBtn}
-                  disabled={disabled}
-                  aria-label={
-                    mobileFollowupSuggestion
-                      ? t('composerMobile.acceptFollowup')
-                      : t('composerMobile.caretRight')
-                  }
-                  title={
-                    mobileFollowupSuggestion
-                      ? t('composerMobile.acceptFollowup')
-                      : t('composerMobile.caretRight')
-                  }
-                  data-web-shell-mobile-caret-right
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => core.pressEditingKey('right')}
-                >
-                  <ArrowRightIcon />
-                </button>
-                <button
-                  type="button"
-                  className={styles.toolBtn}
-                  disabled={disabled}
-                  aria-label={t('composerMobile.insertSlash')}
-                  title={t('composerMobile.insertSlash')}
-                  data-web-shell-mobile-insert-slash
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => core.pressEditingKey('slash')}
-                >
-                  <SlashIcon />
-                </button>
                 {mobileFocused && (
                   <button
                     type="button"
@@ -4934,6 +4888,67 @@ export const ChatEditor = memo(
                 >
                   <Maximize2Icon />
                 </button>
+                <div
+                  className={styles.mobileEditingKeys}
+                  data-web-shell-mobile-editing-keys
+                >
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    aria-label={t('composerMobile.caretUp')}
+                    title={t('composerMobile.caretUp')}
+                    data-web-shell-mobile-caret-up
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => core.pressEditingKey('up')}
+                  >
+                    <ArrowUpIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    aria-label={t('composerMobile.caretDown')}
+                    title={t('composerMobile.caretDown')}
+                    data-web-shell-mobile-caret-down
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => core.pressEditingKey('down')}
+                  >
+                    <ArrowDownIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    aria-label={
+                      touchFollowupCompletion
+                        ? t('composerMobile.acceptFollowup')
+                        : t('composerMobile.caretRight')
+                    }
+                    title={
+                      touchFollowupCompletion
+                        ? t('composerMobile.acceptFollowup')
+                        : t('composerMobile.caretRight')
+                    }
+                    data-web-shell-mobile-caret-right
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => core.pressEditingKey('right')}
+                  >
+                    <ArrowRightIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    aria-label={t('composerMobile.insertSlash')}
+                    title={t('composerMobile.insertSlash')}
+                    data-web-shell-mobile-insert-slash
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => core.pressEditingKey('slash')}
+                  >
+                    <SlashIcon />
+                  </button>
+                </div>
               </div>
             )}
             {mobileFollowupSuggestion && (

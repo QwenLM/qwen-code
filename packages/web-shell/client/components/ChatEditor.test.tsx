@@ -6756,6 +6756,24 @@ describe('ChatEditor mobile composer actions', () => {
     expect(composerCoreState.pressEditingKey).toHaveBeenCalledTimes(4);
   });
 
+  it('announces the accept on the right key exactly when a completion matches', () => {
+    mobileComposer('run');
+    visibleFollowup();
+    const container = renderChatEditor({ visibleToolbarActions: [] });
+    expect(
+      container
+        .querySelector('[data-web-shell-mobile-caret-right]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Accept suggestion');
+    mobileComposer('other');
+    rerenderChatEditor(container, { visibleToolbarActions: [] });
+    expect(
+      container
+        .querySelector('[data-web-shell-mobile-caret-right]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Move cursor right');
+  });
+
   it('keeps the editing-row keys out of the simple variant', () => {
     mobileComposer();
     const container = renderChatEditor({
