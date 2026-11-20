@@ -14,7 +14,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
-import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
@@ -1787,62 +1786,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         }
         return bindingProvisioning.recoverBinding(
                 bindingId, expectedGeneration, false, expectedVersion);
-    }
-
-    private boolean blockRecovery(RuntimeBindingRecord claimed) {
-        return bindingRepository.compareAndSet(claimed, claimed.withState(
-                RuntimeBindingRecord.State.RECOVERY_BLOCKED,
-                claimed.getLease(), clock.instant())) != null;
-    }
-
-    /**
-     * Blocks recovery and answers whether the binding is now blocked. The
-     * deadline and the failure handler hold the same claim, so the one that
-     * writes second finds the block already there. A write or read that
-     * fails answers false, and the failure is kept on {@code cause}.
-     */
-    private boolean blockRecoveryQuietly(RuntimeBindingRecord claimed,
-            Throwable cause) {
-        try {
-            if (blockRecovery(claimed)) {
-                return true;
-            }
-            RuntimeBindingRecord latest = bindingRepository.findById(
-                    claimed.getBindingId());
-            return latest != null && latest.getState()
-                    == RuntimeBindingRecord.State.RECOVERY_BLOCKED;
-        } catch (RuntimeException failure) {
-            cause.addSuppressed(failure);
-            return false;
-        }
-    }
-
-    private void blockRecovery(String bindingId, long operationGeneration) {
-        RuntimeBindingRecord latest = bindingRepository.findById(bindingId);
-        if (latest != null && ownsOperation(latest, operationGeneration)
-                && latest.getState() == RuntimeBindingRecord.State.READY) {
-            blockRecovery(latest);
-        }
-    }
-
-    private boolean ownsOperation(RuntimeBindingRecord record,
-            long operationGeneration) {
-        return brokerOwnerId.equals(record.getOperationOwner())
-                && record.getOperationGeneration() == operationGeneration;
-    }
-
-    private long operationDeadlineNanos() {
-        long leaseNanos = operationLeaseDuration.toNanos();
-        return leaseNanos > Long.MAX_VALUE / 4
-                ? Long.MAX_VALUE : leaseNanos * 4;
-    }
-
-    private long operationDeadlineMillis() {
-        return Math.max(1, operationDeadlineNanos() / 1_000_000);
-    }
-
-    private record DurableProvision(RuntimeLease lease,
-            RuntimeResourceHandle handle) {
     }
 
     private record ReconcileStep(Kind kind, RuntimeObservation observation,
