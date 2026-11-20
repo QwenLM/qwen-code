@@ -216,7 +216,7 @@ jobs:
           GH_TOKEN: '${{ github.token }}'
           REPO: '${{ github.repository }}'
           RUN_ID: '${{ github.run_id }}'
-        run: bash .github/scripts/managed-agent-gate-tier.sh
+        run: 'bash .github/scripts/managed-agent-gate-tier.sh'
 
   suite:
     name: 'SDK Java (${{ needs.scope.outputs.tier }})'
