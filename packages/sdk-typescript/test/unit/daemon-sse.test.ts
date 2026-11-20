@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseSseStream } from '../../src/daemon/sse.js';
+import { parseSseStream, SseFramingError } from '../../src/daemon/sse.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
 function bodyFromString(s: string): ReadableStream<Uint8Array> {
@@ -41,6 +41,125 @@ async function collect(
 }
 
 describe('parseSseStream', () => {
+  it.each(['\n\n', '\r\n\r\n'])(
+    'stops a buffered batch immediately after abort (%j)',
+    async (separator) => {
+      const controller = new AbortController();
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        start(stream) {
+          stream.enqueue(
+            new TextEncoder().encode(
+              [1, 2, 3]
+                .map((id) => `data: ${JSON.stringify({ id, v: 1, type: 'x' })}`)
+                .join(separator) + separator,
+            ),
+          );
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const events: number[] = [];
+      for await (const event of parseSseStream(body, controller.signal)) {
+        events.push(event.id!);
+        controller.abort();
+      }
+      expect(events).toEqual([1]);
+      expect(cancelled).toBe(true);
+    },
+  );
+
+  it('does not deliver a read that settles during cancellation', async () => {
+    const controller = new AbortController();
+    const body = new ReadableStream<Uint8Array>({
+      pull(stream) {
+        stream.enqueue(
+          new TextEncoder().encode('data: {"v":1,"type":"x"}\n\n'),
+        );
+        controller.abort();
+      },
+    });
+    expect(await collect(parseSseStream(body, controller.signal))).toEqual([]);
+  });
+
+  it.each(['\n\n', '\r\n\r\n'])(
+    'stops a batch from an already-closed stream after abort (%j)',
+    async (separator) => {
+      const controller = new AbortController();
+      const body = bodyFromString(
+        [1, 2, 3]
+          .map((id) => `data: ${JSON.stringify({ id, v: 1, type: 'x' })}`)
+          .join(separator) + separator,
+      );
+      const events: number[] = [];
+      for await (const event of parseSseStream(body, controller.signal)) {
+        events.push(event.id!);
+        controller.abort();
+      }
+      expect(events).toEqual([1]);
+    },
+  );
+
+  it('does not flush a buffered tail after abort settles a parked read', async () => {
+    const controller = new AbortController();
+    let pulls = 0;
+    let cancelled = false;
+    let onParkedRead!: () => void;
+    const parkedRead = new Promise<void>((resolve) => {
+      onParkedRead = resolve;
+    });
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(stream) {
+          if (++pulls === 1) {
+            stream.enqueue(
+              new TextEncoder().encode('data: {"id":7,"v":1,"type":"x"}'),
+            );
+          } else {
+            onParkedRead();
+          }
+        },
+        cancel() {
+          cancelled = true;
+        },
+      },
+      // Avoid prefetch: the second pull must be the parser's next read,
+      // after it has retained the unterminated frame in its buffer.
+      { highWaterMark: 0 },
+    );
+    const pending = collect(parseSseStream(body, controller.signal));
+    await parkedRead;
+    controller.abort();
+
+    await expect(pending).resolves.toEqual([]);
+    expect(cancelled).toBe(true);
+    expect(pulls).toBe(2);
+  });
+
+  it('completes cleanly when an oversized read settles during cancellation', async () => {
+    const controller = new AbortController();
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(stream) {
+        source = stream;
+      },
+    });
+    const pending = collect(parseSseStream(body, controller.signal));
+    source.enqueue(new Uint8Array(16 * 1024 * 1024 + 1).fill(0x78));
+    controller.abort();
+
+    await expect(pending).resolves.toEqual([]);
+  });
+
+  it('rejects an oversized separator-free read without cancellation', async () => {
+    const body = bodyFromString('x'.repeat(16 * 1024 * 1024 + 1));
+
+    await expect(collect(parseSseStream(body))).rejects.toBeInstanceOf(
+      SseFramingError,
+    );
+  });
+
   it('parses a single frame', async () => {
     const stream = bodyFromString(
       'id: 1\nevent: session_update\ndata: {"id":1,"v":1,"type":"session_update","data":"hello"}\n\n',

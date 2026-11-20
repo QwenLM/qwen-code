@@ -87,6 +87,17 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // it or override a user opt-in through settings.env or a project .env.
   'QWEN_CODE_ENABLE_WORKFLOWS',
   'QWEN_CODE_DISABLE_WORKFLOWS',
+  // LSP is the same class of opt-in with a larger blast radius: it spawns
+  // language servers that run with the user's permissions. A cloned repository
+  // must not be able to turn them on, nor to unset an operator's kill switch.
+  'QWEN_CODE_ENABLE_LSP',
+  'QWEN_CODE_DISABLE_LSP',
+  // The agent-loop rollout switches are the same class of opt-in experiment:
+  // a project `.env` must not force the shared loop or the event-bus kernel on
+  // (or off) ahead of the operator's explicit setting. The operator's launch
+  // environment and the parity suites' spawned child env are unaffected.
+  'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+  'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
   // The name-only lock is a deployment policy. A project that wants it sets
   // tools.workflowNameOnly, which a workspace may only turn on; a project
   // .env must not be able to unset the operator's exported value.
@@ -107,6 +118,14 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // review of its own change to one reviewer with no reverse audit. CI
   // welds it as a real step env, never a file.
   'QWEN_REVIEW_AUTOMATIC',
+  // The execution sandbox policy (commands/review/lib/sandboxed-exec.ts
+  // `sandboxPolicy`) is an operator decision: it decides whether the reviewed
+  // repository's install/build/test run contained, with the review's
+  // credentials outside the boundary. Same class as the prebuild switch, and
+  // for the same reason — the read-time check cannot see file-sourcing across
+  // a process boundary, so a repository must not be able to write the key into
+  // the environment at all, not merely be ignored when it does.
+  'QWEN_REVIEW_SANDBOX',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo
@@ -299,6 +318,17 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // location is an operator decision (documented as a per-daemon opt-in), so
   // only the daemon's launch environment or a home `.env` may set it.
   'QWEN_SERVE_SESSION_ATTACHMENTS_ROOT',
+  // The two PR-watch overrides are the environment form of
+  // serve.sessionPrWatch, which WORKSPACE_RESTRICTED_SETTINGS strips from
+  // workspace settings: the watch spends the daemon's own gh budget and
+  // injects prompts into sessions across every workspace it serves. A
+  // project `.env` setting either key would hand a repository that
+  // daemon-wide switch — and, because a non-blank event list counts as the
+  // operator's explicit choice, silently suppress the trust-gated per-host
+  // channel alias. The operator channels (home-scoped `.env` and the launch
+  // environment) still apply.
+  'QWEN_SESSION_PR_WATCH_EVENTS',
+  'QWEN_SESSION_PR_WATCH_WAKE_DORMANT',
   // DEV gates the daemon's inherited-loader-env scrub (run-qwen-serve.ts);
   // only the dev harness (scripts/dev.js) stamps it into the launch env. A
   // project file setting it would silently keep loader vars in the base env
@@ -419,10 +449,12 @@ export function keepsEmptyHomeEnvValue(key: string): boolean {
 // ACP child boot).
 //
 // Known adjacent surface: LSP `.lsp.json` env overrides carry their own
-// narrower denylist (`SECURITY_SENSITIVE_ENV_KEYS` in
-// core/lsp/LspServerManager.ts — missing BASH_ENV/ENV/npm_config_node_options).
-// Unifying the two lists is deferred: the LSP surface is experimental
-// (behind --experimental-lsp) and its keys were chosen independently.
+// denylist (`SECURITY_SENSITIVE_ENV_KEYS` in core/lsp/lsp-server-manager.ts).
+// Both lists now block the shell-startup (`BASH_ENV`, `ENV`) and npm
+// node-options (`NPM_CONFIG_NODE_OPTIONS`) vectors; the loader list keeps its
+// broader, non-LSP entries. Unifying them wholesale is still deferred because
+// legitimate language servers rely on ordinary `env` overrides passing
+// through.
 export const INHERITED_LOADER_ENV_KEYS = [
   'NODE_OPTIONS',
   'BUN_OPTIONS',
@@ -526,12 +558,14 @@ export function scrubInheritedLoaderEnv(
 // and tuning flags are legitimate cross-process state, and a bare `-e` probe
 // child still needs them. When a child must not inherit a broken module hook,
 // drop only the hook flags and keep the rest of the value intact.
+// Keep loader spellings in sync with utils/bundled-chunk-resolver.ts.
 const NODE_OPTIONS_LOADER_FLAGS = new Set([
   '--require',
   '-r',
   '--import',
   '--loader',
   '--experimental-loader',
+  '--experimental_loader',
 ]);
 
 export function scrubNodeOptionsLoaderFlags(value: string): string {

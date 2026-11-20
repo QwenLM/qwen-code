@@ -1,4 +1,16 @@
-import { resolvePrivatePolicy } from '@qwen-code/channel-base';
+import {
+  MAX_POLL_INTERVAL_MS,
+  resolvePrivatePolicy,
+} from '@qwen-code/channel-base';
+
+// Shared with the management descriptor's `maximum` so the editor's inline
+// bound and the runtime's bound cannot drift apart (the convention
+// PollingChannelBase documents for MAX_POLL_INTERVAL_MS).
+export const MAX_MAILBOX_PORT = 65535;
+export const MAX_MESSAGE_BYTES = 50 * 1024 * 1024;
+export const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+export const MAX_TEXT_LENGTH = 100_000;
+export { MAX_POLL_INTERVAL_MS };
 
 export function normalizeAddress(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -54,9 +66,20 @@ export function emailSettings(raw: Readonly<Record<string, unknown>>) {
       'Email supports privatePolicy allowlist, open or disabled; configure allowedUsers instead of pairing.',
     );
   }
-  if (raw['dispatchMode'] === 'collect') {
+  // Whitelist rather than exclude: a new dispatch mode must opt in explicitly,
+  // because email's per-delivery durable claim only survives if every message
+  // becomes its own turn — `collect` coalesces it into a later turn and
+  // `inject` hands the text to a running one, so both release the claim as
+  // soon as the message is queued. `null` is unset (the adapter falls back to
+  // followup), not an unsupported value.
+  const dispatchMode = raw['dispatchMode'];
+  if (
+    dispatchMode != null &&
+    dispatchMode !== 'followup' &&
+    dispatchMode !== 'steer'
+  ) {
     throw new Error(
-      'Email does not support collect dispatch mode; use followup or steer so each delivery retains its durable claim.',
+      `Email does not support dispatchMode "${String(dispatchMode)}"; use followup or steer so each delivery retains its durable claim.`,
     );
   }
   addressList(raw['allowedUsers'], 'allowedUsers');
@@ -66,28 +89,28 @@ export function emailSettings(raw: Readonly<Record<string, unknown>>) {
   return {
     address,
     imapHost: text('imapHost'),
-    imapPort: number('imapPort', imapSecure ? 993 : 143, 65535),
+    imapPort: number('imapPort', imapSecure ? 993 : 143, MAX_MAILBOX_PORT),
     imapUser: text('imapUser'),
     imapPassword: text('imapPassword'),
     imapSecure,
     smtpHost: text('smtpHost'),
-    smtpPort: number('smtpPort', smtpSecure ? 465 : 587, 65535),
+    smtpPort: number('smtpPort', smtpSecure ? 465 : 587, MAX_MAILBOX_PORT),
     smtpUser: text('smtpUser'),
     smtpPassword: text('smtpPassword'),
     smtpSecure,
     folder: text('folder', 'INBOX'),
-    pollInterval: number('pollInterval', 60_000, 86_400_000),
+    pollInterval: number('pollInterval', 60_000, MAX_POLL_INTERVAL_MS),
     maxMessageBytes: number(
       'maxMessageBytes',
       10 * 1024 * 1024,
-      50 * 1024 * 1024,
+      MAX_MESSAGE_BYTES,
     ),
     maxAttachmentBytes: number(
       'maxAttachmentBytes',
       5 * 1024 * 1024,
-      50 * 1024 * 1024,
+      MAX_ATTACHMENT_BYTES,
     ),
-    maxTextLength: number('maxTextLength', 32_000, 100_000),
+    maxTextLength: number('maxTextLength', 32_000, MAX_TEXT_LENGTH),
     proactiveRecipients: addressList(
       raw['proactiveRecipients'],
       'proactiveRecipients',

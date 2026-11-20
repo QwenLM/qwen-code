@@ -156,7 +156,7 @@ from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 - [48. review-address · Prepare branch and feedback — Which trusted humans have exhausted their per-window regular feedback budget (see…](#af-048)
 - [49. review-address · Prepare branch and feedback — Time-budget exhaustions SINCE THE LAST SUCCESSFUL ROUND mean the standard…](#af-049)
 - [50. review-address · Triage and address — Bound the agent below the job timeout so a runaway agent fails THIS step (not the whole…](#af-050)
-- [51. review-address · Triage and address — Clamp the override to the budget ceiling: a repo variable past 7,200,000 ms (120m) would…](#af-051)
+- [51. review-address · Triage and address — Clamp the override to the runner's budget ceiling: a repo variable past 14,400,000 ms (240m)…](#af-051)
 - [52. review-address · Push and report — Resolve the review threads whose findings the agent actually IMPLEMENTED, so a human…](#af-052)
 - [53. review-address · Push and report — gh's stderr goes to a fresh mktemp regular file, never a named WORKDIR path: WORKDIR is…](#af-053)
 - [54. review-address · Push and report — gh emits one node per line across every page; slurp them into the flat array both blocks…](#af-054)
@@ -228,8 +228,8 @@ from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 - [121. review-address · Prepare branch and feedback — Growth audit: a budget breach engages Critical-only AND makes the round a…](#af-121)
 - [122. review-address · Prepare branch and feedback — Conflict-handoff idempotence: a conflict verdict parks the PR at a genuinely…](#af-122)
 - [123. review-address · Prepare branch and feedback — Growth audit (a size signal triggers a JUDGMENT, never a stop): the window is…](#af-123)
-- [124. review-address · Post autofix status comment — The agent below runs for up to 130 minutes and the verification gate adds more,…](#af-124)
-- [125. review-address · Triage and address — The primary attempt's real budget: 120m, with a 10-minute margin under the…](#af-125)
+- [124. review-address · Post autofix status comment — The agent below runs for up to 250 minutes (self-hosted) and the verification gate adds…](#af-124)
+- [125. review-address · Triage and address — The primary attempt's real budget is runner-split: 240m self-hosted / 120m hosted, each with a…](#af-125)
 - [126. review-address · Triage and address — Prepare severed hooks for its PAT-bearing git ops; THIS step holds no PAT, so…](#af-126)
 - [127. review-address · Repair deterministic rejection — Which side is corrupt is NOT known here — jq -s fails if EITHER input is…](#af-127)
 - [128. review-address · Finalize verification — The verdict travels WITH the attempt whose outcome is selected: a repair pass…](#af-128)
@@ -265,6 +265,9 @@ from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 - [158. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…](#af-158)
 - [159. route · Takeover round budget — '<cmd> for N' bounds a window's rounds and releases the PR when the budget is spent…](#af-159)
 - [160. (top level) · Env constant commentary — Moved out of the workflow verbatim to keep the file under GitHub's start-runs gate…](#af-160)
+- [161. review-address · Prepare branch and feedback — Failed-check evidence: the agent gets check NAMES only and holds no GitHub…](#af-161)
+- [162. review-scan · Scan for PRs with new feedback — review-pr is excluded from STALE_BASE_REDS: a review timeout is a verdict on THIS diff, not…](#af-162)
+- [163. takeover-command, retry-command, takeover-ack — The command lane joins the persistent pool: an accepted command's visible half…](#af-163)
 
 ---
 
@@ -1409,10 +1412,14 @@ Why 20: 37 PRs carried the label on 2026-08-08, so 5 slots served
 at a larger scale. The ecs-qwen fleet is 84 runners, so 20 concurrent
 legs occupy under a quarter of it, and the executed legs sampled that
 day finished in 3-28 minutes.
-The 345-minute job cap puts the worst case at 5.75 runner-hours per
-slot (115 across the fleet at 20) and holds the per-PR head-write
-concurrency group for the same window. Different PRs never share that
-group, so raising this does not add push contention.
+The runner-split job cap (af-050) puts the worst case at
+7.75 runner-hours per self-hosted slot (155 across the fleet at 20)
+and 5.75 runner-hours per hosted slot (115 across the fleet at 20).
+The 465-minute job cap applies on the self-hosted pool, the
+345-minute job cap on the github-hosted fallback. Each holds the
+per-PR head-write concurrency group for the same window. Different
+PRs never share that group, so raising this does not add push
+contention.
 RAISE BOTH TOGETHER: this must stay strictly below
 MAX_TARGETS_PER_SCAN, or the scan cannot emit enough legs to fill the
 matrix and the extra slots sit idle. A test pins that for the
@@ -1657,20 +1664,44 @@ for this cap. Worst-case budget:
   worst case             330  => job timeout 345, and the job runs
                                  on ubuntu-latest, whose own ceiling
                                  is 360.
+
+Runner-split (2026-11-10): the self-hosted pool carries a 240m agent
+budget (both arms) under a 250-minute step backstop; github-hosted
+keeps the 120m/130m shape above because its 360-minute job ceiling
+cannot hold the self-hosted worst-case chain. The job timeout is an
+expression — the runs-on self-hosted predicate repeated VERBATIM
+(`runner` is not an allowed context in job-level timeout-minutes),
+465 when it holds, 345 otherwise; a meta-test pins the two copies
+equal so they cannot drift.
+
+  setup                    7
+  Triage and address     250  (240 budget + 10 margin)
+  Verification gate       60
+  Repair                  70
+  Repair verification     60
+  report                   3
+  -------------------------------
+  worst case (self-hosted) 450  => job timeout 465
 ```
 
 <a id="af-051"></a>
 
-### 51. review-address · Triage and address — Clamp the override to the budget ceiling: a repo variable past 7,200,000 ms (120m) would…
+### 51. review-address · Triage and address — Clamp the override to the runner's budget ceiling: a repo variable past 14,400,000 ms (240m)…
 
 In `review-address` · `Triage and address`.
 
 ```text
-Clamp the override to the budget ceiling: a repo variable past
-7,200,000 ms (120m) would arm the timer past the 130-minute step
-backstop, the cap would fire first, and the round would be
-misreported as a crash. Malformed values fall back to the same
-ceiling (run-agent.mjs's own || handles the empty/NaN case).
+Clamp the override to the runner's budget ceiling: a repo variable
+past 14,400,000 ms (240m) on the self-hosted pool — or 7,200,000 ms
+(120m) on github-hosted — would arm the timer past the 250-minute
+(130-minute hosted) step backstop, the cap would fire first, and the
+round would be misreported as a crash. The ceiling is runner-split
+because the hosted 360-minute job ceiling cannot hold the self-hosted
+worst-case chain (af-050). An UNSET variable resolves to the runner's
+default BEFORE the clamp (240m self-hosted / 120m hosted), so the
+default never trips the warning; an explicit variable still clamps.
+Malformed values fall back to the same ceiling (run-agent.mjs's own
+|| handles the empty/NaN case).
 The {1,8} width bound keeps 10# inside int64: a 19+ digit value
 wraps negative in (( )) and slips past the comparison unclamped.
 10# forces base-10: a zero-padded value is octal in (( )) and would
@@ -1882,7 +1913,8 @@ In `review-address` · `Push and report`.
 Salvage a race-lost push instead of discarding the run. The
 per-PR head-write concurrency group serialises THIS repo's
 workflows, but it cannot stop the PR author (or anything on the
-fork side) pushing during the agent's ~120-minute window. The
+fork side) pushing during the agent's window — up to 240 minutes
+on the self-hosted pool, 120 on github-hosted (af-125). The
 stated budget widened it from ~50m, so a race-lost push is that
 much likelier and the retry loop below stays bounded at 3 merges.
 Observed twice in one day (#7983, #7985): a one-shot push died
@@ -2373,6 +2405,77 @@ infra problem cannot loop. Deliberately conservative — only unambiguous
 machine/transport failures, never a bare test-level timeout, which could be
 a real regression (a co-present timeout does not block a match — one
 matching line classifies the run). Case-insensitive, vs the annotations.
+
+The built-tree handoff is the one step timeout in the list, and it is
+admitted by NAME, not by the phrase: `The action 'Retry downloading the
+built tree' has timed out`. Only the RETRY, never the first download. Two
+facts decide that split.
+
+The first `Download the built tree` runs with `continue-on-error: true`, so
+its timeout cannot end the job, and its annotation STAYS on the check run
+after the retry recovers. Check run `131031419699` is the case in point: both
+handoff steps report `success`, and its nine annotations are six
+`AssertionError`s, one `Process completed with exit code 1.`, one warning (a
+502 while creating the deflake issue), and one stale
+`The action 'Download the built tree' has timed out after 15 minutes.` — that
+last line is the residue, and admitted it would read a recovered run as
+infrastructure and swallow the real failure.
+
+What the base list would have done with that same run is a statement about
+classification, not about a filing: the base carried no handoff branch at
+all, so this blob matched none of its signatures and was never infrastructure
+there. On that event the lane did not run either — the run is a pull request
+(43170847047, `fix/16675-exec-code-render`), and this workflow's `analyze` job
+covers only a main push or schedule, an SDK Java dispatch, and the Managed
+Agent gate's PR runs, so nothing was filed and there is no filing verdict to
+call right. Adding the first download to the class would have been the
+regression; retry-only keeps the classification that run had and still covers
+the case below. (An earlier revision of this paragraph claimed the two-name
+form had already misclassified that run. It had not, and the claim is
+dropped.)
+
+The retry is armed on `steps.download_tree.outcome == 'failure'`, so it runs
+whenever the first attempt failed, and a timeout there kills the job having
+executed nothing — the shape #16927 documents, where both 15-minute attempts
+expire and the required check is red with zero test signal. What causes it is
+OPEN, and this change does not fix it: #16927's 09:26:51Z measurements
+retract the earlier proxy theory — the download redirects to
+`productionresultssa<N>.blob.core.windows.net`, not to
+`artifactcache.actions.githubusercontent.com`; direct and proxied transfers
+both swung between ~2.3 MB/s and near-stall; the proxy produced the single
+worst sample at 60 s for 2.9 of 8 MiB; and `hk5`, which has no proxy at all,
+also fell to 451 KB/s. What the measurements support is narrower: transfer
+from these Aliyun hosts to Azure blob degrades intermittently on a
+seconds-scale, and which hop is responsible is not established. The
+classification is a classification, not a diagnosis, and a real fix belongs
+to its own change.
+
+The name anchor keeps the "never a bare test-level timeout" rule above
+intact — `Run tests and generate reports`, the no-AK gate, the browser smoke
+and `Install Dependencies` all still file when they time out. A regression
+test pins both halves: the retry annotation matches, and the
+recovered-download blob above does not.
+
+Separate from that class, `CONFIG_FAILURE_SIGNATURES` holds the gate's
+deterministic configuration errors (`HOST_LOAD_MAX_RATIO` /
+`HOST_LOAD_MAX_WAIT_TRIES` / `HOST_LOAD_WAIT_SECONDS` "must be a positive …",
+and `DISK_FLOOR_MIN_FREE_KB` / `DISK_FLOOR_MIN_FREE_INODES` /
+`DISK_FLOOR_MAX_USED_PCT`). A repository variable cannot change between
+attempts, so a re-run fails identically; the scan skips the PR instead of
+re-paying install, artifact download and tooling provisioning, and does not
+hand the typo to an agent that cannot edit a repository variable. The labels
+are kept even for the knobs no workflow sets today, because the scripts
+declare every knob env-overridable: wiring one later must not make its typo
+read as the PR's code. `main-ci-failure-issue.yml` deliberately does not carry
+these — with no rerun to suppress, it files the failure record so a human fixes
+the variable.
+
+Two host-level refusals stay in the infrastructure class, because a re-run can
+land elsewhere: `Host load gate breached` (a contended host cannot run the
+suites) and `Disk floor breached` (the host is out of space or inodes). The
+disk floor's *configuration* errors are the opposite case and sit in the list
+above: `DISK_FLOOR_*` names a threshold a human typed into a repository
+variable, so the same host refuses again and a re-run only spends the wait.
 ```
 
 <a id="af-077"></a>
@@ -2832,11 +2935,17 @@ In `review-scan` · `Scan for PRs with new feedback`.
 startedAt is the only staleness clock: a check blocks only if it
 started within the bound; one with no startedAt (queued, not yet
 running) is not blocking (the next scan re-checks once it starts).
+Two tiers: the general 375-minute horizon applies to every check
+except review-address*, which alone legitimately runs long and gets
+the 495-minute long horizon — 30 minutes above the 465-minute
+self-hosted job cap (af-050) so a live address round is never aged
+out mid-flight, while a hung check on a dead runner still ages out
+at the general bound instead of blocking its PR two extra hours.
 The dispatch-pending marker is exempted by context: it is this
 loop's own StatusContext busy signal (no .workflowName/.name, so
 it passes the filters above) and its dedicated TTL check above is
-the authority on it — the 375-minute horizon here would keep a
-stranded marker blocking long past its TTL.
+the authority on it — either horizon here would keep a stranded
+marker blocking long past its TTL.
 ```
 
 <a id="af-102"></a>
@@ -3159,7 +3268,8 @@ In `review-address` · `Prepare branch and feedback`.
 The instant THIS round's net was measured. Stamped into the
 growth-now marker so the census filters on measurement
 time, not the marker comment's created_at — the report posts the
-marker only after the agent's ~120-minute run, so a round in
+marker only after the agent's run (up to 240 minutes self-hosted,
+120 hosted; af-125), so a round in
 flight when a concurrent base update lands would otherwise pass a
 created_at filter while carrying pre-update sums (#9114 R2-6).
 Emitted ONLY when a measurement happened: an unmeasured attempt
@@ -3330,12 +3440,13 @@ bring new evidence to repeat it.
 
 <a id="af-124"></a>
 
-### 124. review-address · Post autofix status comment — The agent below runs for up to 130 minutes and the verification gate adds more,…
+### 124. review-address · Post autofix status comment — The agent below runs for up to 250 minutes (self-hosted) and the verification gate adds…
 
 In `review-address` · `Post autofix status comment`.
 
 ```text
-The agent below runs for up to 130 minutes and the verification gate adds
+The agent below runs for up to 250 minutes on the self-hosted pool
+(130 on github-hosted) and the verification gate adds
 more, but nothing reaches the PR thread until "Push and report" at the
 very end: a maintainer who just engaged takeover sees silence and cannot
 tell a working round from a stuck one. The agent's output already
@@ -3349,21 +3460,28 @@ fails warns and continues — it must never cost the round.
 
 <a id="af-125"></a>
 
-### 125. review-address · Triage and address — The primary attempt's real budget: 120m, with a 10-minute margin under the…
+### 125. review-address · Triage and address — The primary attempt's real budget is runner-split: 240m self-hosted / 120m hosted, each with a…
 
 In `review-address` · `Triage and address`.
 
 ```text
-The primary attempt's real budget: 120m, with a 10-minute margin
-under the 130-minute step backstop above. The margin covers the
+The primary attempt's real budget is runner-split: 240m with a
+10-minute margin under the 250-minute step backstop on the
+self-hosted pool, 120m under the 130-minute backstop on
+github-hosted (whose 360-minute job ceiling cannot hold the
+self-hosted worst-case chain, af-050). The margin covers the
 internal kill path (SIGTERM, 10s grace, SIGKILL, marker write);
 if the step cap fires first, `agent-timeout` is never written and
 the report step misclassifies the round as a crash.
-QWEN_AUTOFIX_TIMEOUT_MS can only LOWER the fallback without a code
-change: the run block clamps it to the 7,200,000 ms ceiling
-(BUDGET_CAP_MS, the fallback itself), so raising the budget still
-requires editing this default, BUDGET_CAP_MS, and the step backstop,
-while a misconfigured variable degrades to a warning, not a misreport.
+An unset QWEN_AUTOFIX_TIMEOUT_MS resolves to the runner's default
+in the run body — not in the env fallback, so the hosted default
+never trips the clamp warning. An explicit variable can only LOWER
+that default without a code change: the run block clamps it to
+BUDGET_CAP_MS, the runner's ceiling (14,400,000 ms self-hosted /
+7,200,000 ms hosted), so raising the budget still requires editing
+the default, BUDGET_CAP_MS, the step backstop and the job cap
+together, while a misconfigured variable degrades to a warning,
+not a misreport.
 ```
 
 <a id="af-126"></a>
@@ -3833,8 +3951,8 @@ In `review-address` · `Post autofix status comment`.
 
 ```text
 Round heartbeat: the announcement freezes at "working" for
-the whole round — up to the 130-minute agent step plus gate
-and repair — so on the PR page a healthy long round and a
+the whole round — up to the 250-minute self-hosted agent step plus
+gate and repair — so on the PR page a healthy long round and a
 dead one look identical (observed on #9739: ~1.5h of
 silence). A detached loop started here re-PATCHes the SAME
 comment every 10 min with elapsed time and last agent
@@ -3983,17 +4101,25 @@ holds the bot PAT in /proc/<pid>/environ until the cap,
 and any same-UID process on that host — including another
 PR's round running its gate's host-side build/tests —
 reads it directly; the pool's ptrace scope does not gate
-this read, as witnessed above. The cap therefore sits just
-past the 330-minute job envelope — only a crash orphan
-ever reaches it, so the cap IS the bound on its token
-window. A cross-run kill keyed on a WORKDIR pid would
+this read, as witnessed above. The cap is 340 minutes
+(20400s) — ~83 past setup + the 250-minute self-hosted
+address step, kept inside the [19800, 21600] magnitude
+guard, which is what actually bounds the orphan's PAT
+window; the gate kills the loop, so the job envelope is not
+the bound. Only a crash orphan ever reaches the cap, so the
+cap IS the bound on its token window. Raising the address
+step cap past ~330 minutes requires raising
+HB_MAX_AGE_SECONDS and widening the guard in the same
+change. A cross-run kill keyed on a WORKDIR pid would
 reopen the untrusted-kill-target hole, so reclamation
 stays host-local). Reading the file to self-identify is
 safe (the loop never kills anything); the
 killers never read it, which is what keeps the
 untrusted-target hole closed — no cross-run kill. The other
-bounds: a heartbeat-stop marker, or the age cap just past
-the 330-minute job envelope; each tick's gh call is
+bounds: a heartbeat-stop marker, or the 340-minute age cap
+(sized past setup + the 250-minute self-hosted address step
+and kept inside the magnitude guard; the gate kills the
+loop — see above); each tick's gh call is
 additionally wrapped in a 60s timeout so a black-holed
 connection cannot stall the loop past the cap. Killers that
 run in-round touch the stop marker BEFORE killing so a
@@ -4396,16 +4522,19 @@ splits on PR parity — and reaches the skill as three Invocation lines:
 `Self-review: on|off`, `Self-review CLI: node <workspace>/dist/cli.js`
 (the host's qwen wrapper is not on PATH inside the sandbox), and
 `Round deadline (UTC)`. An armed round's agent budget is
-SELF_REVIEW_TIMEOUT_MS (180m default) under a per-arm step cap
-(`timeout-minutes` = 190 armed, 130 unarmed), the unarmed 120m/130m
-margin rule unchanged. The 345-minute job bound cannot hold the armed
-cap AND the 70+60 same-run repair chain, and a GitHub-hosted job is cut
-at 360 whatever the bound says — so the arm is resolved once in prepare
+SELF_REVIEW_TIMEOUT_MS (240m default, the same as the unarmed
+self-hosted default) under the runner-split step cap
+(`timeout-minutes` = 250 self-hosted, 130 hosted), the 10-minute
+margin rule unchanged on both runners. A GitHub-hosted job is cut
+at 360 whatever the bound says and cannot hold a 240m budget's
+worst-case chain at all — so the arm is resolved once in prepare
 (never on a github-hosted runner: the hosted fallback runs the control
-shape), and an armed round skips the same-run repair (its `if:` excludes
-the arm; the repair fired on 7/79 = 9% of acted rounds in the sample), a
-deterministic rejection staying retryable for the next round as it was
-before the repair existed. The A/B must read gate rejections per arm
+shape at 120m/130m), and an armed round skips the same-run repair (its
+`if:` excludes the arm; the repair fired on 7/79 = 9% of acted rounds in
+the sample) — a policy kept from the 180m era even though the 465m
+self-hosted bound would now fit the chain, a deterministic rejection
+staying retryable for the next round as it was before the repair
+existed. The A/B must read gate rejections per arm
 beside the round counts, since the treatment arm pays a full cycle where
 the control arm pays a 60-minute repair. The skill runs the review
 command inside the session's own sandbox with QWEN_REVIEW_SANDBOX=off:
@@ -4868,4 +4997,295 @@ plus a pointer.
   # It is matched against `author_association` at every census site; widening it
   # (NONE, FIRST_TIME_CONTRIBUTOR) hands untrusted text to an agent that runs
   # with a write PAT.
+```
+
+---
+
+<a id="af-161"></a>
+
+### 161. review-address · Prepare branch and feedback — Failed-check evidence: the agent gets check NAMES only and holds no GitHub…
+
+In `review-address` · `Prepare branch and feedback`.
+
+```text
+New in this change, not moved from the YAML.
+
+The address agent receives check NAMES only ("Failed checks" and
+"Still-red checks" render name + conclusion) and holds no GitHub
+credentials, so "Linux unit tests (shard 2/2)" cannot tell it which
+step or assertion went red. For a locally reproducible lane that is
+survivable — the agent maps the name to the repository's own command
+and reruns it — but a shard name, a "Test" check that failed on a
+schema/lint step, or an environment-only lane each cost a full round
+of guessing. The CI Failure Patrol already distils job logs for its
+classifier (ci-flaky-rerun.mjs: redactLog + skillLog), so the
+asymmetry was a missing wire, not a missing capability.
+
+The collector (.github/scripts/autofix-check-evidence.mjs) prints the
+failed STEP NAMES plus a bounded log excerpt per failing job, reusing
+the patrol's skillLog so both automations redact secrets identically.
+Bounds: the first three distinct jobs in rollup order, skillLog's own
+~120-line selection kept whole (truncating it from the head drops the
+tail that carries the failure summary on a noisy multi-error log), an
+8 MiB execFileSync buffer past which the log is dropped rather than
+buffered. Selection mirrors the workflow's `## Still-red checks` gate
+— the same failure conclusions, the same "Qwen Autofix" self-lane
+exclusion with the review-address exception. The sibling `## Failed
+checks` list also admits CANCELLED; a cancelled job is not a failure
+to diagnose, so it is omitted here. External commit statuses carry no
+job URL and stay name-only.
+
+THE LOG FETCH NEEDS THREE PARTS, copied from autofix-pr/ci-log.ts's
+jobLog. Current gh refuses to print a response containing terminal
+escape sequences — which Actions job logs essentially always do —
+unless `--allow-escape-sequences` is passed; a bare call exits 1 with
+empty stdout, and a helper that swallows non-zero exits would silently
+render no excerpt at all. So: pass the flag; fall back to the bare
+call ONLY when stderr says `unknown flag` (older gh has neither the
+check nor the flag); and stripVTControlCharacters the result, because
+raw ANSI would otherwise reach feedback.md and step stdout, where the
+existing defang handles only `::` and `##[`. The behavioral suite's
+fake gh reproduces the refusal, so a missing flag turns it red. The
+same fix lands on the patrol's own GhClient.jobLog, which was equally
+log-blind on current gh. The excerpt fence is sized past any backtick
+run inside it, so a log line carrying backticks cannot close the fence
+early and spill the rest into feedback.md as markdown.
+
+PLACEMENT IS THE TRUST BOUNDARY. The call sits BEFORE this step
+switches the working tree to the PR branch, so the collector AND the
+patrol module it imports execute from the trusted base — the same
+position resolve-sandbox-image.mjs already runs from. Nothing here
+needs a staged copy or a digest: no branch code has executed on this
+host at that point. Moving the call below the checkout would execute
+branch-supplied code with the PAT in env, which is exactly what
+af-041/af-158 exist to prevent.
+
+Degradation is always toward LESS evidence, never a failed round: the
+script is absent from the trusted base until this merges (the node
+call is `|| true`), an unreadable rollup or a failed API read yields
+an empty or partial section, and the feedback block cats the file
+only when it is non-empty. Collector stderr rides
+WORKDIR/check-evidence.log, which the whole-WORKDIR artifact upload
+already carries, so a systematic failure is diagnosable without
+polluting the round log.
+
+The excerpt is a SNAPSHOT taken before checkout, and its preamble
+names the head it describes; the two name-only sections remain the
+authoritative list for the evaluated head. Log text is untrusted
+output: skillLog redacts credentials, headings are stripped to the
+same character class the check-name lists use, and the existing
+feedback echo defangs both workflow-command syntaxes before anything
+reaches step stdout.
+```
+
+<a id="af-162"></a>
+
+### 162. review-scan · Scan for PRs with new feedback — review-pr is excluded from STALE_BASE_REDS: a review timeout is a verdict on THIS diff, not…
+
+[中文说明](#af-162-zh)
+
+In `review-scan` · `Scan for PRs with new feedback`.
+
+```text
+New in this change, not moved from the YAML.
+
+Observed on #16408: a maintainer's feedback comment sat unaddressed
+for 13+ hours while the loop spun a review-timeout ↔ base-update
+cycle. The mechanics: review-pr times out on a large diff (~6h per
+run) and lands FAILURE; the stale-base gate sees a red check that is
+green on MAIN_GREEN_CHECKS (the last-merged PR's review passed) and a
+branch behind main, so it merges main via update-branch and
+`continue`s — skipping feedback processing for that scan. The merge
+creates a new head, which starts a FRESH review-pr run; the #8888
+review-in-flight gate then holds every scan until that run ends, and
+when it times out the stale-base gate fires again. Two base updates
+(01:14, 07:47) both cited review-pr and neither cleared it; the
+pending comment never reached a round. The exclusion breaks the
+SUSTAINED cycle, not the first update: a mixed red set that also
+carries a genuine stale-base red (the 01:14 update cited Lint & Static
+alongside review-pr) still merges main once and re-arms the in-flight
+hold before the pending feedback can be picked up. The mixed-case
+meta-test pins that boundary.
+
+The green-on-main premise is unsound for review-pr specifically: it
+reviews THIS PR's diff, so a timeout reproduces on any base — merging
+main cannot fix it, it only restarts the clock. af-109 already calls
+green-on-main necessary-but-NOT-sufficient; this is the check where
+the insufficiency is structural, not incidental. The selector
+therefore drops review-pr by name (the same key NON_BLOCKING_CHECKS
+uses), alongside the existing Qwen Autofix exclusion.
+
+What remains unchanged: while review-pr is IN_PROGRESS the #8888 gate
+still holds the round (a push would cancel the review); a red
+review-pr still appears in feedback.md's failed-check sections once a
+round runs; and every OTHER red check keeps its stale-base behavior.
+The trade-off: a review-pr red genuinely caused by a stale base no
+longer auto-merges main — but the feedback round still lists it under
+failed checks, and the address agent can merge main itself when the
+evidence calls for it. The meta-test pins both directions: review-pr
+alone green-on-main no longer updates, and a mixed review-pr + Test
+red still updates for Test.
+```
+
+<a id="af-162-zh"></a>
+
+<details>
+<summary>中文说明（af-162 完整中文翻译，与上方英文逐段对应）</summary>
+
+[English](#af-162)
+
+本次新增，非从 YAML 移入。
+
+在 #16408 上观测到：一条维护者反馈评论 13+ 小时无人处理，循环在「评审超时 ↔ base 更新」之间打转。机制：review-pr 在大 diff 上超时（每轮约 6 小时）后落地为 FAILURE；stale-base 门禁看到一个在 MAIN_GREEN_CHECKS 上为绿（最近合入 main 的 PR 评审通过）、且分支落后 main 的红色检查，于是经 update-branch 合入 main 并 `continue`——跳过该次扫描的反馈处理。merge 产生新 head，触发一轮全新的 review-pr 运行；#8888 review-in-flight 门禁随后扣住每次扫描直到该轮结束，超时后 stale-base 门禁再次触发。两次 base 更新（01:14、07:47）都点名 review-pr，却都没能消除它；待处理评论始终没有进入任何一轮。本排除打断的是**持续**循环，而非第一次更新：若红色集合是混合的、还包含真正的 stale-base 红（01:14 那次同时点名 Lint & Static 与 review-pr），仍会合入 main 一次，并在待处理反馈被拾取前重新武装 in-flight 扣压。混合用例的 meta-test 钉住的正是这一边界。
+
+green-on-main 前提对 review-pr 特别不成立：它评审的是本 PR 自己的 diff，超时在任何 base 上都会复现——合入 main 治不了它，只会重启计时。af-109 本就称 green-on-main 是必要非充分信号；这个检查正是其不充分性属于结构性而非偶然性的情形。因此选择器按名字丢弃 review-pr（与 NON_BLOCKING_CHECKS 使用的键相同），与既有的 Qwen Autofix 排除并列。
+
+保持不变的部分：review-pr 处于 IN_PROGRESS 时，#8888 门禁仍扣住本轮（推送会取消评审）；一旦有一轮运行，红色 review-pr 仍会出现在 feedback.md 的失败检查段；其余所有红色检查保持原有 stale-base 行为。权衡：真正由 base 过期导致的 review-pr 红不再自动合入 main——但反馈轮仍会把它列在失败检查里，address agent 可在证据支持时自行合入 main。meta-test 钉住两个方向：仅 review-pr 红且 main 上绿时不再更新；review-pr + Test 混合红时仍会为 Test 更新。
+
+</details>
+
+<a id="af-163"></a>
+
+### 163. takeover-command, retry-command, takeover-ack — The command lane joins the persistent pool: route accepting a command in seconds is invisible while its only visible half sits in the hosted queue.
+
+In `takeover-command`, `retry-command` and `takeover-ack`.
+
+```text
+af-148 took the SCAN lane off the hosted pool because route
+gates the whole fan-out. It left the COMMAND lane hosted
+under the "short jobs stay hosted" rule. That rule missed
+what these three jobs are: the visible half of a command
+route has already accepted. Route decides, and then the
+maintainer sees nothing until a hosted runner arrives.
+
+On 2026-11-08 a maintainer commented '@qwen-code /takeover'
+on PR #16408. The prefilter matched, route ran on ecs-qwen
+in 9 seconds and logged "takeover command accepted: add
+autofix/takeover on PR #16408 by sorrycc (pr-author/write)"
+— and takeover-command then sat queued on ubuntu-latest
+with no runner. The PR carried no label and no ack, which
+is exactly what an UNRECOGNISED command looks like from the
+comment thread. Concurrent hosted jobs in this repo were
+measured waiting 39-49 minutes for a runner that same hour,
+so the silence was going to last most of an hour. Nothing
+was broken; the feedback was simply queued behind a pool
+the loop does not control.
+
+All three move together because they are one class: a
+maintainer-facing ack, only gh and jq, five-minute budget.
+Fixing only /takeover would leave /retry and the label ack
+silent in the same backlog. They share the scan
+lane's expression byte for byte — fork-trust clause and
+MAINTAINER_ECS_RUNNER_DISABLED kill-switch included — so a
+pull_request or pull_request_review from an untrusted fork
+still resolves to hosted, and the kill-switch still wins
+everywhere.
+
+The af-148 premise holds for them too: none of the three
+checks code out, so the reused workspace needs no restore
+or wipe step. Every scratch path comes from mktemp (O_EXCL,
+owner-only): the error-capture files are removed inline and
+the gh config dir is removed by an EXIT trap. That trap is
+not optional on this pool. Nothing reclaims RUNNER_TEMP
+here, and the pool's only age sweep walks /tmp, which cannot
+reach it, so without the trap each command would leave one
+more directory behind for good — free on a hosted VM that
+dies with the job, unbounded on a persistent host. It rides
+EXIT rather than a trailing rm because these steps return
+early on several refusal paths, and it stays step-scoped
+rather than per call because every gh call below reuses that
+one dir. No per-run WORKDIR is needed all the same: mktemp
+names are unpredictable, unlike review-scan's run_id-derived
+path. They call gh and jq, both already used by route on
+this pool; they run no node, docker or tmux, so they get no
+'Check runner environment' capability preflight.
+
+The rule is file-wide, so it is pinned file-wide. Thirteen
+sites mint this dir: ten in the workflow, two in
+autofix-push-and-report.sh and one in
+autofix-status-heartbeat.sh. Seven clean up after themselves
+— route, the three moved jobs, review-scan, the workflow's
+per-call post_status wrapper and the heartbeat's per-tick
+removal. Six do not, and they are the recorded follow-up:
+issue-autofix's publish, review-address's prepare, dry-run
+report and finalize, plus the script's two sites.
+
+route and review-scan are fixed here because they are the
+highest-volume leakers — route alone runs up to 144 times a
+day. review-scan cannot carry a second `trap … EXIT`: bash
+keeps one handler per shell, so its removal joins the
+existing fleet/WORKDIR trap and that merged line is pinned
+verbatim. The merged trap is installed AT THE MINT, not down
+beside FLEET_FILE (R3-1): the empty-PAT guard and the WORKDIR
+pre-clean both exit before that later point, and each would
+otherwise leave the dir behind — a mis-scoped secret would
+leak one per scan tick while a substring census still called
+the site clean. FLEET_FILE does not exist on those paths, so
+the merged line reads it with a `:-` default. Every step that
+gained a trap is pinned to exactly ONE EXIT handler (R3-3):
+a second one silently replaces the first, and neither the
+census nor the lazy preamble match would notice.
+
+Every removal in those traps carries `|| true`. Under the
+runner's `bash -e` a genuinely failing `rm` inside an EXIT
+handler both aborts the rest of the handler and replaces the
+step's own status — probed on bash 5 with a permission-denied
+removal: the second removal never ran and a deliberate
+`exit 0` came out as 1. Cleanup is best-effort; it must not
+decide the step's verdict, and in the chained scan trap it
+must not stop the gh config dir from being removed.
+
+The census took four rounds to get right, and the shape it
+settled on is the point — each earlier fix had widened one
+hand-maintained list, which is why the finding kept growing
+siblings. It now matches the mint by SHAPE rather than by one
+RUNNER_TEMP spelling, so `$RUNNER_TEMP`, `${RUNNER_TEMP}` and
+`${RUNNER_TEMP:-/tmp}` all land, while the literal
+`autofix-gh-config.XXXXXX` keeps unrelated temp dirs
+(weaken.*, qwen-font-probe.*) out of scope. It DISCOVERS the
+script sources by scanning .github/scripts/*.sh instead of
+naming two. And it judges each site on its own region AND
+requires the cleanup to remove that site's OWN variable, so
+an unrelated later `rm` cannot vouch for it. Both lists stay
+exact: an unrecognised site lands in `leaking` and forces a
+recorded decision.
+
+One bound on all of this: an EXIT trap covers bash's own
+exits, not a SIGKILLed shell. That is why the scan lane also
+puts WORKDIR where the age sweep can reach it. The gh config
+dir has no second net, so a hard-killed run leaves one
+behind — empty and owner-only, a directory inode rather than
+a live reroute channel.
+
+The pool's price is the one af-148 paid: gh reads its
+config from the shared, attacker-writable $HOME, and every
+gh call in these three jobs carries CI_DEV_BOT_PAT. A
+planted ~/.config/gh/config.yml with an http_unix_socket
+reroute would capture the PAT in the Authorization header
+and could forge the identity check that gates the label
+write. So each step carries the scan lane's reroute
+preamble BEFORE its first gh call: pin GH_HOST, drop
+planted GH_ENTERPRISE_TOKEN/GH_TOKEN, and mint a fresh
+empty GH_CONFIG_DIR. The mint is guarded rather than
+`export VAR="$(mktemp ...)"`, which reports export's status
+instead of the substitution's — a failing mktemp would
+sail through bash -e with an empty value, and an empty
+GH_CONFIG_DIR is precisely gh's fallback to the shared
+config the preamble exists to close.
+
+One residual is accepted here deliberately, and it is the
+scan lane's, not a new posture: the dir is minted once per
+step and reused across that step's gh calls. RUNNER_TEMP is
+same-UID-writable, so a process left behind on the pool can
+plant a config.yml into it between two calls. The EXIT trap
+ends the dir with the step, so nothing is left to plant into
+afterwards; it does not close the between-calls gap itself.
+takeover-command has two 5-second comment-retry backoffs,
+which is the same bounded window review-scan's retry sleeps
+already leave. The heartbeat is the case that could not take
+it — its 600-second sleep made the window a certainty, so
+af-149 mints per call through a wrapper instead. These steps
+are seconds long and hold no loop; if that window is ever
+judged unacceptable for them, the same wrapper is the
+remedy, not a return to hosted.
 ```

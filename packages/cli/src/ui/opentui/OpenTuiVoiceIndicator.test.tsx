@@ -168,6 +168,30 @@ describe('OpenTUI voice indicator declaration parity', () => {
     );
   });
 
+  it.each([
+    { status: 'recording', expected: 'listening…' },
+    { status: 'transcribing', expected: 'transcribing…' },
+    { status: 'refining', expected: 'refining…' },
+  ] as const)(
+    'speaks $status as a live row without the meter in screen-reader mode',
+    ({ status, expected }) => {
+      const nodes = elements(
+        project({
+          status,
+          audioLevel: 1,
+          interimText: 'hello world',
+          screenReader: true,
+        }),
+      );
+      const rows = nodes.filter((node) => node.type === 'text');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.props['id']).toBe('screen-reader-live-voice');
+      expect(text(rows[0])).toBe(`${expected}\nhello world`);
+      expect(text(rows[0])).not.toContain('█');
+      expect(text(rows[0])).not.toContain('░');
+    },
+  );
+
   it('declares an ellipsized single-line interim row under the same narrow parent', () => {
     viewport.width = 12;
     const long = 'ABCDEFGHIJKLMNOPQRST';

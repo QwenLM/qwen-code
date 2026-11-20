@@ -14,6 +14,7 @@ import type {
   DaemonAuthStatusSnapshot,
   DaemonSubscriptionActivation,
   DaemonCapabilities,
+  DaemonChannelDelivery,
   DaemonChannelEvent,
   DaemonChannelEventsQuery,
   DaemonChannelEventsSnapshot,
@@ -21,6 +22,8 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
   DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
@@ -252,6 +255,59 @@ export interface DaemonChannelsResource {
   snapshot: DaemonChannelsSnapshot;
 }
 
+export interface DaemonChannelObservedContacts {
+  users: Array<{
+    channelName: string;
+    id: string;
+    label: string;
+    lastObservedAt: string;
+  }>;
+  groups: Array<{
+    channelName: string;
+    id: string;
+    label: string;
+    lastObservedAt: string;
+  }>;
+}
+
+export interface DaemonChannelQrLoginActions {
+  /**
+   * `clientId` attributes the login to this browser tab. Without it the daemon
+   * treats every id-less caller as the same client, so it reattaches a peer's
+   * login and lets any of them cancel it.
+   */
+  start(
+    name: string,
+    clientId?: string,
+  ): Promise<DaemonChannelQrLoginStartResult>;
+  state(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  cancel(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  /**
+   * Release a login while the page is going away. Sent with `keepalive` so the
+   * request outlives the document: a reload or tab close runs no React cleanup,
+   * so `cancel` alone never fires for the abandonment path operators use most.
+   * Best-effort — the session still expires if the request is lost.
+   */
+  release(
+    loginId: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void>;
+}
+
+/**
+ * What the channels hook hands its consumers: the identity is the tab's own, so
+ * a caller cannot supply one per call. Advertising the wider contract here
+ * would promise an attribution the hook does not honour — and with no tab id
+ * attached, honouring a caller's would attribute the login to a peer tab.
+ */
+export interface DaemonChannelQrLoginHandlers {
+  start(name: string): Promise<DaemonChannelQrLoginStartResult>;
+  state(loginId: string): Promise<DaemonChannelQrLoginView>;
+  cancel(loginId: string): Promise<DaemonChannelQrLoginView>;
+  release(loginId: string): Promise<void>;
+}
+
 export interface DaemonChannelPairingActions {
   list(name: string): Promise<DaemonChannelPairingRequestsSnapshot>;
   approve(
@@ -318,6 +374,7 @@ export interface DaemonScheduledTask {
    * the capability says whether POST and PATCH accept it. */
   gate?: string | null;
   gateStatus?: DaemonScheduledTaskGateStatus | null;
+  delivery?: DaemonChannelDelivery;
   createdAt: number;
   lastFiredAt: number | null;
   /** Next scheduled fire (epoch ms), or null for a disabled task. A GET-time
@@ -365,6 +422,7 @@ export interface DaemonCreateScheduledTaskRequest {
   /** Gate command; only to a daemon advertising `scheduled_task_gate`, and
    * only on a recurring task. */
   gate?: string;
+  delivery?: DaemonChannelDelivery;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -382,6 +440,8 @@ export interface DaemonUpdateScheduledTaskRequest {
   groupId?: string | null;
   /** Null (or '') removes the gate. */
   gate?: string | null;
+  /** Null explicitly removes delivery; omission preserves it. */
+  delivery?: DaemonChannelDelivery | null;
 }
 
 export interface DaemonAddWorkspaceResult {
@@ -415,6 +475,10 @@ export interface DaemonGoal {
   hasActivePrompt: boolean;
   /** Canonical lifecycle state; UI controls must use its goalId/revision. */
   snapshot: GoalSnapshotV2;
+  /** The owning workspace's cwd, tagged client-side by the Goals page (in
+   * every listing branch) so opening a goal's session restores it in that
+   * workspace's context. Absent when the daemon advertises no workspaces. */
+  workspaceCwd?: string;
 }
 
 /** The `GET /goals` payload. */
@@ -533,6 +597,7 @@ export interface DaemonWorkspaceActions
   activateSubscription(options?: {
     workspaceCwd?: string;
     signal?: AbortSignal;
+    settingsScope?: 'provider' | 'user';
   }): Promise<DaemonSubscriptionActivation>;
   setUiLanguage(
     language: string,
@@ -581,6 +646,9 @@ export interface DaemonWorkspaceActions
 
   // Channels
   loadChannels(): Promise<DaemonChannelsResource>;
+  listChannelObservedContacts(
+    workspaceId?: string,
+  ): Promise<DaemonChannelObservedContacts>;
   upsertChannel(
     name: string,
     request: DaemonChannelUpsertRequest,
@@ -597,6 +665,7 @@ export interface DaemonWorkspaceActions
   stopChannel(name: string): Promise<DaemonChannelMutationResult>;
   restartChannel(name: string): Promise<DaemonChannelMutationResult>;
   channelPairing: DaemonChannelPairingActions;
+  channelQrLogin: DaemonChannelQrLoginActions;
 
   // MCP
   ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus>;
@@ -762,8 +831,10 @@ export interface DaemonWorkspaceActions
     query?: DaemonChannelEventsQuery,
   ): Promise<DaemonChannelEventList>;
 
-  // Goals (session-scoped runtimes, listed workspace-wide)
-  listGoals(): Promise<DaemonGoalList>;
+  // Goals (session-scoped runtimes, listed workspace-wide). `workspaceId` as
+  // for `listScheduledTasks`: the aggregated Web Shell view fans `listGoals`
+  // out over every operable workspace; undefined targets the primary surface.
+  listGoals(workspaceId?: string): Promise<DaemonGoalList>;
   controlGoal(
     sessionId: string,
     request: GoalControlRequest,
@@ -882,3 +953,8 @@ export interface DaemonWorkspaceActions
     options?: { force?: boolean; timeoutMs?: number },
   ): Promise<DaemonWorkspaceRemovalResult>;
 }
+
+export type {
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
+} from '@qwen-code/sdk/daemon';

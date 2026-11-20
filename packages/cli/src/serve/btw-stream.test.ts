@@ -329,4 +329,28 @@ describe('BTW answer snapshots', () => {
     ).toMatchObject({ type: 'error', code: 'btw_failed' });
     expect(f.open(true)).toBe(request);
   });
+
+  it('drops streamed text when a retry restarts the answer', async () => {
+    const f = fixture();
+    const stream = f.open().subscribe(new AbortController().signal);
+    await stream.next();
+    f.push({ type: 'delta', requestId: 'upstream', seq: 0, text: 'partial' });
+    expect((await stream.next()).value).toMatchObject({ answer: 'partial' });
+    f.push({ type: 'reset', requestId: 'upstream' });
+    expect((await stream.next()).value).toMatchObject({ answer: '' });
+    f.push({ type: 'delta', requestId: 'upstream', seq: 1, text: 'final' });
+    f.push({
+      type: 'done',
+      requestId: 'upstream',
+      model: 'main',
+      modelSource: 'main',
+    });
+    const snapshots = [];
+    for await (const snapshot of stream) snapshots.push(snapshot);
+    expect(snapshots.at(-1)).toEqual({
+      type: 'done',
+      requestId: 'request',
+      answer: 'final',
+    });
+  });
 });

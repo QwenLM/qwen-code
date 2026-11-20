@@ -66,11 +66,11 @@ const shouldShowFeedbackBasedOnFatigue = (): boolean => {
  * Check if the session meets the minimum requirements for showing feedback
  * Either tool calls > 10 OR user messages > 5
  */
-const meetsMinimumSessionRequirements = (
+export const meetsMinimumSessionRequirements = (
   sessionStats: SessionStatsState,
 ): boolean => {
   const toolCallsCount = sessionStats.metrics.tools.totalCalls;
-  const userMessagesCount = sessionStats.promptCount;
+  const userMessagesCount = sessionStats.userPromptCount;
 
   return (
     toolCallsCount > MIN_TOOL_CALLS || userMessagesCount > MIN_USER_MESSAGES

@@ -13,6 +13,35 @@ vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
 }));
 
+// Root enters any directory, so a test that needs one it cannot enter sets
+// the error accessSync throws, and the path it throws for, instead of
+// relying on chmod. The path is compared as given: the view passes `cwd`
+// to accessSync unchanged.
+const fsControl = vi.hoisted(() => ({
+  accessError: undefined as NodeJS.ErrnoException | undefined,
+  accessPath: undefined as string | undefined,
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    // Refuses only the search (X_OK) check of the one path the test names,
+    // so a check for another mode or of another directory passes and the
+    // test notices.
+    accessSync: (...args: Parameters<typeof actual.accessSync>) => {
+      const mode = args[1] ?? actual.constants.F_OK;
+      if (
+        fsControl.accessError &&
+        args[0] === fsControl.accessPath &&
+        mode & actual.constants.X_OK
+      ) {
+        throw fsControl.accessError;
+      }
+      return actual.accessSync(...args);
+    },
+  };
+});
+
 import { execFile } from 'node:child_process';
 import {
   aggregateChecks,
@@ -22,15 +51,19 @@ import {
   fetchCurrentBranchPullRequest,
   fetchGitHubPullRequests,
   fetchGitHubPullRequestView,
+  fetchGitHubPullRequestFiles,
+  fetchPullRequestByReference,
   fetchRemoteWebUrl,
   normalizeRemoteToWebUrl,
   parseGhPrList,
   parseGhPrView,
+  parseGhPrFiles,
   pullRequestViewUrl,
   repoKeyFromWebUrl,
   resolveGhBinary,
   GITHUB_PR_LIST_LIMIT,
   GITHUB_PR_VIEW_FAILING_CHECKS_MAX,
+  GITHUB_PR_FILES_MAX,
 } from './github-prs.js';
 
 const mockExecFile = vi.mocked(execFile);
@@ -599,18 +632,20 @@ describe('parseGhPrView', () => {
       expect(nameless.failingChecks).toEqual([]);
     }
 
+    // The cap is pinned, not derived from the constant it is checked by.
+    expect(GITHUB_PR_VIEW_FAILING_CHECKS_MAX).toBe(20);
     const many = parse({
-      statusCheckRollup: Array.from({ length: 30 }, (_, i) => ({
-        __typename: 'CheckRun',
-        name: `job-${i}`,
-        conclusion: 'FAILURE',
-      })),
+      statusCheckRollup: Array.from(
+        { length: GITHUB_PR_VIEW_FAILING_CHECKS_MAX + 1 },
+        (_, i) => ({
+          __typename: 'CheckRun',
+          name: `job-${i}`,
+          conclusion: 'FAILURE',
+        }),
+      ),
     });
     expect(many.failingChecks).toEqual(
-      Array.from(
-        { length: GITHUB_PR_VIEW_FAILING_CHECKS_MAX },
-        (_, i) => `job-${i}`,
-      ),
+      Array.from({ length: 20 }, (_, i) => `job-${i}`),
     );
   });
 
@@ -782,8 +817,57 @@ describe('fetchGitHubPullRequestView', () => {
     expect(result).toEqual({
       kind: 'failed',
       reason: 'cwd_missing',
-      message: 'gh pr view working directory is not a directory',
+      message: 'gh pr view working directory does not exist',
     });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a working directory below a file as missing', async () => {
+    const file = path.join(tmp.dir, 'file');
+    fs.writeFileSync(file, '');
+    mockGhSuccess(ghPrView());
+    expect(
+      await fetchGitHubPullRequestView(url, path.join(file, 'sub')),
+    ).toEqual({
+      kind: 'failed',
+      reason: 'cwd_missing',
+      message: 'gh pr view working directory does not exist',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  // Creating a symlink needs a privilege Windows runners may lack.
+  it.skipIf(process.platform === 'win32')(
+    'names a working directory that cannot be inspected, without spawning gh',
+    async () => {
+      const loop = path.join(tmp.dir, 'loop');
+      fs.symlinkSync(loop, loop);
+      mockGhSuccess(ghPrView());
+      expect(await fetchGitHubPullRequestView(url, loop)).toEqual({
+        kind: 'failed',
+        reason: 'cwd_unusable',
+        message: 'gh pr view working directory cannot be inspected (ELOOP)',
+      });
+      expect(mockExecFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it('names a working directory that cannot be entered, without spawning gh', async () => {
+    mockGhSuccess(ghPrView());
+    fsControl.accessError = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    fsControl.accessPath = tmp.dir;
+    try {
+      expect(await fetchGitHubPullRequestView(url, tmp.dir)).toEqual({
+        kind: 'failed',
+        reason: 'cwd_unusable',
+        message: 'gh pr view working directory cannot be entered (EACCES)',
+      });
+    } finally {
+      fsControl.accessError = undefined;
+      fsControl.accessPath = undefined;
+    }
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 
@@ -860,6 +944,331 @@ describe('fetchGitHubPullRequestView', () => {
   });
 });
 
+describe('parseGhPrFiles', () => {
+  const ghPrFiles = (overrides: Record<string, unknown> = {}) => ({
+    files: [
+      { path: 'src/a.ts', additions: 10, deletions: 2 },
+      { path: 'src/b.ts', additions: 0, deletions: 5 },
+    ],
+    additions: 10,
+    deletions: 7,
+    headRefOid: 'abc1234',
+    ...overrides,
+  });
+  const parse = (overrides: Record<string, unknown> = {}) =>
+    parseGhPrFiles(JSON.stringify(ghPrFiles(overrides)));
+
+  it('maps files, totals and head sha', () => {
+    expect(parse()).toEqual({
+      files: [
+        { path: 'src/a.ts', additions: 10, deletions: 2 },
+        { path: 'src/b.ts', additions: 0, deletions: 5 },
+      ],
+      hiddenCount: 0,
+      additions: 10,
+      deletions: 7,
+      headSha: 'abc1234',
+    });
+  });
+
+  it('caps the file list and reports hiddenCount while keeping PR-wide totals', () => {
+    const files = Array.from({ length: GITHUB_PR_FILES_MAX + 5 }, (_, i) => ({
+      path: `src/f${i}.ts`,
+      additions: 1,
+      deletions: 0,
+    }));
+    const result = parse({ files, additions: 9999, deletions: 8888 });
+    expect(result.files).toHaveLength(GITHUB_PR_FILES_MAX);
+    expect(result.hiddenCount).toBe(5);
+    expect(result.additions).toBe(9999);
+    expect(result.deletions).toBe(8888);
+  });
+
+  it('reports hiddenCount from changedFiles when gh truncates below the code cap', () => {
+    // gh itself caps the files array (100 rows on current CLI) well below
+    // GITHUB_PR_FILES_MAX, so the hidden count must come from changedFiles,
+    // not from the parsed row count. Reproduces a 165-file PR listing 100.
+    const files = Array.from({ length: 100 }, (_, i) => ({
+      path: `src/f${i}.ts`,
+      additions: 1,
+      deletions: 0,
+    }));
+    const result = parse({ files, changedFiles: 165, additions: 12291 });
+    expect(result.files).toHaveLength(100);
+    expect(result.hiddenCount).toBe(65);
+    expect(result.additions).toBe(12291);
+  });
+
+  it('sums parsed rows when gh omits the PR-wide totals', () => {
+    const result = parse({ additions: undefined, deletions: undefined });
+    expect(result.additions).toBe(10);
+    expect(result.deletions).toBe(7);
+  });
+
+  it('skips malformed rows and normalizes negative or non-numeric counts', () => {
+    const result = parse({
+      files: [
+        null,
+        { path: '', additions: 1, deletions: 1 },
+        { additions: 1, deletions: 1 },
+        { path: 'ok.ts', additions: -3, deletions: 'x' },
+      ],
+      additions: undefined,
+      deletions: undefined,
+    });
+    expect(result.files).toEqual([
+      { path: 'ok.ts', additions: 0, deletions: 0 },
+    ]);
+  });
+
+  it('defaults a missing head sha to an empty string', () => {
+    const result = parse({ headRefOid: undefined });
+    expect(result.headSha).toBe('');
+  });
+
+  it.each([
+    ['a JSON array', '[]'],
+    ['null', 'null'],
+    ['a missing files array', JSON.stringify({ additions: 1 })],
+    ['invalid JSON', 'not json'],
+  ])('throws on %s', (_label, stdout) => {
+    expect(() => parseGhPrFiles(stdout)).toThrow();
+  });
+});
+
+describe('fetchGitHubPullRequestFiles', () => {
+  const tmp = useTmpDir('github-prs-files-');
+
+  it('returns not_a_repo outside a git repository', async () => {
+    const result = await fetchGitHubPullRequestFiles(tmp.dir, 1);
+    expect(result).toEqual({ kind: 'not_a_repo' });
+  });
+
+  it('rejects a non-positive or non-integer number before spawning', async () => {
+    const repo = tmp.repo();
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      const result = await fetchGitHubPullRequestFiles(repo, bad);
+      expect(result).toMatchObject({ kind: 'failed' });
+    }
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('requests the files field set by number and parses the result', async () => {
+    const repo = tmp.repo();
+    mockGhSuccess(
+      {
+        files: [{ path: 'a.ts', additions: 3, deletions: 1 }],
+        additions: 3,
+        deletions: 1,
+        headRefOid: 'deadbee',
+      },
+      [
+        'pr',
+        'view',
+        '7',
+        '--json',
+        'files,additions,deletions,headRefOid,changedFiles',
+      ],
+    );
+    const result = await fetchGitHubPullRequestFiles(repo, 7);
+    expect(result).toMatchObject({
+      kind: 'ok',
+      files: {
+        files: [{ path: 'a.ts', additions: 3, deletions: 1 }],
+        additions: 3,
+        deletions: 1,
+        headSha: 'deadbee',
+      },
+    });
+  });
+
+  it('resolves the number in the bound PR repository via --repo', async () => {
+    const repo = tmp.repo();
+    mockGhSuccess({ files: [], additions: 0, deletions: 0, changedFiles: 0 }, [
+      'pr',
+      'view',
+      '7',
+      '--json',
+      'files,additions,deletions,headRefOid,changedFiles',
+      '--repo',
+      'other/repo',
+    ]);
+    const result = await fetchGitHubPullRequestFiles(
+      repo,
+      7,
+      undefined,
+      'other/repo',
+    );
+    expect(result).toMatchObject({ kind: 'ok' });
+  });
+
+  it('carries the Enterprise host through to gh --repo', async () => {
+    const repo = tmp.repo();
+    mockGhSuccess({ files: [], additions: 0, deletions: 0, changedFiles: 0 }, [
+      'pr',
+      'view',
+      '7',
+      '--json',
+      'files,additions,deletions,headRefOid,changedFiles',
+      '--repo',
+      'ghe.corp/other/repo',
+    ]);
+    const result = await fetchGitHubPullRequestFiles(
+      repo,
+      7,
+      undefined,
+      'ghe.corp/other/repo',
+    );
+    expect(result).toMatchObject({ kind: 'ok' });
+  });
+
+  it('accepts a host:port slug in gh --repo', async () => {
+    const repo = tmp.repo();
+    mockGhSuccess({ files: [], additions: 0, deletions: 0, changedFiles: 0 }, [
+      'pr',
+      'view',
+      '7',
+      '--json',
+      'files,additions,deletions,headRefOid,changedFiles',
+      '--repo',
+      'ghe.corp:8443/other/repo',
+    ]);
+    const result = await fetchGitHubPullRequestFiles(
+      repo,
+      7,
+      undefined,
+      'ghe.corp:8443/other/repo',
+    );
+    expect(result).toMatchObject({ kind: 'ok' });
+  });
+
+  it('rejects a malformed repo slug before spawning gh', async () => {
+    const repo = tmp.repo();
+    for (const bad of [
+      '--upload-pack=evil',
+      '-owner/repo',
+      '-ghe.corp/o/r',
+      'owner/repo/extra',
+      'ghe.corp/o/r/extra',
+      'ghe.corp:80:90/o/r',
+      'owner repo',
+      'https://github.com/o/r',
+      'https://ghe.corp/o/r',
+      'owner/',
+    ]) {
+      const result = await fetchGitHubPullRequestFiles(repo, 7, undefined, bad);
+      expect(result).toMatchObject({
+        kind: 'failed',
+        message: 'invalid pull request repository',
+        reason: 'invalid_repo',
+      });
+    }
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('maps a missing gh binary to cli_unavailable', async () => {
+    const repo = tmp.repo();
+    mockExecError('spawn gh ENOENT', { code: 'ENOENT' });
+    const result = await fetchGitHubPullRequestFiles(repo, 7);
+    expect(result).toEqual({ kind: 'cli_unavailable' });
+  });
+
+  it('maps a gh failure to failed with the redacted message', async () => {
+    const repo = tmp.repo();
+    mockExecError('Command failed: gh pr view 7', {
+      stderr: 'could not resolve to a Pull Request',
+    });
+    const result = await fetchGitHubPullRequestFiles(repo, 7);
+    expect(result).toMatchObject({
+      kind: 'failed',
+      message: 'could not resolve to a Pull Request',
+      gitRoot: repo,
+    });
+  });
+
+  it('maps a timeout to failed naming the timeout', async () => {
+    const repo = tmp.repo();
+    mockExecError('Command failed: gh pr view 7', { killed: true });
+    const result = await fetchGitHubPullRequestFiles(repo, 7);
+    expect(result).toMatchObject({
+      kind: 'failed',
+      message: 'gh pr view timed out after 10s',
+    });
+  });
+
+  it('maps output it cannot parse to failed', async () => {
+    const repo = tmp.repo();
+    mockStdout('not json');
+    const result = await fetchGitHubPullRequestFiles(repo, 7);
+    expect(result).toMatchObject({ kind: 'failed', gitRoot: repo });
+  });
+
+  it('runs gh at the git root with the scrubbed workspace env', async () => {
+    const repo = tmp.repo();
+    const seen: {
+      cwd?: string;
+      env?: Record<string, string | undefined>;
+    } = {};
+    mockExec((cb, _args, opts) => {
+      const options = opts as {
+        cwd?: string;
+        env?: Record<string, string | undefined>;
+      };
+      seen.cwd = options.cwd;
+      seen.env = options.env;
+      cb(
+        null,
+        JSON.stringify({
+          files: [],
+          additions: 0,
+          deletions: 0,
+          changedFiles: 0,
+        }),
+        '',
+      );
+    });
+
+    await fetchGitHubPullRequestFiles(repo, 7, {
+      GH_TOKEN: 'workspace-token',
+      GH_REPO: 'other/repo',
+    });
+
+    expect(seen.cwd).toBe(repo);
+    expect(seen.env).toBeDefined();
+    expect(seen.env?.['GH_TOKEN']).toBe('workspace-token');
+    // ghEnv strips repository selectors: only --repo names the repository.
+    expect(seen.env).not.toHaveProperty('GH_REPO');
+  });
+
+  it('reports the fallback binary on a files spawn failure', async () => {
+    const repo = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockExecError('spawn EACCES', { code: 'EACCES' });
+
+    const result = await fetchGitHubPullRequestFiles(repo, 7, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+
+    expect(result).toMatchObject({ kind: 'failed', binary });
+  });
+
+  it('fails on output it cannot parse without naming the binary', async () => {
+    // A fallback binary is in play, so only the parse path can omit it.
+    const repo = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    fakeGh(path.join(home, '.local', 'bin'));
+    mockStdout('not json');
+    const result = await fetchGitHubPullRequestFiles(repo, 7, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+    expect(result).toMatchObject({ kind: 'failed', gitRoot: repo });
+    expect(result).not.toHaveProperty('binary');
+  });
+});
+
 describe('createGitHubPullRequest', () => {
   const tmp = useTmpDir('github-prs-create-', { resetMocks: false });
   afterEach(() => {
@@ -892,6 +1301,19 @@ describe('createGitHubPullRequest', () => {
     expect(seen.env).toBeDefined();
     expect(seen.env).not.toHaveProperty('GIT_DIR');
     expect(seen.env).not.toHaveProperty('GIT_WORK_TREE');
+  });
+
+  it('gives gh pr create its longer 30 s timeout', async () => {
+    mockExecFile.mockClear();
+    const dir = tmp.repo();
+    answerWithUrl('https://github.com/o/r/pull/7');
+
+    await createGitHubPullRequest(dir, { title: 'My PR' });
+
+    expect(mockExecFile).toHaveBeenCalledTimes(1);
+    expect(mockExecFile.mock.calls[0]?.[2]).toMatchObject({
+      timeout: 30_000,
+    });
   });
 
   it('spawns the fallback gh when PATH cannot resolve it', async () => {
@@ -1314,6 +1736,187 @@ describe('fetchCurrentBranchPullRequest', () => {
       status: 'error',
     });
     expect(mockExecFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetchPullRequestByReference', () => {
+  const tmp = useTmpDir('github-prs-by-ref-');
+
+  it('resolves a bare number through gh pr view', async () => {
+    mockGhSuccess(
+      {
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'OPEN',
+      },
+      ['pr', 'view', '77', '--json', 'number,url,state'],
+    );
+
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'pr',
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'open',
+    });
+  });
+
+  it('walks up to the repository root when cwd is a subdirectory', async () => {
+    const repo = tmp.repo();
+    const subdir = path.join(repo, 'packages', 'sub');
+    fs.mkdirSync(subdir, { recursive: true });
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'OPEN',
+    });
+    await fetchPullRequestByReference(subdir, '77');
+    expect(mockExecFile).toHaveBeenCalledTimes(1);
+    // findGitRoot must walk the subdirectory up to the repo root, not spawn
+    // gh in the subdirectory itself.
+    const opts = mockExecFile.mock.calls[0][2] as { cwd: string };
+    expect(opts.cwd).toBe(repo);
+  });
+
+  it('passes a URL reference through unchanged', async () => {
+    const url = 'https://github.example.com/o/r/pull/5';
+    mockGhSuccess({ number: 5, url, state: 'MERGED' }, [
+      'pr',
+      'view',
+      url,
+      '--json',
+      'number,url,state',
+    ]);
+
+    expect(await fetchPullRequestByReference(tmp.repo(), url)).toEqual({
+      status: 'pr',
+      number: 5,
+      url,
+      state: 'merged',
+    });
+  });
+
+  it('classifies a gh lookup failure as failed', async () => {
+    mockExecError('could not resolve to a PullRequest');
+    expect(await fetchPullRequestByReference(tmp.repo(), '999999999')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+  });
+
+  it('classifies a missing gh binary as unavailable', async () => {
+    mockExecError('spawn gh ENOENT', { code: 'ENOENT' });
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'unavailable',
+    });
+  });
+
+  it('classifies a killed gh child as timeout', async () => {
+    mockExecError('timed out', { killed: true });
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'timeout',
+    });
+  });
+
+  it('classifies a missing working directory as failed without spawning gh', async () => {
+    // A missing cwd spawns the same ENOENT as a missing binary; the
+    // pre-check keeps 'unavailable' meaning "gh is not installed".
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'OPEN',
+    });
+    // Outside any repository so findGitRoot cannot resolve the missing cwd
+    // up to an existing parent repo.
+    const missing = path.join(os.tmpdir(), 'github-prs-by-ref-missing-cwd');
+    expect(await fetchPullRequestByReference(missing, '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a deleted cwd inside a surviving repository instead of binding the ancestor repo', async () => {
+    // findGitRoot only inspects ancestors' .git, so a deleted cwd under a
+    // surviving repo resolves up to that repo. The pre-check must run on the
+    // caller-named cwd BEFORE that resolution, or a bare number binds the
+    // ancestor repo's PR (a checkout the session never referenced) and
+    // returns success. Reordering the check back after findGitRoot reds this.
+    const repo = tmp.repo();
+    const gone = path.join(repo, 'vendor', 'libfoo');
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/ancestor/repo/pull/77',
+      state: 'OPEN',
+    });
+    expect(await fetchPullRequestByReference(gone, '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a file cwd inside a surviving repository (the deleted-cwd sibling)', async () => {
+    // Same root cause one spelling over: a cwd that exists but is a regular
+    // file under a surviving repo. findGitRoot still resolves the ancestor,
+    // so the pre-check must reject the caller-named path itself. The killing
+    // mutant is reverting the pre-check's subject to the resolved root
+    // (viewWorkingDirectoryProblem(runDir)); a mere reorder that keeps cwd as
+    // the subject survives.
+    const repo = tmp.repo();
+    const filePath = path.join(repo, 'not-a-dir');
+    fs.writeFileSync(filePath, 'x');
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/ancestor/repo/pull/77',
+      state: 'OPEN',
+    });
+    expect(await fetchPullRequestByReference(filePath, '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on an unrecognizable state', async () => {
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'SOMETHING_NEW',
+    });
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+  });
+
+  it('fails closed on unparseable output', async () => {
+    mockStdout('not json');
+    expect(await fetchPullRequestByReference(tmp.repo(), '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+  });
+
+  it('still spawns gh outside a git repository (a URL names its own repo)', async () => {
+    mockGhSuccess({
+      number: 5,
+      url: 'https://github.com/o/r/pull/5',
+      state: 'CLOSED',
+    });
+    expect(
+      await fetchPullRequestByReference(
+        tmp.dir,
+        'https://github.com/o/r/pull/5',
+      ),
+    ).toEqual({
+      status: 'pr',
+      number: 5,
+      url: 'https://github.com/o/r/pull/5',
+      state: 'closed',
+    });
+    expect(mockExecFile.mock.calls[0]?.[2]).toMatchObject({ cwd: tmp.dir });
   });
 });
 

@@ -9,6 +9,7 @@ import {
   runForkedAgent,
   type ForkedAgentResult,
 } from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
@@ -127,7 +128,12 @@ export async function planUserAutoMemoryDreamByAgent(
   });
 
   if (result.status !== 'completed') {
-    throw new Error(result.terminateReason || 'User Dream agent failed');
+    // No cancelled arm: on the only path that produces one, the manager
+    // marks the record 'cancelled' before aborting and then skips the
+    // error update, so this text would never reach anyone.
+    throw new Error(
+      terminateReasonMessage(result.terminateReason, 'User Dream agent failed'),
+    );
   }
   return result;
 }

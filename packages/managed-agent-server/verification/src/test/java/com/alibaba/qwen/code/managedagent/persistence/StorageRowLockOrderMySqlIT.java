@@ -4,9 +4,10 @@ import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -69,10 +70,8 @@ class StorageRowLockOrderMySqlIT {
         transactions = new TransactionTemplate(new DataSourceTransactionManager(database.source()));
         schema = jdbc.queryForObject("SELECT DATABASE()", String.class);
         threads = Executors.newFixedThreadPool(2);
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id)"
-                + " VALUES (?, ?, ?, ?, ?)", JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE),
-                JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                JdbcRuntimeBindingRepository.storageFenceKey(STORAGE), TENANT, STORAGE);
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id)"
+                + " VALUES (?, ?, ?)", RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE), TENANT, STORAGE);
     }
 
     @AfterEach
@@ -93,7 +92,7 @@ class StorageRowLockOrderMySqlIT {
         // The alias locker starts once admission has read the row for its
         // fence, and admission goes on only after the locker is waiting.
         var admissionJdbc = new PausingJdbc(database.source(), " FROM ma_storage ",
-                () -> transactions.executeWithoutResult(status -> SshWorkspaceStore.physicalKey(jdbc, TENANT, STORAGE)));
+                () -> transactions.executeWithoutResult(status -> JdbcSshWorkspaceStore.physicalKey(jdbc, TENANT, STORAGE)));
         Future<?> admission = threads.submit(() -> transactions.executeWithoutResult(status -> admit(admissionJdbc, shared)));
 
         admission.get(30, TimeUnit.SECONDS);
@@ -211,7 +210,7 @@ class StorageRowLockOrderMySqlIT {
             assertThat(committed.queryForObject("SELECT COUNT(*) FROM performance_schema.data_locks"
                     + " WHERE OBJECT_SCHEMA = ? AND INDEX_NAME = 'uk_ma_storage_business_key' AND LOCK_STATUS = 'GRANTED'"
                     + " AND LOCK_DATA LIKE ?", Integer.class, schema,
-                    "'" + JdbcRuntimeBindingRepository.storageAliasKey(later, STORAGE) + "'%"))
+                    "'" + RuntimeAdmissionFences.storageAliasKey(later, STORAGE) + "'%"))
                     .as("recovery holds the later alias's record").isPositive();
         });
     }
@@ -219,7 +218,7 @@ class StorageRowLockOrderMySqlIT {
     @Test
     void physicalRecoveryOnASingleConnectionKeepsItsCallersTransaction() {
         registerLocal();
-        String alias = JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE);
+        String alias = RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE);
         // The offline recovery entry runs on one connection, as here.
         var single = new SingleConnectionDataSource(database.url(), System.getProperty("mysql.user"),
                 System.getProperty("mysql.password", ""), true);
@@ -241,7 +240,7 @@ class StorageRowLockOrderMySqlIT {
     @Test
     void migrationAbortClearsTheFenceThroughTheAliasIndex(@TempDir Path temp) throws Exception {
         // owner() locked the row through uk_ma_storage_business_key; clearing
-        // the fence through uk_ma_storage_alias would lock the row through a
+        // the fence through any other index would lock the row through a
         // second index inside the same transaction.
         String tenant = "lock-order-migration-tenant";
         String storage = "lock-order-migration-storage";
@@ -267,7 +266,8 @@ class StorageRowLockOrderMySqlIT {
                 .put("stateDirectory", temp.resolve("runtime").toString()).put("nodeExecutable", "/test/node")
                 .put("cliEntry", "/test/cli.js");
         var cleared = new CapturingJdbc(database.source(), "fence_operation_id = NULL WHERE");
-        var operation = new WorkspaceMigrationStore(cleared, manager, guard, new InMemoryRuntimeBindingRepository(),
+        var operation = new WorkspaceMigrationStore(cleared, manager, guard, new JdbcRuntimeBindingRepository(database.source(),
+                new AesGcmSecretProtector("test", new byte[32])),
                 request.toString().getBytes(StandardCharsets.UTF_8), true,
                 new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
         operation.retire(mock(RuntimeBrokerService.class));
@@ -285,19 +285,18 @@ class StorageRowLockOrderMySqlIT {
     }
 
     private static void insertLocal(ManagedSchemaJdbcTemplate jdbc, String tenant, String physical) {
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, physical_key,"
                 + " registration_state, storage_kind, registration_revision, registration_json)"
-                + " VALUES (?, ?, ?, ?, ?, ?, 'REGISTERED', 'LOCAL', 1, '{}')",
-                JdbcRuntimeBindingRepository.storageAliasKey(tenant, STORAGE), JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                JdbcRuntimeBindingRepository.storageFenceKey(STORAGE), tenant, STORAGE, physical);
+                + " VALUES (?, ?, ?, ?, 'REGISTERED', 'LOCAL', 1, '{}')",
+                RuntimeAdmissionFences.storageAliasKey(tenant, STORAGE), tenant, STORAGE, physical);
     }
 
     private void registerLocal() {
         jdbc.update("UPDATE ma_storage SET physical_key = ?, registration_state = 'REGISTERED', storage_kind = 'LOCAL',"
                 + " registration_revision = 1, registration_json = '{}' WHERE alias_key = ?", PHYSICAL,
-                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE));
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state)"
-                + " VALUES (?, ?, 'LOCAL', 'READY')", PHYSICAL, PHYSICAL);
+                RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE));
+        jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, mount_state)"
+                + " VALUES (?, 'LOCAL', 'READY')", PHYSICAL);
     }
 
     private static void admit(ManagedSchemaJdbcTemplate jdbc, boolean shared) {

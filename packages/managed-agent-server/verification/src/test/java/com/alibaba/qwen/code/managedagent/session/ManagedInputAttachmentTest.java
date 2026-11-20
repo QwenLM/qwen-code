@@ -5,9 +5,9 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -33,6 +33,8 @@ import static org.mockito.Mockito.when;
 class ManagedInputAttachmentTest {
     private ManagedAgentService service;
     private ManagedAgentStore store;
+    private HarnessConnector harness;
+    private ManagedSchemaJdbcTemplate jdbc;
     private static final String PNG = Base64.getEncoder().encodeToString(new byte[] {(byte) 137, 80, 78, 71, 13, 10, 26, 10});
 
     @BeforeEach
@@ -41,12 +43,43 @@ class ManagedInputAttachmentTest {
         source.setURL("jdbc:h2:mem:input-attachments-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         ManagedSchema.initialize(source);
-        var registry = mock(ManagedWorkspaceRegistry.class);
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(new ManagedSchemaJdbcTemplate(source), new ObjectMapper(),
+        var registry = mock(JdbcManagedWorkspaceRegistry.class);
+        jdbc = new ManagedSchemaJdbcTemplate(source);
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
                 Clock.systemUTC(), events -> {}, registry, new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        var harness = mock(HarnessConnector.class);
+        harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         service = new ManagedAgentService(store, new RequestDigests(), mock(HarnessCoordinator.class), harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+    }
+
+    @Test
+    void unboundActiveSessionAdvertisesInputAttachmentsWithACapableHarness() {
+        when(harness.supportsInputAttachments()).thenReturn(true);
+        var admission = service.createSession("tenant", "unbound-capable", "qwen-code", null, null, null,
+                List.of(new InputBlock("input_text", "hello")));
+        var summary = service.getWebShellSession("tenant", null, admission.sessionId());
+        assertThat(summary.capabilities().inputAttachments()).isTrue();
+    }
+
+    @Test
+    void unboundSessionWithoutHarnessSupportDoesNotAdvertiseInputAttachments() {
+        var admission = service.createSession("tenant", "unbound-unsupported", "qwen-code", null, null, null,
+                List.of(new InputBlock("input_text", "hello")));
+        var summary = service.getWebShellSession("tenant", null, admission.sessionId());
+        assertThat(summary.capabilities().inputAttachments()).isFalse();
+    }
+
+    @Test
+    void unboundClosedSessionDoesNotAdvertiseInputAttachments() {
+        when(harness.supportsInputAttachments()).thenReturn(true);
+        var admission = service.createSession("tenant", "unbound-closed", "qwen-code", null, null, null,
+                List.of(new InputBlock("input_text", "hello")));
+        // CLOSED keeps deletedAt null, so only the ACTIVE conjunct can refuse;
+        // a DELETED row would pass for the wrong reason (visible is false).
+        jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?",
+                "tenant", admission.sessionId());
+        var summary = service.getWebShellSession("tenant", null, admission.sessionId());
+        assertThat(summary.capabilities().inputAttachments()).isFalse();
     }
 
     @Test

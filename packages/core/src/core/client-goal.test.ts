@@ -1100,7 +1100,9 @@ describe('LlmClient Goal admission', () => {
     const { client, recorder, order } = setupGoalClient();
 
     await drain(
-      goalTurn(client, 'Continue the Goal.', { userTurnRecordedByHost: true }),
+      goalTurn(client, 'Continue the Goal.', {
+        userTurn: { promptId: 'goal-prompt' },
+      }),
     );
 
     expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
@@ -1312,6 +1314,7 @@ describe('LlmClient Goal admission', () => {
       // The send path stamps every delivered notification turn entry, which
       // is what lets recovery tell it apart from a cold pre-send record.
       true,
+      false,
     );
     expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
     expect(order).toEqual(['flush', 'finish']);

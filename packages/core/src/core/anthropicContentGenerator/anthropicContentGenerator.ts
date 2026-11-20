@@ -62,8 +62,10 @@ import { setToolCallPreparations } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { parseToolCallArguments } from '../tool-call-arguments.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { retryContext } from '../../utils/retryContext.js';
 import { getErrorStatus } from '../../utils/errors.js';
 import { buildSessionAwareFetch } from '../outbound-session-id.js';
+import { markRequestDispatched } from '../loggingContentGenerator/request-dispatch.js';
 import {
   isRetryableStatuslessUpstreamError,
   isRetryableStreamTransportError,
@@ -327,6 +329,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
   async generateContent(
     request: GenerateContentParameters,
   ): Promise<GenerateContentResponse> {
+    const singleAttempt = retryContext.getStore()?.singleAttempt;
     let response: Message;
     let anthropicRequest: MessageCreateParamsWithThinking | undefined;
     // Wrap the caller's signal in a per-request child for the same reason as
@@ -345,10 +348,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
       response = (await this.client.messages.create(anthropicRequest, {
         signal: perRequestAc?.signal,
         ...(headers ? { headers } : {}),
+        ...(singleAttempt && { maxRetries: 0 }),
       })) as Message;
       reportAnthropicResponse(telemetryAttempt, response);
     } catch (error) {
       if (
+        !singleAttempt &&
         anthropicRequest &&
         this.disableUnsupportedBlockBinding(error, anthropicRequest)
       ) {
@@ -365,6 +370,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
   async generateContentStream(
     request: GenerateContentParameters,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const singleAttempt = retryContext.getStore()?.singleAttempt;
     const anthropicRequest = await this.buildRequest(request);
     const headers = this.buildPerRequestHeaders(anthropicRequest);
     const streamingRequest: MessageCreateParamsStreaming & {
@@ -387,16 +393,21 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
     let stream: AsyncIterable<RawMessageStreamEvent>;
     try {
+      markRequestDispatched();
       stream = (await this.client.messages.create(
         streamingRequest as MessageCreateParamsStreaming,
         {
           signal: perRequestAc.signal,
           ...(headers ? { headers } : {}),
+          ...(singleAttempt && { maxRetries: 0 }),
         },
       )) as AsyncIterable<RawMessageStreamEvent>;
     } catch (error) {
       perRequestAc.abort();
-      if (this.disableUnsupportedBlockBinding(error, anthropicRequest)) {
+      if (
+        !singleAttempt &&
+        this.disableUnsupportedBlockBinding(error, anthropicRequest)
+      ) {
         return this.generateContentStream(request);
       }
       throw redactProxyError(error);
@@ -423,18 +434,21 @@ export class AnthropicContentGenerator implements ContentGenerator {
           )
         : stream;
 
-    const inner = this.processStreamWithEmptyFallback(
-      this.redactStreamErrors(guardedStream),
-      anthropicRequest,
-      // The empty-stream fallback probe needs a signal that is still live
-      // after the source stream drains. The shared stream guard aborts
-      // `perRequestAc` in its `finally` the moment the source drains — which
-      // happens before the probe runs — so pass the caller's signal instead;
-      // the probe derives its own short-lived child from it.
-      request.config?.abortSignal,
-      headers,
-      telemetryAttempt,
-    );
+    const redactedStream = this.redactStreamErrors(guardedStream);
+    const inner = singleAttempt
+      ? this.processStream(redactedStream, telemetryAttempt)
+      : this.processStreamWithEmptyFallback(
+          redactedStream,
+          anthropicRequest,
+          // The empty-stream fallback probe needs a signal that is still live
+          // after the source stream drains. The shared stream guard aborts
+          // `perRequestAc` in its `finally` the moment the source drains — which
+          // happens before the probe runs — so pass the caller's signal instead;
+          // the probe derives its own short-lived child from it.
+          request.config?.abortSignal,
+          headers,
+          telemetryAttempt,
+        );
     // Abort the child once the stream is fully drained or abandoned; this
     // releases the SDK request and detaches the child's listener from the
     // caller's signal.
@@ -449,7 +463,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
           yield chunk;
         }
       } catch (error) {
-        if (!yielded && disableUnsupportedBlockBinding(error)) {
+        if (
+          !singleAttempt &&
+          !yielded &&
+          disableUnsupportedBlockBinding(error)
+        ) {
           perRequestAc.abort();
           yield* await retryWithoutBlockBinding();
         } else {
@@ -789,12 +807,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // Proxy-hosted Claude: a non-DeepSeek backend on a non-native base URL.
     // Its wire shape is Anthropic's, while its history may carry thinking
     // blocks recorded by another provider without a signature.
-    const isProxyHostedClaude =
-      !isDeepSeek && !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
-    const dropUnsignedAssistantThinking =
+    const isNativeAnthropic = isAnthropicNativeBaseUrl(
+      this.contentGeneratorConfig,
+    );
+    const isProxyHostedClaude = !isDeepSeek && !isNativeAnthropic;
+    const demoteForeignThoughtToText =
       isProxyHostedClaude &&
       !!thinking &&
       this.modelSupportsAdaptiveThinking(true);
+    // Native signature requirements apply to replayed history even when the
+    // current request disables thinking or uses a non-adaptive model.
+    const dropUnsignedAssistantThinking =
+      (!isDeepSeek && isNativeAnthropic) || demoteForeignThoughtToText;
     // Strict Anthropic-compatible proxies (verified against SGLang v0.5.19,
     // #11772; llama.cpp/vLLM expected to behave the same but untested)
     // reject a `thinking` block with no `signature` field at all (HTTP 400,
@@ -808,8 +832,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // the native API's opaque signature), and the two passes must stay
     // disjoint so the 4.6+ wire shape never changes. Unknown or unversioned
     // model ids parse as non-adaptive and keep the fill — that is exactly
-    // what a custom SGLang model id needs. The native API's history is left
-    // untouched.
+    // what a custom SGLang model id needs. Native requests use the separate
+    // unsigned-thinking cleanup.
     // https://github.com/QwenLM/qwen-code/issues/11772
     const fillUnsignedThinkingSignature =
       isProxyHostedClaude && !this.modelSupportsAdaptiveThinking(true);
@@ -857,6 +881,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         dropUnsignedAssistantThinking,
+        demoteForeignThoughtToText,
         fillUnsignedThinkingSignature,
         stripAssistantThinking,
         stripTrailingAssistantPrefill,
@@ -1414,6 +1439,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let completionTokens = 0;
     let completionTokensReported = false;
     let finishReason: string | undefined;
+    let finishMessage: string | undefined;
 
     const blocks = new Map<number, StreamingBlockState>();
     const deferredToolCalls: GenerateContentResponse[] = [];
@@ -1620,6 +1646,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
         }
         case 'message_delta': {
           const stopReasonValue = event.delta.stop_reason;
+          finishMessage ??=
+            this.converter.mapAnthropicStopDetailsToFinishMessage(
+              (event.delta as { stop_details?: unknown }).stop_details,
+            );
           if (stopReasonValue) {
             finishReason = stopReasonValue;
             const hasOpenToolCall = [...blocks.values()].some(
@@ -1719,6 +1749,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 cacheReadTokensReported: cachedTokensReported,
                 cacheCreationTokensReported,
               }),
+              finishMessage,
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -1748,6 +1779,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 cacheReadTokensReported: cachedTokensReported,
                 cacheCreationTokensReported,
               }),
+              finishMessage,
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -1895,6 +1927,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     model?: string,
     finishReason?: string,
     usageMetadata?: GenerateContentResponseUsageMetadata,
+    finishMessage?: string,
   ): GenerateContentResponse {
     const response = new GenerateContentResponse();
     response.responseId = responseId;
@@ -1916,6 +1949,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         index: 0,
         safetyRatings: [],
         ...(mappedFinishReason ? { finishReason: mappedFinishReason } : {}),
+        ...(finishMessage ? { finishMessage } : {}),
       },
     ];
 

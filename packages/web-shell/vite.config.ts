@@ -1,4 +1,6 @@
 import { pierreResources } from './pierre-build';
+import { exceljsBrowser } from './exceljs-build';
+import { createConnection } from 'node:net';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import type { Connect, PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
@@ -7,8 +9,90 @@ import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
 import { getAllowedDaemonOrigin } from './client/config/daemon';
 
+// Trim + `||`, not `??`: launchers export the variable empty (or blank) when
+// no daemon URL is configured, and an empty target makes `new URL()` throw at
+// config load.
+const daemonTarget =
+  process.env['QWEN_DAEMON_URL']?.trim() || 'http://127.0.0.1:4170';
+
+// WHATWG URL keeps the brackets an IPv6 literal needs inside a URL, but a TCP
+// probe takes the bare address; `[::1]` reaches DNS and fails with ENOTFOUND.
+export function probeHostname(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
+// The probe must dial the same authority the proxy does. http-proxy falls back
+// to the protocol's default port, so probing 4170 for a port-less URL reports
+// a healthy daemon while every proxied request fails on port 80.
+export function probeAddress(target: string): { host: string; port: number } {
+  const url = new URL(target);
+  return {
+    host: probeHostname(url.hostname),
+    port: Number(url.port) || (url.protocol === 'https:' ? 443 : 80),
+  };
+}
+
+const probedTargets = new Set<string>();
+
+// One probe per dev server, not per request: an unreachable daemon is not
+// fatal (the E2E suites mock it per page), but the operator learns about it
+// at startup instead of through a suite of slow browser timeouts.
+export function probeDaemonTarget(
+  target: string = daemonTarget,
+  connect: typeof createConnection = createConnection,
+): void {
+  // One probe per target per process: a run that starts several servers
+  // against the same daemon learns nothing from repeating it.
+  if (probedTargets.has(target)) return;
+  probedTargets.add(target);
+  const probe = connect(probeAddress(target), () => probe.destroy());
+  const unreachable = () => {
+    probe.destroy();
+    console.warn(
+      `[web-shell] no daemon is listening at ${target}; proxied ` +
+        'daemon routes answer 502 until one is started (page-level E2E ' +
+        'mocks are unaffected)',
+    );
+  };
+  probe.setTimeout(2_000, unreachable);
+  probe.once('error', unreachable);
+}
+
+// A refused connection, a failed lookup, or a connect-phase timeout means
+// nothing was listening; a reset mid-request means a daemon is there but did
+// not answer. Only the former is `daemon_unreachable`. The proxy sets no
+// read timeout, so ETIMEDOUT here can only come from the connect phase.
+const DAEMON_ABSENT_ERRNOS = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'ENETDOWN',
+  'EHOSTDOWN',
+]);
+
+export function daemonProxyFailure(
+  target: string,
+  error: Error & { code?: string },
+): { code: string; error: string } {
+  const absent = DAEMON_ABSENT_ERRNOS.has(error.code ?? '');
+  return {
+    code: absent ? 'daemon_unreachable' : 'daemon_proxy_error',
+    error: absent
+      ? `No daemon answered at ${target} (${error.message}). ` +
+        'Start the daemon or install the page-level mock before this request.'
+      : `The daemon at ${target} did not complete the request ` +
+        `(${error.message}). Check the daemon, or install the page-level mock ` +
+        'before this request.',
+  };
+}
+
 const daemonProxy: ProxyOptions = {
-  target: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
+  target: daemonTarget,
   changeOrigin: true,
   bypass: (req) => {
     if (req.url?.startsWith('/api/')) return undefined;
@@ -35,6 +119,19 @@ const daemonProxy: ProxyOptions = {
     return undefined;
   },
   configure: (proxy) => {
+    // Vite's own listener already answers a dead daemon with an empty 500;
+    // the lost tests in run 42460891896 were the client's retry cadence, not
+    // a hung response. This handler runs first and replaces that empty 500
+    // with a labeled 502, so the failure is correctly attributed.
+    proxy.on('error', (error, _req, res) => {
+      if (!('writeHead' in res) || res.headersSent || res.writableEnded) return;
+      res.writeHead(502, { 'content-type': 'application/json' });
+      res.end(
+        // Human text in `error`, machine token in `code`: readDaemonError
+        // prefers `error`, so the operator-facing sentence must live there.
+        JSON.stringify(daemonProxyFailure(daemonTarget, error)),
+      );
+    });
     proxy.on('proxyReq', (proxyReq) => {
       proxyReq.removeHeader('origin');
       proxyReq.removeHeader('referer');
@@ -127,6 +224,7 @@ export function createDevelopmentMiddleware(): Connect.NextHandleFunction {
 function configureDevelopmentMiddleware(
   server: ViteDevServer | PreviewServer,
 ): void {
+  probeDaemonTarget();
   server.middlewares.use(createDevelopmentMiddleware());
 }
 
@@ -134,9 +232,8 @@ export default defineConfig(({ command }) => ({
   root: 'client',
   // Worker-only imports otherwise trigger a dev-page reload on first preview.
   optimizeDeps: {
-    exclude: ['@pierre/diffs', 'shiki/wasm'],
+    exclude: ['@pierre/diffs', 'shiki/wasm', 'exceljs'],
     include: [
-      'exceljs',
       'ssf',
       'shiki-files/core',
       'shiki-files/engine/javascript',
@@ -145,6 +242,7 @@ export default defineConfig(({ command }) => ({
   },
   plugins: [
     pierreResources(),
+    exceljsBrowser(),
     react(),
     tailwindcss(),
     {
@@ -153,6 +251,9 @@ export default defineConfig(({ command }) => ({
       configurePreviewServer: configureDevelopmentMiddleware,
     },
   ],
+  worker: {
+    plugins: () => [exceljsBrowser()],
+  },
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(

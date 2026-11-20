@@ -289,6 +289,7 @@ export interface ScheduledTaskKeepalive {
 
 export interface StartScheduledTaskKeepaliveOptions {
   bridge: KeepaliveBridge;
+  restoreSession?: (request: KeepaliveSessionResumeRequest) => Promise<unknown>;
   boundWorkspace: string;
   runtimeBaseDir?: string;
   cleanupSession?: (sessionId: string) => Promise<unknown>;
@@ -305,6 +306,8 @@ export function startScheduledTaskKeepalive(
   opts: StartScheduledTaskKeepaliveOptions,
 ): ScheduledTaskKeepalive {
   const { bridge, boundWorkspace, intervalMs } = opts;
+  const restoreSession: KeepaliveBridge['resumeSession'] =
+    opts.restoreSession ?? ((request) => bridge.resumeSession(request));
   const reviveTimeoutMs = opts.reviveTimeoutMs ?? KEEPALIVE_REVIVE_TIMEOUT_MS;
   const spawnTimeoutMs = opts.spawnTimeoutMs ?? KEEPALIVE_SPAWN_TIMEOUT_MS;
   const cleanupSession =
@@ -377,7 +380,7 @@ export function startScheduledTaskKeepalive(
           boundWorkspace,
         ).readCreationMetadata(sessionId);
         const { completion: resume, deadline } = beginKeepaliveSessionResume(
-          bridge,
+          { resumeSession: restoreSession },
           {
             sessionId,
             workspaceCwd: boundWorkspace,
@@ -559,6 +562,7 @@ const REHYDRATE_MAX_CONCURRENCY = 4;
 
 export async function rehydrateScheduledTaskSessions(deps: {
   bridge: RehydrateBridge;
+  restoreSession?: (request: KeepaliveSessionResumeRequest) => Promise<unknown>;
   boundWorkspace: string;
   onError?: (sessionId: string, err: unknown) => void;
   /** Values above the JS timer limit disable the caller-side watchdog. */
@@ -566,6 +570,8 @@ export async function rehydrateScheduledTaskSessions(deps: {
   onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }): Promise<RehydrateResult> {
   const { bridge, boundWorkspace } = deps;
+  const restoreSession: RehydrateBridge['resumeSession'] =
+    deps.restoreSession ?? ((request) => bridge.resumeSession(request));
   const timeoutMs = deps.loadTimeoutMs ?? REHYDRATE_RESUME_TIMEOUT_MS;
   let tasks;
   try {
@@ -589,7 +595,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
     const metadata = await new SessionService(
       boundWorkspace,
     ).readCreationMetadata(sessionId);
-    const resume = bridge.resumeSession({
+    const resume = restoreSession({
       sessionId,
       workspaceCwd: boundWorkspace,
       ...metadata,

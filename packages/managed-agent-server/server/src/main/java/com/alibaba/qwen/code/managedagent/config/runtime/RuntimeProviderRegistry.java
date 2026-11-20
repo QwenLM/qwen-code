@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.spi.KubernetesRuntimeSupport;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
@@ -26,19 +25,14 @@ public final class RuntimeProviderRegistry {
         for (RuntimeProviderFactory factory : providers) {
             for (String kind : factory.kinds()) {
                 BrokerValues.requireId(kind, "Runtime provider kind");
-                if ("kubernetes".equals(kind)
-                        || factories.putIfAbsent(kind, factory) != null) {
-                    throw new IllegalStateException("Duplicate or reserved Runtime provider kind: " + kind);
+                if (factories.putIfAbsent(kind, factory) != null) {
+                    throw new IllegalStateException("Duplicate Runtime provider kind: " + kind);
                 }
             }
         }
     }
 
     public RuntimeProviderFactory require(String kind) {
-        if ("kubernetes".equals(kind)) {
-            throw new IllegalStateException("Kubernetes Runtime provisioner is not supported; use static"
-                    + " or an installed provider: " + factories.keySet());
-        }
         RuntimeProviderFactory factory = factories.get(kind);
         if (factory == null) {
             throw new IllegalStateException("Runtime provider is not installed: " + kind
@@ -75,12 +69,5 @@ public final class RuntimeProviderRegistry {
             return support;
         }
         throw new IllegalStateException("Installed SSH Runtime provider does not support shared connections");
-    }
-
-    public KubernetesRuntimeSupport kubernetes() {
-        if (require("kubernetes-workspace") instanceof KubernetesRuntimeSupport support) {
-            return support;
-        }
-        throw new IllegalStateException("Installed Kubernetes Runtime provider does not support maintenance");
     }
 }

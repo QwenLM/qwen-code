@@ -15,6 +15,7 @@ import {
   WorkspaceDisplayNameValidationError,
   getWorkspaceRegistrationStorePath,
   normalizeWorkspaceDisplayName,
+  normalizeWorkspaceOrder,
   workspaceRegistrationId,
   workspaceRegistrationScopeHash,
 } from './workspace-registration-store.js';
@@ -44,6 +45,75 @@ afterEach(async () => {
 });
 
 describe('WorkspaceRegistrationStore', () => {
+  it('persists order independently of registration membership and startup order', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    await store.add('/work/second');
+    await store.add('/work/third');
+    const order = ['/work/third', '/work/primary', '/work/second'];
+    await store.setWorkspaceOrder(order);
+    const restored = new WorkspaceRegistrationStore('/work/primary', home);
+    expect((await restored.read()).workspaceOrder).toEqual(order);
+    expect((await restored.read()).workspaces).toEqual([
+      '/work/second',
+      '/work/third',
+    ]);
+    await Promise.all([
+      restored.setWorkspaceOrder([...order].reverse()),
+      store.setDisplayNameByIds(
+        [workspaceRegistrationId('/work/second')],
+        'Second',
+      ),
+      store.add('/work/fourth'),
+      store.removeById(workspaceRegistrationId('/work/third')),
+    ]);
+    const snapshot = await restored.read();
+    expect(snapshot.workspaceOrder).toEqual([...order].reverse());
+    expect(
+      snapshot.displayNames?.[workspaceRegistrationId('/work/second')],
+    ).toBe('Second');
+    expect(snapshot.workspaces).toEqual(['/work/second', '/work/fourth']);
+    expect(
+      (await new WorkspaceRegistrationStore('/other/primary', home).read())
+        .workspaceOrder,
+    ).toBeUndefined();
+  });
+
+  it('validates order before writing and rejects invalid stored metadata', async () => {
+    const store = new WorkspaceRegistrationStore(
+      '/work/primary',
+      await tempHome(),
+    );
+    expect((await store.read()).workspaceOrder).toBeUndefined();
+    await store.setWorkspaceOrder(['/work/primary']);
+    const before = await fs.readFile(store.filePath, 'utf8');
+    for (const value of [
+      null,
+      {},
+      ['relative'],
+      ['/a', '/a'],
+      [42],
+      ['/bad\0path'],
+      ['/' + 'x'.repeat(4096)],
+      Array(257).fill('/a'),
+      new Array<string>(2),
+    ]) {
+      expect(() => normalizeWorkspaceOrder(value)).toThrow();
+    }
+    await expect(store.setWorkspaceOrder(['/a', '/a'])).rejects.toThrow();
+    expect(await fs.readFile(store.filePath, 'utf8')).toBe(before);
+    await fs.writeFile(
+      store.filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        primaryWorkspace: '/work/primary',
+        workspaces: [],
+        workspaceOrder: ['relative'],
+      }),
+    );
+    await expect(store.read()).rejects.toThrow(/absolute path/);
+  });
+
   it('reads 255 named records independently of admission and preserves them on rejected add', async () => {
     const store = new WorkspaceRegistrationStore(
       '/work/primary',

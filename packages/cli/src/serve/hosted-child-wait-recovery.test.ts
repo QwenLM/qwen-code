@@ -268,6 +268,7 @@ describe('hosted child wait recovery (#13708)', () => {
     session: ManagedSession,
     withAssistantRound: boolean,
     orphanName = 'agent',
+    orphanArgs: Record<string, unknown> = {},
   ): Promise<void> {
     const harness = createManagedHarnessHandle(session);
     const authority = session.authority;
@@ -335,7 +336,13 @@ describe('hosted child wait recovery (#13708)', () => {
           role: 'model',
           parts: [
             { functionCall: { id: 'call-1', name: 'agent', args: {} } },
-            { functionCall: { id: 'call-2', name: orphanName, args: {} } },
+            {
+              functionCall: {
+                id: 'call-2',
+                name: orphanName,
+                args: orphanArgs,
+              },
+            },
           ],
         },
       });
@@ -1306,11 +1313,69 @@ describe('hosted child wait recovery (#13708)', () => {
     }
   });
 
+  it.each(['context_remember', 'context_forget'])(
+    'folds a parked agent round personal memory write as unknown: %s',
+    async (name) => {
+      const first = await open('boot-1', true);
+      try {
+        await park(
+          first,
+          true,
+          name,
+          name === 'context_remember'
+            ? { content: 'synthetic preference' }
+            : { memoryId: 'entry', expectedContent: 'synthetic preference' },
+        );
+      } finally {
+        await first.close();
+      }
+      const replacement = await open('boot-2', false);
+      try {
+        const fill = () =>
+          fillParkedRoundAgentGaps({
+            managed: replacement,
+            sessionId: SESSION_ID,
+            promptId: PROMPT_ID,
+            cwd: root,
+            gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+            children: childrenOf(replacement),
+          });
+        expect(await fill()).toBe(1);
+        expect(await fill()).toBe(0);
+        const response = toolResultEntries(await replacement.sink.project())
+          .flatMap((entry) => entry.message?.parts ?? [])
+          .find((part) => part.functionResponse?.id === 'call-2')!;
+        expect(response.functionResponse?.response?.['executionStatus']).toBe(
+          'unknown',
+        );
+        expect(JSON.stringify(response)).toContain(
+          'do not automatically retry',
+        );
+        expect(JSON.stringify(response)).not.toContain('never ran');
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
   // A6 (R2-1): the command-wait gap fill never reads the ledger, so a
   // family sibling of the command wait cannot be proven never started
   // without it — the live continue route refuses, the pre-aborted
   // terminating callers fold the unknown outcome.
-  it('refuses a ledger-less family sibling of a command wait, and answers the unknown outcome when pre-aborted', async () => {
+  it.each([
+    {
+      name: 'refuses a ledger-less family sibling of a command wait, and answers the unknown outcome when pre-aborted',
+      tool: 'agent',
+    },
+    {
+      name: 'folds a parked command round personal memory remember as unknown',
+      tool: 'context_remember',
+    },
+    {
+      name: 'folds a parked command round personal memory forget as unknown',
+      tool: 'context_forget',
+    },
+  ])('$name', async ({ tool }) => {
     const parkCommandWait = async (session: ManagedSession) => {
       const harness = createManagedHarnessHandle(session);
       const contentRef = await session.resources.publish(
@@ -1352,7 +1417,21 @@ describe('hosted child wait recovery (#13708)', () => {
           role: 'model',
           parts: [
             { functionCall: { id: 'call-1', name: 'task_list', args: {} } },
-            { functionCall: { id: 'call-2', name: 'agent', args: {} } },
+            {
+              functionCall: {
+                id: 'call-2',
+                name: tool,
+                args:
+                  tool === 'context_remember'
+                    ? { content: 'synthetic preference' }
+                    : tool === 'context_forget'
+                      ? {
+                          memoryId: 'entry',
+                          expectedContent: 'synthetic preference',
+                        }
+                      : {},
+              },
+            },
           ],
         },
       });
@@ -1393,6 +1472,20 @@ describe('hosted child wait recovery (#13708)', () => {
         commands,
         children: undefined,
       }).catch((cause: unknown) => cause);
+      if (tool !== 'agent') {
+        expect(error).toBe(1);
+        const response = toolResultEntries(await first.sink.project())
+          .flatMap((entry) => entry.message?.parts ?? [])
+          .find((part) => part.functionResponse?.id === 'call-2')!;
+        expect(response.functionResponse?.response?.['executionStatus']).toBe(
+          'unknown',
+        );
+        expect(JSON.stringify(response)).toContain(
+          'do not automatically retry',
+        );
+        expect(JSON.stringify(response)).not.toContain('never ran');
+        return;
+      }
       expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
       // The refusal wrote nothing, so the same parked session serves the
       // pre-aborted arm: the terminating caller folds the unknown outcome.

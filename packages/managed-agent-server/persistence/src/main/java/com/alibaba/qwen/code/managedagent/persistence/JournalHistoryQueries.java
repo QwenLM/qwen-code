@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredTransaction;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.lang3.StringUtils;
@@ -21,13 +22,35 @@ final class JournalHistoryQueries {
     private final JournalFencing fencing;
     private final JournalStoreRows storeRows;
     private final JdbcTemplate jdbc;
+    private final JdbcJournalPacks packs;
 
     JournalHistoryQueries(JournalFencing fencing,
             JournalStoreRows storeRows,
             JdbcTemplate jdbc) {
+        this(fencing, storeRows, jdbc, null);
+    }
+
+    JournalHistoryQueries(JournalFencing fencing,
+            JournalStoreRows storeRows,
+            JdbcTemplate jdbc,
+            JdbcJournalPacks packs) {
         this.fencing = fencing;
         this.storeRows = storeRows;
         this.jdbc = jdbc;
+        this.packs = packs;
+    }
+
+    private ManagedSessionStoreModels.StoredTransaction stored(
+            JournalStoreRows.TransactionRow row, String tenantId, String sessionId) {
+        if (row.recordBytes() != null || packs == null) {
+            return storeRows.storedTransaction(row);
+        }
+        byte[] bytes = packs.resolveBytes(tenantId, sessionId, row.journalRevision(),
+                row.recordDigest(), row.byteLength());
+        if (bytes == null) {
+            throw JournalStoreRows.journalCorrupt();
+        }
+        return storeRows.storedTransaction(storeRows.withRecordBytes(row, bytes));
     }
 
     static final RequestDigests INITIAL_DIGESTS = new RequestDigests();
@@ -118,7 +141,7 @@ final class JournalHistoryQueries {
         boolean hasMore = candidates.size() > selectedCount;
         rows.forEach(row -> JournalStoreRows.requireTransactionWorkspace(row, workspaceId));
         List<StoredTransaction> transactions = rows.stream()
-                .map(storeRows::storedTransaction).toList();
+                .map(row -> stored(row, tenantId, sessionId)).toList();
         long nextRevision = transactions.isEmpty() ? afterRevision
                 : transactions.get(transactions.size() - 1)
                         .journalRevision();
@@ -171,7 +194,7 @@ final class JournalHistoryQueries {
                 throw JournalStoreRows.journalCorrupt();
             }
             JournalStoreRows.requireTransactionWorkspace(row, workspaceId);
-            transactions.add(storeRows.storedTransaction(row));
+            transactions.add(stored(row, tenantId, sessionId));
         }
         boolean more = candidates.size() > selected;
         Long next = more ? transactions.getLast().journalRevision() : null;
@@ -208,7 +231,7 @@ final class JournalHistoryQueries {
                     || row.byteLength() < 1 || row.byteLength() > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
                 throw JournalStoreRows.journalCorrupt();
             }
-            transaction = storeRows.storedTransaction(row);
+            transaction = stored(row, tenantId, sessionId);
         }
         restore(tenantId, workspaceId, sessionId, writerToken);
         return new ManagedSessionStoreModels.CommandTransaction(through, transaction);
@@ -242,7 +265,7 @@ final class JournalHistoryQueries {
         try {
             JournalStoreRows.HeadRow head = storeRows.requireHead(tenantId, sessionId);
             if (!Set.of("ACTIVE", "SEALED").contains(head.state())
-                    || !"READY".equals(head.recoveryStatus()) || head.storageVersion() != JournalStoreRows.STORAGE_VERSION
+                    || !"READY".equals(head.recoveryStatus())
                     || head.compactedThroughRevision() != 0 || head.latestCheckpointResourceId() != null
                     || head.journalRevision() < 1 || head.committedSequence() < 0
                     || workspaceId != null && !workspaceId.equals(head.workspaceId())) {
@@ -261,9 +284,16 @@ final class JournalHistoryQueries {
                         || !Objects.equals(digest, row.previousCommitDigest())) {
                     return false;
                 }
-                storeRows.storedTransaction(row);
-                JournalStoreRows.validateUtf8JsonLines(row.recordBytes(), revision == 1 ? 2 : row.eventCount() + 1);
-                String[] lines = new String(row.recordBytes(), StandardCharsets.UTF_8).split("\n");
+                byte[] bytes = row.recordBytes();
+                if (bytes == null && packs != null) {
+                    bytes = packs.resolveBytes(tenantId, sessionId, row.journalRevision(),
+                            row.recordDigest(), row.byteLength());
+                }
+                if (bytes == null) {
+                    return false;
+                }
+                JournalStoreRows.validateUtf8JsonLines(bytes, revision == 1 ? 2 : row.eventCount() + 1);
+                String[] lines = new String(bytes, StandardCharsets.UTF_8).split("\n");
                 if (revision == 1) {
                     if (!"session.create".equals(row.operation()) || row.eventCount() != 0
                             || row.firstSequence() != 0 || row.lastSequence() != 0 || lines.length != 2
@@ -273,8 +303,8 @@ final class JournalHistoryQueries {
                             || !row.recordDigest().equals(row.contentDigest())) {
                         return false;
                     }
-                    JsonNode engine = JournalStoreRows.CSI_TERMINAL_JSON.readTree(lines[0]);
-                    JsonNode header = JournalStoreRows.CSI_TERMINAL_JSON.readTree(lines[1]);
+                    JsonNode engine = JournalStoreRows.TERMINAL_JSON.readTree(lines[0]);
+                    JsonNode header = JournalStoreRows.TERMINAL_JSON.readTree(lines[1]);
                     JsonNode value = header.path("managedSession");
                     requireInitialResource(value.path("definitionRef"), head, "managed-definition");
                     requireInitialResource(value.path("rootSnapshotRef"), head, "managed-root");
@@ -283,8 +313,7 @@ final class JournalHistoryQueries {
                             || !sessionId.equals(engine.path("sessionId").asText())
                             || !"managed_session_header_v1".equals(header.path("subtype").asText())
                             || !sessionId.equals(header.path("sessionId").asText())
-                            || value.size() != 7 || value.path("formatVersion").asInt() != JournalStoreRows.STORAGE_VERSION
-                            || !"managed-session/1".equals(value.path("minimumReader").asText())
+                            || value.size() != 6 || value.path("formatVersion").asInt() != JournalStoreRows.STORAGE_VERSION
                             || !"managed".equals(value.path("engine").asText())
                             || !"hosted-harness".equals(value.path("createdBy").asText())
                             || value.has("baseTranscriptProof") || !initialScope(value, head)) {
@@ -296,10 +325,10 @@ final class JournalHistoryQueries {
                             || row.lastSequence() != sequence + row.eventCount() || row.commitDigest() == null) {
                         return false;
                     }
-                    var events = JournalStoreRows.CSI_JSON.createArrayNode();
+                    var events = JournalStoreRows.JSON.createArrayNode();
                     boolean activationChanged = false;
                     for (int index = 0; index < row.eventCount(); index++) {
-                        JsonNode record = JournalStoreRows.CSI_TERMINAL_JSON.readTree(lines[index]);
+                        JsonNode record = JournalStoreRows.TERMINAL_JSON.readTree(lines[index]);
                         JsonNode event = record.path("managedSession");
                         JsonNode payload = event.path("payload");
                         String kind = event.path("kind").asText();
@@ -335,7 +364,7 @@ final class JournalHistoryQueries {
                     if (!activationChanged && row.activationEpoch() != activationEpoch) {
                         return false;
                     }
-                    JsonNode markerRecord = JournalStoreRows.CSI_TERMINAL_JSON.readTree(lines[lines.length - 1]);
+                    JsonNode markerRecord = JournalStoreRows.TERMINAL_JSON.readTree(lines[lines.length - 1]);
                     JsonNode marker = markerRecord.path("managedSession");
                     if (!"managed_session_commit_v1".equals(markerRecord.path("subtype").asText())
                             || !sessionId.equals(markerRecord.path("sessionId").asText())
@@ -347,9 +376,9 @@ final class JournalHistoryQueries {
                             || row.lastSequence() != marker.path("lastSequence").asLong(-1)
                             || row.eventCount() != marker.path("eventCount").asInt(-1)
                             || !row.eventsDigest().equals(marker.path("eventsDigest").asText())
-                            || !INITIAL_DIGESTS.digest(JournalStoreRows.CSI_JSON.convertValue(events, Object.class))
+                            || !INITIAL_DIGESTS.digest(JournalStoreRows.JSON.convertValue(events, Object.class))
                                     .equals("sha256:" + row.eventsDigest())
-                            || !INITIAL_DIGESTS.digest(JournalStoreRows.CSI_JSON.convertValue(marker, Object.class))
+                            || !INITIAL_DIGESTS.digest(JournalStoreRows.JSON.convertValue(marker, Object.class))
                                     .equals("sha256:" + row.commitDigest())
                             || !Objects.equals(digest, marker.path("previousCommitDigest").isNull()
                                     ? null : marker.path("previousCommitDigest").asText())) {
@@ -376,10 +405,10 @@ final class JournalHistoryQueries {
 
     void requireInitialResource(JsonNode ref, JournalStoreRows.HeadRow head, String kind) throws IOException {
         WorkspaceRecoveryReader.validateRef(ref);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(head.tenantId(), head.sessionId());
+        String scope = ManagedSessionStore.sessionScopeKey(head.tenantId(), head.sessionId());
         var resources = jdbc.query("SELECT " + ManagedSchemaProjection.RESOURCE.columns()
                         + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND resource_id = ?",
-                storeRows.resourceMapper, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, ref.path("resourceId").asText()), scope, ref.path("resourceId").asText());
+                storeRows.resourceMapper, ManagedSessionStore.resourceKey(scope, ref.path("resourceId").asText()), scope, ref.path("resourceId").asText());
         if (resources.size() != 1) {
             throw JournalStoreRows.journalCorrupt();
         }
@@ -392,7 +421,7 @@ final class JournalHistoryQueries {
         }
         storeRows.verifyStoredResource(resource);
         if ("managed-definition".equals(kind)) {
-            JsonNode definition = JournalStoreRows.CSI_TERMINAL_JSON.readTree(resource.bytes());
+            JsonNode definition = JournalStoreRows.TERMINAL_JSON.readTree(resource.bytes());
             if (definition == null || !definition.isObject()) {
                 throw JournalStoreRows.journalCorrupt();
             }

@@ -12,7 +12,9 @@ ExecStart=/usr/bin/env node /opt/qwen-ephemeral-runner/manager.mjs /etc/qwen-eph
 Restart=always
 RestartSec=10
 KillMode=mixed
-TimeoutStopSec=300
+# Must exceed drainTimeoutSeconds + shutdownGraceSeconds, or systemd kills the
+# manager mid-drain and leaves the containers it was still draining behind.
+TimeoutStopSec=3300
 
 [Install]
 WantedBy=multi-user.target

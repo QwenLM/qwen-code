@@ -53,7 +53,7 @@ public final class StoreLockTrace extends DelegatingDataSource {
             return table(sql, "ma_session")
                     && (sql.startsWith("insert into ma_session ")
                             || sql.startsWith("update ma_session ")
-                            || sql.contains("for update") && !sql.contains("is_csi_guard = true"));
+                            || sql.contains("for update"));
         }
 
         boolean turn() {
@@ -61,7 +61,7 @@ public final class StoreLockTrace extends DelegatingDataSource {
         }
 
         boolean mappedHead() {
-            return head() && sql.startsWith("select tenant_id, workspace_id, session_id, storage_version,")
+            return head() && sql.startsWith("select tenant_id, workspace_id, session_id, has_activity_diagnostics,")
                     && sql.contains("from ma_session_head where tenant_key = ? and harness_key = ?"
                             + " and tenant_id = ? and session_id = ? and head_kind = 'managed_session'");
         }
@@ -109,7 +109,7 @@ public final class StoreLockTrace extends DelegatingDataSource {
             }
             if (event.sql().startsWith("select tenant_id from ma_tenant_guard ")
                     && event.sql().contains("guard_domain = 'runtime_placement' for update")
-                    && com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys.valueKey(tenant).equals(event.arguments().get(1))) {
+                    && tenant.equals(event.arguments().get(1))) {
                 placements.add(transaction);
             }
             if (event.scope(tenant, session) && event.root()) {

@@ -114,6 +114,7 @@ handling.
 | `GithubAdapter` reason filter                                      | `inbound` / `skipped`, reason `reason_filter`; past 20 in one poll, one row with `detail.filtered` counting the rest               |
 | `GithubAdapter` comment lane (`onlyMentioned` miss)                | `inbound` / `skipped`, reason `mention_required`; once per comment while the window is held                                        |
 | `GithubAdapter` dedupe hit                                         | `inbound` / `skipped`, reason `duplicate`; once per comment while the window is held                                               |
+| `GithubAdapter` edited older comment that mentions the bot         | `inbound` / `skipped`, reason `edited_comment`; once per comment while the window is held                                          |
 | `GithubAdapter` thread read failure                                | `inbound` / `failed` (window held) or `skipped`, reason `github_api_error`; throttled while the window is held                     |
 | `GithubAdapter.claimInboundTask`                                   | `task` / `accepted`, with `sessionId` when the target is a bound session                                                           |
 | `GithubAdapter.transitionInboundTask`                              | `task` / `<state>` with `attempts`, `error` and the bound `sessionId`; §5 overrides the terminal word                              |
@@ -550,8 +551,9 @@ classes, the daemon route, the SDK types and the wire shape are unchanged.
   rows instead of 4,500, and the journal did not rotate. The budget is per
   poll, so a genuinely new batch is still described in full. Rows that would
   repeat on every poll of a held window are written once per window instead:
-  the `duplicate` or `mention_required` skip of a comment read again, and a
-  thread skipped for an API error, for up to 8,192 distinct keys per window
+  the `duplicate`, `mention_required` or `edited_comment` skip of a comment
+  read again, and a thread skipped for an API error, for up to 8,192
+  distinct keys per window
   (past that, each new key is written on every poll). A failing thread's
   `github_api_error` row is written on its first failing poll in the window and
   on every tenth failing poll, and a rate limit's or credential failure's on its

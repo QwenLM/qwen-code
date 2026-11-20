@@ -1,0 +1,63 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { AgentLoopResult, AgentLoopRound } from '../core/agent-loop.js';
+import type { ToolCallRequestInfo } from '../core/turn.js';
+
+/** The handlers that publish and consume loop events. */
+export type HandlerName = 'conversation' | 'llm' | 'tool' | 'loop';
+
+export interface LlmSettledData {
+  round: number;
+}
+
+export interface ToolSettledData {
+  round: number;
+}
+
+/**
+ * The loop event vocabulary, expressed over main's agent-loop types. Ported
+ * from the v1.0.0-preview event map (587e3429cabf); `query.*` becomes `loop.*`
+ * and the UUID round id becomes main's numeric round.
+ */
+export interface LoopBusEventMap {
+  'loop.started': { promptId: string };
+  /** The caller aborted the run's signal. */
+  'loop.cancelled': { reason: 'abort' };
+  'loop.finished': { result: AgentLoopResult };
+  'llm.request': { round: number; send: AgentLoopRound };
+  'llm.tool_call': { call: ToolCallRequestInfo };
+  'llm.settled': LlmSettledData;
+  'tool.request': { round: number; calls: ToolCallRequestInfo[] };
+  'tool.cancel': { reason: string };
+  'tool.settled': ToolSettledData;
+  /** Dedicated failure channel for a listener's thrown value; serialize it before crossing processes. */
+  'handler.failed': {
+    source: HandlerName;
+    eventType: LoopBusEventType;
+    round?: number;
+    error: unknown;
+  };
+}
+
+export type LoopBusEventType = keyof LoopBusEventMap;
+
+export interface BusEvent<T extends LoopBusEventType = LoopBusEventType> {
+  /** Identifier consumers can dedup on; the bus does not deduplicate. */
+  eventId: string;
+  type: T;
+  /** Routing key: one run of the agent loop. */
+  runId: string;
+  /** Attribution only; never a routing key. */
+  promptId?: string;
+  /** The round an event belongs to, when round-scoped. */
+  round?: number;
+  data: LoopBusEventMap[T];
+}
+
+export type AnyBusEvent = {
+  [T in LoopBusEventType]: BusEvent<T>;
+}[LoopBusEventType];
