@@ -3,6 +3,7 @@ import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/
 import {
   WEB_SHELL_LANGUAGES,
   LOCAL_FILES_MESSAGE_KEYS,
+  RESTART_RECOVERY_MESSAGE_KEYS,
   getTranslator,
   isRtlLanguage,
   languageDirection,
@@ -1039,6 +1040,18 @@ describe('web-shell zh-TW locale', () => {
     // Script wins over region: zh-Hant-CN stays Traditional.
     expect(normalizeLanguage('zh-Hant-CN')).toBe('zh-TW');
     expect(languageSettingToWebShellLanguage('zh-Hant-CN')).toBe('zh-TW');
+  });
+
+  it('covers every restart-recovery message key without relying on fallbacks', () => {
+    expect(
+      Object.keys(ZH_TW)
+        .filter((key) => key.startsWith('restartRecovery.'))
+        .sort(),
+    ).toEqual([...RESTART_RECOVERY_MESSAGE_KEYS].sort());
+    for (const key of RESTART_RECOVERY_MESSAGE_KEYS) {
+      expect(getTranslator('en')(key)).not.toBe(key);
+      expect(getTranslator('zh-TW')(key)).not.toBe(key);
+    }
   });
 
   it('carries no Simplified-only vocabulary in any entry', () => {
