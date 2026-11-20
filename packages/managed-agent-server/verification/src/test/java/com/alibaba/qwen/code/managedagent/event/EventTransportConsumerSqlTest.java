@@ -66,8 +66,6 @@ public class EventTransportConsumerSqlTest {
     public void setUp() {
         harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.activateForWake(anyString(), anyString()))
-                .thenReturn(true);
         activated = new ArrayList<>();
         JdbcTransportConsumerStore store = new JdbcTransportConsumerStore(jdbc);
         // Loads and batches run inline, so each delivery is settled when
@@ -87,13 +85,13 @@ public class EventTransportConsumerSqlTest {
         deliver(wake(session, WORKSPACE, 3));
         deliver(wake(session, WORKSPACE, 2));
 
-        verify(harness, times(1)).activateForWake(TENANT, session);
+        verify(harness, times(1)).recoverForWake(TENANT, session);
         assertThat(activated).containsExactly(session);
         assertThat(wakeWatermark(session)).isEqualTo(3);
 
         deliver(wake(session, WORKSPACE, 5));
 
-        verify(harness, times(2)).activateForWake(TENANT, session);
+        verify(harness, times(2)).recoverForWake(TENANT, session);
         assertThat(wakeWatermark(session)).isEqualTo(5);
     }
 
@@ -126,12 +124,12 @@ public class EventTransportConsumerSqlTest {
         String journalless = session("ACTIVE");
         deliver(wake(journalless, WORKSPACE, 3));
 
-        verify(harness, never()).activateForWake(anyString(), anyString());
+        verify(harness, never()).recoverForWake(anyString(), anyString());
         assertThat(activated).isEmpty();
 
         jdbc.update("UPDATE ma_session_head SET writer_lease_until = (" + ManagedSchemaTime.SQL_NOW + " + -60000) WHERE tenant_id = ? AND session_id = ?", TENANT, held);
         deliver(wake(held, WORKSPACE, 3));
-        verify(harness, times(1)).activateForWake(TENANT, held);
+        verify(harness, times(1)).recoverForWake(TENANT, held);
     }
 
     // A delayed notice arriving after a clean suspension's seal: the stamp
@@ -155,12 +153,12 @@ public class EventTransportConsumerSqlTest {
             deliver(wake(session, WORKSPACE, 3));
         }
 
-        verify(harness, never()).activateForWake(TENANT, future);
-        verify(harness, never()).activateForWake(TENANT, settled);
+        verify(harness, never()).recoverForWake(TENANT, future);
+        verify(harness, never()).recoverForWake(TENANT, settled);
         assertThat(wakeWatermark(future)).isNull();
         assertThat(wakeWatermark(settled)).isNull();
-        verify(harness, times(1)).activateForWake(TENANT, due);
-        verify(harness, times(1)).activateForWake(TENANT, stale);
+        verify(harness, times(1)).recoverForWake(TENANT, due);
+        verify(harness, times(1)).recoverForWake(TENANT, stale);
     }
 
     private void stamp(String session, long revision, boolean pending, String retryAt) {
@@ -178,7 +176,7 @@ public class EventTransportConsumerSqlTest {
 
         deliver(wake(sealed, WORKSPACE, 3));
 
-        verify(harness, times(1)).activateForWake(TENANT, sealed);
+        verify(harness, times(1)).recoverForWake(TENANT, sealed);
         assertThat(wakeWatermark(sealed)).isEqualTo(3);
     }
 
