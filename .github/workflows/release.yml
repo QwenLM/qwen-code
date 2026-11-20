@@ -853,6 +853,7 @@ jobs:
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          RELEASE_SHA: '${{ needs.prepare.outputs.release_sha }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh push-release-branch'
