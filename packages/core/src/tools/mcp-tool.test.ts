@@ -8,7 +8,6 @@
 import sharp from 'sharp';
 import type { Mock, Mocked } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
   DiscoveredMCPTool,
   generateValidName,
@@ -402,20 +401,19 @@ describe('DiscoveredMCPTool', () => {
       { isErrorValue: true, description: 'true (bool)' },
       { isErrorValue: 'true', description: '"true" (str)' },
     ])(
-      'should return a structured error if MCP tool reports an error',
+      'preserves the SDK-wrapped failure body when isError is $description',
       async ({ isErrorValue }) => {
-        const parts = respond({ error: { isError: isErrorValue } });
+        const text =
+          '{"ok":false,"code":"SLOT_CLOSED","next":"Choose another slot."}';
+        respond({
+          error: { isError: isErrorValue, content: [textBlock(text)] },
+        });
         const result = await exec(tool, 'isErrorTrueCase');
 
-        expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
-        expect(result.llmContent).toBe(
-          `MCP tool '${serverToolName}' reported tool error for function call: ${safeJsonStringify(
-            { name: serverToolName, args: { param: 'isErrorTrueCase' } },
-          )} with response: ${safeJsonStringify(parts)}`,
-        );
-        expect(result.returnDisplay).toContain(
-          `Error: MCP tool '${serverToolName}' reported an error.`,
-        );
+        expect(result.isError).toBe(true);
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toEqual([{ text }]);
+        expect(result.returnDisplay).toBe(text);
       },
     );
 
@@ -426,9 +424,9 @@ describe('DiscoveredMCPTool', () => {
       });
       const result = await exec(tool, 'error-image');
 
-      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
-      expect(result.error?.message).toContain('failure context');
-      expect(result.error?.message).not.toContain('ERROR_IMAGE_DATA');
+      expect(result.isError).toBe(true);
+      expect(result.returnDisplay).toContain('failure context');
+      expect(result.returnDisplay).not.toContain('ERROR_IMAGE_DATA');
       expect(result.llmContent).toEqual([
         { text: 'failure context' },
         ...media('image data', 'image/png', 'ERROR_IMAGE_DATA'),
@@ -883,7 +881,7 @@ describe('DiscoveredMCPTool', () => {
 
       const result = await exec(tool, 'error-image');
 
-      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(result.isError).toBe(true);
       const parts = result.llmContent as Part[];
       expect(parts[2]!.inlineData!.mimeType).toBe('image/jpeg');
       expect(await longEdge(parts[2]!.inlineData!.data!)).toBeLessThanOrEqual(
@@ -958,15 +956,13 @@ describe('DiscoveredMCPTool', () => {
         ]);
       });
 
-      it('should handle tool error even when abort signal is provided', async () => {
-        respond({ error: { isError: true } });
+      it('returns a failure with no body when the MCP result has empty content', async () => {
+        respond({ error: { isError: true, content: [] } });
 
         const result = await exec();
 
-        expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
-        expect(result.returnDisplay).toContain(
-          `Error: MCP tool '${serverToolName}' reported an error.`,
-        );
+        expect(result.isError).toBe(true);
+        expect(result.llmContent).toEqual([]);
       });
 
       it('should handle callTool rejection with abort signal', async () => {
@@ -1348,7 +1344,7 @@ describe('DiscoveredMCPTool', () => {
       const result = await tool
         .buildForApp({ param: 'test' }, received)
         .execute(new AbortController().signal);
-      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(result.isError).toBe(true);
       expect(JSON.stringify(result)).not.toContain('APP_SECRET_TOKEN');
       await expect(
         tool
@@ -2932,10 +2928,12 @@ describe('DiscoveredMCPTool', () => {
     });
 
     it('should not reconnect for an MCP isError result', async () => {
+      const details = { code: 'VALIDATION_FAILED', next: 'Change the input' };
       const initialClient: McpDirectClient = {
         callTool: vi.fn().mockResolvedValueOnce({
           ...textResult('Validation failed'),
           isError: true,
+          structuredContent: details,
         }),
       };
       const { config, discoverToolsForServer } = registry({
@@ -2945,7 +2943,11 @@ describe('DiscoveredMCPTool', () => {
 
       const result = await exec(safeTool({ config, client: initialClient }));
 
-      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(result.isError).toBe(true);
+      expect(result.llmContent).toEqual([
+        { text: JSON.stringify(details) },
+        { text: 'Validation failed' },
+      ]);
       expect(initialClient.callTool).toHaveBeenCalledTimes(1);
       expect(discoverToolsForServer).not.toHaveBeenCalled();
     });

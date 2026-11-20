@@ -10046,6 +10046,17 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  setVisionBridgeSettings(
+    model: string,
+    timeoutMs: number,
+  ): Promise<DaemonSettingUpdateResult> {
+    return this.post(
+      '/settings/vision-bridge',
+      'POST /workspaces/:workspace/settings/vision-bridge',
+      { model, timeoutMs },
+    );
+  }
+
   workspaceTrust(opts?: {
     clientId?: string;
     statusVersion?: 1;

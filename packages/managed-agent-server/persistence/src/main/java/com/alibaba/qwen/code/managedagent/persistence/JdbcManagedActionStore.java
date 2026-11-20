@@ -222,10 +222,10 @@ public class JdbcManagedActionStore
                     "createdAt",
                     "expiresAt",
                     question ? "questions" : "options"));
-            if (question || options.path("v").asLong() == 2 || options.path("v").asLong() == 3 && options.has("inputRef")) {
+            if (options.has("inputRef")) {
                 optionFields.add("inputRef");
             }
-            if (question || options.path("v").asLong() == 3) {
+            if (options.has("continuationRef")) {
                 optionFields.add("continuationRef");
             }
             if (options.has("requiresHumanDecision")) {
@@ -235,8 +235,8 @@ public class JdbcManagedActionStore
             closed(options, optionFields.toArray(String[]::new));
             require(
                     safeNumber(options.path("v"))
-                            && (options.path("v").asLong() == 1
-                                    || options.path("v").asLong() == 2 || options.path("v").asLong() == 3 || question)
+                            && (options.path("v").asLong() == 3 || question)
+                            && (!question || options.has("inputRef") && options.has("continuationRef"))
                             && id.equals(options.path("requestId").asText())
                             && safeNumber(options.path("inputRevision"))
                             && options.path("inputRevision").asLong()
@@ -280,7 +280,7 @@ public class JdbcManagedActionStore
                             && options.path("functionCallId").equals(continuation.path("calls").get(ordinal).path("call").path("callId")));
                 }
             }
-            if (question || options.path("v").asLong() == 3) {
+            if (options.has("continuationRef")) {
                 ManagedHostedRecoveryRecords.reference(options.path("continuationRef"), "hosted-approval-continuation", tenantId, workspaceId, sessionId, resources, hostedReferences);
             }
             Action previous = find(tenantId, sessionId, id).orElse(null);
@@ -311,7 +311,8 @@ public class JdbcManagedActionStore
                                 + ManagedExtensionProjection.recordKey(
                                         sessionId, "action_decision", id + ":" + decided.digest());
                 digest = decided.digest();
-                if ("allow".equals(body.path("optionId").asText()) && publicPlanExit(tenantId, sessionId, options)) {
+                if ("allow".equals(body.path("optionId").asText()) && options.has("continuationRef")
+                        && publicPlanExit(tenantId, sessionId, options)) {
                     JsonNode input = read(new String(resource(options.path("inputRef"), "managed-tool-input", resources).bytes(),
                             StandardCharsets.UTF_8));
                     JsonNode request = read(input.path("payloadJson").asText());
@@ -435,7 +436,8 @@ public class JdbcManagedActionStore
         args.add(limit);
         return jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns("r")
                         + " FROM ma_session_record r JOIN ma_session s ON s.tenant_id=r.tenant_id"
-                        + " AND s.session_id=r.session_id WHERE r.tenant_id=? AND r.record_kind='ACTION'"
+                        + " AND s.session_id=r.session_id AND s.session_scope_key=r.session_scope_key"
+                        + " WHERE r.tenant_id=? AND r.record_kind='ACTION'"
                         + " AND r.state='requested' AND s.deleted_at IS NULL AND (s.session_id=?"
                         + " OR s.parent_session_id=? AND s.public_child_agents_version=1)" + cursor
                         + " ORDER BY r.gmt_create DESC, r.session_id DESC, r.action_id DESC LIMIT ?",
@@ -776,25 +778,29 @@ public class JdbcManagedActionStore
     }
 
     public void settleEndedResponses(long now) {
-        List<OperationTarget> ended = jdbc.query(
-                        "SELECT o.tenant_id, o.session_id, o.operation_id FROM ma_operation o JOIN"
+        record EndedResponse(OperationTarget target, JsonNode body, String actionState,
+                String decisionDigest, String decisionReceiptId) { }
+        List<EndedResponse> ended = jdbc.query(
+                        "SELECT o.tenant_id, o.session_id, o.operation_id, o.request_json,"
+                            + " a.state, a.decision_digest, a.decision_receipt_id FROM ma_operation o JOIN"
                             + " ma_session_record a ON a.record_kind = 'ACTION' AND"
                             + " a.session_scope_key = o.scope_key AND a.tenant_id = o.tenant_id AND"
                             + " a.session_id = o.session_id AND a.action_id = o.action_id WHERE"
                             + " o.operation_kind = 'ACTION_RESPONSE' AND o.delivery_state IN"
                             + " ('PENDING', 'LEASED') AND a.state <> 'requested' LIMIT 50",
-                (r, row) -> new OperationTarget(r.getString(1), r.getString(2), r.getString(3)));
-        for (OperationTarget target : ended) {
-            Response response = response(target.tenantId(), target.sessionId(), target.operationId());
-            Action action = find(target.tenantId(), target.sessionId(), response.actionId()).orElseThrow();
-            boolean matched = "decided".equals(action.state())
-                    && ManagedActionStore.decisionDigest(response.body()).equals(action.decisionDigest());
+                (r, row) -> new EndedResponse(
+                        new OperationTarget(r.getString(1), r.getString(2), r.getString(3)),
+                        read(r.getString(4)), r.getString(5), r.getString(6), r.getString(7)));
+        for (EndedResponse response : ended) {
+            OperationTarget target = response.target();
+            boolean matched = "decided".equals(response.actionState())
+                    && ManagedActionStore.decisionDigest(response.body()).equals(response.decisionDigest());
             jdbc.update(
                     "UPDATE ma_operation SET state = ?, phase = 'SETTLED', admission_stage = 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?, failure_code = ?, decision_receipt_id = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND operation_kind = 'ACTION_RESPONSE' AND delivery_state IN ('PENDING', 'LEASED')",
                     matched ? "COMPLETED" : "FAILED",
                     "rcpt_" + UUID.randomUUID().toString().replace("-", ""),
-                    matched ? null : ManagedActionStore.endedCode(action.state()),
-                    matched ? action.decisionReceiptId() : null,
+                    matched ? null : ManagedActionStore.endedCode(response.actionState()),
+                    matched ? response.decisionReceiptId() : null,
                     now, now, target.tenantId(), target.sessionId(), target.operationId());
         }
     }

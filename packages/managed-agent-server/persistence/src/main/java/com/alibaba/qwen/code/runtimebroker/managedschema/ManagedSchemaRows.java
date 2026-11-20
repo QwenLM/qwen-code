@@ -15,6 +15,7 @@ import java.util.Set;
 /** Reads raw SQL rows while decoding only declared UTF-8 identity columns. */
 public final class ManagedSchemaRows {
     private static final Set<String> BOOLEANS = Set.of(
+            "has_activity_diagnostics",
             "is_accepted_complete",
             "is_activation_record",
             "is_archived",
