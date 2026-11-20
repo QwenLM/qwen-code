@@ -504,6 +504,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_git_check_ignore',
       'workspace_mcp_restart',
       'session_recap',
+      'session_mod_rows',
       'session_generation',
       'workspace_generation',
       'session_btw',

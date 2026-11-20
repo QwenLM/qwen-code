@@ -242,6 +242,7 @@ describe('no-AK integration CI wiring', () => {
       './cli/qwen-serve-restart-recovery.test.ts',
       './cli/qwen-serve-session-cd.test.ts',
       './cli/qwen-serve-generated-ui-state.test.ts',
+      './cli/qwen-serve-mod-rows.test.ts',
       './cli/qwen-serve-streaming.test.ts',
       './cli/qwen-serve-standalone-concurrency.test.ts',
       './helpers/hosted-sse-observer.test.ts',

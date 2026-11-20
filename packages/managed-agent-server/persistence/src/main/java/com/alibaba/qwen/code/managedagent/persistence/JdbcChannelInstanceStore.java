@@ -229,6 +229,9 @@ public class JdbcChannelInstanceStore
      */
     public List<String> listSessionsWithPendingDeliveries(String tenantId,
             String channelId, int limit) {
+        // ma_session.session_scope_key stays NULL for PUBLIC Sessions (only
+        // CONTROL admission writes it), so the record join must stay on the
+        // raw tenant/session identity, not the scope key.
         return jdbc.query("SELECT r.session_id, MIN(r.gmt_create) AS"
                         + " oldest_due"
                         + " FROM ma_session_record r"

@@ -48,7 +48,8 @@ Out of scope (recorded as follow-ups, not silently dropped):
   restart) while a detached background shell keeps running. The shell registry
   is in-memory, so no `hasRunningBackgroundTasks` reaches the client at all.
   Evidence: a remote session whose shell pid had been alive ~26h was absent
-  from live-state and carried no background field in the catalog.
+  from live-state and carried no background field in the catalog. Tracked in
+  #17819.
 - Re-grading the Session Overview panel's cards. A background-only session
   still reads `idle` there, which keeps the panel's sort order and displayed
   status unchanged; its two destructive card actions are gated separately (see
@@ -74,15 +75,35 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   holds no active-work category and grades the row idle.
 - The same predicate replaces every other copy of that question on the action
   side: the sidebar's archive and delete eligibility checks, its standalone
-  archive handler, the recent rows' archive gate, the delete dialog's
-  current-session block, the Session Overview card actions, and the Activity
-  archive confirmation (which previously spelled the same disjunction out
-  twice). A row that says it is busy must not offer the action that ends the
-  work, and no two entry points may disagree.
-- The row's Delete refuses background work on any row, not just the attached
-  one: the delete route has no idle guard, so confirming would kill work the
-  row advertises, and the Session Overview card already refuses that session.
-  An idle attached session stays deletable (#12619).
+  archive handler, the recent rows' archive gate, the delete dialog's refusal
+  guard, the Session Overview card actions, and the Activity archive
+  confirmation (which previously spelled the same disjunction out twice). A
+  row that says it is busy must not offer the action that ends the work, and no
+  two entry points may disagree.
+- The delete rule itself lives beside that predicate as `sessionBlocksDelete`,
+  which takes the caller's own notion of "current" rather than deriving it from
+  an id: the sidebar compares workspace-qualified identity and lets the
+  recent/standalone adapters override it, while the dialog compares session ids.
+  The sidebar row, the sidebar eligibility check and the delete dialog call
+  it, so that rule has one home. The Session Overview card gates are a fourth
+  delete path and deliberately stay stricter — they also require an `idle`
+  grade and block live work on every card, not just the attached one — so they
+  keep their own expression; the Out of scope list above records the same
+  asymmetry for a running turn as a pre-existing difference.
+- Delete refuses background work on any row, not just the attached one, in
+  both the sidebar and the delete dialog: the delete route has no idle guard,
+  so confirming would kill work the row advertises, and the Session Overview
+  card already refuses that session. Clicking a refused row in the dialog
+  names the reason in its hint — the danger button is disabled in that state,
+  so the row click is the only place the refusal can reach the user — and only
+  the attached row's wording says "the current session".
+  An idle attached session stays deletable (#12619). The hint tracks live state
+  rather than the click: it names whichever rule blocks the row now, goes away
+  once the row is deletable again, and stays quiet while a delete is running or
+  a live error or a delete outcome holds the slot — the dialog renders those nowhere
+  else, so a refusal must not take the slot from them. The load error and the
+  delete outcome keep separate slots: sharing one let a recovering list clear
+  a failure the user had not been told about yet.
 - Three staleness holes close with it. Selection mode keeps its own copy of
   each ticked session, so its refresh contract now carries the background flag
   too — otherwise bulk Archive would judge a session by the value it had when

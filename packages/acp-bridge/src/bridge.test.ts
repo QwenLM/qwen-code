@@ -1248,6 +1248,7 @@ describe('createAcpSessionBridge', () => {
       ).toEqual({
         'qwen.goalProposals': true,
         'qwen.mcpAppHost': true,
+        'qwen.modRows': ['AssistantMessage'],
       });
 
       // No snapshot has arrived yet, so the session is "unknown": busy rather
@@ -7786,6 +7787,110 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('keys the pending-restore marker per session on a shared channel', async () => {
+    const restoringId = 'restore-keying-restoring';
+    const settledId = 'restore-keying-settled';
+    const link = (sessionId: string, url: string) => ({
+      id: stableSessionArtifactId(sessionId, `url:${url}`),
+      kind: 'link',
+      storage: 'external_url',
+      source: 'client',
+      status: 'available',
+      title: url,
+      url,
+      retention: 'restorable',
+      clientRetained: true,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    const originalRestore = SessionArtifactStore.prototype.restore;
+    const stores = new Map<string, SessionArtifactStore>();
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (
+        this: SessionArtifactStore,
+        snapshot,
+        options,
+      ) {
+        if (!snapshot) return originalRestore.call(this, snapshot, options);
+        // Key by the snapshot's session id — the store's own sessionId is
+        // private, and tsc --build typechecks the test files.
+        stores.set(snapshot.sessionId, this);
+        if (snapshot.sessionId !== restoringId) {
+          return originalRestore.call(this, snapshot, options);
+        }
+        const first = await originalRestore.call(
+          this,
+          { ...snapshot, artifacts: snapshot.artifacts.slice(0, 1) },
+          options,
+        );
+        await restoreGate;
+        const rest = await originalRestore.call(this, snapshot, options);
+        return [...first, ...rest];
+      });
+    onTestFinished(() => {
+      releaseRestore();
+      restoreSpy.mockRestore();
+    });
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: (request) =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId: request.sessionId,
+                sequence: 7,
+                artifacts: [
+                  link(
+                    request.sessionId,
+                    `https://example.com/${request.sessionId}-a`,
+                  ),
+                  link(
+                    request.sessionId,
+                    `https://example.com/${request.sessionId}-b`,
+                  ),
+                ],
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    const restoringLoad = bridge.loadSession({
+      sessionId: restoringId,
+      workspaceCwd: WS_A,
+    });
+    // The second session loads on the SAME channel while the first
+    // restore is gated: its settled count must not be withheld by the
+    // other session's pending marker.
+    await bridge.loadSession({ sessionId: settledId, workspaceCwd: WS_A });
+    await vi.waitFor(() => {
+      expect(stores.get(restoringId)?.count()).toBe(1);
+    });
+    const rows = bridge.listWorkspaceSessions(WS_A);
+    const restoringRow = rows.find((s) => s.sessionId === restoringId);
+    const settledRow = rows.find((s) => s.sessionId === settledId);
+    expect(restoringRow?.artifactCount).toBeUndefined();
+    expect(restoringRow?.artifactCountPending).toBe(true);
+    expect(settledRow?.artifactCount).toBe(2);
+    expect(settledRow?.artifactCountPending).toBeUndefined();
+
+    releaseRestore();
+    await restoringLoad;
+    const after = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === restoringId);
+    expect(after?.artifactCount).toBe(2);
+    expect(after?.artifactCountPending).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
   it('clears durable artifacts but keeps live ephemerals when rewind returns an empty artifact snapshot', async () => {
     const persistedSnapshots: unknown[] = [];
     const handle = makeChannel({
@@ -8382,6 +8487,194 @@ describe('createAcpSessionBridge', () => {
       }
     },
   );
+
+  it.each(['full', 'summary'] as const)(
+    'supplements a persisted page with retained Mod logs in %s replay',
+    async (liveReplayMode) => {
+      const persisted: BridgeEvent = {
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'persisted prompt' },
+        },
+      };
+      const handle = makeChannel({
+        promptImpl: async ({ sessionId }) => {
+          await handle.agentConnection.extNotification(
+            'qwen/notify/session/mod-log',
+            { sessionId, plugin: 'mod', text: 'during turn' },
+          );
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+            throw new Error(`unexpected ${method}`);
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [persisted],
+            hasMore: true,
+            nextCursor: 'older-page',
+          };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const { sessionId } = session;
+        await bridge.sendPrompt(sessionId, {
+          sessionId,
+          prompt: [{ type: 'text', text: 'live prompt' }],
+        });
+        const idleLog = { sessionId, plugin: 'mod', text: 'after turn' };
+        await handle.agentConnection.extNotification(
+          'qwen/notify/session/mod-log',
+          idleLog,
+        );
+        await vi.waitFor(() => {
+          expect(
+            bridge.getSessionReplaySnapshot(sessionId)?.liveJournal,
+          ).toContainEqual(expect.objectContaining({ data: idleLog }));
+        });
+        const snapshot = bridge.getSessionReplaySnapshot(sessionId)!;
+        const refreshed = await bridge.loadSession({
+          sessionId,
+          workspaceCwd: WS_A,
+          clientId: session.clientId,
+          historyReplay: 'response',
+          historyPageSize: 100,
+          liveReplayMode,
+          compactedReplayMode: liveReplayMode,
+        });
+        expect(refreshed.compactedReplay).toEqual([
+          persisted,
+          expect.objectContaining({
+            type: 'mod_log',
+            data: { sessionId, plugin: 'mod', text: 'during turn' },
+          }),
+        ]);
+        expect(refreshed.liveJournal).toEqual([
+          expect.objectContaining({ type: 'mod_log', data: idleLog }),
+        ]);
+        expect(refreshed.historyHasMore).toBe(true);
+        expect(refreshed.lastEventId).toBe(snapshot.lastEventId);
+        expect(refreshed.eventEpoch).toBe(
+          bridge.getSessionEventEpoch(sessionId),
+        );
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
+
+  it('replays retained Mod logs before the next persisted prompt record', async () => {
+    const events: BridgeEvent[] = [];
+    const persisted = (
+      recordId: string,
+      timestamp: number | string,
+      sessionUpdate: string,
+      text: string,
+    ): BridgeEvent => ({
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate,
+        content: { type: 'text', text },
+        timestamp,
+        _meta: { timestamp, 'qwen.session.recordId': recordId },
+      },
+    });
+    let turns = 0;
+    const handle = makeChannel({
+      promptImpl: async ({ sessionId }) => {
+        await handle.agentConnection.extNotification(
+          'qwen/notify/session/mod-log',
+          { sessionId, plugin: 'mod', text: `turn ${++turns}` },
+        );
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+          throw new Error(`unexpected ${method}`);
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events,
+          hasMore: true,
+          nextCursor: 'older-page',
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const { sessionId, clientId } = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      const log = (text: string) =>
+        expect.objectContaining({
+          type: 'mod_log',
+          data: { sessionId, plugin: 'mod', text },
+        });
+      const prompt = () =>
+        bridge.sendPrompt(sessionId, {
+          sessionId,
+          prompt: [{ type: 'text', text: 'live prompt' }],
+        });
+      await handle.agentConnection.extNotification(
+        'qwen/notify/session/mod-log',
+        { sessionId, plugin: 'mod', text: 'startup' },
+      );
+      const nextTimestampAfter = (replay: 'liveJournal' | 'compactedTurns') =>
+        vi.waitFor(() => {
+          const latest = bridge
+            .getSessionReplaySnapshot(sessionId)
+            ?.[replay].findLast((event) => event.type === 'mod_log');
+          const timestamp = latest?._meta?.['serverTimestamp'];
+          if (typeof timestamp !== 'number')
+            throw new Error('Missing Mod log bridge timestamp');
+          expect(Date.now()).toBeGreaterThan(timestamp);
+          return timestamp + 1;
+        });
+      const firstTime = await nextTimestampAfter('liveJournal');
+      await prompt();
+      const nextTime = new Date(
+        await nextTimestampAfter('compactedTurns'),
+      ).toISOString();
+      await prompt();
+      events.push(
+        persisted(
+          'prompt-one',
+          firstTime,
+          'user_message_chunk',
+          'First prompt',
+        ),
+        persisted('reply-one', firstTime, 'agent_message_chunk', 'First reply'),
+        // A synthetic gap update can precede the message in the same record.
+        persisted('prompt-two', nextTime, 'agent_message_chunk', 'Gap notice'),
+        persisted('prompt-two', nextTime, 'user_message_chunk', 'Next prompt'),
+        persisted('prompt-two', nextTime, 'user_message_chunk', 'More input'),
+        persisted('reply-two', nextTime, 'agent_message_chunk', 'Next reply'),
+      );
+      const loaded = await bridge.loadSession({
+        sessionId,
+        clientId,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        historyPageSize: 20,
+      });
+      expect(loaded.compactedReplay).toEqual([
+        log('startup'),
+        ...events.slice(0, 2),
+        log('turn 1'),
+        ...events.slice(2),
+        log('turn 2'),
+      ]);
+      expect(loaded.historyHasMore).toBe(true);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
 
   it('supplements a persisted page with tool lifecycle metadata only', async () => {
     const handle = makeChannel({
@@ -32095,6 +32388,59 @@ describe('createAcpSessionBridge', () => {
       ).resolves.toMatchObject({ stopReason: 'end_turn' });
     });
 
+    it('invalidates delegation guards when the ACP channel reloads settings', async () => {
+      let markReloadStarted!: () => void;
+      let finishReload!: () => void;
+      const started = new Promise<void>(
+        (resolve) => (markReloadStarted = resolve),
+      );
+      const pending = new Promise<void>((resolve) => (finishReload = resolve));
+      const { channel, agent } = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceReload) {
+            markReloadStarted();
+            await pending;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => channel });
+      onTestFinished(() => bridge.shutdown());
+      const { sessionId } = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const guard = bridge.captureSessionApprovalModeGuard(sessionId);
+      const reload = bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceReload,
+        { cwd: WS_A },
+      );
+      const modeChanged = 'The session approval mode changed during delegation';
+      const request = {
+        sessionId,
+        prompt: [{ type: 'text' as const, text: 'hello' }],
+      };
+      try {
+        await started;
+        expect(guard).toThrow(modeChanged);
+        expect(() => bridge.captureSessionApprovalModeGuard(sessionId)).toThrow(
+          modeChanged,
+        );
+      } finally {
+        finishReload();
+        await reload;
+      }
+      await expect(
+        bridge.sendPrompt(sessionId, request, undefined, {
+          assertCanDispatch: guard,
+        }),
+      ).rejects.toThrow(modeChanged);
+      expect(agent.promptCalls).toEqual([]);
+      expect(() =>
+        bridge.captureSessionApprovalModeGuard(sessionId),
+      ).not.toThrow();
+    });
+
     it('serializes concurrent approval-mode changes through the per-session queue (A3)', async () => {
       // doudouOUC #4484 post-merge review (A3): two concurrent
       // `setSessionApprovalMode` calls must not interleave their ACP
@@ -32495,6 +32841,54 @@ describe('createAcpSessionBridge', () => {
       });
       await expect(
         bridge.generateSessionRecap('does-not-exist'),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      await bridge.shutdown();
+    });
+  });
+
+  describe('askSessionModRow', () => {
+    it("forwards a row to the child and returns the Mods' answer", async () => {
+      let observed: Record<string, unknown> | undefined;
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const { clientStream, agentStream } = createInMemoryChannel();
+          const agent = new FakeAgent({
+            extMethodImpl: (method, params) => {
+              if (method !== 'qwen/control/session/mod_row')
+                return Promise.resolve({});
+              observed = params;
+              return Promise.resolve({
+                status: 'answered',
+                props: { text: '你好', isFirstOfReply: true },
+              });
+            },
+          });
+          new AgentSideConnection(() => agent as Agent, agentStream);
+          return {
+            stream: clientStream,
+            exited: new Promise<
+              | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+              | undefined
+            >(() => {}),
+            kill: async () => {},
+            killSync: () => {},
+          };
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const row = {
+        component: 'AssistantMessage',
+        props: { text: 'Hello', isFirstOfReply: true },
+      };
+      await expect(
+        bridge.askSessionModRow(session.sessionId, row),
+      ).resolves.toEqual({
+        status: 'answered',
+        props: { text: '你好', isFirstOfReply: true },
+      });
+      expect(observed).toEqual({ sessionId: session.sessionId, ...row });
+      await expect(
+        bridge.askSessionModRow('does-not-exist', row),
       ).rejects.toBeInstanceOf(SessionNotFoundError);
       await bridge.shutdown();
     });

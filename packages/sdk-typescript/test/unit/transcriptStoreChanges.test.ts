@@ -60,6 +60,47 @@ describe('daemon transcript store block change summary', () => {
     expect(summary.tailBlockId).toBeUndefined();
   });
 
+  it.each(['assistant', 'thought'] as const)(
+    'updates streaming %s behind Mod log lines without setting another barrier',
+    (kind) => {
+      const store = createDaemonTranscriptStore();
+      const type = `${kind}.text.delta` as const;
+      store.dispatch({ type, text: 'one' });
+      const initial = requireSummary(store);
+      store.dispatch({
+        type: 'status',
+        source: 'mod_log',
+        text: '[Mod translator] finished',
+        clearActiveText: false,
+      });
+      const withLog = requireSummary(store);
+      expect(withLog.tailAppendBarrierRevision).toBe(initial.revision + 1);
+      const [text, log] = store.getSnapshot().blocks;
+
+      store.dispatch({ type, text: ' two' });
+      store.dispatch({ type, text: ' three' });
+      const [nextText, nextLog] = store.getSnapshot().blocks;
+      expect(nextLog).toBe(log);
+      expect(nextText).toMatchObject({ text: 'one two three' });
+      expect(requireSummary(store)).toEqual({
+        source: withLog.source,
+        revision: withLog.revision + 2,
+        tailAppendBarrierRevision: withLog.tailAppendBarrierRevision,
+        tailBlockId: text?.id,
+      });
+
+      store.dispatch({
+        type: 'status',
+        text: 'Other status',
+        clearActiveText: false,
+      });
+      store.dispatch({ type, text: ' four' });
+      const summary = requireSummary(store);
+      expect(summary.tailAppendBarrierRevision).toBe(summary.revision);
+      expect(summary.tailBlockId).toBeUndefined();
+    },
+  );
+
   it('advances the barrier for non-tail mutations and resets', () => {
     const store = createDaemonTranscriptStore();
     store.dispatch({ type: 'assistant.text.delta', text: 'one' });

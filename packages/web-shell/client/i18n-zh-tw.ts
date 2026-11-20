@@ -3551,6 +3551,10 @@ export const ZH_TW: Record<string, MessageValue> = {
   'model.disabled': '不啟用',
 
   'model.setVision': '設定視覺模型',
+  'model.setVisionTimeout': '設定視覺橋接逾時',
+  'model.invalidOption': (v) => `無效的 /model 選項「${v?.option ?? ''}」。`,
+  'model.invalidVisionTimeout': (v) =>
+    `無效的 --timeout 值 "${v?.value ?? ''}"。請使用正整數秒數，例如 60、60s 或 90000ms。`,
   'model.switch': '切換模型',
   'model.unknown': '未知',
   'resume.current': '當前',
