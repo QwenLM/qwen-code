@@ -1052,6 +1052,41 @@ function getFollowupRemainder(
   return remainder.length > 0 ? remainder : null;
 }
 
+/**
+ * Line-aware caret target for the touch editing-row direction keys. Up/Down
+ * keep the column clamped to the target line; leaving the first/last line
+ * clamps to the document start/end, matching native textarea behavior.
+ */
+export function computeCaretTarget(
+  text: string,
+  start: number,
+  end: number,
+  direction: 'up' | 'down' | 'right',
+): number {
+  if (direction === 'right') {
+    return start === end ? Math.min(text.length, end + 1) : end;
+  }
+  const caret = end;
+  const lines = text.split('\n');
+  let offset = 0;
+  let index = lines.length - 1;
+  for (let i = 0; i < lines.length; i += 1) {
+    const lineEnd = offset + lines[i].length;
+    if (caret <= lineEnd) {
+      index = i;
+      break;
+    }
+    offset = lineEnd + 1;
+  }
+  const column = caret - offset;
+  const target = index + (direction === 'up' ? -1 : 1);
+  if (target < 0) return 0;
+  if (target >= lines.length) return text.length;
+  let targetStart = 0;
+  for (let i = 0; i < target; i += 1) targetStart += lines[i].length + 1;
+  return targetStart + Math.min(column, lines[target].length);
+}
+
 export function mapRestoredInputAnnotationsAfterTextChange(
   annotations: readonly DaemonInputAnnotation[],
   previousText: string,
@@ -1601,6 +1636,8 @@ export interface UseComposerCoreReturn {
   ) => void;
   removeInlineTags: (predicate?: (tag: WebShellComposerTag) => boolean) => void;
   insertText: (text: string, options?: WebShellComposerTextOptions) => void;
+  pressEditingKey: (key: 'up' | 'down' | 'right' | 'slash') => void;
+  setComposing: (active: boolean) => void;
   setText: (text: string) => void;
   submit: (input?: WebShellComposerInput) => void;
   clear: (options?: { text?: boolean; tags?: boolean }) => void;
@@ -4976,6 +5013,58 @@ export function useComposerCore(
     ],
   );
 
+  const composingRef = useRef(false);
+  const setComposing = useCallback((active: boolean) => {
+    composingRef.current = active;
+  }, []);
+
+  // Touch editing-row keys. The direction keys stay live without a
+  // suggestion (caret navigation the soft keyboard lacks); Right doubles as
+  // the desktop ArrowRight follow-up accept, replacing the draft with the
+  // completion exactly like the CodeMirror keymap. Slash inserts literally:
+  // the textarea backend has no slash menu, so the key is a character
+  // convenience and command browsing stays in the add drawer.
+  const pressEditingKey = useCallback(
+    (key: 'up' | 'down' | 'right' | 'slash') => {
+      if (!isTouchComposer || composingRef.current) return;
+      const el = expandedTextareaRef.current ?? mobileTextareaRef.current;
+      if (!el) return;
+      const text = mobileTextRef.current;
+      if (key === 'right') {
+        const followup = followupStateRef.current;
+        const completion = getFollowupCompletion(
+          text,
+          followup?.isVisible ? followup.suggestion : null,
+        );
+        if (completion) {
+          historyBrowseActiveRef.current = false;
+          setMobileText(completion);
+          const restoreCaret = () => {
+            el.setSelectionRange(completion.length, completion.length);
+          };
+          if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(restoreCaret);
+          } else {
+            window.setTimeout(restoreCaret, 0);
+          }
+          el.focus();
+          onAcceptFollowupRef.current?.('right', { skipOnAccept: true });
+          return;
+        }
+      }
+      if (key === 'slash') {
+        insertText('/');
+        return;
+      }
+      const start = el.selectionStart ?? text.length;
+      const end = el.selectionEnd ?? start;
+      const target = computeCaretTarget(text, start, end, key);
+      el.focus();
+      el.setSelectionRange(target, target);
+    },
+    [insertText, isTouchComposer, setMobileText],
+  );
+
   const getText = useCallback(() => {
     if (isTouchComposer) return mobileTextRef.current;
     return viewRef.current?.state.doc.toString() ?? '';
@@ -5755,6 +5844,8 @@ export function useComposerCore(
     addTags,
     removeInlineTags,
     insertText,
+    pressEditingKey,
+    setComposing,
     setText,
     submit,
     clear,

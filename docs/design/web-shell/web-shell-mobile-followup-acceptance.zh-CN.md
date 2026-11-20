@@ -14,9 +14,11 @@
 
 一个触点,一条接受路径:
 
-- **建议 chip 条**:输入行上方,覆盖所有 composer 变体;chip 样式的可点按按钮,标签即建议文本本身,前带插入图标,旁带忽略按钮。编辑行不带任何 follow-up 控件。
+- **建议 chip 条**:输入行上方,覆盖所有 composer 变体;chip 样式的可点按按钮,标签即建议文本本身,前带插入图标,旁带忽略按钮。编辑行不带 follow-up 专用控件;其 → 光标键兼作同一接受(对齐桌面 ArrowRight)。
 
 单 chip 是三轮评审的终态。第一版加建议条与编辑行 `Tab` 键;评审指出触摸用户没有 Tab 键与相应肌肉记忆。第二版把该键改本地化动作词(`Fill in` / 填入 / Вставить);评审指出光秃及物动词仍缺宾语,且与建议内容空间分离。终版删除编辑行键,并给建议条 chip 容器(浅底、描边、插入图标),使其在无 hover 的触摸端读作可点:内容即标签,是最易懂的形态,也与业界移动建议 chip 一致。随键删除的还有 `composerMobile.fillFollowup` 目录键。
+
+第四轮评审在编辑行尾侧(default 变体、触摸)加入始终有活功能的编辑键:↑/↓ 行感知移动光标(列钳制到目标行、首/末行出界钳到文档首/尾);→ 光标右移,并在建议匹配时兼作桌面 ArrowRight 式接受(整草稿替换为补全,遥测 method `right`);/ 插字面斜杠——textarea 后端没有 slash 菜单,该键是字符便利键,命令浏览仍在加号抽屉。IME 组合期间按键让路;纯光标移动不碰草稿与其持久化。simple 变体与语音通话时编辑行不渲染,键排缺席。历史召回仍走搜索面板:不复活步进回调,故 #14220 移除步进的 inline-tag-chip 限制不适用。
 
 可见性:触摸后端已挂载、建议可见、草稿为空、composer 未禁用。开始打字即隐藏,与桌面 ghost 的前缀规则精神一致,同时保证触摸面不干扰草稿。chip 可见时触摸 textarea 保持普通占位符,建议文字只出现在一个 surface 上;早先一版曾同时留在 placeholder 里,造成同屏重复。桌面仍保留空输入 placeholder、前缀 ghost 补全的渲染。
 
@@ -29,12 +31,13 @@
 - 44px 触摸目标;chip 行仅在有建议时占一行 44px,空闲布局不变。
 - textarea 保持 16px 字号(iOS focus 自动缩放规则);chip 是按钮,14px 文本 + 插入图标 + 单行省略。
 - chip 与其它输入框控件一样 preventDefault mousedown,避免在手势插入前丢焦点;aria-label 组合本地化动作与建议文本,屏幕阅读器两者都得。
-- 「不出现模拟键盘键」的旧验收仍然成立:没有任何 follow-up 控件命名键盘键或光秃动词,编辑行完全不带。
+- 「不出现模拟键盘键」的旧验收仍然成立:没有 follow-up 控件命名键盘键或光秃动词;编辑行键是有原生语义的光标/字符键,不是模拟接受/历史键。
+- 编辑键在 IME 组合期间让路(compositionstart/end 门控);纯光标移动不改草稿,草稿持久化与历史浏览状态不受影响。
 
 ## 验证
 
-- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):8/8 通过——chip 填入不发送、忽略、空输入直发、打字隐藏、前缀补全、编辑行不带 follow-up 键而 chip 接受(default 变体)、chip 可见时 placeholder 保持普通文案(单 surface),以及两条 zh-CN 用例钉住本地化 chip 文本与忽略标签并截中文 UI 图。composer-layout harness 为这些用例提供可选 `language` URL 参数;spec 会把取证截图写入其 test-results 输出目录。
-- `ChatEditor.test.tsx` mobile composer actions:新增 8 条单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)与 accept/dismiss 接线;合并后 head 上连同 `i18n.test.ts` 383/383 通过。
+- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):11/11 通过——chip 填入不发送、忽略、空输入直发、打字隐藏、前缀补全、编辑行不带 follow-up 专用键而 chip 接受(default 变体)、chip 可见时 placeholder 保持普通文案(单 surface)、光标上/下/右移动、→ 接受可见建议、字面斜杠插入,以及两条 zh-CN 用例钉住本地化 chip 文本、忽略标签与光标键标签并截中文 UI 图。composer-layout harness 为这些用例提供可选 `language` URL 参数;spec 会把取证截图写入其 test-results 输出目录。
+- `ChatEditor.test.tsx` mobile composer actions:单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)、accept/dismiss 接线、编辑键接线与 → 的动态 aria-label;`useComposerCore.test.ts` 钉行感知光标计算;合并后 head 上三个文件 398/398 通过。
 - web-shell `tsc --noEmit` 与改动文件 ESLint:干净。
 - 未覆盖:mobile-webkit / iOS 真机(本机缺 WebKit 运行库);软键盘弹起时新增行的高度挤压;iPad 外接键盘 Tab/→ 接受(后置)。
 

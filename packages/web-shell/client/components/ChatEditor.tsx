@@ -127,6 +127,9 @@ import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
+  ArrowDownIcon,
+  ArrowRightIcon,
+  ArrowUpIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ChevronUpIcon,
@@ -4129,6 +4132,8 @@ export const ChatEditor = memo(
               className={styles.mobileTextarea}
               value={core.mobileComposer.value}
               onChange={core.mobileComposer.onChange}
+              onCompositionStart={() => core.setComposing(true)}
+              onCompositionEnd={() => core.setComposing(false)}
               onFocus={() => setMobileFocused(true)}
               onBlur={() => {
                 setMobileFocused(false);
@@ -4843,6 +4848,62 @@ export const ChatEditor = memo(
                 {!mobileContextRowVisible && (
                   <span className={styles.mobileEditingSpacer} />
                 )}
+                <button
+                  type="button"
+                  className={styles.toolBtn}
+                  disabled={disabled}
+                  aria-label={t('composerMobile.caretUp')}
+                  title={t('composerMobile.caretUp')}
+                  data-web-shell-mobile-caret-up
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => core.pressEditingKey('up')}
+                >
+                  <ArrowUpIcon />
+                </button>
+                <button
+                  type="button"
+                  className={styles.toolBtn}
+                  disabled={disabled}
+                  aria-label={t('composerMobile.caretDown')}
+                  title={t('composerMobile.caretDown')}
+                  data-web-shell-mobile-caret-down
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => core.pressEditingKey('down')}
+                >
+                  <ArrowDownIcon />
+                </button>
+                <button
+                  type="button"
+                  className={styles.toolBtn}
+                  disabled={disabled}
+                  aria-label={
+                    mobileFollowupSuggestion
+                      ? t('composerMobile.acceptFollowup')
+                      : t('composerMobile.caretRight')
+                  }
+                  title={
+                    mobileFollowupSuggestion
+                      ? t('composerMobile.acceptFollowup')
+                      : t('composerMobile.caretRight')
+                  }
+                  data-web-shell-mobile-caret-right
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => core.pressEditingKey('right')}
+                >
+                  <ArrowRightIcon />
+                </button>
+                <button
+                  type="button"
+                  className={styles.toolBtn}
+                  disabled={disabled}
+                  aria-label={t('composerMobile.insertSlash')}
+                  title={t('composerMobile.insertSlash')}
+                  data-web-shell-mobile-insert-slash
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => core.pressEditingKey('slash')}
+                >
+                  <SlashIcon />
+                </button>
                 {mobileFocused && (
                   <button
                     type="button"

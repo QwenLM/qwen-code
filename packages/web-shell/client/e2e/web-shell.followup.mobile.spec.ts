@@ -244,6 +244,61 @@ test('mobile editing row carries no follow-up key while the chip bar accepts', a
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
+test('mobile editing-row direction keys move the caret', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('aa\nbbb\ncc');
+  const caret = () =>
+    textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart);
+  expect(await caret()).toBe(9);
+  await page.locator('[data-web-shell-mobile-caret-up]').tap();
+  expect(await caret()).toBe(5);
+  await page.locator('[data-web-shell-mobile-caret-down]').tap();
+  expect(await caret()).toBe(9);
+  await textarea.evaluate((el) => el.setSelectionRange(1, 1));
+  await page.locator('[data-web-shell-mobile-caret-right]').tap();
+  expect(await caret()).toBe(2);
+  expect(daemon.promptRequests()).toHaveLength(0);
+  // The chip bar only renders with an empty draft (single-surface rule).
+  await textarea.fill('');
+  await pushSuggestion(daemon, scenario.sessionId);
+  await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath('followup-keys-row-v5.png'),
+  });
+});
+
+test('mobile right key accepts the visible suggestion', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await pushSuggestion(daemon, scenario.sessionId);
+  await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
+  const rightKey = page.locator('[data-web-shell-mobile-caret-right]');
+  await expect(rightKey).toHaveAttribute('aria-label', 'Accept suggestion');
+  await rightKey.tap();
+  await expect(textarea).toHaveValue(SUGGESTION);
+  await expect(page.locator(FOLLOWUP_BAR)).toHaveCount(0);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile slash key inserts a literal slash', async ({ page }, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await page.locator('[data-web-shell-mobile-insert-slash]').tap();
+  await expect(textarea).toHaveValue('/');
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
 test('mobile follow-up bar renders in Simplified Chinese', async ({
   page,
 }, testInfo) => {
@@ -269,7 +324,7 @@ test('mobile follow-up bar renders in Simplified Chinese', async ({
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile chip bar accepts in Simplified Chinese without an editing-row key', async ({
+test('mobile chip bar accepts in Simplified Chinese with caret keys only', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -283,11 +338,14 @@ test('mobile chip bar accepts in Simplified Chinese without an editing-row key',
   await expect(page.locator(FOLLOWUP_ACCEPT)).toHaveText(ZH_SUGGESTION);
   await expect(editingRow.locator(FOLLOWUP_ACCEPT)).toHaveCount(0);
   await expect(
-    editingRow.getByRole('button', { name: '填入', exact: true }),
-  ).toHaveCount(0);
+    editingRow.locator('[data-web-shell-mobile-caret-up]'),
+  ).toHaveAttribute('aria-label', '光标上移');
+  await expect(
+    editingRow.locator('[data-web-shell-mobile-insert-slash]'),
+  ).toHaveAttribute('aria-label', '插入斜杠');
   await expect(textarea).toHaveAttribute('placeholder', idlePlaceholder!);
   await page.screenshot({
-    path: testInfo.outputPath('followup-bar-default-zh-v2.png'),
+    path: testInfo.outputPath('followup-keys-row-zh-v5.png'),
   });
   await page.locator(FOLLOWUP_ACCEPT).tap();
   await expect(textarea).toHaveValue(ZH_SUGGESTION);

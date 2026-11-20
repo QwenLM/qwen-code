@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildComposerPrompt,
   buildComposerPromptWithInlineTagPlacements,
+  computeCaretTarget,
   getComposerTagDisplay,
   getComposerTagLabel,
   getComposerTagValue,
@@ -9,6 +10,32 @@ import {
   replaceInlineTagPlacements,
   serializeComposerTag,
 } from './useComposerCore';
+
+describe('touch editing-key caret targets', () => {
+  it('moves right one character and clamps at the document end', () => {
+    expect(computeCaretTarget('abc', 1, 1, 'right')).toBe(2);
+    expect(computeCaretTarget('abc', 3, 3, 'right')).toBe(3);
+  });
+
+  it('collapses a selection to its end when moving right', () => {
+    expect(computeCaretTarget('abc', 0, 2, 'right')).toBe(2);
+  });
+
+  it('keeps the column across lines and clamps to shorter lines', () => {
+    expect(computeCaretTarget('aa\nbbb\ncc', 6, 6, 'up')).toBe(2);
+    expect(computeCaretTarget('aaaa\nbb\ncccc', 10, 10, 'up')).toBe(7);
+    expect(computeCaretTarget('aa\nbbb', 1, 1, 'down')).toBe(4);
+  });
+
+  it('clamps to the document edges when leaving the first or last line', () => {
+    expect(computeCaretTarget('aa\nbb', 1, 1, 'up')).toBe(0);
+    expect(computeCaretTarget('aa\nbb', 4, 4, 'down')).toBe(5);
+  });
+
+  it('lands on empty lines with a zero column', () => {
+    expect(computeCaretTarget('a\n\nb', 3, 3, 'up')).toBe(2);
+  });
+});
 
 describe('follow-up completion helpers', () => {
   it('uses the full suggestion when the editor is empty', () => {

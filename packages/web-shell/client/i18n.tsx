@@ -1233,6 +1233,10 @@ const EN: Messages = {
   'composerMobile.history': 'Input history',
   'composerMobile.acceptFollowup': 'Accept suggestion',
   'composerMobile.dismissFollowup': 'Dismiss suggestion',
+  'composerMobile.caretUp': 'Move cursor up',
+  'composerMobile.caretDown': 'Move cursor down',
+  'composerMobile.caretRight': 'Move cursor right',
+  'composerMobile.insertSlash': 'Insert slash',
   'composerMobile.stop': 'Stop',
   'composerMobile.attachments': (v) =>
     `Attached files/images: ${v?.count ?? 0}`,

@@ -165,6 +165,8 @@ const composerCoreState = vi.hoisted(() => ({
   getText: vi.fn(() => ''),
   setText: vi.fn(),
   insertText: vi.fn(),
+  pressEditingKey: vi.fn(),
+  setComposing: vi.fn(),
   expandPastedText: vi.fn(),
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
@@ -317,6 +319,8 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         addTags: composerCoreState.addTags,
         removeInlineTags: vi.fn(),
         insertText: composerCoreState.insertText,
+        pressEditingKey: composerCoreState.pressEditingKey,
+        setComposing: composerCoreState.setComposing,
         setText: composerCoreState.setText,
         submit: vi.fn(),
         clear: vi.fn(),
@@ -416,6 +420,8 @@ afterEach(() => {
   composerCoreState.getText.mockReset().mockReturnValue('');
   composerCoreState.setText.mockReset();
   composerCoreState.insertText.mockReset();
+  composerCoreState.pressEditingKey.mockReset();
+  composerCoreState.setComposing.mockReset();
   composerCoreState.expandPastedText.mockReset();
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
@@ -6724,6 +6730,43 @@ describe('ChatEditor mobile composer actions', () => {
     });
     accept.dispatchEvent(mouseDown);
     expect(mouseDown.defaultPrevented).toBe(true);
+    expect(
+      container
+        .querySelector('[data-web-shell-mobile-caret-right]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Accept suggestion');
+  });
+
+  it('wires the editing-row direction and slash keys to the composer core', async () => {
+    mobileComposer('draft');
+    const container = renderChatEditor({ visibleToolbarActions: [] });
+    for (const [hook, key] of [
+      ['[data-web-shell-mobile-caret-up]', 'up'],
+      ['[data-web-shell-mobile-caret-down]', 'down'],
+      ['[data-web-shell-mobile-caret-right]', 'right'],
+      ['[data-web-shell-mobile-insert-slash]', 'slash'],
+    ] as const) {
+      const button = container.querySelector<HTMLButtonElement>(hook)!;
+      expect(button).not.toBeNull();
+      await act(async () => {
+        button.click();
+      });
+      expect(composerCoreState.pressEditingKey).toHaveBeenCalledWith(key);
+    }
+    expect(composerCoreState.pressEditingKey).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps the editing-row keys out of the simple variant', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      customization: { composerVariant: 'simple' },
+    });
+    expect(
+      container.querySelector('[data-web-shell-mobile-caret-up]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-mobile-insert-slash]'),
+    ).toBeNull();
   });
 
   it('accepts the follow-up into the draft without submitting', async () => {
