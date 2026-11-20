@@ -4099,7 +4099,7 @@ export const ChatEditor = memo(
 
     // Touch accept fills the textarea without submitting (desktop Tab
     // semantics); Send with an empty input still submits the suggestion
-    // directly. The bar covers every variant, the editing-row Tab key only
+    // directly. The bar covers every variant, the editing-row fill key only
     // the default one, and both hide once the user starts typing.
     const mobileFollowupSuggestion =
       !disabled &&
