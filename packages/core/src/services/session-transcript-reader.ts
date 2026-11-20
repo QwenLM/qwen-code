@@ -1972,12 +1972,16 @@ function getIndexCacheBytesByClass(): { shared: number; oversized: number } {
 // getIndexCacheBytesByClass and pruneCacheByteBudget apply to live entries.
 // A shared entry whose projection or hook aggregate pushes it past the
 // shared budget moves into the oversized class instead of being refused
-// against a budget it no longer belongs to.
+// against a budget it no longer belongs to. When superseded snapshots of
+// the same file block the target class (an old prefix whose retained
+// projection holds it), they are reclaimed only if the addition fits after
+// the reclaim — the same fit-before-evict judgment the admission doors use.
 function cacheAdditionFitsClassBudget(
-  currentBytes: number,
+  entry: CacheEntry,
   extraBytes: number,
 ): boolean {
   const sharedBudget = getIndexCacheMaxBytes();
+  const currentBytes = entry.byteSize ?? 0;
   const totalBytes = currentBytes + extraBytes;
   const oversized = totalBytes > sharedBudget;
   const classBudget = oversized
@@ -1988,7 +1992,26 @@ function cacheAdditionFitsClassBudget(
   // The entry's current bytes already count toward its current class; when
   // the addition crosses the class boundary they move with it.
   const staysInClass = currentBytes > sharedBudget === oversized;
-  return classTotal + (staysInClass ? extraBytes : totalBytes) <= classBudget;
+  const added = staysInClass ? extraBytes : totalBytes;
+  if (classTotal + added <= classBudget) return true;
+  const value = entry.value;
+  if (!value) return false;
+  const reclaimable = supersededSnapshotBytes(
+    value.filePath,
+    value.snapshotSize,
+    value.lastUpdated,
+    value.fileIdentity,
+    oversized,
+  );
+  if (classTotal - reclaimable + added > classBudget) return false;
+  evictSupersededSnapshots(
+    value.filePath,
+    value.snapshotSize,
+    value.lastUpdated,
+    value.fileIdentity,
+    oversized,
+  );
+  return true;
 }
 
 function pruneCache(now = Date.now()): void {
@@ -2709,13 +2732,15 @@ async function getCachedIndex(params: {
 
   debugLogger.debug(`index cache miss ${key}`);
   params.onCacheState?.('miss');
-  const pending = buildIndex(params);
-  indexCache.set(key, {
-    pending,
-    expiresAt: now + INDEX_CACHE_TTL_MS,
-  });
-  try {
-    const value = await pending;
+  // Waiters share the verified completion, not the raw build: a snapshot
+  // rewritten under the build must fail every sharer closed, not only the
+  // initiator's cache admission. The wrapper compares its own promise
+  // against the cache entry; a const self-reference trips TS2454, so the
+  // binding is a let assigned exactly once.
+  let pending: Promise<TranscriptIndex> | undefined;
+  // eslint-disable-next-line prefer-const -- assigned once, see above
+  pending = (async () => {
+    const value = await buildIndex(params);
     const byteSize = estimateIndexCacheBytes(value);
     const oversized = byteSize > getIndexCacheMaxBytes();
     const classBudget = oversized
@@ -2739,20 +2764,37 @@ async function getCachedIndex(params: {
     // snapshot before admitting or evicting, so a stale completion neither
     // caches a torn index nor evicts the live newer entry as an "orphan".
     // allowAppend keeps a prefix frozen across a concurrent append valid.
-    if (
-      !(await hasSnapshotSignature(
+    let signatureOk: boolean;
+    try {
+      signatureOk = await hasSnapshotSignature(
         params.filePath,
         params.fileIdentity,
         params.snapshotSize,
         params.lastUpdated,
         true,
-      ))
-    ) {
+      );
+    } catch (error) {
+      // A transient stat error (EMFILE/EIO/EACCES) leaves the file state
+      // unknown: serve the built snapshot uncached rather than fail a page
+      // that was ready. ENOENT stays false inside hasSnapshotSignature.
+      if (indexCache.get(key)?.pending === pending) {
+        indexCache.delete(key);
+      }
+      debugLogger.debug(
+        `index cache skipped verify after stat error ${key}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return value;
+    }
+    if (!signatureOk) {
       if (indexCache.get(key)?.pending === pending) {
         indexCache.delete(key);
       }
       debugLogger.debug(`index cache skipped changed snapshot ${key}`);
-      return value;
+      throw new SessionTranscriptSnapshotUnavailableError(
+        path.basename(params.filePath, '.jsonl'),
+      );
     }
     // The signature check yielded; the pending entry may have been replaced.
     if (indexCache.get(key)?.pending !== pending) {
@@ -2794,19 +2836,31 @@ async function getCachedIndex(params: {
         oversized,
       );
     }
-    indexCache.set(key, {
+    const entry: CacheEntry = {
       value,
       byteSize,
       expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
-    });
+    };
+    indexCache.set(key, entry);
+    // A concurrent page may have decoded and attached a projection to this
+    // index object while the build was pending; account or drop it here too,
+    // so admission never leaves retained bodies off-budget.
+    accountManagedProjection(value, entry);
     pruneCache();
     return value;
+  })();
+  indexCache.set(key, {
+    pending,
+    expiresAt: now + INDEX_CACHE_TTL_MS,
+  });
+  try {
+    return await pending;
   } catch (error) {
     if (indexCache.get(key)?.pending === pending) {
       indexCache.delete(key);
     }
     debugLogger.debug(
-      `index cache build failed ${key}: ${
+      `index cache completion rejected ${key}: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
@@ -3209,9 +3263,8 @@ function accountManagedProjection(index: TranscriptIndex, entry: CacheEntry) {
   const projection = managedProjections.get(index);
   if (!projection) return;
   const projectionBytes = estimateManagedProjectionBytes(projection);
-  const currentBytes = entry.byteSize ?? 0;
-  if (cacheAdditionFitsClassBudget(currentBytes, projectionBytes)) {
-    entry.byteSize = currentBytes + projectionBytes;
+  if (cacheAdditionFitsClassBudget(entry, projectionBytes)) {
+    entry.byteSize = (entry.byteSize ?? 0) + projectionBytes;
   } else {
     managedProjections.delete(index);
   }
@@ -3797,7 +3850,7 @@ export class SessionTranscriptReader {
         // index cached elsewhere must not block hook retention on shared
         // entries, and an aggregate that pushes a shared entry past the
         // shared budget moves it into the oversized class.
-        if (cacheAdditionFitsClassBudget(cached.byteSize ?? 0, byteSize)) {
+        if (cacheAdditionFitsClassBudget(cached, byteSize)) {
           cached.hookTurns ??= new Map();
           cached.hookTurns.set(promptId, turn);
           cached.byteSize = (cached.byteSize ?? 0) + byteSize;
