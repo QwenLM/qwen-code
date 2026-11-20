@@ -2179,6 +2179,33 @@ class ToolPublicationStoreTest {
     }
 
     @Test
+    void capacityRefusalReadsEachScopeAggregateOnce() {
+        ObjectNode second = addSecondExecution();
+        List<String> aggregates = new java.util.ArrayList<>();
+        JdbcTemplate observed = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
+            @Override
+            public <T> T query(String sql, org.springframework.jdbc.core.PreparedStatementSetter setter,
+                    org.springframework.jdbc.core.ResultSetExtractor<T> extractor) {
+                if (sql.startsWith("SELECT COALESCE(SUM(")) {
+                    aggregates.add(sql);
+                }
+                return super.query(sql, setter, extractor);
+            }
+        };
+        store = new ToolPublicationStore(observed, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        aggregates.clear();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
+        assertThat(aggregates).hasSize(2);
+        assertThat(aggregates.getFirst()).contains("tenant_key = ?", "AS used");
+        assertThat(aggregates.getLast()).contains("scope_key = ?", "AS retained", "producer_phase <> 'FINISHING'");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
     void refusesEachExhaustedLimitWithItsOwnCode() {
         ObjectNode second = addSecondExecution();
         store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
