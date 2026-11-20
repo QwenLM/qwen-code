@@ -24,7 +24,36 @@ describe('memoryCommand', () => {
   });
 
   it('advertises the explicit team migration subcommand', () => {
-    expect(memoryCommand.argumentHint).toBe('[migrate-team]');
+    expect(memoryCommand.argumentHint).toBe('[show|migrate-team]');
+  });
+
+  it('shows the combined memory through the command history UI', async () => {
+    const config = {
+      getUserMemory: vi.fn().mockReturnValue('# Context\nProject convention.'),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue('# Auto memory\nIndex.'),
+      getAutoMemoryContext: vi.fn().mockReturnValue('Latest catalog.'),
+      getMemoryFileCount: vi.fn().mockReturnValue(1),
+    } as unknown as Config;
+    const context = createMockCommandContext({
+      executionMode: 'interactive',
+      services: {
+        config,
+        settings: {
+          merged: { context: { fileName: 'QWEN.md' } },
+        } as never,
+      },
+    });
+
+    const result = await memoryCommand.action?.(context, 'show');
+
+    expect(result).toBeUndefined();
+    expect(context.ui.addItem).toHaveBeenCalledTimes(2);
+    expect(context.ui.addItem).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('# Context\nProject convention.'),
+      }),
+      expect.any(Number),
+    );
   });
 
   it('starts team migration only from the explicit subcommand', async () => {
