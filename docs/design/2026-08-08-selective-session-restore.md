@@ -413,13 +413,6 @@ delete the cache entry only when the entry still identifies that pending build;
 an evicted or superseded pending promise must not overwrite or delete a newer
 value.
 
-Superseded in part by [untrusted-persisted-transcript.md](untrusted-persisted-transcript.md):
-admission and the restore offer now reclaim superseded same-file snapshots when
-the incoming snapshot fits after the reclaim (fit-before-evict) instead of
-skipping on any eviction, and concurrent requests share the build's verified
-completion — snapshot re-verification and admission — rather than the raw build
-promise. The non-clobbering ownership rule above still holds.
-
 Projection hints that duplicate existing interpretation logic must use shared
 helpers rather than reimplement it in the scanner. In particular, prompt-turn
 hints must use the exact `record.promptId` plus UI-telemetry `prompt_id`
