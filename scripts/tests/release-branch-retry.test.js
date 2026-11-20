@@ -69,11 +69,17 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
         git('commit', '--allow-empty', '-m', `Retry\n\n${trailer}`);
       }
       // Real `gh release view` on a missing release prints the message to
-      // stderr and exits 1; the resume arm keys on that text, so the stub has
-      // to reproduce it rather than exit silently.
+      // stderr and exits 1, and the resume arm keys on that text. The stub has
+      // to answer per subcommand: `gh auth setup-git` runs earlier in the step
+      // and must still succeed, or the step dies before the resume logic.
       writeFileSync(
         join(bin, 'gh'),
-        '#!/bin/sh\necho "release not found" >&2\nexit 1\n',
+        '#!/bin/sh\n' +
+          'case "$1 $2" in\n' +
+          '  "auth setup-git") exit 0 ;;\n' +
+          '  "release view") echo "release not found" >&2; exit 1 ;;\n' +
+          'esac\n' +
+          'exit 0\n',
         { mode: 0o755 },
       );
       // Stub npm so the dist-tag guard does not hit the real registry.
