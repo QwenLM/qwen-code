@@ -644,6 +644,15 @@ function SessionOverviewPanelInner({
   const editingIdentity = editingCard
     ? getSessionIdentity(editingCard)
     : undefined;
+  // The first focus after an editor opens selects the current name and later
+  // ones do not, so a caret the user placed survives any focus that returns
+  // to the field.
+  const renameSelectedRef = useRef(false);
+  const selectRenameOnFirstFocus = useCallback((element: HTMLInputElement) => {
+    if (renameSelectedRef.current) return;
+    renameSelectedRef.current = true;
+    element.select();
+  }, []);
   const isCurrentCard = useCallback(
     (card: SessionCard) => {
       const current = connectionRef.current;
@@ -1076,6 +1085,7 @@ function SessionOverviewPanelInner({
   const startRename = useCallback((card: SessionCard) => {
     setActionError(null);
     setDetailsOpen(null);
+    renameSelectedRef.current = false;
     setEditingCard(card);
     setEditingName(card.label);
   }, []);
@@ -1497,6 +1507,9 @@ function SessionOverviewPanelInner({
                       autoFocus
                       value={editingNameRef.current}
                       onChange={(event) => setEditingName(event.target.value)}
+                      onFocus={(event) =>
+                        selectRenameOnFirstFocus(event.currentTarget)
+                      }
                       onBlur={cancelRename}
                       onKeyDown={(event) => {
                         if (event.key === 'Escape') {
@@ -1830,6 +1843,7 @@ function SessionOverviewPanelInner({
       isCurrentCard,
       onOpenSession,
       registeredWorkspaces,
+      selectRenameOnFirstFocus,
       sessionMetadataEnabled,
       sessionDetailsProps,
       startBindPr,
