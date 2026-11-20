@@ -8,9 +8,10 @@
  * Wall-clock budget for the maximum transcript-document browser gate.
  *
  * The 7M-character document renders well inside a minute on a dev machine, but
- * the shared self-hosted ARM64 pool has measured it past that ceiling under
- * contention: 73s (recorded in ci.yml's web_shell_e2e_smoke history), 68.4s
- * (#17158), 60.9s (#17203) and 64.5s (#17884). Those hosts get the same 3x
+ * shared self-hosted pools have measured it past that ceiling under
+ * contention: 73s on the x64 pool (ci.yml's web_shell_e2e_smoke history,
+ * marked x64-specific there), 68.4s (#17158), 60.9s (#17203) and 64.5s
+ * (#17884). Those hosts get the same 3x
  * multiplier the interactive harness uses in `interactive/wait.ts`; GitHub-
  * hosted CI and local runs keep the tight 60s ceiling so a real regression
  * still fails fast. RUNNER_ENVIRONMENT is a runner default, so both gate steps
