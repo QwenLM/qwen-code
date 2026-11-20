@@ -6249,6 +6249,45 @@ describe('createServeApp', () => {
       expect(await workflowCapability()).toBe(false);
     });
 
+    it.skipIf(process.platform === 'win32')(
+      'keeps Workflow available when a home .env link has no target',
+      async () => {
+        const home = path.join(
+          serverTestEnvironmentRoot,
+          'acp-broken-env-home',
+        );
+        const userConfig = path.join(home, '.qwen');
+        const workspace = path.join(
+          serverTestEnvironmentRoot,
+          'acp-broken-env-workspace',
+        );
+        await fsp.mkdir(userConfig, { recursive: true });
+        await fsp.mkdir(workspace);
+        const envTarget = path.join(home, 'linked.env');
+        await fsp.symlink(envTarget, path.join(userConfig, '.env'));
+        const app = createServeApp({ ...baseOpts, workspace }, undefined, {
+          primaryWorkspaceTrusted: true,
+          daemonEnv: { HOME: home },
+        });
+        const capability = async () => {
+          const response = await request(app)
+            .get('/capabilities')
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .expect(200);
+          return response.body.workspaces[0].workflowsEnabled;
+        };
+
+        expect(await capability()).toBe(true);
+        await fsp.mkdir(envTarget);
+        expect(await capability()).toBe(false);
+        await fsp.rmdir(envTarget);
+        await fsp.writeFile(envTarget, 'QWEN_CODE_SAFE_MODE=1\n');
+        expect(await capability()).toBe(false);
+        await fsp.writeFile(envTarget, '');
+        expect(await capability()).toBe(true);
+      },
+    );
+
     it.each(['absolute', 'relative'] as const)(
       'loads Workflow settings from %s QWEN_HOME in the child home .env',
       async (homeKind) => {

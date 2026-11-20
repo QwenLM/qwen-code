@@ -244,7 +244,17 @@ export function readStartupHomeEnv(
   applyHomeEnvOverrides(
     env,
     () => getGlobalQwenDirLite(env, homeDir, workspaceCwd),
-    readConfigFile,
+    (file) => {
+      // ACP startup ignores .env paths without a target.
+      try {
+        fs.statSync(file);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+          return undefined;
+        throw error;
+      }
+      return readConfigFile(file);
+    },
   );
   return spawnedEnvironmentView(env);
 }
