@@ -17,7 +17,7 @@ Two touch points, one accept path:
 - **Suggestion bar** above the input row, in every composer variant: the suggestion text as a tappable button plus a dismiss button.
 - **Editing-row Tab key**, default variant only (the editing row does not render in the simple variant or during voice capture): a `Tab`-labelled button that appears only while a suggestion is visible.
 
-Visibility for both: touch backend mounted, suggestion visible, draft empty, composer enabled. Both hide as soon as the user types, matching the desktop ghost's prefix rule in spirit while keeping the touch surface draft-free.
+Visibility for both: touch backend mounted, suggestion visible, draft empty, composer enabled. Both hide as soon as the user types, matching the desktop ghost's prefix rule in spirit while keeping the touch surface draft-free. While the bar is visible the touch textarea keeps its ordinary placeholder, so the suggestion text appears on exactly one surface; an earlier revision also left it in the placeholder, which duplicated the text on screen. Desktop keeps rendering the suggestion as placeholder (empty input) and ghost completion (typed prefix).
 
 Accept calls `onAcceptFollowup('tab')` without `skipOnAccept`, so the host's existing `onAccept → insertText` wiring fills the textarea and focuses it inside the tap gesture (iOS opens the keyboard only for gesture-initiated focus). Dismiss calls `onDismissFollowup`, keeping the existing ignored-outcome telemetry. No new data path: the daemon sidechannel, controller, and insertText touch branch are reused unchanged.
 
@@ -32,9 +32,9 @@ Preserved fast paths: Send with an empty input still submits the visible suggest
 
 ## Validation
 
-- `client/e2e/web-shell.followup.mobile.spec.ts`, mobile-chromium (Pixel 7 touch emulation): 6/6 passed — bar fill without submit, dismiss, empty-send direct submit, typing hides the bar, prefix completion, editing-row Tab key fill. The spec captures evidence screenshots into its
+- `client/e2e/web-shell.followup.mobile.spec.ts`, mobile-chromium (Pixel 7 touch emulation): 6/6 passed — bar fill without submit, dismiss, empty-send direct submit, typing hides the bar, prefix completion, editing-row Tab key fill, and the placeholder staying ordinary while the bar shows (single surface). The spec captures evidence screenshots into its
   test-results output.
-- `ChatEditor.test.tsx` mobile composer actions: 8 new unit tests pin visibility (draft, hidden suggestion, desktop backend, disabled, simple variant) and the accept/dismiss wiring; 319/319 passed with `i18n.test.ts`.
+- `ChatEditor.test.tsx` mobile composer actions: 8 new unit tests pin visibility (draft, hidden suggestion, desktop backend, disabled, simple variant) and the accept/dismiss wiring; 383/383 passed with `i18n.test.ts` at the merged head.
 - web-shell `tsc --noEmit` and ESLint on the changed files: clean.
 - Not covered: mobile-webkit / real iOS devices (host lacks WebKit runtime libs); soft-keyboard-open layout pressure from the extra row; iPad hardware-keyboard Tab/Right acceptance (deferred).
 

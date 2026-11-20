@@ -33,6 +33,7 @@ Phones and tablets use the plain-textarea composer, which has no Tab or arrow ke
 - Tap the bar's dismiss button to ignore the suggestion.
 - With an empty input, tapping Send submits the visible suggestion directly; typing a prefix of the suggestion and tapping Send completes and submits it.
 - The bar hides as soon as you start typing.
+- The input keeps its ordinary placeholder while the bar is shown, so the suggestion text appears only once; desktop still shows it as placeholder and ghost text.
 
 ## When Suggestions Appear
 

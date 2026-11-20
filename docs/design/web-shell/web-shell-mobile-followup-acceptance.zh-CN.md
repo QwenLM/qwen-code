@@ -17,7 +17,7 @@
 - **建议条**:输入行上方,覆盖所有 composer 变体;建议文本作为可点按按钮,旁带忽略按钮。
 - **编辑行 Tab 键**:仅 default 变体(simple 变体与语音通话时编辑行不渲染);仅在有建议时出现的 `Tab` 文本按钮。
 
-两者可见性条件一致:触摸后端已挂载、建议可见、草稿为空、composer 未禁用。开始打字即隐藏,与桌面 ghost 的前缀规则精神一致,同时保证触摸面不干扰草稿。
+两者可见性条件一致:触摸后端已挂载、建议可见、草稿为空、composer 未禁用。开始打字即隐藏,与桌面 ghost 的前缀规则精神一致,同时保证触摸面不干扰草稿。建议条可见时触摸 textarea 保持普通占位符,建议文字只出现在一个 surface 上;早先一版曾同时留在 placeholder 里,造成同屏重复。桌面仍保留空输入 placeholder、前缀 ghost 补全的渲染。
 
 接受调用 `onAcceptFollowup('tab')` 且不带 `skipOnAccept`,复用宿主现成的 `onAccept → insertText` 接线:在 tap 手势内填入 textarea 并 focus(iOS 只对手势内发起的 focus 弹键盘)。忽略调用 `onDismissFollowup`,保留既有 ignored 遥测。不新增数据通路:daemon sidechannel、controller、insertText 触摸分支均原样复用。
 
@@ -32,8 +32,8 @@
 
 ## 验证
 
-- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):6/6 通过——建议条填入不发送、忽略、空输入直发、打字隐藏、前缀补全、编辑行 Tab 键填入。spec 会把取证截图写入其 test-results 输出目录。
-- `ChatEditor.test.tsx` mobile composer actions:新增 8 条单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)与 accept/dismiss 接线;连同 `i18n.test.ts` 319/319 通过。
+- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):6/6 通过——建议条填入不发送、忽略、空输入直发、打字隐藏、前缀补全、编辑行 Tab 键填入,以及建议条可见时 placeholder 保持普通文案(单 surface)。spec 会把取证截图写入其 test-results 输出目录。
+- `ChatEditor.test.tsx` mobile composer actions:新增 8 条单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)与 accept/dismiss 接线;合并后 head 上连同 `i18n.test.ts` 383/383 通过。
 - web-shell `tsc --noEmit` 与改动文件 ESLint:干净。
 - 未覆盖:mobile-webkit / iOS 真机(本机缺 WebKit 运行库);软键盘弹起时新增行的高度挤压;iPad 外接键盘 Tab/→ 接受(后置)。
 

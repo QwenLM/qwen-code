@@ -4633,13 +4633,15 @@ export function useComposerCore(
   }, [disabled]);
 
   // Computed in the render scope so the mobile textarea backend can share the
-  // exact placeholder the CodeMirror path shows.
+  // placeholder the CodeMirror path shows. Touch diverges on purpose: the
+  // suggestion bar is the single surface for the suggestion there, so the
+  // textarea keeps its ordinary placeholder instead of repeating the text.
   const followupSuggestion =
     !disabled && followupState?.isVisible && followupState.suggestion
       ? followupState.suggestion
       : null;
   const composerPlaceholder =
-    followupSuggestion ??
+    (isTouchComposer ? null : followupSuggestion) ??
     (shellMode ? t('editor.shellPlaceholder') : placeholderText);
 
   useEffect(() => {

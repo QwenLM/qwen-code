@@ -112,14 +112,18 @@ test('mobile suggestion bar fills the textarea without submitting', async ({
   await expect(textarea).toBeVisible();
   await expect(page.locator('.cm-editor')).toHaveCount(0);
   await expect(page.locator(FOLLOWUP_BAR)).toHaveCount(0);
+  const idlePlaceholder = await textarea.getAttribute('placeholder');
   await pushSuggestion(daemon, scenario.sessionId);
   const bar = page.locator(FOLLOWUP_BAR);
   await expect(bar).toBeVisible();
   await expect(page.locator(FOLLOWUP_ACCEPT)).toHaveText(SUGGESTION);
-  await expect(textarea).toHaveAttribute('placeholder', SUGGESTION);
+  // Single surface: the bar carries the suggestion text; the textarea keeps
+  // its ordinary placeholder instead of repeating it.
+  await expect(textarea).toHaveAttribute('placeholder', idlePlaceholder!);
+  await expect(textarea).not.toHaveAttribute('placeholder', SUGGESTION);
   await expect(send).toBeEnabled();
   await page.screenshot({
-    path: testInfo.outputPath('followup-bar-simple.png'),
+    path: testInfo.outputPath('followup-bar-simple-v2.png'),
   });
   await page.locator(FOLLOWUP_ACCEPT).tap();
   await expect(textarea).toHaveValue(SUGGESTION);
@@ -218,12 +222,14 @@ test('mobile editing row Tab key fills the textarea without submitting', async (
   const editingRow = page.locator('[data-web-shell-mobile-editing-actions]');
   await expect(editingRow).toBeVisible();
   await expect(page.locator(FOLLOWUP_TAB)).toHaveCount(0);
+  const idlePlaceholder = await textarea.getAttribute('placeholder');
   await pushSuggestion(daemon, scenario.sessionId);
   const tabKey = page.locator(FOLLOWUP_TAB);
   await expect(tabKey).toBeVisible();
   await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
+  await expect(textarea).toHaveAttribute('placeholder', idlePlaceholder!);
   await page.screenshot({
-    path: testInfo.outputPath('followup-tab-key.png'),
+    path: testInfo.outputPath('followup-tab-key-v2.png'),
   });
   await tabKey.tap();
   await expect(textarea).toHaveValue(SUGGESTION);
