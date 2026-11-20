@@ -1172,9 +1172,9 @@ describe('ci flaky rerun patrol', () => {
   it('keeps the failure line after a CR-terminated value of a whitespace-bounded rule', () => {
     // Bearer's \S+ and the env rule's [^"',\s}]+ also stop at \r, so the strip
     // welds their value onto the next logical line just like the header rules.
-    // The post-strip pass must not re-redact a value that already reads
-    // [redacted], or it eats the ##[error] marker and the excerpt loses the
-    // failure it was fetched for.
+    // The post-strip value is a tempered token that stops before the ##[error]
+    // marker, so the weld cannot carry the value over the marker and the
+    // excerpt keeps the failure it was fetched for.
     const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
       '\n',
     );
@@ -1199,8 +1199,8 @@ describe('ci flaky rerun patrol', () => {
     // The scheme rule's userinfo is a tempered token per @-segment: it runs to
     // the next whitespace or @ but never across the ##[error] marker. Two
     // shapes: one where the first pass already redacted the userinfo, and one
-    // where it saw no @ at all and never matched — in both, the temper keeps
-    // the rule off the ##[error] marker.
+    // where the only @ sits past the CR so the first pass never reached it — in
+    // both, the temper keeps the rule off the ##[error] marker.
     for (const line of [
       'https://u@h\r##[error]AssertionError:real@failure',
       'https://host\r##[error]AssertionError:real@failure',
@@ -1214,10 +1214,13 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('keeps the marker when a control splits the credential keyword itself', () => {
-    // A split keyword is exactly the case the first pass cannot see, so the
-    // repair pass must redact the welded value. Selection runs before the strip
-    // so the line is still chosen, and the value is a tempered token that stops
-    // before the ##[error] marker, so the weld cannot carry the value over it.
+    // A split keyword is exactly the case the first pass cannot see. Selection
+    // runs before the strip so the line is still chosen. For the env / Bearer
+    // fixtures the repair pass redacts the welded value (a tempered token that
+    // stops before the ##[error] marker); for the private-key fixture the
+    // tempered body stops at the marker, so the marker survives rather than the
+    // span being redacted. Either way the weld cannot carry a value over the
+    // marker.
     const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
       '\n',
     );
