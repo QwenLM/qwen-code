@@ -90,6 +90,9 @@ class ExternalShellWorkerProtocolTest {
         // would mangle a correct capture.
         var payload = "x".repeat(32 * 1024 - 1) + "é" + "y".repeat(11) + "\n";
         try (var worker = ExternalShellWorkerFixture.start(payload, "")) {
+            var commandLine = String.join(" ", worker.launchCommand);
+            assertTrue(commandLine.length() < 32767,
+                    "The worker command line must fit Windows process creation limits");
             var transport = worker.transport();
             var channel = begin(worker, transport);
             var stdout = worker.copy(transport, channel, "stdout");
