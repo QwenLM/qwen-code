@@ -2,9 +2,16 @@
 
 [English](2026-11-18-managed-channel-card-surfaces.md) | [简体中文](2026-11-18-managed-channel-card-surfaces.zh-CN.md)
 
-Status: implemented in this change for DingTalk interactive cards (private
-chat); the live-tenant smoke and card rendering for other adapters stay
-separate. This is slice **H5e** of
+Status: merged in [#17748](https://github.com/QwenLM/qwen-code/pull/17748)
+(squash `5d91810c8f`) for DingTalk interactive cards (private chat).
+Verification ledger: build / typecheck / lint rc=0; the DingTalk, channel-base,
+core channel and CLI suites green; 29 load-bearing rules red under mutation
+across three review rounds; a real CONNECT-proxy A/B and a real full-chain
+integration (real HTTP control plane + real card proxy/TLS origin + real
+on-disk state, where a `delivered` receipt prunes the card body) pass. Deferred
+follow-ups (live-tenant smoke, other providers, read-model metadata, streaming,
+group cards) are tracked in
+[#17813](https://github.com/QwenLM/qwen-code/issues/17813). This is slice **H5e** of
 [#12827](https://github.com/QwenLM/qwen-code/issues/12827), tracked by
 [#17716](https://github.com/QwenLM/qwen-code/issues/17716), under the Managed
 Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). It

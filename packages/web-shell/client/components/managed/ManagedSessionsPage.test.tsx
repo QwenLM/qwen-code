@@ -401,6 +401,91 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it.each([undefined, 's1'] as const)(
+    'opens the static Managed capability inventory from session %s without new requests',
+    async (sessionId) => {
+      await render(sessionId);
+      const calls = Object.values(mocks.client).map(
+        (method) => method.mock.calls.length,
+      );
+      const trigger = [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Managed capabilities',
+      );
+      expect(trigger).toBeDefined();
+      await act(async () => trigger!.click());
+      expect(document.querySelectorAll('[data-managed-surface]')).toHaveLength(
+        35,
+      );
+      expect(
+        Object.values(mocks.client).map((method) => method.mock.calls.length),
+      ).toEqual(calls);
+    },
+  );
+
+  it.each([undefined, 's1'])(
+    'opens the same static inventory in the full-shell home layout from session %s without new requests',
+    async (sessionId) => {
+      const navigationTarget = document.createElement('div');
+      document.body.appendChild(navigationTarget);
+      try {
+        await render(sessionId, 'en', provider, navigationTarget);
+        const calls = Object.values(mocks.client).map(
+          (method) => method.mock.calls.length,
+        );
+        const trigger = [...container.querySelectorAll('button')].find(
+          (button) => button.textContent === 'Managed capabilities',
+        );
+        expect(trigger).toBeDefined();
+        await act(async () => trigger!.click());
+        expect(
+          document.querySelectorAll('[data-managed-surface]'),
+        ).toHaveLength(35);
+        expect(
+          Object.values(mocks.client).map((method) => method.mock.calls.length),
+        ).toEqual(calls);
+      } finally {
+        navigationTarget.remove();
+      }
+    },
+  );
+
+  it('exposes the static inventory to an existing host-only Session without catalog or creation requests', async () => {
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    const calls = Object.values(mocks.client).map(
+      (method) => method.mock.calls.length,
+    );
+    const trigger = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Managed capabilities',
+    );
+    expect(trigger).toBeDefined();
+    await act(async () => trigger!.click());
+    expect(document.querySelectorAll('[data-managed-surface]')).toHaveLength(
+      35,
+    );
+    expect(
+      Object.values(mocks.client).map((method) => method.mock.calls.length),
+    ).toEqual(calls);
+    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+    expect(mocks.client.createSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps all toolbar actions wrappable when narrow layouts use long translations', async () => {
+    await render('s1', 'ru');
+    const newButton = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Новая управляемая задача',
+    );
+    const actions = container.querySelector(
+      '[data-managed-surface-decisions-trigger]',
+    );
+    expect(newButton).toBeDefined();
+    expect(actions).not.toBeNull();
+    expect(actions!.textContent).toBe('Возможности Managed');
+    expect(newButton!.parentElement!.className).toContain('flex-wrap');
+    expect(actions!.parentElement!.className).toContain('flex-wrap');
+  });
+
   it('intercepts BTW and recap before main-task busy and queue admission', async () => {
     const create = vi.fn().mockImplementation(async (_sessionId, request) => ({
       ...sideQuery,

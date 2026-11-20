@@ -244,28 +244,94 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
     }
 
     @Test
-    void paginatesWithAStableCursorThatFreezesTheFirstPageWindow() throws Exception {
-        seedArtifactSession("session-2", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+    void paginatesWithAnIdUpperBoundThatExcludesNewRows() throws Exception {
+        String newest = seedArtifactSession("session-2", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        long through = fixture.jdbc().queryForObject(
+                "SELECT id FROM ma_artifact WHERE artifact_id = ?", Long.class, newest);
         var first = page("reader", body(null, 1));
-        assertThat(first.path("data")).hasSize(1);
+        assertThat(ids(first)).containsExactly(newest);
         assertThat(first.path("hasMore").asBoolean()).isTrue();
         String cursor = first.path("nextCursor").asText();
+        var position = JSON.readTree(Base64.getUrlDecoder().decode(cursor));
+        assertThat(position.size()).isEqualTo(6);
+        assertThat(position.path("watermark").asLong()).isEqualTo(through);
+        assertThat(position.path("before").asLong()).isEqualTo(through);
         String late = seedArtifactSession("session-3", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
         var walked = new ArrayList<String>(ids(first));
         while (true) {
             var next = page("reader", body(cursor, 1));
             assertThat(next.path("data")).hasSize(1);
+            assertThat(next.path("data").get(0).path("artifact").path("availability").asText())
+                    .isEqualTo("available");
+            assertThat(next.path("data").get(0).path("access").path("can_read_content").asBoolean()).isTrue();
             walked.addAll(ids(next));
             if (!next.path("hasMore").asBoolean()) {
                 assertThat(next.path("nextCursor").isNull()).isTrue();
                 break;
             }
             cursor = next.path("nextCursor").asText();
+            var nextPosition = JSON.readTree(Base64.getUrlDecoder().decode(cursor));
+            assertThat(nextPosition.path("watermark").asLong()).isEqualTo(through);
+            assertThat(nextPosition.path("before").asLong()).isLessThan(position.path("before").asLong());
+            position = nextPosition;
         }
         assertThat(walked).hasSize(3).doesNotHaveDuplicates().doesNotContain(late);
         var fresh = page("reader", body(null, null));
         assertThat(ids(fresh)).hasSize(4);
         assertThat(ids(fresh).getFirst()).isEqualTo(late);
+    }
+
+    @Test
+    void watermarkDoesNotFreezeVisibilityOrAvailability() throws Exception {
+        String pending = seedArtifactSession(TENANT, "session-pending", WORKSPACE, "ACTIVE",
+                false, null, "PUBLIC", WORKSPACE, "PENDING");
+        String shared = seedArtifactSession("session-shared", WORKSPACE, "ACTIVE", true, "owner", "PUBLIC", WORKSPACE);
+        String revoked = seedArtifactSession("session-revoked", WORKSPACE, "ACTIVE", false, "owner", "PUBLIC", WORKSPACE);
+        String newest = seedArtifactSession("session-newest", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        var first = page("reader", body(null, 1));
+        assertThat(ids(first)).containsExactly(newest);
+        assertThat(first.path("hasMore").asBoolean()).isTrue();
+        String cursor = first.path("nextCursor").asText();
+        String late = seedArtifactSession("session-late", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+
+        // An id upper bound does not freeze visibility or availability.
+        fixture.jdbc().update("UPDATE ma_operation SET state = 'READY' WHERE operation_id = ?",
+                "result-session-pending");
+        fixture.jdbc().update("UPDATE ma_session SET owner_only = 0 WHERE tenant_id = ? AND session_id = ?",
+                TENANT, "session-shared");
+        fixture.jdbc().update("UPDATE ma_session SET owner_only = 1 WHERE tenant_id = ? AND session_id = ?",
+                TENANT, "session-revoked");
+        fixture.jdbc().update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE tenant_id = ? AND session_id = ?",
+                TENANT, "session-1");
+
+        var next = page("reader", body(cursor, 100));
+        assertThat(ids(next)).containsExactlyInAnyOrder(
+                shared, pending, stdout.path("id").asText(), stderr.path("id").asText());
+        assertThat(ids(next)).doesNotContain(revoked, newest, late);
+        assertThat(ids(next).subList(0, 2)).containsExactly(shared, pending);
+        assertThat(next.path("hasMore").asBoolean()).isFalse();
+        assertThat(next.path("nextCursor").isNull()).isTrue();
+        for (var row : next.path("data")) {
+            assertThat(row.path("artifact").path("availability").asText()).isEqualTo("unavailable");
+            assertThat(row.path("access").path("can_read_content").asBoolean()).isFalse();
+        }
+        assertThat(ids(page("reader", body(null, 1)))).containsExactly(late);
+    }
+
+    @Test
+    void answersAnEmptyContinuationAfterRowsBecomeInvisible() throws Exception {
+        var first = page("reader", body(null, 1));
+        assertThat(first.path("hasMore").asBoolean()).isTrue();
+        String cursor = first.path("nextCursor").asText();
+        fixture.jdbc().update("UPDATE ma_session SET status = 'DELETING' WHERE tenant_id = ? AND session_id = ?",
+                TENANT, "session-1");
+        String late = seedArtifactSession("session-late", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+
+        var next = page("reader", body(cursor, 1));
+        assertThat(next.path("data")).isEmpty();
+        assertThat(next.path("hasMore").asBoolean()).isFalse();
+        assertThat(next.path("nextCursor").isNull()).isTrue();
+        assertThat(ids(page("reader", body(null, 1)))).containsExactly(late);
     }
 
     @Test
@@ -278,9 +344,12 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
         seedArtifactSession("session-legacy", null, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
         seedArtifactSession("session-control", WORKSPACE, "ACTIVE", false, null, "CONTROL", WORKSPACE);
         String drifted = seedArtifactSession("session-drift", WORKSPACE, "ACTIVE", false, null, "PUBLIC", "workspace-2");
+        String otherWorkspace = seedArtifactSession("session-other-workspace", "workspace-2", "ACTIVE",
+                false, null, "PUBLIC", "workspace-2");
+        assertThat(ids(page("reader", body(null, 1)))).containsExactly(archived);
         var reader = ids(page("reader", body(null, 100)));
         assertThat(reader).contains(visible, archived, stdout.path("id").asText(), stderr.path("id").asText());
-        assertThat(reader).doesNotContain(privateId, drifted);
+        assertThat(reader).doesNotContain(privateId, drifted, otherWorkspace);
         assertThat(reader).hasSize(4);
         assertThat(ids(page("owner", body(null, 100)))).contains(privateId);
         fixture.jdbc().update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
@@ -290,7 +359,7 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                 + " role) VALUES (?, 'workspace-2', ?, 'READER')", TENANT,
                 "reader".getBytes(StandardCharsets.UTF_8));
         var other = page("reader", "{\"workspaceId\":\"workspace-2\"}");
-        assertThat(other.path("data")).isEmpty();
+        assertThat(ids(other)).containsExactly(otherWorkspace);
         assertThat(ids(page("reader", body(null, 100)))).doesNotContain(drifted);
     }
 

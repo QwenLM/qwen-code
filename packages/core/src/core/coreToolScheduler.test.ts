@@ -11139,6 +11139,35 @@ describe('CoreToolScheduler telemetry spans', () => {
     expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
   });
 
+  it.each(['SLOT_CLOSED: Choose another slot.', ''])(
+    'keeps reported failures out of the success path (%j)',
+    async (body) => {
+      const hooks = eventHookBus(allowOnlyPreToolUse);
+      const { spanRecord, call } = await runSingleTool({
+        hooks,
+        execute: vi.fn().mockResolvedValue({
+          llmContent: [{ text: body }],
+          returnDisplay: body,
+          isError: true,
+        }),
+      });
+
+      expectStatus(call, 'error');
+      expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
+      const error = body || 'Tool reported an error.';
+      expect(call.response.resultDisplay).toBe(error);
+      expect(
+        call.response.responseParts[0]?.functionResponse?.response,
+      ).toEqual({
+        error,
+      });
+      expect(
+        hooks.request.mock.calls.map(([request]) => request.eventName),
+      ).toEqual(['PreToolUse', 'PostToolUseFailure']);
+      expect(hooks.request.mock.calls[1]?.[0]?.input).toMatchObject({ error });
+    },
+  );
+
   it('preserves a structured tool display when the tool returns an error', async () => {
     const resultDisplay = {
       type: 'vision_bridge_notice' as const,

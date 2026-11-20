@@ -1015,6 +1015,14 @@ describe('managed session header', () => {
     expect(parseManagedSessionHeader(header()).engine).toBe('managed');
   });
 
+  it('accepts a header without a minimum-reader requirement', () => {
+    const withoutReader: Record<string, unknown> = { ...header() };
+    delete withoutReader['minimumReader'];
+    const parsed = parseManagedSessionHeader(withoutReader);
+    expect(parsed.engine).toBe('managed');
+    expect(parsed.minimumReader).toBeUndefined();
+  });
+
   it('refuses a newer format or reader requirement', () => {
     headerError({ formatVersion: 2 }, /is not supported by this reader/);
     headerError(
