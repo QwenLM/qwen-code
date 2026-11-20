@@ -128,13 +128,15 @@ class Query:
 
     async def _initialize(self) -> None:
         try:
+            timeout = self._options.timeout
+            timeout.validate_control_request_serializable()
             payload: dict[str, Any] = {
                 "hooks": None,
                 # The CLI bounds its deferred initialize reply below this
                 # budget, so it must carry the caller's value rather than
                 # leaving the CLI to assume the default.
                 "timeout": {
-                    "controlRequest": self._options.timeout.control_request * 1000,
+                    "controlRequest": timeout.control_request_milliseconds(),
                 },
             }
             if self._options.mcp_servers:
