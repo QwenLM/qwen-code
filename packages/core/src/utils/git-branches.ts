@@ -1929,7 +1929,10 @@ async function resolveCommitPaths(
   cwd: string,
   paths: string[],
   env?: Readonly<Record<string, string | undefined>>,
-  stagedDeletions: ReadonlySet<string> = new Set(),
+  staged: Readonly<StagedIndexChanges> = {
+    deleted: new Set(),
+    renamed: [],
+  },
 ): Promise<string[]> {
   const output = await runGit(
     cwd,
@@ -2026,11 +2029,22 @@ async function resolveCommitPaths(
   for (const pair of preImageCandidates) {
     refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.path);
   }
+  // Neither leg above sees a rename in a repo that sets `status.renames=false`:
+  // `status` reports the two halves unpaired, so there is no `oldPath` to
+  // carry, and `git diff HEAD` cannot pair them either. The index still records
+  // the rename, so guard its pre-image here — independently of both configs.
+  // Like the status leg above, this only guards; it adds no paths, so a
+  // selection that does not reach the old path commits exactly what it did
+  // before, and the deletion it never selected stays uncommitted.
+  for (const pair of staged.renamed) {
+    if (!selectedOrPrefix(pair.oldPath)) continue;
+    refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.newPath);
+  }
   // A plain staged deletion has no rename entry to pair, so the loops above
   // never see it — yet `commit -- <path>` reads the deletion from the index
   // and takes whatever now sits at that path from the worktree, publishing an
   // occupant in place of the deletion the user selected.
-  for (const deleted of stagedDeletions) {
+  for (const deleted of staged.deleted) {
     if (!selectedOrPrefix(deleted)) continue;
     if (lstatOrNull(root || cwd, deleted) !== null) {
       throw new Error(
@@ -2042,17 +2056,29 @@ async function resolveCommitPaths(
 }
 
 /**
- * The paths the index has deleted (status `D`) among the caller's selection.
- * A staged deletion is absent from both `ls-files --cached` and `--others`,
- * so it is invisible to the status listing `resolveCommitPaths` works from.
+ * What the index records for the caller's selection beyond a plain edit: the
+ * paths it has deleted, and the renames it has paired.
  */
-async function stagedDeletionPaths(
+interface StagedIndexChanges {
+  /** Paths the index has deleted (status `D`). */
+  deleted: Set<string>;
+  /** Renames the index has recorded (status `R`), pre-image first. */
+  renamed: Array<{ oldPath: string; newPath: string }>;
+}
+
+/**
+ * The index's own view of the caller's selection. A staged deletion is absent
+ * from both `ls-files --cached` and `--others`, so it is invisible to the
+ * status listing `resolveCommitPaths` works from — and its rename pairs do not
+ * depend on `status.renames` or on `git diff HEAD` being able to pair them.
+ */
+async function readStagedIndexChanges(
   cwd: string,
   paths: string[],
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<Set<string>> {
-  const deleted = new Set<string>();
-  if (!(await hasHead(cwd, env))) return deleted;
+): Promise<StagedIndexChanges> {
+  const changes: StagedIndexChanges = { deleted: new Set(), renamed: [] };
+  if (!(await hasHead(cwd, env))) return changes;
   const indexChanges = await runGit(
     cwd,
     [
@@ -2060,6 +2086,11 @@ async function stagedDeletionPaths(
       '--cached',
       '--name-status',
       '-z',
+      // Under `diff.relative` and a workspace bound below the repository root
+      // this prints cwd-relative names, which match no root-relative selection
+      // — the pathspec does not change that. `status` and `ls-files` are
+      // pinned to the root elsewhere; this read has to be too.
+      '--no-relative',
       '--',
       ...literalPathspecs(paths),
     ],
@@ -2069,16 +2100,23 @@ async function stagedDeletionPaths(
   for (let i = 0; i < tokens.length; i++) {
     const status = tokens[i];
     if (!/^[A-Z](?:\d+)?$/.test(status)) continue;
-    if (status.startsWith('R') || status.startsWith('C')) {
+    if (status.startsWith('R')) {
+      changes.renamed.push({
+        oldPath: tokens[i + 1] ?? '',
+        newPath: tokens[i + 2] ?? '',
+      });
+      i += 2;
+    } else if (status.startsWith('C')) {
+      // A copy leaves its source in place, so there is no pre-image to guard.
       i += 2;
     } else if (status.startsWith('D')) {
-      deleted.add(tokens[i + 1] ?? '');
+      changes.deleted.add(tokens[i + 1] ?? '');
       i++;
     } else if (i + 1 < tokens.length) {
       i++;
     }
   }
-  return deleted;
+  return changes;
 }
 
 /**
@@ -2155,11 +2193,11 @@ export async function gitCommit(
   // status `D` and is dropped. `commit -- <path>` then takes whatever content
   // now sits at that path from the worktree and publishes it as a rewrite,
   // silently replacing the deletion the user selected. Ask the index instead.
-  const stagedDeletions = paths
-    ? await stagedDeletionPaths(cwd, paths, env)
-    : new Set<string>();
+  const staged = paths
+    ? await readStagedIndexChanges(cwd, paths, env)
+    : { deleted: new Set<string>(), renamed: [] };
   const selection = paths
-    ? await resolveCommitPaths(cwd, paths, env, stagedDeletions)
+    ? await resolveCommitPaths(cwd, paths, env, staged)
     : undefined;
   const stagesEverything = opts?.all === true;
   // Snapshot the index before staging so a failed commit (e.g. a rejecting
@@ -2218,43 +2256,17 @@ export async function gitCommit(
       // A staged deletion sits in neither listing — removed from the index,
       // absent from the worktree — yet `commit -- <path>` records it from the
       // index, so a selection of staged removals must not read as empty. The
-      // same index diff names a staged rename's pre-image, which the commit
+      // same index view names a staged rename's pre-image, which the commit
       // below has to keep naming even when a case-folding filesystem resolves
-      // the old path to the post-image on disk.
-      const indexDeleted = new Set<string>();
-      const indexRenamedOld = new Set<string>();
-      if (await hasHead(cwd, env)) {
-        const indexChanges = await runGit(
-          cwd,
-          [
-            'diff',
-            '--cached',
-            '--name-status',
-            '-z',
-            '--',
-            ...literalPathspecs(selection),
-          ],
-          env,
-        );
-        const indexTokens = indexChanges.split('\0');
-        // `--name-status -z` is a flat token stream, so a path is read as a
-        // status unless the loop consumes it with its own record: a path whose
-        // first character is R, C or D would otherwise swallow the next
-        // record's status and drop that record from the sets below.
-        for (let i = 0; i < indexTokens.length; i++) {
-          const status = indexTokens[i];
-          if (!/^[A-Z](?:\d+)?$/.test(status)) continue;
-          if (status.startsWith('R') || status.startsWith('C')) {
-            indexRenamedOld.add(indexTokens[i + 1] ?? '');
-            i += 2;
-          } else if (status.startsWith('D')) {
-            indexDeleted.add(indexTokens[i + 1] ?? '');
-            i++;
-          } else {
-            i++;
-          }
-        }
-      }
+      // the old path to the post-image on disk. It is re-read here rather than
+      // reused from `resolveCommitPaths` because the resolver's view predates
+      // staging and this lists `selection`, which the resolver may have widened
+      // with rename halves.
+      const stagedNow = await readStagedIndexChanges(cwd, selection, env);
+      const indexDeleted = stagedNow.deleted;
+      const indexRenamedOld = new Set(
+        stagedNow.renamed.map((pair) => pair.oldPath),
+      );
       const existing = selection.filter((p) => known.has(p));
       // `resolveCommitPaths` ran before staging, and staging is what can empty
       // the selection — a rename whose halves the resolver dropped, or a path

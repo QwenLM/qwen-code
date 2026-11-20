@@ -3098,6 +3098,74 @@ describe('gitCommit', () => {
     );
   });
 
+  it('finds a staged deletion from a subdirectory under diff.relative', async () => {
+    // `diff.relative=true` makes `git diff --cached` print cwd-relative names
+    // when the workspace is bound below the repository root. The index read
+    // has to stay root-relative like the rest of this module, or it reports
+    // `gone.ts` for a selection holding `sub/gone.ts`, matches nothing, and
+    // the guard never runs.
+    const dir = makeRepo();
+    commitFile(dir, 'sub/gone.ts', 'content\n', 'add sub file');
+    git(dir, 'config', 'diff.relative', 'true');
+    git(dir, 'rm', '-q', 'sub/gone.ts');
+    write(dir, { 'sub/gone.ts': 'OCCUPANT\n' });
+
+    await expect(
+      gitCommit(path.join(dir, 'sub'), 'remove sub file', {
+        paths: ['sub/gone.ts'],
+      }),
+    ).rejects.toThrow(
+      /is staged for deletion, but a file now sits at that path/,
+    );
+
+    expect(git(dir, 'show', 'HEAD:sub/gone.ts')).toBe('content\n');
+    expect(git(dir, 'status', '--porcelain', 'sub/gone.ts')).toContain(
+      'D  sub/gone.ts',
+    );
+  });
+
+  it('refuses an occupied rename pre-image under status.renames=false', async () => {
+    // Neither `git status` (rename pairing switched off) nor `git diff HEAD`
+    // (the post-image is rewritten past the similarity threshold) pairs the
+    // halves, so only the index records the rename. Without that leg the old
+    // path reads as an untracked addition, `add -A` restages the occupant, and
+    // the commit publishes it in place of the deletion the user selected.
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'aaaa\nbbbb\ncccc\ndddd\neeee\n', 'add old');
+    git(dir, 'config', 'status.renames', 'false');
+    git(dir, 'mv', 'old.txt', 'new.txt');
+    write(dir, {
+      'new.txt': 'zzzz\nyyyy\nxxxx\nwwww\nvvvv\n',
+      'old.txt': 'SQUATTER-SECRET\n',
+    });
+
+    await expect(
+      gitCommit(dir, 'rename file', { paths: ['old.txt', 'new.txt'] }),
+    ).rejects.toThrow(/a file now sits at the old path/);
+
+    expect(git(dir, 'show', 'HEAD:old.txt')).toBe(
+      'aaaa\nbbbb\ncccc\ndddd\neeee\n',
+    );
+  });
+
+  it('leaves an unselected pre-image uncommitted under status.renames=false', async () => {
+    // The index leg is a guard, not a pairing: a selection that never names the
+    // old path must not have that deletion committed for it. The old path is
+    // left alone, so there is no occupant and nothing to refuse.
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'aaaa\nbbbb\ncccc\ndddd\neeee\n', 'add old');
+    git(dir, 'config', 'status.renames', 'false');
+    git(dir, 'mv', 'old.txt', 'new.txt');
+    write(dir, { 'new.txt': 'zzzz\nyyyy\nxxxx\nwwww\nvvvv\n' });
+
+    await gitCommit(dir, 'rename file', { paths: ['new.txt'] });
+
+    expect(
+      git(dir, 'show', '--name-status', '--format=', 'HEAD').trim(),
+    ).not.toContain('old.txt');
+    expect(git(dir, 'status', '--porcelain', 'old.txt')).toContain('D');
+  });
+
   it.skipIf(process.platform === 'win32')(
     'accepts a git-legal root-level name that starts with a drive-like prefix',
     async () => {
