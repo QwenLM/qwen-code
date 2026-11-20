@@ -10,7 +10,6 @@ import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
@@ -433,11 +432,6 @@ class SessionLifecycleCoordinatorTest {
         return closingWorldOp(suffix, 2);
     }
 
-    /** The same world on external-files, deleting under lifecycle v1. */
-    private static World closingWorldExternalFilesLifecycle(String suffix) {
-        return closingWorldOp(suffix, 1);
-    }
-
     private static World closingWorldOp(String suffix, int lifecycleProtocol) {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:close-cascade-" + suffix + UUID.randomUUID()
@@ -482,16 +476,9 @@ class SessionLifecycleCoordinatorTest {
                         new StoreModels.SessionLineage(session, session,
                                 "run-1", 1))
                 .sessionId());
-        // D3: ordinary files closes on lifecycle v2; external-files keeps
-        // v1. The cascade claim tagging is protocol-independent (any
-        // active lifecycle claim tags the child updates), so the witnesses
-        // ride both. The profile swap lands after the child insert: the
-        // child is admitted while the parent still reads ordinary files.
-        if (lifecycleProtocol == 1) {
-            jdbc.update("UPDATE ma_session SET tool_profile = ?"
-                            + " WHERE tenant_id = ? AND session_id = ?",
-                    WorkspaceToolProfiles.EXTERNAL_FILES, "tenant", session);
-        }
+        // D3: ordinary files closes on lifecycle v2. The cascade claim
+        // tagging is protocol-independent (any active lifecycle claim
+        // tags the child updates).
         String operation = transactions.execute(ignored -> lifecycleProtocol != 0
                 ? store.beginWorkspaceLifecycle("tenant", session,
                         OperationKind.DELETE, "owner", "a".repeat(64),
@@ -1364,13 +1351,14 @@ class SessionLifecycleCoordinatorTest {
     }
 
     // The cascade's child updates ride the parent's own lifecycle claim
-    // — the fence's matching key — under both v1 (external-files) and v2
-    // (ordinary files). An ordinary parent's updates stay exactly plain.
+    // — the fence's matching key — under lifecycle v2 (ordinary files);
+    // a protocol-0 parent's updates stay exactly plain. External-files
+    // (v1) parents cannot admit children, so v2 is the only reachable
+    // claimed shape.
     @Test
     void lifecycleProtocolClaimTagsEveryCascadeOperation() {
         World plainWorld = closingWorld("claim-plain-");
         World lifecycleWorld = closingWorldLifecycle("claim-life-");
-        World externalWorld = closingWorldExternalFilesLifecycle("claim-ext-");
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(
@@ -1402,27 +1390,11 @@ class SessionLifecycleCoordinatorTest {
                         "operationId", lifecycleWorld.operation,
                         "claimGeneration", lifecycleRecord.claimGeneration(),
                         "kind", "delete"));
-                var externalRecord = externalWorld.store.findOperation(
-                        "tenant", externalWorld.session,
-                        externalWorld.operation).orElseThrow();
-                assertThat(externalRecord.lifecycleProtocolVersion())
-                        .isEqualTo(1);
-                var externalTagged =
-                        new java.util.LinkedHashMap<String, Object>();
-                coordinator.runLifecycleChildOperation(externalRecord,
-                        externalTagged);
-                assertThat(externalTagged).containsEntry("authority", Map.of(
-                        "operationId", externalWorld.operation,
-                        "claimGeneration", externalRecord.claimGeneration(),
-                        "kind", "delete"));
                 assertThat(harness.operations)
                         .extracting(op -> op.get("authority"))
                         .containsExactly(null, Map.of("operationId",
                                 lifecycleWorld.operation, "claimGeneration",
                                 lifecycleRecord.claimGeneration(), "kind",
-                                "delete"), Map.of("operationId",
-                                externalWorld.operation, "claimGeneration",
-                                externalRecord.claimGeneration(), "kind",
                                 "delete"));
             } finally {
                 coordinator.stopRenewals();
