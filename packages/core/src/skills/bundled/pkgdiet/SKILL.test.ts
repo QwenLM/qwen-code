@@ -62,12 +62,18 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain('SystemDefaults');
     expect(normalizedBody).toContain('QWEN_CODE_SYSTEM_DEFAULTS_PATH');
     expect(normalizedBody).toContain('--mcp-config');
-    expect(normalizedBody).toContain('session-injected (ACP/IDE)');
+    expect(normalizedBody).toContain('Session-injected');
+    expect(normalizedBody).toContain(
+      '/Library/Application Support/QwenCode/settings.json',
+    );
+    expect(normalizedBody).toContain(
+      'C:\\ProgramData\\qwen-code\\settings.json',
+    );
     expect(normalizedBody).toContain(
       'The pkgdiet allowlist (command, args, cwd validation) is applied only to the **user scope** entry',
     );
     expect(normalizedBody).toContain(
-      "system-level, CLI-flag (`--mcp-config`), or session-injected (ACP/IDE) source that is outside this skill's inspection reach",
+      'SystemDefaults, system-scope, CLI-flag, or session-injected entries',
     );
 
     // Bootstrap checks, policy filters, allowlist, and whole entry inspection
@@ -76,6 +82,17 @@ describe('bundled pkgdiet skill', () => {
     );
     expect(normalizedBody).toContain('mcp.allowed');
     expect(normalizedBody).toContain('mcp.excluded');
+
+    // Hoisted provenance fail-closed check (R7-1)
+    expect(normalizedBody).toContain(
+      'If `check_dependency` is reachable but no `pkgdiet` entry is found in the three readable tiers',
+    );
+    expect(normalizedBody).toContain("the server's origin cannot be validated");
+    expect(normalizedBody).toContain(
+      'and stop — do not use it as the guardrail',
+    );
+
+    // Untrusted project/workspace scopes
     expect(normalizedBody).toContain(
       'originates in project or workspace scope, treat it as untrusted',
     );
@@ -87,6 +104,7 @@ describe('bundled pkgdiet skill', () => {
     );
     expect(normalizedBody).not.toMatch(/mcp\s+approve/);
 
+    // User scope allowlist inspection
     expect(normalizedBody).toContain('it must contain only allowed keys');
     expect(normalizedBody).toContain('["-y", "pkgdiet@2.0.0", "mcp"]');
     expect(normalizedBody).toContain(
@@ -112,11 +130,26 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'identity mismatch rather than a residual risk',
     );
-    expect(normalizedBody).toContain('npm config get registry');
-    expect(body).not.toContain('~/.npmrc');
-    expect(normalizedBody).toContain('https://registry.npmjs.org/');
 
-    expect(normalizedBody).toContain('set `mcpServers.pkgdiet.cwd`');
+    // Normalized registry check and non-zero exit handling (R7-2)
+    expect(normalizedBody).toContain('npm config get registry');
+    expect(normalizedBody).toContain(
+      'If the command exits non-zero, report that npm could not be executed to inspect the registry, and stop',
+    );
+    expect(normalizedBody).toContain(
+      'Normalize the registry URL by stripping any trailing slash: the normalized output must be `https://registry.npmjs.org`',
+    );
+    expect(body).not.toContain('~/.npmrc');
+    expect(normalizedBody).toContain('https://registry.npmjs.org');
+
+    // Registration in a single write with cwd (R7-3)
+    expect(normalizedBody).toContain(
+      'write `mcpServers.pkgdiet` in a single write with `command: "npx"`, `args: ["-y", "pkgdiet@2.0.0", "mcp"]`, and `cwd`',
+    );
+    expect(normalizedBody).toContain(
+      'A single write ensures file-watcher reconciliation never sees a cwd-less entry spawned from the project directory',
+    );
+
     expect(normalizedBody).toContain("serverName === 'pkgdiet'");
     expect(normalizedBody).toContain('mcp__pkgdiet__check_dependency');
     expect(normalizedBody).toContain('retrying `tool_search`');
@@ -137,6 +170,12 @@ describe('bundled pkgdiet skill', () => {
     const inspectCheck = normalizedBody.indexOf(
       'Inspect session policy filters, configured MCP servers, and tool availability',
     );
+    const provenanceHalt = normalizedBody.indexOf(
+      'If `check_dependency` is reachable but no `pkgdiet` entry is found',
+    );
+    const configuredBranch = normalizedBody.indexOf(
+      'If an entry named `pkgdiet` is configured in any of the three readable tiers',
+    );
     const fastPath = normalizedBody.indexOf('skip to Instructions');
     const sandboxCheck = normalizedBody.indexOf(
       'If shell execution is sandboxed',
@@ -146,8 +185,10 @@ describe('bundled pkgdiet skill', () => {
     );
 
     expect(inspectCheck).toBeGreaterThanOrEqual(0);
-    expect(fastPath).toBeGreaterThan(inspectCheck);
-    expect(sandboxCheck).toBeGreaterThan(inspectCheck);
+    expect(provenanceHalt).toBeGreaterThan(inspectCheck);
+    expect(configuredBranch).toBeGreaterThan(provenanceHalt);
+    expect(fastPath).toBeGreaterThan(configuredBranch);
+    expect(sandboxCheck).toBeGreaterThan(fastPath);
     expect(registryCheck).toBeGreaterThan(sandboxCheck);
 
     const confirmation = normalizedBody.indexOf(
@@ -157,14 +198,16 @@ describe('bundled pkgdiet skill', () => {
       '- Start the PkgDiet guardrail',
     );
     const cancelOption = normalizedBody.indexOf('- Cancel');
-    const cmdIndex = normalizedBody.indexOf('"${QWEN_CODE_CLI:-qwen}" mcp add');
-    const failCheck = normalizedBody.indexOf('If the command exits non-zero');
+    const writeStepIndex = normalizedBody.indexOf('Register the server:');
+    const failCheck = normalizedBody.indexOf(
+      'If writing the settings entry fails',
+    );
 
     expect(confirmation).toBeGreaterThanOrEqual(0);
     expect(installOption).toBeGreaterThan(confirmation);
     expect(cancelOption).toBeGreaterThan(installOption);
-    expect(cmdIndex).toBeGreaterThan(cancelOption);
-    expect(failCheck).toBeGreaterThan(cmdIndex);
+    expect(writeStepIndex).toBeGreaterThan(cancelOption);
+    expect(failCheck).toBeGreaterThan(writeStepIndex);
 
     // Scoped consent uninstall command check
     const consentSlice = normalizedBody.slice(installOption, cancelOption);
@@ -200,9 +243,6 @@ describe('bundled pkgdiet skill', () => {
     expect(body).not.toContain('@pkgdiet/mcp-server');
     expect(body).not.toContain('--command');
     expect(body).not.toContain('--args');
-    expect(body).toContain(
-      '"${QWEN_CODE_CLI:-qwen}" mcp add --scope user pkgdiet npx -y pkgdiet@2.0.0 mcp',
-    );
 
     // Instructions contracts
     expect(body).toContain('ALLOW');
@@ -238,20 +278,30 @@ describe('bundled pkgdiet skill', () => {
       'committed cache must be removed before proceeding',
     );
 
-    // Registry redirects and local resolution
+    // Registry redirects and rewritten local resolution (R6-2)
     expect(normalizedBody).toContain('.yarnrc.yml');
     expect(normalizedBody).toContain('bunfig.toml');
     expect(normalizedBody).toContain('node_modules/.bin');
     expect(normalizedBody).toContain('treat the verdict as not applicable');
-    expect(normalizedBody).toContain('command runs normally');
     expect(normalizedBody).toContain(
-      'resolves to a binary that exists on disk (`node_modules/.bin/<name>`, or an installed dependency) without fetching from a registry',
+      'If the command is a local script or binary that performs no network install (a compiled tool already present on disk, or a run script that only invokes local binaries without fetching from a registry), it is out of scope and the command runs normally',
+    );
+    expect(normalizedBody).toContain(
+      'A same-named entry on disk (`node_modules/.bin/<name>`) does not exempt a command that may download or execute remote code: if it is `npm install`/`ci`/`add`, an `npx`/`npm exec`/`yarn dlx`/`pnpm dlx`/`bunx`/`create` form, or a wrapper or postinstall that may download, it remains in scope and must be evaluated',
     );
     expect(normalizedBody).toContain(
       'For a `package.json` script, read the script body and gate any registry-fetching command inside it; otherwise treat the command as a registry fetch and run the check',
     );
 
+    // Concrete name resolution & scaffolder mapping (R7-4)
     expect(normalizedBody).toContain('cannot be resolved');
+    expect(normalizedBody).toContain(
+      'For scaffolder commands (`npm create <name>`, `npm init <name>`, `pnpm create <name>`, `yarn create <name>`, `bun create <name>`), the package fetched and executed from the registry is `create-<name>` (or `@scope/create-<name>` if scoped); check that `create-<name>` package, not `<name>`',
+    );
+    expect(normalizedBody).toContain(
+      'If the mapping is ambiguous, do not run the command',
+    );
+
     expect(normalizedBody).toContain('tool_call');
     expect(normalizedBody).toContain(
       'Never install a substitute the user has not explicitly approved',
