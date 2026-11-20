@@ -673,6 +673,7 @@ describe('release workflow', () => {
           env: {
             ...process.env,
             PUBLISH_AUDIO_CAPTURE: 'true',
+            PUBLISH_CHANNEL_MSTEAMS: 'true',
             PUBLISH_EXTERNAL_CONTEXT_MEM0: 'true',
           },
         },
@@ -800,6 +801,7 @@ describe('release workflow', () => {
               IS_DRY_RUN: dryRun,
               NPM_TAG: 'preview',
               PUBLISH_AUDIO_CAPTURE: optional,
+              PUBLISH_CHANNEL_MSTEAMS: optional,
               PUBLISH_EXTERNAL_CONTEXT_MEM0: optional,
               PUBLISH_FAILURE: failure,
               CLI_PUBLISHED: cliPublished,
@@ -830,6 +832,7 @@ describe('release workflow', () => {
               optional === 'true' ||
               ![
                 '@qwen-code/audio-capture',
+                '@qwen-code/channel-msteams',
                 '@qwen-code/external-context-mem0',
               ].includes(name),
           ),
@@ -4030,13 +4033,24 @@ esac`,
     );
   });
 
-  it('publishes the Mem0 Extension only after trusted publishing bootstrap', () => {
+  it('publishes bootstrap-gated packages only after trusted publishing bootstrap', () => {
     const publishSteps = releaseYaml.jobs.publish.steps;
     const publishStep = publishSteps.find(
       (step) => step.name === 'Publish npm packages',
     );
     expect(publishStep.env.PUBLISH_EXTERNAL_CONTEXT_MEM0).toContain(
       "vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true'",
+    );
+    // npm cannot bind trusted publishing to a package that has never been
+    // published, so the first Teams release failed the nightly's publish job
+    // (#17898). Both clauses are load-bearing: the repository guard stops a
+    // fork publishing into @qwen-code, the variable stops upstream
+    // authenticating against a package that does not exist yet.
+    expect(publishStep.env.PUBLISH_CHANNEL_MSTEAMS).toContain(
+      "vars.NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED == 'true'",
+    );
+    expect(publishStep.env.PUBLISH_CHANNEL_MSTEAMS).toContain(
+      "github.repository == 'QwenLM/qwen-code'",
     );
     // The audio-capture switch replaced a deleted step-level
     // `if: github.repository == 'QwenLM/qwen-code'` gate. Unpinned, a fork

@@ -37,6 +37,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       process.env.PUBLISH_AUDIO_CAPTURE !== 'true'
     )
       continue;
+    // npm can only bind trusted publishing to a package that already exists,
+    // so Teams stays out until its one-time bootstrap publish is done.
+    if (
+      name === '@qwen-code/channel-msteams' &&
+      process.env.PUBLISH_CHANNEL_MSTEAMS !== 'true'
+    )
+      continue;
     if (
       name === '@qwen-code/external-context-mem0' &&
       process.env.PUBLISH_EXTERNAL_CONTEXT_MEM0 !== 'true'

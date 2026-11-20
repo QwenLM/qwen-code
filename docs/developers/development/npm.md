@@ -79,6 +79,26 @@ Every scheduled or manual release follows these steps:
 5.  Builds and publishes the packages to npm with the appropriate dist-tag.
 6.  Creates a GitHub Release for the version.
 
+### Packages awaiting their npm bootstrap publish
+
+npm only lets a maintainer configure trusted publishing for a package that
+already exists, and `Publish Release` authenticates with trusted publishing
+alone — it carries no npm token. A package that has never been published
+therefore cannot be released by the workflow, and attempting it fails the
+whole `publish` job, not just that package.
+
+`@qwen-code/external-context-mem0` and `@qwen-code/channel-msteams` stay out of
+the publish set until a maintainer completes their one-time public bootstrap
+publish and binds them to `release.yml` in the `production-release`
+environment. They are gated on the repository variables
+`NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED` and
+`NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED`, both defaulting to off, so a
+release skips them instead of failing to authenticate. Set a variable to
+`true` only after its bootstrap publish, and bootstrap the first actual Qwen
+release that contains the package rather than inventing a second version line.
+The already-shipped guard still probes both packages, so a partial release
+cannot be overwritten by a retry.
+
 ### Failure Handling
 
 If any step in the release workflow fails, it will automatically create a new issue in the repository with the labels `bug` and a type-specific failure label (e.g., `nightly-failure`, `preview-failure`). The issue will contain a link to the failed workflow run for easy debugging.
