@@ -348,6 +348,9 @@ describe('Managed Agent gate required check', () => {
     ['pull_request', '', false, true],
     ['pull_request', '', true, true],
     ['pull_request', 'none', true, true],
+    // A cancelled full run must still report, so the next approval retries
+    // the suite under this name.
+    ['pull_request_review', 'full', true, true],
   ])(
     '%s %s tier with workflow cancelled=%s reports=%s',
     (event, tier, cancelled, expected) => {
@@ -505,8 +508,9 @@ describe('Managed Agent gate tier selection', () => {
   // A stand-in gh: check-runs prints FAKE_URLS (approval dedup) or
   // FAKE_ALL_URLS (the pull_request scan); a run lookup prints event, pull
   // request numbers and head branch from FAKE_EVENTS ("id=event:prs:branch");
-  // a direct PR lookup supplies the fork fallback's head ref; a jobs lookup
-  // reports FAKE_FULL membership.
+  // a direct PR lookup supplies the fork fallback's head sha (HEAD_SHA unless
+  // FAKE_PR_HEAD_SHA) and head ref; a jobs lookup reports FAKE_FULL
+  // membership.
   writeFileSync(
     join(dir, 'gh'),
     [
@@ -515,7 +519,7 @@ describe('Managed Agent gate tier selection', () => {
       'case "$2" in',
       '  */check-runs*filter=all*) printf "%s" "${FAKE_ALL_URLS}" ;;',
       '  */check-runs*) printf "%s" "${FAKE_URLS}" ;;',
-      '  */pulls/*) printf \'%s\\t%s\\n\' "${HEAD_SHA}" "${FAKE_HEAD_REF:-feature}" ;;',
+      '  */pulls/*) printf \'%s\\t%s\\n\' "${FAKE_PR_HEAD_SHA:-${HEAD_SHA}}" "${FAKE_HEAD_REF:-feature}" ;;',
       '  */actions/runs/*/jobs*) id="${2%/jobs*}"; id="${id##*/}"; [[ " ${FAKE_FULL:-} " == *" ${id} "* ]] && echo true || echo false ;;',
       '  */actions/runs/*) id="${2##*/}"; for p in ${FAKE_EVENTS}; do if [[ "${p%%=*}" == "${id}" ]]; then rec="${p#*=}"; event="${rec%%:*}"; rest="${rec#*:}"; if [[ "${rest}" == *:* ]]; then prs="${rest%%:*}"; branch="${rest#*:}"; else prs="${rest}"; branch=""; fi; [[ -n "${prs}" ]] || prs=-; printf \'%s\\t%s\\t%s\\n\' "${event}" "${prs}" "${branch}"; fi; done ;;',
       'esac',
@@ -554,6 +558,18 @@ describe('Managed Agent gate tier selection', () => {
   };
   const url = (run) =>
     `https://github.com/QwenLM/qwen-code/actions/runs/${run}/job/9`;
+
+  it('grants the scope token every API scope the tier script reads', () => {
+    // The fork approval fallback reads `pulls/{n}`; without
+    // `pull-requests: read` it fails closed and reds the required check on a
+    // second approval of an already-verified head.
+    expect(gate.jobs.scope.permissions).toEqual({
+      actions: 'read',
+      checks: 'read',
+      contents: 'read',
+      'pull-requests': 'read',
+    });
+  });
 
   it.each(['pull_request', 'push', 'merge_group'])(
     'runs the fast tier for a touched %s',
@@ -689,6 +705,18 @@ describe('Managed Agent gate tier selection', () => {
         FAKE_EVENTS: '42=pull_request_review::other-branch',
         FAKE_FULL: '42',
         FAKE_HEAD_REF: 'feature',
+      }),
+    ).toBe('tier=full');
+    // The branch alone is not enough: a PR that has since moved to another
+    // head cannot let this candidate run pass for it.
+    expect(
+      tier({
+        ...approve,
+        FAKE_URLS: url(42),
+        FAKE_EVENTS: '42=pull_request_review::feature',
+        FAKE_FULL: '42',
+        FAKE_HEAD_REF: 'feature',
+        FAKE_PR_HEAD_SHA: 'h2',
       }),
     ).toBe('tier=full');
   });

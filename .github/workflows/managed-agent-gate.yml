@@ -50,6 +50,10 @@ jobs:
       actions: 'read'
       checks: 'read'
       contents: 'read'
+      # The fork approval fallback reads the pull request to confirm the
+      # candidate run still points at this head; a run whose pull_requests
+      # list is empty cannot be matched without it.
+      pull-requests: 'read'
     outputs:
       sha: '${{ steps.paths.outputs.sha }}'
       tier: '${{ steps.tier.outputs.tier }}'
