@@ -612,7 +612,7 @@ See [Anthropic's tool-choice restrictions](https://platform.claude.com/docs/en/a
 }
 ```
 
-When overriding `baseUrl`, provide the endpoint prefix without an API-version suffix such as `/v1beta`; the SDK appends the Gemini API version itself. For a third-party Gemini-compatible `baseUrl`, Qwen Code sends the configured API key in both `x-goog-api-key` and `Authorization: Bearer` headers, so no duplicate `customHeaders` credential template is needed. The official Gemini endpoint and Vertex AI do not get this implicit Bearer header. An explicit `generationConfig.customHeaders.authorization` entry (in any casing) takes precedence over the implicit header. Third-party streams ending with the SSE sentinel `data: [DONE]` are treated as ending normally.
+When overriding `baseUrl`, provide the endpoint prefix without an API-version suffix such as `/v1beta`; the SDK appends the Gemini API version itself. For a third-party Gemini-compatible `baseUrl`, Qwen Code sends the configured API key in both `x-goog-api-key` and `Authorization: Bearer` headers, so no duplicate `customHeaders` credential template is needed. The official Gemini endpoint and Vertex AI do not get this implicit Bearer header. An explicit `authorization` or `x-goog-api-key` entry in `generationConfig.customHeaders` (in any casing) takes precedence over the implicit header. Third-party streams ending with the SSE sentinel `data: [DONE]` are treated as ending normally.
 
 For a vision model that can also follow the normal Qwen Code agent policy and use tools, opt in to full-turn image routing with both capabilities:
 

@@ -3880,7 +3880,7 @@ export const ChatEditor = memo(
                   setModelDropdownOpen(open);
                   if (open) {
                     setModeDropdownOpen(false);
-                    void modelRefresh?.refresh?.();
+                    void modelRefresh?.refreshLocal?.();
                   }
                 }}
                 onSelect={handleModelSelect}

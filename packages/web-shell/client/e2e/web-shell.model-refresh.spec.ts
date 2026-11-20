@@ -127,13 +127,6 @@ test('reloads on open and shows a newly configured Gemini model @smoke', async (
   let reloads = 0;
   await page.route('**/workspaces/*/models/reload', async (route) => {
     reloads += 1;
-    scenario.state.models = {
-      currentModelId: scenario.currentModel,
-      availableModels: [
-        { modelId: scenario.currentModel, name: 'Qwen Test' },
-        { modelId: 'gemini-4-neon(gemini)', name: 'gemini-4-neon' },
-      ],
-    };
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({ status: 'applied' }),
@@ -145,6 +138,13 @@ test('reloads on open and shows a newly configured Gemini model @smoke', async (
     replayCompleteEvent({ sessionId: scenario.sessionId }),
   );
   const selector = page.locator('[data-web-shell-model-button]');
+  scenario.state.models = {
+    currentModelId: scenario.currentModel,
+    availableModels: [
+      { modelId: scenario.currentModel, name: 'Qwen Test' },
+      { modelId: 'gemini-4-neon(gemini)', name: 'gemini-4-neon' },
+    ],
+  };
   await selector.click();
 
   await expect(
@@ -152,7 +152,7 @@ test('reloads on open and shows a newly configured Gemini model @smoke', async (
   ).toBeVisible();
   await expect(selector).toContainText('Qwen Test');
   expect(scenario.currentModel).toBe('qwen-test');
-  expect(reloads).toBe(1);
+  expect(reloads).toBe(0);
 });
 
 test('refreshes the model picker without selecting or replaying a session @smoke', async ({
@@ -206,6 +206,9 @@ test('refreshes the model picker without selecting or replaying a session @smoke
   await page.screenshot({
     path: testInfo.outputPath('model-refresh-before.png'),
   });
+  await page
+    .getByRole('button', { name: 'Refresh models', exact: true })
+    .click();
   await expect(
     page.getByRole('alert').filter({ hasText: 'Unable to refresh models' }),
   ).toBeVisible();

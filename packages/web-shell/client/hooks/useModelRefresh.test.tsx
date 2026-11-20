@@ -24,8 +24,12 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 let root: Root;
 let container: HTMLDivElement;
 let state: ReturnType<typeof useModelRefresh>;
-function Host() {
-  state = useModelRefresh();
+function Host({
+  beforeRefresh,
+}: {
+  beforeRefresh?: Parameters<typeof useModelRefresh>[0];
+}) {
+  state = useModelRefresh(beforeRefresh);
   return null;
 }
 beforeEach(async () => {
@@ -41,6 +45,33 @@ afterEach(async () => {
 });
 
 describe('model refresh controls', () => {
+  it('skips host sync for local refresh but keeps it on explicit refresh', async () => {
+    const beforeRefresh = vi.fn().mockResolvedValue(undefined);
+    await act(async () => root.render(<Host beforeRefresh={beforeRefresh} />));
+    mock.actions.refreshModels.mockImplementation(
+      async (callback?: typeof beforeRefresh) => {
+        await callback?.({ workspaceCwd: '/a', sessionId: 'a' });
+      },
+    );
+
+    await act(async () => {
+      await state.refreshLocal!();
+    });
+    expect(beforeRefresh).not.toHaveBeenCalled();
+    expect(mock.actions.refreshModels).toHaveBeenLastCalledWith(undefined, {
+      reloadProviders: false,
+    });
+
+    await act(async () => {
+      await state.refresh!();
+    });
+    expect(beforeRefresh).toHaveBeenCalledOnce();
+    expect(mock.actions.refreshModels).toHaveBeenLastCalledWith(
+      beforeRefresh,
+      undefined,
+    );
+  });
+
   it('keeps composer props stable across unrelated parent renders', async () => {
     const before = state;
     await act(async () => root.render(<Host />));

@@ -4574,25 +4574,28 @@ describe('ChatEditor toolbar popovers', () => {
     }
   });
 
-  it('refreshes the model catalog each time the model popover opens', () => {
+  it('refreshes only the local catalog each time the model popover opens', () => {
     const refresh = vi.fn().mockResolvedValue(undefined);
+    const refreshLocal = vi.fn().mockResolvedValue(undefined);
     const container = renderChatEditor({
       visibleToolbarActions: ['model'],
       availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
-      modelRefresh: { refresh, refreshing: false },
+      modelRefresh: { refresh, refreshLocal, refreshing: false },
     });
     const openButton = container.querySelector<HTMLButtonElement>(
       '[data-web-shell-model-button]',
     )!;
 
     act(() => openButton.click());
-    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refreshLocal).toHaveBeenCalledTimes(1);
+    expect(refresh).not.toHaveBeenCalled();
 
     act(() => openButton.click());
-    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refreshLocal).toHaveBeenCalledTimes(1);
 
     act(() => openButton.click());
-    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refreshLocal).toHaveBeenCalledTimes(2);
+    expect(refresh).not.toHaveBeenCalled();
   });
 
   it('opens a searchable model popover and selects the filtered model', () => {

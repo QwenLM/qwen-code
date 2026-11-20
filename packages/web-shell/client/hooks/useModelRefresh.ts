@@ -27,33 +27,46 @@ export function useModelRefresh(
       generation.current += 1;
     };
   }, [connection.sessionId, connection.workspaceCwd, contextKey]);
-  const refresh = useCallback(async () => {
-    if (pending.current) return;
-    pending.current = true;
-    const request = ++generation.current;
-    const owner = ownerGuard.capture();
-    setRefreshing(true);
-    setError(undefined);
-    try {
-      await actions.refreshModels(beforeRefresh);
-    } catch (err) {
-      if (request === generation.current && owner.isCurrent()) {
-        setError(err instanceof Error ? err.message : String(err));
+  const refresh = useCallback(
+    async (localOnly: boolean) => {
+      if (pending.current) return;
+      pending.current = true;
+      const request = ++generation.current;
+      const owner = ownerGuard.capture();
+      setRefreshing(true);
+      setError(undefined);
+      try {
+        await actions.refreshModels(
+          localOnly ? undefined : beforeRefresh,
+          localOnly ? { reloadProviders: false } : undefined,
+        );
+      } catch (err) {
+        if (request === generation.current && owner.isCurrent()) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        if (request === generation.current) {
+          pending.current = false;
+          setRefreshing(false);
+        }
       }
-    } finally {
-      if (request === generation.current) {
-        pending.current = false;
-        setRefreshing(false);
-      }
-    }
-  }, [actions, beforeRefresh, ownerGuard]);
+    },
+    [actions, beforeRefresh, ownerGuard],
+  );
+  const refreshAll = useCallback(() => refresh(false), [refresh]);
+  const refreshLocal = useCallback(() => refresh(true), [refresh]);
   const available =
     connection.status === 'connected' &&
     (!connection.sessionContext ||
       connection.sessionContext.kind === 'workspace') &&
     connection.capabilities?.features.includes('workspace_model_reload');
   return useMemo(
-    () => ({ refresh: available ? refresh : undefined, refreshing, error }),
-    [available, refresh, refreshing, error],
+    () => ({
+      refresh: available ? refreshAll : undefined,
+      refreshLocal: available ? refreshLocal : undefined,
+      refreshing,
+      error,
+    }),
+    [available, refreshAll, refreshLocal, refreshing, error],
   );
 }

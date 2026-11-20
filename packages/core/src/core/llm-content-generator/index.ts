@@ -15,14 +15,6 @@ import { InstallationManager } from '../../config/installationManager.js';
 
 export { LlmContentGenerator } from './llm-content-generator.js';
 
-function isOfficialGeminiBaseUrl(baseUrl: string): boolean {
-  try {
-    return new URL(baseUrl).hostname === 'generativelanguage.googleapis.com';
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Create the Google GenAI-backed LLM content generator.
  */
@@ -46,20 +38,6 @@ export function createLlmContentGenerator(
       ...headers,
       'x-gemini-api-privileged-user-id': `${installationId}`,
     };
-  }
-  const hasCustomAuthorization = Object.keys(config.customHeaders ?? {}).some(
-    (name) => name.toLowerCase() === 'authorization',
-  );
-  if (
-    config.authType === AuthType.USE_GEMINI &&
-    config.apiKey &&
-    config.baseUrl &&
-    !isOfficialGeminiBaseUrl(config.baseUrl) &&
-    !hasCustomAuthorization
-  ) {
-    // Third-party Gemini-compatible gateways commonly use the same key as
-    // Bearer auth. Keep the SDK's x-goog-api-key as well for other proxies.
-    headers['Authorization'] = `Bearer ${config.apiKey}`;
   }
   const httpOptions = config.baseUrl
     ? {
