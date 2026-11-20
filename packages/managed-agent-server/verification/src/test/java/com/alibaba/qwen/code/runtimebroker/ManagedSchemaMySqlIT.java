@@ -468,9 +468,9 @@ class ManagedSchemaMySqlIT {
                     connection.prepareStatement(
                             "INSERT INTO"
                                 + " ma_session_head(tenant_id,session_id,workspace_id,tenant_key,"
-                                + "harness_key,harness_session_id,head_kind,storage_version,state,"
+                                + "harness_key,harness_session_id,head_kind,state,"
                                 + "writer_generation,journal_revision,committed_sequence,activation_epoch,gmt_create,gmt_modified)"
-                                + " VALUES(?,?,?,?,?,?,'MANAGED_SESSION',1,'OPEN',"
+                                + " VALUES(?,?,?,?,?,?,'MANAGED_SESSION','OPEN',"
                                 + "0,0,0,0," + ManagedSchemaTime.SQL_NOW + "," + ManagedSchemaTime.SQL_NOW + ")")) {
                 insert.setBytes(1, tenant);
                 insert.setBytes(2, session);

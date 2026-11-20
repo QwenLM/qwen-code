@@ -98,10 +98,6 @@ public class ManagedAgentConfiguration {
     public com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFiles managedLocalWorkspaceFiles() {
         return new com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess();
     }
-    @org.springframework.context.annotation.Bean
-    public com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy managedSessionReaderVersion() {
-        return new ManagedSessionReaderVersion();
-    }
     @org.springframework.context.annotation.Bean(destroyMethod = "close")
     public com.alibaba.qwen.code.runtimebroker.spi.SshConnections managedSshConnections(ManagedAgentProperties properties) {
         if (!com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties)
