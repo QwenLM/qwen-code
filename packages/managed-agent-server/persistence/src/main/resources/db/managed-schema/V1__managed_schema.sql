@@ -531,7 +531,7 @@ CREATE TABLE ma_resource_ref (
     resource_id VARBINARY(2048) COMMENT 'Resource identity within the Session scope.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_resource_ref_business_key UNIQUE (session_scope_key, owner_kind, owner_key, owner_revision, resource_key),
-    CONSTRAINT ck_ma_ref_owner CHECK ((CASE owner_kind WHEN 'JOURNAL' THEN 7 WHEN 'NATIVE_SNAPSHOT' THEN 15 WHEN 'CAPTURE' THEN 7 WHEN 'ARTIFACT' THEN 8 WHEN 'MESSAGE' THEN 7 WHEN 'SESSION_RECORD' THEN 14 WHEN 'EVENT_STREAM' THEN 12 WHEN 'OPERATION' THEN 9 WHEN 'OPERATION_WORK' THEN 14 WHEN 'RECOVERY' THEN 8 WHEN 'HOSTED_CLEANUP' THEN 14 WHEN 'SIDE_QUERY' THEN 10 ELSE -1 END = CHAR_LENGTH(owner_kind))),
+    CONSTRAINT ck_ma_ref_owner CHECK ((CASE owner_kind WHEN 'JOURNAL' THEN 7 WHEN 'NATIVE_SNAPSHOT' THEN 15 WHEN 'CAPTURE' THEN 7 WHEN 'ARTIFACT' THEN 8 WHEN 'MESSAGE' THEN 7 WHEN 'SESSION_RECORD' THEN 14 WHEN 'EVENT_STREAM' THEN 12 WHEN 'OPERATION' THEN 9 WHEN 'OPERATION_WORK' THEN 14 WHEN 'RECOVERY' THEN 8 WHEN 'HOSTED_CLEANUP' THEN 14 WHEN 'SIDE_QUERY' THEN 10 WHEN 'RUNTIME_STAGE' THEN 13 ELSE -1 END = CHAR_LENGTH(owner_kind))),
     runtime_binding_key CHAR(64) COMMENT 'Runtime binding key required for HOSTED_CLEANUP references.',
     CONSTRAINT ck_ma_ref_binding CHECK ((owner_kind = 'HOSTED_CLEANUP' AND runtime_binding_key IS NOT NULL AND owner_revision > 0) OR (owner_kind <> 'HOSTED_CLEANUP' AND runtime_binding_key IS NULL)),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
@@ -1140,6 +1140,24 @@ CREATE TABLE ma_tool_execution (
     CONSTRAINT pk_ma_tool_execution_id PRIMARY KEY (id),
     CONSTRAINT ck_ma_tool_execution_boolean_values CHECK ((is_cancel_requested >= 0 AND is_cancel_requested <= 1))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Idempotent tool executions, dispatch fencing, cancellation, and terminal results.';
+
+CREATE TABLE ma_runtime_stage (
+    execution_call_id_hash CHAR(64) NOT NULL COMMENT 'Hash of the stable execution-call identity.',
+    execution_call_id VARBINARY(2048) NOT NULL COMMENT 'Original stable identity of the background execution.',
+    delivery_seq BIGINT UNSIGNED NOT NULL COMMENT 'Per-run delivery sequence of the staged entry, starting at 1.',
+    runtime_session_key CHAR(64) NOT NULL COMMENT 'Hashed scoped Runtime Session identity used for wake and deletion.',
+    binding_id VARBINARY(2048) NOT NULL COMMENT 'Runtime binding identity that produced the entry.',
+    runtime_generation BIGINT UNSIGNED NOT NULL COMMENT 'Generation of the referenced Runtime binding.',
+    entry_kind VARCHAR(16) NOT NULL COMMENT 'Delivery entry kind: output, observation, or terminal.',
+    entry_json LONGTEXT NOT NULL COMMENT 'Serialized delivery entry with resource references; bytes live in the resource store.',
+    is_wake_worthy TINYINT UNSIGNED NOT NULL COMMENT 'Whether applying this entry wakes a suspended Session.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_runtime_stage_business_key UNIQUE (execution_call_id_hash, delivery_seq),
+    INDEX idx_ma_runtime_stage_session (runtime_session_key, is_wake_worthy),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_runtime_stage_id PRIMARY KEY (id),
+    CONSTRAINT ck_ma_runtime_stage_boolean_values CHECK ((is_wake_worthy >= 0 AND is_wake_worthy <= 1))
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Broker-staged worker delivery entries awaiting journal commit during suspension.';
 
 CREATE TABLE ma_storage_owner (
     storage_key CHAR(64) NOT NULL COMMENT 'Canonical storage coordination key for ownership and execution membership.',
