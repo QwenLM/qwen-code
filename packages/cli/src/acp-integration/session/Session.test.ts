@@ -34218,6 +34218,97 @@ describe('Session', () => {
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         });
 
+        it('keeps queued cron fires until the Send now handoff settles', async () => {
+          type Fire = (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+          }) => void;
+          let fireCron!: Fire;
+          const scheduler = {
+            hasPendingWork: true,
+            enableDurable: vi.fn().mockResolvedValue(undefined),
+            start: vi.fn((callback: Fire) => {
+              fireCron = callback;
+            }),
+            stop: vi.fn(),
+            list: vi.fn().mockReturnValue([]),
+            getExitSummary: vi.fn().mockReturnValue(undefined),
+          };
+          mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+          mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+          session.startCronScheduler();
+          await vi.waitFor(() => expect(scheduler.start).toHaveBeenCalled());
+
+          let finishHandoff!: () => void;
+          const handoff = new Promise<Record<string, unknown>>((resolve) => {
+            finishHandoff = () => resolve({});
+          });
+          mockClient.extMethod = vi.fn((method) =>
+            method === MID_TURN_GOAL_HANDOFF_METHOD
+              ? handoff
+              : Promise.resolve({ messages: [] }),
+          );
+          const { streaming, release } = openResponse([readFileCall]);
+          const foreground = startPrompt();
+          await streaming;
+          fireCron({
+            id: 'first',
+            prompt: 'first cron fire',
+            cronExpr: '* * * * *',
+          });
+          fireCron({
+            id: 'second',
+            prompt: 'second cron fire',
+            cronExpr: '* * * * *',
+          });
+
+          try {
+            session.sendMidTurnInputNow();
+            await expect(foreground).resolves.toEqual({
+              stopReason: 'cancelled',
+            });
+            await nextTick();
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+            await expect(
+              session.prompt(
+                {
+                  sessionId: 'test-session-id',
+                  prompt: [{ type: 'text', text: 'correct foreground' }],
+                },
+                {
+                  version: 1,
+                  sessionId: 'test-session-id',
+                  promptId: 'promoted-correction',
+                },
+              ),
+            ).resolves.toEqual({ stopReason: 'end_turn' });
+            await nextTick();
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+
+            finishHandoff();
+            await vi.waitFor(() =>
+              expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4),
+            );
+            expect(
+              vi
+                .mocked(mockChat.sendMessageStream)
+                .mock.calls.map(([, request]) => request.message),
+            ).toEqual(
+              [
+                'do it',
+                'correct foreground',
+                'first cron fire',
+                'second cron fire',
+              ].map((text) => [{ text }]),
+            );
+            expect(scheduler.stop).not.toHaveBeenCalled();
+          } finally {
+            release();
+            finishHandoff();
+          }
+        });
+
         it('ends the turn for input sent while its tools run', async () => {
           let toolSignal: AbortSignal | undefined;
           let markRunning!: () => void;

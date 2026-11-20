@@ -137,6 +137,7 @@ import {
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { fnResponse } from '../test-utils/model-fixtures.js';
+import type { HookSpanMetadata } from '../telemetry/session-tracing.js';
 
 /** MockTool that self-identifies as an omni media-policy tool, so a
  * `fixed_policy` execution origin passes the scheduler's origin/descriptor
@@ -171,16 +172,7 @@ type ToolSpanRecord = {
   /** Metadata passed to endToolBlockedOnUserSpan. */
   blockedMetadata?: { decision?: string; source?: string };
   /** Metadata passed to endHookSpan. */
-  hookMetadata?: {
-    success?: boolean;
-    shouldProceed?: boolean;
-    shouldStop?: boolean;
-    blockType?: string;
-    hasAdditionalContext?: boolean;
-    postBatchStop?: boolean;
-    postBatchStopReason?: string;
-    error?: string;
-  };
+  hookMetadata?: HookSpanMetadata;
 };
 
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
@@ -11783,6 +11775,7 @@ describe('CoreToolScheduler telemetry spans', () => {
   ])(
     'settles after Send now without waiting for $hook (interrupted execution: $interruptExecution)',
     async ({ hook, outcome, interruptExecution }) => {
+      toolSpanRecords.length = 0;
       const abort = new AbortController();
       const entered = deferred<HookRequest>();
       const releaseHook = deferred<HookExecutionResponse>();
@@ -11824,6 +11817,11 @@ describe('CoreToolScheduler telemetry spans', () => {
         }
         const [call] = await settledLastBatch(onAllToolCallsComplete);
         expectStatus(call, 'cancelled');
+        const hookSpan = definedHookSpan(hook);
+        expect(hookSpan.ended).toBe(true);
+        expect(hookSpan.hookMetadata?.waitInterrupted).toBe(true);
+        expect(hookSpan.hookMetadata?.error).toBeUndefined();
+        expect(hookSpan.hookMetadata?.success).toBeUndefined();
         expect(JSON.stringify(call.response.responseParts)).toContain(
           interruptExecution
             ? TOOL_INTERRUPTED_FOR_USER_MESSAGE
@@ -11838,6 +11836,28 @@ describe('CoreToolScheduler telemetry spans', () => {
         releaseHook.resolve(hookResponse(hook, {}));
         await scheduled;
       }
+    },
+  );
+
+  it.each(['PostToolUse', 'PostToolUseFailure'])(
+    'reports actual %s hook errors to telemetry',
+    async (hook) => {
+      await runSingleTool({
+        ...(hook === 'PostToolUseFailure' && {
+          execute: executeToolError('tool failed'),
+        }),
+        hooks: hookBus(async (request) => {
+          if (request.eventName === hook) {
+            throw new Error('hook transport failed');
+          }
+          return hookResponse(request.eventName, {});
+        }),
+      });
+
+      expect(definedHookSpan(hook).hookMetadata).toMatchObject({
+        success: false,
+        error: 'hook transport failed',
+      });
     },
   );
 

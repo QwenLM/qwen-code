@@ -12266,13 +12266,6 @@ export function createSessionControlPlane(
                   entry.activePromptTerminal.resolve();
                 }
                 entry.promptActive = true;
-                // Dispatch can preempt a live Goal before its terminal
-                // arrives. Retire permission ownership now, but keep the ID
-                // so the child can still publish that Goal's terminal.
-                if (entry.goalTurnId !== undefined) {
-                  entry.retiringGoalTurnId = entry.goalTurnId;
-                }
-                clearGoalTurn(entry, permissionMediator);
                 entry.activePromptId = pendingEntry.promptId;
                 delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
@@ -12343,7 +12336,17 @@ export function createSessionControlPlane(
                     );
                   }
                 };
-                if (!guardedDispatch) pendingEntry.dispatched = true;
+                const markPromptDispatched = () => {
+                  pendingEntry.dispatched = true;
+                  // A guarded write can still be refused before this point.
+                  // Keep the Goal's ID for its terminal, retiring only its
+                  // permission ownership once the prompt starts writing.
+                  if (entry.goalTurnId !== undefined) {
+                    entry.retiringGoalTurnId = entry.goalTurnId;
+                  }
+                  clearGoalTurn(entry, permissionMediator);
+                };
+                if (!guardedDispatch) markPromptDispatched();
                 const promptPromise = forwardPrompt(
                   entry.connection,
                   promptRequest,
@@ -12367,7 +12370,7 @@ export function createSessionControlPlane(
                           context?.assertCanDispatch?.();
                         },
                         onWriteStarted() {
-                          pendingEntry.dispatched = true;
+                          markPromptDispatched();
                           notifyDispatchObserver(onWriteStarted);
                         },
                         onWritten() {
@@ -12421,6 +12424,11 @@ export function createSessionControlPlane(
                       getTransportClosedReject(entry),
                     );
 
+                const cancelDispatchedTurnApprovals = () => {
+                  if (pendingEntry.dispatched) {
+                    permissionMediator.cancelForTurnCancel(sessionId);
+                  }
+                };
                 // The user echo (`echoPromptToSessionBus`) was already published
                 // BEFORE the forward. If the forward itself fails (transport died,
                 // ACP child error) and it wasn't a user-initiated cancel that
@@ -12457,7 +12465,7 @@ export function createSessionControlPlane(
                         // already ends the turn visibly; a phantom
                         // forward-failure line and prompt_cancelled broadcast
                         // would misreport it.
-                        permissionMediator.cancelForTurnCancel(sessionId);
+                        cancelDispatchedTurnApprovals();
                         return;
                       }
                       writeStderrLine(
@@ -12470,7 +12478,7 @@ export function createSessionControlPlane(
                         originatorClientId,
                         'forward_failed',
                       );
-                      permissionMediator.cancelForTurnCancel(sessionId);
+                      cancelDispatchedTurnApprovals();
                     },
                   )
                   .catch(() => {});
@@ -12486,7 +12494,7 @@ export function createSessionControlPlane(
                     pendingEntry.promptId,
                     originatorClientId,
                   );
-                  permissionMediator.cancelForTurnCancel(sessionId);
+                  cancelDispatchedTurnApprovals();
                   if (
                     pendingEntry.dispatched &&
                     byId.get(sessionId) === entry
@@ -12603,7 +12611,10 @@ export function createSessionControlPlane(
               }
             }
           }
+          const goalOwnsQueue =
+            !pendingEntry.dispatched && entry.goalTurnActive === true;
           const shouldSettleMidTurnQueue =
+            !goalOwnsQueue &&
             entry.pendingPromptCount === 1 &&
             !entry.backgroundTurn &&
             !entry.closing &&
@@ -12611,13 +12622,18 @@ export function createSessionControlPlane(
           const undrainedMessages = shouldSettleMidTurnQueue
             ? entry.midTurnMessageQueue.splice(0)
             : [];
-          // A send-now request held for a drain belongs to this turn; the
-          // promotion below delivers what it asked for.
-          delete entry.sendNowAfterDrains;
+          // A refused prompt never took ownership of the active Goal's
+          // queue or its held send-now request.
+          if (!goalOwnsQueue) delete entry.sendNowAfterDrains;
           // An approval this turn asked for can no longer be answered: a
           // send-now interrupt ends the turn from inside the child, which
           // stops waiting on the request without the host's cancel path.
-          permissionMediator.cancelForPrompt(sessionId, pendingEntry.promptId);
+          if (pendingEntry.dispatched) {
+            permissionMediator.cancelForPrompt(
+              sessionId,
+              pendingEntry.promptId,
+            );
+          }
           // Release the old turn before handing back queue-only messages. Its
           // caller synchronously reserves the next FIFO slot, then ordinary
           // promotions follow it without exposing the fallback as queued.
@@ -16132,10 +16148,20 @@ export function createSessionControlPlane(
       if (!holdsUserInput()) {
         return { requested: false };
       }
-      const turnOwner = () =>
-        entry.activePromptId ??
-        entry.goalTurnId ??
-        entry.backgroundTurn?.turnId;
+      const turnOwner = () => {
+        const { activePromptId, goalTurnId, backgroundTurn } = entry;
+        // A guarded RPC claims prompt bookkeeping before the write, while
+        // the still-live Goal keeps owning its input queue.
+        if (
+          goalTurnId !== undefined &&
+          !entry.pendingPromptList.some(
+            (prompt) => prompt.promptId === activePromptId && prompt.dispatched,
+          )
+        ) {
+          return goalTurnId;
+        }
+        return activePromptId ?? goalTurnId ?? backgroundTurn?.turnId;
+      };
       const owner = turnOwner();
       const request = () => {
         // A drain answered meanwhile may have taken the messages.

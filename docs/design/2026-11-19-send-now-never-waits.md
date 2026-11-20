@@ -73,8 +73,8 @@ reasons are under "Decisions and rationale".
 
 ## Goals and scope
 
-- Send now targets delivery within one round trip when earlier prompts and
-  an in-flight drain do not already control delivery.
+- Send now targets delivery within one round trip when earlier prompts, an
+  in-flight drain, or tool cancellation do not delay delivery.
 - A running shell command that can move to the background is not killed.
 - The interrupt ends only the current turn: cron keeps running, background
   notifications are not paused, and the Goal is not paused.
@@ -110,18 +110,15 @@ background first and then the other tools are interrupted.
    settles: a later request waits for the tool-boundary drain or a cut of the
    next response, and never ends a turn that is already finishing.
 2. The reason is a controlled cancellation like Stop, so the turn ends as
-   `cancelled`. It skips the session-wide steps of `cancelPendingPrompt`: the
-   cron scheduler keeps running, the cron queue is kept, and background
-   notifications are not paused.
+   `cancelled`. The cron scheduler keeps running and retains queued fires.
+   The agent holds automatic Goal, cron and background-notification turns
+   until the daemon's prompt FIFO settles, including attachment resolution
+   or withdrawal.
 3. Goal: an interrupted Goal turn (including a user turn while a Goal is
    active) is a handoff, the same as being preempted by a new prompt. The turn
    ends and the Goal stays active. If the FIFO allows promotion at settlement,
    the promoted prompt runs as the next Goal turn. Earlier ordinary prompts
-   keep their place and can drain the message at a tool boundary. The agent
-   holds automatic Goal work while the daemon settles the prompt queue,
-   including attachment resolution. If the
-   message is removed before dispatch, automatic Goal work can resume when
-   the queue settles.
+   keep their place and can drain the message at a tool boundary.
    The interrupted turn still counts toward usage. Its work is exempt from
    adding to the no-progress streak, since the host can submit the queued
    message only after settlement.
@@ -224,6 +221,9 @@ in that phase.
   generating them again costs tokens. This follows from an explicit click.
 - An interrupted tool may be half done (a command stopped midway). This is the
   same as Stop, and the tooltip says it interrupts.
+- Some tools finish their current operation before cancellation settles. A
+  directory scan in `record_artifact` or a worktree mutation already in progress
+  can delay the next prompt.
 - The interrupt relies on "with no drain in flight, the messages are still with
   the daemon", that is, the request and drain answers arrive in order on one
   channel; this needs a dedicated test. If the user deletes every queued
@@ -235,19 +235,21 @@ in that phase.
 - An interrupt during a pending approval abandons that request on the agent
   side. At settlement, the daemon cancels approvals owned by the ending prompt
   or autonomous Goal turn. Autonomous Goal approvals use the Goal turn ID, so
-  the daemon can clear their cards before the next prompt starts. A held
-  send-now request remains revocable until it is forwarded. When its turn ends,
-  the daemon discards it even if the drain has already scheduled the forwarding.
+  the daemon can clear their cards when it starts writing a replacement prompt
+  to the agent. A replacement rejected before the write leaves the live Goal's
+  approvals in place. A held send-now request remains revocable until it is
+  forwarded. When its turn ends, the daemon discards it even if the drain has
+  already scheduled the forwarding.
 
 ## Validation plan
 
-- Unit tests (`Session.test.ts`): each of the three cases; the interrupt
-  neither stops cron nor pauses notifications; an interrupted Goal turn leaves
-  the Goal active and is not recorded as a user interrupt; no interrupt while a
-  drain is in flight; the request is bound to its turn; no-op without a turn; an
-  interrupt during a pending approval is not recorded as a user rejection; both
-  loop paths covered; (PR 2) same-turn delivery after the move, the tool result
-  states the reason, and a later Stop stops those shells.
+- Unit tests (`Session.test.ts`) cover all three delivery cases on both loop
+  paths. Queued cron fires run after the handoff without stopping the scheduler.
+  An interrupted Goal stays active and has no user-interrupt record. A request
+  stays bound to its turn, does nothing without a turn, and avoids interrupting
+  a turn with a drain in flight. An interrupted approval has no rejection
+  record. PR 2 tests cover same-turn delivery after moving a shell to the
+  background, the tool result's explanation, and stopping those shells later.
 - Daemon: promoted messages keep their order and originating client after the
   interrupt.
 - E2E (`qwen serve` + Web Shell + a scripted provider): reuse the old doc's
@@ -260,15 +262,15 @@ in that phase.
   the model request carrying the message starts within 1 s of the click in
   the cases below:
 
-| State at the click        | Today              | Target                                            |
-| ------------------------- | ------------------ | ------------------------------------------------- |
-| Model writing text        | about 50 ms        | Unchanged                                         |
-| Model streaming tool args | Waits for the tool | Next turn, < 1 s (PR 1)                           |
-| Foreground shell running  | 6.1 s              | PR 1: next turn; PR 2: same turn, command running |
-| Non-backgroundable tool   | Waits for the tool | Next turn, < 1 s (PR 1)                           |
+| State at the click            | Today              | Target                                            |
+| ----------------------------- | ------------------ | ------------------------------------------------- |
+| Model writing text            | about 50 ms        | Unchanged                                         |
+| Model streaming tool args     | Waits for the tool | Next turn, < 1 s (PR 1)                           |
+| Foreground shell running      | 6.1 s              | PR 1: next turn; PR 2: same turn, command running |
+| Tool that can cancel promptly | Waits for the tool | Next turn, < 1 s (PR 1)                           |
 
-- After the interrupt the Goal stays active and continues; cron and
-  notifications run as usual.
+- The Goal stays active after the interrupt. Queued automatic turns resume
+  after the handoff.
 - The guarantees of the old doc that this design keeps are still covered by
   tests.
 

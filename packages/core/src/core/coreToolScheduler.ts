@@ -502,8 +502,6 @@ export const TOOL_INTERRUPTED_FOR_USER_MESSAGE =
   'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.';
 export const TOOL_DISCARDED_FOR_USER_MESSAGE =
   'The tool had already completed, but its output was discarded when the user interrupted to send you a message, which follows. Read it before deciding whether to run the tool again.';
-const POST_TOOL_HOOK_INTERRUPTED =
-  'Hook wait interrupted to send a user message.';
 
 function interruptedForUserMessage(signal: AbortSignal): boolean {
   return signal.reason === USER_MESSAGE_INTERRUPT_ABORT_REASON;
@@ -520,6 +518,8 @@ function cancelledAfterCompletionMessage(signal: AbortSignal): string {
     ? TOOL_DISCARDED_FOR_USER_MESSAGE
     : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
 }
+
+type PostToolHookResult<T> = T & { waitInterrupted?: true };
 
 async function waitForPostToolHook<T>(
   signal: AbortSignal,
@@ -658,27 +658,26 @@ async function safelyFirePostToolUseFailureHook(
   tool_call_id?: string,
   durationMs?: number,
   owner?: HookExecutionOwner,
-): ReturnType<typeof firePostToolUseFailureHook> {
+): Promise<PostToolHookResult<PostToolUseFailureHookResult>> {
   try {
-    return await waitForPostToolHook<PostToolUseFailureHookResult>(
-      turnSignal,
-      { hookError: POST_TOOL_HOOK_INTERRUPTED },
-      (hookSignal) =>
-        firePostToolUseFailureHook(
-          messageBus,
-          toolUseId,
-          toolName,
-          toolInput,
-          errorMessage,
-          isInterrupt,
-          permissionMode,
-          // An interrupt still emits the failure hook. Its result is no longer
-          // needed by the ending turn.
-          isInterrupt && hookSignal.aborted ? undefined : hookSignal,
-          tool_call_id,
-          durationMs,
-          owner,
-        ),
+    return await waitForPostToolHook<
+      PostToolHookResult<PostToolUseFailureHookResult>
+    >(turnSignal, { waitInterrupted: true }, (hookSignal) =>
+      firePostToolUseFailureHook(
+        messageBus,
+        toolUseId,
+        toolName,
+        toolInput,
+        errorMessage,
+        isInterrupt,
+        permissionMode,
+        // An interrupt still emits the failure hook. Its result is no longer
+        // needed by the ending turn.
+        isInterrupt && hookSignal.aborted ? undefined : hookSignal,
+        tool_call_id,
+        durationMs,
+        owner,
+      ),
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -2789,13 +2788,15 @@ export class CoreToolScheduler {
    */
   private postToolUseFailureEndMeta = (
     r: Awaited<ReturnType<typeof safelyFirePostToolUseFailureHook>>,
-  ): HookSpanMetadata =>
-    r.hookError
+  ): HookSpanMetadata => {
+    if (r.waitInterrupted) return { waitInterrupted: true };
+    return r.hookError
       ? { success: false, error: r.hookError }
       : {
           success: true,
           hasAdditionalContext: !!r.additionalContext,
         };
+  };
 
   /**
    * Open the call's tool span, or return the one already open for it. It is
@@ -6949,11 +6950,11 @@ export class CoreToolScheduler {
           const postHookResult = await this.withHookSpan(
             { hookEvent: 'PostToolUse', toolName: canonicalName, toolUseId },
             () =>
-              waitForPostToolHook<PostToolUseHookResult>(
+              waitForPostToolHook<PostToolHookResult<PostToolUseHookResult>>(
                 signal,
                 {
                   shouldStop: false,
-                  hookError: POST_TOOL_HOOK_INTERRUPTED,
+                  waitInterrupted: true,
                 },
                 (hookSignal) =>
                   firePostToolUseHook(
@@ -6969,8 +6970,9 @@ export class CoreToolScheduler {
                     this.hookOwners.get(callId),
                   ),
               ),
-            (r) =>
-              r.hookError
+            (r) => {
+              if (r.waitInterrupted) return { waitInterrupted: true };
+              return r.hookError
                 ? {
                     success: false,
                     error: r.hookError,
@@ -6986,7 +6988,8 @@ export class CoreToolScheduler {
                     shouldStop: r.shouldStop,
                     hasAdditionalContext: !!r.additionalContext,
                     blockType: r.shouldStop ? 'stop' : undefined,
-                  },
+                  };
+            },
           );
           if (cancelIfFinished()) return;
 

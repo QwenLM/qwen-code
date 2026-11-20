@@ -42842,7 +42842,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     }
   });
 
-  it.each(['RPC dispatch', 'a newer Goal start'] as const)(
+  it.each(['RPC', 'guarded RPC', 'newer Goal'] as const)(
     'clears the lost Goal approval on %s',
     async (replacement) => {
       const handle = makeChannel();
@@ -42870,11 +42870,17 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
           bridge.getSessionPendingPermissionIds(sessionId);
         await vi.waitFor(() => expect(pendingIds()).toHaveLength(1));
 
-        if (replacement === 'RPC dispatch') {
-          await bridge.sendPrompt(sessionId, {
+        if (replacement !== 'newer Goal') {
+          const assertCanDispatch =
+            replacement === 'guarded RPC' ? vi.fn() : undefined;
+          await bridge.sendPrompt(
             sessionId,
-            prompt: [{ type: 'text', text: 'continue' }],
-          });
+            { sessionId, prompt: [{ type: 'text', text: 'continue' }] },
+            undefined,
+            { assertCanDispatch },
+          );
+          if (assertCanDispatch)
+            expect(assertCanDispatch).toHaveBeenCalledTimes(2);
         } else {
           await startGoal('new-goal');
         }
@@ -42892,7 +42898,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         );
         expect(pendingIds()).toEqual([]);
 
-        if (replacement === 'a newer Goal start') {
+        if (replacement === 'newer Goal') {
           const newApproval = ask('new-goal', 'new-write');
           await vi.waitFor(() => expect(pendingIds()).toHaveLength(1));
           const activeIds = pendingIds();
@@ -42921,6 +42927,183 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       }
     },
   );
+
+  it('keeps the running Goal queue and approvals when a guarded prompt never reaches ACP', async () => {
+    const sentNow = vi.fn();
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === MID_TURN_SEND_NOW_METHOD) sentNow();
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const reading = deferred<void>();
+    const attachments = deferred<ContentBlock[]>();
+    const resolveContent = vi.spyOn(
+      SessionAttachmentStore.prototype,
+      'resolveContent',
+    );
+    try {
+      const { sessionId, clientId } = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      const goalTurnId = 'live-goal';
+      await handle.agentConnection.extNotification('_qwencode/start_turn', {
+        sessionId,
+        source: 'goal',
+        turnId: goalTurnId,
+      });
+      const ask = (toolCallId: string) =>
+        handle.agentConnection.requestPermission({
+          sessionId,
+          toolCall: { toolCallId, title: 'write' },
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+          _meta: { goalTurnId },
+        });
+      const pendingIds = () => bridge.getSessionPendingPermissionIds(sessionId);
+      const allow = {
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      } as const;
+      const existingApproval = ask('before');
+      await vi.waitFor(() => expect(pendingIds()).toHaveLength(1));
+      const [existingId] = pendingIds();
+      bridge.enqueueMidTurnMessage(sessionId, 'draining', { clientId }, 'slow');
+      resolveContent.mockImplementationOnce(() => {
+        reading.resolve();
+        return attachments.promise;
+      });
+      const drain = handle.agentConnection.extMethod(
+        MID_TURN_QUEUE_DRAIN_METHOD,
+        {
+          sessionId,
+        },
+      );
+      await reading.promise;
+      expect(
+        bridge.enqueueMidTurnMessage(
+          sessionId,
+          'still queued',
+          { clientId },
+          'goal-input',
+          { rejectIfIdle: true },
+        ),
+      ).toEqual({ accepted: true, messageId: 'goal-input' });
+
+      const request = vi.fn(() =>
+        bridge.sendMidTurnMessagesNow(sessionId, { clientId }),
+      );
+      const assertCanDispatch = vi
+        .fn()
+        .mockImplementationOnce(() => queueMicrotask(request))
+        .mockImplementation(() => {
+          throw new Error('Dispatch revoked before the ACP write');
+        });
+      await expect(
+        bridge.sendPrompt(
+          sessionId,
+          { sessionId, prompt: [{ type: 'text', text: 'continue' }] },
+          undefined,
+          { assertCanDispatch },
+        ),
+      ).rejects.toThrow('Dispatch revoked before the ACP write');
+      expect(assertCanDispatch).toHaveBeenCalledTimes(2);
+      expect(request).toHaveReturnedWith({ requested: true });
+      expect(sentNow).not.toHaveBeenCalled();
+      expect(handle.agent.promptCalls).toEqual([]);
+      expect(bridge.getSessionSummary(sessionId)?.hasActivePrompt).toBe(true);
+      expect(
+        bridge.getMidTurnMessages(sessionId, { clientId }).messages,
+      ).toEqual([
+        expect.objectContaining({
+          messageId: 'goal-input',
+          text: 'still queued',
+        }),
+      ]);
+      expect(pendingIds()).toEqual([existingId]);
+      expect(bridge.respondToPermission(existingId!, allow)).toBe(true);
+      await expect(existingApproval).resolves.toMatchObject(allow);
+
+      const laterApproval = ask('after');
+      await vi.waitFor(() => expect(pendingIds()).toHaveLength(1));
+      expect(bridge.respondToPermission(pendingIds()[0]!, allow)).toBe(true);
+      await expect(laterApproval).resolves.toMatchObject(allow);
+      attachments.resolve([]);
+      await expect(drain).resolves.toMatchObject({ messages: ['draining'] });
+      await vi.waitFor(() => expect(sentNow).toHaveBeenCalledOnce());
+    } finally {
+      resolveContent.mockRestore();
+      attachments.resolve([]);
+      await bridge.shutdown();
+    }
+  });
+
+  it('promotes Goal input when the Goal ends before a refused guarded prompt settles', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const started = deferred<void>();
+    const attachments = deferred<ContentBlock[]>();
+    const resolveContent = vi.spyOn(
+      SessionAttachmentStore.prototype,
+      'resolveContent',
+    );
+    try {
+      const { sessionId, clientId } = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      const turnId = 'finishing-goal';
+      await handle.agentConnection.extNotification('_qwencode/start_turn', {
+        sessionId,
+        source: 'goal',
+        turnId,
+      });
+      await vi.waitFor(() =>
+        expect(bridge.getSessionSummary(sessionId)?.hasActivePrompt).toBe(true),
+      );
+      bridge.enqueueMidTurnMessage(sessionId, 'undrained', { clientId }, 'm1');
+      resolveContent.mockImplementationOnce(() => {
+        started.resolve();
+        return attachments.promise;
+      });
+      const refused = bridge.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [{ type: 'text', text: 'refused' }] },
+        undefined,
+        {
+          assertCanDispatch() {
+            throw new Error('Dispatch revoked');
+          },
+        },
+      );
+      await started.promise;
+      await handle.agentConnection.extNotification('_qwencode/end_turn', {
+        sessionId,
+        source: 'goal',
+        turnId,
+        reason: 'end_turn',
+        promptId: `${sessionId}########1`,
+      });
+      await vi.waitFor(() =>
+        expect(bridge.getSessionSummary(sessionId)?.hasActivePrompt).toBe(
+          false,
+        ),
+      );
+      expect(
+        bridge.getMidTurnMessages(sessionId, { clientId }).messages,
+      ).toHaveLength(1);
+      expect(handle.agent.promptCalls).toEqual([]);
+      attachments.resolve([]);
+      await expect(refused).rejects.toThrow('Dispatch revoked');
+      await vi.waitFor(() =>
+        expect(handle.agent.promptCalls.map(({ prompt }) => prompt)).toEqual([
+          [{ type: 'text', text: 'undrained' }],
+        ]),
+      );
+    } finally {
+      resolveContent.mockRestore();
+      attachments.resolve([]);
+      await bridge.shutdown();
+    }
+  });
 
   it('publishes a preempted Goal terminal once and keeps the newer Goal active', async () => {
     const handle = makeChannel();
