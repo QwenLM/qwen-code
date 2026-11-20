@@ -74,9 +74,13 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
       writeFileSync(join(bin, 'npm'), '#!/bin/sh\necho "1.2.2"\n', {
         mode: 0o755,
       });
-      writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', {
-        mode: 0o755,
-      });
+      // node exits 0 for the semver comparison (channel behind = safe).
+      // Any other exit means the comparison itself failed.
+      writeFileSync(
+        join(bin, 'node'),
+        '#!/bin/sh\nif echo "$2" | grep -q "1.2.4"; then exit 1; fi\nexit 0\n',
+        { mode: 0o755 },
+      );
       const result = spawnSync('bash', [script, 'push-release-branch'], {
         cwd: checkout,
         encoding: 'utf8',

@@ -211,27 +211,74 @@ case "${step}" in
           # Reject only when the channel has moved PAST this version. A
           # channel still on an older version is the normal partial-publish
           # retry: resuming moves it forward.
-          if node -e "
-            const [a,b] = ['${current_tag}', '${RELEASE_VERSION}'].map(v => v.replace(/^v/,'').split(/[.-]/).map(Number));
+          # Use a three-way exit: 0 = at/behind (safe), 1 = ahead (refuse),
+          # 2 = comparison failed (refuse with distinct message).
+          compare_result=0
+          node -e "
+            const parse = v => v.replace(/^v/,'').split(/[.-]/).map(s => parseInt(s, 10) || 0);
+            const [a, b] = [process.argv[1], process.argv[2]].map(parse);
             for (let i = 0; i < Math.max(a.length, b.length); i++) {
               const d = (a[i]||0) - (b[i]||0);
               if (d > 0) process.exit(1);
               if (d < 0) process.exit(0);
             }
             process.exit(0);
-          " 2>/dev/null; then
-            : # channel is at or behind the release version — safe to resume
-          else
+          " "${current_tag}" "${RELEASE_VERSION}" 2>/dev/null || compare_result=$?
+          # node exits 1 on both "channel is ahead" and internal failure.
+          # Re-run without suppression to distinguish: if stderr is empty,
+          # the comparison ran and the channel is ahead; otherwise it failed.
+          if [[ "${compare_result}" -eq 1 ]]; then
+            node_stderr="$(node -e "
+              const parse = v => v.replace(/^v/,'').split(/[.-]/).map(s => parseInt(s, 10) || 0);
+              const [a, b] = [process.argv[1], process.argv[2]].map(parse);
+              for (let i = 0; i < Math.max(a.length, b.length); i++) {
+                const d = (a[i]||0) - (b[i]||0);
+                if (d > 0) process.exit(1);
+                if (d < 0) process.exit(0);
+              }
+              process.exit(0);
+            " "${current_tag}" "${RELEASE_VERSION}" 2>&1 >/dev/null)" || true
+            if [[ -n "${node_stderr}" ]]; then
+              echo "::error::Cannot compare npm ${NPM_TAG} (${current_tag}) with ${RELEASE_VERSION}: ${node_stderr}. Refusing to resume."
+              echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+              exit 1
+            fi
             echo "::error::npm ${NPM_TAG} is ${current_tag}, past ${RELEASE_VERSION}. Resuming would regress the dist-tag."
             echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
+          if [[ "${compare_result}" -ne 0 ]]; then
+            echo "::error::Cannot compare npm ${NPM_TAG} (${current_tag}) with ${RELEASE_VERSION}; refusing to resume."
+            echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+          # compare_result == 0: channel is at or behind — safe to resume.
         fi
         # Skip tree comparison when the release is already complete (tag +
         # GitHub Release exist): the finalize workflow may have pushed a
         # CHANGELOG commit that makes the tree differ, but the version is
         # done and should not be reported as a failure.
-        if gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx 'false'; then
+        release_check_ok=false
+        for attempt in 1 2 3; do
+          if gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx 'false'; then
+            release_check_ok=true
+            release_published=true
+            break
+          elif gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx 'true'; then
+            release_check_ok=true
+            release_published=false
+            break
+          fi
+          if [[ "${attempt}" -lt 3 ]]; then
+            sleep $(( attempt * 5 ))
+          fi
+        done
+        if [[ "${release_check_ok}" == "false" ]]; then
+          echo "::error::Cannot confirm GitHub Release ${RELEASE_TAG} state after 3 attempts; refusing to resume."
+          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
+        if [[ "${release_published}" == "true" ]]; then
           echo "::notice::Release ${RELEASE_TAG} is already published; nothing to resume."
           echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
           exit 1
@@ -244,6 +291,7 @@ case "${step}" in
         fi
         git switch --detach "${release_commit}"
         echo "reused_commit=true" >> "${GITHUB_OUTPUT}"
+        echo "reused_commit_sha=${release_commit}" >> "${GITHUB_OUTPUT}"
         echo "::notice::Reusing ${release_branch_name} at ${release_commit}; published npm versions will be skipped."
         exit 0
       fi

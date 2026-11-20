@@ -766,6 +766,8 @@ jobs:
       }}
     outputs:
       version_refusal: '${{ steps.push_release_branch.outputs.version_refusal }}'
+      reused_commit: '${{ steps.push_release_branch.outputs.reused_commit }}'
+      reused_commit_sha: '${{ steps.push_release_branch.outputs.reused_commit_sha }}'
     # Serialize each real/dry release tag; never cancel an active publish.
     concurrency:
       group: 'release-publish-${{ needs.prepare.outputs.release_tag }}-${{ needs.prepare.outputs.is_dry_run }}'
@@ -865,8 +867,19 @@ jobs:
       - *checkout_release_workflow_scripts
 
       - name: 'Rebuild artifacts for the reused release commit'
-        if: "${{ steps.push_release_branch.outputs.reused_commit == 'true' }}"
-        run: '.release-workflow/.github/scripts/run-release-step.sh build-package'
+        # Only rebuild when the reused commit differs from the commit the
+        # restored artifacts were built for. When they match, the restored
+        # dist/standalone is already correct and a rebuild would wipe it
+        # (esbuild rmSync(dist)) without the archives step to regenerate it.
+        if: "${{ steps.push_release_branch.outputs.reused_commit == 'true' && steps.push_release_branch.outputs.reused_commit_sha != needs.build_release.outputs.release_commit }}"
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
+          QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+        run: |-
+          .release-workflow/.github/scripts/run-release-step.sh build-package
+          .release-workflow/.github/scripts/run-release-step.sh build-archives
 
       - *reset_release_workflow_scripts
       - *checkout_release_workflow_scripts

@@ -1171,7 +1171,7 @@ describe('assertVersionUnreleased', () => {
   // found and how a partial publish resumes (matching branch reused, then
   // per-package skip) instead of pointing at manual recovery.
   const refusalMessage = (foundOn) =>
-    `Version 1.2.3 has already shipped; refusing to push the release branch over it. Found on: ${foundOn}. If a previous attempt published only part of the release, re-run the release: the push step reuses the existing release branch when its contents match, and the publish step skips already-published packages.`;
+    `Version 1.2.3 has already shipped; refusing to push the release branch over it. Found on: ${foundOn}. If a previous attempt published only part of the release and its release branch still exists, re-run the failed job — the push step reuses the branch when its contents match and the publish step skips already-published packages. If the branch was deleted, restore it from the original release commit or recover the remaining packages manually.`;
 
   it('pins the full published-package set', () => {
     // Changing private flags must not accidentally expand the release surface.
