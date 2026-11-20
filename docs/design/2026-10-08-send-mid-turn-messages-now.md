@@ -5,8 +5,8 @@
 Status: implemented.
 
 [Send now never waits for tools](2026-11-19-send-now-never-waits.md) revises
-the decisions not to cut a response that started a tool call and not to
-interrupt running tools.
+the decision "No cut once a tool call starts" and the guarantee that running
+tools are never interrupted.
 
 ## Problem
 

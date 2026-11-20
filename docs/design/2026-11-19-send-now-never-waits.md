@@ -4,11 +4,11 @@
 
 Status: decided; implemented in two PRs.
 
-This design revises two decisions in
-[Send queued mid-turn messages now](2026-10-08-send-mid-turn-messages-now.md),
-"a response that started a tool call is not cut" and "running tools are not
-interrupted", and carries out the "move a running shell to the background" item
-that design's Risks section left for later. Everything else stays as it is:
+[Send queued mid-turn messages now](2026-10-08-send-mid-turn-messages-now.md)
+includes the decision "No cut once a tool call starts" and guarantees that
+running tools are never interrupted. This design revises both and carries out
+the "move a running shell to the background" item that design's Risks section
+left for later. Everything else stays as it is:
 Enter queues, delivery at tool boundaries, session scope, a request bound to its
 turn, and draining before cutting.
 
@@ -43,12 +43,12 @@ user cannot see, so the user can only read it as a click that did nothing.
 - Send now: `Session.sendMidTurnInputNow()` records the request, and the `pull`
   in `#openResponseInterrupt` drains and then cuts only while the response has
   no tool call (`hasFunctionCalls()` is false).
-- Both ACP paths (the legacy loop and the shared round) run tools through
-  `Session.runTool`. `runTool` calls
-  `invocation.execute(signal, onProgress, shellConfig)` without
-  `setPromoteAbortControllerCallback`, so ACP cannot move a foreground shell to
-  the background today; the TUI's Ctrl+B already does it through
-  `CoreToolScheduler`.
+- The legacy ACP loop executes tools through `Session.runTool`, which calls
+  `invocation.execute(signal, onProgress, shellConfig)`. The shared round uses
+  `runAcpToolBatch` and `CoreToolScheduler`. The scheduler already passes
+  `setPromoteAbortControllerCallback` to shell invocations and stores the
+  controller on the executing tool call. The TUI reads that state for Ctrl+B.
+  ACP's Send now handler still needs access to those controllers.
 - Stop (`cancelPendingPrompt`) does more than end the turn: it stops the cron
   scheduler and clears the cron queue, pauses background notifications, and
   pauses the Goal as a user interrupt (`#settleGoalTurn` records
@@ -149,8 +149,10 @@ background first and then the other tools are interrupted.
 
 ### Move shells to the background (PR 2)
 
-1. `runTool` passes `setPromoteAbortControllerCallback` to shell calls and keeps
-   the session's handles for running foreground shells.
+1. Expose the promotion controllers for running foreground shells to the
+   session. In the legacy loop, pass `setPromoteAbortControllerCallback` from
+   `runTool`. In the shared round, read the existing controllers from scheduler
+   updates in `runAcpToolBatch` and pass them through the batch host.
 2. When a Send now request arrives, each handle gets
    `abort({ kind: 'background' })`. If only those shells were left in the batch,
    the batch ends, the tool boundary drains, and the same turn answers; if other
@@ -202,17 +204,17 @@ in that phase.
   record a message without answering it; leaving it with the daemon to be
   promoted at turn end is shorter and already verified.
 - **Two PRs.** The interrupt works on its own and fixes "the click does
-  nothing" first; moving shells to the background wires a new execution
-  parameter and gets its own review.
+  nothing" first. Moving shells to the background requires separate wiring for
+  the two tool execution paths and gets its own review.
 
 ## Constraints
 
-- The changes are in the `Session` layer that both ACP paths share
-  (`sendMidTurnInputNow`, the abort reason classification, `#settleGoalTurn`,
-  `runTool`), not in the shared round itself; tests cover both paths. The
-  shared path's tool results come from `CoreToolScheduler`, so the abort reason
-  `USER_MESSAGE_INTERRUPT_ABORT_REASON` and its tool result text live in core,
-  shared by both paths. This does not wait for #17744.
+- Both ACP paths use the same `Session` logic for the Send now interrupt, abort
+  reason classification, and Goal settlement. The abort reason
+  `USER_MESSAGE_INTERRUPT_ABORT_REASON` and its tool result text live in core
+  so both `Session.runTool` and `CoreToolScheduler` can use them. PR 2 connects
+  both tool execution paths to the session, and tests cover both paths. This
+  does not wait for #17744.
 - The `sendMidTurnMessagesNow` route and capability stay the same, but SDK
   callers see the new behavior, so the release notes need a line.
 

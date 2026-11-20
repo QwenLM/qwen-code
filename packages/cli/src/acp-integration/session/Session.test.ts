@@ -34222,18 +34222,19 @@ describe('Session', () => {
           await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
           expect(execute).not.toHaveBeenCalled();
           expect(drainCalls()).toHaveLength(0);
-          // Not the user turning the call down.
           expect(
             mockChatRecordingService.recordToolResult,
-          ).not.toHaveBeenCalledWith(
-            expect.anything(),
-            expect.objectContaining({ status: 'error' }),
+          ).toHaveBeenCalledExactlyOnceWith(
+            expect.arrayContaining([
+              expect.objectContaining({
+                functionResponse: expect.objectContaining({
+                  id: 'c',
+                  name: 'read_file',
+                }),
+              }),
+            ]),
+            expect.objectContaining({ status: 'cancelled' }),
           );
-          for (const [, record] of vi.mocked(
-            mockChatRecordingService.recordToolResult,
-          ).mock.calls) {
-            expect(record).toMatchObject({ status: 'cancelled' });
-          }
         });
 
         it('lets a tool-boundary drain still out take the input into the turn', async () => {
@@ -34283,7 +34284,10 @@ describe('Session', () => {
           });
         });
 
-        async function verifyGoalHandoff(origin: 'runtime' | 'user') {
+        async function verifyGoalHandoff(
+          origin: 'runtime' | 'user',
+          outcome: 'resolved' | 'rejected',
+        ) {
           const permit: core.GoalTurnPermit = {
             goalId: 'goal-1',
             revision: 1,
@@ -34316,10 +34320,18 @@ describe('Session', () => {
               );
             },
           );
-          let finishHandoff!: (result: Record<string, unknown>) => void;
-          const handoff = new Promise<Record<string, unknown>>((resolve) => {
-            finishHandoff = resolve;
-          });
+          let finishHandoff!: () => void;
+          const handoff = new Promise<Record<string, unknown>>(
+            (resolve, reject) => {
+              finishHandoff = () => {
+                if (outcome === 'rejected') {
+                  reject(new Error('Goal handoff failed'));
+                } else {
+                  resolve({});
+                }
+              };
+            },
+          );
           mockClient.extMethod = vi.fn((method) =>
             method === MID_TURN_GOAL_HANDOFF_METHOD
               ? handoff
@@ -34397,14 +34409,19 @@ describe('Session', () => {
           });
           await nextTick();
           expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
-          finishHandoff({});
+          finishHandoff();
           await vi.waitFor(() =>
             expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(nextPermit),
           );
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
         }
 
-        it.each(['runtime', 'user'] as const)(
-          'hands off a %s Goal turn waiting for approval on Send now',
+        it.each([
+          ['runtime', 'resolved'],
+          ['user', 'resolved'],
+          ['runtime', 'rejected'],
+        ] as const)(
+          'hands off a %s Goal turn waiting for approval on Send now (%s)',
           verifyGoalHandoff,
         );
 

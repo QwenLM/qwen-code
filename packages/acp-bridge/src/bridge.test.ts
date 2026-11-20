@@ -42083,11 +42083,12 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
   });
 
   it.each([
-    ['forwards it once the drain has answered', false],
-    ['drops it when the input is gone by then', true],
-  ])(
+    ['forwards it once the drain has answered', 'resolved'],
+    ['drops it when the input is gone by then', 'removed'],
+    ['forwards it once the failed drain has requeued its input', 'rejected'],
+  ] as const)(
     'holds a send-now request while a drain resolves attachments: %s',
-    async (_label, removeQueued) => {
+    async (_label, outcome) => {
       const firstTurn = deferred<void>();
       const order: string[] = [];
       const handle = makeChannel({
@@ -42129,9 +42130,8 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
           .extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
             sessionId: session.sessionId,
           })
-          .then((answer) => {
+          .finally(() => {
             order.push('drain answered');
-            return answer;
           });
         await vi.waitFor(() => expect(resolveSpy).toHaveBeenCalled());
         bridge.enqueueMidTurnMessage(session.sessionId, 'second', client, 'm2');
@@ -42142,16 +42142,27 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         // The drain took `first` but has not answered: the child would read a
         // request with no drain out as `second` still being queued.
         expect(requests()).toEqual([]);
-        if (removeQueued) {
+        if (outcome === 'removed') {
           expect(
             bridge.removeMidTurnMessage(session.sessionId, 'm2', client),
           ).toEqual({ removed: true });
         }
 
-        gate.resolve([]);
-        await expect(drain).resolves.toMatchObject({ messages: ['first'] });
+        if (outcome === 'rejected') {
+          gate.reject(new Error('attachment read failed'));
+          await expect(drain).rejects.toThrow();
+          const queue = bridge.getMidTurnMessages(session.sessionId, client);
+          expect(queue.messages.map((message) => message.messageId)).toEqual([
+            'm1',
+            'm2',
+          ]);
+          expect(queue.settledMessageIds).not.toContain('m1');
+        } else {
+          gate.resolve([]);
+          await expect(drain).resolves.toMatchObject({ messages: ['first'] });
+        }
         await new Promise((r) => setTimeout(r, 10));
-        if (removeQueued) {
+        if (outcome === 'removed') {
           expect(requests()).toEqual([]);
         } else {
           await vi.waitFor(() => expect(requests()).toHaveLength(1));

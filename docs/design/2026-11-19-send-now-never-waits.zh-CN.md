@@ -5,9 +5,9 @@
 状态：已定，分两个 PR 实现。
 
 本文修改 [立即发送回合中排队的消息](2026-10-08-send-mid-turn-messages-now.zh-CN.md)
-中「工具调用开始后不截断」「正在运行的工具不中断」两条决策，并落地该文「风险」
-一节留待以后的「把运行中的 shell 转到后台」。其余行为（Enter 排队、工具边界送达、
-会话级、请求绑定回合、先取队列再截断）保持不变。
+中「工具调用开始后不打断」的决策和「正在运行的工具永远不被打断」的保证。
+本文也落地该文「风险」一节留待以后的「把运行中的 shell 转到后台」。其余行为（Enter 排队、
+工具边界送达、会话级、请求绑定回合、先取队列再截断）保持不变。
 
 ## 问题
 
@@ -34,10 +34,11 @@
   回合使用 `settleMidTurnQueueAfterAutomaticTurn`。
 - 立即发送：`Session.sendMidTurnInputNow()` 记下请求，`#openResponseInterrupt` 的
   `pull` 只在回复还没出现工具调用（`hasFunctionCalls()` 为假）时先取队列再截断。
-- 两条 ACP 路径（旧循环和 shared round）最终都经 `Session.runTool` 执行工具。
-  `runTool` 调用 `invocation.execute(signal, onProgress, shellConfig)`，没有传
-  `setPromoteAbortControllerCallback`，所以 ACP 目前不能把前台 shell 转到后台；
-  TUI 的 Ctrl+B 已经通过 `CoreToolScheduler` 支持这一点。
+- ACP 旧循环通过 `Session.runTool` 执行工具，调用
+  `invocation.execute(signal, onProgress, shellConfig)`。shared round 通过
+  `runAcpToolBatch` 和 `CoreToolScheduler` 执行工具。调度器已为 shell 调用传入
+  `setPromoteAbortControllerCallback`，并把转后台控制器保存在执行中的工具调用状态上。
+  TUI 的 Ctrl+B 使用该状态。ACP 的立即发送处理仍需接入这些控制器。
 - 停止（`cancelPendingPrompt`）除了中止当前回合，还会停掉 cron 调度器并清空 cron
   队列、暂停后台通知、以用户中断为由暂停 Goal（`#settleGoalTurn` 把
   `USER_CANCEL_ABORT_REASON` 记为用户中断）。被新 prompt 抢占的 Goal 回合
@@ -109,8 +110,9 @@ shell 转到后台，再打断其余工具。
 
 ### shell 转后台（PR 2）
 
-1. `runTool` 给 shell 调用传 `setPromoteAbortControllerCallback`，在会话里记录正在
-   运行的前台 shell 的转后台句柄。
+1. 将运行中的前台 shell 的转后台控制器交给会话。旧循环通过 `runTool` 传入
+   `setPromoteAbortControllerCallback`。shared round 在 `runAcpToolBatch` 中从
+   调度器的工具状态更新读取已有控制器，再通过批次宿主交给会话。
 2. 立即发送请求到达时，对每个句柄 `abort({ kind: 'background' })`。批次里只剩这些
    shell 时，批次随即结束，工具边界取队列，同一轮回应；还有其他工具时，转后台后按
    PR 1 打断。
@@ -145,16 +147,15 @@ shell 转到后台，再打断其余工具。
   抢占 Goal 回合」一致。
 - **打断前不取队列。** 取走后回合又结束，消息会被记录但不被回应；留在守护进程由回合
   结束时提升，路径更短、已验证。
-- **分两个 PR。** 打断独立可用，先解决「点了没反应」；shell 转后台要接新的执行参数，
-  单独评审。
+- **分两个 PR。** 打断独立可用，先解决「点了没反应」。shell 转后台需要分别接入两条
+  工具执行路径，单独评审。
 
 ## 约束
 
-- 改动在两条 ACP 路径共用的 `Session` 层（`sendMidTurnInputNow`、中止原因分类、
-  `#settleGoalTurn`、`runTool`），不改 shared round 本身；两条路径都要测试覆盖。
-  shared 路径的工具结果由 `CoreToolScheduler` 生成，所以中止原因
-  `USER_MESSAGE_INTERRUPT_ABORT_REASON` 和对应的工具结果文字定义在 core，两条路径
-  共用。不等待 #17744。
+- 两条 ACP 路径共用 `Session` 中的立即发送打断、中止原因分类和 Goal 结算逻辑。
+  中止原因 `USER_MESSAGE_INTERRUPT_ABORT_REASON` 和对应的工具结果文字定义在 core，
+  供 `Session.runTool` 和 `CoreToolScheduler` 使用。PR 2 将两条工具执行路径接入会话，
+  测试覆盖两条路径。不等待 #17744。
 - `sendMidTurnMessagesNow` 的路由和能力位不变，但 SDK 调用方会看到新行为，发布说明
   需写一行。
 
