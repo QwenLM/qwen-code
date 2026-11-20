@@ -283,6 +283,53 @@ describe('tool header description direction', () => {
     },
     { title: "Grep: 'نمط|pattern'", args: {}, dir: 'ltr', tag: 'BDI' },
     { title: "Grep: 'نمط|pattern' in .", args: {}, dir: 'ltr', tag: 'BDI' },
+    // GrepInvocation.getDescription's formatDisplayPath emits "src" for both.
+    {
+      title: "Grep: 'نمط|pattern' in src",
+      args: { path: './src' },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      title: "Grep: 'نمط|pattern' in src (filter: '*.ts')",
+      args: { path: 'src/', glob: '*.ts' },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      title: 'Grep: اعثر على الملاحظات',
+      args: { path: './src' },
+      dir: 'auto',
+      tag: 'SPAN',
+    },
+    {
+      title: "Grep: 'نمط|pattern' in ~/other/src",
+      args: { path: '/home/worker/other/src' },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      title:
+        "Grep: 'نمط|pattern' in first/.../intermediate/intermediate/intermediate/intermediate/intermediate/src",
+      args: { path: './first/' + 'intermediate/'.repeat(10) + 'src' },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      title:
+        "Grep: 'نمط|pattern' in ~/.../intermediate/intermediate/intermediate/intermediate/intermediate/src",
+      args: {
+        path: '/home/worker/other/' + 'intermediate/'.repeat(10) + 'src',
+      },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      title: "Grep: 'نمط|pattern' in the text you provided",
+      args: { path: './src' },
+      dir: 'auto',
+      tag: 'SPAN',
+    },
     {
       title: 'Grep: اعثر على الملاحظات',
       args: { path: 'مجلد', glob: '*.ts' },

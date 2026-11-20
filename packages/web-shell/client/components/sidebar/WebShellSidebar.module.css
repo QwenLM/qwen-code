@@ -1588,6 +1588,19 @@ button.livePendingSession:hover {
   }
 }
 
+@keyframes sessionTitleScrollRtl {
+  to {
+    transform: translateX(var(--session-title-scroll-distance, 0px));
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :global([dir='rtl']) .sessionRow:hover .sessionTextInner,
+  :global([dir='rtl']) .sessionRow:focus-within .sessionTextInner {
+    animation-name: sessionTitleScrollRtl;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sessionRow:hover .sessionTextInner,
   .sessionRow:focus-within .sessionTextInner {

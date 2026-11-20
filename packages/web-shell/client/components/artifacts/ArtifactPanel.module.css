@@ -121,6 +121,19 @@
   }
 }
 
+@keyframes artifactTabTitleScrollRtl {
+  to {
+    transform: translateX(var(--session-title-scroll-distance, 0px));
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :global([dir='rtl']) .tabItem:hover .tabTitleInner,
+  :global([dir='rtl']) .tabItem:focus-within .tabTitleInner {
+    animation-name: artifactTabTitleScrollRtl;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .tabItem:hover .tabTitleInner,
   .tabItem:focus-within .tabTitleInner {

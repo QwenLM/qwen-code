@@ -356,36 +356,73 @@ export function isMachineToolDescription(
     const text = truncateText(candidate, MAX_DESCRIPTION_LENGTH);
     return description === text || description === truncateText(text, 120);
   };
-  // The legacy wire title has no provenance flag. Only recognize a grep
-  // title that exactly matches the daemon's known machine form, never arbitrary
-  // prose supplied with the same arguments.
-  return (
-    matches(produced.text) ||
-    getGrepTitlesFromArgs(tool, workspaceCwd).some(matches)
-  );
+  if (matches(produced.text)) return true;
+
+  // Legacy grep titles have no provenance flag. Recognize the daemon's
+  // pattern and filter framing without reimplementing its path formatting.
+  const grepTitle = getDaemonGrepDescription(tool, workspaceCwd);
+  return grepTitle !== null && matches(grepTitle);
 }
 
-function getGrepTitlesFromArgs(
+function getDaemonGrepDescription(
   tool: ACPToolCall,
   workspaceCwd?: string,
-): string[] {
+): string | null {
   const name = tool.toolName.toLowerCase();
-  if (name !== 'grep' && name !== 'grep_search') return [];
+  if (name !== 'grep' && name !== 'grep_search') return null;
   const args = tool.args;
   const pattern = args?.pattern ?? args?.query;
-  if (typeof pattern !== 'string' || !pattern) return [];
+  if (typeof pattern !== 'string' || !pattern) return null;
 
-  const rawPath = typeof args?.path === 'string' ? args.path : '';
+  const title = getDescriptionFromTitle(tool, workspaceCwd);
+  if (!title) return null;
+
+  const prefix = formatDescriptionPaths(`'${pattern}'`, workspaceCwd);
   const filter =
     typeof args?.glob === 'string' && args.glob
-      ? ` (filter: '${args.glob}')`
+      ? ' ' + formatDescriptionPaths(`(filter: '${args.glob}')`, workspaceCwd)
       : '';
-  // Unlike the browser's args-only fallback, the daemon's JS Grep appends a
-  // formatted path (defaulting to "."), and RipGrep omits an unset path.
-  const path = pathForDisplay(rawPath || '.', workspaceCwd);
-  const titles = [`'${pattern}' in ${path}${filter}`];
-  if (!rawPath) titles.push(`'${pattern}'${filter}`);
-  return titles.map((title) => formatDescriptionPaths(title, workspaceCwd));
+  // RipGrep can omit an unset path; the JS grep implementation uses ".".
+  if (!args?.path && title === prefix + filter) return title;
+  const pathPrefix = `${prefix} in `;
+  if (!title.startsWith(pathPrefix) || !title.endsWith(filter)) return null;
+
+  const path = title.slice(pathPrefix.length, title.length - filter.length);
+  const rawPath = getStringArg(args, 'path') || '.';
+  return matchesDaemonGrepPath(path, rawPath, workspaceCwd) ? title : null;
+}
+
+function matchesDaemonGrepPath(
+  shown: string,
+  raw: string,
+  workspaceCwd?: string,
+): boolean {
+  if (!shown) return false;
+
+  const rawPath = normalizeSeparators(raw).replace(/(?<=.)\/+$/, '');
+  const paths = [pathForDisplay(rawPath, workspaceCwd), rawPath].map(
+    (path) => path.replace(/^(?:\.\/)+|\/+$/g, '') || '.',
+  );
+  const [start, end, extra] = shown.split('...');
+  if (isAbsoluteLikePath(rawPath) && shown.startsWith('~/')) {
+    // The browser does not know the daemon's home directory. Match the
+    // unelided home-relative suffix, or the anchors of an elided suffix.
+    if (rawPath.endsWith(`/${shown.slice(2)}`)) return true;
+    if (end?.startsWith('/') && extra === undefined && rawPath.endsWith(end)) {
+      const index = rawPath.indexOf(`/${start.slice(2)}`, 1);
+      if (index > 0 && rawPath.length - index > shown.length) return true;
+    }
+  }
+  return paths.some(
+    (path) =>
+      shown === path ||
+      (start &&
+        end &&
+        extra === undefined &&
+        path.length > shown.length &&
+        path.startsWith(start) &&
+        path.endsWith(end)),
+  );
 }
 
 export function getToolSummaryDescription(
