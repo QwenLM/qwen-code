@@ -1,5 +1,6 @@
 import { cp, mkdir, rm, symlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import process from 'node:process';
 
 import { PUBLIC_DOC_ROOTS } from '../src/app/public-docs.js';
 
