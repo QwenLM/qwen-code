@@ -280,9 +280,9 @@ class SessionOssStorageMySqlIT {
     private void insertHead(long revision) {
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
                 + " workspace_id, session_id, harness_session_id, head_kind, state,"
-                + " storage_version, writer_generation, journal_revision, committed_sequence,"
+                + " writer_generation, journal_revision, committed_sequence,"
                 + " last_commit_digest, activation_epoch, packed_through_revision, gmt_create,"
-                + " gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'MANAGED_SESSION', 'ACTIVE', 1, 1,"
+                + " gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'MANAGED_SESSION', 'ACTIVE', 1,"
                 + " ?, ?, 'digest', 0, 0, 0, 0)",
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(TENANT),
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(SESSION),

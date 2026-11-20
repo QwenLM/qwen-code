@@ -28,12 +28,12 @@ class WorkspaceCreationSchemaMySqlIT {
             Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
             var jdbc = new JdbcTemplate(source);
             jdbc.update("INSERT INTO ma_session_head (head_kind, tenant_key, harness_key, tenant_id,"
-                    + " harness_session_id, workspace_id, session_id, storage_version, state,"
+                    + " harness_session_id, workspace_id, session_id, state,"
                     + " writer_generation, writer_id, writer_lease_until, lease_token_hash,"
                     + " journal_revision, committed_sequence, last_commit_digest, activation_epoch,"
                     + " compacted_through_revision, recovery_status, gmt_create, gmt_modified)"
                     + " VALUES ('MANAGED_SESSION', ?, ?, 'tenant', 'session', 'workspace', 'session',"
-                    + " 1, 'SEALED', 1, 'original', 946684800000, ?, 1, 1, ?, 1, 0, 'READY', 1, 1)",
+                    + " 'SEALED', 1, 'original', 946684800000, ?, 1, 1, ?, 1, 0, 'READY', 1, 1)",
                     ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key("session"),
                     "a".repeat(64), "b".repeat(64));
             jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
