@@ -166,7 +166,7 @@ public enum ManagedSchemaProjection {
                     + "hook_ordinal, hook_definition_hash, record_kind, state, action_id, action_version, "
                     + "decision_receipt_id, decision_digest, prompt_id, turn_id, options_json"),
     STORAGE(
-            "alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key, "
+            "alias_key, tenant_id, storage_id, physical_key, "
                     + "registration_state, storage_kind, registration_revision, registration_json, "
                     + "fence_operation_id, mount_revision, gmt_create, gmt_modified"),
     STORAGE_OWNER(

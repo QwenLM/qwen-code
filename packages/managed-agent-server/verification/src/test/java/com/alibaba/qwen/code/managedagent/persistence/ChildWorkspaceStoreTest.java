@@ -74,9 +74,8 @@ class ChildWorkspaceStoreTest {
 
     private void alias(String id, String kind) {
         String alias = RuntimeAdmissionFences.storageAliasKey("tenant", id);
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, ?, ?, ?)",
-                alias, RuntimeAdmissionFences.storageFenceKey("tenant"),
-                RuntimeAdmissionFences.storageFenceKey(id), "tenant".getBytes(StandardCharsets.UTF_8),
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, ?)",
+                alias, "tenant".getBytes(StandardCharsets.UTF_8),
                 id.getBytes(StandardCharsets.UTF_8), kind);
         if ("LOCAL".equals(kind)) {
             String physical = ManagedSchemaKeys.key("local-test", id);

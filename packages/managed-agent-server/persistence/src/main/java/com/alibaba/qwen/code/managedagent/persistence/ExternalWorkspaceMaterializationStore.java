@@ -86,9 +86,8 @@ public final class ExternalWorkspaceMaterializationStore {
             long revision = registration.registrationRevision();
             if (!registeredAliasId.equals(registration.tenantWorkspaceId())
                     || jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ?"
-                            + " AND tenant_key = ? AND storage_key = ? AND physical_key = ? AND registration_revision = ?",
-                            Long.class, aliasKey, RuntimeAdmissionFences.storageFenceKey(tenant),
-                            RuntimeAdmissionFences.storageFenceKey(registeredAliasId), physical, revision) != 1
+                            + " AND tenant_id = ? AND storage_id = ? AND physical_key = ? AND registration_revision = ?",
+                            Long.class, aliasKey, tenant, registeredAliasId, physical, revision) != 1
                     || jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? AND physical_key = ?"
                             + " AND tenant_id = ? AND storage_id = ? AND storage_kind = 'EXTERNAL'"
                             + " AND mount_revision = ? AND mount_root = ? AND mount_state = 'UNVERIFIED'"

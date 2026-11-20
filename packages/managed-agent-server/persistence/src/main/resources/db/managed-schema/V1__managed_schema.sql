@@ -970,8 +970,6 @@ CREATE TABLE ma_extension_operation (
 
 CREATE TABLE ma_storage (
     alias_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and logical storage identity.',
-    tenant_key CHAR(64) NOT NULL COMMENT 'Hashed tenant identity used for indexed lookup.',
-    storage_key CHAR(64) NOT NULL COMMENT 'Storage identity key used for indexed lookup and coordination.',
     tenant_id VARBINARY(2048) NOT NULL COMMENT 'Tenant identity used for isolation.',
     storage_id VARBINARY(2048) NOT NULL COMMENT 'Logical storage identity.',
     physical_key CHAR(64) COMMENT 'Canonical physical storage identity shared by logical aliases.',
@@ -984,7 +982,6 @@ CREATE TABLE ma_storage (
     gmt_create BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Record creation time in Unix epoch milliseconds.',
     gmt_modified BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Last record update time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_storage_business_key UNIQUE (alias_key),
-    CONSTRAINT uk_ma_storage_alias UNIQUE (tenant_key, storage_key),
     CONSTRAINT ck_ma_storage_registration CHECK ((CASE registration_state WHEN 'FENCE_ONLY' THEN 10 WHEN 'REGISTERED' THEN 10 WHEN 'RETIRING' THEN 8 WHEN 'RETIRED' THEN 7 ELSE -1 END = CHAR_LENGTH(registration_state))),
     CONSTRAINT ck_ma_storage_registered CHECK (registration_state = 'FENCE_ONLY' OR (physical_key IS NOT NULL AND registration_revision IS NOT NULL AND registration_json IS NOT NULL)),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',

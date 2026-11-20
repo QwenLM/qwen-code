@@ -308,10 +308,9 @@ class ManagedTaskCancelOperationTest {
         OperationRecord admitted = begin("key-1", "digest-1", RUNNING_CHILD)
                 .operation();
         settle(admitted, TaskCancelOutcome.completed());
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?,"
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?,"
                 + " 'storage-1', ?)",
-                RuntimeAdmissionFences.storageAliasKey(TENANT, "storage-1"), RuntimeAdmissionFences.storageFenceKey(TENANT),
-                RuntimeAdmissionFences.storageFenceKey("storage-1"),
+                RuntimeAdmissionFences.storageAliasKey(TENANT, "storage-1"),
                 TENANT, UUID.randomUUID().toString());
         assertThat(begin("key-1", "digest-1", RUNNING_CHILD).replayed())
                 .isTrue();

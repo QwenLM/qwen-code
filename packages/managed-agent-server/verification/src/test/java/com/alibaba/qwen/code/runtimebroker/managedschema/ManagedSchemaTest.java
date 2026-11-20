@@ -535,8 +535,8 @@ class ManagedSchemaTest {
                     SQLException.class,
                     () -> statement.execute("UPDATE ma_session_head SET journal_revision = 0"));
             statement.execute(
-                    "INSERT INTO ma_storage (alias_key,tenant_key,storage_key,tenant_id,storage_id)"
-                            + " VALUES ('alias','tenant','storage','tenant','storage')");
+                    "INSERT INTO ma_storage (alias_key,tenant_id,storage_id)"
+                            + " VALUES ('alias','tenant','storage')");
             try (var row =
                     statement.executeQuery(
                             "SELECT registration_state,physical_key FROM ma_storage")) {

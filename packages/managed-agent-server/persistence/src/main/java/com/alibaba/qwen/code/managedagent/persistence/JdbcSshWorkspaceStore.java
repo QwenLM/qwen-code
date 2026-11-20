@@ -158,11 +158,10 @@ public class JdbcSshWorkspaceStore
                 throw new ManagedAgentException(409, "storage_already_registered", "Physical directory already has an owner.");
             }
             String alias = RuntimeAdmissionFences.storageAliasKey(intent.tenantId(), intent.storageId());
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, physical_key,"
                             + " storage_kind, registration_state, registration_revision, registration_json)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, 'SSH_LOCAL', 'FENCE_ONLY', 1, ?)"
+                            + " VALUES (?, ?, ?, ?, 'SSH_LOCAL', 'FENCE_ONLY', 1, ?)"
                             + " ON DUPLICATE KEY UPDATE alias_key = alias_key", alias,
-                    RuntimeAdmissionFences.storageFenceKey(intent.tenantId()), RuntimeAdmissionFences.storageFenceKey(intent.storageId()),
                     bytes(intent.tenantId()), bytes(intent.storageId()), physical, encode(registration));
             jdbc.update("UPDATE ma_operation SET result_json = ? WHERE operation_key = ?", encode(registration),
                     operationKey(intent.tenantId(), intent.operationId()));

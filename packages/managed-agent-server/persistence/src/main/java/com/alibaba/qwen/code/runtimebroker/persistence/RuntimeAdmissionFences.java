@@ -297,10 +297,6 @@ public final class RuntimeAdmissionFences {
                 409, "runtime_admission_closed", "Session admission is closed", false);
     }
 
-    public static String storageFenceKey(String value) {
-        return JdbcRepositorySupport.valueKey(value);
-    }
-
     public static String storageAliasKey(String tenantId, String storageId) {
         return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("qwen-csi-alias/1", tenantId, storageId);
     }
@@ -309,9 +305,8 @@ public final class RuntimeAdmissionFences {
         try (PreparedStatement statement =
                 connection.prepareStatement(
                         "SELECT tenant_id, storage_id, fence_operation_id"
-                                + " FROM ma_storage WHERE tenant_key = ? AND storage_key = ?")) {
-            statement.setString(1, storageFenceKey(tenantId));
-            statement.setString(2, storageFenceKey(storageId));
+                                + " FROM ma_storage WHERE alias_key = ?")) {
+            statement.setString(1, storageAliasKey(tenantId, storageId));
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return null;

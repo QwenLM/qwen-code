@@ -85,11 +85,10 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                         + " storage_kind, mount_root, mount_revision) VALUES (?, ?, ?, ?, 'EXTERNAL', ?, ?)",
                         physical, physical, tenant, workspace, registration.alias().mountRoot(),
                         registration.identity().registrationRevision());
-                jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+                jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, physical_key,"
                         + " storage_kind, registration_state, registration_revision, registration_json, gmt_create, gmt_modified)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 'EXTERNAL', 'REGISTERED', ?, ?, " + ManagedSchemaTime.SQL_NOW
+                        + " VALUES (?, ?, ?, ?, 'EXTERNAL', 'REGISTERED', ?, ?, " + ManagedSchemaTime.SQL_NOW
                         + ", " + ManagedSchemaTime.SQL_NOW + ")", aliasKey,
-                        RuntimeAdmissionFences.storageFenceKey(tenant), RuntimeAdmissionFences.storageFenceKey(workspace),
                         tenant, workspace, physical, registration.identity().registrationRevision(), encoded);
             } catch (DuplicateKeyException duplicate) {
                 // The global lock serializes registration, so the pre-checks above

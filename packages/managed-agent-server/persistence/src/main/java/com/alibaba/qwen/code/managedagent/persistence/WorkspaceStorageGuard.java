@@ -369,14 +369,12 @@ public class WorkspaceStorageGuard {
 
     private void prepareAlias(String tenant, String storage, String physical, String operation) {
         String request = "{\"schemaVersion\":1,\"operationId\":\"" + operation + "\"}";
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
-                + " storage_kind, registration_json, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'LOCAL', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")"
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, physical_key,"
+                + " storage_kind, registration_json, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'LOCAL', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")"
                 + " ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN physical_key IS NULL OR registration_json IS NULL OR storage_kind = 'UNREGISTERED' THEN VALUES(gmt_modified) ELSE gmt_modified END, physical_key = COALESCE(physical_key, VALUES(physical_key)),"
                 + " storage_kind = CASE WHEN storage_kind = 'UNREGISTERED' THEN 'LOCAL' ELSE storage_kind END,"
                 + " registration_json = COALESCE(registration_json, VALUES(registration_json))",
-                RuntimeAdmissionFences.storageAliasKey(tenant, storage),
-                RuntimeAdmissionFences.storageFenceKey(tenant),
-                RuntimeAdmissionFences.storageFenceKey(storage), tenant, storage, physical, request);
+                RuntimeAdmissionFences.storageAliasKey(tenant, storage), tenant, storage, physical, request);
         var alias = LocalStorageOwners.alias(jdbc, tenant, storage, true);
         if (alias == null || !physical.equals(alias.get("physical_key")) || !"LOCAL".equals(alias.get("storage_kind"))
                 || !List.of("FENCE_ONLY", "REGISTERED").contains(alias.get("registration_state"))

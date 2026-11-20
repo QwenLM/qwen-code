@@ -114,11 +114,10 @@ class WorkspaceMigrationAdmissionTest {
     }
 
     private void storage(String kind) {
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id,"
                         + " physical_key, storage_kind, registration_state, registration_revision, registration_json)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, 'REGISTERED', 1, '{}')",
-                alias(), RuntimeAdmissionFences.storageFenceKey(TENANT),
-                RuntimeAdmissionFences.storageFenceKey(STORAGE), TENANT, STORAGE, PHYSICAL, kind);
+                        + " VALUES (?, ?, ?, ?, ?, 'REGISTERED', 1, '{}')",
+                alias(), TENANT, STORAGE, PHYSICAL, kind);
         jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, tenant_id, storage_id,"
                         + " storage_kind, mount_state) VALUES (?, ?, ?, ?, ?, 'READY')",
                 PHYSICAL, PHYSICAL, TENANT, STORAGE, kind);

@@ -355,11 +355,9 @@ public class JdbcPhysicalStorageReleaseTest {
         private void alias(String aliasTenant, String storage) throws Exception {
             execute(
                     "INSERT INTO"
-                        + " ma_storage(alias_key,tenant_key,storage_key,tenant_id,storage_id,physical_key,registration_state,storage_kind,registration_revision,registration_json)"
-                        + " VALUES(?,?,?,?,?,?,'REGISTERED',?,1,'{}')",
+                        + " ma_storage(alias_key,tenant_id,storage_id,physical_key,registration_state,storage_kind,registration_revision,registration_json)"
+                        + " VALUES(?,?,?,?,'REGISTERED',?,1,'{}')",
                     RuntimeAdmissionFences.storageAliasKey(aliasTenant, storage),
-                    RuntimeAdmissionFences.storageFenceKey(aliasTenant),
-                    RuntimeAdmissionFences.storageFenceKey(storage),
                     aliasTenant.getBytes(StandardCharsets.UTF_8),
                     storage.getBytes(StandardCharsets.UTF_8),
                     physical, storageKind);
