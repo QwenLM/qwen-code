@@ -641,7 +641,9 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     // ...and removed from the launch checkout, which is where the copy used
     // to read from.
     gitIn(repoRoot, 'checkout', '-q', 'main');
-    expect(await exists(path.join(repoRoot, WORKTREE_INCLUDE_FILE))).toBe(false);
+    expect(await exists(path.join(repoRoot, WORKTREE_INCLUDE_FILE))).toBe(
+      false,
+    );
 
     const service = new GitWorktreeService(repoRoot, baseDir);
     const result = await service.createUserWorktree('rev', 'with-include');
