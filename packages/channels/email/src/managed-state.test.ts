@@ -149,6 +149,18 @@ describe('ManagedEmailStateStore registration-identity keying', () => {
     mkdirSync(store.file);
     expect(() => store.load()).toThrow(/could not be read/);
     expect(() => store.load()).toThrow(store.file);
+    // The fs cause is kept so an operator can tell unreadable from invalid.
+    let caught: unknown;
+    try {
+      store.load();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).cause).toBeInstanceOf(Error);
+    expect((caught as { cause: NodeJS.ErrnoException }).cause.code).toBe(
+      'EISDIR',
+    );
   });
 
   it('load() distinguishes invalid JSON from an invalid state', () => {
@@ -418,25 +430,28 @@ describe('ManagedEmailStateStore registration-identity keying', () => {
       'cp|tenant-a|chan|actor|ws|.',
     );
     mkdirSync(store.directory, { recursive: true });
-    expect(store.highestSiblingGeneration()).toBe(0);
+    expect(store.highestSiblingGeneration().generation).toBe(0);
     writeFileSync(
       join(store.directory, 'managed-state.json'),
       JSON.stringify({ ...freshState(), generation: 2 }),
     );
+    // The keyed sibling dominates the archive: after the upgrade it can be the
+    // sole surviving high-water, so this arm must decide the assertion.
     writeFileSync(
       join(store.directory, 'managed-state-aaaaaaaaaaaaaaaa.json'),
-      JSON.stringify({ ...freshState(), generation: 3 }),
+      JSON.stringify({ ...freshState(), generation: 6 }),
     );
     writeFileSync(
       join(store.directory, 'managed-state.json.stranded-xyz'),
       JSON.stringify({ ...freshState(), generation: 5 }),
     );
     // A corrupt sibling, an in-flight tmp, and the Legacy state contribute
-    // nothing — only the managed ledgers and archives carry the counter.
-    writeFileSync(
-      join(store.directory, 'managed-state-bbbbbbbbbbbbbbbb.json'),
-      '{not json',
+    // nothing to the number — only the managed ledgers and archives carry it.
+    const corrupt = join(
+      store.directory,
+      'managed-state-bbbbbbbbbbbbbbbb.json',
     );
+    writeFileSync(corrupt, '{not json');
     writeFileSync(
       join(store.directory, 'cccc.tmp'),
       JSON.stringify({ generation: 99 }),
@@ -445,7 +460,10 @@ describe('ManagedEmailStateStore registration-identity keying', () => {
       join(store.directory, 'state.json'),
       JSON.stringify({ generation: 99 }),
     );
-    expect(store.highestSiblingGeneration()).toBe(5);
+    const carried = store.highestSiblingGeneration();
+    expect(carried.generation).toBe(6);
+    // The corrupt sibling is named, not dropped silently; tmp/Legacy ignored.
+    expect(carried.skipped).toEqual([corrupt]);
   });
 
   it('the saved state round-trips through the validator', () => {

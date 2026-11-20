@@ -241,26 +241,31 @@ export class ManagedEmailAdapter {
         // lost inbound mail.
         const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
         const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
-        // The "fresh window" loss claims hold when this start's cursor pins past
-        // the legacy cursor, so the legacy window sits below it and is never
-        // re-fetched. That is true on a fresh upgrade (no ledger loaded) AND on
-        // the retry after a first start that failed after openMailbox already
-        // pinned a fresh ledger to the tip — `!loaded` alone would suppress the
-        // clauses on that retry even though the window is permanently skipped.
-        // On a roll-forward after a rollback whose keyed cursor still sits below
-        // the legacy cursor, the poll re-fetches the legacy window, so claiming a
-        // loss there would page the operator about a loss that does not happen.
-        // This is a reporting gate, not a cursor adoption: the cursor itself is
-        // never seeded from the legacy.
-        const freshWindow =
+        // The loss clauses are reporting gates keyed on the cursors, not on
+        // load-ness, so the retry after a first start that failed once
+        // openMailbox pinned a fresh ledger to the tip still reports a window
+        // that is permanently skipped. The pending claims sit at/below the legacy
+        // cursor, so they are stranded once the loaded cursor reaches it (the
+        // search floor is cursor + 1). The offline window begins at legacy cursor
+        // + 1, so it is only skipped when the loaded cursor is STRICTLY past the
+        // legacy cursor — at equality the next poll admits that mail, and
+        // claiming a loss would be the false alarm these gates exist to prevent.
+        // A roll-forward whose keyed cursor still sits below the legacy cursor
+        // re-fetches the window and is told no loss. The cursor itself is never
+        // seeded from the legacy.
+        const cursor = legacy.lastUid;
+        const pendingStranded =
           loaded === undefined ||
-          (legacy.lastUid !== undefined && loaded.lastUid >= legacy.lastUid);
+          (cursor !== undefined && loaded.lastUid >= cursor);
+        const offlineSkipped =
+          loaded === undefined ||
+          (cursor !== undefined && loaded.lastUid > cursor);
         let consequence = '';
         if (!legacy.readable) {
           consequence =
-            ' Its contents could not be read, so any staged-but-unadmitted claims it held are stranded.';
+            ' Its contents could not be read; restore or repair it before restarting — the account generation it carried is the only local copy, and any staged-but-unadmitted claims it held are stranded.';
         } else {
-          if (legacy.pending > 0 && freshWindow)
+          if (legacy.pending > 0 && pendingStranded)
             consequence +=
               ' Its staged-but-unadmitted claims are stranded; the fresh ledger starts at the current mailbox tip and does not re-fetch them.';
           if (legacy.outbound > 0)
@@ -272,8 +277,8 @@ export class ManagedEmailAdapter {
           // Name that window separately — an independent sentence, not a
           // loosening of the pending gate (mirrors the GitHub offline-window
           // clause). A genuinely cursor-less legacy reports no loss.
-          if (freshWindow && legacy.lastUid !== undefined)
-            consequence += ` Mail received after the legacy cursor (UID ${legacy.lastUid}) and before this start was never listed and will not be admitted.`;
+          if (offlineSkipped && cursor !== undefined)
+            consequence += ` Mail received after the legacy cursor (UID ${cursor}) and before this start was never listed and will not be admitted.`;
         }
         this.log(
           `Managed email upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
@@ -308,32 +313,33 @@ export class ManagedEmailAdapter {
       await this.openMailbox();
       if (!this.running)
         throw new Error('Managed email adapter stopped during connection.');
-      // The control plane fences account_generation on a (tenant_id, channel_id)
-      // row that every registration identity of the mailbox shares, and it never
-      // moves back (a lower one is refused channel_generation_stale). A mailbox
-      // that already re-keyed persisted a higher generation; seed ONLY that
-      // monotonic counter from EVERY durable source in the mailbox directory
-      // (the live legacy, sibling keyed ledgers, and the .stranded-* archives),
-      // so a second registration still meets the high-water after the first
-      // archived the literal legacy. The `>` comparison makes this idempotent on
-      // a current ledger; the empty-pending guard keeps it from raising the
-      // generation under staged claims, which would change their dedupe key.
-      // This adopts no pending/cursor state — a fresh ledger still starts at the
-      // mailbox tip with empty pending.
-      const seedGeneration = Math.max(
-        legacy?.readable &&
-          typeof legacy.generation === 'number' &&
-          Number.isSafeInteger(legacy.generation)
-          ? legacy.generation
-          : 0,
-        this.store.highestSiblingGeneration(),
-      );
-      if (
-        this.state &&
-        this.state.pending.length === 0 &&
-        seedGeneration > this.state.generation
-      ) {
-        this.state.generation = seedGeneration;
+      // openMailbox clamped a fresh or epoch-changed ledger to the durable
+      // high-water before registering. A loaded ledger whose epoch already
+      // matches can still lag the shared (tenant_id, channel_id) row — it missed
+      // epoch changes another registration counted — so heal it here too. The
+      // row is monotonic and >= every sibling generation, so when the high-water
+      // sits above this ledger's generation its staged claims are already dead
+      // (their generation can never be registered): drop them visibly — never
+      // re-offer them at a raised generation, which would change their dedupe
+      // key — and raise the counter, mirroring the epoch branch. An unreadable
+      // generation source is named, not dropped silently. No cursor adoption.
+      const { generation: highWater, skipped } =
+        this.store.highestSiblingGeneration();
+      for (const path of skipped) {
+        this.log(
+          `Managed email could not read the generation source ${path}; its generation is not carried this start.`,
+        );
+      }
+      if (this.state && highWater > this.state.generation) {
+        if (this.state.pending.length) {
+          this.log(
+            `Managed email account generation healed from ${this.state.generation} to ${highWater} to meet the shared control-plane row; ${this.state.pending.length} staged claim(s) of the old generation admit nothing further.`,
+          );
+          this.state.pending = [];
+          this.state.instanceRefusals = 0;
+          this.instanceStalled = false;
+        }
+        this.state.generation = highWater;
         this.persist();
       }
       await this.ensureRegistered(this.state!);
@@ -409,11 +415,18 @@ export class ManagedEmailAdapter {
       return;
     }
     const uidValidity = String(mailbox.uidValidity);
+    // The control plane fences account_generation on a (tenant_id, channel_id)
+    // row shared by every registration of the mailbox, so a ledger that missed
+    // one or more epoch changes while down must jump to the durable high-water,
+    // not merely +1, or its register is refused channel_generation_stale before
+    // any later seed can heal it. Clamp both the fresh and the epoch generation
+    // to it here, before this branch registers.
+    const { generation: highWater } = this.store.highestSiblingGeneration();
     if (!this.state) {
       this.state = {
         version: 1,
         uidValidity,
-        generation: 1,
+        generation: Math.max(1, highWater),
         lastUid: mailbox.uidNext - 1,
         pending: [],
         outbound: [],
@@ -435,7 +448,7 @@ export class ManagedEmailAdapter {
       this.state = {
         ...this.state,
         uidValidity,
-        generation: this.state.generation + 1,
+        generation: Math.max(this.state.generation + 1, highWater),
         lastUid: mailbox.uidNext - 1,
         instanceRefusals: 0,
         pending: [],

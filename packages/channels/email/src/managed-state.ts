@@ -326,15 +326,18 @@ export class ManagedEmailStateStore {
    * makes the seed survive the first start's rename (mirrors the GitHub store's
    * entry-scoped `entryWatchEpisodes` carry). Only the counter is carried,
    * never pending/cursor state. Best-effort: an unreadable or corrupt sibling
-   * contributes nothing, never a startup failure. Returns 0 when no ledger
-   * carries a generation.
+   * contributes nothing to the number, never a startup failure, but its path is
+   * returned in `skipped` so the caller can log that a generation source was
+   * unreadable rather than dropping it silently (mirrors `entryWatchEpisodes`).
+   * `generation` is 0 when no ledger carries one.
    */
-  highestSiblingGeneration(): number {
+  highestSiblingGeneration(): { generation: number; skipped: string[] } {
+    const skipped: string[] = [];
     let names: string[];
     try {
       names = readdirSync(this.directory);
     } catch {
-      return 0;
+      return { generation: 0, skipped };
     }
     let highest = 0;
     for (const name of names) {
@@ -343,10 +346,11 @@ export class ManagedEmailStateStore {
       if (!/^managed-state(-[0-9a-f]{16})?\.json(\.stranded-.+)?$/.test(name)) {
         continue;
       }
+      const filePath = join(this.directory, name);
       try {
-        const value = JSON.parse(
-          readFileSync(join(this.directory, name), 'utf8'),
-        ) as { generation?: unknown } | null;
+        const value = JSON.parse(readFileSync(filePath, 'utf8')) as {
+          generation?: unknown;
+        } | null;
         const generation = value?.generation;
         if (
           typeof generation === 'number' &&
@@ -357,10 +361,12 @@ export class ManagedEmailStateStore {
           highest = generation;
         }
       } catch {
-        // An unreadable sibling contributes nothing.
+        // An unreadable sibling contributes nothing to the number, but name it
+        // so the operator can find the corrupt generation source.
+        skipped.push(filePath);
       }
     }
-    return highest;
+    return { generation: highest, skipped };
   }
 
   save(state: ManagedEmailState): void {

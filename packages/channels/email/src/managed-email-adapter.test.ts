@@ -2123,6 +2123,10 @@ describe('managed email adapter registration-identity isolation', () => {
     plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
     const a = make();
     await a.connect();
+    // A real message at uid 1 so a replayed claim would reach the wire: a
+    // hand-written claim against an empty mailbox is dropped before submission
+    // and cannot witness the cross-tenant replay at all.
+    append(raw('tenant-a-mail'));
     const sA = state(a);
     sA.pending = [{ uid: 1, eventId: '1:1' }];
     sA.lastUid = 1;
@@ -2137,6 +2141,7 @@ describe('managed email adapter registration-identity isolation', () => {
     expect(dirname(b.stateFile)).toBe(dirname(stateFileA));
     expect(state(b).pending).toEqual([]);
     await b.tick();
+    expect(plane.submitAttempts).toBe(0);
     expect(plane.events).toHaveLength(0);
     await b.disconnect();
   });
@@ -2538,5 +2543,108 @@ describe('managed email adapter registration-identity isolation', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it('the epoch branch clamps a multi-generation lag to the durable high-water', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor-a|ws|.';
+    const a = make();
+    await a.connect();
+    const dir = dirname(a.stateFile);
+    // A sibling registration advanced the shared row to 3 while A was down.
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 3 }),
+    );
+    await a.disconnect();
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 3;
+    box.epoch = 3n;
+    box.messages.clear();
+    box.next = 1;
+    // A loads its generation-1 ledger; the epoch branch must jump to the
+    // high-water (3), not register generation 2 and meet a 409 before the seed.
+    const a2 = make();
+    await a2.connect();
+    expect(plane.registrations.at(-1)).toEqual({ accountGeneration: 3 });
+    expect(state(a2).generation).toBe(3);
+    await a2.disconnect();
+  });
+
+  it('heals a lagging loaded ledger and drops its dead staged claims visibly', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor-a|ws|.';
+    const a = make({}, { log: (l: string) => lines.push(l) });
+    await a.connect();
+    const dir = dirname(a.stateFile);
+    const sA = state(a);
+    sA.pending = [{ uid: 1, eventId: '1:1' }];
+    sA.lastUid = 1;
+    writeFileSync(a.stateFile, JSON.stringify(sA));
+    // A sibling of the same mailbox advanced the shared row to 2.
+    writeFileSync(
+      join(dir, 'managed-state-aaaaaaaaaaaaaaaa.json'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 2 }),
+    );
+    await a.disconnect();
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 2;
+    lines.length = 0;
+    // A2 loads the generation-1 ledger with a staged claim, epoch unchanged.
+    // The claim's generation can never be registered (the row is ahead), so it
+    // is dead: heal to 2 and drop it visibly rather than wedge on every start.
+    const a2 = make({}, { log: (l: string) => lines.push(l) });
+    await a2.connect();
+    expect(state(a2).generation).toBe(2);
+    expect(state(a2).pending).toEqual([]);
+    expect(plane.registrations.at(-1)).toEqual({ accountGeneration: 2 });
+    expect(lines.some((l) => l.includes('admit nothing further'))).toBe(true);
+    await a2.disconnect();
+  });
+
+  it('does not claim a skipped offline window when the retry cursor equals the legacy cursor', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const first = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(first.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // Quiescent upgrade: the legacy cursor sits at the tip (0); the first start
+    // pins the fresh ledger to that same tip, then fails at registration.
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), lastUid: 0 }),
+    );
+    plane.failRegisters = 1;
+    await expect(first.connect()).rejects.toThrow();
+    await first.disconnect();
+    // Mail arrives after the failed start; the retry cursor still equals the
+    // legacy cursor, so the next poll (cursor + 1) admits it — no skipped window.
+    append(raw('after-failed-start'));
+    lines.length = 0;
+    const second = make({}, { log: (l: string) => lines.push(l) });
+    await second.connect();
+    const s2 = lines.filter((l) => l.includes('is stranded and not replayed'));
+    expect(s2).toHaveLength(1);
+    expect(s2[0]).not.toContain('Mail received after the legacy cursor');
+    await second.tick();
+    expect(plane.events.length).toBeGreaterThan(0);
+    await second.disconnect();
+  });
+
+  it('an unreadable legacy carries a restore instruction when the row refuses the fresh generation', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 2;
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'managed-state.json'), '{not json');
+    await expect(adapter.connect()).rejects.toThrow();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('restore or repair it before restarting');
+    expect(stranded[0]).toContain('only local copy');
   });
 });
