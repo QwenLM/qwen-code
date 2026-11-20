@@ -254,6 +254,21 @@ describe('model catalog', () => {
     expect(tokenLimit('qwen-math-plus')).toBe(262_144);
   });
 
+  it('serves the DeepSeek V3.1 and V3.2 limits to their dotted spellings', () => {
+    for (const id of [
+      'deepseek-v3.1',
+      'deepseek-ai/DeepSeek-V3.1',
+      'deepseek-v3.2',
+      'deepseek-v3.2-exp',
+    ]) {
+      expect({ id, output: tokenLimit(id, 'output') }).toEqual({
+        id,
+        output: 65_536,
+      });
+    }
+    expect(tokenLimit('deepseek-v3.1-terminus')).toBe(163_840);
+  });
+
   it('ships the current modality-only projection for offline startup', () => {
     expect(lookupModelCatalog('inkling')).toEqual({
       modalities: { image: true },
