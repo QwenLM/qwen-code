@@ -106,7 +106,7 @@ function brandLogoImage(): HTMLImageElement | null {
 
 /** The built-in inline mark — the one every unconfigured deployment sees. */
 function builtInMark(): Element | null {
-  return container.querySelector('svg[viewBox="17.5 27.7 135.6 135.6"]');
+  return container.querySelector('svg[data-testid="qwen-brand-mark"]');
 }
 
 beforeEach(() => {
@@ -350,6 +350,19 @@ describe('sidebar brand', () => {
     // The positive half of "default unchanged": the built-in mark is actually
     // there, not merely that no img is present (an empty 28px box passes that).
     expect(builtInMark()).not.toBeNull();
+  });
+
+  it('uses the compact dark-theme artwork with theme-aware color', () => {
+    renderSidebar();
+
+    const mark = builtInMark();
+    expect(mark?.getAttribute('viewBox')).toBe('0 0 24 24');
+    expect(mark?.getAttribute('fill')).toBe('currentColor');
+    expect(mark?.getAttribute('fill-rule')).toBe('evenodd');
+    expect(mark?.querySelectorAll('path')).toHaveLength(1);
+    expect(mark?.querySelector('path')?.getAttribute('d')).toMatch(
+      /^M12\.604 1\.34/,
+    );
   });
 
   it('renders the configured name', () => {
