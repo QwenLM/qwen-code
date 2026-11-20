@@ -218,23 +218,38 @@ case "${step}" in
           compare_result=0
           CURRENT_TAG="${current_tag}" RELEASE_VERSION_VAR="${RELEASE_VERSION}" node -e "
             const parse = v => {
-              const parts = v.replace(/^v/,'').split(/[.-]/);
-              // Refuse non-numeric segments (e.g. nightly hashes) — they
-              // cannot be compared numerically and must not be treated as 0.
-              return parts.map(s => {
-                const n = parseInt(s, 10);
-                if (Number.isNaN(n)) return NaN;
-                return n;
-              });
+              const s = v.replace(/^v/, '');
+              const dash = s.indexOf('-');
+              const core = (dash === -1 ? s : s.slice(0, dash)).split('.');
+              if (core.length < 3) return null;
+              const nums = core.map(x => parseInt(x, 10));
+              if (nums.some(Number.isNaN)) return null;
+              return { nums, pre: dash === -1 ? '' : s.slice(dash + 1) };
             };
-            const [a, b] = [process.env.CURRENT_TAG, process.env.RELEASE_VERSION_VAR].map(parse);
-            if (a.some(Number.isNaN) || b.some(Number.isNaN)) process.exit(2);
-            for (let i = 0; i < Math.max(a.length, b.length); i++) {
-              const d = (a[i]||0) - (b[i]||0);
-              if (d > 0) process.exit(1);
-              if (d < 0) process.exit(0);
-            }
-            process.exit(0);
+            const cmpPre = (a, b) => {
+              if (!a && !b) return 0;
+              if (!a) return 1;
+              if (!b) return -1;
+              const ap = a.split('.'), bp = b.split('.');
+              for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
+                if (ap[i] === undefined) return -1;
+                if (bp[i] === undefined) return 1;
+                const an = /^[0-9]+/.test(ap[i]), bn = /^[0-9]+/.test(bp[i]);
+                if (an && bn) {
+                  const d = parseInt(ap[i], 10) - parseInt(bp[i], 10);
+                  if (d) return d > 0 ? 1 : -1;
+                } else if (an) return -1;
+                else if (bn) return 1;
+                else if (ap[i] !== bp[i]) return ap[i] > bp[i] ? 1 : -1;
+              }
+              return 0;
+            };
+            const a = parse(process.env.CURRENT_TAG), b = parse(process.env.RELEASE_VERSION_VAR);
+            if (!a || !b) process.exit(2);
+            let d = 0;
+            for (let i = 0; i < 3; i++) { d = (a.nums[i]||0) - (b.nums[i]||0); if (d) break; }
+            if (!d) d = cmpPre(a.pre, b.pre);
+            process.exit(d > 0 ? 1 : 0);
           " 2>/dev/null || compare_result=$?
           # node exits 1 on both "channel is ahead" and internal failure.
           # Re-run without suppression to distinguish: if stderr is empty,
@@ -242,21 +257,38 @@ case "${step}" in
           if [[ "${compare_result}" -eq 1 ]]; then
             node_stderr="$(CURRENT_TAG="${current_tag}" RELEASE_VERSION_VAR="${RELEASE_VERSION}" node -e "
               const parse = v => {
-                const parts = v.replace(/^v/,'').split(/[.-]/);
-                return parts.map(s => {
-                  const n = parseInt(s, 10);
-                  if (Number.isNaN(n)) return NaN;
-                  return n;
-                });
+                const s = v.replace(/^v/, '');
+                const dash = s.indexOf('-');
+                const core = (dash === -1 ? s : s.slice(0, dash)).split('.');
+                if (core.length < 3) return null;
+                const nums = core.map(x => parseInt(x, 10));
+                if (nums.some(Number.isNaN)) return null;
+                return { nums, pre: dash === -1 ? '' : s.slice(dash + 1) };
               };
-              const [a, b] = [process.env.CURRENT_TAG, process.env.RELEASE_VERSION_VAR].map(parse);
-              if (a.some(Number.isNaN) || b.some(Number.isNaN)) process.exit(2);
-              for (let i = 0; i < Math.max(a.length, b.length); i++) {
-                const d = (a[i]||0) - (b[i]||0);
-                if (d > 0) process.exit(1);
-                if (d < 0) process.exit(0);
-              }
-              process.exit(0);
+              const cmpPre = (a, b) => {
+                if (!a && !b) return 0;
+                if (!a) return 1;
+                if (!b) return -1;
+                const ap = a.split('.'), bp = b.split('.');
+                for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
+                  if (ap[i] === undefined) return -1;
+                  if (bp[i] === undefined) return 1;
+                  const an = /^[0-9]+/.test(ap[i]), bn = /^[0-9]+/.test(bp[i]);
+                  if (an && bn) {
+                    const d = parseInt(ap[i], 10) - parseInt(bp[i], 10);
+                    if (d) return d > 0 ? 1 : -1;
+                  } else if (an) return -1;
+                  else if (bn) return 1;
+                  else if (ap[i] !== bp[i]) return ap[i] > bp[i] ? 1 : -1;
+                }
+                return 0;
+              };
+              const a = parse(process.env.CURRENT_TAG), b = parse(process.env.RELEASE_VERSION_VAR);
+              if (!a || !b) process.exit(2);
+              let d = 0;
+              for (let i = 0; i < 3; i++) { d = (a.nums[i]||0) - (b.nums[i]||0); if (d) break; }
+              if (!d) d = cmpPre(a.pre, b.pre);
+              process.exit(d > 0 ? 1 : 0);
             " 2>&1 >/dev/null)" || true
             if [[ -n "${node_stderr}" ]]; then
               echo "::error::Cannot compare npm ${NPM_TAG} (${current_tag}) with ${RELEASE_VERSION}: ${node_stderr}. Refusing to resume."
