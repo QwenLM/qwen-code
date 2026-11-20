@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createContext, useContext, useMemo, useRef } from 'react';
+import {
+  createContext,
+  useContext,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from 'react';
 import type { ReactNode } from 'react';
 import type { Message } from '../../adapters/types';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
@@ -20,12 +26,17 @@ import {
   useModRow,
   useOnScreen,
 } from './mod-rows';
+import {
+  ThinkingBodyComponentContext,
+  type ThinkingBodyProps,
+} from './ThinkingBody';
 
 const FirstOfReplyContext = createContext<
   ReadonlyMap<string, boolean> | undefined
 >(undefined);
 
-export function ModReplyRowsProvider({
+/** Draws the Mods' rewrites of this transcript's reply and thinking rows. */
+export function ModRowsProvider({
   messages,
   children,
 }: {
@@ -42,9 +53,51 @@ export function ModReplyRowsProvider({
       <AssistantMessageComponentContext.Provider
         value={asker ? ModAssistantMessage : undefined}
       >
-        {children}
+        <ThinkingBodyComponentContext.Provider
+          value={asker ? ModThinkingBody : undefined}
+        >
+          {children}
+        </ThinkingBodyComponentContext.Provider>
       </AssistantMessageComponentContext.Provider>
     </FirstOfReplyContext.Provider>
+  );
+}
+
+/**
+ * An expanded thought's body: once complete and on screen, a thought of the
+ * session's own model is asked for, and drawn with the text its hooks wrote.
+ */
+export function ModThinkingBody({
+  content,
+  isStreaming,
+  fromSubagent,
+  onRewritten,
+}: ThinkingBodyProps) {
+  const asker = useContext(ModRowAskerContext);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const text = content.trimEnd();
+  const row =
+    !fromSubagent && !isStreaming && text.trim()
+      ? { component: 'Thinking', props: { text } }
+      : undefined;
+  const answer = useModRow(
+    asker,
+    row,
+    useOnScreen(bodyRef, row !== undefined),
+  )?.['text'];
+  const rewrite =
+    typeof answer === 'string' && answer !== text ? answer : undefined;
+  useLayoutEffect(() => {
+    if (rewrite !== undefined) onRewritten?.();
+  }, [rewrite, onRewritten]);
+  return (
+    <div ref={bodyRef}>
+      <Markdown
+        content={rewrite ?? content}
+        source="thinking"
+        isStreaming={isStreaming}
+      />
+    </div>
   );
 }
 

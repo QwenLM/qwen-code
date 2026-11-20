@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { SelectionCopyMenu } from './SelectionCopyMenu';
+import { ThinkingBody } from './ThinkingBody';
 import { TurnSources } from '../sources/TurnSources';
 import {
   useWebShellCustomization,
@@ -435,6 +436,8 @@ interface ThinkingMessageProps {
   content: string;
   author?: DaemonMessageAuthor;
   isStreaming?: boolean;
+  /** A subagent's thought, drawn outside its tool card. */
+  fromSubagent?: boolean;
   timestamp?: number;
   isLocateFlashing?: boolean;
   generateContent?: SessionContentGenerator;
@@ -572,6 +575,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   content,
   author,
   isStreaming,
+  fromSubagent,
   timestamp,
   isLocateFlashing = false,
   generateContent,
@@ -581,6 +585,9 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   const documentMode = transcriptRenderMode === 'document';
   const documentExpanded = useTranscriptDocumentExpanded();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  // A thought a Mod rewrote needs no translate button.
+  const [rewritten, setRewritten] = useState(false);
+  const markRewritten = useCallback(() => setRewritten(true), []);
   const showThinking = documentMode ? documentExpanded : thinkingExpanded;
   const thinkingActive = isStreaming === true;
   const startTimeRef = useRef(timestamp ?? Date.now());
@@ -653,6 +660,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                 !documentMode &&
                 (language === 'zh-CN' || language === 'zh-TW') &&
                 !thinkingActive &&
+                !rewritten &&
                 generateContent !== undefined
               }
               generateContent={generateContent}
@@ -662,10 +670,11 @@ export const ThinkingMessage = memo(function ThinkingMessage({
               <div className={styles.thinkingExpandedClip}>
                 <div className={styles.thinkingExpandedInner}>
                   <div className={styles.thinkingExpandedWrap}>
-                    <Markdown
+                    <ThinkingBody
                       content={content}
-                      source="thinking"
                       isStreaming={isStreaming}
+                      fromSubagent={fromSubagent}
+                      onRewritten={markRewritten}
                     />
                   </div>
                 </div>

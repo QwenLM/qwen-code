@@ -46,6 +46,7 @@ import { findWorkflowTaskForTool } from '../../utils/workflowTasks';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { WorkflowExecutionView } from './WorkflowExecutionView';
 import { Markdown } from './Markdown';
+import { ThinkingBody } from './ThinkingBody';
 import { openSessionLink } from './session-link';
 import { ThinkingDoneIcon, ThinkingTranslateButton } from './AssistantMessage';
 import {
@@ -117,6 +118,7 @@ interface ToolGroupProps {
     content: string;
     isStreaming?: boolean;
     beforeToolCallId?: string;
+    parentToolCallId?: string;
   }>;
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
@@ -2013,16 +2015,21 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
 const ThoughtLine = memo(function ThoughtLine({
   content,
   isStreaming,
+  fromSubagent,
   generateContent,
 }: {
   content: string;
   isStreaming?: boolean;
+  fromSubagent: boolean;
   generateContent?: SessionContentGenerator;
 }) {
   const transcriptRenderMode = useTranscriptRenderMode();
   const documentMode = transcriptRenderMode === 'document';
   const documentExpanded = useTranscriptDocumentExpanded();
   const [expanded, setExpanded] = useState(false);
+  // A thought a Mod rewrote needs no translate button.
+  const [rewritten, setRewritten] = useState(false);
+  const markRewritten = useCallback(() => setRewritten(true), []);
   const showContent = documentMode ? documentExpanded : expanded;
   const handleToggle = useCallback(() => {
     if (!documentMode) setExpanded((value) => !value);
@@ -2033,16 +2040,19 @@ const ThoughtLine = memo(function ThoughtLine({
         isStreaming={isStreaming}
         expanded={showContent}
         documentMode={documentMode}
-        translateContent={documentMode || isStreaming ? undefined : content}
+        translateContent={
+          documentMode || isStreaming || rewritten ? undefined : content
+        }
         generateContent={generateContent}
         onToggle={handleToggle}
       />
       {showContent && (
         <div className={styles.chatSummaryThoughtContent}>
-          <Markdown
+          <ThinkingBody
             content={content}
-            source="thinking"
             isStreaming={isStreaming}
+            fromSubagent={fromSubagent}
+            onRewritten={markRewritten}
           />
         </div>
       )}
@@ -2309,6 +2319,9 @@ export const ToolGroup = memo(function ToolGroup({
                             key={`thought-${tool.callId}-${index}`}
                             content={thought.content}
                             isStreaming={thought.isStreaming}
+                            fromSubagent={
+                              thought.parentToolCallId !== undefined
+                            }
                             generateContent={generateContent}
                           />
                         ))}
@@ -2336,6 +2349,9 @@ export const ToolGroup = memo(function ToolGroup({
                                     key={`thought-${agent.callId}-${index}`}
                                     content={thought.content}
                                     isStreaming={thought.isStreaming}
+                                    fromSubagent={
+                                      thought.parentToolCallId !== undefined
+                                    }
                                     generateContent={generateContent}
                                   />
                                 )),
@@ -2367,6 +2383,7 @@ export const ToolGroup = memo(function ToolGroup({
                       key={`thought-trailing-${index}`}
                       content={thought.content}
                       isStreaming={thought.isStreaming}
+                      fromSubagent={thought.parentToolCallId !== undefined}
                       generateContent={generateContent}
                     />
                   ))}

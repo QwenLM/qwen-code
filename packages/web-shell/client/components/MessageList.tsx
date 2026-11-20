@@ -430,6 +430,7 @@ function mergeCompactToolGroups(
       content: string;
       isStreaming?: boolean;
       beforeToolCallId?: string;
+      parentToolCallId?: string;
     }> = [];
     const thoughtsAwaitingTool: Array<(typeof thoughts)[number]> = [];
     for (const item of run) {
@@ -437,6 +438,9 @@ function mergeCompactToolGroups(
         const thought = {
           content: item.content,
           ...(item.isStreaming === true ? { isStreaming: true } : {}),
+          ...(item.parentToolCallId
+            ? { parentToolCallId: item.parentToolCallId }
+            : {}),
         };
         thoughts.push(thought);
         thoughtsAwaitingTool.push(thought);

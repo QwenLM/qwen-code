@@ -195,6 +195,8 @@ export interface DaemonThinkingMessage extends DaemonMessageMeta {
   role: 'thinking';
   content: string;
   isStreaming?: boolean;
+  /** Identifies a subagent's thought rendered without its parent tool card. */
+  parentToolCallId?: string;
 }
 
 export interface DaemonToolGroupMessage extends DaemonMessageMeta {
@@ -213,6 +215,7 @@ export interface DaemonToolGroupMessage extends DaemonMessageMeta {
     content: string;
     isStreaming?: boolean;
     beforeToolCallId?: string;
+    parentToolCallId?: string;
   }>;
 }
 

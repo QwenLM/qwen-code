@@ -22,7 +22,7 @@ import {
 import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
-import { ModReplyRowsProvider } from './messages/ModAssistantMessage';
+import { ModRowsProvider } from './messages/ModAssistantMessage';
 import { ModRowAsker, ModRowAskerContext } from './messages/mod-rows';
 
 const virtualizerTestState = vi.hoisted(() => ({
@@ -105,6 +105,12 @@ vi.mock('./MessageItem', async () => {
             message.role === 'tool_group'
               ? message.thoughts
                   ?.map((thought) => String(Boolean(thought.isStreaming)))
+                  .join('|')
+              : undefined,
+          'data-thought-parents':
+            message.role === 'tool_group'
+              ? message.thoughts
+                  ?.map((thought) => thought.parentToolCallId ?? '')
                   .join('|')
               : undefined,
         },
@@ -1129,13 +1135,13 @@ describe('MessageList — turn collapse (DOM)', () => {
         root.render(
           <I18nProvider language="en">
             <ModRowAskerContext.Provider value={asker}>
-              <ModReplyRowsProvider messages={messages}>
+              <ModRowsProvider messages={messages}>
                 <MessageList
                   key="session:live"
                   messages={messages}
                   pendingApproval={null}
                 />
-              </ModReplyRowsProvider>
+              </ModRowsProvider>
             </ModRowAskerContext.Provider>
           </I18nProvider>,
         );
@@ -5830,6 +5836,30 @@ describe('MessageList — turn collapse (DOM)', () => {
       expect(virtualizerTestState.getItemKeys.at(-1)).toBe(getItemKey);
     },
   );
+
+  it("folds a subagent's thought into a compact group with its parent", () => {
+    const thought = (id: string, parentToolCallId?: string): Message => ({
+      id,
+      role: 'thinking',
+      content: id,
+      timestamp: 1_001,
+      ...(parentToolCallId ? { parentToolCallId } : {}),
+    });
+    const container = mount(
+      [
+        userMsg('u1'),
+        thought('own'),
+        thought('nested', 'agent-1'),
+        toolMsg('g1'),
+      ],
+      undefined,
+      { isResponding: false, compactMode: true },
+    );
+
+    const summaryRow = container.querySelector('[data-thought-content]');
+    expect(summaryRow?.getAttribute('data-thought-content')).toBe('own|nested');
+    expect(summaryRow?.getAttribute('data-thought-parents')).toBe('|agent-1');
+  });
 
   it('keeps the compact thinking tail on the streamed-tail patch path while idle', () => {
     const toolGroup = toolMsg('g1');

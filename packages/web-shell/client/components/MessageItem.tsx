@@ -265,6 +265,7 @@ export const MessageItem = memo(function MessageItem({
             content={message.content}
             author={message.author}
             isStreaming={message.isStreaming}
+            fromSubagent={message.parentToolCallId !== undefined}
             timestamp={message.timestamp}
             isLocateFlashing={isLocateFlashing}
             generateContent={generateContent}

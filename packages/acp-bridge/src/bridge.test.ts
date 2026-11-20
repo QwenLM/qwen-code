@@ -1248,7 +1248,7 @@ describe('createAcpSessionBridge', () => {
       ).toEqual({
         'qwen.goalProposals': true,
         'qwen.mcpAppHost': true,
-        'qwen.modRows': ['AssistantMessage'],
+        'qwen.modRows': ['AssistantMessage', 'Thinking'],
       });
 
       // No snapshot has arrived yet, so the session is "unknown": busy rather

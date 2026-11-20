@@ -142,8 +142,9 @@ and `isInteractive: false`, as in a headless run. Every ACP session raises
 each prompt that runs `UserPromptSubmit`. `$.model.complete`, `$.store`, the
 `$.session` reads, `$.clock` and `$.turn.abort` work as in the terminal.
 
-A Web Shell session raises `ui.render` for the [reply rows](#reply-rows) the
-Web Shell shows; no ACP session raises it for other sites, nor
+A Web Shell session raises `ui.render` for the [reply rows](#reply-rows) and
+[thinking rows](#thinking-rows) the Web Shell shows; no ACP session raises it
+for other sites, nor
 `prompt.submit`, `tool.call` or `tool.check` yet, so hooks on them are skipped
 with the diagnostic described in
 [Middleware and recovery](#middleware-and-recovery). `$.prompt.submit` drops its prompt, and
@@ -163,24 +164,24 @@ does not.
 
 ## Supported subset
 
-| Surface    | Behavior                                                                                                                                                                                                               |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files                                       |
-| Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                                                          |
-| Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                                                  |
-| Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                                                           |
-| Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                                 |
-| Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                                                              |
-| API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                                                            |
-| Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                                                           |
-| Store      | `$.store` keeps each plugin's JSON values between sessions, described in [The store](#the-store)                                                                                                                       |
-| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and those a Mod submits, described in [Turn events](#turn-events)                                                                    |
-| Model      | `$.model.complete` runs one completion on the session's client, described in [Model calls](#model-calls)                                                                                                               |
-| Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                                         |
-| Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input                                |
-| Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                                               |
-| Drawing    | `ui.render` draws the [band above the prompt](#the-band-above-the-prompt) and rewrites [reply rows](#reply-rows) and [thinking rows](#thinking-rows) in the Ink and OpenTUI terminals, and reply rows in the Web Shell |
-| Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                                                |
+| Surface    | Behavior                                                                                                                                                                                                |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files                        |
+| Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                                           |
+| Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                                   |
+| Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                                            |
+| Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                  |
+| Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                                               |
+| API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                                             |
+| Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                                            |
+| Store      | `$.store` keeps each plugin's JSON values between sessions, described in [The store](#the-store)                                                                                                        |
+| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and those a Mod submits, described in [Turn events](#turn-events)                                                     |
+| Model      | `$.model.complete` runs one completion on the session's client, described in [Model calls](#model-calls)                                                                                                |
+| Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                          |
+| Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input                 |
+| Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                                |
+| Drawing    | `ui.render` draws the [band above the prompt](#the-band-above-the-prompt) and rewrites [reply rows](#reply-rows) and [thinking rows](#thinking-rows) in the Ink and OpenTUI terminals and the Web Shell |
+| Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
 Runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
@@ -1219,11 +1220,8 @@ buttons copy the original text. A row asked again after
 `$.ui.invalidate('ui.render')` draws its new answer once the Web Shell asks
 for it again, which today means after a reload.
 
-The Web Shell does not draw thinking rows yet. A hook that names the
-`Thinking` component loads in a Web Shell session without the "will not run"
-diagnostic, since the session raises `ui.render` for reply rows, and is not
-called. Turn Mods on from the Web Shell settings page; sessions started after
-the change load them, though the page asks for a restart as the terminals do.
+Turn Mods on from the Web Shell settings page; sessions started after the
+change load them, though the page asks for a restart as the terminals do.
 
 ## Thinking rows
 
@@ -1267,6 +1265,31 @@ The host raises a site only when some hook may hear it: a hook that names a
 `component` in its matcher hears only the sites it names, and `ui.invalidate`
 re-runs only the sites the calling Mod may hear. A hook with no `component`
 matcher hears every site, including `Thinking`.
+
+### Thinking rows in the Web Shell
+
+The Web Shell offers the same site for each thought of the model, whether the
+thought is a row of its own or a line folded into a tool summary. Click a
+thought to expand it: the Web Shell asks the session's Mods for it once it is
+complete, expanded and on screen, so a thought that stays collapsed costs no
+hook run. A subagent's thoughts are not offered. A hook receives:
+
+```js
+{
+  surface: 'desktop',
+  component: 'Thinking',
+  requestId: '7a1e…', // a digest of the thought's props
+  props: { text: 'Check how the worker queues dispatches first.' },
+}
+```
+
+As with [reply rows in the Web Shell](#in-the-web-shell), the same text is the
+same row: expanding a thought again, a reload or a second tab draws the first
+answer without running the hooks again, for as long as the session stays open.
+The collapsed line keeps the original text. Once the Web Shell draws a Mod's
+rewrite of a thought, it hides the translate button beside that thought, which
+would translate the original. An exported transcript draws the original
+thoughts.
 
 ## TypeScript, JSX and relative imports
 

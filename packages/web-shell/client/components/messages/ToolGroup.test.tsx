@@ -3094,6 +3094,77 @@ describe('thinking rows in the compact summary', () => {
     expect(container.textContent).not.toContain('DUMPED CONTENT');
   });
 
+  it("asks for a folded thought once it is expanded, and never for a subagent's", async () => {
+    const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+    const { ModRowsProvider } = await import('./ModAssistantMessage');
+    const ask = vi.fn(async () => ({
+      status: 'answered' as const,
+      props: { text: '先读文件。' },
+    }));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <I18nProvider language="zh-CN">
+          <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+            <ModRowsProvider messages={[]}>
+              <ToolGroup
+                generateContent={vi.fn()}
+                tools={[
+                  makeTool({
+                    callId: 'tool-1',
+                    toolName: 'ReadFile',
+                    status: 'completed',
+                  }),
+                  makeTool({
+                    callId: 'tool-2',
+                    toolName: 'Glob',
+                    status: 'completed',
+                  }),
+                ]}
+                thoughts={[
+                  { content: 'Read the file.\n', beforeToolCallId: 'tool-1' },
+                  {
+                    content: 'Subagent plan',
+                    beforeToolCallId: 'tool-2',
+                    parentToolCallId: 'agent-1',
+                  },
+                ]}
+              />
+            </ModRowsProvider>
+          </ModRowAskerContext.Provider>
+        </I18nProvider>,
+      ),
+    );
+
+    const translateButtons = () =>
+      container.querySelectorAll('button[title="翻译"]').length;
+    act(() => container.querySelector('button')?.click());
+    expect(ask).not.toHaveBeenCalled();
+    expect(translateButtons()).toBe(2);
+    // jsdom has no IntersectionObserver, so a mounted body counts as shown.
+    await act(async () => {
+      for (const header of container.querySelectorAll(
+        '[data-testid="compact-thinking-summary"]',
+      )) {
+        (header as HTMLElement).click();
+      }
+    });
+    expect(ask).toHaveBeenCalledOnce();
+    expect(ask).toHaveBeenCalledWith({
+      component: 'Thinking',
+      props: { text: 'Read the file.' },
+    });
+    const text = container.textContent ?? '';
+    expect(text).toContain('先读文件。');
+    expect(text).not.toContain('Read the file.');
+    expect(text).toContain('Subagent plan');
+    // Only the rewritten thought drops its translate button.
+    expect(translateButtons()).toBe(1);
+  });
+
   it('renders thoughts interleaved with their tools in original order', () => {
     const container = renderToolGroup(
       [
