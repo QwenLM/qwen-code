@@ -402,6 +402,86 @@ test('mobile vertical keys follow soft-wrapped lines like the native arrows', as
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
+test('mobile up-move to a wrapped line end keeps the emoji whole', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const draft = '😀' + 'a'.repeat(60);
+  await textarea.fill(draft);
+  await textarea.evaluate((el) => el.setSelectionRange(6, 6));
+  await page.locator('[data-web-shell-mobile-caret-up]').tap();
+  expect(
+    await textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart),
+  ).toBe(2);
+  await page.locator('[data-web-shell-mobile-insert-slash]').tap();
+  const value = await textarea.evaluate(
+    (el) => (el as HTMLTextAreaElement).value,
+  );
+  expect(value).toBe('😀/' + 'a'.repeat(60));
+  expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(value)).toBe(false);
+  expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value)).toBe(false);
+  // Native parity for the same up-move.
+  await textarea.fill(draft);
+  await textarea.evaluate((el) => el.setSelectionRange(6, 6));
+  await textarea.focus();
+  await page.keyboard.press('ArrowUp');
+  expect(
+    await textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart),
+  ).toBe(2);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile down after a horizontal move does not restore the old column', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('abc\ndef');
+  await textarea.evaluate((el) => el.setSelectionRange(1, 1));
+  await page.locator('[data-web-shell-mobile-caret-right]').tap();
+  expect(
+    await textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart),
+  ).toBe(2);
+  await page.locator('[data-web-shell-mobile-caret-down]').tap();
+  expect(
+    await textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart),
+  ).toBe(6);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile keys stay responsive on a 50k draft without full-draft measurement', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('a'.repeat(50000));
+  await textarea.evaluate((el) => el.setSelectionRange(0, 0));
+  const timeClick = async (hook: string) =>
+    page.evaluate((selector) => {
+      const button = document.querySelector(selector) as HTMLButtonElement;
+      const t0 = performance.now();
+      button.click();
+      return performance.now() - t0;
+    }, hook);
+  expect(await timeClick('[data-web-shell-mobile-caret-right]')).toBeLessThan(
+    200,
+  );
+  expect(
+    await textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart),
+  ).toBe(1);
+  expect(await timeClick('[data-web-shell-mobile-caret-up]')).toBeLessThan(200);
+  // Cached-mirror repeat is cheaper still.
+  expect(await timeClick('[data-web-shell-mobile-caret-up]')).toBeLessThan(200);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
 test('mobile vertical run holds the preferred column through short lines', async ({
   page,
 }, testInfo) => {

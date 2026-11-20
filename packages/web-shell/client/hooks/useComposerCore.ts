@@ -85,7 +85,8 @@ import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
 import {
   caretGraphemeColumn,
   logicalLineStarts,
-  measureVisualLineStarts,
+  lineContentEnd,
+  visualLineStartsAround,
   nextGraphemeBoundary,
   offsetAtGraphemeColumn,
   lineIndexAt,
@@ -1088,8 +1089,7 @@ export function computeCaretTarget(
   if (target < 0) return 0;
   if (target >= lineStarts.length) return text.length;
   const targetStart = lineStarts[target];
-  const targetEnd =
-    target + 1 < lineStarts.length ? lineStarts[target + 1] - 1 : text.length;
+  const targetEnd = lineContentEnd(text, lineStarts, target);
   return offsetAtGraphemeColumn(text, targetStart, targetEnd, column);
 }
 
@@ -5085,10 +5085,20 @@ export function useComposerCore(
       }
       const start = el.selectionStart ?? text.length;
       const end = el.selectionEnd ?? start;
-      let lineStarts = measureVisualLineStarts(el, text);
-      if (lineStarts.length === 1 && text.includes('\n')) {
-        lineStarts = logicalLineStarts(text);
+      if (key === 'right') {
+        // Horizontal moves never touch line measurement: stepping one
+        // grapheme needs no layout, even on a 50k-char draft.
+        const target = computeCaretTarget(text, start, end, 'right');
+        programmaticSelectionRef.current = [target, target];
+        el.focus();
+        el.setSelectionRange(target, target);
+        revealCaret(el, text, target);
+        return;
       }
+      // Up/down: only the visual lines around the caret are measured, and
+      // the preferred column is written here alone — a horizontal or slash
+      // move clears it above and must not write the pre-move column back.
+      const lineStarts = visualLineStartsAround(el, text, end);
       const column =
         verticalColumnRef.current ?? caretGraphemeColumn(text, end, lineStarts);
       const target = computeCaretTarget(

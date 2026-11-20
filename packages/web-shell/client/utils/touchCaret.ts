@@ -73,6 +73,21 @@ export function lineIndexAt(lineStarts: number[], caret: number): number {
   return index;
 }
 
+/**
+ * Content end of a displayed line. An explicit newline is skipped, but a
+ * soft-wrap boundary has no separator to skip: subtracting one there would
+ * chop the final grapheme of the wrapped line (splitting a surrogate pair).
+ */
+export function lineContentEnd(
+  text: string,
+  lineStarts: number[],
+  index: number,
+): number {
+  if (index + 1 >= lineStarts.length) return text.length;
+  const next = lineStarts[index + 1];
+  return text[next - 1] === '\n' ? next - 1 : next;
+}
+
 /** Grapheme column of caret within its line. */
 export function caretGraphemeColumn(
   text: string,
@@ -81,8 +96,7 @@ export function caretGraphemeColumn(
 ): number {
   const index = lineIndexAt(lineStarts, caret);
   const lineStart = lineStarts[index];
-  const lineEnd =
-    index + 1 < lineStarts.length ? lineStarts[index + 1] - 1 : text.length;
+  const lineEnd = lineContentEnd(text, lineStarts, index);
   const boundaries = graphemeBoundaries(text.slice(lineStart, lineEnd));
   const column = caret - lineStart;
   let count = 0;
@@ -105,30 +119,27 @@ export function offsetAtGraphemeColumn(
   return lineStart + boundaries[clamped];
 }
 
-interface VisualLineCache {
+interface MirrorCache {
   text: string;
   width: number;
-  starts: number[];
+  mirror: HTMLDivElement;
+  node: Text;
 }
 
-const visualLineCache = new WeakMap<HTMLTextAreaElement, VisualLineCache>();
+const mirrorCache = new WeakMap<HTMLTextAreaElement, MirrorCache>();
 
 /**
- * Displayed (soft-wrapped) line start offsets, measured with a mirror that
- * replicates the textarea's wrapping styles. Falls back to logical lines when
- * layout is unavailable (jsdom) so unit tests exercise the pure math.
+ * Build (or reuse) a mirror replicating the textarea's wrapping styles. The
+ * mirror is cached per text+width, so a vertical run pays one layout, not
+ * one per key. Measuring line tops never enumerates the whole draft —
+ * `topAt` answers in O(log n) binary searches around the caret instead of a
+ * per-grapheme rect loop, which would block the key handler on long drafts.
  */
-export function measureVisualLineStarts(
-  el: HTMLTextAreaElement,
-  text: string,
-): number[] {
+function getMirror(el: HTMLTextAreaElement, text: string): MirrorCache | null {
   const width = el.clientWidth;
-  const cached = visualLineCache.get(el);
-  if (cached && cached.text === text && cached.width === width) {
-    return cached.starts;
-  }
-  const fallback = logicalLineStarts(text);
-  if (typeof document === 'undefined' || width <= 0) return fallback;
+  if (typeof document === 'undefined' || width <= 0) return null;
+  const cached = mirrorCache.get(el);
+  if (cached && cached.text === text && cached.width === width) return cached;
   const style = window.getComputedStyle(el);
   const mirror = document.createElement('div');
   mirror.setAttribute('aria-hidden', 'true');
@@ -161,32 +172,135 @@ export function measureVisualLineStarts(
   mirror.style.borderColor = 'transparent';
   // A trailing '\n' only renders its empty line box when something follows
   // it; the zero-width sentinel makes the last visual line measurable.
-  const mirrorText = text.endsWith('\n') ? `${text}\u200b` : text;
-  const node = document.createTextNode(mirrorText);
+  const node = document.createTextNode(
+    text.endsWith('\n') ? `${text}\u200b` : text,
+  );
   mirror.appendChild(node);
   document.body.appendChild(mirror);
-  const starts = [0];
-  let lastTop = Number.NaN;
+  const entry: MirrorCache = { text, width, mirror, node };
+  mirrorCache.set(el, entry);
+  return entry;
+}
+
+/** Layout top of the displayed line containing offset. */
+function topAt(cache: MirrorCache, text: string, offset: number): number {
+  if (cache.node.length === 0) return 0;
+  let o = offset;
+  if (o >= text.length) o = cache.node.length - 1;
+  else if (text[o] === '\n' && o > 0) o = o - 1;
+  // Character rect, not a collapsed caret: a collapsed range at a wrap
+  // boundary reports the previous line's end (upstream affinity).
   const range = document.createRange();
-  // Per-grapheme character rects, not collapsed carets: a collapsed range at
-  // a wrap boundary reports the previous line's end (upstream affinity),
-  // which would shift every detected line start one character late.
-  const boundaries = graphemeBoundaries(mirrorText);
-  for (let i = 0; i + 1 < boundaries.length; i += 1) {
-    range.setStart(node, boundaries[i]);
-    range.setEnd(node, boundaries[i + 1]);
-    const rect = range.getBoundingClientRect();
-    if (Number.isNaN(lastTop)) {
-      lastTop = rect.top;
-    } else if (rect.top > lastTop + 1) {
-      starts.push(boundaries[i]);
-      lastTop = rect.top;
-    }
-  }
+  range.setStart(cache.node, o);
+  range.setEnd(cache.node, Math.min(o + 1, cache.node.length));
+  const top = range.getBoundingClientRect().top;
   range.detach();
-  mirror.remove();
-  visualLineCache.set(el, { text, width, starts });
-  return starts;
+  return top;
+}
+
+/** First offset in [lo, hi] whose line top >= target (tops are monotonic). */
+function firstAtLeast(
+  cache: MirrorCache,
+  text: string,
+  lo: number,
+  hi: number,
+  target: number,
+): number {
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (topAt(cache, text, mid) >= target - 0.5) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+
+/** First offset in [lo, hi] whose line top > target. */
+function firstAbove(
+  cache: MirrorCache,
+  text: string,
+  lo: number,
+  hi: number,
+  target: number,
+): number {
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (topAt(cache, text, mid) > target + 0.5) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+
+/**
+ * Displayed line starts around the caret: previous visual line (if any),
+ * current visual line and next visual line. Only these boundaries are
+ * measured — the up/down keys move one line per press, so the array need
+ * not enumerate the whole draft. Falls back to all logical lines when
+ * layout is unavailable (jsdom).
+ */
+export function visualLineStartsAround(
+  el: HTMLTextAreaElement,
+  text: string,
+  caret: number,
+): number[] {
+  const logicalStarts = logicalLineStarts(text);
+  const cache = getMirror(el, text);
+  if (!cache) return logicalStarts;
+  const index = lineIndexAt(logicalStarts, caret);
+  const logicalStart = logicalStarts[index];
+  const logicalEnd =
+    index + 1 < logicalStarts.length
+      ? logicalStarts[index + 1] - 1
+      : text.length;
+  const top = topAt(cache, text, caret);
+  const currentStart = firstAtLeast(cache, text, logicalStart, caret, top);
+  const starts: number[] = [];
+  if (currentStart > logicalStart) {
+    const prevTop = topAt(cache, text, currentStart - 1);
+    starts.push(
+      firstAtLeast(cache, text, logicalStart, currentStart - 1, prevTop),
+    );
+  } else if (index > 0) {
+    // The current visual line opens this logical line; the previous visual
+    // line is the last of the preceding logical line.
+    const prevTop = topAt(cache, text, logicalStarts[index] - 1);
+    starts.push(
+      firstAtLeast(
+        cache,
+        text,
+        logicalStarts[index - 1],
+        logicalStarts[index] - 1,
+        prevTop,
+      ),
+    );
+  }
+  starts.push(currentStart);
+  const lastTop = topAt(cache, text, logicalEnd);
+  if (top < lastTop - 0.5) {
+    const nextStart = firstAbove(cache, text, caret + 1, logicalEnd, top);
+    starts.push(nextStart);
+    // The next visual line also needs its own end boundary: without it the
+    // target-line clamp would read to the end of the whole document.
+    const nextTop = topAt(cache, text, nextStart);
+    const nextEnd =
+      nextTop < lastTop - 0.5
+        ? firstAbove(cache, text, nextStart + 1, logicalEnd, nextTop)
+        : logicalEnd;
+    if (nextEnd > nextStart) starts.push(nextEnd);
+  } else if (index + 1 < logicalStarts.length) {
+    const nextStart = logicalStarts[index + 1];
+    starts.push(nextStart);
+    const nextEnd =
+      index + 2 < logicalStarts.length
+        ? logicalStarts[index + 2] - 1
+        : text.length;
+    if (nextEnd > nextStart) starts.push(nextEnd);
+  } else if (caret < text.length) {
+    // The document-end sentinel bounds the current line, but it must not
+    // become a pseudo line start when the caret sits on it — otherwise the
+    // caret reads as column 0 of that phantom line and up/down mis-step.
+    starts.push(text.length);
+  }
+  return [...new Set(starts)].sort((a, b) => a - b);
 }
 
 /** Scroll the caret's displayed line into the textarea's scrollport. */
@@ -195,12 +309,18 @@ export function revealCaret(
   text: string,
   caret: number,
 ): void {
-  const starts = measureVisualLineStarts(el, text);
-  const index = lineIndexAt(starts, caret);
   const style = window.getComputedStyle(el);
   const lineHeight =
     parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.6;
-  const caretTop = (parseFloat(style.paddingTop) || 0) + index * lineHeight;
+  let caretTop: number;
+  const cache = getMirror(el, text);
+  if (cache) {
+    caretTop = topAt(cache, text, caret) - topAt(cache, text, 0);
+  } else {
+    caretTop =
+      (parseFloat(style.paddingTop) || 0) +
+      lineIndexAt(logicalLineStarts(text), caret) * lineHeight;
+  }
   if (caretTop < el.scrollTop) {
     el.scrollTop = caretTop;
   } else if (caretTop + lineHeight > el.scrollTop + el.clientHeight) {

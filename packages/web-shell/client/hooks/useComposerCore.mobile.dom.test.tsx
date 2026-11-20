@@ -1505,6 +1505,17 @@ describe('touch editing-row keys', () => {
     expect(textarea().selectionStart).toBe(2);
   });
 
+  it('recomputes the column after a horizontal move instead of writing it back', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('abc\ndef');
+    textarea().setSelectionRange(1, 1);
+    act(() => latest!.pressEditingKey('right'));
+    expect(textarea().selectionStart).toBe(2);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(6);
+  });
+
   it('resets the held column when the user jumps the selection', async () => {
     mockTouchDevice();
     await mount();

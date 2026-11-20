@@ -70,6 +70,20 @@ describe('touch editing-key caret targets', () => {
     expect(computeCaretTarget('aaaaaa', 1, 1, 'down', [0, 3])).toBe(4);
     expect(computeCaretTarget('aaaaaa', 4, 4, 'down', [0, 3])).toBe(6);
   });
+
+  it('clamps up-moves to the whole last grapheme of a wrapped line', () => {
+    const text = '😀' + 'a'.repeat(60);
+    // Soft-wrap after the emoji: the line end is the wrap boundary itself,
+    // not boundary-1, or the emoji's last surrogate unit would be chopped.
+    const caret = computeCaretTarget(text, 6, 6, 'up', [0, 2]);
+    expect(caret).toBe(2);
+    const next = text.slice(0, caret) + '/' + text.slice(caret);
+    expect(next.startsWith('😀/')).toBe(true);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(next)).toBe(false);
+    expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(next)).toBe(false);
+    // An explicit newline keeps the historical skip-the-'\n' behavior.
+    expect(computeCaretTarget('😀\naa', 4, 4, 'up')).toBe(2);
+  });
 });
 
 describe('follow-up completion helpers', () => {
