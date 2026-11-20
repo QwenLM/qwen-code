@@ -2400,6 +2400,14 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'attachment.readFailed': 'Failed to read attachment.',
   'attachment.loadingFile': 'Loading file...',
   'attachment.loadingPreview': 'Loading preview...',
+  'pdf.previousPage': 'Previous page',
+  'pdf.nextPage': 'Next page',
+  'pdf.openFull': 'Open full PDF',
+  'pdf.page': (v) => `PDF page ${v?.page ?? 1}`,
+  'pdf.fileChanged': 'File changed while loading. Reopen the preview to retry.',
+  'pdf.workerFailed': 'Could not start the PDF preview.',
+  'pdf.externalFontMap':
+    'This PDF needs a font map. Open the full PDF to view it.',
   'sideTask.creating': 'Creating side task…',
   'sideTask.createFailed': 'Failed to create side task',
   'sideTask.commandsLoadingTimedOut':
