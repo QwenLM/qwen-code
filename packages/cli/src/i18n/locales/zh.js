@@ -1708,6 +1708,8 @@ export default {
     '由于压缩摘要被截断，无法压缩聊天历史。',
   'Could not compress chat history due to an API error.':
     '由于 API 错误，无法压缩聊天历史。',
+  'Could not compress chat history because it is too large for the context window.':
+    '聊天历史过大，超出上下文窗口，无法压缩。',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1917,6 +1919,18 @@ export default {
     '当前语音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 设置语音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '当前视觉模型：{{visionModel}}\n使用 "/model --vision <model-id>" 设置视觉桥接模型。',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    '设置视觉桥接超时（秒，配合 --vision 使用）',
+  '--timeout can only be used with --vision.':
+    '--timeout 只能与 --vision 一起使用。',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    '无效的 --timeout 值 "{{value}}"。请使用正整数秒数，例如 60、60s 或 90000ms。',
+  'Vision bridge timeout: {{timeout}}': '视觉桥接超时：{{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    '已保存视觉桥接超时 {{timeout}}{{scope}}。更高优先级的设置使实际超时为 {{effectiveTimeout}}。',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    '视觉桥接超时：{{timeout}}\n使用 "/model --vision --timeout <seconds>" 修改。',
+  '{{timeout}} (default)': '{{timeout}}（默认）',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     '当前图像模型：{{imageModel}}\n使用 "/model --image <model-id>" 设置图像生成模型。',
   'Compaction model override cleared': '压缩模型覆盖已清除',

@@ -7,10 +7,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
+  existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -303,13 +305,19 @@ export class ManagedGithubStateStore {
   readonly directory: string;
   readonly file: string;
 
-  constructor(name: string, cwd: string, baseUrl: string) {
-    // One directory per channel name per endpoint per workspace, beside the
-    // other channel state. Credentials never define identity. The lock
-    // serializes concurrent managed instances of this name + endpoint; it
-    // does not cross-lock the Legacy GitHub channel, so the operator must run
-    // exactly one consumer per bot identity.
-    const key = createHash('sha256')
+  constructor(name: string, cwd: string, baseUrl: string, identityKey = '') {
+    // The lock directory is keyed by the configured entry (channel name +
+    // endpoint baseUrl) per workspace — NOT by destination — so two instances
+    // of the same name + endpoint contend for one connection lock even when
+    // they target different control-plane destinations; a per-destination lock
+    // would let both run concurrently and duplicate inbound processing. The
+    // ledger FILE beneath that directory is keyed by the full registration
+    // identity (control plane + tenant + channel + actor + workspace +
+    // cwd-relative), so a pending comment staged under one registration is
+    // never loaded or replayed under another. Credentials never define
+    // identity. The lock does not cross-lock the Legacy GitHub channel, so the
+    // operator must run exactly one consumer per bot identity.
+    const entryKey = createHash('sha256')
       .update(`${name}\u0000${baseUrl}`)
       .digest('hex')
       .slice(0, 16);
@@ -317,21 +325,265 @@ export class ManagedGithubStateStore {
       getGlobalQwenDir(),
       'channels',
       getWorkspaceScopeDirName(cwd),
-      `github-${key}`,
+      `github-${entryKey}`,
     );
-    this.file = join(this.directory, 'managed-state.json');
+    const ledgerKey = createHash('sha256')
+      .update(identityKey)
+      .digest('hex')
+      .slice(0, 16);
+    this.file = join(this.directory, `managed-state-${ledgerKey}.json`);
   }
 
   load(): ManagedGithubState | undefined {
+    // Name the file and keep the cause, and keep an I/O failure distinguishable
+    // from a corrupt state: the directory now holds a ledger per registration,
+    // so the operator must know WHICH file is unreadable (e.g. EISDIR) versus
+    // merely invalid, while a sibling registration's healthy ledger sits beside
+    // it. Mirrors the WeCom / DingTalk stores this change parallels.
+    let raw: string;
     try {
-      const value: unknown = JSON.parse(readFileSync(this.file, 'utf8'));
-      if (!validManagedGithubState(value)) throw new Error('invalid state');
-      return value;
+      raw = readFileSync(this.file, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw new Error(
-        'Managed GitHub state is unreadable or invalid; restore it before restarting.',
+        `Managed GitHub state at ${this.file} could not be read; restore it before restarting.`,
+        { cause: error },
       );
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(
+        `Managed GitHub state at ${this.file} is not valid JSON; restore it before restarting.`,
+        { cause: error },
+      );
+    }
+    if (!validManagedGithubState(value)) {
+      throw new Error(
+        `Managed GitHub state at ${this.file} is invalid; restore it before restarting.`,
+      );
+    }
+    return value;
+  }
+
+  /**
+   * The pre-registration-identity ledger this entry used before the upgrade.
+   * A sibling `managed-state.json` is stranded by the upgrade: its staged-but-
+   * unadmitted claims were never seen by the control plane (only `submitInbound`
+   * makes a claim visible), and the fresh ledger's null cursor starts the poll
+   * window at connect time, so the old notification is not re-listed. Report
+   * the path and its pending / outbound counts so the drop is explicit, never
+   * silent. Detection is NOT gated on the identity-keyed ledger being absent: a
+   * rollback to the pre-upgrade build can stage fresh claims into
+   * `managed-state.json` after a keyed ledger already exists, and those must
+   * still be reported. The caller archives the file once the start succeeds
+   * (`archiveStrandedLegacy`). The legacy ledger is NOT adopted — adopting it
+   * would replay one registration's pending into another, the cross-ownership
+   * hazard the identity keying prevents.
+   *
+   * `readable` distinguishes a legacy whose contents could not be read or
+   * parsed (counts unknown, reported as 0 but flagged) from one that parsed to
+   * an empty ledger: an unreadable legacy certainly strands whatever it held,
+   * so the caller must not render it as a quiescent "nothing was lost".
+   */
+  strandedLegacyLedger():
+    | {
+        path: string;
+        pending: number;
+        outbound: number;
+        watchPending: number;
+        watchPendingKeys: string[];
+        readable: boolean;
+        watermark: string | null;
+      }
+    | undefined {
+    const legacyPath = join(this.directory, 'managed-state.json');
+    if (!existsSync(legacyPath)) return undefined;
+    let pending = 0;
+    let outbound = 0;
+    let watchPending = 0;
+    const watchPendingKeys: string[] = [];
+    let readable = true;
+    let watermark: string | null = null;
+    try {
+      const value = JSON.parse(readFileSync(legacyPath, 'utf8')) as {
+        pending?: unknown[];
+        outbound?: unknown[];
+        cursor?: { lastProcessedAt?: unknown };
+        watch?: { prs?: unknown };
+      } | null;
+      // A parseable non-ledger (`{}`, `[]`, `null`, or an object without the
+      // ledger's pending/outbound arrays) is not a quiescent empty ledger: it
+      // is an unrecognized file whose claims are unknown. Flag it unreadable so
+      // the notice reports a possible loss, never a loss-free "0 pending / 0
+      // outbound" all-clear (deferred item 7).
+      const isLedgerShape =
+        !!value &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        Array.isArray(value.pending) &&
+        Array.isArray(value.outbound);
+      if (!isLedgerShape) readable = false;
+      const pendingList = value?.pending;
+      const outboundList = value?.outbound;
+      pending = Array.isArray(pendingList) ? pendingList.length : 0;
+      // Only segments whose delivery status is UNKNOWN are a loss: a definitive
+      // receipt (accepted/rejected) proves the outcome, but an absent receipt —
+      // or one whose outcome is 'unknown' — does not, so both count toward the
+      // unknown-status clause (deferred item 9; an {outcome:'unknown'} receipt
+      // is not a known outcome).
+      outbound = Array.isArray(outboundList)
+        ? outboundList.filter((segment) => {
+            const receipt =
+              segment && typeof segment === 'object'
+                ? (segment as { receipt?: { outcome?: unknown } }).receipt
+                : undefined;
+            return !(
+              receipt &&
+              (receipt.outcome === 'accepted' || receipt.outcome === 'rejected')
+            );
+          }).length
+        : 0;
+      // The legacy notification watermark: the fresh ledger's null cursor
+      // restarts the poll window at connect time, so unread notifications
+      // updated after this watermark while the bot was down are never listed.
+      // Surfacing it lets the notice name that skipped window even when the
+      // legacy staged no pending/outbound (R1-4).
+      const lastProcessedAt = value?.cursor?.lastProcessedAt;
+      watermark = typeof lastProcessedAt === 'string' ? lastProcessedAt : null;
+      // The legacy watch.prs queue holds detected-but-undelivered transitions
+      // (R3-1). The fresh ledger re-baselines watch.prs empty and does NOT
+      // adopt them — injecting one registration's detected events under
+      // another is the cross-ownership replay the keying prevents — so they
+      // are stranded work. Count the PR entries whose queue is non-empty so
+      // the notice names that loss instead of a quiescent "0 pending", and
+      // collect their keys so the caller can tell whether the loaded ledger
+      // holds a baseline to re-detect them against (R5). The durable episode
+      // counters are carried separately, entry-scoped, by entryWatchEpisodes().
+      const rawPrs = value?.watch?.prs;
+      if (!!rawPrs && typeof rawPrs === 'object' && !Array.isArray(rawPrs)) {
+        for (const [key, entry] of Object.entries(rawPrs)) {
+          const queue = (entry as { pending?: unknown } | null)?.pending;
+          if (Array.isArray(queue) && queue.length > 0) {
+            watchPending += 1;
+            watchPendingKeys.push(key);
+          }
+        }
+      }
+    } catch {
+      // A corrupt or unreadable legacy still strands; flag it so the caller
+      // reports unknown counts and a possible loss, never a silent "empty".
+      readable = false;
+    }
+    return {
+      path: legacyPath,
+      pending,
+      outbound,
+      watchPending,
+      watchPendingKeys,
+      readable,
+      watermark,
+    };
+  }
+
+  /**
+   * The entry-scoped durable PR-watch episode counters, merged across every
+   * ledger this entry directory holds: the live legacy, each registration's
+   * identity-keyed ledger, and the `.stranded-*` archives (R3-1). The
+   * admission ledger is permanent and keyed without a registration
+   * discriminant, so the counters must outlive the legacy archive:
+   * registration A adopts them and archives the legacy, then registration B
+   * must still resume them rather than restart at 0 and re-derive an
+   * already-admitted input id (a silently deduped recurrence). Reading the
+   * archives — not just the live legacy — is what makes the carry survive the
+   * first start's rename. `Math.max` per key only errs toward a new id (the
+   * input id already binds tenant/channel), and values are sanitized to safe
+   * integers >= 1. A counter whose only home is a `watch.prs` baseline (its
+   * watermark was evicted) is carried too. This is the carry SOURCE, not the
+   * persisted state: it is returned uncapped, and the adapter merges it into the
+   * loaded ledger non-destructively under the validator's 1024 bound (R7-1) —
+   * capping here would discard recoverable counters before the adapter can
+   * place them. Best-effort: an unreadable or corrupt sibling is skipped, never
+   * a startup failure, but its path is returned in `skipped` so the caller can
+   * log that a counter source was unreadable rather than dropping it silently
+   * (deferred item 8). `episodes` is undefined when no ledger carries counters.
+   */
+  entryWatchEpisodes(): {
+    episodes: Record<string, number> | undefined;
+    skipped: string[];
+  } {
+    const skipped: string[] = [];
+    let names: string[];
+    try {
+      names = readdirSync(this.directory);
+    } catch {
+      return { episodes: undefined, skipped };
+    }
+    const merged: Record<string, number> = {};
+    for (const name of names) {
+      // The legacy ledger, the identity-keyed ledgers, and the legacy archives
+      // — never an in-flight <uuid>.tmp or the lock metadata.
+      if (!/^managed-state(-[0-9a-f]{16})?\.json(\.stranded-.+)?$/.test(name)) {
+        continue;
+      }
+      const filePath = join(this.directory, name);
+      let value: unknown;
+      try {
+        value = JSON.parse(readFileSync(filePath, 'utf8'));
+      } catch {
+        skipped.push(filePath);
+        continue;
+      }
+      const watch = (
+        value as { watch?: { episodes?: unknown; prs?: unknown } } | null
+      )?.watch;
+      const raw = watch?.episodes;
+      if (!!raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        for (const [key, entry] of Object.entries(raw)) {
+          if (Number.isSafeInteger(entry) && (entry as number) >= 1) {
+            merged[key] = Math.max(merged[key] ?? 0, entry as number);
+          }
+        }
+      }
+      // A counter whose only home is a prs baseline (its watermark was evicted
+      // by the live cap) is still durable; carry it too, or a rebind would
+      // restart it and re-derive an admitted id.
+      const rawPrs = watch?.prs;
+      if (!!rawPrs && typeof rawPrs === 'object' && !Array.isArray(rawPrs)) {
+        for (const [key, entry] of Object.entries(rawPrs)) {
+          const episode = (entry as { episode?: unknown } | null)?.episode;
+          if (Number.isSafeInteger(episode) && (episode as number) >= 1) {
+            merged[key] = Math.max(merged[key] ?? 0, episode as number);
+          }
+        }
+      }
+    }
+    if (Object.keys(merged).length === 0)
+      return { episodes: undefined, skipped };
+    return { episodes: merged, skipped };
+  }
+
+  /**
+   * Archive a reported legacy ledger so it is not re-announced on every later
+   * start (and a second registration of the entry is not told the first
+   * registration's claims were its own). Renaming — not deleting — keeps the
+   * stranded claims inspectable, and a rollback that stages a fresh
+   * `managed-state.json` is detected again on the next upgrade. This never
+   * adopts the claims into the keyed ledger. Returns the archived path, or
+   * undefined when there is nothing to archive or the rename fails (the file
+   * then stays and is reported again next start — degraded, never a startup
+   * failure).
+   */
+  archiveStrandedLegacy(): string | undefined {
+    const legacyPath = join(this.directory, 'managed-state.json');
+    if (!existsSync(legacyPath)) return undefined;
+    const archived = `${legacyPath}.stranded-${randomUUID()}`;
+    try {
+      renameSync(legacyPath, archived);
+      return archived;
+    } catch {
+      return undefined;
     }
   }
 

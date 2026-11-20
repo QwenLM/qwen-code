@@ -324,6 +324,9 @@ class Issue13181QueryBudgetTest {
     @Test
     void sessionListsAssemblePagesFromGroupedBatchQueries() {
         Fixture fixture = new Fixture();
+        fixture.ledger.reset();
+        assertThat(fixture.store.findLatestLifecycleOperations("tenant", List.of())).isEmpty();
+        assertThat(fixture.ledger.total()).isZero();
         String plain = "tenant-" + UUID.randomUUID();
         List<String> plainIds = new ArrayList<>();
         List<String> plainTurnIds = new ArrayList<>();
@@ -366,6 +369,8 @@ class Issue13181QueryBudgetTest {
                 + fixture.ledger.summary());
         // Page + active turns + message coverage.
         assertThat(fixture.ledger.total()).isEqualTo(3);
+        assertThat(fixture.ledger.count("ma_session.model_config_ciphertext")).isZero();
+        assertThat(fixture.ledger.count("ma_session.permission_rules_json")).isZero();
         // The batch turn read projects only the summary columns; the page
         // never holds a parsed prompt graph per row.
         assertThat(fixture.ledger.count("select * from ma_turn"))
@@ -399,7 +404,9 @@ class Issue13181QueryBudgetTest {
                 + fixture.ledger.summary());
         // Page + latest turns + environment events + lifecycle summary; unbound rows read no model metadata.
         assertThat(fixture.ledger.total()).isEqualTo(4);
-        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
+        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id",
+                "where o.tenant_id = ? and o.session_id in (", "and o.session_scope_key in (",
+                "!session_scope_key is null")).isEqualTo(1);
         // The latest-turn batch read projects only the summary columns.
         assertThat(fixture.ledger.count("turn_record.*")).isZero();
         assertThat(fixture.ledger.count("turn_record.session_id,"
@@ -625,7 +632,9 @@ class Issue13181QueryBudgetTest {
         // compression projection, missing-head and operation batches remain
         // constant, not per row.
         assertThat(fixture.ledger.total()).isEqualTo(13);
-        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
+        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id",
+                "where o.tenant_id = ? and o.session_id in (", "and o.session_scope_key in (",
+                "!session_scope_key is null")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
         assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
@@ -675,7 +684,9 @@ class Issue13181QueryBudgetTest {
             assertThat(fixture.ledger.count("select session_id, revision from ma_session_record")).isEqualTo(1);
             assertThat(fixture.ledger.count("head_kind = 'managed_session'")).isEqualTo(1);
             assertThat(fixture.ledger.count("operation_kind = 'context_compression'")).isEqualTo(1);
-            assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
+            assertThat(fixture.ledger.count("row_number() over (partition by o.session_id",
+                    "where o.tenant_id = ? and o.session_id in (", "and o.session_scope_key in (",
+                    "!session_scope_key is null")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
             assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);

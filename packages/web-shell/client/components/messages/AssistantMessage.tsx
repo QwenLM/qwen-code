@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type RefObject,
 } from 'react';
 import {
   LightbulbIcon,
@@ -55,7 +56,7 @@ import styles from './AssistantMessage.module.css';
 import { HookStatistics } from './HookStatistics';
 import type { HookStatisticsTurn } from './hook-statistics-context';
 
-interface AssistantMessageProps {
+export interface AssistantMessageProps {
   hookTurn?: HookStatisticsTurn;
   content: string;
   author?: DaemonMessageAuthor;
@@ -77,6 +78,8 @@ interface AssistantMessageProps {
   customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
   turnSources?: readonly WebShellSource[];
   onSourceOpen?: (source: WebShellSource) => void;
+  displayContent?: string;
+  copySource?: RefObject<HTMLDivElement | null>;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -97,6 +100,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   customFooterInfo,
   turnSources,
   onSourceOpen,
+  displayContent = content,
+  copySource,
 }: AssistantMessageProps) {
   const { t } = useI18n();
   const renderMode = useTranscriptRenderMode();
@@ -143,7 +148,7 @@ export const AssistantMessage = memo(function AssistantMessage({
     (format: 'text' | 'markdown') => {
       let value = content;
       if (format === 'text') {
-        const body = contentRef.current;
+        const body = (copySource ?? contentRef).current;
         if (!body) return;
         const range = body.ownerDocument.createRange();
         range.selectNodeContents(body);
@@ -154,7 +159,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         .then(format === 'text' ? flashCopied : flashMarkdownCopied)
         .catch(warnClipboardWriteFailure);
     },
-    [content, flashCopied, flashMarkdownCopied],
+    [content, copySource, flashCopied, flashMarkdownCopied],
   );
   // Clicking the lit icon clears the mark; clicking the other one switches it.
   const handleFeedback = useCallback(
@@ -243,11 +248,11 @@ export const AssistantMessage = memo(function AssistantMessage({
         >
           <SelectionCopyMenu
             className={styles.contentBody}
-            content={content}
+            content={displayContent}
             enabled={renderMode === 'interactive' && !isStreaming}
           >
             <Markdown
-              content={content}
+              content={displayContent}
               source="assistant"
               isStreaming={isStreaming}
             />
