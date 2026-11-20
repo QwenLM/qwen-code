@@ -1077,6 +1077,26 @@ describe('McpTransportPool', () => {
       removeMCPServerStatus('srv');
     });
 
+    it('does not certify a discarded pooled acquire failure as a deliberate teardown (issue #12160)', async () => {
+      // The catch that discards a failed acquire also calls
+      // `client.disconnect()`. Left at the default `deliberate: true` it
+      // mints the name-wide teardown marker, telling an abort repair that
+      // the owner stopped `srv` — and vetoing recovery for a live sibling
+      // connection registered under the same name.
+      const pool = mkPool();
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+      const mocked = mockMcpSuccess();
+      mocked.connect.mockRejectedValueOnce(new Error('spawn failed'));
+
+      await expect(acquire(pool, 'srv', cfg, 's1', r)).rejects.toThrow(
+        'spawn failed',
+      );
+
+      expect(isMCPServerTeardownIntent('srv')).toBe(false);
+      removeMCPServerStatus('srv');
+    });
+
     it('certifies a pooled eviction as a deliberate teardown before its transition fires (issue #12160)', async () => {
       // An abort repair reads the `DISCONNECTED` a deliberate teardown
       // produces and must not revive the server. The ordering that guarantees

@@ -763,7 +763,7 @@ export class PoolEntry {
    * `failed`.
    */
   async forceShutdown(
-    reason: 'drain_timer' | 'max_idle' | 'manual',
+    reason: 'drain_timer' | 'max_idle' | 'manual' | 'failed_acquire',
   ): Promise<void> {
     if (this.state === 'closed' || this.state === 'failed') return;
     // flip state to
@@ -882,12 +882,13 @@ export class PoolEntry {
       );
     }
     try {
-      // `silent_drop` is the one sweep nobody asked for: the transport was
-      // already dead when it ran, so the closing it performs must not be
-      // certified as the owner's intent — the abort repair may be the very
-      // party that needs to revive this server (issue #12160).
+      // `silent_drop` and `failed_acquire` are the two sweeps nobody asked
+      // for: one closes a transport that was already dead, the other
+      // discards an acquire that never became live. Neither is the owner's
+      // intent, and certifying either would veto recovery for a live sibling
+      // connection under the same name (issue #12160).
       await this.client.disconnect({
-        deliberate: reason !== 'silent_drop',
+        deliberate: reason !== 'silent_drop' && reason !== 'failed_acquire',
       });
     } catch (err) {
       // Disconnect failure is rare (usually a transport bug worth
