@@ -12,6 +12,7 @@ import type {
   GoalRecord,
   GoalStateCause,
 } from '@qwen-code/qwen-code-core';
+import { CompressionStatus } from '@qwen-code/qwen-code-core';
 import { collectSessionData } from './collect.js';
 import { toJson } from './formatters/json.js';
 import { toJsonl } from './formatters/jsonl.js';
@@ -279,6 +280,184 @@ describe('collectSessionData', () => {
 
     expect(data.metadata?.channel).toBe('web-shell');
     expect(data.messages[0]?.message?.parts?.[0]?.text).toBe('hello');
+  });
+
+  describe('context usage', () => {
+    const reply = (
+      uuid: string,
+      usageMetadata: Record<string, number>,
+      contextWindowSize?: number,
+    ): ChatRecord =>
+      ({
+        uuid,
+        parentUuid: null,
+        sessionId: 'session-usage',
+        timestamp: '2025-01-01T00:00:00.000Z',
+        type: 'assistant',
+        cwd: '',
+        version: '1.0.0',
+        message: { role: 'model', parts: [{ text: 'done' }] },
+        usageMetadata,
+        ...(contextWindowSize !== undefined ? { contextWindowSize } : {}),
+      }) as ChatRecord;
+
+    const compression = (newTokenCount: number): ChatRecord =>
+      ({
+        uuid: 'compression',
+        parentUuid: null,
+        sessionId: 'session-usage',
+        timestamp: '2025-01-01T00:00:00.000Z',
+        type: 'system',
+        subtype: 'chat_compression',
+        cwd: '',
+        version: '1.0.0',
+        systemPayload: {
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [],
+        },
+      }) as ChatRecord;
+
+    const exportUsage = async (messages: ChatRecord[]) =>
+      (
+        await collectSessionData(
+          {
+            sessionId: 'session-usage',
+            startTime: '2025-01-01T00:00:00.000Z',
+            messages,
+          },
+          { getChannel: () => 'cli' },
+        )
+      ).metadata;
+
+    it('measures it by the prompt size, not the turn total', async () => {
+      const metadata = await exportUsage([
+        reply(
+          'a1',
+          {
+            promptTokenCount: 50_000,
+            candidatesTokenCount: 30_000,
+            totalTokenCount: 80_000,
+          },
+          100_000,
+        ),
+      ]);
+
+      expect(metadata?.contextUsagePercent).toBe(50);
+      expect(metadata?.totalTokens).toBe(80_000);
+    });
+
+    it('falls back to the turn total when the prompt size is missing', async () => {
+      const metadata = await exportUsage([
+        reply('a1', { totalTokenCount: 80_000 }, 100_000),
+      ]);
+
+      expect(metadata?.contextUsagePercent).toBe(80);
+    });
+
+    it('falls back to the turn total when the prompt size was recorded as 0', async () => {
+      const metadata = await exportUsage([
+        reply('a1', { promptTokenCount: 0, totalTokenCount: 80_000 }, 100_000),
+      ]);
+
+      expect(metadata?.contextUsagePercent).toBe(80);
+    });
+
+    it('uses the last reply and sums every reply into the total', async () => {
+      const metadata = await exportUsage([
+        reply(
+          'a1',
+          { promptTokenCount: 40_000, totalTokenCount: 45_000 },
+          100_000,
+        ),
+        reply(
+          'a2',
+          { promptTokenCount: 87_000, totalTokenCount: 96_000 },
+          100_000,
+        ),
+      ]);
+
+      expect(metadata?.contextUsagePercent).toBe(87);
+      expect(metadata?.totalTokens).toBe(141_000);
+    });
+
+    it('keeps the last reading when a later reply reports no usage', async () => {
+      const metadata = await exportUsage([
+        reply(
+          'a1',
+          { promptTokenCount: 50_000, totalTokenCount: 60_000 },
+          100_000,
+        ),
+        reply('a2', { promptTokenCount: 0, totalTokenCount: 0 }, 100_000),
+      ]);
+
+      expect(metadata?.contextUsagePercent).toBe(50);
+    });
+
+    it('keeps the last reading when a later reply has no window', async () => {
+      const metadata = await exportUsage([
+        reply(
+          'a1',
+          { promptTokenCount: 50_000, totalTokenCount: 60_000 },
+          100_000,
+        ),
+        reply('a2', { promptTokenCount: 90_000, totalTokenCount: 95_000 }),
+      ]);
+
+      expect(metadata?.contextUsagePercent).toBe(50);
+      expect(metadata?.contextWindowSize).toBe(100_000);
+    });
+
+    it('uses the compressed size after a compression', async () => {
+      const metadata = await exportUsage([
+        reply(
+          'a1',
+          { promptTokenCount: 180_000, totalTokenCount: 185_000 },
+          200_000,
+        ),
+        compression(30_000),
+      ]);
+
+      expect(metadata?.contextUsagePercent).toBe(15);
+      expect(metadata?.contextWindowSize).toBe(200_000);
+      // The compressed size changes the context reading, not the total spent.
+      expect(metadata?.totalTokens).toBe(185_000);
+    });
+
+    it('keeps the last reading when a compression reports no size', async () => {
+      const metadata = await exportUsage([
+        reply(
+          'a1',
+          { promptTokenCount: 50_000, totalTokenCount: 60_000 },
+          100_000,
+        ),
+        compression(0),
+        compression(Number.NaN),
+      ]);
+
+      expect(metadata?.contextUsagePercent).toBe(50);
+    });
+
+    it('uses the next reply after a compression', async () => {
+      const metadata = await exportUsage([
+        reply(
+          'a1',
+          { promptTokenCount: 180_000, totalTokenCount: 185_000 },
+          200_000,
+        ),
+        compression(30_000),
+        reply(
+          'a2',
+          { promptTokenCount: 150_000, totalTokenCount: 152_000 },
+          200_000,
+        ),
+      ]);
+
+      expect(metadata?.contextUsagePercent).toBe(75);
+    });
   });
 
   it('exports a session whose transcript ends on an active goal', async () => {
