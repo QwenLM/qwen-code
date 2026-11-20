@@ -172,6 +172,8 @@ function setup(
     isInitialized: () => true,
     getChat: () => ({ getGenerationConfig: () => ({ tools: [] }) }),
     addHistory: vi.fn(async () => {}),
+    getHistoryToolCallFingerprints: () => [],
+    recordCompletedToolCall: vi.fn(),
   };
   const config = {
     initialize: vi.fn(async () => {}),
