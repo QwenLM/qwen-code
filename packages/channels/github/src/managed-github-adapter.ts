@@ -489,6 +489,7 @@ export class ManagedGithubAdapter {
       options.name,
       options.cwd,
       this.settings.baseUrl,
+      options.controlPlane.destinationKey ?? '',
     );
     this.controlPlane = options.controlPlane;
     this.deps = options.deps;
@@ -530,13 +531,151 @@ export class ManagedGithubAdapter {
       );
     }
     try {
-      this.state = this.store.load() ?? {
+      const loaded = this.store.load();
+      // The upgrade to per-registration ledgers strands the legacy
+      // managed-state.json: make the drop explicit, never silent. Detect it
+      // even when a keyed ledger already exists — a rollback to the
+      // pre-upgrade build can stage fresh legacy claims after the upgrade. The
+      // legacy ledger is not adopted — that would replay one registration's
+      // pending into another. It is archived only once the start succeeds
+      // (below), so a failed first start leaves the file for a rollback to
+      // recover.
+      const legacy = this.store.strandedLegacyLedger();
+      if (legacy) {
+        // An unreadable legacy is not an empty one: its counts are unknown and
+        // any claims it held are stranded. Name the inbound and outbound
+        // consequences separately so an outbound-only strand does not report
+        // lost inbound comments, and a quiescent 0/0 legacy reports no loss.
+        // The pending count folds in the legacy watch.prs queues (R3-1): those
+        // detected-but-undelivered transitions are stranded work too, so a
+        // legacy holding only a queued PR-watch event must not render as a
+        // quiescent "0 pending".
+        const pendingLabel = legacy.readable
+          ? legacy.pending + legacy.watchPending
+          : 'unknown';
+        const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
+        // The "fresh window" loss claims only hold when the loaded ledger has no
+        // watermark of its own. On a roll-forward after a rollback the keyed
+        // ledger already has a cursor, so the poll re-lists from it and the
+        // legacy watermark's window is NOT skipped — claiming a loss there would
+        // page the operator about a loss that does not exist (R1-4 fix-induced).
+        const freshWindow = !loaded || loaded.cursor.lastProcessedAt === null;
+        let consequence = '';
+        if (!legacy.readable) {
+          consequence =
+            ' Its contents could not be read as a ledger, so any staged-but-unadmitted claims it held are stranded.';
+        } else {
+          if (legacy.pending > 0 && freshWindow)
+            consequence +=
+              ' Its staged-but-unadmitted claims are stranded; the fresh notification window does not re-list them.';
+          // The queued PR-watch transitions are not adopted (R3-1); name that
+          // even when the legacy staged no inbound pending/outbound. Whether
+          // one can be re-derived depends on the LOADED BASELINES, not the
+          // window alone (R5): a roll-forward re-detects the edge only if the
+          // loaded ledger holds a watch.prs baseline for the stranded PR. A
+          // ledger can have a cursor yet no baseline for it (the PR was bound
+          // only during the rollback window, or the earlier run never finished
+          // a watch pass) — there the first observation detects nothing and
+          // only records a baseline. Decide PER PR (deferred item 11): a mixed
+          // queue must not read as wholly lost when a baselined subset can
+          // re-derive, and re-detection is conditional on the edge RECURRING —
+          // a baseline already past the edge does not re-fire it, so presence
+          // alone must not promise re-derivation.
+          if (legacy.watchPending > 0) {
+            const loadedPrs: Record<string, unknown> = loaded?.watch?.prs ?? {};
+            const baselined = legacy.watchPendingKeys.filter(
+              (key) => loadedPrs[key] !== undefined,
+            ).length;
+            const unbaselined = legacy.watchPendingKeys.length - baselined;
+            if (baselined === 0) {
+              consequence +=
+                ' Its queued PR-watch transitions were dropped; there is no baseline to re-detect them against, so they are neither replayed nor re-derived.';
+            } else if (unbaselined === 0) {
+              consequence += ` Its queued PR-watch transitions were not adopted; this ledger holds their baselines, so ${baselined} may be re-derived if the edge recurs.`;
+            } else {
+              consequence += ` Its queued PR-watch transitions were not adopted; ${baselined} may be re-derived against a loaded baseline if their edge recurs, and ${unbaselined} are dropped with no baseline to re-detect against.`;
+            }
+          }
+          if (legacy.outbound > 0)
+            consequence +=
+              ' Its outbound segments with an unknown delivery status were dropped.';
+          // Even a legacy with no pending/outbound drops the offline backlog:
+          // the fresh null cursor restarts the window at connect time, so
+          // mentions received after the legacy watermark while the bot was down
+          // are never listed. Name that skipped window separately (R1-4).
+          if (freshWindow && legacy.watermark !== null)
+            consequence += ` Unread notifications updated after ${legacy.watermark} and before this start were never listed, so mentions received since then were not admitted.`;
+        }
+        this.log(
+          `Managed GitHub upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
+        );
+      }
+      this.state = loaded ?? {
         version: 1,
         generation: 1,
         cursor: { lastProcessedAt: null, dispatchedComments: [] },
         pending: [],
         outbound: [],
       };
+      // Carry the durable episode counters into WHATEVER state was loaded
+      // (R3-1), not only a fresh object: the admission ledger is permanent, so
+      // restarting the counter would re-derive an already-admitted input id and
+      // dedupe a genuine post-upgrade recurrence. The counters are entry-scoped
+      // — merged Math.max per key from every ledger in the entry directory
+      // (live legacy, keyed ledgers, and the .stranded-* archives) — so they
+      // survive the first start's archive of the legacy and a roll-forward over
+      // an existing keyed ledger. watch.prs re-baselines silently; the queued
+      // transitions are NOT adopted (cross-ownership replay).
+      const { episodes: entryEpisodes, skipped } =
+        this.store.entryWatchEpisodes();
+      // A counter source that could not be read is skipped, not silently
+      // dropped: name it so the operator knows the carry may be incomplete
+      // (deferred item 8).
+      for (const filePath of skipped) {
+        this.log(
+          `Managed GitHub could not read the episode-counter source ${filePath}; its counters are not carried this start.`,
+        );
+      }
+      if (entryEpisodes) {
+        const watch = this.state.watch ?? { prs: {} };
+        const episodes: Record<string, number> = { ...(watch.episodes ?? {}) };
+        // R7-1: the carry is NON-DESTRUCTIVE — persist() writes this map back
+        // over the loaded ledger, so evicting the loaded registration's own
+        // counters would lose them permanently. Keep every own counter; raise
+        // existing ones and add carried ones only while there is room, each
+        // floored at the prs baseline so a stale archive can never lower the
+        // effective seed (R7-2: the seed `episodes ?? prs.episode ?? 0` lets a
+        // watermark shadow the baseline; entryWatchEpisodes already carries the
+        // loaded prs baselines, so flooring here is the single guard needed).
+        // Iterate sorted so the result is independent of the directory
+        // enumeration order. At the hard bound, overflow carried counters are
+        // bounded-and-accepted (the same tradeoff as the live watermark
+        // eviction): their source files persist and are re-read next start, but
+        // they are NOT promised a slot this start — and the overflow is logged,
+        // never silent.
+        let overflow = 0;
+        for (const key of Object.keys(entryEpisodes).sort()) {
+          const baseline = watch.prs[key]?.episode;
+          const carried = entryEpisodes[key]!;
+          const value =
+            baseline !== undefined ? Math.max(carried, baseline) : carried;
+          if (episodes[key] !== undefined) {
+            episodes[key] = Math.max(episodes[key]!, value);
+          } else if (
+            Object.keys(episodes).length < MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT
+          ) {
+            episodes[key] = value;
+          } else {
+            overflow += 1;
+          }
+        }
+        if (overflow > 0) {
+          this.log(
+            `Managed GitHub episode carry: ${overflow} counter(s) not carried this start (the loaded ledger holds the ${MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT}-counter cap); their sources persist and are re-read next start.`,
+          );
+        }
+        this.state.watch = { ...watch, episodes };
+      }
       if (this.state.pending.some((entry) => entry.held)) {
         this.instanceStalled = true;
         this.state.instanceRefusals = Math.max(
@@ -563,6 +702,28 @@ export class ManagedGithubAdapter {
       // a stopped, deaf adapter the CLI would then park on.
       if (!this.running || this.ownershipLost)
         throw new Error('Managed GitHub adapter stopped during connection.');
+      // The start succeeded, so archive the reported legacy: a static legacy is
+      // not re-announced on every later start, and a second registration of the
+      // entry is not told the first registration's claims were its own. A
+      // failed start above leaves it untouched for a rollback to recover; the
+      // notice then simply repeats on the retry.
+      if (legacy) {
+        const archived = this.store.archiveStrandedLegacy();
+        // The notice above names the legacy path, which this rename moves; name
+        // the archived path too so an operator following the notice can still
+        // find the preserved claims instead of hitting ENOENT.
+        if (archived) {
+          this.log(
+            `Managed GitHub archived the legacy ledger to ${archived}; the claims it held are preserved there for inspection.`,
+          );
+        } else {
+          // A failed rename leaves the legacy in place; say so rather than
+          // letting the notice name a path with no archive outcome (R7).
+          this.log(
+            `Managed GitHub could not archive the legacy ledger ${legacy.path}; it remains in place and will be reported again on the next start.`,
+          );
+        }
+      }
       // The first window starts at connect time: no historical backlog.
       this.startedAt = new Date((this.deps.now ?? Date.now)()).toISOString();
       if (this.pollLoop) this.loop = this.runLoop();

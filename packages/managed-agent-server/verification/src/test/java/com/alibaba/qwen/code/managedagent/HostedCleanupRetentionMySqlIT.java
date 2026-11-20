@@ -50,7 +50,6 @@ class HostedCleanupRetentionMySqlIT extends HostedCleanupRetentionTest {
                         .header("Content-Type", "application/json")
                         .header(TenantContextFilter.HEADER, "tenant")
                         .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, ExtensionRecordJournal.TOKEN)
-                        .header("X-Qwen-Managed-Max-Readable-Storage-Version", "2")
                         .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(request))).build(),
                         HttpResponse.BodyHandlers.ofString());
                 assertThat(response.statusCode()).as(route).isEqualTo(409);

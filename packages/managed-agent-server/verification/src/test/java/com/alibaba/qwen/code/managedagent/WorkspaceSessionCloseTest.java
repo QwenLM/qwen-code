@@ -81,8 +81,10 @@ class WorkspaceSessionCloseTest {
         String operation = mapper.readTree(admitted.getResponse().getContentAsString()).path("id").asText();
         await().untilAsserted(() -> assertThat(runtime.fenced).containsKey(session));
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSING");
+        // D3: files closes on v2, so the claim gate names the fence
+        // (workspace_lifecycle_claim_fenced) ahead of the v1 admission-closed code.
         assertThatThrownBy(() -> journal.acquireWriter(tenant, session, "a".repeat(43),
-                new AcquireWriterRequest("ws", "writer", 10_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
+                new AcquireWriterRequest("ws", "writer", 10_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced"));
         mvc.perform(post("/api/agent/web-shell/v1/sessions/close").header(TenantContextFilter.HEADER, tenant)
                 .principal(actor(tenant, "owner")).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"close\"}"))
@@ -149,6 +151,11 @@ class WorkspaceSessionCloseTest {
     void liveOriginalWriterPreventsCompletionUntilItSeals() throws Exception {
         String tenant = "close-writer-" + UUID.randomUUID();
         String session = create(tenant);
+        // D3: the original writer seals itself without lifecycle authority,
+        // which is v1 single-phase behavior; external-files keeps protocol 1
+        // (ordinary files is v2 now, where a seal must carry the claim).
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES, tenant, session);
         String token = "a".repeat(43);
         var grant = journal.acquireWriter(tenant, session, token, new AcquireWriterRequest("ws", "original", 60_000L));
         var admitted = mvc.perform(post("/v1/agents/sessions/" + session + "/close")
@@ -228,6 +235,12 @@ class WorkspaceSessionCloseTest {
         @Bean @Primary HarnessConnector uninitializedHarness() {
             return new UnavailableHarnessConnector() {
                 public boolean supportsLifecycle() { return true; }
+                // D3: the live-writer witness rides external-files (v1), whose
+                // saved lifecycle the default connector does not advertise.
+                public boolean supportsSavedLifecycle(String profile) {
+                    return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                            || super.supportsSavedLifecycle(profile);
+                }
                 public void detachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {}
             };
         }
