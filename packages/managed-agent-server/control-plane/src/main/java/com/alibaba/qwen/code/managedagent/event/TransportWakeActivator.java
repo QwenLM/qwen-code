@@ -58,6 +58,8 @@ public class TransportWakeActivator implements Closeable {
         SETTLED,
         /** A live writer holds the Session; its own wake pump runs the input. */
         OWNED,
+        /** A clean suspension's stamp shows nothing due now; the backstop owns the next attempt. */
+        NOT_DUE,
         /** This Harness cannot load Sessions now. */
         UNAVAILABLE,
         /** Redelivered, duplicated or older than an already-claimed wake. */
@@ -138,6 +140,9 @@ public class TransportWakeActivator implements Closeable {
         }
         if (fence.liveWriter()) {
             return Outcome.OWNED;
+        }
+        if (fence.backstopOwned()) {
+            return Outcome.NOT_DUE;
         }
         if (!harness.isAvailable()) {
             return Outcome.UNAVAILABLE;

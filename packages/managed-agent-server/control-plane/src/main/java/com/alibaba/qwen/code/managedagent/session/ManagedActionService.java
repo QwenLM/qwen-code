@@ -25,6 +25,7 @@ import org.springframework.stereotype.Service;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -143,8 +144,12 @@ public class ManagedActionService {
             }
         }
         var rows = actions.listWithChildren(tenant, session, before, beforeSession, beforeId, limit + 1);
+        Set<String> checkedSessions = new HashSet<>();
+        checkedSessions.add(session);
         for (var row : rows) {
-            sessions.requireReadableSession(tenant, actor, row.sessionId());
+            if (checkedSessions.add(row.sessionId())) {
+                sessions.requireReadableSession(tenant, actor, row.sessionId());
+            }
         }
         return rows;
     }
@@ -380,7 +385,7 @@ public class ManagedActionService {
         JsonNode options = action.options();
         String tool = options.path("toolName").asText();
         if (!"requested".equals(action.state())
-                || !List.of(2L, 3L).contains(options.path("v").asLong())
+                || options.path("v").asLong() != 3
                 || !PREVIEW_TOOLS.contains(tool)) {
             return null;
         }

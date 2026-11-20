@@ -58,6 +58,76 @@ class ManagedSessionHistoryTest {
                     delete.operation().operationId());
             assertThat(store.findLatestLifecycleOperations("tenant", List.of("session-1")).get("session-1").operationId())
                     .isEqualTo(delete.operation().operationId());
+            assertThat(jdbc.queryForList("SELECT session_scope_key FROM ma_operation"
+                            + " WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')", String.class))
+                    .hasSize(3).containsOnly(ManagedSessionStore.sessionScopeKey("tenant", "session-1"));
         }
+    }
+
+    @Test
+    void lifecycleWindowKeepsActivePriorityTieBreakersAndTenantSessionScope() {
+        try (var fixture = ConsolidatedStoreFixture.open("lifecycle_window")) {
+            ManagedSchema.initialize(fixture.source());
+            JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(fixture.source());
+            ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
+                    ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            seedSession(jdbc, "tenant", "close", "CLOSING", "PUBLIC");
+            seedSession(jdbc, "tenant", "delete", "DELETING", "PUBLIC");
+            seedSession(jdbc, "tenant", "archive", "ARCHIVING", "PUBLIC");
+            seedSession(jdbc, "tenant", "active", "ACTIVE", "PUBLIC");
+            seedSession(jdbc, "tenant", "unrequested", "CLOSING", "PUBLIC");
+            // PUBLIC IDs are globally unique; a CONTROL row can reuse one in another tenant.
+            seedSession(jdbc, "other", "close", "CLOSING", "CONTROL");
+            seedOperation(jdbc, "tenant", "close", "close-terminal", "CLOSE", "FAILED", 900, 900);
+            seedOperation(jdbc, "tenant", "close", "close-early", "CLOSE", "PENDING", 90, 100);
+            seedOperation(jdbc, "tenant", "close", "close-z", "CLOSE", "RUNNING", 50, 200);
+            seedOperation(jdbc, "tenant", "close", "close-a", "CLOSE", "RECOVERY_BLOCKED", 80, 200);
+            seedOperation(jdbc, "tenant", "close", "close-b", "CLOSE", "PENDING", 80, 200);
+            seedOperation(jdbc, "tenant", "close", "wrong-kind", "DELETE", "RUNNING", 1000, 1000);
+            seedOperation(jdbc, "tenant", "delete", "delete-old", "DELETE", "COMPLETED", 10, 10);
+            seedOperation(jdbc, "tenant", "delete", "delete-failed", "DELETE", "FAILED", 20, 20);
+            seedOperation(jdbc, "tenant", "delete", "delete-wrong-kind", "CLOSE", "RUNNING", 1000, 1000);
+            seedOperation(jdbc, "tenant", "archive", "archive-blocked", "ARCHIVE", "RECOVERY_BLOCKED", 30, 30);
+            seedOperation(jdbc, "tenant", "active", "active-close", "CLOSE", "PENDING", 40, 40);
+            seedOperation(jdbc, "tenant", "unrequested", "unrequested-close", "CLOSE", "PENDING", 50, 50);
+            seedOperation(jdbc, "other", "close", "other-close", "CLOSE", "RUNNING", 2000, 2000);
+
+            var operations = store.findLatestLifecycleOperations("tenant", List.of("close", "delete", "archive", "active"));
+            assertThat(operations).containsOnlyKeys("close", "delete", "archive");
+            assertThat(operations.get("close").operationId()).isEqualTo("close-b");
+            assertThat(operations.get("close").status()).isEqualTo("pending");
+            assertThat(operations.get("delete").operationId()).isEqualTo("delete-failed");
+            assertThat(operations.get("delete").failureCode()).isEqualTo("fixture");
+            assertThat(operations.get("archive").type()).isEqualTo("archive");
+            assertThat(operations.get("archive").status()).isEqualTo("recovery_blocked");
+            jdbc.update("UPDATE ma_operation SET state = 'FAILED' WHERE operation_id = ?", "close-b");
+            assertThat(store.findLatestLifecycleOperations("tenant", List.of("close")).get("close").operationId())
+                    .isEqualTo("close-a");
+            jdbc.update("UPDATE ma_operation SET state = 'FAILED' WHERE operation_id = ?", "close-a");
+            assertThat(store.findLatestLifecycleOperations("tenant", List.of("close")).get("close").operationId())
+                    .isEqualTo("close-z");
+            assertThat(store.findLatestLifecycleOperations("other", List.of("close")).get("close").operationId())
+                    .isEqualTo("other-close");
+            assertThat(store.findLatestLifecycleOperations("tenant", List.of())).isEmpty();
+        }
+    }
+
+    private void seedSession(JdbcTemplate jdbc, String tenant, String session, String status, String kind) {
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified,"
+                        + " tenant_key, session_key, session_scope_key, session_kind) VALUES (?, ?, 'qwen-code', ?, 0, 0, ?, ?, ?, ?)",
+                tenant, session, status, ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session),
+                ManagedSessionStore.sessionScopeKey(tenant, session), kind);
+    }
+
+    private void seedOperation(JdbcTemplate jdbc, String tenant, String session, String id,
+            String kind, String state, long created, long modified) {
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, tenant_id, session_id,"
+                        + " operation_id, operation_kind, target_kind, target_key, request_digest, request_json,"
+                        + " state, phase, failure_code, gmt_create, gmt_modified)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, ?, ?, ?)",
+                AgentStoreRows.sessionOperationKey(tenant, session, OperationKind.valueOf(kind), id),
+                scope, scope, tenant, session, id, kind,
+                ManagedSchemaKeys.key(session), state, state, "FAILED".equals(state) ? "fixture" : null, created, modified);
     }
 }
