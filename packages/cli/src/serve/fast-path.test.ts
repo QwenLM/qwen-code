@@ -409,12 +409,12 @@ afterEach(() => {
 });
 
 describe('CLI entry import boundary', () => {
-  it('does not statically import the full gemini entry before the serve fast path can run', () => {
-    const cliSource = readFileSync('src/cli.ts', 'utf8');
+  it('keeps the general CLI out of the serve entry static imports', () => {
+    const cliSource = readFileSync('src/cli-entry.ts', 'utf8');
 
+    expect(cliSource).not.toContain("from './cli.js'");
     expect(cliSource).not.toContain("import './llm.js'");
     expect(cliSource).not.toContain("import { main } from './llm.js'");
-    expect(cliSource).not.toContain("process.argv[2] === 'serve'");
     expect(cliSource).toContain("await import('./serve/fast-path.js')");
   });
 

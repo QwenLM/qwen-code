@@ -42,7 +42,7 @@ import { testInternals } from './managed-runtime-ledger.js';
 
 // Real `qwen --acp` children and their Runtime workers, run from source
 // through tsx; workspace packages resolve to their sources too.
-const CLI_ENTRY = fileURLToPath(new URL('../cli.ts', import.meta.url));
+const CLI_ENTRY = fileURLToPath(new URL('../../index.ts', import.meta.url));
 const CLI_TSCONFIG = fileURLToPath(
   new URL('../../tsconfig.json', import.meta.url),
 );

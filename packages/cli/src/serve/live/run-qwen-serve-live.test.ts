@@ -289,6 +289,73 @@ describe('qwen serve Live Host discovery', () => {
     });
   });
 
+  it('serves a queued brand request during Live Host publication', async () => {
+    const runtime = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-serve-live-'),
+    );
+    temporaryDirectories.push(runtime);
+    const workspace = path.join(runtime, 'workspace');
+    const qwenHome = path.join(runtime, 'settings-home');
+    await Promise.all([fs.mkdir(workspace), fs.mkdir(qwenHome)]);
+    await fs.writeFile(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({ experimental: { liveVoice: { enabled: true } } }),
+    );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    resetHomeEnvBootstrapForTesting();
+    let releasePublication!: () => void;
+    const publicationGate = new Promise<void>((resolve) => {
+      releasePublication = resolve;
+    });
+    const { writeLiveDiscoveryFile } =
+      await vi.importActual<typeof import('./discovery.js')>('./discovery.js');
+    trackedWriteLiveDiscoveryFile.mockImplementationOnce(
+      async (...args: Parameters<typeof writeLiveDiscoveryFile>) => {
+        await publicationGate;
+        return writeLiveDiscoveryFile(...args);
+      },
+    );
+
+    let handle: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      const token = 'integration-test-token';
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          token,
+        },
+        {
+          resolveOnListen: true,
+          deferRuntimeUntilFirstHealth: true,
+          preheatBridge: false,
+          daemonLogBaseDir: path.join(runtime, 'debug'),
+          liveDiscoveryStableBaseDir: runtime,
+          runtimePlatform: 'darwin',
+        },
+      );
+      const brand = await fetch(`${handle.url}/brand`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(liveTimeoutMs / 2),
+      });
+      expect(brand.status).toBe(200);
+      releasePublication();
+      await handle.runtimeReady;
+      await expect(
+        fs.stat(getLiveDiscoveryPath(runtime)),
+      ).resolves.toBeDefined();
+    } finally {
+      releasePublication();
+      await handle?.close();
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      resetHomeEnvBootstrapForTesting();
+    }
+  });
+
   it('hands stable discovery ownership to a waiting enabled daemon', async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-serve-live-handoff-'),

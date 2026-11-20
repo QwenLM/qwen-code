@@ -32,12 +32,15 @@ import {
   MCP_COMMANDS,
   TOP_LEVEL_COMMANDS,
   handleCriticalError,
-  isExpectedPtyRaceError,
   resolveBootstrapRoute,
   runCliEntry,
+} from './cli.js';
+import {
+  dispatchCliStartup,
   runCliEntryPoint,
   stampCliEntryEnv,
-} from './cli.js';
+} from './cli-entry.js';
+import { isExpectedPtyRaceError } from './utils/uncaught-exception-handler.js';
 
 const mocks = vi.hoisted(() => ({
   main: vi.fn(),
@@ -1182,6 +1185,27 @@ describe('runCliEntry', () => {
     expect(mocks.main).not.toHaveBeenCalled();
   });
 
+  it('dispatches a leading serve before the general CLI', async () => {
+    process.env['QWEN_CODE_MESSAGING_SOCKET'] = '/parent/inbox';
+    process.env['QWEN_CODE_MESSAGING_TOKEN'] = 'peer-secret';
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    const entryUrl = 'file:///bundle/cli.js';
+    mocks.tryRunServeFastPath.mockImplementationOnce(async () => {
+      expect(process.env['QWEN_CODE_MESSAGING_SOCKET']).toBeUndefined();
+      expect(process.env['QWEN_CODE_MESSAGING_TOKEN']).toBeUndefined();
+      expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBe(
+        'guard-secret',
+      );
+      return true;
+    });
+
+    await dispatchCliStartup(['serve'], entryUrl);
+
+    expect(mocks.tryRunServeFastPath).toHaveBeenCalledWith(['serve']);
+    expect(mocks.installBundledChunkResolver).toHaveBeenCalledWith(entryUrl);
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
   it('keeps the serve fast path ahead of the full CLI startup', async () => {
     mocks.tryRunServeFastPath.mockResolvedValue(true);
 
@@ -1204,7 +1228,7 @@ describe('runCliEntry', () => {
   });
 
   it('does not install the chunk resolver twice when serve with ACP falls through', async () => {
-    await runCliEntry(['serve', '--acp']);
+    await dispatchCliStartup(['serve', '--acp'], import.meta.url);
 
     expect(mocks.tryRunServeFastPath).toHaveBeenCalledTimes(1);
     expect(mocks.installBundledChunkResolver).toHaveBeenCalledTimes(1);
@@ -1234,13 +1258,34 @@ describe('runCliEntry', () => {
     },
   );
 
-  it('initializes profilers once when the serve fast path falls back', async () => {
+  it('hands serve fallback to the full parser without retrying the fast path', async () => {
     mocks.tryRunServeFastPath.mockResolvedValue(false);
 
-    await runCliEntry(['serve']);
+    await dispatchCliStartup(['serve', '--help'], import.meta.url);
 
-    expect(mocks.tryRunServeFastPath).toHaveBeenCalledWith(['serve']);
+    expect(mocks.tryRunServeFastPath).toHaveBeenCalledExactlyOnceWith([
+      'serve',
+      '--help',
+    ]);
     expect(mocks.main).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves version precedence for a leading serve', async () => {
+    await dispatchCliStartup(['serve', '--help', '-v'], import.meta.url);
+
+    expect(stdout.join('')).toBe('9.9.9\n');
+    expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('preserves managed npm update precedence for a leading serve', async () => {
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+
+    await dispatchCliStartup(['serve'], import.meta.url);
+
+    expect(mocks.installManagedNpmUpdate).toHaveBeenCalledWith('2.0.0');
+    expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
   });
 
   it('preserves the external Guard token for the full serve parser', async () => {
@@ -1378,26 +1423,12 @@ describe('stampCliEntryEnv', () => {
     expect(process.env['QWEN_CODE_CLI']).toBeUndefined();
   });
 
-  it('derives the bin entry one level up from the compiled module', () => {
-    // cli.ts emits to dist/src/cli.js and the shebang bin is dist/index.js —
-    // one level up, not two. Two lands on the unbuilt packages/cli/index.js,
-    // which fails the existence check and silently never stamps, and no other
-    // test can catch that: the derivation is only reachable under a built
-    // layout, where vitest never runs.
-    const source = readFileSync('src/cli.ts', 'utf8');
-    expect(source).toContain("new URL('../index.js', import.meta.url)");
-    expect(
-      new URL('../index.js', 'file:///repo/packages/cli/dist/src/cli.js')
-        .pathname,
-    ).toBe('/repo/packages/cli/dist/index.js');
+  it('derives the workspace bin from the workspace entry module', () => {
+    const source = readFileSync('index.ts', 'utf8');
+    expect(source).toContain("new URL('./index.js', import.meta.url)");
   });
 
-  it('default derivation never throws and never stamps outside a built layout', () => {
-    // Under vitest Vite rewrites new URL(…, import.meta.url) to a non-file
-    // URL, and in dev runs the derived ../index.js is the unbuilt
-    // packages/cli/index.js. Both must keep the bare-`qwen` fallback — a
-    // failed derivation taking the CLI down would be worse than the version
-    // skew this stamp exists to fix.
+  it('leaves the slot unset when an entry path is unavailable', () => {
     stampCliEntryEnv();
 
     expect(process.env['QWEN_CODE_CLI']).toBeUndefined();
@@ -1408,32 +1439,39 @@ describe('bootstrap import boundaries', () => {
   it('installs the chunk resolver before importing the serve fast path', () => {
     // Runtime mocks observe the call, not module evaluation; pin the import
     // boundary too so moving installation after the import cannot pass.
-    const source = readFileSync('src/cli.ts', 'utf8');
-    const install = source.indexOf(
-      'installBundledChunkResolver(import.meta.url)',
-    );
+    const source = readFileSync('src/cli-entry.ts', 'utf8');
+    const install = source.indexOf('installBundledChunkResolver(entryUrl)');
     const fastPathImport = source.indexOf("import('./serve/fast-path.js')");
 
     expect(install).toBeGreaterThan(-1);
     expect(fastPathImport).toBeGreaterThan(install);
   });
 
-  it('keeps fast-path-only dependencies out of static imports', () => {
-    const source = readFileSync('src/cli.ts', 'utf8');
+  it.each([
+    {
+      file: 'src/cli.ts',
+      forbiddenCoreImport: /from '@qwen-code\/qwen-code-core'/,
+    },
+    {
+      file: 'src/cli-entry.ts',
+      forbiddenCoreImport: /from '@qwen-code\/qwen-code-core(?:\/|')/,
+    },
+  ])(
+    '$file keeps fast-path-only dependencies out of static imports',
+    ({ file, forbiddenCoreImport }) => {
+      const source = readFileSync(file, 'utf8');
 
-    expect(source).not.toContain("import yargs from 'yargs'");
-    expect(source).not.toContain("from '@qwen-code/qwen-code-core'");
-    expect(source).not.toContain("import './llm.js'");
-    expect(source).not.toContain("import { main } from './llm.js'");
-    expect(source).not.toContain("from './utils/acp-startup-profiler.js'");
-  });
+      expect(source).not.toContain("import yargs from 'yargs'");
+      expect(source).not.toMatch(forbiddenCoreImport);
+      expect(source).not.toContain("import './llm.js'");
+      expect(source).not.toContain("import { main } from './llm.js'");
+      expect(source).not.toContain("from './utils/acp-startup-profiler.js'");
+    },
+  );
 
   it('keeps the shared option definitions free of runtime imports', () => {
-    // cli.ts evaluates top-level-options.js in-process on every fast path,
-    // so any runtime import it emits joins the bootstrap entry's static
-    // closure. A value import from @qwen-code/qwen-code-core there was
-    // measured at +10 MB and ~6x slower `qwen --help`/`qwen mcp`; only
-    // erased `import type` statements are allowed in this module.
+    // A value import from @qwen-code/qwen-code-core here was measured at
+    // +10 MB and ~6x slower `qwen --help`/`qwen mcp`.
     const source = readFileSync('src/config/top-level-options.ts', 'utf8');
     for (const line of source.match(/^import .*$/gm) ?? []) {
       expect(line).toMatch(/^import type /);
@@ -1441,7 +1479,7 @@ describe('bootstrap import boundaries', () => {
   });
 
   it('initializes profilers during bootstrap module evaluation', () => {
-    const source = readFileSync('src/cli.ts', 'utf8');
+    const source = readFileSync('src/cli-entry.ts', 'utf8');
 
     expect(source).toContain(
       "import { initStartupProfiler } from './utils/startupProfiler.js'",
@@ -1450,17 +1488,17 @@ describe('bootstrap import boundaries', () => {
       "import { initCpuProfiler } from './utils/cpuProfiler.js'",
     );
     expect(source.indexOf('initStartupProfiler();')).toBeLessThan(
-      source.indexOf('export async function runCliEntry('),
+      source.indexOf('export async function dispatchCliStartup('),
     );
     expect(source.indexOf('initCpuProfiler();')).toBeLessThan(
-      source.indexOf('export async function runCliEntry('),
+      source.indexOf('export async function dispatchCliStartup('),
     );
   });
 
   it('uses the bootstrap file as the production bundle entry', () => {
     const source = readFileSync('../../esbuild.config.js', 'utf8');
 
-    expect(source).toContain("cli: 'packages/cli/src/cli.ts'");
+    expect(source).toContain("cli: 'packages/cli/index.ts'");
     expect(source).toContain(
       "'execution-worker': 'packages/core/src/services/execution-worker-main.ts'",
     );
@@ -2322,15 +2360,15 @@ describe('bootstrap error handling', () => {
   });
 
   it('wires stampCliEntryEnv into the entry point', () => {
-    const source = readFileSync('src/cli.ts', 'utf8');
+    const source = readFileSync('src/cli-entry.ts', 'utf8');
     const entryPoint = source.slice(
       source.indexOf('export async function runCliEntryPoint'),
     );
-    expect(entryPoint).toContain('stampCliEntryEnv()');
+    expect(entryPoint).toContain('stampCliEntryEnv(entryPath)');
     // "First thing in runCliEntryPoint" is the property the doc relies on: the
     // stamp must land before the CLI runs, not merely somewhere in the body —
     // a stamp moved below `await run()` would still pass a contains() check.
-    expect(entryPoint.indexOf('stampCliEntryEnv()')).toBeLessThan(
+    expect(entryPoint.indexOf('stampCliEntryEnv(entryPath)')).toBeLessThan(
       entryPoint.indexOf('await run()'),
     );
   });

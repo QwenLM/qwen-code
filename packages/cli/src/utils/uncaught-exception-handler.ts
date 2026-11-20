@@ -6,11 +6,8 @@
 
 import { writeStderrLine } from './stdioHelpers.js';
 
-// These helpers live in a leaf module (no import of cli.ts or llm.tsx) so
-// both the entry point and the lazily-loaded llm.tsx can share them. A
-// static import of cli.ts from llm.tsx makes esbuild hoist the entry into a
-// shared chunk under `splitting: true`, which silently disables the bootstrap
-// guard at the bottom of cli.ts and leaves the bundled CLI dead.
+// Keep this leaf independent of the entry lifecycle so llm.tsx can share the
+// handler without pulling bootstrap dependencies into its module graph.
 
 function getErrnoCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object') {

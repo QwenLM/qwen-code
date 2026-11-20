@@ -23,14 +23,29 @@ const wrapper = transformSync(
 ).code;
 
 describe.each([
-  { label: 'CLI', args: [], module: 'src/cli.js', entry: 'runCliEntryPoint' },
+  {
+    label: 'CLI',
+    args: [],
+    module: 'src/cli-entry.js',
+    successSource: `
+      import assert from 'node:assert/strict';
+      import { fileURLToPath } from 'node:url';
+      export async function runCliEntryPoint(run, handleError, entryPath) {
+        assert.equal(entryPath, fileURLToPath(new URL('../index.js', import.meta.url)));
+        await run();
+      }
+      export async function dispatchCliStartup() { process.stdout.write('CLI'); }
+    `,
+  },
   {
     label: 'worker',
     args: ['--workspace-recovery-worker'],
     module: 'src/serve/workspace-recovery-worker.js',
-    entry: 'runWorkspaceRecoveryWorker',
+    successSource: `
+      export async function runWorkspaceRecoveryWorker() { process.stdout.write('worker'); }
+    `,
   },
-])('$label wrapper startup', ({ label, args, module, entry }) => {
+])('$label wrapper startup', ({ label, args, module, successSource }) => {
   let directory: string;
 
   beforeEach(() => {
@@ -87,10 +102,7 @@ describe.each([
   );
 
   it('runs the selected entry successfully', () => {
-    writeFileSync(
-      path.join(directory, module),
-      `export async function ${entry}() { process.stdout.write('${label}'); }`,
-    );
+    writeFileSync(path.join(directory, module), successSource);
     const result = spawnSync(process.execPath, ['index.js', ...args], {
       cwd: directory,
       env: { ...process.env, NODE_OPTIONS: '' },

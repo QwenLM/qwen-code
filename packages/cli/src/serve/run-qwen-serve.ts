@@ -3082,8 +3082,9 @@ function createDelegatingServeApp(
     waitForDeferredRuntimeRoutes?: boolean;
     startRuntime?: () => boolean;
     runtimeReady?: Promise<void>;
+    appStartupReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
-    authenticateDeferredChannelWebhookRequest?: RequestHandler;
+    loadDeferredChannelWebhookAuth?: () => Promise<RequestHandler>;
     isPreAuthRequest?: (req: Request) => boolean | Promise<boolean>;
   } = {},
 ): Application {
@@ -3104,11 +3105,10 @@ function createDelegatingServeApp(
           startedAt: new Date(),
           path: 'joined',
         };
-        const webhookRequest = isChannelWebhookRequest(req);
-        const authGate = webhookRequest
-          ? (options.authenticateDeferredChannelWebhookRequest ??
-            options.authenticateDeferredRuntimeRequest)
-          : options.authenticateDeferredRuntimeRequest;
+        const authGate =
+          options.loadDeferredChannelWebhookAuth && isChannelWebhookRequest(req)
+            ? await options.loadDeferredChannelWebhookAuth()
+            : options.authenticateDeferredRuntimeRequest;
         // A rejecting predicate must not 500 every deferred request —
         // fail closed to the bearer gate instead.
         const preAuthExempted =
@@ -3126,7 +3126,11 @@ function createDelegatingServeApp(
           timing.path = 'started_on_request';
         }
         try {
-          await options.runtimeReady;
+          // The mounted app can serve these reads while Live Host discovery
+          // finishes. runtimeReady still settles on early shutdown.
+          await (options.appStartupReady && isStartupMetadataRequest(req)
+            ? Promise.race([options.appStartupReady, options.runtimeReady])
+            : options.runtimeReady);
         } catch {
           if (preAuthExempted) {
             // The bootstrap app serves the failure envelope only behind its
@@ -3160,6 +3164,13 @@ function isBootstrapServeRoute(req: Request): boolean {
       ? req.path.slice(0, -1)
       : req.path;
   return BOOTSTRAP_SERVE_PATHS.has(path);
+}
+
+function isStartupMetadataRequest(req: Request): boolean {
+  return (
+    (req.method === 'GET' || req.method === 'HEAD') &&
+    /^\/(?:brand|workspace\/voice|workspaces\/[^/]+\/stat)\/?$/i.test(req.path)
+  );
 }
 
 function isChannelWebhookRequest(req: Request): boolean {
@@ -5652,20 +5663,28 @@ async function runQwenServeImpl(
       }
       throw err;
     }
-    // Must settle before initializeDaemonMetrics(): metrics.getMeter() caches
-    // a noop meter permanently if called before the SDK registers the global
-    // MeterProvider. This runs in the deferred runtime load, off the fast path.
-    await core.initializeTelemetry(
-      createDaemonTelemetryRuntimeConfig(
-        daemonTelemetrySettings,
-        resolvedCliVersion,
-        `daemon:${process.pid}`,
-        {
-          otlpEndpoint: core.DEFAULT_OTLP_ENDPOINT,
-          telemetryTarget: core.DEFAULT_TELEMETRY_TARGET,
-        },
+    // Load the remaining runtime handlers while telemetry initializes. The
+    // SDK must register its provider before initializeDaemonMetrics accesses it.
+    const [
+      { createSubSessionLauncher, createSubSessionWorkspaceIndex },
+      scheduledTaskRoutes,
+      { sessionAttachmentsRoots },
+    ] = await Promise.all([
+      import('./create-sub-session.js'),
+      import('./routes/scheduled-tasks.js'),
+      import('./session-attachments-root.js'),
+      core.initializeTelemetry(
+        createDaemonTelemetryRuntimeConfig(
+          daemonTelemetrySettings,
+          resolvedCliVersion,
+          `daemon:${process.pid}`,
+          {
+            otlpEndpoint: core.DEFAULT_OTLP_ENDPOINT,
+            telemetryTarget: core.DEFAULT_TELEMETRY_TARGET,
+          },
+        ),
       ),
-    );
+    ]);
     core.initializeDaemonMetrics();
     daemonEventLoopMonitor?.dispose();
     daemonEventLoopMonitor = core.startEventLoopLagMonitor({
@@ -6413,18 +6432,8 @@ async function runQwenServeImpl(
           );
         }
       });
-    // `create_sub_session` tool: spawn a fresh top-level sub-session on request
-    // from a child's agent turn and (for 'first-turn') return its result.
-    // Dynamic-imported (not at module scope) so the serve fast-path bundle
-    // closure check doesn't trace create-sub-session's transitive deps.
-    const [
-      { createSubSessionLauncher, createSubSessionWorkspaceIndex },
-      scheduledTaskRoutes,
-    ] = await Promise.all([
-      import('./create-sub-session.js'),
-      import('./routes/scheduled-tasks.js'),
-    ]);
-    // Lets a session's sub-session run in another registered workspace.
+    // `create_sub_session` spawns a fresh top-level sub-session from a child's
+    // agent turn, optionally in another registered workspace.
     const subSessionWorkspaces = createSubSessionWorkspaceIndex(
       () => workspaceRegistryForPersistence.current,
     );
@@ -6434,9 +6443,6 @@ async function runQwenServeImpl(
           | { sessionArchiveCoordinator?: SessionArchiveCoordinator }
           | undefined
       )?.sessionArchiveCoordinator;
-    const { sessionAttachmentsRoots } = await import(
-      './session-attachments-root.js'
-    );
     const createCurrentSessionScheduledTaskHandler =
       (
         workspaceCwd: string,
@@ -9600,21 +9606,20 @@ async function runQwenServeImpl(
       ? () => startRuntimeAfterHealth?.()
       : undefined,
   });
-  const deferredChannelWebhookAuth = deferRuntimeUntilFirstHealth
-    ? createDeferredChannelWebhookAuth(
-        resolveChannelWebhookConfigSource,
-        await loadChannelWebhookConfigRuntime(),
-        daemonLog,
-      )
-    : undefined;
   const app =
     runtimeApp ??
     createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
       waitForDeferredRuntimeRoutes: deferRuntimeUntilFirstHealth,
       startRuntime: () => startRuntimeForRequest?.() ?? false,
       runtimeReady,
+      appStartupReady: serveAppStartupReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
-      authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
+      loadDeferredChannelWebhookAuth: async () =>
+        createDeferredChannelWebhookAuth(
+          resolveChannelWebhookConfigSource,
+          await loadChannelWebhookConfigRuntime(),
+          daemonLog,
+        ),
       // The runtime app serves these before bearerAuth; a browser navigation
       // cannot attach the bearer header, so the cold gate must let them
       // through (and start the runtime) exactly like the warm app would.
