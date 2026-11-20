@@ -66,6 +66,21 @@ export function markFirstTextPart(request: PartListUnion): PartListUnion {
 }
 
 /**
+ * `markFirstTextPart`, unless a part of `request` is marked already. A front
+ * end that marks its own prompt has placed the mark where the person's text
+ * is: ACP puts what the person attached first and marks the instruction it
+ * ends with, so marking the first part as well would mark the attachment.
+ */
+export function markFirstTextPartUnlessMarked(
+  request: PartListUnion,
+): PartListUnion {
+  const parts = Array.isArray(request) ? request : [request];
+  return parts.some((part) => typeof part !== 'string' && isTypedPrompt(part))
+    ? request
+    : markFirstTextPart(request);
+}
+
+/**
  * Whether `part` is text and nothing else, allowing only the typed-prompt
  * mark: `{ text }` or `{ text, partMetadata: { [TYPED_PROMPT_METADATA]: true } }`.
  * Shape checks that require a lone `text` key use this, so the mark does not

@@ -5337,6 +5337,43 @@ describe('Session', () => {
       );
     });
 
+    it('hands core an attachment-first prompt with only its instruction marked (#9455)', async () => {
+      const send = useSharedRounds([text('ok'), finished()]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'check this log' },
+          {
+            type: 'resource',
+            resource: {
+              uri: 'attachment:///app.log',
+              mimeType: 'text/plain',
+              text: 'line1\nline2',
+            },
+          },
+        ],
+        _meta: { 'qwen.daemon.submittedPrompt': 'check this log' },
+      });
+
+      expect(send).toHaveBeenCalledOnce();
+      const [parts, , , options] = send.mock.calls[0] as [
+        Part[],
+        unknown,
+        unknown,
+        Record<string, unknown>,
+      ];
+      // The shared round passes the person's words on as `humanInput`, which
+      // is what makes core mark a request, and the attachment comes first.
+      expect(options).toMatchObject({ humanInput: { text: 'check this log' } });
+      const marked = (core.markFirstTextPartUnlessMarked(parts) as Part[])
+        .filter((part) => core.isTypedPrompt(part))
+        .map((part) => part.text ?? '');
+      expect(marked).toHaveLength(1);
+      expect(marked[0]).toContain('check this log');
+      expect(marked[0]).not.toContain('line1');
+    });
+
     it.each([
       ['the Stop hook reached its cap', 'cap'],
       ['the guard gave way to a queued prompt', 'queued'],

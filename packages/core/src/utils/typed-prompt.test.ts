@@ -11,6 +11,7 @@ import {
   isBareTextPart,
   isTypedPrompt,
   markFirstTextPart,
+  markFirstTextPartUnlessMarked,
   markTypedPrompt,
   TYPED_PROMPT_METADATA,
 } from './typed-prompt.js';
@@ -123,6 +124,30 @@ describe('markFirstTextPart', () => {
     const request: Part[] = [{ text: 'typed' }, header];
     markFirstTextPart(request);
     expect(request).toEqual([{ text: 'typed' }, header]);
+  });
+});
+
+describe('markFirstTextPartUnlessMarked', () => {
+  const header: Part = { text: '\n--- Content from referenced files ---' };
+  const markedTexts = (request: PartListUnion) =>
+    (Array.isArray(request) ? request : [request])
+      .filter(
+        (part): part is Part => typeof part !== 'string' && isTypedPrompt(part),
+      )
+      .map((part) => part.text);
+
+  it('marks the first text part when no part is marked yet', () => {
+    expect(
+      markedTexts(markFirstTextPartUnlessMarked([{ text: 'typed' }, header])),
+    ).toEqual(['typed']);
+  });
+
+  it('leaves a request whose front end marked its prompt as it is', () => {
+    // ACP puts what the person attached first and marks the instruction
+    // it ends with; marking the first part as well would mark the
+    // attachment.
+    const request: Part[] = [header, markTypedPrompt({ text: 'typed' })];
+    expect(markFirstTextPartUnlessMarked(request)).toBe(request);
   });
 });
 

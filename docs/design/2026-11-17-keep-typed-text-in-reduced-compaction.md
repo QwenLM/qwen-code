@@ -35,7 +35,7 @@ Two checks drop a completed local command's input from resumed history only when
 
 ### Where it is set
 
-- **Core, for the CLI front ends.** When `sendMessageStream` receives `humanInput` with a person's prompt, and the prompt is not a Mod's, the first text part of the request is marked. These front ends put the person's text first. A plain `-p` prompt carries no `humanInput`, so it is not marked. Pasted text is sent framed in `<clipboard-paste>` with a line of framing prose after it, and that part is marked whole.
+- **Core, for the CLI front ends.** When `sendMessageStream` receives `humanInput` with a person's prompt, and the prompt is not a Mod's, the first text part of the request is marked. These front ends put the person's text first. A plain `-p` prompt carries no `humanInput`, so it is not marked. Pasted text is sent framed in `<clipboard-paste>` with a line of framing prose after it, and that part is marked whole. A request that already holds a marked part is left as it is. A caller that sends `humanInput` must therefore put the person's text first or mark it itself: ACP, which puts the instruction last and passes `humanInput` on the shared agent loop, marks its own.
 - **ACP.** In a prompt a person wrote, the parts built from their text blocks are marked, and so is the instruction part that joins them with pointers to the attached resources. A model-only prompt, a runtime Goal continuation, a mid-turn message, a slash command (including text that starts with a slash but names no command) and a prompt that holds only attachments mark nothing.
 - **Hosted.** The prompt the session's user sent, the input memory recall reads, is marked when it reaches the model as written. One a hook rewrote or extended, or that recalled memory was joined to, is left unmarked.
 
@@ -65,6 +65,7 @@ Only on the first send, after the plain reduction made the request smaller. The 
 - When the plain request's budget is the 20,000-token cap, keeping more than 10,000 characters beyond the plain cut would take more than half of it, so a request longer than about 14,000 characters is cut as before. In a tighter window the limit is lower.
 - A kept request the server rejects is retried with the plain cut. Where the plain request would have been rejected too, the two flows then differ: the plain flow retries with a smaller budget or gives up, and the kept flow sends the plain cut once.
 - The text after a marked part's leading envelopes is kept whole as typed. In the CLI that includes the paste-framing prose and a prompt a `UserPromptSubmit` hook rewrote, since `humanInput` follows the rewrite.
+- Core marks the first text part, so a caller that sends `humanInput` with another part first, and marks nothing itself, gets that other part marked. Headless mode does this on a first turn that carries a startup-worktree or recovered-agents notice: the notice goes in its own part ahead of the person's text, so the notice is marked, compaction still cuts it as a block, and that turn's text is cut as before.
 - Sessions recorded before this change have no marks, and are cut as before.
 - This change does not measure whether keeping the text improves task outcomes.
 

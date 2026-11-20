@@ -40,7 +40,7 @@ import {
   type UserPromptAdmission,
 } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
-import { isTypedPrompt } from '../utils/typed-prompt.js';
+import { isTypedPrompt, markTypedPrompt } from '../utils/typed-prompt.js';
 import { detectTurnInterruption } from './turn-interruption.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -1874,6 +1874,23 @@ describe('Gemini Client (client.ts)', () => {
         expect(markedTexts()).toEqual([typed]);
       },
     );
+
+    it('leaves a prompt its front end already marked as it is', async () => {
+      // ACP sends what the person attached first and marks the instruction
+      // it ends with, and passes `humanInput` on the shared agent loop.
+      await run(
+        [
+          { text: '<reference content>' },
+          markTypedPrompt({ text: 'port the parser' }),
+        ],
+        'typed-prompt-premarked',
+        {
+          type: SendMessageType.UserQuery,
+          humanInput: { text: 'port the parser' },
+        },
+      );
+      expect(markedTexts()).toEqual(['port the parser']);
+    });
 
     it.each<[string, SendMessageOptions]>([
       ['a prompt with no humanInput', { type: SendMessageType.UserQuery }],
