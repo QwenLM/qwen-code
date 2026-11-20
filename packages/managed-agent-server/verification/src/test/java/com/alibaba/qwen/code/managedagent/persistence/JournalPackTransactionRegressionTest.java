@@ -89,25 +89,37 @@ class JournalPackTransactionRegressionTest {
     }
 
     private byte[] bytes(int size) {
+        return bytes(size, 0);
+    }
+
+    private byte[] bytes(int size, int seed) {
         byte[] value = new byte[size];
         for (int index = 0; index < size; index++) {
-            value[index] = (byte) (index % 251);
+            value[index] = (byte) ((index + seed) % 251);
         }
         return value;
     }
 
     private void insertHead(long journalRevision) {
+        insertHead(SESSION, journalRevision);
+    }
+
+    private void insertHead(String session, long journalRevision) {
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
                 + " workspace_id, session_id, harness_session_id, head_kind, state,"
                 + " writer_generation, journal_revision, committed_sequence,"
                 + " last_commit_digest, activation_epoch, packed_through_revision, gmt_create,"
                 + " gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'MANAGED_SESSION', 'ACTIVE', 1,"
                 + " ?, ?, 'digest', 0, 0, 0, 0)",
-                ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(SESSION),
-                TENANT, WORKSPACE, SESSION, SESSION, journalRevision, journalRevision);
+                ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(session),
+                TENANT, WORKSPACE, session, session, journalRevision, journalRevision);
     }
 
     private void insertTransaction(long revision, byte[] value) {
+        insertTransaction(SESSION, revision, value);
+    }
+
+    private void insertTransaction(String session, long revision, byte[] value) {
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
                 + " journal_revision, transaction_id, operation, command_id, command_key_hash,"
                 + " content_digest, first_sequence, last_sequence, event_count, events_digest,"
@@ -115,7 +127,7 @@ class JournalPackTransactionRegressionTest {
                 + " activation_epoch, record_encoding, record_bytes, byte_length, record_digest,"
                 + " gmt_create) VALUES (?, ?, ?, ?, ?, 'turn.start', ?, ?, 'content', ?, ?, 1,"
                 + " 'events', ?, 1, 'writer', 'hash', 0, 'identity', ?, ?, ?, 0)",
-                TENANT, WORKSPACE, SESSION, revision, "tx-" + revision, "cmd-" + revision,
+                TENANT, WORKSPACE, session, revision, "tx-" + revision, "cmd-" + revision,
                 "cmdkey-" + revision, revision, revision, "commit-" + revision, value,
                 value.length, JournalStoreRows.sha256(value));
     }
@@ -327,6 +339,51 @@ class JournalPackTransactionRegressionTest {
                     first.length)).isEqualTo(first);
             assertThat(packs.resolveBytes(TENANT, SESSION, 2, JournalStoreRows.sha256(second),
                     second.length)).isEqualTo(second);
+        }
+    }
+
+    @Test
+    @Timeout(60)
+    void sealedHeadsDoNotStallTheEvictionWindow() {
+        try (var context = context(new PublicationProbeWiring.InMemoryObjectStore())) {
+            JdbcJournalPacks packs = context.getBean(JdbcJournalPacks.class);
+            // 32 sessions publish a pack and then seal — the normal resting state between
+            // writer leases. Their packs age past the cutoff ahead of the active one.
+            for (int index = 0; index < 32; index++) {
+                String session = SESSION + "-sealed-" + index;
+                insertHead(session, 1);
+                insertTransaction(session, 1, bytes(4096, index + 1));
+                assertThat(packs.compactOnce(TENANT, WORKSPACE, session)).isTrue();
+                jdbc.update("UPDATE ma_session_head SET state = 'SEALED' WHERE tenant_id = ?"
+                        + " AND session_id = ?", TENANT, session);
+                jdbc.update("UPDATE ma_journal_pack SET gmt_modified = gmt_modified - 60000"
+                        + " WHERE tenant_id = ? AND session_id = ?", TENANT, session);
+            }
+            // The active session's pack is newer, so it sits behind the 32 sealed packs
+            // in the global oldest-first LIMIT 32 window.
+            byte[] active = bytes(4096);
+            insertHead(1);
+            insertTransaction(1, active);
+            assertThat(packs.compactOnce(TENANT, WORKSPACE, SESSION)).isTrue();
+            // An ACTIVE-only recheck returned 0 on every pass: the same 32 sealed-head
+            // packs were re-selected forever and the active pack was never reached.
+            assertThat(packs.deleteCoveredBlobs()).isEqualTo(32);
+            // The next pass reaches the active pack behind the former window.
+            assertThat(packs.deleteCoveredBlobs()).isEqualTo(1);
+            assertThat(packCount("PUBLISHED")).isZero();
+            assertThat(packCount("EVICTED")).isEqualTo(33);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx WHERE"
+                    + " record_bytes IS NULL", Long.class)).isEqualTo(33L);
+            // A third pass selects nothing: the sweep progresses and terminates.
+            assertThat(packs.deleteCoveredBlobs()).isZero();
+            // Evicted bytes stay resolvable for sealed and active sessions alike, each
+            // from its own pack: the payloads differ per session, so resolving the wrong
+            // session's pack would fail the digest/length match.
+            byte[] sealedFirst = bytes(4096, 1);
+            assertThat(packs.resolveBytes(TENANT, SESSION + "-sealed-0", 1,
+                    JournalStoreRows.sha256(sealedFirst), sealedFirst.length)).isEqualTo(sealedFirst);
+            assertThat(packs.resolveBytes(TENANT, SESSION, 1,
+                    JournalStoreRows.sha256(active), active.length)).isEqualTo(active);
         }
     }
 
