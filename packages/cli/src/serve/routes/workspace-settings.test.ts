@@ -1013,6 +1013,12 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 
+  it('includes enableLoadingPhrases and customWittyPhrases in allowed keys for web shell clients', () => {
+    const keys = getAllowedKeys();
+    expect(keys.has('ui.accessibility.enableLoadingPhrases')).toBe(true);
+    expect(keys.has('ui.customWittyPhrases')).toBe(true);
+  });
+
   it.each(['ui.brand', 'ui.brand.name', 'ui.brand.logoPath'])(
     'keeps the web shell brand (%s) off the settings surface',
     async (key) => {
