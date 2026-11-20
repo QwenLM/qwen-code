@@ -11927,9 +11927,8 @@ export function registerSessionRoutes(
     ),
   );
 
-  // Deliver the queued mid-turn messages now: the agent cuts a streaming
-  // model response short instead of waiting for its next tool boundary,
-  // unless that response has started a tool call.
+  // Send now cuts a streaming foreground response or ends its tool-calling
+  // turn. Queued messages follow the prompt FIFO when a turn ends.
   app.post(
     '/session/:id/mid-turn-messages/send-now',
     mutate(),

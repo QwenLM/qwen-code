@@ -25,6 +25,7 @@ import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { gitEnv, gitRemoteEnv } from '../utils/git-branches.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { raceWithAbort } from '../utils/race-with-abort.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
 
@@ -2225,17 +2226,21 @@ export class GitWorktreeService {
    */
   async removeWorktree(
     worktreePath: string,
+    signal?: AbortSignal,
   ): Promise<{ success: boolean; error?: string }> {
     let git: SimpleGit;
     try {
-      git = await this.getGit();
+      git = await raceWithAbort(signal, () => this.getGit());
     } catch (error) {
+      signal?.throwIfAborted();
       return {
         success: false,
         error: `Failed to remove worktree: ${error instanceof Error ? error.message : 'Unknown error'}`,
       };
     }
 
+    // Keep cancellation outside the catch that falls back to fs.rm.
+    signal?.throwIfAborted();
     try {
       // Remove the worktree from git
       await git.raw(['worktree', 'remove', worktreePath, '--force']);
@@ -3067,6 +3072,8 @@ export class GitWorktreeService {
     baseBranch?: string,
     options?: {
       symlinkDirectories?: readonly string[];
+      /** Cancel before starting Git creation. Once started, finish setup. */
+      signal?: AbortSignal;
       /** The caller owns the pr-<N> shape (PR-backed startup). */
       prBacked?: boolean;
       /**
@@ -3103,6 +3110,8 @@ export class GitWorktreeService {
       detached?: boolean;
     },
   ): Promise<CreateWorktreeResult> {
+    const signal = options?.signal;
+    signal?.throwIfAborted();
     const validationError = GitWorktreeService.validateUserWorktreeSlug(
       slug,
       options?.prBacked === true ? { allowPrBackedShape: true } : undefined,
@@ -3114,33 +3123,30 @@ export class GitWorktreeService {
       return { success: false, error: validationError };
     }
 
+    let gitAddStarted = false;
     try {
       const worktreesDir = this.getUserWorktreesDir();
-      await fs.mkdir(worktreesDir, { recursive: true });
       const worktreePath = path.join(worktreesDir, slug);
 
-      if (await fileExists(worktreePath)) {
+      if (await raceWithAbort(signal, () => fileExists(worktreePath))) {
         const error = `Worktree already exists at ${worktreePath}`;
         debugLogger.warn(`createUserWorktree: ${error}`);
         return { success: false, error };
       }
 
-      // Keep the worktrees directory and its contents out of the parent
-      // repo's `git status` and any subsequent glob/grep that walks from
-      // the parent root. Only writes when the file is missing — never
-      // touches an existing user-managed `.qwen/.gitignore`.
-      await this.ensureWorktreesGitignored();
-
-      const base = baseBranch || (await this.getCurrentBranch());
+      const base =
+        baseBranch ||
+        (await raceWithAbort(signal, () => this.getCurrentBranch()));
       const detached = options?.detached === true;
       const branchName = detached ? '' : worktreeBranchForSlug(slug);
 
       if (!detached) {
         // Refuse to clobber a pre-existing branch with the same name. Use
-        // `git show-ref --verify --quiet refs/heads/<branch>` (exit 0 →
-        // branch exists). The previous `-B` form would have force-reset
-        // such a branch and silently dropped unmerged commits.
-        const branchExists = await this.localBranchExists(branchName);
+        // `for-each-ref` prints the matching local ref. A forced reset here
+        // could silently drop unmerged commits.
+        const branchExists = await raceWithAbort(signal, () =>
+          this.localBranchExists(branchName),
+        );
         if (branchExists) {
           const error =
             `Cannot create worktree "${slug}": branch ${branchName} already exists. ` +
@@ -3151,9 +3157,16 @@ export class GitWorktreeService {
         }
       }
 
-      await (
-        await this.getGit()
-      ).raw(
+      const git = await raceWithAbort(signal, () => this.getGit());
+      signal?.throwIfAborted();
+      await fs.mkdir(worktreesDir, { recursive: true });
+      signal?.throwIfAborted();
+      // Keep managed checkouts out of the parent repo's status and file walks.
+      await this.ensureWorktreesGitignored();
+      signal?.throwIfAborted();
+
+      gitAddStarted = true;
+      await git.raw(
         detached
           ? ['worktree', 'add', '--detach', worktreePath, base]
           : ['worktree', 'add', '-b', branchName, worktreePath, base],
@@ -3277,6 +3290,7 @@ export class GitWorktreeService {
       };
       return { success: true, worktree, carriedPaths };
     } catch (error) {
+      if (!gitAddStarted) signal?.throwIfAborted();
       const message = `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`;
       debugLogger.warn(`createUserWorktree: ${message}`);
       return { success: false, error: message };
@@ -4339,6 +4353,8 @@ export class GitWorktreeService {
     options: {
       deleteBranch?: boolean;
       forceDeleteBranch?: boolean;
+      /** Cancel before Git removal starts. Once started, finish cleanup. */
+      signal?: AbortSignal;
       /** The slug-derived branch was created by this worktree's named
        * creation (which refuses a pre-existing ref), so it is owned even
        * if the checkout later moved to another branch. Without this,
@@ -4366,6 +4382,7 @@ export class GitWorktreeService {
      * own branch, or the slug ref when kept), if any. */
     keptBranch?: string;
   }> {
+    const { signal } = options;
     const worktreePath = this.getUserWorktreePath(slug);
     const branchName = worktreeBranchForSlug(slug);
     // Refuse to remove a checkout that EXISTS but cannot be verified as a
@@ -4376,20 +4393,26 @@ export class GitWorktreeService {
     // The registered-worktree probe (common-dir + toplevel) returns null in
     // that state, so fail closed. A directory already gone is a legitimate
     // no-op the removal flow below handles (branchSkipped), not a refusal.
-    const checkoutPresent = await fs
-      .stat(worktreePath)
-      .then(() => true)
-      .catch(() => false);
+    const checkoutPresent = await raceWithAbort(signal, () =>
+      fs
+        .stat(worktreePath)
+        .then(() => true)
+        .catch(() => false),
+    );
     if (
       checkoutPresent &&
-      (await this.getRegisteredWorktreeBranch(worktreePath)) === null
+      (await raceWithAbort(signal, () =>
+        this.getRegisteredWorktreeBranch(worktreePath),
+      )) === null
     ) {
       return {
         success: false,
         error: 'Worktree checkout is unverifiable',
       };
     }
-    const detached = await this.isDetachedWorktree(worktreePath);
+    const detached = await raceWithAbort(signal, () =>
+      this.isDetachedWorktree(worktreePath),
+    );
     // Capture the branch the checkout actually sits on BEFORE removal.
     // A session worktree branched in place ("Create branch here") is no
     // longer detached, but it never owned the slug-derived name either —
@@ -4397,7 +4420,9 @@ export class GitWorktreeService {
     // pre-existing user `worktree-<slug>` be deleted once it merges.
     const actualBranch = detached
       ? ''
-      : await this.getWorktreeBranchName(worktreePath);
+      : await raceWithAbort(signal, () =>
+          this.getWorktreeBranchName(worktreePath),
+        );
 
     // A detached worktree has no branch whose safe-delete refusal would
     // protect committed work: the `git branch -d` below can never fire for
@@ -4409,7 +4434,9 @@ export class GitWorktreeService {
       options.deleteBranch &&
       !options.forceDeleteBranch &&
       detached &&
-      (await this.hasUnmergedWorktreeCommits(slug, options.baseCommit))
+      (await raceWithAbort(signal, () =>
+        this.hasUnmergedWorktreeCommits(slug, options.baseCommit),
+      ))
     ) {
       return {
         success: false,
@@ -4418,7 +4445,7 @@ export class GitWorktreeService {
       };
     }
 
-    const removed = await this.removeWorktree(worktreePath);
+    const removed = await this.removeWorktree(worktreePath, signal);
     if (!removed.success) {
       return removed;
     }

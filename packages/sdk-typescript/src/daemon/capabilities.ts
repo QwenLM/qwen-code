@@ -86,9 +86,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // behavior. Client-generated message ids make retries idempotent.
   session_mid_turn_message_query: { since: 'v1' },
   // `POST /session/:id/mid-turn-messages/send-now` asks the agent to deliver
-  // the queued mid-turn messages now, cutting a streaming model response
-  // short instead of waiting for its next tool boundary, unless that response
-  // has started a tool call.
+  // the queued mid-turn messages now instead of at its next tool boundary:
+  // a streaming model response is cut short, and a turn whose response has
+  // started a tool call, or whose tools run, ends and the queued messages
+  // follow the prompt FIFO.
   session_mid_turn_send_now: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
