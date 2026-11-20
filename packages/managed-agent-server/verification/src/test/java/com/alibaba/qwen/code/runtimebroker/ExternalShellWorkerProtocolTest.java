@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletionException;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -97,6 +98,49 @@ class ExternalShellWorkerProtocolTest {
             assertEquals(payload, stdout.bytes());
             assertEquals(List.of(false, false, true), stdout.eofs());
             worker.copy(transport, channel, "stderr");
+            assertEquals("drained", worker.stopDrained(transport));
+        }
+    }
+
+    @Test
+    @Timeout(60)
+    void copiesAMultiBlockStderrCaptureBlockByBlockWithoutLosingBytes() throws Exception {
+        // Stderr rides the same block chain as stdout, and a noisy
+        // command's stderr spans blocks on its own: two full 32 KiB blocks
+        // plus a short tail, with the multi-byte character straddling the
+        // first block boundary exactly as in the stdout case, so per-block
+        // decoding would mangle a correct capture here too.
+        var noise = "x".repeat(32 * 1024 - 1) + "é" + "y".repeat(32 * 1024 + 1) + "\n";
+        try (var worker = ExternalShellWorkerFixture.start("witness\n", noise)) {
+            var transport = worker.transport();
+            var channel = begin(worker, transport);
+            var stderr = worker.copy(transport, channel, "stderr");
+
+            assertEquals(noise, stderr.bytes());
+            assertEquals(List.of(false, false, false, true), stderr.eofs());
+            assertEquals("witness\n", worker.copy(transport, channel, "stdout").bytes());
+            assertEquals("drained", worker.stopDrained(transport));
+        }
+    }
+
+    @Test
+    @Timeout(60)
+    void anEmptyStdoutCaptureCopiesZeroBytesNotTheStandInFallback() throws Exception {
+        // A command that wrote nothing to stdout still has its stream:
+        // zero data bytes with the EOF as its only sequence. The stand-in's
+        // 'witness' fallback belongs to an absent payload only, so an empty
+        // captured stdout must copy back empty rather than fall back — that
+        // distinction keeps an honest zero-byte capture from being
+        // published as output the command never produced.
+        try (var worker = ExternalShellWorkerFixture.start("", "")) {
+            var transport = worker.transport();
+            var channel = begin(worker, transport);
+            var stdout = worker.copy(transport, channel, "stdout");
+            assertEquals("", stdout.bytes());
+            assertEquals(List.of(true), stdout.eofs());
+            var stderr = worker.copy(transport, channel, "stderr");
+            assertEquals("", stderr.bytes());
+            assertEquals(List.of(true), stderr.eofs());
             assertEquals("drained", worker.stopDrained(transport));
         }
     }
@@ -399,5 +443,55 @@ class ExternalShellWorkerProtocolTest {
             worker.copy(transport, channel, "stderr");
             assertEquals("drained", worker.stopDrained(transport));
         }
+    }
+
+    @Test
+    void commandLineGuardChecksBothSidesOfItsUtf16JoinBoundary() {
+        // This is a lower-bound size check, not Windows argument serialization:
+        // even an accepted join may grow when ProcessBuilder quotes arguments.
+        for (var command : List.of(List.of("node", "worker.mjs"),
+                List.of("x".repeat(32_765)), List.of("x".repeat(32_766)),
+                List.of("node", "x".repeat(32_761)),
+                List.of("😀".repeat(16_383)), List.of(" ".repeat(32_766)))) {
+            assertDoesNotThrow(() -> ExternalShellWorkerFixture
+                    .requireWindowsSafeCommandLine(command));
+        }
+        for (var command : List.of(List.of("x".repeat(32_767)),
+                List.of("x".repeat(32_768)), List.of("x".repeat(32_780)),
+                List.of("node", "x".repeat(32_762)),
+                List.of("😀".repeat(16_383) + "x"))) {
+            var refused = assertThrows(AssertionError.class, () -> ExternalShellWorkerFixture
+                    .requireWindowsSafeCommandLine(command));
+            assertTrue(refused.getMessage().contains("CreateProcess"));
+        }
+    }
+
+    @Test
+    @Timeout(60)
+    void refusesACommandLineTheWindowsCreateProcessLimitCannotCarry() throws Exception {
+        // The guard is the #17885 tripwire: a capture payload back on the
+        // command line must fail here, in the fixture, instead of as a
+        // platform-dependent launch error. The Windows limit of 32767
+        // characters includes the terminating NUL, so a join of exactly
+        // 32767 cannot launch and must already be refused; the upper side
+        // is the regression's own shape, a --stdout= argument large enough
+        // that no argument could survive it. Nothing may start in this
+        // case: both refusals happen before the process is launched, which
+        // is what lets a non-Windows lane catch a Windows-only failure.
+        var script = java.nio.file.Path.of(
+                "src/test/resources/external-shell-worker.mjs").toAbsolutePath();
+        var fixed = "node".length() + 1 + script.toString().length() + 1
+                + "--storage-revision=1".length() + 1;
+        var atTheLimit = assertThrows(AssertionError.class, () ->
+                ExternalShellWorkerFixture.start("witness\n", "",
+                        "x".repeat(32_767 - fixed)));
+        assertTrue(atTheLimit.getMessage().contains("CreateProcess"),
+                "The refusal must name the Windows limit: " + atTheLimit.getMessage());
+        var regression = assertThrows(AssertionError.class, () ->
+                ExternalShellWorkerFixture.start("witness\n", "",
+                        "--stdout=" + "x".repeat(32_780 - fixed - "--stdout=".length())));
+        assertTrue(regression.getMessage().contains("boot document"),
+                "The refusal must say where the payload belongs: "
+                        + regression.getMessage());
     }
 }

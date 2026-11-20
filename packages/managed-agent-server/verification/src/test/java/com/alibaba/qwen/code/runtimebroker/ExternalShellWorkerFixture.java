@@ -87,17 +87,19 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
         return boot(stdout, stderr, binding.getProvisionSeed(), binding.getRequest(), revision, extra);
     }
 
-    private static void requireWindowsSafeCommandLine(List<String> command) {
+    static void requireWindowsSafeCommandLine(List<String> command) {
         // Windows CreateProcess caps the whole command line at 32767
-        // characters, so a capture payload must ride the boot document
-        // instead of an argument: the large-capture case alone is 32780
-        // characters (#17885).
+        // characters including the terminating NUL, so 32766 is the
+        // longest join that can ever launch: a capture payload must ride
+        // the boot document instead of an argument — the large-capture
+        // case alone is 32780 characters (#17885).
         var joined = String.join(" ", command);
-        if (joined.length() > 32_767) {
+        if (joined.length() > 32_766) {
             throw new AssertionError("The worker command line is "
                     + joined.length() + " characters, over the Windows"
-                    + " CreateProcess limit of 32767; pass capture payloads in"
-                    + " the boot document, not as arguments");
+                    + " CreateProcess limit of 32767 including the terminating"
+                    + " NUL; pass capture payloads in the boot document, not"
+                    + " as arguments");
         }
     }
 

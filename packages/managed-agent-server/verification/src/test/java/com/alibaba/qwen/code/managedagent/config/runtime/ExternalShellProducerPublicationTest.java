@@ -185,6 +185,10 @@ class ExternalShellProducerPublicationTest {
             assertEquals("error", finished.path("result").path("executionStatus").asText());
             assertEquals("complete", manifest.path("captureStatus").asText());
             assertEquals("boom\n", lane.read(manifest, manifestRef, "stderr"));
+            // The command wrote nothing to stdout: its stream is sealed
+            // empty, and the stand-in's 'witness' fallback must not appear
+            // in its place — an empty captured stream reads back empty.
+            assertEquals("", lane.read(manifest, manifestRef, "stdout"));
             assertEquals("drained", lane.stopDrained());
         }
     }
