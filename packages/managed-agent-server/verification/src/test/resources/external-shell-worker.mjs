@@ -51,9 +51,11 @@ const value = (name) => {
   return found ? found.slice(name.length + 3) : undefined;
 };
 // Each stream's payload, so a case can drive a multi-block copy and an empty
-// stderr without the stand-in inventing output of its own.
-const stdout = Buffer.from(value('stdout') ?? 'witness\n', 'utf8');
-const stderr = Buffer.from(value('stderr') ?? '', 'utf8');
+// stderr without the stand-in inventing output of its own. They ride the boot
+// document rather than argv: a capture payload can exceed the whole Windows
+// CreateProcess command-line limit of 32767 characters (#17885).
+const stdout = Buffer.from(boot.stdout ?? 'witness\n', 'utf8');
+const stderr = Buffer.from(boot.stderr ?? '', 'utf8');
 const exitCode = Number(value('exit-code') ?? '0');
 // The storage revision this worker registered with. A request carrying any
 // other revision is the closed-lane refusal, as on the shipped worker.

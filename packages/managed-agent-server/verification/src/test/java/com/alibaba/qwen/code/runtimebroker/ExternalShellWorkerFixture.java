@@ -87,6 +87,20 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
         return boot(stdout, stderr, binding.getProvisionSeed(), binding.getRequest(), revision, extra);
     }
 
+    private static void requireWindowsSafeCommandLine(List<String> command) {
+        // Windows CreateProcess caps the whole command line at 32767
+        // characters, so a capture payload must ride the boot document
+        // instead of an argument: the large-capture case alone is 32780
+        // characters (#17885).
+        var joined = String.join(" ", command);
+        if (joined.length() > 32_767) {
+            throw new AssertionError("The worker command line is "
+                    + joined.length() + " characters, over the Windows"
+                    + " CreateProcess limit of 32767; pass capture payloads in"
+                    + " the boot document, not as arguments");
+        }
+    }
+
     private static ExternalShellWorkerFixture boot(String stdout, String stderr,
             RuntimeProvisionSeed seed, RuntimeProvisionRequest request, long revision,
             String... extra) throws IOException {
@@ -94,9 +108,9 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
         var script = Path.of("src/test/resources/external-shell-worker.mjs").toAbsolutePath();
         assumeTrue(Files.isRegularFile(script), "The worker stand-in is required");
         var command = new ArrayList<>(List.of("node", script.toString(),
-                "--stdout=" + stdout, "--stderr=" + stderr,
                 "--storage-revision=" + revision));
         command.addAll(List.of(extra));
+        requireWindowsSafeCommandLine(command);
         var process = new ProcessBuilder(command).redirectErrorStream(false).start();
         var scope = request.getScope();
         var boot = new LinkedHashMap<String, Object>();
@@ -116,6 +130,12 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
         boot.put("mountRoot", scope.getCanonicalCwd());
         boot.put("capabilityDigest", scope.getCapabilityDigest());
         boot.put("isolationClass", scope.getIsolationClass());
+        // The captured stream payloads ride the boot document, never argv: a
+        // capture payload can exceed the whole Windows CreateProcess
+        // command-line limit of 32767 characters, which no argument survives
+        // (#17885).
+        boot.put("stdout", stdout);
+        boot.put("stderr", stderr);
         try (OutputStream stdin = process.getOutputStream()) {
             stdin.write(JSON.writeValueAsBytes(boot));
         }
