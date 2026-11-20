@@ -113,6 +113,30 @@ public interface RuntimeBrokerOperations {
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
             String runtimeSessionId, Map<String, Object> publisher, Long writerGeneration);
 
+    public default CompletionStage<Void> detachPublisher(
+            String harnessSessionId,
+            String runtimeSessionId,
+            Long writerGeneration,
+            Map<String, Long> appliedThrough) {
+        return java.util.concurrent.CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_publisher_detach_unsupported",
+                "Runtime Broker does not support Shell publisher detach.", false));
+    }
+
+    public default CompletionStage<List<Map<String, Object>>> listStagedDeliveries(
+            String harnessSessionId, String writerId, long writerGeneration) {
+        return java.util.concurrent.CompletableFuture.completedFuture(List.of());
+    }
+
+    public default CompletionStage<Void> acknowledgeStagedDeliveries(
+            String harnessSessionId,
+            String writerId,
+            long writerGeneration,
+            String executionCallId,
+            long throughSeq) {
+        return java.util.concurrent.CompletableFuture.completedFuture(null);
+    }
+
     public CompletionStage<Map<String, Object>> acknowledgeExecution(
             String harnessSessionId, String runtimeSessionId,
             String executionCallId, Map<String, Object> receipt);

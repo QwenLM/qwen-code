@@ -182,6 +182,42 @@ final class ManagedSessionRetirementStore {
         if (!cleanupOwners.isEmpty()) {
             return true;
         }
+        var stagedRows = jdbc.queryForList(
+                "SELECT id, execution_call_id_hash, delivery_seq FROM ma_runtime_stage"
+                        + " WHERE runtime_session_key = ? ORDER BY execution_call_id_hash, delivery_seq"
+                        + " LIMIT ? FOR UPDATE",
+                scope,
+                limit);
+        for (var row : stagedRows) {
+            jdbc.update(
+                    "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'RUNTIME_STAGE'"
+                            + " AND owner_key = ? AND owner_revision = ?",
+                    scope,
+                    ManagedSchemaKeys.identity((String) row.get("execution_call_id_hash")),
+                    row.get("delivery_seq"));
+            jdbc.update("DELETE FROM ma_runtime_stage WHERE id = ?", row.get("id"));
+        }
+        if (!stagedRows.isEmpty()) {
+            return true;
+        }
+        var stagedRefs = jdbc.queryForList(
+                "SELECT owner_key, owner_revision, resource_key FROM ma_resource_ref"
+                        + " WHERE session_scope_key = ? AND owner_kind = 'RUNTIME_STAGE'"
+                        + " ORDER BY owner_key, owner_revision, resource_key LIMIT ? FOR UPDATE",
+                scope,
+                limit);
+        for (var row : stagedRefs) {
+            jdbc.update(
+                    "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'RUNTIME_STAGE'"
+                            + " AND owner_key = ? AND owner_revision = ? AND resource_key = ?",
+                    scope,
+                    row.get("owner_key"),
+                    row.get("owner_revision"),
+                    row.get("resource_key"));
+        }
+        if (!stagedRefs.isEmpty()) {
+            return true;
+        }
         var streams =
                 jdbc.queryForList(
                         "SELECT stream_kind, stream_id FROM ma_event_stream WHERE tenant_id = ? AND"
@@ -327,6 +363,13 @@ final class ManagedSessionRetirementStore {
         }
         if (hasJournalPacks(jdbc, ManagedSessionStore.sessionScopeKey(tenant, session))) {
             throw new IllegalStateException("Session journal pack collection is incomplete");
+        }
+        String retirementScope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        if (!jdbc.queryForList("SELECT id FROM ma_runtime_stage WHERE runtime_session_key = ? LIMIT 1",
+                retirementScope).isEmpty()
+                || !jdbc.queryForList("SELECT resource_key FROM ma_resource_ref WHERE session_scope_key = ?"
+                        + " AND owner_kind = 'RUNTIME_STAGE' LIMIT 1", retirementScope).isEmpty()) {
+            throw new IllegalStateException("Runtime staging collection is incomplete");
         }
         var operations =
                 jdbc.queryForList(
