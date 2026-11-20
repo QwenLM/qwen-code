@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
@@ -245,6 +246,30 @@ class WorkspaceSessionRetentionTest {
         assertThat(jdbc.queryForObject("SELECT retirement_operation_id FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", String.class, tenant, session)).isEqualTo(id);
         assertThat(count(tenant, session, "session.deleted")).isEqualTo(1);
+        assertThat(runtime.calls.get(session)).isEqualTo(1);
+    }
+
+    @Test
+    void anActiveExternalShellSessionDeletesOnItsNegotiatedProtocol() throws Exception {
+        String tenant = tenant();
+        String session = create(tenant);
+        jdbc.update("UPDATE ma_session SET tool_profile = ?, approval_mode = 'default'"
+                + " WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_SHELL, tenant, session);
+        // The external Shell lane can only ever negotiate protocol 1, so a live
+        // Session on that profile must be admitted for DELETE instead of
+        // falling into the closed-only protocol-0 path. Reading the advertised
+        // capability first keeps the admission and the projection in step.
+        request(get(PUBLIC + session), tenant, "owner", null)
+                .andExpect(jsonPath("$.capabilities.session_delete").value(true));
+        String id = json(request(delete(PUBLIC + session), tenant, "owner", "delete")
+                .andExpect(status().isAccepted())).path("id").asText();
+        await().untilAsserted(() -> assertThat(store.findOperation(tenant, session, id)
+                .orElseThrow().state()).isEqualTo("COMPLETED"));
+        assertThat(jdbc.queryForObject("SELECT lifecycle_protocol_version FROM ma_operation"
+                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?",
+                Integer.class, tenant, session, id)).isEqualTo(1);
+        assertThat(store.requireSession(tenant, session).status()).isEqualTo("DELETED");
         assertThat(runtime.calls.get(session)).isEqualTo(1);
     }
 
@@ -522,6 +547,12 @@ class WorkspaceSessionRetentionTest {
         @Bean @Primary HarnessConnector uninitializedHarness() {
             return new UnavailableHarnessConnector() {
                 public boolean supportsLifecycle() { return true; }
+                public boolean supportsSavedLifecycle(String profile) {
+                    // The external Shell lane negotiates a saved lifecycle on
+                    // protocol 1; its Runtime answers publish/settle directly.
+                    return WorkspaceToolProfiles.EXTERNAL_SHELL.equals(profile)
+                            || super.supportsSavedLifecycle(profile);
+                }
                 public void detachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {}
             };
         }

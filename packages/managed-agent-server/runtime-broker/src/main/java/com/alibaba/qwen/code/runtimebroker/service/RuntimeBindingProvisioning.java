@@ -800,7 +800,6 @@ final class RuntimeBindingProvisioning {
                 });
     }
 
-
     /** The one identity for "the reconciliation ran out of time" — the fault-gate predicates key on it. */
     private static RuntimeBrokerException reconcileTimeout() {
         return unavailable("runtime_broker_reconcile_timeout",
@@ -955,7 +954,7 @@ final class RuntimeBindingProvisioning {
             }
             if (expectedVersion != null) {
                 // 与工具 admission 共用 binding 行 CAS。先关闭新写，
-                // 再检查抢先进入的未决工具；失败时保持 BLOCKED。
+                // 再检查抢先进入的未决工具。
                 RuntimeBindingRecord fenced =
                         bindingRepository.compareAndSet(
                                 claimed,
@@ -963,10 +962,24 @@ final class RuntimeBindingProvisioning {
                                         RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                                         claimed.getLease(),
                                         clock.instant()));
-                if (fenced == null
-                        || executionRepository.hasActiveByBinding(
-                                fenced.getBindingId(),
-                                fenced.getGeneration())) {
+                if (fenced == null) {
+                    return failed(conflict("runtime_broker_recovery_blocked",
+                            "Recovery admission is unsettled"));
+                }
+                if (executionRepository.hasActiveByBinding(
+                        fenced.getBindingId(),
+                        fenced.getGeneration())) {
+                    // 抢先进入的工具在资格读取与围栏之间落地，而所有取证路径
+                    // 都要求 READY/DRAINING：围栏本是为了保护这个工具，因此
+                    // 冲突返回前必须把本次围栏补偿回 READY，不能把健康的
+                    // binding 卡住。补偿失败说明有别的写者持有该行，不归我们处理。
+                    if (claimed.getState() == RuntimeBindingRecord.State.READY) {
+                        bindingRepository.compareAndSet(fenced,
+                                fenced.withState(
+                                        RuntimeBindingRecord.State.READY,
+                                        fenced.getLease(),
+                                        clock.instant()));
+                    }
                     return failed(conflict("runtime_broker_recovery_blocked",
                             "Recovery admission is unsettled"));
                 }

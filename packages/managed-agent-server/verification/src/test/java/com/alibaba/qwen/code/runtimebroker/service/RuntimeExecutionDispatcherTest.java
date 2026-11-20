@@ -400,6 +400,72 @@ class RuntimeExecutionDispatcherTest {
                 any(Instant.class));
     }
 
+    // A store read that fails while the shared dispatch waits is transient:
+    // the claim is retried under the same deadline instead of settling the
+    // PREPARED row, which would fail a dispatch another attempt can still
+    // drive.
+    @Test
+    void aRetryableStoreFailureReschedulesTheWaitInsteadOfSettlingTheRecord()
+            throws Exception {
+        var registry = mock(RuntimeBindingRegistry.class);
+        var bindings = mock(RuntimeBindingRepository.class);
+        var sessions = mock(RuntimeSessionRepository.class);
+        var executions = mock(ToolExecutionRepository.class);
+        var scheduler = mock(ScheduledExecutorService.class);
+        var context = mock(SessionContext.class);
+        var binding = mock(RuntimeBindingRecord.class);
+        var session = mock(RuntimeSession.class);
+        var prepared = mock(ToolExecutionRecord.class);
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null,
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE,
+                "workspace");
+        when(binding.getRequest()).thenReturn(request);
+        when(context.binding()).thenReturn(binding);
+        when(context.session()).thenReturn(session);
+        when(session.getScope()).thenReturn(scope);
+        when(session.getHarnessSessionId()).thenReturn("harness");
+        when(prepared.getExecutionCallId()).thenReturn("execution");
+        when(prepared.getState()).thenReturn(ToolExecutionRecord.State.PREPARED);
+        when(prepared.sameIdentity(prepared)).thenReturn(true);
+        when(prepared.getReference()).thenReturn(Map.of("sessionId", "runtime", "dispatchMode", "deferred"));
+        when(executions.findByExecutionCallId("execution")).thenReturn(prepared);
+        var ticks = new java.util.ArrayList<Runnable>();
+        when(scheduler.schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS))).thenAnswer(call -> {
+            ticks.add(call.getArgument(0));
+            return mock(ScheduledFuture.class);
+        });
+        var dispatcher = new RuntimeExecutionDispatcher(registry, mock(RuntimeExecutionState.class), bindings,
+                sessions, executions, mock(RuntimeProvisioner.class), mock(RuntimeTransport.class),
+                mock(RuntimePublicationVerifier.class), "broker", Duration.ofSeconds(60),
+                Duration.ofSeconds(10), Clock.fixed(Instant.parse("2026-11-01T00:00:00Z"), ZoneOffset.UTC),
+                scheduler, mock(ScheduledExecutorService.class), new AtomicBoolean());
+        dispatcher.beginDispatch(context, prepared, Map.of("toolName", "read_file", "input", Map.of()), null,
+                com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload.of("digest", "read_file"));
+        var field = RuntimeExecutionDispatcher.class.getDeclaredField("dispatches");
+        field.setAccessible(true);
+        var dispatches = (java.util.concurrent.ConcurrentMap<String, CompletableFuture<Void>>) field.get(dispatcher);
+        var queued = dispatches.get("execution");
+        assertNotNull(queued);
+        when(executions.claimValidatedDispatch(eq("execution"), eq("broker"),
+                any(Duration.class), any())).thenThrow(new com.alibaba.qwen.code.runtimebroker.StoreFailureException(
+                        "lock wait timeout exceeded",
+                        new java.sql.SQLException("timeout")));
+        ticks.getFirst().run();
+        verify(executions, never()).settlePrepared(any(), any(), any());
+        assertFalse(queued.isDone());
+        assertEquals(2, ticks.size());
+        // Still inside the same deadline: the next attempt retries too rather
+        // than answering the caller a terminal failure.
+        ticks.get(1).run();
+        verify(executions, never()).settlePrepared(any(), any(), any());
+        assertFalse(queued.isDone());
+        assertEquals(3, ticks.size());
+        dispatcher.cancelPendingOperations();
+        scheduler.shutdownNow();
+    }
+
     // The initial schedule is the one exit the tick's own catch cannot cover:
     // a dispatch that lost the race to RuntimeBrokerService.close() (scheduler
     // shut down after the null claim) must still settle its PREPARED row, or
@@ -563,6 +629,19 @@ class RuntimeExecutionDispatcherTest {
 
     @Test
     void anExternalShellDispatchPassesTheFilesGate() {
+        dispatchExternalShell(Map.of("command", "printf hi"));
+    }
+
+    @Test
+    void anExplicitForegroundMarkerDoesNotRefuseTheExternalShellDispatch() {
+        // The control plane validates `is_background` as any boolean and keeps
+        // the key, so a foreground command can carry an explicit `false`.
+        // Judging the key's presence settled a runnable command as
+        // workspace_tool_unsupported instead of dispatching it.
+        dispatchExternalShell(Map.of("command", "pwd", "is_background", false));
+    }
+
+    private void dispatchExternalShell(Map<String, Object> input) {
         var fixture = new Fixture();
         // Bind the external Shell placement: same provisioner, session
         // isolation and storage identity as files, but the Shell digest.
@@ -585,7 +664,7 @@ class RuntimeExecutionDispatcherTest {
                 "dispatchMode", "deferred_v3");
         when(fixture.prepared.getReference()).thenReturn(reference);
         Map<String, Object> payload = Map.of("toolName", "run_shell_command",
-                "input", Map.of("command", "printf hi"));
+                "input", input);
         // The capture map the dispatcher derives from the grant's binding.
         var grant = new com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant(
                 "pub-1", "token", "http://127.0.0.1:1",

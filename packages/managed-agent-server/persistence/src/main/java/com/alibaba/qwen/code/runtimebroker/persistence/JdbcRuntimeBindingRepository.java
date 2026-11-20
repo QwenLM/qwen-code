@@ -421,8 +421,6 @@ public final class JdbcRuntimeBindingRepository
         }
     }
 
-
-
     private void requireSameDataSource(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, String message) {
         if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)

@@ -84,13 +84,16 @@ final class RuntimeDispatchPayloadAdmission {
             // The external foreground-Shell lane admits exactly one Tool v3
             // family member. Background Shell and Monitor keep their own
             // ledgers and holds, which this placement's single-worker drain
-            // cannot prove.
+            // cannot prove. The lane is foreground-only by construction, so
+            // the marker is judged by its VALUE: the control plane validates
+            // `is_background` as any boolean and does not strip the key, so a
+            // foreground command carrying an explicit `false` must admit.
             Map<?, ?> shellInput = payload.get("input") instanceof Map<?, ?> value
                     ? value : Map.of();
             if (!v3 || record.getReference().containsKey("runtimeProtocol")
                     || !"run_shell_command".equals(toolName)
-                    || shellInput.containsKey("is_background")
-                    || shellInput.containsKey("is_monitor")
+                    || Boolean.TRUE.equals(shellInput.get("is_background"))
+                    || Boolean.TRUE.equals(shellInput.get("is_monitor"))
                     || publicationVerifier == null
                     || publicationVerifier.externalShell() == null) {
                 Map<String, Object> refusal = new LinkedHashMap<>();

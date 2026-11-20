@@ -7,16 +7,14 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 
@@ -170,7 +168,8 @@ final class RuntimeExecutionDispatcher {
                                 || payload == null
                                 || !"run_shell_command".equals(String.valueOf(payload.get("toolName")))
                                 || !(payload.get("input") instanceof Map<?, ?> input)
-                                || input.containsKey("is_background") || input.containsKey("is_monitor")))) {
+                                || Boolean.TRUE.equals(input.get("is_background"))
+                                || Boolean.TRUE.equals(input.get("is_monitor"))))) {
             throw invalid("runtime_payload_invalid",
                     "External Shell requires a foreground Tool v3 Shell payload");
         }
@@ -335,6 +334,19 @@ final class RuntimeExecutionDispatcher {
                                 });
                     }
                 } catch (RuntimeException | Error error) {
+                    // A transient store or admission failure before the
+                    // deadline is the contended state this wait exists for: the
+                    // occupying dispatch holds the very binding row whose
+                    // SELECT ... FOR UPDATE this tick takes, so a lock-wait
+                    // timeout is most likely exactly while the slot is busy. It
+                    // must reschedule like an occupied slot, not terminally
+                    // settle a tool that was never attempted. The deadline is
+                    // still the single ceiling: every tick re-reads it above.
+                    if (retryableWaitFailure(error)
+                            && clock.instant().isBefore(deadline)
+                            && rescheduleTick(this, attempt)) {
+                        return;
+                    }
                     // Every exceptional exit feeds the same write-only future,
                     // so the stranded PREPARED row must settle here too or it
                     // hangs the caller's poll and fences the binding's release
@@ -367,6 +379,34 @@ final class RuntimeExecutionDispatcher {
             throw rejected;
         }
         return queued;
+    }
+
+    /**
+     * A store outage or a retryable refusal is transient by contract: the same
+     * failure on the first attempt leaves the row PREPARED and answers a
+     * retryable 503. Anything else — an unclassified invariant violation, a
+     * non-retryable broker refusal or a JVM error — is terminal for this wait,
+     * because the waiter owns the PREPARED row.
+     */
+    private static boolean retryableWaitFailure(Throwable error) {
+        Throwable cause = unwrap(error);
+        return cause instanceof StoreFailureException
+                || cause instanceof RuntimeBrokerException failure && failure.isRetryable();
+    }
+
+    /**
+     * A closed broker shuts the scheduler down, so a rejected reschedule is
+     * itself the terminal signal and the caller must settle the row.
+     */
+    private boolean rescheduleTick(Runnable tick,
+            java.util.concurrent.atomic.AtomicInteger attempt) {
+        try {
+            scheduler.schedule(tick, v3PollDelayMillis(attempt.getAndIncrement()),
+                    TimeUnit.MILLISECONDS);
+            return true;
+        } catch (RuntimeException | Error rejected) {
+            return false;
+        }
     }
 
     private void settleStrandedPrepared(ToolExecutionRecord prepared,

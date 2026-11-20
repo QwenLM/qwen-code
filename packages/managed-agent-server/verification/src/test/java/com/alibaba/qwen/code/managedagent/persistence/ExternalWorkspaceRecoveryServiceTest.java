@@ -137,6 +137,17 @@ class ExternalWorkspaceRecoveryServiceTest {
         when(claimed.getOperationGeneration()).thenReturn(1L);
         when(fenced.getBindingId()).thenReturn("binding");
         when(fenced.getGeneration()).thenReturn(1L);
+        // The tool admitted between the eligibility read and the fence is
+        // exactly what the fence exists to protect: every evidence path
+        // requires READY/DRAINING, so the conflict must put the row back.
+        var restoreState = new java.util.concurrent.atomic.AtomicReference<RuntimeBindingRecord.State>();
+        var restored = mock(RuntimeBindingRecord.class);
+        when(fenced.withState(org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any())).thenAnswer(call -> {
+                    restoreState.set(call.getArgument(0));
+                    return restored;
+                });
+        when(bindings.compareAndSet(fenced, restored)).thenReturn(restored);
         when(bindings.claimOperation(org.mockito.ArgumentMatchers.eq("binding"),
                 org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any())).thenReturn(claimed);
         when(claimed.withState(org.mockito.ArgumentMatchers.eq(RuntimeBindingRecord.State.RECOVERY_BLOCKED),
@@ -153,6 +164,12 @@ class ExternalWorkspaceRecoveryServiceTest {
             assertThrows(java.util.concurrent.CompletionException.class,
                     () -> nativeBroker.recoverExternalWorkspaceBinding("binding", 1, 7).toCompletableFuture().join());
             verify(bindings).compareAndSet(claimed, fenced);
+            // The blocking fence was compensated on its own version, so the
+            // healthy binding is READY again and a racing tool can still be
+            // answered from it; leaving RECOVERY_BLOCKED would have failed
+            // that tool's evidence path forever.
+            verify(bindings).compareAndSet(fenced, restored);
+            assertEquals(RuntimeBindingRecord.State.READY, restoreState.get());
             verify(provisioner, never()).reconcile(org.mockito.ArgumentMatchers.any(),
                     org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
         } finally {
