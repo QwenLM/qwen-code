@@ -22695,6 +22695,54 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('applies both permission scopes when the first notification reads both changes', async () => {
+    const settings = makeCoreSettings();
+    Object.assign(settings, {
+      reloadScopesFromDiskAtomically: vi.fn(() => {
+        settings.setValue(SettingScope.User, 'permissions.deny', ['ReadFile']);
+        settings.setValue(SettingScope.Workspace, 'permissions.deny', [
+          'ListFiles',
+        ]);
+        return true;
+      }),
+    });
+    const permissionManager = {
+      addPersistentRule: vi.fn(),
+      removePersistentRule: vi.fn(),
+    };
+    const innerConfig = await setupSessionMocks('test-session-id');
+    Object.assign(innerConfig, {
+      getPermissionManager: () => permissionManager,
+      storage: { ...innerConfig.storage, getProjectRoot: () => '/tmp' },
+    });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const notify = (scope: string, revision: number) =>
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+          v: 1,
+          revision,
+          kind: 'permissions',
+          scope,
+          cwd: '/tmp',
+        });
+
+      await expect(notify('user', 1)).resolves.toMatchObject({
+        acknowledged: true,
+      });
+      await expect(notify('workspace', 2)).resolves.toMatchObject({
+        acknowledged: true,
+      });
+      expect(permissionManager.addPersistentRule.mock.calls).toEqual([
+        ['ReadFile', 'deny'],
+        ['ListFiles', 'deny'],
+      ]);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('keeps a workspace-scope permission change out of a worktree session', async () => {
     let mergedSettings: Record<string, unknown> = {
       permissions: { allow: [], ask: [], deny: [] },
@@ -23979,6 +24027,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'deny',
     );
     expect(permissionManager.removePersistentRule).not.toHaveBeenCalled();
+
+    await agent.extMethod('qwen/permissions/setRules', {
+      scope: 'user',
+      ruleType: 'deny',
+      rules: ['Workflow'],
+    });
+
+    expect(permissionManager.removePersistentRule).toHaveBeenCalledWith(
+      'ReadFile',
+      'deny',
+    );
+    expect(permissionManager.addPersistentRule).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -39007,9 +39067,9 @@ describe('sessionLanguage multi-session propagation', () => {
         () => (workflowsEnabled ?? true) && !workflowDisabled,
       ),
       applyWorkflowsEnabledSetting: vi.fn(
-        (enabled: boolean | undefined, disabled: ReadonlySet<string>) => {
+        (enabled: boolean | undefined, disabled?: ReadonlySet<string>) => {
           workflowsEnabled = enabled;
-          workflowDisabled = disabled.has('workflow');
+          if (disabled) workflowDisabled = disabled.has('workflow');
         },
       ),
       getBareMode: vi.fn().mockReturnValue(false),
@@ -39147,21 +39207,26 @@ describe('sessionLanguage multi-session propagation', () => {
     mergedSettings = reloadedSettings;
     cfg.storage.getProjectRoot.mockReturnValue('/reload');
     cfg.getTargetDir.mockReturnValue('/reload/subdir');
-    vi.mocked(loadSettings).mockClear();
+    vi.mocked(readLiveSettingsSnapshot).mockClear();
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {}),
     ).resolves.toMatchObject({ changedKeys: [] });
-    expect(loadSettings).toHaveBeenCalledWith(
-      '/reload',
-      expect.objectContaining({ skipLoadEnvironment: true }),
-    );
-    expect(loadSettings).not.toHaveBeenCalledWith(
-      '/reload/subdir',
-      expect.anything(),
-    );
+    expect(readLiveSettingsSnapshot).toHaveBeenCalledWith('/reload');
+    expect(readLiveSettingsSnapshot).not.toHaveBeenCalledWith('/reload/subdir');
     expect(cfg.applyWorkflowsEnabledSetting).toHaveBeenLastCalledWith(
       undefined,
       new Set(['workflow']),
+    );
+    expect(cfg.isWorkflowsEnabled()).toBe(false);
+
+    reloadedSettings = {};
+    vi.mocked(readLiveSettingsSnapshot).mockImplementationOnce(() => {
+      throw new SyntaxError('Invalid workspace settings');
+    });
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(cfg.applyWorkflowsEnabledSetting).toHaveBeenLastCalledWith(
+      undefined,
+      undefined,
     );
     expect(cfg.isWorkflowsEnabled()).toBe(false);
 

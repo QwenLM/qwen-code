@@ -11251,6 +11251,7 @@ export class Config {
 
   private supportsWorkflowTool(): boolean {
     return !(
+      this.getBareMode() ||
       this.shellExecutionSandbox ||
       this.provisionalWorkspace ||
       this.executionEnvironment ||
@@ -11271,15 +11272,14 @@ export class Config {
 
   isWorkflowsEnabled(): boolean {
     if (!this.supportsWorkflowTool()) return false;
-    // On unless settings turn them off, except that bare and safe mode keep
-    // them off unless settings turn them on. The env pair overrides
-    // settings, and QWEN_CODE_DISABLE_WORKFLOWS=1 wins.
+    // On unless settings turn them off. Safe mode requires an explicit opt-in.
+    // The env pair overrides settings, and QWEN_CODE_DISABLE_WORKFLOWS=1 wins.
     if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
     const enabled =
       process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1' ||
       (typeof this.workflowsEnabled === 'boolean'
         ? this.workflowsEnabled
-        : !(this.bareMode || this.safeMode));
+        : !this.safeMode);
     return enabled && !this.isWorkflowToolDenied();
   }
 
@@ -11535,7 +11535,6 @@ export class Config {
       !this.supportsWorkflowTool() ||
       this.workflowsEnabled === false ||
       !isTopLevelSession() ||
-      this.getBareMode() ||
       process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1' ||
       this.isWorkflowToolDenied()
     ) {

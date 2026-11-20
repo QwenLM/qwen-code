@@ -4126,23 +4126,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             if (event.type === 'replay_complete') {
               acceptingConfig = true;
-              if (replayedWorkflowCommands) {
+              if (replayedWorkflowCommands && isConfigOwner()) {
                 const fallback = replayedWorkflowCommands;
                 replayedWorkflowCommands = undefined;
                 const snapshot = connectionRef.current.supportedCommands;
                 const { commands, skills } = connectionRef.current;
+                const ownsSnapshot = (current: DaemonConnectionState) =>
+                  isConfigOwner() &&
+                  current.sessionId === activeSession.sessionId &&
+                  current.supportedCommands === snapshot;
                 const applyCurrent = (
                   update: SetStateAction<DaemonConnectionState>,
                   observed = { commands, skills },
                 ) =>
                   setConnectionSynchronous((current) => {
-                    if (
-                      !isConfigOwner() ||
-                      current.sessionId !== activeSession.sessionId ||
-                      current.supportedCommands !== snapshot
-                    ) {
-                      return current;
-                    }
+                    if (!ownsSnapshot(current)) return current;
                     const next =
                       typeof update === 'function' ? update(current) : update;
                     if (
@@ -4163,27 +4161,36 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       },
                     };
                   });
-                void withActionTimeout(
-                  activeSession.supportedCommands(),
-                  'Refresh commands after replay timed out',
-                ).then(
-                  (status) => {
-                    if (status.sessionId !== activeSession.sessionId) return;
+                const readCommands = () =>
+                  withActionTimeout(
+                    activeSession.supportedCommands(),
+                    'Refresh commands after replay timed out',
+                  ).then(
+                    (status) =>
+                      status.sessionId === activeSession.sessionId
+                        ? status
+                        : undefined,
+                    () => undefined,
+                  );
+                void (async () => {
+                  const status =
+                    (await readCommands()) ??
+                    (snapshot !== undefined &&
+                    ownsSnapshot(connectionRef.current)
+                      ? await readCommands()
+                      : undefined);
+                  if (status !== undefined) {
                     applyCurrent((current) => ({
                       ...current,
                       ...mapSupportedCommands(status),
                       supportedCommands: status,
                     }));
-                  },
-                  () => {
-                    if (supportedCommands === undefined) {
-                      updateConnectionFromDaemonEvent(
-                        fallback.event,
-                        (update) => applyCurrent(update, fallback),
-                      );
-                    }
-                  },
-                );
+                  } else if (snapshot === undefined) {
+                    updateConnectionFromDaemonEvent(fallback.event, (update) =>
+                      applyCurrent(update, fallback),
+                    );
+                  }
+                })();
               }
             }
             const replayUpdate =

@@ -22,9 +22,11 @@ import {
   saveModifiedSettings,
   getSettingDefinition,
   isDefaultValue,
+  settingExistsInScope,
   requiresRestart,
   getRestartRequiredFromModified,
   getDefaultValue,
+  getSettingResetValue,
   setPendingSettingValueAny,
   getNestedValue,
   getEffectiveValue,
@@ -140,6 +142,7 @@ export function SettingsDialog({
   width,
   config,
 }: SettingsDialogProps): React.JSX.Element {
+  const safeMode = config?.isSafeMode() ?? false;
   // Get vim mode context to sync vim mode changes
   const { vimEnabled } = useVimModeState();
   const { toggleVimEnabled } = useVimModeActions();
@@ -249,7 +252,12 @@ export function SettingsDialog({
           if (!TOGGLE_TYPES.has(definition?.type)) {
             return;
           }
-          const currentValue = getEffectiveValue(key, pendingSettings, {});
+          const currentValue = getEffectiveValue(
+            key,
+            pendingSettings,
+            {},
+            safeMode,
+          );
           let newValue: SettingsValue;
           if (definition?.type === 'boolean') {
             newValue = nextBooleanSettingValue(
@@ -992,13 +1000,13 @@ export function SettingsDialog({
           // Ctrl+C or Ctrl+L: Clear current setting and reset to default
           const currentSetting = items[activeSettingIndex];
           if (currentSetting) {
-            const defaultValue = getDefaultValue(currentSetting.value);
+            const resetValue = getSettingResetValue(currentSetting.value);
             const defType = currentSetting.type;
-            if (defType === 'boolean' || defaultValue === undefined) {
+            if (defType === 'boolean' || resetValue === undefined) {
               setPendingSettings((prev) =>
                 setPendingSettingValueAny(
                   currentSetting.value,
-                  defaultValue,
+                  resetValue,
                   prev,
                 ),
               );
@@ -1008,13 +1016,13 @@ export function SettingsDialog({
               defType === 'enum'
             ) {
               if (
-                typeof defaultValue === 'number' ||
-                typeof defaultValue === 'string'
+                typeof resetValue === 'number' ||
+                typeof resetValue === 'string'
               ) {
                 setPendingSettings((prev) =>
                   setPendingSettingValueAny(
                     currentSetting.value,
-                    defaultValue,
+                    resetValue,
                     prev,
                   ),
                 );
@@ -1023,9 +1031,9 @@ export function SettingsDialog({
 
             const scopeSettings = settings.forScope(selectedScope).settings;
             const resetChangesValue =
-              !isDefaultValue(currentSetting.value, scopeSettings) &&
+              settingExistsInScope(currentSetting.value, scopeSettings) &&
               getEffectiveValue(currentSetting.value, scopeSettings, {}) !==
-                defaultValue;
+                resetValue;
             setModifiedSettings((prev) => {
               const updated = new Set(prev);
               if (resetChangesValue) updated.add(currentSetting.value);
@@ -1048,10 +1056,10 @@ export function SettingsDialog({
               const immediateSettings = new Set([currentSetting.value]);
               const toSaveValue =
                 currentSetting.type === 'boolean'
-                  ? defaultValue
-                  : typeof defaultValue === 'number' ||
-                      typeof defaultValue === 'string'
-                    ? defaultValue
+                  ? resetValue
+                  : typeof resetValue === 'number' ||
+                      typeof resetValue === 'string'
+                    ? resetValue
                     : undefined;
               const immediateSettingsObject =
                 toSaveValue !== undefined
@@ -1098,7 +1106,7 @@ export function SettingsDialog({
               // Track default reset as a pending change if restart required
               setGlobalPendingChanges((prev) => {
                 const next = new Map(prev);
-                next.set(currentSetting.value, defaultValue as PendingValue);
+                next.set(currentSetting.value, resetValue as PendingValue);
                 return next;
               });
             } else {
@@ -1341,6 +1349,7 @@ export function SettingsDialog({
                 mergedSettings,
                 modifiedSettings,
                 pendingSettings,
+                safeMode,
               );
             }
             const shouldBeGreyedOut = isDefaultValue(item.value, scopeSettings);

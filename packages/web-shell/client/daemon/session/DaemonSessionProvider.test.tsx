@@ -13011,16 +13011,19 @@ describe('DaemonSessionProvider', () => {
 
   it.each([
     'success',
-    'both fail',
-    'replay read fails',
+    'no snapshot and replay read fails',
+    'revalidated after a stale initial read',
+    'both revalidations fail',
     'newer replay commands arrive',
     'live commands arrive',
+    'live Workflow status arrives during retry',
   ] as const)(
     'keeps the Workflow catalog current through SSE delta replay (%s)',
     async (reads) => {
       const disconnect = createDeferred<void>();
       const backlogDelivered = createDeferred<void>();
       const finishReplay = createDeferred<void>();
+      const deliverLiveStatus = createDeferred<void>();
       const catalog = [
         { name: 'before', source: 'project' as const },
         { name: 'after', source: 'project' as const },
@@ -13038,23 +13041,28 @@ describe('DaemonSessionProvider', () => {
         ...catalog,
         { name: 'during-replay', source: 'project' as const },
       ];
+      const replayDisablesWorkflows =
+        reads === 'revalidated after a stale initial read';
+      const disabledStatus = {
+        ...status,
+        workflowsEnabled: false,
+        savedWorkflows: [],
+      };
       const supportedCommands = vi.fn(async () => ({
         ...status,
         savedWorkflows: latest,
       }));
-      supportedCommands.mockResolvedValueOnce({
-        ...status,
-        workflowsEnabled: false,
-        savedWorkflows: [],
-      });
       const reconnectReadFails =
-        reads === 'both fail' || reads === 'newer replay commands arrive';
+        reads === 'no snapshot and replay read fails' ||
+        reads === 'newer replay commands arrive';
       if (reconnectReadFails) {
-        supportedCommands.mockRejectedValueOnce(
-          new Error('Reconnect read failed'),
-        );
+        supportedCommands
+          .mockRejectedValueOnce(new Error('Initial read failed'))
+          .mockRejectedValueOnce(new Error('Reconnect read failed'));
       } else {
-        supportedCommands.mockResolvedValueOnce(status);
+        supportedCommands
+          .mockResolvedValueOnce(disabledStatus)
+          .mockResolvedValueOnce(status);
       }
       if (reads === 'live commands arrive') {
         supportedCommands.mockImplementationOnce(() => recoveryRead.promise);
@@ -13062,6 +13070,13 @@ describe('DaemonSessionProvider', () => {
         supportedCommands.mockRejectedValueOnce(
           new Error('Replay read failed'),
         );
+        if (replayDisablesWorkflows) {
+          supportedCommands.mockResolvedValueOnce(disabledStatus);
+        } else if (reads === 'live Workflow status arrives during retry') {
+          supportedCommands.mockImplementationOnce(() => recoveryRead.promise);
+        } else if (!reconnectReadFails) {
+          supportedCommands.mockRejectedValueOnce(new Error('Retry failed'));
+        }
       }
       const events = vi.fn(async function* (
         opts: { signal?: AbortSignal } = {},
@@ -13082,8 +13097,8 @@ describe('DaemonSessionProvider', () => {
               _meta: {
                 availableSkills: ['older-skill'],
                 workflowStatus: {
-                  workflowsEnabled: true,
-                  savedWorkflows: [catalog[0]],
+                  workflowsEnabled: !replayDisablesWorkflows,
+                  savedWorkflows: replayDisablesWorkflows ? [] : [catalog[0]],
                 },
               },
             },
@@ -13127,6 +13142,28 @@ describe('DaemonSessionProvider', () => {
             },
           };
         }
+        if (reads === 'live Workflow status arrives during retry') {
+          await deliverLiveStatus.promise;
+          yield {
+            id: 7,
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionId: status.sessionId,
+              update: {
+                sessionUpdate: 'available_commands_update',
+                availableCommands: [{ name: 'live-command', description: '' }],
+                _meta: {
+                  availableSkills: ['live-skill'],
+                  workflowStatus: {
+                    workflowsEnabled: false,
+                    savedWorkflows: [],
+                  },
+                },
+              },
+            },
+          };
+        }
         await untilAborted(opts.signal);
       });
       sdkMocks.sessions.push(
@@ -13147,21 +13184,32 @@ describe('DaemonSessionProvider', () => {
         reconnectDelayMs: 1,
         maxReconnectDelayMs: 1,
       });
-      expect(connection?.supportedCommands?.workflowsEnabled).toBe(false);
+      expect(connection?.supportedCommands?.workflowsEnabled).toBe(
+        reconnectReadFails ? undefined : false,
+      );
 
       await act(async () => {
         disconnect.resolve();
         await backlogDelivered.promise;
       });
       expect(connection?.supportedCommands?.savedWorkflows).toEqual(
-        reconnectReadFails ? [] : catalog,
+        reconnectReadFails ? undefined : catalog,
       );
 
       await act(async () => {
         finishReplay.resolve();
         await flushPromises();
       });
-      expect(supportedCommands).toHaveBeenCalledTimes(3);
+      if (replayDisablesWorkflows) {
+        expect(connection?.supportedCommands?.workflowsEnabled).toBe(false);
+      }
+      expect(supportedCommands).toHaveBeenCalledTimes(
+        reconnectReadFails ||
+          reads === 'success' ||
+          reads === 'live commands arrive'
+          ? 3
+          : 4,
+      );
       if (reads === 'live commands arrive') {
         await act(async () => {
           recoveryRead.resolve({ ...status, savedWorkflows: latest });
@@ -13172,6 +13220,23 @@ describe('DaemonSessionProvider', () => {
           'fresh-skill',
         ]);
         expect(connection?.skills).toEqual(['fresh-skill']);
+      }
+      if (reads === 'live Workflow status arrives during retry') {
+        await act(async () => {
+          deliverLiveStatus.resolve();
+          await flushPromises();
+        });
+        expect(connection?.supportedCommands?.workflowsEnabled).toBe(false);
+        await act(async () => {
+          recoveryRead.resolve({ ...status, savedWorkflows: latest });
+          await flushPromises();
+        });
+        expect(connection?.supportedCommands?.workflowsEnabled).toBe(false);
+        expect(connection?.commands?.map(({ name }) => name)).toEqual([
+          'live-command',
+          'live-skill',
+        ]);
+        expect(connection?.skills).toEqual(['live-skill']);
       }
       if (reads === 'newer replay commands arrive') {
         expect(connection?.commands?.map(({ name }) => name)).toEqual([
@@ -13188,7 +13253,7 @@ describe('DaemonSessionProvider', () => {
         });
         expect(connection?.workflowStatusRevision).toBe(1);
       }
-      if (reads === 'both fail') {
+      if (reads === 'no snapshot and replay read fails') {
         expect(connection?.commands?.map(({ name }) => name)).toEqual([
           'older-command',
           'older-skill',
@@ -13197,10 +13262,12 @@ describe('DaemonSessionProvider', () => {
       }
       const expected = {
         success: latest,
-        'both fail': [catalog[0]],
-        'replay read fails': catalog,
+        'no snapshot and replay read fails': [catalog[0]],
+        'revalidated after a stale initial read': [],
+        'both revalidations fail': catalog,
         'newer replay commands arrive': [catalog[0]],
         'live commands arrive': latest,
+        'live Workflow status arrives during retry': [],
       };
       expect(connection?.supportedCommands?.savedWorkflows).toEqual(
         expected[reads],

@@ -3987,6 +3987,10 @@ async function assertManagedConversationDirectoryIdentity(
 class QwenAgent implements Agent {
   private readonly workspaceSettings: LoadedSettings;
   private sessions: Map<string, Session> = new Map();
+  private readonly appliedPermissionRules = new WeakMap<
+    Session,
+    Partial<Record<SettingScope, PermissionRuleSet>>
+  >();
   /**
    * Cross-session messaging for every session this process hosts.
    *
@@ -7900,7 +7904,7 @@ class QwenAgent implements Agent {
   }
 
   private async syncLivePermissionManagers(
-    before: PermissionRuleSet,
+    previousScopeRules: PermissionRuleSet,
     after: PermissionRuleSet,
     settingScope: SettingScope,
     settingsCwd: string,
@@ -7950,43 +7954,46 @@ class QwenAgent implements Agent {
       effectiveRulesByWorkspace.set(workspace, rules);
       return rules;
     };
-    for (const ruleType of PERMISSION_RULE_TYPES) {
-      const oldRules = new Set(before[ruleType]);
-      const newRules = new Set(after[ruleType]);
-      const removed = before[ruleType].filter((rule) => !newRules.has(rule));
-      const added = after[ruleType].filter((rule) => !oldRules.has(rule));
+    for (const session of this.sessions.values()) {
+      const config = session.getConfig();
+      const workspace = this.sessionWorkspaceRoot(config);
+      // Use the admission root, not the live cwd, for workspace-scoped writes.
+      if (
+        settingScope === SettingScope.Workspace &&
+        this.canonicalWorkspacePath(workspace) !==
+          this.canonicalWorkspacePath(settingsCwd)
+      ) {
+        continue;
+      }
+      const pm = config.getPermissionManager?.();
+      if (!pm) continue;
+      const applied = this.appliedPermissionRules.get(session) ?? {};
+      const before = applied[settingScope] ?? previousScopeRules;
+      const next = { ...before };
+      applied[settingScope] = next;
+      this.appliedPermissionRules.set(session, applied);
 
-      if (removed.length === 0 && added.length === 0) continue;
+      for (const ruleType of PERMISSION_RULE_TYPES) {
+        const oldRules = new Set(before[ruleType]);
+        const newRules = new Set(after[ruleType]);
+        const removed = before[ruleType].filter((rule) => !newRules.has(rule));
+        const added = after[ruleType].filter((rule) => !oldRules.has(rule));
+        if (removed.length === 0 && added.length === 0) continue;
 
-      for (const session of this.sessions.values()) {
-        const config = session.getConfig();
-        const workspace = this.sessionWorkspaceRoot(config);
-        if (settingScope === SettingScope.Workspace) {
-          // A workspace-scoped write only applies to sessions bound to the
-          // workspace it landed in. `settingsCwd` is the requesting session's
-          // stable workspace root; skip sessions in other workspaces so a
-          // worktree's grant/deny doesn't fan out to every live session with
-          // no record in their own settings files.
-          if (
-            this.canonicalWorkspacePath(workspace) !==
-            this.canonicalWorkspacePath(settingsCwd)
-          ) {
-            continue;
-          }
-        }
-        const pm = config.getPermissionManager?.();
-        if (!pm) continue;
         // Isolate per-session failures: a stale/broken permission manager for
         // one session must not abort syncing the rest (settings are already
         // persisted, so the in-memory sync is best-effort).
         try {
           const workflowsWereEnabled =
             ruleType === 'deny' && config.isWorkflowsEnabled();
-          if (settingScope === SettingScope.User || requestSettings.isTrusted) {
+          const appliesAdditions =
+            settingScope === SettingScope.User || requestSettings.isTrusted;
+          if (appliesAdditions) {
             for (const rule of added) {
               pm.addPersistentRule(rule, ruleType);
             }
           }
+          let pendingRemovals: string[] = [];
           if (removed.length > 0) {
             const effective = getEffectiveRules(workspace);
             // Preserve existing restrictions if their other sources can't be read.
@@ -8002,8 +8009,16 @@ class QwenAgent implements Agent {
                   }
                 }
               }
+            } else {
+              pendingRemovals = removed;
             }
           }
+          next[ruleType] = [
+            ...(appliesAdditions
+              ? after[ruleType]
+              : after[ruleType].filter((rule) => oldRules.has(rule))),
+            ...pendingRemovals,
+          ];
           if (
             ruleType === 'deny' &&
             workflowsWereEnabled !== config.isWorkflowsEnabled()
@@ -11532,10 +11547,10 @@ class QwenAgent implements Agent {
                   ? SettingScope.User
                   : SettingScope.Workspace;
               const before = readPermissionRuleSet(
-                this.settings.forScope(scope).settings,
+                this.workspaceSettings.forScope(scope).settings,
               );
               if (
-                !this.settings.reloadScopesFromDiskAtomically([
+                !this.workspaceSettings.reloadScopesFromDiskAtomically([
                   SettingScope.User,
                   SettingScope.Workspace,
                 ])
@@ -11546,10 +11561,12 @@ class QwenAgent implements Agent {
               }
               await this.syncLivePermissionManagers(
                 before,
-                readPermissionRuleSet(this.settings.forScope(scope).settings),
+                readPermissionRuleSet(
+                  this.workspaceSettings.forScope(scope).settings,
+                ),
                 scope,
                 changeCwd,
-                this.settings,
+                this.workspaceSettings,
                 true,
               );
               break;
@@ -16180,7 +16197,10 @@ class QwenAgent implements Agent {
           );
         }
 
-        const disabledToolsByWorkspace = new Map<string, ReadonlySet<string>>();
+        const disabledToolsByWorkspace = new Map<
+          string,
+          ReadonlySet<string> | undefined
+        >();
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
         const skipped: string[] = [];
@@ -16189,12 +16209,19 @@ class QwenAgent implements Agent {
           sessions.map(async ([id, session]) => {
             const config = session.getConfig();
             const workspace = this.sessionWorkspaceRoot(config);
-            let disabledTools = disabledToolsByWorkspace.get(workspace);
-            if (!disabledTools) {
-              const settings = this.loadRequestSettings(workspace);
-              disabledTools = new Set(
-                normalizeDisabledToolList(settings.merged.tools?.disabled),
-              );
+            if (!disabledToolsByWorkspace.has(workspace)) {
+              let disabledTools: ReadonlySet<string> | undefined;
+              try {
+                const { merged } = readLiveSettingsSnapshot(workspace);
+                disabledTools = new Set(
+                  normalizeDisabledToolList(merged.tools?.disabled),
+                );
+              } catch (error) {
+                debugLogger.warn(
+                  'Could not reload tool exclusions; keeping the live exclusions:',
+                  error,
+                );
+              }
               disabledToolsByWorkspace.set(workspace, disabledTools);
             }
             // Workflow admission and controls follow the live flag even
@@ -16202,7 +16229,7 @@ class QwenAgent implements Agent {
             const workflowsWereEnabled = config.isWorkflowsEnabled();
             await config.applyWorkflowsEnabledSetting(
               newMerged.tools?.workflowsEnabled,
-              disabledTools,
+              disabledToolsByWorkspace.get(workspace),
             );
             if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
               this.cancelDisabledWorkflowRuns(session);
@@ -18074,6 +18101,12 @@ class QwenAgent implements Agent {
   ): Promise<Session> {
     options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission(this.hostExecutionEngine);
+    const appliedPermissionRules = {
+      [SettingScope.User]: readPermissionRuleSet(settings.user?.settings),
+      [SettingScope.Workspace]: readPermissionRuleSet(
+        settings.isTrusted ? settings.workspace?.settings : undefined,
+      ),
+    };
     const sessionId = normalizeSessionIdForLookup(config.getSessionId());
     const llmClient = config.getLlmClient();
     const needsInitialize = !llmClient.isInitialized();
@@ -18263,6 +18296,7 @@ class QwenAgent implements Agent {
         );
       }
       this.assertHostedSessionIdAvailable(sessionId);
+      this.appliedPermissionRules.set(session, appliedPermissionRules);
       this.sessions.set(sessionId, session);
       session.bindWorkflowModeUpdates?.(
         () =>

@@ -30,6 +30,8 @@ import {
   type SavedWorkflowEntry,
 } from '@qwen-code/qwen-code-core';
 import { SavedWorkflowLoader } from './saved-workflow-loader.js';
+import { CommandService } from './CommandService.js';
+import { workflowsCommand } from '../ui/commands/workflowsCommand.js';
 import {
   extensionOwnerLabel,
   getCommandSourceBadge,
@@ -145,6 +147,29 @@ describe('SavedWorkflowLoader', () => {
     expect('workflowName' in projectCmd).toBe(false);
     expect(projectCmd.sourceLabel).toBe('Workflow');
     expect(getCommandSourceBadge(projectCmd)).toBeNull();
+  });
+
+  it('keeps the built-in /workflows controls when a saved workflow has that name', async () => {
+    listMock.mockResolvedValue([entry({ name: 'workflows' })]);
+    const commands = await CommandService.create(
+      [
+        { loadCommands: async () => [workflowsCommand] },
+        new SavedWorkflowLoader(makeConfig()),
+      ],
+      signal,
+    );
+
+    expect(commands.getCommands()).toEqual([
+      expect.objectContaining({
+        name: 'workflows',
+        kind: CommandKind.BUILT_IN,
+      }),
+      expect.objectContaining({
+        name: 'workflow.workflows',
+        workflowName: 'workflows',
+        source: 'workflow-command',
+      }),
+    ]);
   });
 
   it('names the owner once, in the capped badge, even for a long display name', async () => {

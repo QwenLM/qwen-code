@@ -1189,14 +1189,14 @@ export function readSettingsSnapshot(
 /** Read a snapshot using the running CLI's settings paths and substitutions. */
 export function readLiveSettingsSnapshot(
   workspaceDir: string,
-  workspaceTrusted: boolean,
+  workspaceTrusted?: boolean,
 ): LoadedSettings {
   return readSettingsLayers(
     workspaceDir,
     {
       consumeCorruptionEnvVars: false,
       skipLoadEnvironment: true,
-      skipWorkspaceSettings: !workspaceTrusted,
+      skipWorkspaceSettings: workspaceTrusted === false,
       workspaceTrusted,
     },
     {},

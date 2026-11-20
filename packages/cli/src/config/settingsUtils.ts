@@ -15,6 +15,8 @@ import { getSettingsSchema } from './settingsSchema.js';
 import { t } from '../i18n/index.js';
 import { isAutoLanguage } from '../i18n/languageUtils.js';
 
+const WORKFLOWS_ENABLED_SETTING = 'tools.workflowsEnabled';
+
 // The schema is now nested, but many parts of the UI and logic work better
 // with a flattened structure and dot-notation keys. This section flattens the
 // schema into a map for easier lookups.
@@ -67,8 +69,13 @@ export function requiresRestart(key: string): boolean {
 /**
  * Get the default value for a setting
  */
-export function getDefaultValue(key: string): SettingsValue {
+export function getDefaultValue(key: string, safeMode = false): SettingsValue {
+  if (key === WORKFLOWS_ENABLED_SETTING && safeMode) return false;
   return getFlattenedSchema()[key]?.default;
+}
+
+export function getSettingResetValue(key: string): SettingsValue {
+  return key === WORKFLOWS_ENABLED_SETTING ? undefined : getDefaultValue(key);
 }
 
 /**
@@ -117,9 +124,9 @@ export function getEffectiveValue(
   key: string,
   settings: Settings,
   mergedSettings: Settings,
+  safeMode = false,
 ): SettingsValue {
-  const definition = getSettingDefinition(key);
-  if (!definition) {
+  if (!getSettingDefinition(key)) {
     return undefined;
   }
 
@@ -137,8 +144,7 @@ export function getEffectiveValue(
     return value as SettingsValue;
   }
 
-  // Return default value if no value is set anywhere
-  return definition.default;
+  return getDefaultValue(key, safeMode);
 }
 
 /**
@@ -623,9 +629,11 @@ export function saveModifiedSettings(
       return;
     }
 
-    const isDefaultValue = value === getDefaultValue(settingKey);
-
-    if (existsInOriginalFile || !isDefaultValue) {
+    if (
+      existsInOriginalFile ||
+      settingKey === WORKFLOWS_ENABLED_SETTING ||
+      value !== getDefaultValue(settingKey)
+    ) {
       loadedSettings.setValue(scope, settingKey, value);
     }
   });
@@ -640,20 +648,22 @@ export function getDisplayValue(
   _mergedSettings: Settings,
   modifiedSettings: Set<string>,
   pendingSettings?: Settings,
+  safeMode = false,
 ): string {
   // Prioritize pending changes if user has modified this setting
   const definition = getSettingDefinition(key);
+  const defaultValue = getDefaultValue(key, safeMode);
 
   let value: SettingsValue;
   if (pendingSettings && settingPathExists(key, pendingSettings)) {
     // Show the value from the pending (unsaved) edits when it exists
-    value = getEffectiveValue(key, pendingSettings, {});
+    value = getEffectiveValue(key, pendingSettings, {}, safeMode);
   } else if (settingExistsInScope(key, settings)) {
     // Show the value defined at the current scope if present
-    value = getEffectiveValue(key, settings, {});
+    value = getEffectiveValue(key, settings, {}, safeMode);
   } else {
     // Fall back to the schema default when the key is unset in this scope
-    value = getDefaultValue(key);
+    value = defaultValue;
   }
 
   let valueString = value === undefined ? t('(not set)') : String(value);
@@ -675,7 +685,6 @@ export function getDisplayValue(
   }
 
   // Check if value is different from default OR if it's in modified settings OR if there are pending changes
-  const defaultValue = getDefaultValue(key);
   const isChangedFromDefault = value !== defaultValue;
   const isInModifiedSettings = modifiedSettings.has(key);
 

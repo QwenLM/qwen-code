@@ -297,6 +297,7 @@ describe('readSettingsSnapshot', () => {
     const treeBefore = describeTree();
 
     expect(() => read()).toThrow();
+    expect(() => readLiveSettingsSnapshot(workspace)).toThrow();
     expect(describeTree()).toEqual(treeBefore);
   });
 });

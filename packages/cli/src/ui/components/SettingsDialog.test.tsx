@@ -21,13 +21,25 @@
  *
  */
 
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { render } from 'ink-testing-library';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  onTestFinished,
+} from 'vitest';
 import { SettingsDialog } from './SettingsDialog.js';
 import { LoadedSettings, SettingScope } from '../../config/settings.js';
 import { VimModeProvider } from '../contexts/VimModeContext.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { act } from 'react';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   getDialogSettingKeys,
   getSettingDefinition,
@@ -503,6 +515,70 @@ describe('SettingsDialog', () => {
       );
       unmount();
     });
+
+    it.each([
+      { workflowsEnabled: false, safeMode: true },
+      { workflowsEnabled: true, safeMode: true },
+      { workflowsEnabled: false, safeMode: false },
+    ])(
+      'unsets Dynamic Workflows=$workflowsEnabled with Safe Mode=$safeMode',
+      async ({ workflowsEnabled, safeMode }) => {
+        const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-workflows-'));
+        onTestFinished(() => rmSync(tempDir, { recursive: true, force: true }));
+        const userSettings = {
+          tools: { workflowsEnabled, webSearch: { enabled: false } },
+        };
+        const settings = createMockSettings(userSettings);
+        settings.user.path = path.join(tempDir, 'settings.json');
+        writeFileSync(settings.user.path, JSON.stringify(userSettings));
+        const actual = await vi.importActual<
+          typeof import('../../config/settingsUtils.js')
+        >('../../config/settingsUtils.js');
+        vi.mocked(saveModifiedSettings).mockImplementationOnce(
+          actual.saveModifiedSettings,
+        );
+        const config = { isSafeMode: () => safeMode } as Config;
+        const onRestartRequest = vi.fn();
+        const { stdin, unmount, lastFrame } = render(
+          <KeypressProvider kittyProtocolEnabled={false}>
+            <SettingsDialog
+              settings={settings}
+              config={config}
+              onSelect={vi.fn()}
+              onRestartRequest={onRestartRequest}
+            />
+          </KeypressProvider>,
+        );
+        const activeRow = () =>
+          lastFrame()
+            ?.split('\n')
+            .find((line) => line.includes('●\uFE0E Dynamic Workflows'));
+        const readSettings = () =>
+          JSON.parse(readFileSync(settings.user.path, 'utf8'));
+        for (const character of 'tools.workflowsEnabled') {
+          act(() => stdin.write(character));
+          await wait();
+        }
+        act(() => stdin.write(TerminalKeys.DOWN_ARROW));
+        await waitFor(() =>
+          expect(activeRow()).toContain(`${workflowsEnabled}*`),
+        );
+
+        act(() => stdin.write('\u000C'));
+        await waitFor(() => expect(activeRow()).toContain(`${!safeMode}*`));
+        expect(readSettings()).toEqual(userSettings);
+        act(() => stdin.write('r'));
+        await waitFor(() => expect(onRestartRequest).toHaveBeenCalledOnce());
+        expect(readSettings()).toEqual({
+          tools: { webSearch: { enabled: false } },
+        });
+        await waitFor(() => {
+          expect(activeRow()).toContain(String(!safeMode));
+          expect(activeRow()).not.toContain('*');
+        });
+        unmount();
+      },
+    );
 
     it('does not persist a reset when the stored value already equals the default', async () => {
       vi.mocked(saveModifiedSettings).mockClear();

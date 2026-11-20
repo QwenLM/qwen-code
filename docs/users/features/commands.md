@@ -147,6 +147,8 @@ Commands for managing AI tools and models.
 >
 > `/workflows` offers run controls when dynamic workflows are enabled. Use the user- or system-scoped [`tools.workflowsEnabled`](../configuration/settings.md) setting or the `QWEN_CODE_ENABLE_WORKFLOWS=1` / `QWEN_CODE_DISABLE_WORKFLOWS=1` environment overrides. In sessions that support Workflow mode, `/workflows mode status` and `/workflows mode off` remain available when the tool is disabled.
 >
+> A saved workflow named `workflows` is available as `/workflow.workflows`, leaving `/workflows` available for run controls.
+>
 > `/lsp` appears when LSP is enabled through the user- or system-scoped `tools.lspEnabled` setting, its environment overrides, or `--experimental-lsp`. `/trust` appears when `security.folderTrust.enabled` is set. `/dream` and `/forget` appear when managed auto-memory is available.
 
 > [!note]

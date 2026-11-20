@@ -40,6 +40,7 @@ import {
   requiresRestart,
   getRestartRequiredFromModified,
   getDefaultValue,
+  getSettingResetValue,
   getNestedValue,
   validateSettingValue,
 } from '../../config/settingsUtils.js';
@@ -302,6 +303,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
     config,
     availableTerminalHeight,
   } = props;
+  const safeMode = config?.isSafeMode() ?? false;
 
   const [mode, setMode] = useState<'settings' | 'scope'>('settings');
   const [selectedScope, setSelectedScope] = useState<SettingScope>(
@@ -491,7 +493,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
 
   const toggleCurrent = (key: string) => {
     const definition = getSettingDefinition(key);
-    const currentValue = getEffectiveValue(key, pendingSettings, {});
+    const currentValue = getEffectiveValue(key, pendingSettings, {}, safeMode);
     const newValue = nextToggleValue(definition, currentValue);
     if (newValue === undefined) return;
     applySettingValue(key, newValue);
@@ -524,8 +526,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   const resetCurrentToDefault = (key: string) => {
     const currentSetting = items[activeSettingIndexRef.current];
     if (!currentSetting || currentSetting.key !== key) return;
-    const defaultValue = getDefaultValue(key);
-    applySettingValue(key, defaultValue);
+    applySettingValue(key, getSettingResetValue(key));
     setModifiedSettings((prev) => {
       const updated = new Set(prev);
       updated.delete(key);
@@ -984,6 +985,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
                 settings.merged,
                 modifiedSettings,
                 pendingSettings,
+                safeMode,
               );
             }
             const greyedOut = isDefaultValue(

@@ -22,6 +22,8 @@ vi.mock('../telemetry/index.js', () => ({
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
   isTelemetrySdkInitialized: vi.fn().mockReturnValue(false),
   shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
+  logStartSession: vi.fn(),
+  StartSessionEvent: vi.fn(),
   refreshSessionContext: vi.fn(),
 }));
 vi.mock('../core/contentGenerator.js', () => ({
@@ -77,6 +79,9 @@ vi.mock('../ide/ide-client.js', () => ({
 }));
 vi.mock('../utils/memory-constants.js', () => ({
   setMemoryFilename: vi.fn(),
+}));
+vi.mock('../utils/toolResultCleanup.js', () => ({
+  cleanupOldToolResults: vi.fn().mockResolvedValue(undefined),
 }));
 
 import * as fs from 'node:fs';
@@ -135,7 +140,7 @@ describe('Config workflows feature gate', () => {
     [
       'turned on in bare mode',
       { bareMode: true, workflowsEnabled: true },
-      true,
+      false,
     ],
     [
       'turned on in safe mode',
@@ -154,6 +159,19 @@ describe('Config workflows feature gate', () => {
     process.env['QWEN_CODE_ENABLE_WORKFLOWS'] = '1';
     const cfg = new Config({ ...baseParams });
     expect(cfg.isWorkflowsEnabled()).toBe(true);
+  });
+
+  it('keeps Workflow unavailable after enabling it in a live bare session', async () => {
+    delete process.env['QWEN_CODE_ENABLE_WORKFLOWS'];
+    delete process.env['QWEN_CODE_DISABLE_WORKFLOWS'];
+    const cfg = new Config({ ...baseParams, bareMode: true });
+    await cfg.initialize({ skipMcpDiscovery: true });
+
+    await cfg.applyWorkflowsEnabledSetting(true);
+    process.env['QWEN_CODE_ENABLE_WORKFLOWS'] = '1';
+
+    expect(cfg.isWorkflowsEnabled()).toBe(false);
+    expect(cfg.getToolRegistry().hasRegisteredTool('workflow')).toBe(false);
   });
 
   // TST-I1: "respects setWorkflowsEnabled(true)" was deleted — it is a

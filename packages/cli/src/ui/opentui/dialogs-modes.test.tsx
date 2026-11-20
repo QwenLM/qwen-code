@@ -94,10 +94,12 @@ vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 vi.mock('./key-map.js', () => ({
   toOriginalKey: (key: {
+    ctrl?: boolean;
     name?: string;
     shift?: boolean;
     sequence?: string;
   }) => ({
+    ctrl: key.ctrl ?? false,
     name: key.name ?? '',
     shift: key.shift ?? false,
     sequence: key.sequence ?? '',
@@ -133,7 +135,7 @@ const CONCISE = BUILT_IN_OUTPUT_STYLES.find(
 );
 if (!CONCISE) throw new Error('missing Concise output style');
 
-function press(name: string, shift = false) {
+function press(name: string, shift = false, ctrl = false) {
   if (mocks.state.keyboardHandlers.length === 0) {
     throw new Error('no keyboard handler registered');
   }
@@ -141,7 +143,7 @@ function press(name: string, shift = false) {
     for (const handler of [...mocks.state.keyboardHandlers]) {
       // A digit's identity is its sequence: the quick-select path matches on
       // it, and a bare name would fall through as a non-numeric key.
-      handler({ name, shift, sequence: name.length === 1 ? name : '' });
+      handler({ name, shift, ctrl, sequence: name.length === 1 ? name : '' });
     }
   });
 }
@@ -2360,6 +2362,54 @@ describe('OpenTuiSettingsDialog region budget', () => {
     expect(screen.getByText(items[items.length - 1]!.label)).toBeTruthy();
     expect(screen.getByText(items[items.length - 8]!.label)).toBeTruthy();
     expect(screen.queryByText(items[items.length - 9]!.label)).toBeNull();
+  });
+});
+
+describe('OpenTuiSettingsDialog Dynamic Workflows', () => {
+  it('shows the Safe Mode default and distinguishes an explicit opt-in from reset', () => {
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
+    const stored: { tools: { workflowsEnabled?: boolean } } = { tools: {} };
+    const setValue = vi.fn((_scope, _key, value: boolean | undefined) => {
+      if (value === undefined) delete stored.tools.workflowsEnabled;
+      else stored.tools.workflowsEnabled = value;
+    });
+    const settings = {
+      isTrusted: true,
+      merged: stored,
+      forScope: () => ({ settings: stored }),
+      setValue,
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        config={{ isSafeMode: () => true } as Config}
+        onSelect={vi.fn()}
+      />,
+    );
+    for (const character of 'tools.workflowsEnabled') press(character);
+    press('down');
+    const displayedRow = () =>
+      screen.getByText('Dynamic Workflows').parentElement?.parentElement
+        ?.parentElement?.textContent;
+    expect(displayedRow()).toMatch(/false$/);
+
+    press('return');
+    expect(setValue).toHaveBeenLastCalledWith(
+      SettingScope.User,
+      'tools.workflowsEnabled',
+      true,
+    );
+    expect(displayedRow()).toMatch(/true\*$/);
+
+    press('l', false, true);
+    expect(setValue).toHaveBeenLastCalledWith(
+      SettingScope.User,
+      'tools.workflowsEnabled',
+      undefined,
+    );
+    expect(stored.tools).not.toHaveProperty('workflowsEnabled');
+    expect(displayedRow()).toMatch(/false$/);
   });
 });
 
