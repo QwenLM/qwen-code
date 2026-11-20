@@ -104,7 +104,6 @@ function fixture(
     head: {
       ...KEY,
       state: 'SEALED',
-      storageVersion: 1,
       writerId: 'writer',
       writerGeneration: 1,
       writerLeaseUntil: null,
@@ -383,8 +382,6 @@ async function hostedModelFixture(
   } finally {
     await session.close();
   }
-  if (options.diagnostics)
-    f.source.head = { ...f.source.head, storageVersion: 3 };
   const attempts = session.authority
     .eventsInSequenceRange(1, session.authority.committedSequence)
     .filter((event) => event.kind === 'model.attempt');
@@ -442,7 +439,6 @@ async function diagnosticResourceFixture(kind: string) {
       },
     });
   });
-  f.source.head = { ...f.source.head, storageVersion: 3 };
   return { ...f, diagnosticRef: diagnosticRef! };
 }
 
@@ -1391,10 +1387,9 @@ describe('verifyRecoverySession', () => {
   });
 
   it.each(Object.values(MANAGED_MODEL_STATISTICS_KINDS))(
-    'verifies committed diagnostic resource %s at storage version 3',
+    'verifies committed diagnostic resource %s',
     async (kind) => {
       const f = await diagnosticResourceFixture(kind);
-      expect(f.source.head.storageVersion).toBe(3);
       expect(f.diagnosticRef.kind).toBe(kind);
       await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
         fileHistory: 'not_captured',
@@ -2256,11 +2251,7 @@ it('restores committed execution diagnostic source resources', async () => {
       message: { role: 'model', parts: [{ text: 'done' }] },
     });
   });
-  const source = {
-    ...f.source,
-    head: { ...f.source.head!, storageVersion: 4 },
-  };
-  await expect(verifyRecoverySession(source, f.io)).resolves.toBeDefined();
+  await expect(verifyRecoverySession(f.source, f.io)).resolves.toBeDefined();
   const diagnostics = [...f.resources.keys()].filter(
     (id) => f.refs.get(id)?.kind === 'managed-execution-diagnostics',
   );

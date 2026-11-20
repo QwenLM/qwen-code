@@ -613,13 +613,12 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             Timestamp lease = (Timestamp) head.get("writer_lease_until");
             check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now(jdbc)), "source_drift");
             check(Set.of("ACTIVE", "SEALED", "DELETED").contains(head.get("state"))
-                    && List.of(1, 2, 3, 4, 5).contains(((Number) head.get("storage_version")).intValue())
                     && ((Number) head.get("compacted_through_revision")).longValue() >= 0
                     && ((Number) head.get("compacted_through_revision")).longValue() <= ((Number) head.get("journal_revision")).longValue()
                     && "READY".equals(head.get("recovery_status")), "source_drift");
             ObjectNode value = source.putObject("head");
             fields(value, head, "tenantId", "tenant_id", "workspaceId", "workspace_id", "sessionId", "session_id",
-                    "state", "state", "storageVersion", "storage_version", "writerId", "writer_id",
+                    "state", "state", "writerId", "writer_id",
                     "writerGeneration", "writer_generation", "writerLeaseUntil", "writer_lease_fingerprint",
                     "journalRevision", "journal_revision", "committedSequence", "committed_sequence",
                     "lastCommitDigest", "last_commit_digest", "activationEpoch", "activation_epoch",

@@ -441,6 +441,24 @@ describe('debugLogger', () => {
       expect(isDebugLoggingDegraded()).toBe(false);
     });
 
+    it('keeps degraded state when a failed append also has a throwing observer', async () => {
+      vi.mocked(fs.appendFile).mockRejectedValueOnce(new Error('Disk full'));
+      const deliveries: boolean[] = [];
+      const logger = createDebugLogger();
+      logger.warnWithDelivery?.((delivered) => {
+        deliveries.push(delivered);
+        throw new Error('observer failed');
+      }, 'failed append');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).toHaveBeenCalledOnce();
+      // The observer's exception neither escapes nor repeats the receipt, and
+      // the real append failure is still recorded.
+      expect(deliveries).toEqual([false]);
+      expect(isDebugLoggingDegraded()).toBe(true);
+    });
+
     it('stays true after failure even if subsequent writes succeed', async () => {
       vi.mocked(fs.appendFile).mockRejectedValueOnce(
         new Error('Temporary error'),

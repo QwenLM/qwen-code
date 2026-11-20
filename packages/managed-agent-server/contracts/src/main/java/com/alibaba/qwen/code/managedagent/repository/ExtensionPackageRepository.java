@@ -11,12 +11,14 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionP
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 public interface ExtensionPackageRepository {
     @FunctionalInterface
     public interface Access {
         public void require(boolean write); }
     public List<Package> list(String tenant, String workspace);
+    public Optional<Package> findLatestCatalogPackage(String tenant, String workspace, String extensionId);
     public Package get(String tenant, String workspace, Pin pin);
     public boolean hasSettings(String tenant, String workspace, Pin pin);
     public default Operation preparePublish(String tenant, String actor, String workspace, String extensionId,
