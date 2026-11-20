@@ -267,7 +267,7 @@ describe('original Hosted retirement owner barrier', () => {
     };
   }
 
-  it('admits /2 with the durable matching profile and diagnostics storage support', async () => {
+  it('admits /2 with the durable matching profile and enables diagnostics', async () => {
     const fixture = setup();
     try {
       const selected = await fixture.attach('csi-files-retirement/2');
@@ -277,7 +277,6 @@ describe('original Hosted retirement owner barrier', () => {
       expect(JSON.parse(definition[1].toString()).toolProfile).toBe(
         'csi-files-retirement/2',
       );
-      expect(selected.stores.supportsModelDiagnostics).toHaveBeenCalledOnce();
       expect(components.diagnostics).toHaveBeenCalledWith(
         expect.objectContaining({ authority: selected.authority }),
       );
@@ -287,43 +286,27 @@ describe('original Hosted retirement owner barrier', () => {
     }
   });
 
-  it.each(['storage', 'profile'] as const)(
-    'refuses /2 with incompatible %s before enabling diagnostics or binding history',
-    async (failure) => {
-      const fixture = setup();
-      const selected = fixture.createOwner('csi-files-retirement/2');
-      if (failure === 'storage')
-        selected.stores.supportsModelDiagnostics.mockReturnValue(false);
-      else
-        selected.stores.resourceStore.read.mockResolvedValue(
-          Buffer.from(
-            JSON.stringify({ toolProfile: 'csi-files-retirement/1' }),
-          ),
-        );
-      try {
-        const response = await fixture.post(
-          selected,
-          'attach',
-          selected.attachment,
-        );
-        expect(response.status).toBe(409);
-        expect(response.body.code).toBe(
-          failure === 'storage'
-            ? 'csi_diagnostics_storage_unavailable'
-            : 'csi_runtime_identity_conflict',
-        );
-        expect(components.diagnostics).not.toHaveBeenCalled();
-        expect(components.bind).not.toHaveBeenCalled();
-        expect(components.initial).not.toHaveBeenCalled();
-        if (failure === 'storage') {
-          expect(selected.stores.resourceStore.publish).not.toHaveBeenCalled();
-          expect(components.open).not.toHaveBeenCalled();
-        }
-      } finally {
-        await fixture.handle.stopLocal();
-      }
-    },
-  );
+  it('refuses /2 with incompatible profile before enabling diagnostics or binding history', async () => {
+    const fixture = setup();
+    const selected = fixture.createOwner('csi-files-retirement/2');
+    selected.stores.resourceStore.read.mockResolvedValue(
+      Buffer.from(JSON.stringify({ toolProfile: 'csi-files-retirement/1' })),
+    );
+    try {
+      const response = await fixture.post(
+        selected,
+        'attach',
+        selected.attachment,
+      );
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe('csi_runtime_identity_conflict');
+      expect(components.diagnostics).not.toHaveBeenCalled();
+      expect(components.bind).not.toHaveBeenCalled();
+      expect(components.initial).not.toHaveBeenCalled();
+    } finally {
+      await fixture.handle.stopLocal();
+    }
+  });
 
   it('closes new selected-owner admission before joining and isolates other owners', async () => {
     const fixture = setup();

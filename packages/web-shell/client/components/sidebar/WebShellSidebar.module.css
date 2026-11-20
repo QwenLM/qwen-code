@@ -2457,7 +2457,9 @@ button.livePendingSession:hover {
 }
 
 .moreMenu {
-  width: 240px;
+  width: max-content;
+  min-width: 240px;
+  max-width: min(22rem, calc(100vw - 24px));
   max-height: var(--radix-popover-content-available-height);
   overflow-y: auto;
 }
@@ -2500,10 +2502,17 @@ button.livePendingSession:hover {
   color: inherit;
   background: transparent;
   cursor: pointer;
+  text-align: start;
 }
 
-.moreMenu .footerButtonLabel {
-  display: inline;
+.moreMenu .footerButtonLabel,
+.moreMenu .collapseButton > span {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: start;
 }
 
 .moreMenu .navIcon {
@@ -2519,6 +2528,11 @@ button.livePendingSession:hover {
 
 .moreLocalFiles::after {
   content: attr(aria-label);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: start;
 }
 
 .moreMenu .version {

@@ -46,6 +46,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `session-worktree.scan-delay` | — | 时长 | `1000` | Session worktree 任务两次运行之间的间隔；每次运行继续未完成的单 Session Git worktree 步骤，并使 worktree 未能准备好的 Session 的初始 Turn 失败。接受 `1s` 这类时长；不带单位的数字按毫秒计。 |
 | `side-queries-enabled` | `QWEN_MANAGED_AGENT_SIDE_QUERIES_ENABLED` | 布尔 | `false` | 为具备显式 model_config、执行权限、Session Store 以及声明 side-query/1 的 Harness 的 ACTIVE Session 开启新的 actor 私有 BTW 与 recap 生成。默认关闭。关闭新请求受理后仍保留已授权结果读取和已受理任务。此版本不支持模型目录或默认模型 Session。 |
 | `trusted-actor-header` | `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` | 字符串 | *（空）* | 一个请求头名称（例如 `X-Qwen-Actor-Id`），在没有上游认证主体时，其值连同 `X-Qwen-Tenant-Id` 一起被信任为调用方的 actor ID。仅在 open 认证模式下使用；与 signed 模式同时配置时启动时拒绝。open 模式下开启 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 时必须设置本项。切勿在不可信客户端能访问服务端的环境中设置。为空时禁用。 |
+| `wake-dispatch.enabled` | `QWEN_MANAGED_AGENT_WAKE_DISPATCH_ENABLED` | 布尔 | `false` | 允许 Hosted Harness 挂起一个空闲 Session，前提是它的待处理输入全部是延后到期且未被尝试过的唤醒输入。Session Store 会在 writer grant 中公告该能力，挂起时的 seal 会在 head 上记下最早的到期时间，唤醒恢复扫描在到期时加载该 Session，无需重放 journal。默认关闭。关闭后不再产生新的此类挂起；已带戳的 head 仍会在到期时投递。 |
 | `wake-recovery.scan-delay` | — | 时长 | `2s` | 唤醒恢复扫描两次运行之间的间隔；每次运行最多找出 8 个存有已提交输入但无写入者持有的 Session，并重新挂接以运行其唤醒。仅在开启 `qwen.managed-agent.session-store.enabled` 且 Hosted Harness 可用时运行。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 
 ## `qwen.managed-agent.artifacts`
@@ -96,7 +97,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `claim-lease` | `QWEN_MANAGED_AGENT_CHANNELS_CLAIM_LEASE` | 时长 | `10m` | 渠道适配器对一条出站投递的认领在未收到回执时保持有效的时长。超时后，对账任务将该投递结果记为未知，且不会自动重发。不带单位的数字按秒计。 |
-| `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | 布尔 | `false` | 是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。 |
+| `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | 布尔 | `false` | 是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发，以及 PR-watch 绑定的创建/列表/退订与私有 PR 事件注入）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。 |
 | `scan-delay` | — | 时长 | `30s` | 渠道对账任务两次运行之间的间隔；每次运行把认领时间超过 `qwen.managed-agent.channels.claim-lease` 的出站投递认领结算为未知，每次最多 50 条。接受 `30s` 这类时长；不带单位的数字按毫秒计。 |
 
 ## `qwen.managed-agent.client-files`
@@ -189,7 +190,7 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `request-timeout` | — | 时长 | `30s` | 对 Hosted Harness 的单次普通调用（包括非接管的挂接加载）允许的最长时长。任务取消尝试的时限至少为该值的四倍，且不少于 5 分钟。必须为正值；不带单位的数字按秒解析。 |
 | `token` | `QWEN_MANAGED_AGENT_HARNESS_TOKEN` | 字符串 | *（空）* | 控制面发送给 Hosted Harness 的 bearer token，须与 Harness 的 `QWEN_SERVER_TOKEN` 相同；属于机密。`qwen.managed-agent.harness.enabled` 为 true 时必填，除非由 `qwen.managed-agent.harness.credentials-file` 提供；两者同时设置时启动时拒绝。预检会对仍以模板占位符 `replace-` 开头的值报失败。 |
 | `turn-deadline` | `QWEN_MANAGED_AGENT_HARNESS_TURN_DEADLINE` | 时长 | `30m` | 已受理的 Turn 在被 Harness 以超时失败结束之前允许运行的时长，避免停滞的模型流永久占用 Session。随每个 Turn 发送。`qwen.managed-agent.harness.enabled` 为 true 时，取值不在 `1ms` 到约 24.8 天之间会被拒绝：单个 Harness 时启动时拒绝；开启 `qwen.managed-agent.harness.pool.enabled` 时则改为所有池成员都无法加入；不带单位的数字按秒解析。 |
-| `workspace-child-agents-enabled` | `QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED` | 布尔 | `true` | 是否允许在其开启期间创建的、符合条件的 Workspace Shell Session 将工作委派给公共子 agent：内置 `qwen-code` Session，以及开启托管扩展执行时的 AgentDefinition Session。仅在启用 `qwen.managed-agent.harness.workspace-shell-enabled` 与 `qwen.managed-agent.runtime-broker.durable-local-process`、`qwen.managed-agent.runtime-broker.provisioner=local-process`、`qwen.managed-agent.runtime-broker.bound-session-isolation-class=session` 且 Harness 支持时生效，否则不报错、保持关闭。设为 false 会停止后续的子 agent 启动。 |
+| `workspace-child-agents-enabled` | `QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED` | 布尔 | `true` | 是否允许在其开启期间创建的、符合条件的 Workspace Shell Session 将工作委派给公共子 agent：内置 `qwen-code` Session，以及开启托管扩展执行时的 AgentDefinition Session。仅在启用 `qwen.managed-agent.harness.workspace-shell-enabled`、`qwen.managed-agent.runtime-broker.bound-session-isolation-class=session`、持久 `local-process` Broker（`qwen.managed-agent.runtime-broker.durable-local-process`）或 SSH Broker（`qwen.managed-agent.runtime-broker.provisioner=ssh-process`、已配置节点且 `session` 隔离），且单个或池化 Harness 广告该能力时生效，否则不报错、保持关闭。常驻/CSI Workspace 始终不符合条件。设为 false 会停止后续的子 agent 启动。 |
 | `workspace-files-enabled` | `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` | 布尔 | `false` | 绑定 Workspace 的 Session 是否获得 Hosted Workspace 文件工具（`hosted-workspace-files/1`）及 Workspace 文件路由（关闭时这些路由返回 `409 workspace_files_disabled`）。启动要求启用 Harness、Session Store 与 `qwen.managed-agent.runtime-broker.enabled`；Broker 须为 `local-process`、`session` 隔离，并具备 Workspace 挂载、创建根目录、已验证的 Workspace 恢复或 SSH 节点之一；审批模式须为 `yolo`、`default` 或 `auto-edit`。外部 Runtime provisioner 下启动时拒绝此项。 |
 | `workspace-shell-enabled` | `QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED` | 布尔 | `false` | 新建的内置 `qwen-code` Workspace Session 是否使用 `hosted-workspace-shell/1` profile：文件工具加前台 Shell。启动要求 `qwen.managed-agent.harness.workspace-files-enabled` 且审批模式为 `default` 或 `auto-edit`；与外部 Runtime provisioner 同时使用时启动时拒绝。关闭后，现有 Shell Session 的新 Turn 以 `409 workspace_unavailable` 被拒绝。 |
 
@@ -296,6 +297,17 @@ tool publication 与 Session 资源 / journal 冷存储共用的通用 Aliyun OS
 | `workspace-generation` | `QWEN_MANAGED_AGENT_WORKSPACE_GENERATION` | 字符串 | `1` | Broker 默认 Workspace 的代数（generation），写入未绑定已登记 Workspace 的 Session 的 Runtime 作用域。须为非空字符串，最长 512 个字符；`qwen.managed-agent.runtime-broker.enabled` 为 true 时必填。 |
 | `workspace-id` | `QWEN_MANAGED_AGENT_WORKSPACE_ID` | 字符串 | *（空）* | Broker 默认 Workspace 的 ID，未绑定已登记 Workspace 的 Session 与 Session Store 共用它。使用 `local-process` 时，留空则取规范化后 `qwen.managed-agent.runtime-broker.workspace-cwd` 的 SHA-256 前 16 个十六进制字符，显式设置的值必须与之相同；其他 provisioner 必须显式设置。启用 Hosted Harness 和 Session Store 时，与 `qwen.managed-agent.session-store.workspace-id` 不一致则启动时拒绝。已有 Session 后不要修改，因为未绑定的 Session 依据它解析 Store 作用域。 |
 | `workspace-mounts` | — | YAML 列表 | *（空）* | 管理员挂载的 Workspace 存储根目录，在配置文件（YAML）中以列表设置，每项包含 `tenant-id`、`storage-id` 和 `root`。每个 `root` 必须是已存在的规范化目录；各根目录不得重叠或互为别名，同一租户与存储的组合只能出现一次。要求 `local-process` provisioner；否则或与外部 provisioner 同时使用时，启动时拒绝。共享同一数据库的所有 Broker 必须使用相同的列表。 |
+
+## `qwen.managed-agent.runtime-broker.mcp-parking`
+
+让空闲挂起 Session 的 MCP 连接保持存活以便重开时复用，并在空闲一段时间后回收。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `batch-size` | `QWEN_MANAGED_AGENT_MCP_PARKING_BATCH_SIZE` | 整数 | `100` | 每轮回收最多检查的 Runtime Session 数。取值须在 1 到 1000 之间；即使未启用 park 也会在启动时校验，越界则启动时拒绝。 |
+| `enabled` | `QWEN_MANAGED_AGENT_MCP_PARKING_ENABLED` | 布尔 | `false` | 挂起的 Session 是否保留其 MCP 连接和存储成员资格直到被回收。关闭时每次挂起都照常 drain。仅在启用 `qwen.managed-agent.runtime-broker.enabled` 时生效，且从不适用于外部存储。 |
+| `idle-duration` | `QWEN_MANAGED_AGENT_MCP_PARKING_IDLE_DURATION` | 时长 | `30m` | Session 须保持挂起多久，其 parked MCP 连接才会被关闭、存储成员资格才会被交还。同一存储上的物理维护会提前触发回收。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。 |
+| `scan-delay` | `QWEN_MANAGED_AGENT_MCP_PARKING_SCAN_DELAY` | 时长 | `1m` | 回收任务在一轮结束后等待多久再开始下一轮。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。 |
 
 ## `qwen.managed-agent.runtime-broker.retention`
 

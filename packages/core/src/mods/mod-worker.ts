@@ -33,6 +33,7 @@ import {
   ENGINE_NODE,
   MOD_ROW_SITES,
   type ModRenderSite,
+  type ModRenderSurface,
 } from './render-tree.js';
 import {
   MOD_EVENTS,
@@ -129,7 +130,7 @@ let logChars = 0;
 let operations = 0;
 let pumping = false;
 let builtinTool: string | undefined;
-let surface: 'terminal' | null = null;
+let surface: ModRenderSurface | null = null;
 let sites: readonly ModRenderSite[] = [];
 let version = 'unknown';
 // Whether the host runs what `$.prompt.submit` submits.
@@ -313,6 +314,7 @@ class Realm {
     const identity = this.vm.newString(
       JSON.stringify({ name: plugin.name, root: plugin.source.root }),
     );
+    const drawnOn = this.vm.newString(surface ?? '');
     this.guest = this.vm.unwrapResult(
       this.vm.callFunction(
         factory,
@@ -320,12 +322,14 @@ class Realm {
         bridge,
         status,
         identity,
+        drawnOn,
       ),
     );
     factory.dispose();
     bridge.dispose();
     status.dispose();
     identity.dispose();
+    drawnOn.dispose();
   }
   execute<T>(action: () => T, call?: ModInvocation): T {
     executing++;
@@ -1296,7 +1300,8 @@ port.on('message', async (request: ModWorkerRequest) => {
       starting = true;
       await dispatch(
         'session.start',
-        { cwd: request.cwd, surface, isInteractive: surface === 'terminal' },
+        // A surface that draws has a person at its prompt.
+        { cwd: request.cwd, surface, isInteractive: surface !== null },
         engineOrigin,
         [],
         async (e) => ({ cwd: e['cwd'] }),

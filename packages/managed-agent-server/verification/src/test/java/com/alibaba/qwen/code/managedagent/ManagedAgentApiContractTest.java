@@ -76,7 +76,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.networknt.schema.ValidationMessage;
+import com.networknt.schema.Error;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -1489,11 +1489,22 @@ class ManagedAgentApiContractTest {
                 """
                 {"sessionId":"%s","operationId":"%s"}
                 """.formatted(webSessionId, webCloseId));
-        exchange(drift, "archiveWebShellSession", 202,
+        String webArchiveId = json(exchange(drift, "archiveWebShellSession", 202,
                 post(WEB_SHELL + "/sessions/archive").header(TENANT, tenant),
                 """
                 {"sessionId":"%s","idempotencyKey":"contract-web-archive"}
-                """.formatted(webSessionId));
+                """.formatted(webSessionId))).get("operationId").asText();
+        awaitOperation(tenant, webSessionId, webArchiveId);
+        assertThat(json(exchange(drift, "webShellGetSession", 200,
+                post(WEB_SHELL + "/sessions/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\"}".formatted(webSessionId)))
+                        .get("status").asText()).isEqualTo("archived");
+        JsonNode archivedExport = json(exchange(drift, "webShellExportSession", 200,
+                post(WEB_SHELL + "/sessions/export/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"limit\":1}".formatted(webSessionId)));
+        assertThat(archivedExport.path("items").size()).isEqualTo(1);
+        assertThat(archivedExport.at("/items/0/sessionId").asText()).isEqualTo(webSessionId);
+        assertThat(archivedExport.at("/items/0/itemId").asText()).isNotEmpty();
         exchange(drift, "archiveWebShellSession", 404,
                 post(WEB_SHELL + "/sessions/archive")
                         .header(TENANT, otherTenant),
@@ -4079,8 +4090,8 @@ class ManagedAgentApiContractTest {
     }
 
     private static void collect(Map<String, String> drift, String label,
-            Set<ValidationMessage> messages) {
-        for (ValidationMessage message : messages) {
+            List<Error> messages) {
+        for (Error message : messages) {
             String location = message.getInstanceLocation().toString()
                     .replaceAll("/\\d+(?=/|$)", "/*");
             if (location.isEmpty()) {
@@ -4088,7 +4099,7 @@ class ManagedAgentApiContractTest {
             }
             String property = message.getProperty() == null ? ""
                     : " " + message.getProperty();
-            drift.put(label + ": " + location + " " + message.getType()
+            drift.put(label + ": " + location + " " + message.getKeyword()
                     + property, message.getMessage());
         }
     }
