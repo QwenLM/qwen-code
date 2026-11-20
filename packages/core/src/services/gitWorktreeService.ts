@@ -918,7 +918,7 @@ function carriedEntryMatches(
   if (stored.hash === null) {
     return status === ' D' && current !== undefined && current.hash === null;
   }
-  if (status !== ' M' && status !== '??') return false;
+  if (status !== ' M' && status !== '??' && status !== '!!') return false;
   return (
     current !== undefined &&
     current.hash === stored.hash &&
@@ -4227,20 +4227,46 @@ export class GitWorktreeService {
           ? undefined
           : carriedBound -
             Buffer.byteLength(JSON.stringify(carriedPaths ?? []), 'utf8');
-      // The worktree is checked out at the revision being created (a PR
-      // head for `--worktree=#<N>`), so the include file is read there,
-      // matching the tree the copy lands in.
+      // The include list is read only from content the caller already
+      // controls. A PR-backed worktree (`--worktree=#<N>`) is checked out
+      // at the pull request's head, so the `.worktreeinclude` there is
+      // authored by whoever opened the PR: honouring it would let a
+      // contributor name which of the reviewer's own gitignored files
+      // (`.env`, keys) get copied into the checkout the reviewing agent then
+      // works in. Read the launch checkout instead for PR-backed worktrees
+      // and from the created revision otherwise, so the file matches the tree
+      // it configures without letting a remote branch choose the list.
+      const includeRevision = options?.prBacked
+        ? undefined
+        : await runGitCapture(worktreePath, ['rev-parse', 'HEAD']).then(
+            ({ stdout }) => stdout.trim() || undefined,
+            () => undefined,
+          );
       const includedPaths = await this.copyIncludedPathsFromRepo(
         worktreePath,
         options?.dirtyStateSource ?? this.sourceRepoPath,
         includeBudget,
-        await runGitCapture(worktreePath, ['rev-parse', 'HEAD']).then(
-          ({ stdout }) => stdout.trim() || undefined,
-          () => undefined,
-        ),
+        includeRevision,
       );
       if (includedPaths.length > 0) {
         carriedPaths = [...(carriedPaths ?? []), ...includedPaths];
+        // The copies land in the worktree but nothing about them is in the
+        // source checkout, so without an identity here `worktreeHasWork`
+        // reads them as the user's own uncommitted work and both reapers
+        // refuse the checkout forever. Extend the bound overlay with them so
+        // a worktree whose only content is the pristine copies is reapable.
+        carriedEntries = [
+          ...(carriedEntries ?? []),
+          ...(await computeCarriedIdentities(worktreePath, includedPaths).catch(
+            (error) => {
+              debugLogger.warn(
+                `createUserWorktree: include identity computation failed for ${slug}; ` +
+                  `the reaper will treat the copies as the user's work: ${error}`,
+              );
+              return [];
+            },
+          )),
+        ];
       }
 
       const worktree: WorktreeInfo = {

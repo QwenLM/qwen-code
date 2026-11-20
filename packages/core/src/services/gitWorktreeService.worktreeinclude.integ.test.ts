@@ -24,6 +24,7 @@ import {
   WORKTREE_INCLUDE_FILE,
   listIgnoredFiles,
   parseWorktreeInclude,
+  worktreeHasWork,
 } from './gitWorktreeService.js';
 
 const exists = (p: string) =>
@@ -654,6 +655,33 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     );
   });
 
+  it('ignores a `.worktreeinclude` that only exists on the PR head', async () => {
+    // `--worktree=#<N>` checks out the pull request's head, so the
+    // `.worktreeinclude` committed there is authored by whoever opened the
+    // PR. Honouring it would let a contributor name the reviewer's own
+    // gitignored files (`.env`, keys) and have them copied into the checkout
+    // the review runs in. A PR-backed worktree must read the launch checkout
+    // instead, which carries no such file here.
+    await fs.writeFile(path.join(repoRoot, '.env'), 'TOKEN=abc\n');
+    gitIn(repoRoot, 'branch', '-q', 'pr-head');
+    gitIn(repoRoot, 'checkout', '-q', 'pr-head');
+    await fs.writeFile(path.join(repoRoot, WORKTREE_INCLUDE_FILE), '.env\n');
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'pr include list', '--no-verify');
+    gitIn(repoRoot, 'checkout', '-q', 'main');
+    expect(await exists(path.join(repoRoot, WORKTREE_INCLUDE_FILE))).toBe(
+      false,
+    );
+
+    const service = new GitWorktreeService(repoRoot, baseDir);
+    const result = await service.createUserWorktree('21718', 'pr-head', {
+      prBacked: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(await exists(path.join(result.worktree!.path, '.env'))).toBe(false);
+  });
+
   it('matches a trailing-space sibling byte-exactly instead of trimming it', async () => {
     // An unescaped `.env ` in `.gitignore` is stripped to `.env` by git's own
     // parser. The sibling has to be escaped (`.env\\ `) so it matches only the
@@ -716,6 +744,28 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     );
 
     expect(removal).toMatchObject({ success: true });
+  });
+
+  it('records the copied paths as carried identities so the reaper sees a clean worktree', async () => {
+    // The copies land in the worktree but nothing about them is in the source
+    // checkout, so without a carried identity `worktreeHasWork` reads them as
+    // the user's own uncommitted work and both reapers refuse the checkout
+    // forever. R12-1.
+    await writeIgnoredFixtures();
+    await fs.writeFile(path.join(repoRoot, WORKTREE_INCLUDE_FILE), '.env\n');
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include list', '--no-verify');
+
+    const service = new GitWorktreeService(repoRoot, baseDir);
+    const created = await service.createUserWorktree('reapable', 'main');
+    expect(created.success).toBe(true);
+    if (!created.worktree) throw new Error('worktree missing');
+
+    expect(created.carriedEntries?.some((e) => e.path === '.env')).toBe(true);
+    await expect(worktreeHasWork(created.worktree.path)).resolves.toBe(true);
+    await expect(
+      worktreeHasWork(created.worktree.path, created.carriedEntries),
+    ).resolves.toBe(false);
   });
 
   it('copies from the session checkout, not the service checkout', async () => {
