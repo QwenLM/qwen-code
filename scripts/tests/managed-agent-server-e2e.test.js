@@ -2625,6 +2625,9 @@ describe('managed-agent-server e2e runner', () => {
       ),
       'both Spring launch sites must use the same durable provider setting',
     ).toHaveLength(2);
+    expect(source).toMatch(
+      /workspaceTurns\s*\? crashProcess\(spring\.child, 'Spring Managed Agent Server \(original\)'\)\s*: crashChild/,
+    );
   });
 
   // The frozen control-plane arm proves #12952 Q2's binding half only if the

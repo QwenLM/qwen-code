@@ -286,8 +286,8 @@ if (registerStorage && process.platform !== 'linux') {
     'QWEN_E2E_REGISTER_STORAGE=1 requires Linux native storage identity',
   );
 }
-// After Spring restarts, preparing a Workspace Turn requires reclaiming the
-// original local Worker binding. With --harness-only, its Broker stays alive.
+// After Spring restarts, its replacement must adopt the original local
+// Worker binding before preparing a Workspace Turn.
 if (workspaceTurns && !harnessOnly && process.platform !== 'linux') {
   const mode = bigOutput
     ? '--big-output'
@@ -295,7 +295,7 @@ if (workspaceTurns && !harnessOnly && process.platform !== 'linux') {
       ? '--inflight-failover'
       : '--continuation-failover';
   throw new Error(
-    `${mode} requires Linux: the replacement Broker must reclaim the dead worker's Runtime binding. Run the mode in the Hosted failover E2E CI job or a Linux container.`,
+    `${mode} requires Linux: the replacement Broker must adopt the original worker's Runtime binding. Run the mode in the Hosted failover E2E CI job or a Linux container.`,
   );
 }
 // The frozen-arm teardown wakes the former writer by this registry key, so
@@ -4607,7 +4607,8 @@ try {
     } else {
       await Promise.all([
         crashChild(harness.child, `${hostedHarnessLabel} (original)`),
-        inflightFailover || continuationFailover
+        // The replacement Broker attests and adopts the live Workspace Worker.
+        workspaceTurns
           ? crashProcess(spring.child, 'Spring Managed Agent Server (original)')
           : crashChild(spring.child, 'Spring Managed Agent Server (original)'),
       ]);

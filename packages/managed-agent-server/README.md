@@ -2113,9 +2113,9 @@ npm run test:e2e:managed-big-output
 It streams a long answer, verifies the complete public text and stored record,
 deletes the original Harness and Runtime homes, and checks the complete answer
 in a cold replacement's model context. A short answer remains inline. The
-mode executes no tools. The second Workspace Turn waits for Runtime readiness,
-so the replacement Broker must reclaim the original worker binding. This
-requires durable local processes on Linux.
+mode executes no tools. The Runtime Worker survives the Spring crash. The
+replacement Broker uses durable local-process identity on Linux to adopt the
+worker before admitting the second Workspace Turn.
 
 A zero-delay run checks the real-model path as shown above; a controlled
 cold-start delay additionally tests serial preparation before model output:
