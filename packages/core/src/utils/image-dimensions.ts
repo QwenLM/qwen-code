@@ -22,7 +22,19 @@ export function parseImageDimensions(
 }
 
 function isPng(b: Uint8Array): boolean {
-  return b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47;
+  // All 8 signature bytes: a \x89PNG-prefixed non-PNG (e.g. text) must
+  // not reach the IHDR read as dimensions (#17321 round-6 deferral).
+  return (
+    b.length > 8 &&
+    b[0] === 0x89 &&
+    b[1] === 0x50 &&
+    b[2] === 0x4e &&
+    b[3] === 0x47 &&
+    b[4] === 0x0d &&
+    b[5] === 0x0a &&
+    b[6] === 0x1a &&
+    b[7] === 0x0a
+  );
 }
 
 function pngDimensions(

@@ -460,6 +460,50 @@ describe('compactionInputSlimming', () => {
         ),
       ).toBe(3000 * 4); // override, not 1013*4
     });
+    it('propagates the image floor into functionResponse-nested media (#17321 round-6 deferral)', () => {
+      // Tool media rides on functionResponse.parts; the transport floor
+      // must reach it or a nested screenshot prices below what the send
+      // path charges. Reverting the floor pass-through on the nested walk
+      // must redden this test.
+      const real = new Uint8Array(33);
+      real.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+      real[8] = 0;
+      real[9] = 0;
+      real[10] = 0;
+      real[11] = 13;
+      real.set([0x49, 0x48, 0x44, 0x52], 12);
+      real[16] = 0;
+      real[17] = 0;
+      real[18] = 0x07;
+      real[19] = 0x80; // 1920
+      real[20] = 0;
+      real[21] = 0;
+      real[22] = 0x04;
+      real[23] = 0x38; // 1080
+      const nested = {
+        functionResponse: {
+          name: 'read_file',
+          response: { output: 'ok' },
+          parts: [
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: Buffer.from(real).toString('base64'),
+              },
+            },
+          ],
+        },
+      };
+      // Without the floor the nested 1920x1080 image bills 1013 tokens
+      // (4052 chars); with it, the flat 1600 (6400) wins.
+      expect(
+        estimatePartChars(nested as never, 1600, 1600),
+      ).toBeGreaterThanOrEqual(1600 * 4 + 'ok'.length + 64);
+      expect(estimatePartChars(nested as never, 1600)).toBe(
+        1013 * 4 + 'ok'.length + 64,
+      );
+    });
+
     it('keeps the flat budget for non-image inline binary kinds (#17321 F4)', () => {
       // Real parseable PNG bytes under a non-image mime: the mime gate must
       // reject them before the parser runs, proving the gate exists rather
