@@ -49,6 +49,12 @@ type GeminiStreamPart = { responseInternal: Response };
 type GeminiApiClient = {
   apiCall?(url: string, init: RequestInit): Promise<Response>;
   processStreamResponse?(response: Response): AsyncGenerator<GeminiStreamPart>;
+  includeExtraHttpOptionsToRequestInit(
+    init: RequestInit,
+    options: HttpOptions,
+    url: string,
+    signal?: AbortSignal,
+  ): Promise<RequestInit>;
 };
 
 function isThirdPartyGeminiBaseUrl(baseUrl: string): boolean {
@@ -71,7 +77,11 @@ function withoutDoneSentinel(
       const payload = await result.value.responseInternal.clone().text();
       if (payload.trim() !== '[DONE]') return result;
       await iterator.return?.();
-      await response.body?.cancel();
+      try {
+        await response.body?.cancel();
+      } catch {
+        // A reset after a complete sentinel does not invalidate the response.
+      }
       return { done: true, value: undefined };
     },
     async return() {
@@ -100,14 +110,39 @@ function installIsolatedTransport(
   };
   if (typeof apiClient?.apiCall !== 'function') return false;
   const destinations = new WeakMap<Response, string>();
+  // apiCall shallow-copies RequestInit but preserves the Headers instance.
+  const explicitNativeHeaderRequests = new WeakSet<Headers>();
+  if (typeof apiClient.includeExtraHttpOptionsToRequestInit === 'function') {
+    const includeExtraHttpOptionsToRequestInit =
+      apiClient.includeExtraHttpOptionsToRequestInit.bind(apiClient);
+    apiClient.includeExtraHttpOptionsToRequestInit = async (
+      init,
+      options,
+      url,
+      signal,
+    ) => {
+      const hasExplicitNativeHeader = Object.keys(options.headers ?? {}).some(
+        (name) => name.toLowerCase() === 'x-goog-api-key',
+      );
+      const request = await includeExtraHttpOptionsToRequestInit(
+        init,
+        options,
+        url,
+        signal,
+      );
+      if (hasExplicitNativeHeader && request.headers) {
+        explicitNativeHeaderRequests.add(request.headers as Headers);
+      }
+      return request;
+    };
+  }
   const apiCall = apiClient.apiCall.bind(apiClient);
   apiClient.apiCall = async (url, init) => {
     if (options.apiKey && !client.vertexai && isThirdPartyGeminiBaseUrl(url)) {
       const headers = new Headers(init.headers);
-      const explicitNativeKey = headers.get('x-goog-api-key');
       if (
         !headers.has('authorization') &&
-        (explicitNativeKey === null || explicitNativeKey === options.apiKey)
+        !explicitNativeHeaderRequests.has(init.headers as Headers)
       ) {
         headers.set('Authorization', `Bearer ${options.apiKey}`);
         init = { ...init, headers };

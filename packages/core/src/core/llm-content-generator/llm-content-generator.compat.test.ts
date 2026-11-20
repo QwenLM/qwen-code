@@ -129,6 +129,19 @@ describe('proxy and Vertex authentication routing', () => {
     expect(headers.has('authorization')).toBe(false);
   });
 
+  it.each(['requestHeaders', 'httpHeaders'])(
+    'does not add Bearer for an explicit equal-value native key in %s',
+    async (source) => {
+      const definition: GeneratorOptions = {
+        apiKey: 'cred-key',
+        [source]: { 'x-goog-api-key': 'cred-key' },
+      };
+      const headers = await captureRequestHeaders(definition);
+      expect(headers.get('x-goog-api-key')).toBe('cred-key');
+      expect(headers.has('authorization')).toBe(false);
+    },
+  );
+
   it('uses an ambient Gemini proxy URL for destination-aware auth', async () => {
     vi.stubEnv('GOOGLE_GEMINI_BASE_URL', PROXY_URL);
     const headers = await captureRequestHeaders({ baseUrl: null });
@@ -257,6 +270,20 @@ describe('SSE sentinel compatibility', () => {
     await expect(readStreamText(response)).resolves.toBe('answer');
     expect(cancelled).toBe(true);
   });
+
+  it.each(['terminated', 'ECONNRESET'])(
+    'returns a complete answer when body cancellation after the sentinel fails: %s',
+    async (message) => {
+      const response = new Response(`data: ${candidate}\n\ndata: [DONE]\n\n`, {
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+      Object.defineProperty(response.body, 'cancel', {
+        value: () => Promise.reject(new Error(message)),
+      });
+
+      await expect(readStreamText(response)).resolves.toBe('answer');
+    },
+  );
 
   it('does not end on text that only mentions the sentinel', async () => {
     const body = `data: ${candidate.replace('answer', '[DONE]')}\n\n`;
