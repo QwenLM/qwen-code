@@ -5521,7 +5521,6 @@ export class Session implements SessionContext {
   }
 
   #deferAutomaticQueueDrainUntilTurnsSettle(): boolean {
-    if (this.midTurnHandoff) return true;
     const completions = [
       this.pendingPromptCompletion,
       this.cronCompletion,
@@ -13364,7 +13363,7 @@ export class Session implements SessionContext {
   }
 
   #nextCronQueueIndex(): number {
-    if (this.cronQueue.length === 0) return -1;
+    if (this.cronQueue.length === 0 || this.midTurnHandoff) return -1;
     if (this.todoStopGuardQueuedPromptPriority) return -1;
     if (!this.todoStopGuard.blocksUnrelatedAutomaticTurns) return 0;
     return this.cronQueue.findIndex((item) =>
@@ -14912,6 +14911,9 @@ export class Session implements SessionContext {
     const channelTasks = [...this.channelTaskCaptures].filter(
       (capture) => capture.workChainId && !capture.signal.aborted,
     );
+    // The handoff waits for the FIFO. Notifications related to a per_task
+    // prompt must be allowed to settle that prompt within the FIFO.
+    if (this.midTurnHandoff && channelTasks.length === 0) return -1;
     // Independent admission waits for the parent RPC to settle. Do not let
     // an unrelated queue head block the related results that RPC awaits.
     return this.notificationQueue.findIndex(

@@ -34309,6 +34309,124 @@ describe('Session', () => {
           }
         });
 
+        it('lets a queued per_task channel prompt settle during the Send now handoff', async () => {
+          let finishHandoff!: () => void;
+          const handoff = new Promise<Record<string, unknown>>((resolve) => {
+            finishHandoff = () => resolve({});
+          });
+          mockClient.extMethod = vi.fn((method) => {
+            if (method === MID_TURN_GOAL_HANDOFF_METHOD) return handoff;
+            return Promise.resolve(
+              method === '_qwencode/start_turn'
+                ? { accepted: true }
+                : { messages: [] },
+            );
+          });
+          const { streaming, release } = openResponse([readFileCall]);
+          const foreground = startPrompt();
+          const cancelChannel = new AbortController();
+          try {
+            await streaming;
+            session.sendMidTurnInputNow();
+            await expect(foreground).resolves.toEqual({
+              stopReason: 'cancelled',
+            });
+            expect(mockClient.extMethod).toHaveBeenCalledWith(
+              MID_TURN_GOAL_HANDOFF_METHOD,
+              { sessionId: 'test-session-id' },
+            );
+
+            const task = {
+              id: 'channel-task',
+              description: 'Channel task',
+              isBackgrounded: true,
+              notified: false,
+              status: 'running',
+              todoWorkChainId: 'test-session-id########2',
+            };
+            mockBackgroundTaskRegistry.getAll.mockReturnValue([task]);
+            const textStream = (text: string) =>
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: { candidates: [{ content: { parts: [{ text }] } }] },
+                },
+              ]);
+            const send = vi
+              .fn()
+              .mockResolvedValueOnce(textStream('Channel response'))
+              .mockResolvedValueOnce(textStream('Related result'))
+              .mockResolvedValueOnce(textStream('Independent result'));
+            mockChat.sendMessageStream = send;
+            const settled = vi.fn();
+            const channelPrompt = session
+              .prompt(
+                {
+                  sessionId: 'test-session-id',
+                  prompt: [{ type: 'text', text: 'channel message' }],
+                  _meta: {
+                    [CHANNEL_PROMPT_META_KEY]: true,
+                    [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task',
+                  },
+                },
+                {
+                  version: 1,
+                  sessionId: 'test-session-id',
+                  promptId: 'queued-channel',
+                },
+                cancelChannel.signal,
+              )
+              .then(settled);
+            await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+
+            const notify =
+              mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+                -1,
+              )![0];
+            notify('independent done', '<independent />', {
+              agentId: 'independent-task',
+              status: 'completed',
+              todoWorkChainId: 'another-chain',
+            });
+            task.status = 'completed';
+            task.notified = true;
+            notify('related done', '<related />', {
+              agentId: task.id,
+              status: 'completed',
+              todoWorkChainId: task.todoWorkChainId,
+            });
+            await vi.waitFor(() =>
+              expect(settled).toHaveBeenCalledWith(
+                expect.objectContaining({
+                  stopReason: 'end_turn',
+                  _meta: expect.objectContaining({
+                    [CHANNEL_TASK_RESULT_META_KEY]: 'Related result',
+                  }),
+                }),
+              ),
+            );
+            await channelPrompt;
+            await nextTick();
+            expect(send).toHaveBeenCalledTimes(2);
+            expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+              '_qwencode/start_turn',
+              expect.anything(),
+            );
+
+            // Another prompt can still hold the FIFO after the channel settles.
+            finishHandoff();
+            await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(3));
+            expect(mockClient.extMethod).toHaveBeenCalledWith(
+              '_qwencode/start_turn',
+              expect.objectContaining({ taskId: 'independent-task' }),
+            );
+          } finally {
+            cancelChannel.abort();
+            release();
+            finishHandoff();
+          }
+        });
+
         it('ends the turn for input sent while its tools run', async () => {
           let toolSignal: AbortSignal | undefined;
           let markRunning!: () => void;

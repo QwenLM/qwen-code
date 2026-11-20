@@ -111,9 +111,10 @@ background first and then the other tools are interrupted.
    next response, and never ends a turn that is already finishing.
 2. The reason is a controlled cancellation like Stop, so the turn ends as
    `cancelled`. The cron scheduler keeps running and retains queued fires.
-   The agent holds automatic Goal, cron and background-notification turns
-   until the daemon's prompt FIFO settles, including attachment resolution
-   or withdrawal.
+   The agent holds automatic Goal and cron turns and independent background
+   notifications until the daemon's prompt FIFO settles, including attachment
+   resolution or withdrawal. A waiting `per_task` channel prompt can still
+   process notifications from its own work chain and settle.
 3. Goal: an interrupted Goal turn (including a user turn while a Goal is
    active) is a handoff, the same as being preempted by a new prompt. The turn
    ends and the Goal stays active. If the FIFO allows promotion at settlement,
@@ -245,6 +246,8 @@ in that phase.
 
 - Unit tests (`Session.test.ts`) cover all three delivery cases on both loop
   paths. Queued cron fires run after the handoff without stopping the scheduler.
+  Related notifications let a `per_task` channel prompt settle while
+  independent notifications stay queued.
   An interrupted Goal stays active and has no user-interrupt record. A request
   stays bound to its turn, does nothing without a turn, and avoids interrupting
   a turn with a drain in flight. An interrupted approval has no rejection
