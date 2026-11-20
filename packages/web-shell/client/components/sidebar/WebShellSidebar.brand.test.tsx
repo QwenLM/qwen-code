@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { WebShellBrand } from '../../brandContext';
+import canonicalLightSvg from '../../public/assets/icon.svg?raw';
 import {
   DAEMON_APPROVAL_MODES,
   clickSidebarElement,
@@ -110,6 +111,31 @@ function brandLogoImage(): HTMLImageElement | null {
 /** The built-in inline mark — the one every unconfigured deployment sees. */
 function builtInMark(): Element | null {
   return container.querySelector('svg[data-testid="qwen-brand-mark"]');
+}
+
+function expectOriginalLightMark(): void {
+  const canonical = new DOMParser().parseFromString(
+    canonicalLightSvg,
+    'image/svg+xml',
+  );
+  const expectedPaths = Array.from(
+    canonical.querySelectorAll('path'),
+    (path) => ({
+      fill: path.getAttribute('fill'),
+      d: path.getAttribute('d'),
+    }),
+  );
+  expect(expectedPaths).toHaveLength(3);
+
+  const mark = builtInMark();
+  expect(mark?.getAttribute('viewBox')).toBe('17.5 27.7 135.6 135.6');
+  expect(mark?.getAttribute('fill')).toBeNull();
+  expect(
+    Array.from(mark?.querySelectorAll('path') ?? [], (path) => ({
+      fill: path.getAttribute('fill'),
+      d: path.getAttribute('d'),
+    })),
+  ).toEqual(expectedPaths);
 }
 
 beforeEach(() => {
@@ -371,14 +397,27 @@ describe('sidebar brand', () => {
   it('keeps the original blue mark in the light theme', () => {
     renderSidebar(undefined, undefined, { theme: 'light' });
 
-    const mark = builtInMark();
-    expect(mark?.getAttribute('viewBox')).toBe('17.5 27.7 135.6 135.6');
-    expect(mark?.getAttribute('fill')).toBeNull();
-    expect(
-      Array.from(mark?.querySelectorAll('path') ?? [], (path) =>
-        path.getAttribute('fill'),
-      ),
-    ).toEqual(['#082DFF', '#082DFF', '#082DFF']);
+    expectOriginalLightMark();
+  });
+
+  it('keeps the original light mark after a logo decode failure', () => {
+    renderSidebar({ logoDataUri: 'data:image/svg+xml,NOT-SVG' }, undefined, {
+      theme: 'light',
+    });
+
+    const image = brandLogoImage();
+    expect(image).not.toBeNull();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      act(() => {
+        image!.dispatchEvent(new Event('error'));
+      });
+
+      expectOriginalLightMark();
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('renders the configured name', () => {
