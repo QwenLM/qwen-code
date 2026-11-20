@@ -416,6 +416,60 @@ export function isSubpaths(parentPath: string[], childPath: string): boolean {
 }
 
 /**
+ * Expand a relative symlink target against its (already real) parent the way
+ * the kernel does: segment by segment, so a `..` applies to whatever the
+ * segment before it resolved to. `path.resolve(parent, target)` instead erases
+ * `sub/..` before `sub` is expanded, which lets `sub -> /outside` plus
+ * `note -> ./sub/../secret` pass a containment check that reports a path inside
+ * the root while the actual read lands outside it. Segments that cannot be
+ * resolved keep their lexical spelling — nothing can be read past them.
+ */
+function expandSymlinkTarget(
+  parent: string,
+  target: string,
+  realpath: (target: string) => string,
+): string {
+  const separator = os.platform() === 'win32' ? /[\\/]+/ : /\/+/;
+  let current = parent;
+  for (const segment of target.split(separator)) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      current = path.dirname(current);
+      continue;
+    }
+    current = path.join(current, segment);
+    try {
+      current = realpath(current);
+    } catch {
+      // Not there (yet): keep the lexical form.
+    }
+  }
+  return current;
+}
+
+async function expandSymlinkTargetAsync(
+  parent: string,
+  target: string,
+): Promise<string> {
+  const separator = os.platform() === 'win32' ? /[\\/]+/ : /\/+/;
+  let current = parent;
+  for (const segment of target.split(separator)) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      current = path.dirname(current);
+      continue;
+    }
+    current = path.join(current, segment);
+    try {
+      current = await fs.promises.realpath(current);
+    } catch {
+      // Not there (yet): keep the lexical form.
+    }
+  }
+  return current;
+}
+
+/**
  * Follow a leading symlink chain at `inputPath` to its eventual target, even
  * when that target does not exist yet (a dangling link).
  *
@@ -451,7 +505,11 @@ function resolveLeafSymlink(inputPath: string): string {
       } catch {
         parent = path.dirname(current);
       }
-      current = path.resolve(parent, target);
+      current = expandSymlinkTarget(
+        parent,
+        target,
+        fs.realpathSync.native ?? fs.realpathSync,
+      );
     }
   }
   return current; // chain too deep — caller still range-checks the result
@@ -513,7 +571,7 @@ async function resolveLeafSymlinkAsync(inputPath: string): Promise<string> {
       } catch {
         parent = path.dirname(current);
       }
-      current = path.resolve(parent, target);
+      current = await expandSymlinkTargetAsync(parent, target);
     }
   }
   return current; // chain too deep — caller still range-checks the result
