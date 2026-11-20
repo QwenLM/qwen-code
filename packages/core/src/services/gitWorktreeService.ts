@@ -7,6 +7,7 @@
 import nodeFs from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { randomBytes, randomInt } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { execFile, execSync } from 'node:child_process';
@@ -20,7 +21,7 @@ import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
-import { runGitCapture } from '../utils/git-branches.js';
+import { runGit, runGitCapture } from '../utils/git-branches.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { gitEnv, gitRemoteEnv } from '../utils/git-branches.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
@@ -153,6 +154,608 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * One path of the dirty overlay a creation carried, with the content
+ * identity it had at carry time (R9-6). The managed-session has-work gate
+ * waives a carried path only while its current state still matches this
+ * identity: a session that stages, deletes, or further edits a carried file
+ * has produced new work the source checkout does not hold, so the gate must
+ * read it as work and the reaper must snapshot it. Path equality alone
+ * cannot tell the original carried copy from a later edit to the same path.
+ *
+ * `hash === null` records a carried deletion (the carry removed the path);
+ * any other state of that path is new work. `executable` is the carried
+ * file's exec bit, so a mode-only change is new work too. Non-regular
+ * carried entries (symlinks, directories) get no content identity. A carried
+ * untracked symlink is still waived by the general symlink waiver (it holds no
+ * data in this checkout — removing it only unlinks it); any other non-regular
+ * carried entry reads as work, the conservative direction (R5-6).
+ */
+export interface CarriedEntry {
+  path: string;
+  hash: string | null;
+  executable: boolean;
+}
+
+/**
+ * Compute carry-time content identities for the overlay paths inside a
+ * worktree: absent paths become carried deletions, regular files are hashed
+ * with `git hash-object --no-filters` (raw bytes, batched to bound argv) and
+ * carry their exec bit. Non-regular entries are omitted (a carried untracked
+ * symlink falls to the general symlink waiver; other non-regular entries read
+ * as work). Rejects on a read/hash failure — a caller that cannot describe
+ * the overlay must not record an exemption it cannot later verify.
+ */
+export async function computeCarriedIdentities(
+  worktreePath: string,
+  paths: readonly string[],
+): Promise<CarriedEntry[]> {
+  const entries: CarriedEntry[] = [];
+  const present: Array<{ path: string; executable: boolean }> = [];
+  for (const rel of paths) {
+    let stat;
+    try {
+      stat = await fs.lstat(path.join(worktreePath, rel));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        entries.push({ path: rel, hash: null, executable: false });
+        continue;
+      }
+      throw error;
+    }
+    if (stat.isFile()) {
+      // Git derives the index mode from the OWNER exec bit alone (100755 vs
+      // 100644). A wider mask (0o111) would read a git-visible mode change
+      // like 0755→0655 as unchanged and waive it (R6-2).
+      present.push({ path: rel, executable: (stat.mode & 0o100) !== 0 });
+    }
+  }
+  const BATCH = 200;
+  for (let i = 0; i < present.length; i += BATCH) {
+    const batch = present.slice(i, i + BATCH);
+    // --no-filters hashes the raw on-disk bytes. A path's clean filter (eol /
+    // text / a custom clean command) can normalize an edit away, so hashing
+    // filtered content would read a changed carried file as pristine and let
+    // the reaper delete the session's new bytes without a snapshot (R4-1).
+    const out = await runGit(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      'hash-object',
+      '--no-filters',
+      '--',
+      ...batch.map((e) => e.path),
+    ]);
+    const hashes = out.split('\n').filter((line) => line.length > 0);
+    if (hashes.length !== batch.length) {
+      throw new Error(
+        `computeCarriedIdentities: hash-object returned ${hashes.length} hashes for ${batch.length} paths`,
+      );
+    }
+    for (let j = 0; j < batch.length; j++) {
+      entries.push({
+        path: batch[j].path,
+        hash: hashes[j],
+        executable: batch[j].executable,
+      });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Whether the source checkout still holds the carried overlay, content-for-
+ * content. The no-archive collection of a pristine carried-only worktree is
+ * safe only on that premise: the overlay is a copy of the source's dirty state,
+ * so deleting the worktree's copy loses nothing while the source keeps it. The
+ * gate verifies the worktree side, but the source may have moved on (reverted,
+ * re-edited, or lost the files) — nothing else checks it (R5-2). Compare the
+ * source's current identities for the carried paths against the recorded ones.
+ * Fail-closed: a source that cannot be read, or whose content no longer matches,
+ * does NOT authorize the no-archive delete (the caller snapshots instead).
+ */
+export async function carriedOverlayStillHeldBySource(
+  sourcePath: string,
+  carriedEntries: readonly CarriedEntry[],
+  worktreePath?: string,
+): Promise<boolean> {
+  try {
+    // carriedFrom may name a SUBDIRECTORY of the source checkout (a session
+    // /cd'd below the top): the overlay paths are repo-relative, so resolve
+    // the checkout top before joining them. A gone or unreadable source
+    // fails rev-parse and falls to the catch — including an all-deletions
+    // overlay, whose absent paths would otherwise lstat as ENOENT and
+    // masquerade as "still absent" in a source that no longer exists.
+    const sourceTop = (
+      await runGit(sourcePath, [
+        ...NO_EXEC_CONFIG,
+        'rev-parse',
+        '--show-toplevel',
+      ])
+    ).trim();
+    // Upward discovery can land in an UNRELATED repository when the source
+    // checkout's own .git is gone (a corrupted sibling worktree under the
+    // main repo's managed dir discovers the enclosing main repo — the
+    // R5-14 decoy again). When the managed worktree is known, require the
+    // source to resolve into the SAME repository (identical git common
+    // dir); the carry always comes from a checkout of that repository.
+    if (worktreePath !== undefined) {
+      const [sourceCommon, worktreeCommon] = await Promise.all([
+        runGit(sourceTop, [...NO_EXEC_CONFIG, 'rev-parse', '--git-common-dir']),
+        runGit(worktreePath, [
+          ...NO_EXEC_CONFIG,
+          'rev-parse',
+          '--git-common-dir',
+        ]),
+      ]);
+      const [sourceReal, worktreeReal] = await Promise.all([
+        fs.realpath(path.resolve(sourceTop, sourceCommon.trim())),
+        fs.realpath(path.resolve(worktreePath, worktreeCommon.trim())),
+      ]);
+      if (sourceReal !== worktreeReal) return false;
+    }
+    const current = new Map(
+      (
+        await computeCarriedIdentities(
+          sourceTop,
+          carriedEntries.map((e) => e.path),
+        )
+      ).map((e) => [e.path, e]),
+    );
+    for (const stored of carriedEntries) {
+      const cur = current.get(stored.path);
+      if (stored.hash === null) {
+        // A missing identity can also mean a present non-regular path.
+        if (cur === undefined || cur.hash !== null) return false;
+      } else if (
+        cur === undefined ||
+        cur.hash === null ||
+        cur.hash !== stored.hash ||
+        cur.executable !== stored.executable
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch (error) {
+    debugLogger.debug(
+      `carriedOverlayStillHeldBySource: cannot verify source ${sourcePath}, refusing no-archive collection: ${error}`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Whether the index hides any path's worktree changes from `git status` via
+ * an assume-unchanged (lowercase tag) or skip-worktree (`S`) bit. Such a bit
+ * lets a session edit read clean, so a predicate gating a destructive sink
+ * must refuse it — except for paths legitimately omitted by
+ * `git sparse-checkout`. Those omissions are verified against Git's own
+ * current rules, not inferred from core.sparseCheckout=true alone: an
+ * unexpected S on an included path can hide a tracked deletion. An exempt
+ * path must also be genuinely absent, so a materialized S path is never
+ * waived. Refusing every S would instead strand legitimate sparse omissions.
+ * Older Git without `check-rules` recomputes the index flags in a private
+ * copy via `sparse-checkout reapply`. All other probe failures remain
+ * fail-closed. Pins the worktree's own `.git` (no upward
+ * discovery): only the named sparse-index expansion advice is suppressed;
+ * any other stderr output counts as hidden.
+ */
+/**
+ * Only an ENOENT leaf below a directory ancestor is a genuine omission.
+ * Unreadable entries and non-directory ancestors cannot prove absence.
+ * Probes are memoized only within one enumeration.
+ */
+async function isPathProvablyAbsent(
+  repoRoot: string,
+  relativePath: string,
+  ancestorProbes: Map<string, boolean>,
+): Promise<boolean> {
+  const candidate = path.join(repoRoot, relativePath);
+  try {
+    await fs.lstat(candidate);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+  }
+  let ancestor = path.dirname(candidate);
+  const walked: string[] = [];
+  const decide = (verdict: boolean): boolean => {
+    for (const item of walked) ancestorProbes.set(item, verdict);
+    return verdict;
+  };
+  for (;;) {
+    const memoized = ancestorProbes.get(ancestor);
+    if (memoized !== undefined) return decide(memoized);
+    try {
+      const verdict = (await fs.stat(ancestor)).isDirectory();
+      ancestorProbes.set(ancestor, verdict);
+      return decide(verdict);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        ancestorProbes.set(ancestor, false);
+        return decide(false);
+      }
+    }
+    walked.push(ancestor);
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) return false;
+    ancestor = parent;
+  }
+}
+
+async function legacySparseOmissionMayHideWork(
+  worktreePath: string,
+  omitted: ReadonlySet<string>,
+): Promise<boolean> {
+  const probeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-sparse-'));
+  const index = path.join(probeDir, 'index');
+  const privateWorktree = path.join(probeDir, 'worktree');
+  try {
+    const indexPath = (
+      await runGit(worktreePath, [
+        ...NO_EXEC_CONFIG,
+        'rev-parse',
+        '--git-path',
+        'index',
+      ])
+    ).trim();
+    await fs.mkdir(privateWorktree);
+    await fs.copyFile(
+      path.resolve(worktreePath, indexPath),
+      index,
+      fsConstants.COPYFILE_EXCL,
+    );
+    // reapply also cleans stale sparse directories. Redirect both its index
+    // and work-tree to private files, including any directory removals.
+    const env = {
+      ...gitEnv(),
+      GIT_INDEX_FILE: index,
+      GIT_WORK_TREE: privateWorktree,
+    };
+    const reapplied = await execFileAsync(
+      'git',
+      [
+        ...NO_EXEC_CONFIG,
+        '-c',
+        'submodule.recurse=false',
+        '--no-optional-locks',
+        'sparse-checkout',
+        'reapply',
+      ],
+      {
+        cwd: worktreePath,
+        env,
+        timeout: 30_000,
+        maxBuffer: 64 * 1024 * 1024,
+        encoding: 'utf8',
+      },
+    );
+    if (reapplied.stderr.trim().length > 0) return true;
+    const listed = await execFileAsync(
+      'git',
+      [
+        ...NO_EXEC_CONFIG,
+        '-c',
+        'advice.sparseIndexExpanded=false',
+        '--no-optional-locks',
+        'ls-files',
+        '-v',
+        '-z',
+      ],
+      {
+        cwd: worktreePath,
+        env,
+        timeout: 30_000,
+        maxBuffer: 64 * 1024 * 1024,
+        encoding: 'utf8',
+      },
+    );
+    if (listed.stderr.trim().length > 0) return true;
+    const remaining = new Set<string>();
+    for (const entry of listed.stdout.split('\0')) {
+      const tag = entry[0];
+      if (/[a-z]/.test(tag ?? '')) return true;
+      if (tag !== 'S') continue;
+      const relativePath = entry.slice(2);
+      if (relativePath.includes('\uFFFD') || !omitted.has(relativePath)) {
+        return true;
+      }
+      remaining.add(relativePath);
+    }
+    // A disappeared S means Git considers that path included, so the
+    // original bit may have hidden a tracked deletion rather than an
+    // ordinary sparse omission.
+    return remaining.size !== omitted.size;
+  } finally {
+    await fs.rm(probeDir, { recursive: true, force: true });
+  }
+}
+
+export async function hasHiddenIndexBit(
+  worktreePath: string,
+): Promise<boolean> {
+  try {
+    await fs.access(path.join(worktreePath, '.git'));
+    // The listing's size follows the repository (~64 B/tracked path), not the
+    // question; give it a much larger buffer than the default so a large index
+    // does not overflow into the fail-closed "has work" answer (R3-2). A truly
+    // enormous index still fails closed (preserve), never deletes bare.
+    const { stdout, stderr } = await runGitCapture(
+      worktreePath,
+      [
+        ...NO_EXEC_CONFIG,
+        '-c',
+        'advice.sparseIndexExpanded=false',
+        '--no-optional-locks',
+        'ls-files',
+        '-v',
+        '-z',
+      ],
+      undefined,
+      64 * 1024 * 1024,
+    );
+    if (stderr.trim().length > 0) {
+      debugLogger.debug(
+        `worktreeHasWork: ls-files -v probe at ${worktreePath} reported on stderr, treating as work: ${stderr.trim()}`,
+      );
+      return true;
+    }
+    const skipWorktree = new Set<string>();
+    for (const entry of stdout.split('\0')) {
+      if (entry.length === 0) continue;
+      const tag = entry[0];
+      if (/[a-z]/.test(tag)) return true;
+      if (tag === 'S') {
+        const relativePath = entry.slice(2);
+        // A replacement character cannot reliably recover the original path
+        // bytes. Git could therefore disagree about directory inclusion.
+        if (relativePath.includes('\uFFFD')) return true;
+        skipWorktree.add(relativePath);
+      }
+    }
+    if (skipWorktree.size > 0) {
+      // The effective value includes legacy shared local configuration,
+      // which can exist without extensions.worktreeConfig.
+      const sparse = await runGitCapture(worktreePath, [
+        ...NO_EXEC_CONFIG,
+        'config',
+        '--type=bool',
+        '--get',
+        'core.sparseCheckout',
+      ])
+        .then(({ stdout: out }) => out.trim())
+        .catch(() => 'false');
+      if (sparse !== 'true') return true;
+      // A materialized S path is never a legitimate omission, even when
+      // sparse.expectFilesOutsideOfPatterns=true keeps it out of status.
+      // Only an ENOENT leaf below a directory ancestor may be waived.
+      const omitted: string[] = [];
+      const ancestorProbes = new Map<string, boolean>();
+      for (const rel of skipWorktree) {
+        if (!(await isPathProvablyAbsent(worktreePath, rel, ancestorProbes))) {
+          return true;
+        }
+        omitted.push(rel);
+      }
+      // Git's rules, not merely core.sparseCheckout=true, decide whether an
+      // omitted path is legitimate. A hand-set S on an included path can
+      // hide a tracked deletion from status and both cleanup digests.
+      let unsupported = false;
+      let stdinError: unknown;
+      const included = await new Promise<{
+        stdout: string;
+        stderr: string;
+      }>((resolve, reject) => {
+        const child = execFile(
+          'git',
+          [
+            ...NO_EXEC_CONFIG,
+            '--no-optional-locks',
+            'sparse-checkout',
+            'check-rules',
+            '-z',
+          ],
+          {
+            cwd: worktreePath,
+            env: gitEnv(),
+            timeout: 30_000,
+            maxBuffer: 64 * 1024 * 1024,
+            encoding: 'utf8',
+          },
+          (error, stdout, stderr) => {
+            if (error && stderr.includes("unknown subcommand: `check-rules'")) {
+              unsupported = true;
+              resolve({ stdout, stderr });
+            } else if (error) reject(error);
+            else if (stdinError !== undefined) reject(stdinError);
+            else resolve({ stdout, stderr });
+          },
+        );
+        child.on('error', reject);
+        // An unsupported command can close stdin before its real stderr
+        // arrives. Keep other input failures for that completion handler.
+        child.stdin?.on('error', (error) => {
+          stdinError = error;
+        });
+        child.stdin?.end(`${omitted.join('\0')}\0`);
+      });
+      if (unsupported) {
+        return await legacySparseOmissionMayHideWork(
+          worktreePath,
+          skipWorktree,
+        );
+      }
+      if (included.stderr.trim().length > 0) return true;
+      const includedPaths = new Set(included.stdout.split('\0'));
+      for (const rel of skipWorktree) {
+        if (includedPaths.has(rel)) return true;
+      }
+    }
+    return false;
+  } catch (error) {
+    debugLogger.debug(
+      `worktreeHasWork: ls-files -v probe at ${worktreePath} failed, treating as work: ${error}`,
+    );
+    return true;
+  }
+}
+
+/**
+ * Whether a merge/rebase/cherry-pick/revert/bisect is paused in this worktree.
+ * The paused operation's private state lives in the per-worktree gitdir and
+ * is NOT representable by a worktree tar + status header: cleanup must
+ * preserve, never delete and hope a restore recreates it (P1).
+ *
+ * Checked are pseudo-ref files (MERGE_AUTOSTASH, MERGE_HEAD, REBASE_HEAD,
+ * CHERRY_PICK_HEAD, REVERT_HEAD, BISECT_START) AND the pause DIRECTORIES
+ * (rebase-merge, rebase-apply, sequencer) — rebase `break`/`exec` and `git am`
+ * carry their state only in these directories. REBASE_HEAD can outlive
+ * `rebase --quit`, so it alone does not prove a pause: require a pause
+ * directory too. All paths resolve through one `rev-parse --git-dir` (the
+ * real admin dir of a linked worktree), so an in-progress operation reads as
+ * pending even on linked worktrees. Fail-closed: a read error counts as
+ * pending.
+ */
+export async function worktreeHasPendingGitOperation(
+  worktreePath: string,
+): Promise<boolean> {
+  const files = [
+    'MERGE_AUTOSTASH',
+    'MERGE_HEAD',
+    'REBASE_HEAD',
+    'CHERRY_PICK_HEAD',
+    'REVERT_HEAD',
+    'BISECT_START',
+  ];
+  const pauseDirs = ['rebase-merge', 'rebase-apply', 'sequencer'];
+  try {
+    const gitDir = (
+      await runGit(worktreePath, [...NO_EXEC_CONFIG, 'rev-parse', '--git-dir'])
+    ).trim();
+    const root = path.resolve(worktreePath, gitDir);
+    for (const rel of [...files, ...pauseDirs]) {
+      try {
+        await fs.access(path.join(root, rel));
+        if (rel === 'REBASE_HEAD') {
+          const paused = await Promise.all(
+            pauseDirs.map(async (dir) => {
+              try {
+                await fs.access(path.join(root, dir));
+                return true;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                  throw error;
+                }
+                return false;
+              }
+            }),
+          );
+          if (!paused.includes(true)) continue;
+        }
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    return false;
+  } catch (error) {
+    debugLogger.debug(
+      `worktreeHasPendingGitOperation: probe at ${worktreePath} failed, treating as pending: ${error}`,
+    );
+    return true;
+  }
+}
+
+/**
+ * Whether the worktree holds an initialized submodule's state: a populated
+ * gitlink in the index, or a persisting submodule object store. A submodule
+ * has its own object database, which can hold unpushed commits that live
+ * nowhere else; removing the checkout (or archiving only its working files)
+ * would discard them, and `submodule.<name>.ignore=dirty` can hide the dirt
+ * from `git status`. A destructive sink must therefore preserve such a
+ * checkout. Fail-closed: a read error counts as populated.
+ */
+export async function worktreeHasPopulatedGitlink(
+  worktreePath: string,
+): Promise<boolean> {
+  try {
+    await fs.access(path.join(worktreePath, '.git'));
+    const { stdout, stderr } = await runGitCapture(
+      worktreePath,
+      [
+        ...NO_EXEC_CONFIG,
+        '-c',
+        'advice.sparseIndexExpanded=false',
+        '--no-optional-locks',
+        'ls-files',
+        '--stage',
+        '-z',
+      ],
+      undefined,
+      64 * 1024 * 1024,
+    );
+    if (stderr.trim().length > 0) return true;
+    for (const entry of stdout.split('\0')) {
+      if (!entry.startsWith('160000 ')) continue;
+      const separator = entry.indexOf('\t');
+      if (separator < 0) return true;
+      const gitlinkPath = path.resolve(
+        worktreePath,
+        entry.slice(separator + 1),
+      );
+      if (
+        gitlinkPath === worktreePath ||
+        !gitlinkPath.startsWith(`${worktreePath}${path.sep}`)
+      ) {
+        return true;
+      }
+      const populated = await fs
+        .lstat(gitlinkPath)
+        .then(async (stat) => {
+          if (!stat.isDirectory()) return true;
+          return (await fs.readdir(gitlinkPath)).length > 0;
+        })
+        .catch((error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return false;
+          throw error;
+        });
+      if (populated) return true;
+    }
+    // A submodule's object database (possibly holding unpushed commits)
+    // persists in the per-worktree admin dir `<git-dir>/modules/<name>` even
+    // when the working directory is emptied (deinit) OR the gitlink leaves
+    // the index entirely (`git rm lib`, staged or committed) — `git worktree
+    // remove` then deletes the store with the admin dir, and the archive
+    // cannot cover it (it sits outside the worktree root). Scan it
+    // UNCONDITIONALLY: gating on the index gitlink let a staged removal
+    // bypass the preserve (R5-3 round-6). A worktree that never initialized
+    // a submodule has no modules dir; the ENOENT-tolerant readdir keeps that
+    // case cheap.
+    const gitDir = (
+      await runGit(worktreePath, [...NO_EXEC_CONFIG, 'rev-parse', '--git-dir'])
+    ).trim();
+    const modulesDir = path.resolve(worktreePath, gitDir, 'modules');
+    // ENOENT means "never initialized a submodule" — cheap and clean. Any
+    // OTHER read error (EACCES on a store created by another user, ENOTDIR,
+    // EMFILE) must rethrow into the outer fail-closed catch: a store that
+    // exists but cannot be listed may hold the only copy of unpushed
+    // commits, and a blanket catch would answer "no store" and let the
+    // reaper delete it (R7-1).
+    const modules = await fs
+      .readdir(modulesDir)
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return [] as string[];
+        throw error;
+      });
+    if (modules.length > 0) return true;
+    return false;
+  } catch (error) {
+    debugLogger.debug(
+      `worktreeHasPopulatedGitlink: probe at ${worktreePath} failed, treating as populated: ${error}`,
+    );
+    return true;
+  }
+}
+
+/**
  * The one "is there work here?" predicate for every path that destroys a
  * worktree checkout: the CLI startup sweep (`cleanupStaleAgentWorktrees`)
  * and the daemon's orphan reaper both gate `removeUserWorktree` on this,
@@ -189,7 +792,35 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
  * and a clean enclosing repo would read as "no work", authorizing the
  * destructive sinks this predicate gates.
  */
-export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
+export async function worktreeHasWork(
+  worktreePath: string,
+  carriedEntries?: readonly CarriedEntry[],
+): Promise<boolean> {
+  // A hidden index bit (assume-unchanged / skip-worktree) hides a path's
+  // worktree changes from `git status`, so a session edit under such a bit
+  // would read clean and be deleted bare. Refuse on any hidden bit before
+  // either probe — carried or not — mirroring the prepared-worktree gate's
+  // `ls-files -v` check. Fail-closed: a probe error counts as work.
+  if (await hasHiddenIndexBit(worktreePath)) return true;
+  // A paused merge/rebase/cherry-pick holds private operation state
+  // (MERGE_AUTOSTASH) that neither the archive nor a fresh checkout can
+  // recreate — never let a sink collect a checkout in that state (P1).
+  if (await worktreeHasPendingGitOperation(worktreePath)) return true;
+  // An initialized submodule holds its own object database (possibly unpushed
+  // commits) that neither the worktree tar nor `git worktree remove` preserves,
+  // and submodule.<name>.ignore=dirty can hide its dirt from status. Count it
+  // as work so no destructive sink collects the checkout (P1 submodule).
+  if (await worktreeHasPopulatedGitlink(worktreePath)) return true;
+  // With a recorded carried overlay, exempt exactly those paths whose
+  // current state still matches the carry-time identity, so a checkout
+  // whose only content is the pristine carried copy reads clean (R9-6).
+  // Absent/empty keeps the status probe below unchanged.
+  if (carriedEntries && carriedEntries.length > 0) {
+    return hasNonCarriedWork(
+      worktreePath,
+      new Map(carriedEntries.map((e) => [e.path, e])),
+    );
+  }
   try {
     await fs.access(path.join(worktreePath, '.git'));
     const { stdout, stderr } = await runGitCapture(worktreePath, [
@@ -217,7 +848,8 @@ export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
       let waived: string | null = null;
       if (
         (status === '!!' || status === '??') &&
-        entry === WORKTREE_SESSION_FILE
+        (entry === WORKTREE_SESSION_FILE ||
+          WORKTREE_SESSION_TMP_PATTERN.test(entry))
       ) {
         waived = 'session-marker';
       } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
@@ -248,6 +880,155 @@ export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
 }
 
 /**
+ * Whether a carried path's current state still matches its carry-time
+ * identity, so waiving it loses no work. A carried deletion must still be
+ * an unstaged deletion of an absent path; carried content must still be an
+ * unstaged tracked edit (` M`) or untracked file (`??`) with the same blob
+ * hash and exec bit. Any other status — staged (`M `, `A `, `D `), a
+ * deletion of carried content, a symlink replacement — or any content/mode
+ * drift is new work the source checkout does not hold. `current` is absent
+ * when the path is now non-regular (symlink/dir), which never matches.
+ */
+function carriedEntryMatches(
+  stored: CarriedEntry,
+  current: CarriedEntry | undefined,
+  status: string,
+): boolean {
+  if (stored.hash === null) {
+    return status === ' D' && current !== undefined && current.hash === null;
+  }
+  if (status !== ' M' && status !== '??') return false;
+  return (
+    current !== undefined &&
+    current.hash === stored.hash &&
+    current.executable === stored.executable
+  );
+}
+
+/**
+ * Carried-aware variant of {@link worktreeHasWork}: a checkout whose only
+ * content is the pristine recorded carried overlay reads clean, while any
+ * non-carried work — and any session change to a carried path — still
+ * preserves it (R9-6). One collapsed probe, `status --porcelain
+ * --untracked-files=all --ignored=matching -z`: non-ignored untracked files
+ * stay file-level (so a carried path matches exactly and non-ASCII paths are
+ * not C-quoted), while ignored entries collapse to directories — the same
+ * geometry the base predicate uses, so a large `node_modules` does not
+ * enumerate file-level and overflow the capture buffer, and nested ignored
+ * disposable output is waived exactly as capture excludes it. The carried
+ * waiver is content-aware: a carried path is exempt only while its current
+ * state matches the carry-time identity ({@link carriedEntryMatches}), because
+ * path equality alone cannot distinguish the original carried copy from a
+ * later edit, stage, or delete of the same path. The reaper's session-marker /
+ * disposable-output / symlink waivers apply on top of the carried exemption
+ * for non-carried entries. Fail-closed like the base predicate: any read error
+ * or stderr output counts as work.
+ */
+async function hasNonCarriedWork(
+  worktreePath: string,
+  carried: ReadonlyMap<string, CarriedEntry>,
+): Promise<boolean> {
+  try {
+    await fs.access(path.join(worktreePath, '.git'));
+    // Snapshot the carried paths' current identities once, so a further
+    // edit / stage / delete of a carried path reads as work rather than
+    // being waived by path equality alone.
+    const current = new Map(
+      (await computeCarriedIdentities(worktreePath, [...carried.keys()])).map(
+        (e) => [e.path, e],
+      ),
+    );
+    // Verify every carried entry against its current identity independent of
+    // whether `git status` lists it: a carried untracked file the session
+    // deleted leaves no status record, so the status loop alone would read the
+    // checkout clean and collect it without a snapshot (R5-8). Any drift — a
+    // content file edited, deleted, or replaced by a non-regular entry, or a
+    // carried deletion restored — is work.
+    for (const [rel, stored] of carried) {
+      const cur = current.get(rel);
+      if (stored.hash === null) {
+        if (cur !== undefined && cur.hash !== null) return true;
+      } else if (
+        cur === undefined ||
+        cur.hash === null ||
+        cur.hash !== stored.hash ||
+        cur.executable !== stored.executable
+      ) {
+        return true;
+      }
+    }
+    // One collapsed probe: --ignored=matching lists ignored entries (dirs
+    // collapsed, so a large node_modules does not enumerate file-level and
+    // overflow the capture buffer), --untracked-files=all keeps non-ignored
+    // untracked files file-level so a carried path matches exactly, and -z
+    // keeps raw bytes (no C-quoting of non-ASCII paths). This mirrors the base
+    // predicate's ignored geometry, so nested ignored disposable output
+    // (`packages/app/node_modules/`) is waived here exactly as capture
+    // excludes it.
+    const { stdout, stderr } = await runGitCapture(
+      worktreePath,
+      [
+        ...NO_EXEC_CONFIG,
+        '--no-optional-locks',
+        'status',
+        '--porcelain',
+        '--untracked-files=all',
+        '--ignored=matching',
+        '-z',
+      ],
+      undefined,
+      64 * 1024 * 1024,
+    );
+    if (stderr.trim().length > 0) {
+      debugLogger.debug(
+        `worktreeHasWork: carried status probe at ${worktreePath} reported on stderr, treating as work: ${stderr.trim()}`,
+      );
+      return true;
+    }
+    for (const record of stdout.split('\0')) {
+      if (record.length === 0) continue;
+      const status = record.slice(0, 2);
+      const entry = record.slice(3);
+      // The carry applies the stash without --index, so the overlay never
+      // contains rename/copy records; one means the index was touched inside
+      // the worktree. Refuse.
+      if (status[0] === 'R' || status[0] === 'C') return true;
+      const stored = carried.get(entry);
+      let waived: string | null = null;
+      if (stored !== undefined) {
+        if (!carriedEntryMatches(stored, current.get(entry), status)) {
+          return true;
+        }
+        waived = 'carried-overlay';
+      } else if (
+        (status === '!!' || status === '??') &&
+        (entry === WORKTREE_SESSION_FILE ||
+          WORKTREE_SESSION_TMP_PATTERN.test(entry))
+      ) {
+        waived = 'session-marker';
+      } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
+        waived = 'disposable-output';
+      } else if (
+        (status === '!!' || status === '??') &&
+        (await isSymlinkEntry(worktreePath, entry))
+      ) {
+        waived = 'symlink';
+      }
+      if (waived === null) return true;
+      debugLogger.debug(
+        `worktreeHasWork: waiving ${status} ${entry} (${waived}) at ${worktreePath}`,
+      );
+    }
+    return false;
+  } catch (error) {
+    debugLogger.debug(
+      `worktreeHasWork: carried probe at ${worktreePath} failed, treating as work: ${error}`,
+    );
+    return true;
+  }
+}
+
+/**
  * Disposable build output at the root (`node_modules/`) or as a workspace
  * package's own ignored directory (`packages/app/node_modules/`). That nested
  * rendering depends on how the ignore rule is spelled rather than holding for
@@ -256,9 +1037,11 @@ export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
  * A rule matching the directory's *contents* instead (a package-local
  * `node_modules/**`) makes git list them individually
  * (`!! packages/app/node_modules/x/`), whose last segment is not in the set,
- * so such a tree still counts as work and the checkout is preserved.
+ * so such a tree still counts as work (the reaper snapshots it before
+ * deleting). The snapshot's exclusion matcher reads the same listing, so it
+ * archives exactly this content rather than dropping it (R6-1).
  */
-function isDisposableIgnoredEntry(entry: string): boolean {
+export function isDisposableIgnoredEntry(entry: string): boolean {
   const segments = entry.replace(/\/$/, '').split('/');
   if (DISPOSABLE_IGNORED_ROOTS.has(segments[0] ?? '')) return true;
   return (
@@ -1103,6 +1886,16 @@ export interface CreateWorktreeResult {
    * rollback exempts exactly these from its cleanliness gate.
    */
   carriedPaths?: string[];
+  /**
+   * The same overlay with carry-time content identities, for the
+   * managed-session sidecar. The orphan reaper's gate waives a carried path
+   * only while its current state still matches its identity, so a session
+   * that stages, deletes, or further edits a carried file is snapshotted
+   * rather than deleted (R9-6). Absent when the carry applied nothing or its
+   * identities could not be computed — the gate then treats the overlay as
+   * work, the conservative direction.
+   */
+  carriedEntries?: CarriedEntry[];
 }
 
 export interface WorktreeSetupResult {
@@ -3200,6 +3993,7 @@ export class GitWorktreeService {
       }
 
       let carriedPaths: string[] | undefined;
+      let carriedEntries: CarriedEntry[] | undefined;
       if (options?.carryDirtyState === true) {
         const captureService =
           options.dirtyStateSource !== undefined &&
@@ -3277,6 +4071,20 @@ export class GitWorktreeService {
           // A skipped untracked entry (pre-existing destination or escaping
           // ancestor symlink) is not part of the overlay the rollback exempts.
           carriedPaths = [...dirtyState.trackedFiles, ...createdUntracked];
+          // Content identities for the managed-session gate. A failure here
+          // leaves carriedEntries absent (the gate then treats the overlay as
+          // work and snapshots it) without affecting the prepared rollback,
+          // which exempts by path in its never-attached context.
+          carriedEntries = await computeCarriedIdentities(
+            worktreePath,
+            carriedPaths,
+          ).catch((error) => {
+            debugLogger.warn(
+              `createUserWorktree: carried identity computation failed for ${slug}; ` +
+                `the reaper will snapshot the overlay: ${error}`,
+            );
+            return undefined;
+          });
         }
       }
 
@@ -3288,7 +4096,7 @@ export class GitWorktreeService {
         isActive: true,
         createdAt: Date.now(),
       };
-      return { success: true, worktree, carriedPaths };
+      return { success: true, worktree, carriedPaths, carriedEntries };
     } catch (error) {
       if (!gitAddStarted) signal?.throwIfAborted();
       const message = `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`;
@@ -4711,15 +5519,7 @@ export class GitWorktreeService {
           if (entry[0] === 'R' || entry[0] === 'C') return false;
           if (!exempt.has(entry.slice(3))) return false;
         }
-        const hiddenIndexEntries = await worktreeGit.raw([
-          'ls-files',
-          '-v',
-          '-z',
-        ]);
-        const hasHiddenIndexBits = hiddenIndexEntries
-          .split('\0')
-          .some((entry) => /^(?:S|[a-z])/.test(entry));
-        if (hasHiddenIndexBits) return false;
+        if (await hasHiddenIndexBit(worktreePath)) return false;
         if (await hasPopulatedGitlink()) return false;
         // clean -ndx has no -z form and collapses untracked directories
         // to "dir/", which never matches the file-level carried paths.

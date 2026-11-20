@@ -17,6 +17,7 @@ import {
   withDaemonSpan,
 } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import { GENERATED_UI_CARD_ID_PATTERN } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
+import { parseLineTolerantWithIntegrity } from '@qwen-code/qwen-code-core/utils/jsonl-utils.js';
 import { writeSessionBranchSidecar } from '@qwen-code/qwen-code-core/services/session-branch-sidecar.js';
 import {
   APPROVAL_MODES,
@@ -121,6 +122,7 @@ import {
   InvalidSessionMetadataError,
   SessionArtifactValidationError,
   SessionArchivedError,
+  SessionArchivingError,
   SessionConflictError,
   SessionBusyError,
   SessionLimitExceededError,
@@ -171,6 +173,7 @@ import {
   deleteDaemonSessions,
   logSessionArchiveWarning,
   resolveSessionIdForRestore,
+  DaemonDrainingError,
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -204,6 +207,7 @@ import { createSessionOrganizationService } from '../session-organization-helper
 import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
   AGENT_SESSION_SOURCE_TYPE,
+  isHiddenCatalogSource,
 } from '../../runtime/agent-session-source.js';
 import {
   omitSkillDetailsForSdkSurface,
@@ -276,6 +280,13 @@ import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
+import {
+  DEFAULT_RESTART_RECOVERY_WINDOW_MS,
+  MAX_RESTART_RECOVERY_ITEMS,
+  MAX_RESTART_RECOVERY_WINDOW_MS,
+  readRestartRecoveryState,
+  scanRestartRecoveries,
+} from '../restart-recovery-scan.js';
 import {
   clearBranchWorktreeJournalDurable,
   createBranchWorktreeJournal,
@@ -885,6 +896,20 @@ export type ResolveSubagentSessionRuntime = (
   route: string,
   parentSessionId: string,
 ) => Promise<WorkspaceRuntime | undefined>;
+
+const SESSION_FILE_ID_PATTERN = /^[0-9a-fA-F-]{32,36}$/;
+
+/**
+ * Bridge errors can cross module or process boundaries, where `instanceof`
+ * alone is not reliable; the typed name and code survive that boundary.
+ */
+function isSessionNotFoundError(error: unknown): boolean {
+  if (error instanceof SessionNotFoundError) return true;
+  if (!(error instanceof Error)) return false;
+  if (error.name === 'SessionNotFoundError') return true;
+  const code = (error as Error & { code?: unknown }).code;
+  return code === 'session_not_found' || code === 'session_closing';
+}
 
 export function registerSessionRoutes(
   app: Application,
@@ -3163,6 +3188,7 @@ export function registerSessionRoutes(
       | undefined;
     let worktreeBaseBranch: string | undefined;
     let worktreeBaseCommit: string | undefined;
+    let worktreeCarriedEntries: WorktreeSession['carriedEntries'];
     let worktreeDurablyAttached = false;
     let spawnCompleted = false;
 
@@ -3461,6 +3487,7 @@ export function registerSessionRoutes(
           baseCommit: worktreeBaseCommit,
           baseBranch: worktreeBaseBranch,
         };
+        worktreeCarriedEntries = wtResult.carriedEntries;
         // Worktree sessions must be independent — never coalesce onto an
         // existing single-scope session that lives in the main checkout.
         sessionScope = 'thread';
@@ -3815,6 +3842,9 @@ export function registerSessionRoutes(
               originalBranch: worktreeBaseBranch ?? '',
               originalHeadCommit: worktreeBaseCommit ?? '',
               worktreeBase: worktreeBaseCommit,
+              // Record the carried overlay so the orphan reaper can exempt it
+              // (R9-6). Absent when the creation carried nothing.
+              carriedEntries: worktreeCarriedEntries,
             },
           );
           assertRuntimeGenerationOpen?.();
@@ -5941,6 +5971,13 @@ export function registerSessionRoutes(
                 originalBranch: currentBranch ?? '',
                 originalHeadCommit: baseCommit,
                 worktreeBase: baseCommit,
+                // Record the carried overlay so the orphan reaper can exempt
+                // it (R9-6). Absent when the handoff carried nothing.
+                carriedEntries: created.carriedEntries,
+                // The carry came from the session's own checkout, which a
+                // /cd may have moved to a sibling: the reaper's source-side
+                // check must verify THAT checkout, not originalCwd (R5-14).
+                carriedFrom: sourceCwd,
               });
               assertRuntimeGenerationOpen?.();
               const changed = await runtime.bridge.changeSessionCwd(
@@ -6541,6 +6578,14 @@ export function registerSessionRoutes(
                   // living in a sibling managed worktree). The promotion
                   // test, exit_worktree and the orphan reaper read this.
                   worktreeBase: base.headCommit,
+                  // Record the carried overlay so the orphan reaper can exempt
+                  // it (R9-6); the journal already carries the paths for the
+                  // prepared cleanup.
+                  carriedEntries: worktreeResult.carriedEntries,
+                  // The carry came from the session's checkout, which may be
+                  // a sibling of the repo top: the reaper's source-side check
+                  // must verify THAT checkout, not originalCwd (R5-14).
+                  carriedFrom: base.checkoutCwd,
                 });
                 journal = await updateBranchWorktreeJournal(
                   journalPath,
@@ -11420,6 +11465,666 @@ export function registerSessionRoutes(
       res.off('close', onClose);
     }
   });
+
+  const restartRecoveryBatchRequest = z
+    .object({
+      workspaces: z
+        .array(z.string().min(1).max(MAX_SELECTOR_CHARS))
+        .min(1)
+        .max(MAX_BATCH_WORKSPACES),
+      sinceMs: z.number().int().positive().optional(),
+    })
+    .strict();
+
+  const hasIntactRecoverySourceTail = (filePath: string): boolean => {
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(filePath, 'r');
+      const size = fs.fstatSync(fd).size;
+      const readStart = Math.max(0, size - 64 * 1024);
+      const buffer = Buffer.alloc(Math.min(size, 64 * 1024));
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, readStart);
+      const lines = buffer.toString('utf8', 0, bytesRead).split('\n');
+      let continuation = false;
+      if (readStart > 0) {
+        const peek = Buffer.alloc(1);
+        fs.readSync(fd, peek, 0, 1, readStart - 1);
+        if (peek[0] !== 0x0a) {
+          lines.shift();
+          continuation = true;
+        }
+      }
+      let sawRecord = false;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed === '') continue;
+        if (!parseLineTolerantWithIntegrity(trimmed, filePath).complete) {
+          return false;
+        }
+        sawRecord = true;
+      }
+      if (continuation && !sawRecord) {
+        // Find the clipped record's boundary using at most one earlier window.
+        const prefixLength = Math.min(readStart, 64 * 1024);
+        const prefixStart = readStart - prefixLength;
+        const prefixBuffer = Buffer.alloc(prefixLength);
+        fs.readSync(fd, prefixBuffer, 0, prefixLength, prefixStart);
+        const boundary = prefixBuffer.lastIndexOf(0x0a);
+        if (boundary < 0 && prefixStart > 0) return false;
+        return parseLineTolerantWithIntegrity(
+          Buffer.concat([prefixBuffer, buffer.subarray(0, bytesRead)])
+            .toString('utf8', boundary + 1)
+            .trim(),
+          filePath,
+        ).complete;
+      }
+      return true;
+    } catch {
+      return false;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Closing a read-only descriptor must not replace the source verdict.
+        }
+      }
+    }
+  };
+
+  const inspectRestartRecoverySession = async (
+    runtime: WorkspaceRuntime,
+    sessionService: ReturnType<typeof createWorkspaceRuntimeSessionService>,
+    sessionId: string,
+  ): Promise<{
+    loaded: boolean;
+    sourceTypes: string[];
+    sourceUnknown: boolean;
+  }> => {
+    const metadata = await sessionService.readCreationMetadataIfReadable(
+      sessionId,
+      'active',
+    );
+    const sourceTypes =
+      metadata?.sourceType === undefined ? [] : [metadata.sourceType];
+    let sourceUnknown = metadata === undefined;
+    if (!sourceUnknown && metadata?.sourceType === undefined) {
+      const item = await sessionService.getSessionListItem(sessionId, 'active');
+      sourceUnknown ||= item === undefined;
+      if (item !== undefined) {
+        if (item.sourceType !== undefined) {
+          sourceTypes.push(item.sourceType);
+        }
+        sourceUnknown ||= !hasIntactRecoverySourceTail(item.filePath);
+      }
+    }
+    try {
+      const liveSource = runtime.bridge.getSessionSummary(sessionId).sourceType;
+      if (liveSource !== undefined) sourceTypes.push(liveSource);
+      return { loaded: true, sourceTypes, sourceUnknown };
+    } catch (error) {
+      if (!isSessionNotFoundError(error)) throw error;
+      return { loaded: false, sourceTypes, sourceUnknown };
+    }
+  };
+
+  class HiddenRestartRecoverySessionError extends Error {
+    constructor() {
+      super('Restart recovery session became hidden before dispatch.');
+    }
+  }
+
+  app.post('/sessions/recovery', async (req, res) => {
+    const route = 'POST /sessions/recovery';
+    const parsed = restartRecoveryBatchRequest.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        code: 'invalid_restart_recovery_batch_request',
+        error: 'Invalid restart recovery batch request.',
+      });
+      return;
+    }
+
+    const now = Date.now();
+    const windowMs = Math.min(
+      parsed.data.sinceMs ?? DEFAULT_RESTART_RECOVERY_WINDOW_MS,
+      MAX_RESTART_RECOVERY_WINDOW_MS,
+    );
+    const sinceMs = now - windowMs;
+
+    const readMember = async (workspace: string) => {
+      const entry = resolveWorkspaceEntryBySelector(
+        workspaceRegistry,
+        workspace,
+      );
+      if (!entry) {
+        return failedBatchMember(
+          workspace,
+          undefined,
+          404,
+          'workspace_not_found',
+          'Workspace is not registered with this daemon.',
+        );
+      }
+      const unavailable = () =>
+        failedBatchMember(
+          workspace,
+          entry,
+          503,
+          'workspace_runtime_unavailable',
+          'Workspace runtime is not active.',
+        );
+      const { generation, isCurrent } = captureWorkspaceEntryCurrency(
+        workspaceRegistry,
+        entry,
+      );
+      if (!generation || !isCurrent()) return unavailable();
+      const runtime = generation.runtime;
+      if (!runtime.trusted) {
+        logSessionRoutingFailure(route, 'untrusted_workspace', {
+          workspaceId: runtime.workspaceId,
+          workspaceCwd: runtime.workspaceCwd,
+        });
+        return failedBatchMember(
+          workspace,
+          entry,
+          403,
+          'untrusted_workspace',
+          'Workspace is not trusted.',
+        );
+      }
+      try {
+        const sessionService = createWorkspaceRuntimeSessionService(runtime);
+        const sessionIds = (
+          await sessionService.listAllProjectSessionIds('active')
+        ).filter((sessionId) => SESSION_FILE_ID_PATTERN.test(sessionId));
+        const result = scanRestartRecoveries({
+          sessionService,
+          sessionIds,
+          sinceMs,
+          limit: Number.POSITIVE_INFINITY,
+          isSessionLiveActive: (sessionId) => {
+            try {
+              const summary = runtime.bridge.getSessionSummary(sessionId);
+              return (
+                summary.hasActivePrompt || (summary.pendingPromptCount ?? 0) > 0
+              );
+            } catch {
+              return false;
+            }
+          },
+        });
+        const visibleItems = [];
+        for (
+          let index = 0;
+          index < result.items.length &&
+          visibleItems.length <= MAX_RESTART_RECOVERY_ITEMS;
+          index += 4
+        ) {
+          if (controller.signal.aborted) return;
+          const candidates = await Promise.all(
+            result.items.slice(index, index + 4).map(async (item) => ({
+              item,
+              ...(await inspectRestartRecoverySession(
+                runtime,
+                sessionService,
+                item.sessionId,
+              )),
+            })),
+          );
+          if (controller.signal.aborted) return;
+          for (const candidate of candidates) {
+            if (
+              !candidate.sourceUnknown &&
+              !candidate.sourceTypes.some(isHiddenCatalogSource)
+            ) {
+              visibleItems.push(candidate.item);
+            }
+          }
+        }
+        if (!isCurrent()) return unavailable();
+        const truncated = visibleItems.length > MAX_RESTART_RECOVERY_ITEMS;
+        return {
+          workspace,
+          workspaceId: runtime.workspaceId,
+          cwd: runtime.workspaceCwd,
+          v: 1 as const,
+          items: visibleItems.slice(0, MAX_RESTART_RECOVERY_ITEMS),
+          truncated,
+        };
+      } catch (error) {
+        if (isGenerationClosedError(error) || !isCurrent()) {
+          return unavailable();
+        }
+        daemonLog?.error(
+          error instanceof Error ? error.message : String(error),
+          error instanceof Error ? error : undefined,
+          {
+            route,
+            workspaceId: entry.workspaceId,
+          },
+        );
+        return failedBatchMember(
+          workspace,
+          entry,
+          500,
+          'restart_recovery_failed',
+          'Failed to read restart recovery state.',
+        );
+      }
+    };
+
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const onClose = () => {
+      if (!res.writableEnded) abort();
+    };
+    req.once('aborted', abort);
+    res.once('close', onClose);
+    if (req.aborted || res.destroyed) abort();
+
+    const workspaces = [];
+    try {
+      for (const workspace of parsed.data.workspaces) {
+        if (controller.signal.aborted) return;
+        workspaces.push(await readMember(workspace));
+        // The member read is synchronous disk work; yield so a client
+        // disconnect is observed between members.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      if (controller.signal.aborted) return;
+      addDaemonRequestAttribute(
+        'qwen-code.daemon.restart_recovery_batch.members',
+        workspaces.length,
+      );
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({ workspaces });
+    } finally {
+      req.off('aborted', abort);
+      res.off('close', onClose);
+    }
+  });
+
+  const restartRecoveryContinueRequest = z
+    .object({
+      sessions: z
+        .array(
+          z
+            .object({
+              workspace: z.string().min(1).max(MAX_SELECTOR_CHARS),
+              sessionId: z.string().min(1).max(256),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(10),
+      confirmToolTurn: z.boolean().optional(),
+    })
+    .strict();
+
+  app.post(
+    '/sessions/recovery/continue',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const route = 'POST /sessions/recovery/continue';
+      const parsed = restartRecoveryContinueRequest.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          code: 'invalid_restart_recovery_continue_request',
+          error: 'Invalid restart recovery continue request.',
+        });
+        return;
+      }
+
+      const confirmToolTurn = parsed.data.confirmToolTurn === true;
+
+      const continueOne = async (requested: {
+        workspace: string;
+        sessionId: string;
+      }): Promise<Record<string, unknown>> => {
+        const base = {
+          workspace: requested.workspace,
+          sessionId: requested.sessionId,
+        };
+        const entry = resolveWorkspaceEntryBySelector(
+          workspaceRegistry,
+          requested.workspace,
+        );
+        if (!entry) {
+          return { ...base, status: 'error', code: 'workspace_not_found' };
+        }
+        const { generation, isCurrent } = captureWorkspaceEntryCurrency(
+          workspaceRegistry,
+          entry,
+        );
+        if (!generation || !isCurrent()) {
+          return {
+            ...base,
+            status: 'error',
+            code: 'workspace_runtime_unavailable',
+          };
+        }
+        const runtime = generation.runtime;
+        if (!runtime.trusted) {
+          logSessionRoutingFailure(route, 'untrusted_workspace', {
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          });
+          return { ...base, status: 'error', code: 'untrusted_workspace' };
+        }
+        if (parseVirtualSubagentSessionId(requested.sessionId)) {
+          return {
+            ...base,
+            status: 'not_continuable',
+            code: 'virtual_subagent',
+          };
+        }
+        // The ledger path is derived from this value; reject anything that is
+        // not a persisted session id before touching the filesystem.
+        if (!SESSION_FILE_ID_PATTERN.test(requested.sessionId)) {
+          return {
+            ...base,
+            status: 'not_continuable',
+            code: 'invalid_session_id',
+          };
+        }
+
+        const continueLocked = async (): Promise<Record<string, unknown>> => {
+          if (!isCurrent()) {
+            return {
+              ...base,
+              status: 'error',
+              code: 'workspace_runtime_unavailable',
+            };
+          }
+          const sessionService = createWorkspaceRuntimeSessionService(runtime);
+          const state = readRestartRecoveryState(
+            sessionService.getPromptLedgerPath(requested.sessionId),
+          );
+          if (state.kind !== 'interrupted') {
+            return {
+              ...base,
+              status: 'not_continuable',
+              code: state.kind === 'settled' ? 'already_moved' : 'no_evidence',
+            };
+          }
+
+          const { sourceTypes, loaded, sourceUnknown } =
+            await inspectRestartRecoverySession(
+              runtime,
+              sessionService,
+              requested.sessionId,
+            );
+          if (!isCurrent()) {
+            return {
+              ...base,
+              status: 'error',
+              code: 'workspace_runtime_unavailable',
+            };
+          }
+          if (sourceTypes.some(isHiddenCatalogSource)) {
+            return {
+              ...base,
+              status: 'not_continuable',
+              code: 'hidden_session',
+            };
+          }
+          if (sourceUnknown) {
+            return {
+              ...base,
+              status: 'not_continuable',
+              code: 'metadata_unreadable',
+            };
+          }
+
+          let restoreAttachment:
+            | { sessionId: string; clientId: string }
+            | undefined;
+          let restoredSessionId: string | undefined;
+          if (!loaded) {
+            const outcome = await restoreSessionCore({
+              action: 'load',
+              runtime,
+              workspaceCwd: runtime.workspaceCwd,
+              sessionId: requested.sessionId,
+              archiveCoordinator,
+              requestedSessionIdAdmission,
+              assertRuntimeGenerationOpen:
+                captureRuntimeGenerationAssertion(runtime),
+              daemonLog,
+              materializeLiveConversationDirectory:
+                deps.materializeLiveConversationDirectory,
+              historyPageSize: undefined,
+              liveReplayMode: undefined,
+              compactedReplayMode: undefined,
+              clientId: undefined,
+              approvalMode: undefined,
+              restoreSource: {},
+              isCancelled: () => false,
+            });
+            if (outcome.kind === 'cancelled') {
+              return { ...base, status: 'error', code: 'cancelled' };
+            }
+            restoredSessionId = outcome.session.sessionId;
+            if (outcome.session.sourceType !== undefined) {
+              sourceTypes.push(outcome.session.sourceType);
+            }
+            // The restore attaches a generated client id even when the caller
+            // supplied none. A batch owns no client, so the attachment is
+            // released when the continuation request returns (accepted or
+            // rejected). Dispatch admits the prompt first, so an accepted
+            // continuation keeps the session open; detaching before dispatch
+            // would let the idle-close path tear down the just-loaded session.
+            if (outcome.session.clientId !== undefined) {
+              restoreAttachment = {
+                sessionId: outcome.session.sessionId,
+                clientId: outcome.session.clientId,
+              };
+            }
+          }
+
+          try {
+            if (!isCurrent()) {
+              return {
+                ...base,
+                status: 'error',
+                code: 'workspace_runtime_unavailable',
+              };
+            }
+            if (sourceTypes.some(isHiddenCatalogSource)) {
+              return {
+                ...base,
+                status: 'not_continuable',
+                code: 'hidden_session',
+              };
+            }
+            const context = await runtime.bridge.getSessionContextStatus(
+              requested.sessionId,
+            );
+            const recovery = context.recovery;
+            if (!recovery || !recovery.canContinue) {
+              return {
+                ...base,
+                status: 'not_continuable',
+                ...(recovery ? { kind: recovery.kind } : {}),
+              };
+            }
+            if (recovery.cancellationConfirmationId) {
+              return {
+                ...base,
+                status: 'confirmation_required',
+                kind: recovery.kind,
+                code: 'cancellation_confirmation',
+              };
+            }
+            if (recovery.kind === 'interrupted_turn' && !confirmToolTurn) {
+              return {
+                ...base,
+                status: 'confirmation_required',
+                kind: recovery.kind,
+                code: 'tool_turn',
+              };
+            }
+
+            const promptId = crypto.randomUUID();
+            const assertCanContinue = () => {
+              if (!isCurrent()) {
+                throw new WorkspaceGenerationClosedError();
+              }
+              const summary = runtime.bridge.getSessionSummary(
+                requested.sessionId,
+              );
+              if (isHiddenCatalogSource(summary.sourceType)) {
+                throw new HiddenRestartRecoverySessionError();
+              }
+            };
+            const result = await runtime.bridge.continueSession(
+              requested.sessionId,
+              {
+                promptId,
+                ...(recovery.kind === 'interrupted_prompt' ||
+                recovery.kind === 'interrupted_turn'
+                  ? { expectedInterruption: recovery.kind }
+                  : {}),
+                assertCanContinue,
+                assertCanDispatch: assertCanContinue,
+                requireDispatchAck: true,
+              },
+            );
+            if (!result.accepted) {
+              if (
+                result.reason === 'interruption_mismatch' &&
+                result.interruption === 'interrupted_turn' &&
+                !confirmToolTurn
+              ) {
+                return {
+                  ...base,
+                  status: 'confirmation_required',
+                  kind: result.interruption,
+                  code: 'tool_turn',
+                };
+              }
+              return {
+                ...base,
+                status: 'rejected',
+                kind: recovery.kind,
+                interruption: result.interruption,
+              };
+            }
+            if (restoredSessionId !== undefined) {
+              try {
+                // A waking drain can admit its own prompt, so the requested
+                // continuation must already be admitted before we notify it.
+                deps.onSessionRestored?.({
+                  runtime,
+                  workspaceCwd: runtime.workspaceCwd,
+                  sessionId: restoredSessionId,
+                });
+              } catch (err) {
+                daemonLog?.warn(
+                  `session restored hook failed for ${restoredSessionId}: ${String(err)}`,
+                );
+              }
+            }
+            return {
+              ...base,
+              status: 'accepted',
+              kind: result.interruption,
+              promptId: result.promptId ?? promptId,
+              ...(result.lastEventId !== undefined
+                ? { lastEventId: result.lastEventId }
+                : {}),
+              ...(result.eventEpoch !== undefined
+                ? { eventEpoch: result.eventEpoch }
+                : {}),
+            };
+          } finally {
+            if (restoreAttachment !== undefined) {
+              await runtime.bridge
+                .detachClient(
+                  restoreAttachment.sessionId,
+                  restoreAttachment.clientId,
+                )
+                .catch(() => {});
+            }
+          }
+        };
+        try {
+          return await archiveCoordinator.runSharedMany(
+            [requested.sessionId],
+            continueLocked,
+          );
+        } catch (error) {
+          if (isSessionNotFoundError(error)) {
+            return { ...base, status: 'error', code: 'session_not_found' };
+          }
+          if (error instanceof HiddenRestartRecoverySessionError) {
+            return {
+              ...base,
+              status: 'not_continuable',
+              code: 'hidden_session',
+            };
+          }
+          if (error instanceof DaemonDrainingError) {
+            return { ...base, status: 'error', code: 'daemon_draining' };
+          }
+          if (error instanceof SessionArchivingError) {
+            return { ...base, status: 'error', code: 'session_archiving' };
+          }
+          if (error instanceof RequestedSessionIdAdmissionError) {
+            return { ...base, status: 'error', code: error.code };
+          }
+          if (isGenerationClosedError(error) || !isCurrent()) {
+            return {
+              ...base,
+              status: 'error',
+              code: 'workspace_runtime_unavailable',
+            };
+          }
+          daemonLog?.error(
+            error instanceof Error ? error.message : String(error),
+            error instanceof Error ? error : undefined,
+            {
+              route,
+              workspaceId: entry.workspaceId,
+              sessionId: requested.sessionId,
+            },
+          );
+          return { ...base, status: 'error', code: 'continue_failed' };
+        }
+      };
+
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      const onClose = () => {
+        if (!res.writableEnded) abort();
+      };
+      req.once('aborted', abort);
+      res.once('close', onClose);
+      if (req.aborted || res.destroyed) abort();
+
+      const results: Array<Record<string, unknown>> = [];
+      try {
+        for (const requested of parsed.data.sessions) {
+          if (controller.signal.aborted) return;
+          results.push(await continueOne(requested));
+          // Loading and continuing are serial disk/bridge work; yield so a
+          // client disconnect is observed between sessions.
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        if (controller.signal.aborted) return;
+        addDaemonRequestAttribute(
+          'qwen-code.daemon.restart_recovery_continue_batch.members',
+          results.length,
+        );
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(200).json({ results });
+      } finally {
+        req.off('aborted', abort);
+        res.off('close', onClose);
+      }
+    },
+  );
 
   const workspaceSessionInfoHandler =
     (paramName: 'id' | 'workspace'): RequestHandler =>

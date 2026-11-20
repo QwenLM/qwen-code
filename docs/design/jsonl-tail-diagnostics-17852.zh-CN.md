@@ -2,9 +2,20 @@
 
 [English](./jsonl-tail-diagnostics-17852.md) | [简体中文](./jsonl-tail-diagnostics-17852.zh-CN.md)
 
-**状态：本次改动已实现，待评审。** 这是已合入的追加完整性修复 #17771 的后续工作，
-解决跟踪 issue #17852 的事项 1–3。事项 4（Windows 原生与当前 head 的 macOS 验证）
-**未**在此解决，见[范围边界](#范围边界)。
+**状态：已合入。** 随
+[#17901](https://github.com/QwenLM/qwen-code/pull/17901) 落地，squash 提交
+`78411506df6734efd2fcf7e627ab1b27098afd77`，合入日期 `2026-11-20`。这是已合入的
+追加完整性修复 #17771 的后续工作，解决跟踪 issue #17852 的事项 1–3。事项 4
+（Windows 原生与当前 head 的 macOS 验证）**未**解决，仍在 #17852 中开放，见
+[范围边界](#范围边界)。
+
+下文的验证计划已按原样执行。其结果——已确认的 280 条告警更替基线及其 128 条的
+改动后结果、聚焦套件 150 → 171 的计数、11 行变异矩阵及其一行有意存活的归因、
+以及仅 Linux 的原生 FIFO 证据——记录在
+[验证报告](https://github.com/QwenLM/qwen-code/pull/17901#issuecomment-7029094987)
+与
+[跟踪 issue 上的落地说明](https://github.com/QwenLM/qwen-code/issues/17852#issuecomment-7032035092)
+中。
 
 ## 问题陈述
 
@@ -221,10 +232,12 @@ tail` 见证钉住，而不是由本用例钉住。
 
 ## 范围边界
 
-#17852 的事项 4 **未**在此交付。Windows 原生共享冲突行为与当前 head 的 macOS
-行为需要本次改动未曾运行其上的宿主。此前 `14893f6f10` 的 macOS 证据早于 #17771
-的 writer-handle 生命周期，不被复用为验证。跳过的 CI 任务不被当作原生平台认证。
-本次改动中的 Linux 原生结果都标注其实际 OS 与 Node 版本，不推广到其他平台。
+#17852 的事项 4 **未**由 #17901 交付，仍在该跟踪 issue 中开放。Windows 原生共享
+冲突行为与当前 head 的 macOS 行为需要已合入改动未曾运行其上的宿主。此前
+`14893f6f10` 的 macOS 证据早于 #17771 的 writer-handle 生命周期，不被复用为验证。
+跳过的 CI 任务不被当作原生平台认证：在合入 head 上，该 PR 的检查为 30 pass /
+40 skipping / 0 fail，Windows 与 macOS 测试车道正在这些跳过之中。已合入改动的
+Linux 原生结果都标注其实际 OS 与 Node 版本，不推广到其他平台。
 
 同样不在范围内（与 #17852 一致）：通用跨进程追加锁、任意路径替换原子性、通用
 FIFO transcript 支持、已丢失历史 JSON 字节重建、daemon 升级/重启，以及已损坏
@@ -237,7 +250,15 @@ FIFO transcript 支持、已丢失历史 JSON 字节重建、daemon 升级/重�
 
 ## 参考
 
-- 跟踪 issue：[#17852](https://github.com/QwenLM/qwen-code/issues/17852)。
+- 本设计的落地 PR：[#17901](https://github.com/QwenLM/qwen-code/pull/17901)，
+  squash `78411506df6734efd2fcf7e627ab1b27098afd77`，PR head
+  `b265c5f17ed4294594dd86374ea41ff389daceb8`。
+- 验证报告：
+  [#17901 评论](https://github.com/QwenLM/qwen-code/pull/17901#issuecomment-7029094987)。
+  落地说明与剩余范围：
+  [#17852 评论](https://github.com/QwenLM/qwen-code/issues/17852#issuecomment-7032035092)。
+- 跟踪 issue：[#17852](https://github.com/QwenLM/qwen-code/issues/17852) ——
+  仅就事项 4 保持开放。
 - 已合入父 PR：[#17771](https://github.com/QwenLM/qwen-code/pull/17771)，squash
   `f8fa7c476f2244d5c6832fb2bb9a551882c425b3`。
 - 合入后账本：[#17853](https://github.com/QwenLM/qwen-code/pull/17853)，
