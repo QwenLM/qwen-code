@@ -6,7 +6,7 @@
 
 **已合入：** [PR #17862](https://github.com/QwenLM/qwen-code/pull/17862)，squash 提交为 [`48ff083de4e5c328598293d4d86c13014dd73357`](https://github.com/QwenLM/qwen-code/commit/48ff083de4e5c328598293d4d86c13014dd73357)。来自同一后台执行的兼容消息与思考 chunk 现在会在 live journal 中合并。合并边界是完整规范化后的 background-turn 描述符：不同描述符、非法描述符和未知扩展字段都保持离散，避免后一个 chunk 的 metadata 替换较早的可选归属信息。
 
-[真实 HTTP 与完整 CI 补充报告](https://github.com/QwenLM/qwen-code/pull/17862#issuecomment-7028422487)报告 150 条脚本断言，覆盖同目录的 `compactionEngine.test.ts` 单测文件（152/152）、独立编译的 base/head 回放对照、五个被杀死的生产守卫变异，以及真实 daemon 的 full/summary `/load` 检查；完整描述符一直保留到终态 compaction 后。[引擎与身份变异账本](https://github.com/QwenLM/qwen-code/pull/17862#issuecomment-7027993738)另报告 186 条脚本断言通过。二者范围重叠且夹具不同，不能相加当成互不重复的覆盖量。journal 上限和自适应预算策略没有移除，默认上限对照仍会报告截断。
+[真实 HTTP 与完整 CI 补充报告](https://github.com/QwenLM/qwen-code/pull/17862#issuecomment-7028422487)报告 150 条脚本断言，覆盖独立编译的 base/head 回放对照、五个被杀死的生产守卫变异，以及真实 daemon 的 full/summary `/load` 检查；完整描述符一直保留到终态 compaction 后。同目录的 `compactionEngine.test.ts` 单测文件通过 152/152。[引擎与身份变异账本](https://github.com/QwenLM/qwen-code/pull/17862#issuecomment-7027993738)另报告 186 条脚本断言通过。二者范围重叠且夹具不同，不能相加当成互不重复的覆盖量。journal 上限和自适应预算策略没有移除，默认上限对照仍会报告截断。
 
 **延期事项：** base 已有的终态 slot 路径仍可能跨不同 background-turn 身份合并并丢失较早的 metadata，本 PR 没有修复该行为。[issue #17914](https://github.com/QwenLM/qwen-code/issues/17914)、[原始非阻塞评审线程](https://github.com/QwenLM/qwen-code/pull/17862#discussion_r4637214828)和[关联该 issue 的线程回复](https://github.com/QwenLM/qwen-code/pull/17862#discussion_r4639238655)共同跟踪这项独立工作，不表示它已经修复。
 
