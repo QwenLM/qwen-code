@@ -16,6 +16,11 @@ Codex 保留最近的托管 worktree，且清理时绝不丢失工作：归档/�
 回收，但含真实会话工作的 checkout 仍拒绝删除）。P6 对托管会话 worktree 以「先快照
 再删除」取代该拒绝，使清理把 work 保存在归档中，而非搁置 checkout。
 
+本 PR 交付的 U1–U3 切片保持普通 archive/unarchive 不具破坏性：已有有效 checkout、
+其绑定及原始字节均保留。此切片中，先快照再移除的触发方是会话删除/孤儿清理路径。
+U4 按数量回收及 U5 重开恢复均未实现。上述目标和整体验收描述完整 P6 计划，不是
+本切片当前的 archive 行为。
+
 ## 分解
 
 P6 在 #17237 分支上分五个单元落地；每个可独立测试。
@@ -85,14 +90,13 @@ marker，则在任何清理之前拒绝，不能只相信成员的词法路径�
 而读取该值的保留清扫是 U4。在渲染行与消费方存在之前就把它加入 `WEB_SHELL_SETTINGS` 会
 破坏该不变量（并留下一个无人读取的设置），故 U4 把允许清单条目、UI 行与清扫一并接线。
 
-### U3 — 归档/删除触发：先快照再删除
+### U3 — 删除触发：先快照再删除
 
-托管会话 worktree 被会话归档/删除移除时（`executeWorktreeCleanup` 与归档流），移除前
-捕获快照（U1），然后尝试移除——快照保存了 dirty work，故对**仅托管会话 worktree** 解除
-`worktreeHasWork` 拒绝；工具/agent worktree 保留现有拒绝语义。归档先取 coordinator 锁，
-再取 worktree ownership 锁；在 sidecar 存活期间校验 ownership，确认移动后在同锁下重读
-archived sidecar。仅当其仍指向已验证的 checkout 才清理；chat 记录和 archived sidecar 保留。
-删除则要求 ownership 记录已先移除。移除仍委托
+托管会话 worktree 被会话删除移除时（`executeWorktreeCleanup`），移除前捕获快照（U1），
+然后尝试移除——快照保存了 dirty work，故对**仅托管会话 worktree** 解除 `worktreeHasWork`
+拒绝；工具/agent worktree 保留现有拒绝语义。归档保留 checkout 和可逆的 archive/unarchive
+绑定，不触发快照/移除；重开恢复仍属于 U5。删除在 sidecar 存活期间校验 ownership，仅当
+会话记录已删除后才继续清理。移除仍委托
 `removeUserWorktree`，它拒绝携带无 ref 可达 commit 的检出（缺省托管 worktree 是
 detached）：此时快照已写但检出被保留（`unmerged commits`），故「无论 dirty 状态都移除」
 对 dirty 内容成立，对未合并 commit 不成立。捕获失败同样回退保留（fail-closed：未获持久
@@ -159,7 +163,8 @@ Web Shell 呈现入口（chat 头/会话概览）。i18n。同一 session 前缀
 
 ## 验收（P6 整体）
 
-- 归档 chat 在快照后删除其 worktree；重开提供恢复；清扫保留最近 15（缺省）。
+- 在包含 U4/U5（由 #17237 跟踪）的完整 P6 流程中，归档/删除 chat 在移除前
+  快照其 worktree，重开提供恢复，清扫保留最近 15（缺省）。
 - dirty 托管会话 worktree 在快照后删除（不再永久保留）；快照保真恢复 commit+dirty+
   untracked 内容及 tracked 删除。对搬运路径的会话改动被快照，绝不裸删（R9-6 内容感知门）。
 - 工具/agent worktree 保留现有拒绝语义。

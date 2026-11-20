@@ -2944,7 +2944,6 @@ export function registerSessionRoutes(
               resolveConflicts,
               requireIdle,
               assertCanMutate,
-              runtimeWorkspaceCwd: runtime.workspaceCwd,
             }),
           ),
       );

@@ -2015,6 +2015,10 @@ describe('POST /session/:id/worktree-handoff', () => {
     const rootHead = git(fixture.workspaceDir, 'rev-parse', 'HEAD');
     expect(git(siblingPath, 'rev-parse', 'HEAD')).not.toBe(rootHead);
     fixture.setEffectiveCwd(siblingPath);
+    writeFileSync(
+      path.join(siblingPath, 'session-carry.txt'),
+      'sibling-carry\n',
+    );
 
     const res = await request(fixture.app)
       .post(`/session/${fixture.sessionId}/worktree-handoff`)
@@ -2030,6 +2034,20 @@ describe('POST /session/:id/worktree-handoff', () => {
       // to=worktree bases the worktree at the workspace HEAD, so the
       // creation base equals the gate base here.
       expect(sidecar.session.worktreeBase).toBe(rootHead);
+      expect(sidecar.session.carriedFrom).toBe(realpathSync(siblingPath));
+      expect(sidecar.session.carriedEntries).toEqual([
+        {
+          path: 'session-carry.txt',
+          hash: git(
+            siblingPath,
+            'hash-object',
+            '--no-filters',
+            '--',
+            'session-carry.txt',
+          ),
+          executable: expect.any(Boolean),
+        },
+      ]);
     }
 
     // The return leg must succeed, not 409 local_head_moved.
@@ -2038,6 +2056,12 @@ describe('POST /session/:id/worktree-handoff', () => {
       .send({ to: 'local' });
     expect(back.status).toBe(200);
     expect(back.body.worktree).toBeNull();
+    expect(
+      readFileSync(
+        path.join(fixture.workspaceDir, 'session-carry.txt'),
+        'utf8',
+      ),
+    ).toBe('sibling-carry\n');
   });
 
   it('keeps the sidecar naming the auto branch when detach fails mid-promotion', async () => {

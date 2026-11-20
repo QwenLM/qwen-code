@@ -628,6 +628,9 @@ export async function captureWorktreeSnapshot(
         gzip: true,
         portable: true,
         noMtime: true,
+        // tar 7.5.22 can close gzip twice while finishing parallel hardlink
+        // jobs, escaping its promise as an unhandled stream error.
+        jobs: 1,
         filter: (p) => !isExcludedFromSnapshot(p, matcher),
       },
       ['.'],

@@ -129,8 +129,8 @@ rename/copy 记录直接拒绝。非搬运条目保留现有 session-marker / di
 仅含原始搬运内容的 checkout 读作干净；免快照回收前，回收器还校验搬运来源检出
 （`sidecar.carriedFrom ?? sidecar.originalCwd`）仍逐内容持有该覆盖层，不再持有或不可读
 时改为快照（R5-2/R5-14）。裸回收前立即复核来源；发生变化或读取失败时保留目标，而不是
-丢弃最后一副本。归档移动会话记录和 sidecar 后，在同一 ownership 锁内重新读取该 sidecar，
-仅当归档副本仍指向原 checkout 时才清理；删除则要求会话记录已先行移除。捕获还会读回
+丢弃最后一副本。归档移动会话记录和 sidecar，并保留 checkout 及其可逆的
+archive/unarchive 绑定。删除先校验 ownership，在会话记录已删除后才进行快照与移除。捕获还会读回
 真实 tar 内容、可执行位和链接目标，与最终 checkout 不一致时拒绝。含真实会话工作——包括
 对搬运路径的会话改动——的 checkout 读作工作并被先快照再删除（P6 U3）。core 保留清扫
 （`worktreeCleanup.ts`）在本交付项中保持不变。
@@ -138,8 +138,8 @@ rename/copy 记录直接拒绝。非搬运条目保留现有 session-marker / di
 ## 验收
 
 - 仅含原始搬运覆盖层的会话 worktree 在会话删除后被孤儿回收器回收（复现 S8 的回归）。
-- 会话归档后，真实 dirty checkout 在完成快照后被移除；archived sidecar 保留，
-  可从其旁的归档恢复原始字节。
+- 对已有有效 worktree-backed 会话，归档和取消归档保留 checkout、原始字节和 worktree 绑定；
+  归档不触发快照或移除，取消归档后仍能沿原路径加载。
 - 搬运来源不再持有覆盖层或不可读时，仅含原始搬运内容的 checkout 改为快照——包括来源
   是 `carriedFrom` 记录的兄弟检出、而 `originalCwd`（诱饵）仍匹配搬运时身份的情形
   （R5-2/R5-14）。

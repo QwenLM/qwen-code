@@ -2302,32 +2302,123 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     await expect(pending).resolves.toMatchObject({ removed: [sessionId] });
   });
 
-  it('archives a chat and snapshots its dirty checkout before removal (P6 U3)', async () => {
+  it('keeps worktree content and binding across archive and unarchive', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440089';
     const { service, worktreePath } = setupWorktreeSession(sessionId);
     fs.writeFileSync(path.join(worktreePath, 'file.txt'), 'archive-me\n');
-
-    const result = await archiveDaemonSessions({
-      sessionIds: [sessionId],
-      service,
-      bridge: cleanupBridge(),
-      coordinator: new SessionArchiveCoordinator(),
-    });
-
-    expect(result.archived).toEqual([sessionId]);
-    const sidecarPath = service.getWorktreeSessionPathForArchiveState(
+    fs.writeFileSync(path.join(worktreePath, 'draft.txt'), 'not-in-head\n');
+    const coordinator = new SessionArchiveCoordinator();
+    const archivedSidecar = service.getWorktreeSessionPathForArchiveState(
       sessionId,
       'archived',
     );
-    expect(fs.existsSync(sidecarPath)).toBe(true);
+
+    const archived = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator,
+    });
+
+    expect(archived.archived).toEqual([sessionId]);
+    expect(fs.existsSync(archivedSidecar)).toBe(true);
+    expect(fs.statSync(worktreePath).isDirectory()).toBe(true);
+    expect(fs.readFileSync(path.join(worktreePath, 'file.txt'), 'utf8')).toBe(
+      'archive-me\n',
+    );
+    expect(fs.readFileSync(path.join(worktreePath, 'draft.txt'), 'utf8')).toBe(
+      'not-in-head\n',
+    );
+    expect(
+      fs
+        .readdirSync(path.dirname(archivedSidecar))
+        .filter((name) => name.endsWith('.worktree-snapshot.tar.gz')),
+    ).toEqual([]);
+
+    const unarchived = await unarchiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      coordinator,
+    });
+
+    expect(unarchived.unarchived).toEqual([sessionId]);
+    expect(fs.existsSync(archivedSidecar)).toBe(false);
+    const activeSidecar = service.getWorktreeSessionPath(sessionId);
+    expect(fs.existsSync(activeSidecar)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(activeSidecar, 'utf8'))).toMatchObject({
+      worktreePath,
+    });
+    expect(fs.readFileSync(path.join(worktreePath, 'draft.txt'), 'utf8')).toBe(
+      'not-in-head\n',
+    );
+  });
+
+  it('snapshots dirty content when deleting an already archived chat', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440094';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    const coordinator = new SessionArchiveCoordinator();
+    fs.writeFileSync(path.join(worktreePath, 'file.txt'), 'archived-tracked\n');
+    fs.writeFileSync(path.join(worktreePath, 'draft.txt'), 'archived-draft\n');
+
+    const archived = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator,
+    });
+
+    expect(archived.archived).toEqual([sessionId]);
+    expect(fs.statSync(worktreePath).isDirectory()).toBe(true);
+    const archivedSidecar = service.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      'archived',
+    );
+    expect(fs.existsSync(archivedSidecar)).toBe(true);
+    expect(
+      fs
+        .readdirSync(path.dirname(archivedSidecar))
+        .filter((name) => name.endsWith('.worktree-snapshot.tar.gz')),
+    ).toEqual([]);
+
+    const removed = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator,
+    });
+
+    expect(removed.removed).toEqual([sessionId]);
     await expectWorkArchived(
       service,
       sessionId,
       worktreePath,
       'file.txt',
-      'archive-me\n',
+      'archived-tracked\n',
       'archived',
     );
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      'draft.txt',
+      'archived-draft\n',
+      'archived',
+    );
+    const archiveFile = fs
+      .readdirSync(path.dirname(archivedSidecar))
+      .find((name) => name.endsWith('.worktree-snapshot.tar.gz'));
+    expect(archiveFile).toBeDefined();
+    const archiveMeta = await readWorktreeSnapshotMeta(
+      path.join(
+        path.dirname(archivedSidecar),
+        archiveFile!.replace(/\.tar\.gz$/, '.json'),
+      ),
+    );
+    expect(archiveMeta.dirty).toEqual({
+      tracked: 1,
+      untracked: 1,
+      deleted: [],
+    });
   });
 
   it('keeps the checkout when the session record was never there', async () => {

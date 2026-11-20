@@ -176,10 +176,9 @@ verifies the carry SOURCE checkout (`sidecar.carriedFrom ?? sidecar.originalCwd`
 still holds the overlay content-for-content, and snapshots instead when it does
 not or cannot be read (R5-2/R5-14). Immediately before a bare collection it
 re-validates that source; a change or read failure preserves the target rather
-than discarding the only remaining copy. Archiving moves the session record and
-sidecar, then re-reads the sidecar under the same ownership lock and permits
-cleanup only if the archived copy still names that checkout. Deletion instead
-requires the record to have been removed first. Two external digests alone
+than discarding the only remaining copy. Archive moves the session record and sidecar while preserving the checkout and
+its reversible archive/unarchive binding. For delete, ownership is verified
+before the session record is removed; only then does snapshot/removal proceed. Two external digests alone
 cannot certify the archive: capture reads back its raw tar contents,
 executable bits and link targets, and rejects a mismatch with the final
 checkout. A checkout with genuine session work — including a session
@@ -192,8 +191,9 @@ deliverable.
 - A session worktree whose only content is the pristine carried overlay is
   collected by the orphan reaper after the session is deleted (regression
   reproducing S8).
-- After a session is archived, a genuinely dirty checkout is snapshotted and
-  removed, while its archived sidecar remains to locate the original bytes.
+- For an existing valid worktree-backed session, archive and unarchive preserve
+  its checkout, exact bytes and worktree binding; the archive trigger neither
+  snapshots nor removes the checkout.
 - A pristine carried-only checkout is snapshotted instead when the carry source
   no longer holds the overlay or cannot be read — including when the source is
   a sibling checkout recorded in `carriedFrom` while `originalCwd` (the decoy)

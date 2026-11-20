@@ -34,6 +34,7 @@ const lsFilesProbeBuffers = vi.hoisted(() => [] as Array<number | undefined>);
 const captureTiming = vi.hoisted(() => ({
   afterRead: undefined as undefined | ((relativePath: string) => void),
   beforeCreate: undefined as undefined | (() => void),
+  afterCreate: undefined as undefined | (() => Promise<unknown>),
 }));
 vi.mock('../utils/git-branches.js', async (importOriginal) => {
   const actual =
@@ -94,12 +95,15 @@ vi.mock('tar', async (importOriginal) => {
         tarCreateEntryModes.push(-1);
       }
       captureTiming.beforeCreate?.();
-      return createFile(
+      const completed = createFile(
         captureTiming.afterRead
           ? { ...options, maxReadSize: 4 * 1024 * 1024 }
           : options,
         entries,
       );
+      return captureTiming.afterCreate
+        ? completed.then(async () => captureTiming.afterCreate?.())
+        : completed;
     },
     {
       syncFile: actual.create.syncFile,
@@ -181,6 +185,7 @@ describe('worktreeSnapshotService (P6 U1)', () => {
   afterEach(async () => {
     captureTiming.afterRead = undefined;
     captureTiming.beforeCreate = undefined;
+    captureTiming.afterCreate = undefined;
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -247,6 +252,147 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     ).rejects.toThrow();
     await expect(fs.access(metaPath)).resolves.toBeUndefined();
   });
+
+  it('captures and restores hardlinked file pairs correctly', async () => {
+    const left = path.join(worktree, 'left-hardlink.bin');
+    const right = path.join(worktree, 'right-hardlink.bin');
+    const payload = randomBytes(8 * 1024 * 1024);
+    await fs.writeFile(left, payload);
+    await fs.link(left, right);
+    expect((await fs.stat(left)).ino).toBe((await fs.stat(right)).ino);
+
+    const result = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: {
+        ...meta(),
+        dirty: { tracked: 0, untracked: 2, deleted: [] },
+      },
+    });
+    expect(result.checkoutMatchesCapture).toBe(true);
+    const members = new Map<string, { type: string; linkpath?: string }>();
+    await tar.t({
+      file: result.snapshotPath,
+      onReadEntry: (entry) => {
+        if (entry.path.includes('hardlink.bin')) {
+          members.set(path.posix.normalize(entry.path), {
+            type: entry.type,
+            linkpath: entry.linkpath,
+          });
+        }
+      },
+    });
+    expect(members.size).toBe(2);
+    expect(members.get('left-hardlink.bin')?.type).toBe('File');
+    const hardlink = members.get('right-hardlink.bin');
+    expect(hardlink?.type).toBe('Link');
+    expect(path.posix.normalize(hardlink?.linkpath ?? '')).toBe(
+      'left-hardlink.bin',
+    );
+
+    const restored = await restoreOverHead(
+      result.snapshotPath,
+      result.metaPath,
+      'restored-hardlinks',
+    );
+    for (const name of ['left-hardlink.bin', 'right-hardlink.bin']) {
+      expect(
+        (await fs.readFile(path.join(restored, name))).equals(payload),
+      ).toBe(true);
+    }
+    expect((await fs.stat(path.join(restored, 'left-hardlink.bin'))).ino).toBe(
+      (await fs.stat(path.join(restored, 'right-hardlink.bin'))).ino,
+    );
+  });
+
+  it.each(['HEAD', 'branch'] as const)(
+    'does not certify a late %s change',
+    async (scenario) => {
+      const before = meta();
+      captureTiming.afterCreate = async () => {
+        if (scenario === 'HEAD') {
+          git(worktree, 'commit', '--allow-empty', '-qm', 'move head');
+        } else {
+          git(worktree, 'checkout', '-q', '-b', 'after-snapshot');
+        }
+      };
+      const result = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: before,
+      });
+
+      const head = git(worktree, 'rev-parse', 'HEAD');
+      const branch = git(worktree, 'branch', '--show-current');
+      if (scenario === 'HEAD') {
+        expect(head).not.toBe(before.headCommit);
+        expect(branch).toBe(before.branch);
+      } else {
+        expect(head).toBe(before.headCommit);
+        expect(branch).toBe('after-snapshot');
+      }
+      expect(result.checkoutMatchesCapture).toBe(false);
+    },
+  );
+
+  it('captures symlinks and rejects a later target change', async (ctx) => {
+    const alias = path.join(worktree, 'alias.txt');
+    const alternate = path.join(worktree, 'alternate.txt');
+    await fs.writeFile(alternate, 'alternate\n');
+    try {
+      await fs.symlink('committed.txt', alias);
+    } catch (error) {
+      if (process.platform === 'win32') ctx.skip();
+      throw error;
+    }
+    const metadata = {
+      ...meta(),
+      dirty: { tracked: 0, untracked: 2, deleted: [] },
+    };
+    const original = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: metadata,
+    });
+    expect(original.checkoutMatchesCapture).toBe(true);
+
+    captureTiming.afterCreate = async () => {
+      await fs.unlink(alias);
+      await fs.symlink('alternate.txt', alias);
+    };
+    const changed = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: metadata,
+    });
+    expect(await fs.readlink(alias)).toBe('alternate.txt');
+    expect(changed.checkoutMatchesCapture).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not certify a changed owner-exec bit',
+    async () => {
+      const target = path.join(worktree, 'payload.txt');
+      await fs.writeFile(target, 'mode-only\n');
+      await fs.chmod(target, 0o755);
+      expect((await fs.stat(target)).mode & 0o100).toBe(0o100);
+      captureTiming.afterCreate = async () => {
+        await fs.chmod(target, 0o644);
+      };
+
+      const result = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: {
+          ...meta(),
+          dirty: { tracked: 0, untracked: 1, deleted: [] },
+        },
+      });
+
+      expect((await fs.stat(target)).mode & 0o100).toBe(0);
+      expect(result.checkoutMatchesCapture).toBe(false);
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'refuses a FIFO rather than silently omitting it from the archive',

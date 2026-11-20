@@ -957,14 +957,12 @@ function sanitizeLogLine(message: string): string {
 export async function archiveDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'closeSession'> &
-    Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>;
+  bridge: Pick<AcpSessionBridge, 'closeSession'>;
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   resolveConflicts?: boolean;
   requireIdle?: boolean;
   assertCanMutate?: () => void;
-  runtimeWorkspaceCwd?: string;
 }): Promise<DaemonArchiveSessionsResult> {
   const {
     sessionIds,
@@ -975,7 +973,6 @@ export async function archiveDaemonSessions(params: {
     resolveConflicts = false,
     requireIdle = false,
     assertCanMutate,
-    runtimeWorkspaceCwd,
   } = params;
   const uniqueSessionIds = [
     ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
@@ -1111,83 +1108,9 @@ export async function archiveDaemonSessions(params: {
             maintenanceError,
           };
         };
-        const activeSidecar = service.getWorktreeSessionPath(sessionId);
-        const archivedSidecar = service.getWorktreeSessionPathForArchiveState(
-          sessionId,
-          'archived',
-        );
-        if (
-          !fs.existsSync(activeSidecar) &&
-          (archivedSidecar === activeSidecar || !fs.existsSync(archivedSidecar))
-        ) {
-          return await (coordinatorLockHeld
-            ? mutateSession()
-            : coordinator.runExclusiveMany([sessionId], mutateSession));
-        }
-        const archiveAndCleanup = async () => {
-          const cleanupPlan = await prepareWorktreeCleanup(
-            service,
-            sessionId,
-            runtimeWorkspaceCwd ?? service.getProjectRoot(),
-          );
-          if (!cleanupPlan) return mutateSession();
-          const releaseCleanupLock =
-            await acquireWorktreeCleanupLock(cleanupPlan);
-          try {
-            const ownership = await verifyWorktreeCleanupOwnership(
-              cleanupPlan,
-              (candidate) => sessionLiveOnBridge(bridge, candidate),
-            );
-            if (!ownership.ok) {
-              logWorktreeCleanupPreserve(sessionId, ownership.reason);
-            }
-            const result = await mutateSession();
-            if (
-              ownership.ok &&
-              (result.kind === 'archived' || result.kind === 'resolvedConflict')
-            ) {
-              try {
-                assertCanMutate?.();
-                const archivedPlan = await prepareWorktreeCleanup(
-                  service,
-                  sessionId,
-                  runtimeWorkspaceCwd ?? service.getProjectRoot(),
-                );
-                const archivedSidecar =
-                  service.getWorktreeSessionPathForArchiveState(
-                    sessionId,
-                    'archived',
-                  );
-                if (
-                  !archivedPlan ||
-                  archivedPlan.sidecarPath !== archivedSidecar ||
-                  archivedPlan.sidecar.slug !== cleanupPlan.sidecar.slug ||
-                  archivedPlan.sidecar.worktreePath !==
-                    cleanupPlan.sidecar.worktreePath ||
-                  archivedPlan.lockKey !== cleanupPlan.lockKey
-                ) {
-                  logWorktreeCleanupPreserve(
-                    sessionId,
-                    'archive sidecar changed during cleanup',
-                  );
-                } else {
-                  await executeWorktreeCleanup(archivedPlan);
-                }
-              } catch (error) {
-                logWorktreeCleanupPreserve(
-                  sessionId,
-                  `cleanup execution failed: ${errorMessage(error)}`,
-                );
-              }
-            }
-            return result;
-          } finally {
-            releaseCleanupLock();
-          }
-        };
         return await (coordinatorLockHeld
-          ? archiveAndCleanup()
-          : coordinator.runExclusiveMany([sessionId], archiveAndCleanup));
+          ? mutateSession()
+          : coordinator.runExclusiveMany([sessionId], mutateSession));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;

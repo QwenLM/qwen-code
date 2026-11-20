@@ -19,6 +19,13 @@ checkout with genuine session work still refuses deletion). P6 replaces that
 refusal with snapshot-then-delete for managed session worktrees, so cleanup
 preserves the work in an archive instead of stranding the checkout.
 
+The delivered U1–U3 slice keeps ordinary archive/unarchive non-destructive:
+a valid existing checkout, its binding and its byte content are preserved. The
+snapshot-then-remove trigger in this slice is the session-deletion/orphan
+cleanup path. U4 retention-driven reclamation and U5 snapshot restore on reopen
+are not implemented here. The Goal and Overall Acceptance below describe the
+complete P6 plan, not current archive behavior in this slice.
+
 ## Decomposition
 
 P6 lands as five units on the #17237 branch; each is independently testable.
@@ -129,18 +136,16 @@ row and the consumer exist would break that invariant (and leave a setting
 nothing reads), so U4 wires the allowlist entry, the UI row, and the sweep
 together.
 
-### U3 — Archive/delete trigger: snapshot-then-delete
+### U3 — Delete trigger: snapshot-then-delete
 
-When a managed session worktree is removed by session archive/delete
-(`executeWorktreeCleanup` and the archive flow), capture a snapshot (U1) before
-removal, then attempt removal — the snapshot preserves the dirty work, so the
-`worktreeHasWork` refusal is lifted for **managed session worktrees only**;
-tool/agent worktrees keep the existing refusal semantics. Archive takes the
-coordinator lock before the worktree ownership lock, verifies ownership while
-the sidecar is present, and after a confirmed move re-reads the archived
-sidecar under that same lock. Cleanup proceeds only while it still names the
-verified checkout; the chat record and archived sidecar survive. Delete
-instead requires the ownership record to have been removed first. Removal is still
+When a managed session worktree is removed by session deletion
+(`executeWorktreeCleanup`), capture a snapshot (U1) before removal, then attempt
+removal — the snapshot preserves the dirty work, so the `worktreeHasWork`
+refusal is lifted for **managed session worktrees only**; tool/agent worktrees
+keep the existing refusal semantics. Archive preserves the checkout and its
+reversible archive/unarchive binding; it does not trigger snapshot removal, and
+restore-on-reopen remains U5. Delete verifies ownership while the sidecar is
+present and proceeds only after the session record was removed. Removal is still
 delegated to `removeUserWorktree`, which refuses a checkout carrying commits no
 ref reaches (the default managed worktree is detached): in that case the
 snapshot is written but the checkout is preserved (`unmerged commits`), so
@@ -245,8 +250,9 @@ older valid-looking archive.
 
 ## Acceptance (P6 overall)
 
-- Archiving a chat deletes its worktree after snapshotting; reopening offers
-  restore; the sweep keeps the most recent 15 (default).
+- In the complete P6 flow including U4/U5 (tracked in #17237), archiving/deleting
+  a chat snapshots its worktree before removal, reopening offers restore, and
+  the sweep keeps the most recent 15 (default).
 - A dirty managed session worktree is deleted after snapshot (no permanent
   preserve); the snapshot restores commits + dirty + untracked content and
   tracked deletions faithfully. A session change to a carried path is
