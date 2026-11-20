@@ -473,7 +473,11 @@ export function mcpVersionNegotiationFor(
   };
 }
 
-export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
+export function createMcpClient(
+  name: string,
+  cfg: MCPServerConfig,
+  options?: { declareElicitation?: boolean },
+): Client {
   return new Client(
     { name, version: '0.0.1' },
     {
@@ -483,7 +487,11 @@ export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
       // catalogs into a discovery failure that this module reports as empty.
       listMaxPages: 0,
       capabilities: {
-        elicitation: {},
+        // Opt-in per caller (#17316 / review R1-2): declaring the
+        // capability in the shared factory advertised it for every client
+        // this module builds, not just the one that answers
+        // elicitation/create.
+        ...(options?.declareElicitation ? { elicitation: {} } : {}),
         extensions: {
           [MCP_APPS_EXTENSION_ID]: {
             mimeTypes: [MCP_APP_RESOURCE_MIME_TYPE],
@@ -603,6 +611,10 @@ export class McpClient {
     this.client = createMcpClient(
       `qwen-cli-mcp-client-${this.serverName}`,
       this.serverConfig,
+      // This is the client whose connect() registers the elicitation
+      // decline handler (#17316) — it must be the one to declare the
+      // capability.
+      { declareElicitation: true },
     );
   }
 

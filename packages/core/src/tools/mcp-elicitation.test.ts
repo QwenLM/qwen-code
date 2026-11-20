@@ -82,9 +82,11 @@ class ScriptedElicitationTransport {
 
 describe('MCP elicitation (#17316)', () => {
   it('declares the elicitation capability in the initialize handshake', async () => {
-    const client = createMcpClient('elicitation-test', {
-      url: 'http://localhost:3000/mcp',
-    });
+    const client = createMcpClient(
+      'elicitation-test',
+      { url: 'http://localhost:3000/mcp' },
+      { declareElicitation: true },
+    );
     const transport = new ScriptedElicitationTransport();
     await client.connect(transport as unknown as Transport);
     try {
@@ -102,9 +104,11 @@ describe('MCP elicitation (#17316)', () => {
   });
 
   it('declines a server-initiated elicitation/create over a real transport', async () => {
-    const client = createMcpClient('elicitation-test', {
-      url: 'http://localhost:3000/mcp',
-    });
+    const client = createMcpClient(
+      'elicitation-test',
+      { url: 'http://localhost:3000/mcp' },
+      { declareElicitation: true },
+    );
     // The production registration the connect path uses — not a re-derived
     // copy: if it breaks, this test observes the breakage.
     registerMcpClientHandlers(client, 'elicitation-test');
