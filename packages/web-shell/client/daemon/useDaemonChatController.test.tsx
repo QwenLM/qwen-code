@@ -320,4 +320,103 @@ describe('useDaemonChatController', () => {
     mountReact(<Probe />);
     expect(controller!.transcriptState).toBe('loading');
   });
+
+  it('forwards images and files to the submit action', async () => {
+    mountReact(<Probe />);
+    const images = [{ mimeType: 'image/png', data: 'aW1n' }];
+    const files = [{ path: '/w/a.ts' }];
+    await controller!.submit({
+      text: 'hi',
+      images: images as never,
+      files: files as never,
+    });
+    expect(harness.submitPrompt).toHaveBeenCalledWith(
+      'hi',
+      expect.objectContaining({ images, files }),
+    );
+  });
+
+  it('establishes a cancel only when the turn ends cancelled', async () => {
+    mountReact(<Probe />);
+    await controller!.submit({ text: 'hi' });
+    const result = await controller!.cancel();
+    expect(result.admission).toBe('accepted');
+    expect(controller!.phase).toBe('cancelling');
+    act(() => {
+      harness.promptSettledListener!({ promptId: 'p1', outcome: 'cancelled' });
+    });
+    expect(
+      controller!.operations.find((op) => op.kind === 'cancel')?.state,
+    ).toBe('established');
+    expect(controller!.phase).toBe('idle');
+  });
+
+  it('fails a cancel when the turn completes on its own', async () => {
+    mountReact(<Probe />);
+    await controller!.submit({ text: 'hi' });
+    await controller!.cancel();
+    act(() => {
+      harness.promptSettledListener!({ promptId: 'p1', outcome: 'completed' });
+    });
+    expect(
+      controller!.operations.find((op) => op.kind === 'cancel')?.state,
+    ).toBe('failed');
+    expect(
+      controller!.operations.find((op) => op.kind === 'submit')?.state,
+    ).toBe('established');
+  });
+
+  it('settles a cancel with no live turn as failed', async () => {
+    mountReact(<Probe />);
+    const result = await controller!.cancel();
+    expect(result.admission).toBe('accepted');
+    expect(
+      controller!.operations.find((op) => op.kind === 'cancel')?.state,
+    ).toBe('failed');
+    expect(controller!.phase).toBe('idle');
+  });
+
+  it('reports an unknown cancel admission when the cancel transport throws', async () => {
+    harness.cancel.mockRejectedValue(new Error('network'));
+    mountReact(<Probe />);
+    const result = await controller!.cancel();
+    expect(result.admission).toBe('unknown');
+  });
+
+  it('establishes an answered question when its permission leaves the pending set', async () => {
+    harness.pendingPermissions = [permissionBlock('q1', { questions: true })];
+    mountReact(<Probe />);
+    const result = await controller!.respondQuestion('q1', [
+      { questionId: '0', value: 'Alice' },
+    ]);
+    expect(result.admission).toBe('accepted');
+    expect(
+      controller!.operations.find((op) => op.kind === 'question')?.state,
+    ).toBe('unsettled');
+    harness.pendingPermissions = [];
+    forceRerender!();
+    expect(
+      controller!.operations.find((op) => op.kind === 'question')?.state,
+    ).toBe('established');
+  });
+
+  it('reports a rejected question admission when the vote is not applied', async () => {
+    harness.pendingPermissions = [permissionBlock('q1', { questions: true })];
+    harness.submitPermission.mockResolvedValue(false);
+    mountReact(<Probe />);
+    const result = await controller!.respondQuestion('q1', [
+      { questionId: '0', value: 'Alice' },
+    ]);
+    expect(result.admission).toBe('rejected');
+  });
+
+  it('reports an unknown question admission when the vote throws', async () => {
+    harness.pendingPermissions = [permissionBlock('q1', { questions: true })];
+    harness.submitPermission.mockRejectedValue(new Error('network'));
+    mountReact(<Probe />);
+    const result = await controller!.respondQuestion('q1', [
+      { questionId: '0', value: 'Alice' },
+    ]);
+    expect(result.admission).toBe('unknown');
+  });
 });
