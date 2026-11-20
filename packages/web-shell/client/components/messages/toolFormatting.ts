@@ -337,6 +337,52 @@ export function getToolDescription(
   return '';
 }
 
+export function isMachineToolDescription(
+  tool: ACPToolCall,
+  description: string,
+  workspaceCwd?: string,
+): boolean {
+  if (getStringArg(tool.args, 'description')) return false;
+  const command = tool.args?.command;
+  if (
+    isShellToolName(tool.toolName) &&
+    typeof command === 'string' &&
+    command
+  ) {
+    const renderedCommand = truncateText(command, MAX_DESCRIPTION_LENGTH);
+    return (
+      description === renderedCommand ||
+      description === truncateText(renderedCommand, 120)
+    );
+  }
+  const name = tool.toolName.toLowerCase();
+  if (
+    ![
+      'read',
+      'read_file',
+      'readfile',
+      'edit',
+      'editfile',
+      'write',
+      'write_file',
+      'writefile',
+      'list_directory',
+      'listfiles',
+    ].includes(name)
+  )
+    return false;
+  const path = tool.args?.file_path ?? tool.args?.path ?? tool.args?.directory;
+  if (typeof path !== 'string' || !path) return false;
+  const renderedPath = truncateText(
+    pathForDisplay(path, workspaceCwd),
+    MAX_DESCRIPTION_LENGTH,
+  );
+  return (
+    description === renderedPath ||
+    description === truncateText(renderedPath, 120)
+  );
+}
+
 export function getToolSummaryDescription(
   tool: ACPToolCall,
   workspaceCwd?: string,

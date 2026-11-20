@@ -1,3 +1,4 @@
+import { MachineText } from '../ui/machine-text';
 import {
   Fragment,
   memo,
@@ -73,6 +74,7 @@ import {
   getTaskExecutionRecord,
   getShellToolSemanticDescription,
   getToolDescription,
+  isMachineToolDescription,
   getAdvisorDisplayText,
   getToolSummaryDescription,
   getToolResultSummary,
@@ -352,7 +354,7 @@ function ToolExpandedCard({
 }: {
   title: string;
   action?: ReactNode;
-  detail?: string;
+  detail?: ReactNode;
   status?: ACPToolCall['status'];
   children?: ReactNode;
 }) {
@@ -364,7 +366,11 @@ function ToolExpandedCard({
           <span className={styles.expandedCardTitle}>{title}</span>
           {action}
         </span>
-        {detail && <span className={styles.expandedCardDetail}>{detail}</span>}
+        {detail && (
+          <span className={styles.expandedCardDetail} dir="auto">
+            {detail}
+          </span>
+        )}
       </div>
       {children && <div className={styles.expandedCardBody}>{children}</div>}
     </div>
@@ -743,13 +749,22 @@ export function getToolHeaderKind(tool: ACPToolCall): ToolHeaderKind {
 function DefaultToolHeaderExtra({
   description,
   elapsed,
+  machine = false,
 }: {
   description: string;
   elapsed: string;
+  machine?: boolean;
 }) {
   return (
     <>
-      {description && <span className={styles.lineArg}>{description}</span>}
+      {description &&
+        (machine ? (
+          <MachineText className={styles.lineArg}>{description}</MachineText>
+        ) : (
+          <span className={styles.lineArg} dir="auto">
+            {description}
+          </span>
+        ))}
       {elapsed && <span className={styles.lineElapsed}>{elapsed}</span>}
     </>
   );
@@ -762,6 +777,11 @@ function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
   return (
     <DefaultToolHeaderExtra
       description={info.description}
+      machine={isMachineToolDescription(
+        info.tool,
+        info.description,
+        info.workspaceCwd,
+      )}
       elapsed={
         info.kind === 'agent' || isActiveToolStatus(info.tool.status)
           ? info.elapsed
@@ -1653,7 +1673,15 @@ export const ToolLine = memo(function ToolLine({
   const useMarkdownDetail = isRead || isAdvisor;
   const hideDescriptionInHeader =
     showDescriptionInDetail && !isShell && !isSearch && !isRead;
-  const expandedCardDetail = fullDescription;
+  const expandedCardDetail = isMachineToolDescription(
+    tool,
+    fullDescription,
+    workspaceCwd,
+  ) ? (
+    <MachineText>{fullDescription}</MachineText>
+  ) : (
+    fullDescription
+  );
   // Contentless tools still get a titled card when the user opens them.
   const showExpandedSummaryPanel =
     expanded && !detailView && (!isTodo || (!hasTodoList && !result));

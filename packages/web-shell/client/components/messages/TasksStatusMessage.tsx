@@ -1,9 +1,17 @@
+import { MachineText } from '../ui/machine-text';
 import {
   useDaemonAvailability,
   useDaemonAvailabilityController,
 } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskRuntime,
@@ -257,7 +265,7 @@ function rowLabel(
   task: DaemonSessionTaskStatus,
   blocking: boolean,
   workflowOnly = false,
-): string {
+): ReactNode {
   switch (task.kind) {
     case 'agent':
       // `blocking` comes from computeUserBlockingIds — an agent is tagged
@@ -267,7 +275,11 @@ function rowLabel(
       // a background parent blocks that parent, not the user).
       return blocking ? `[blocking] ${task.label}` : task.label;
     case 'shell':
-      return `[shell] ${task.command}`;
+      return (
+        <>
+          [shell] <MachineText>{task.command}</MachineText>
+        </>
+      );
     case 'monitor':
       return `[monitor] ${task.description}`;
     case 'workflow':
@@ -1180,12 +1192,16 @@ export function TasksStatusMessage({
 function detailTitle(
   task: DaemonSessionTaskStatus,
   t: ReturnType<typeof useI18n>['t'],
-): string {
+): ReactNode {
   switch (task.kind) {
     case 'agent':
       return `${task.subagentType ? localizeAgentTypeName(task.subagentType, t) : t('common.agent')} › ${task.label}`;
     case 'shell':
-      return `${t('tasks.kind.shell')} › ${task.command}`;
+      return (
+        <>
+          {t('tasks.kind.shell')} › <MachineText>{task.command}</MachineText>
+        </>
+      );
     case 'monitor':
       return `${t('tasks.kind.monitor')} › ${task.description}`;
     case 'workflow':

@@ -179,6 +179,93 @@ describe('ReadFile output availability', () => {
   });
 });
 
+describe('tool header description direction', () => {
+  it.each(['CustomTool', 'mcp__server__lookup', 'Shell'])(
+    'keeps Arabic semantic %s descriptions auto-direction',
+    (toolName) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName,
+          args: {
+            description: 'شرح عربي للعملية',
+            ...(toolName === 'Shell' ? { command: 'echo ok' } : {}),
+          },
+        }),
+        {},
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.textContent).toBe('شرح عربي للعملية');
+      expect(arg?.getAttribute('dir')).toBe('auto');
+      expect(arg?.querySelector('bdi')).toBeNull();
+    },
+  );
+
+  it.each(['مجلد/run.sh --name "ملف"', '  مجلد/run.sh\necho ok  '])(
+    'isolates a known shell command fallback: %s',
+    (command) => {
+      const container = renderToolLine(
+        makeTool({ toolName: 'Shell', args: { command } }),
+        {},
+        {},
+        'ar',
+      );
+      expect(
+        container.querySelector('bdi[class*="lineArg"][dir="ltr"]')
+          ?.textContent,
+      ).toBe(command);
+      expect(
+        container.querySelector('[class*="lineName"]')?.hasAttribute('dir'),
+      ).toBe(false);
+    },
+  );
+
+  it('isolates an Arabic-first path fallback without treating prose as a path', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', args: { file_path: 'مجلد/file.ts' } }),
+      {},
+      {},
+      'ar',
+    );
+    const arg = container.querySelector('[class*="lineArg"]');
+    expect(arg?.getAttribute('dir')).toBe('ltr');
+    expect(arg?.tagName).toBe('BDI');
+    expect(arg?.textContent).toBe('مجلد/file.ts');
+    const prose = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        args: { file_path: 'مجلد/file.ts', description: 'قراءة الملف العربي' },
+      }),
+      {},
+      {},
+      'ar',
+    );
+    expect(prose.querySelector('[class*="lineArg"]')?.textContent).toBe(
+      'قراءة الملف العربي',
+    );
+    expect(prose.querySelector('[class*="lineArg"] bdi')).toBeNull();
+  });
+
+  it('keeps long paths isolated in expanded document details', () => {
+    const path = 'مجلد/' + 'nested/'.repeat(25) + 'file.ts';
+    const container = renderToolGroup(
+      [makeTool({ toolName: 'WriteFile', args: { file_path: path } })],
+      {},
+      undefined,
+      'document',
+      undefined,
+      undefined,
+      'ar',
+    );
+    expect(
+      container.querySelector('[class*="expandedCardDetail"] bdi[dir="ltr"]')
+        ?.textContent,
+    ).toBe(path);
+    expect(container.textContent).not.toContain('[object Object]');
+  });
+});
+
 describe('tool result row direction', () => {
   it('renders quota notices and arbitrary summaries with auto direction', () => {
     const quota = renderToolLine(

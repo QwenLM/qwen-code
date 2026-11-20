@@ -223,6 +223,58 @@ it('keeps polling workflow tasks when an enabled panel opens empty', async () =>
   expect(getTasksMock).not.toHaveBeenCalled();
 });
 
+describe('shell task command direction', () => {
+  it.each(['interactive', 'document'] as const)(
+    'isolates only the command in %s rows and detail headings',
+    (renderMode) => {
+      const command = 'مجلد/run.sh --name "ملف عربي"';
+      const container = renderPanel(
+        [
+          {
+            kind: 'shell',
+            id: 'shell-rtl',
+            label: 'تشغيل',
+            description: 'وصف',
+            status: 'running',
+            startTime: 1000,
+            runtimeMs: 500,
+            command,
+            cwd: '/tmp',
+          },
+          agentTask('orphan', {
+            parentAgentId: 'gone',
+            parentName: 'المحرر',
+            depth: 2,
+          }),
+        ],
+        { language: 'ar', renderMode },
+      );
+      const name = Array.from(
+        container.querySelectorAll('[class*="nameCell"]'),
+      ).find((node) => node.textContent?.includes(command));
+      expect(name?.querySelector('bdi[dir="ltr"]')?.textContent).toBe(command);
+      expect(name?.hasAttribute('dir')).toBe(false);
+      expect(
+        container.querySelector('[class*="orphanNote"]')?.closest('bdi'),
+      ).toBeNull();
+      if (renderMode === 'interactive') {
+        const row = name?.closest('[role="button"]') as HTMLElement;
+        expect(row.textContent).toContain(command);
+        act(() => row.click());
+      }
+      if (renderMode === 'interactive') {
+        const title = Array.from(
+          container.querySelectorAll('[class*="title"]'),
+        ).find((node) => node.querySelector('bdi')?.textContent === command);
+        expect(title?.querySelector('bdi')?.getAttribute('dir')).toBe('ltr');
+        expect(title?.hasAttribute('dir')).toBe(false);
+        expect(title?.textContent).toContain(' › ' + command);
+      }
+      expect(container.textContent).not.toContain('[object Object]');
+    },
+  );
+});
+
 describe('TasksStatusMessage monitor details', () => {
   it('pins explicit machine details but not localized agent type in Arabic documents', () => {
     const container = renderPanel(
