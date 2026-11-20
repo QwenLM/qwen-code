@@ -379,7 +379,8 @@ describe('Managed workspace navigation', () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       'Workspace list offline',
     );
-    expect(group('a').textContent).toContain('Task one');
+    expect(group('a').textContent).toContain('Project');
+    expect(container.querySelector('[role="status"]')).toBeNull();
     expect(
       group('a').querySelector('button[aria-label^="Artifact library: "]'),
     ).toBeNull();
