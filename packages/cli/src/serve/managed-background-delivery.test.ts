@@ -30,11 +30,8 @@ import {
   MANAGED_SHELL_PUBLISHER_ROUTE,
   ManagedShellPublisherRegistry,
 } from './managed-shell-publisher.js';
-import type {
-  WorkerBackgroundCaptureSink} from './managed-background-delivery.js';
-import {
-  WorkerMonitorPolicy,
-} from './managed-background-delivery.js';
+import type { WorkerBackgroundCaptureSink } from './managed-background-delivery.js';
+import { WorkerMonitorPolicy } from './managed-background-delivery.js';
 
 let root: string | undefined;
 let session: ManagedSession | undefined;
@@ -84,7 +81,7 @@ function resourceStore(
   };
 }
 
-async function rig() {
+async function rig(options: { install?: boolean } = {}) {
   root = await mkdtemp(path.join(tmpdir(), 'qwen-worker-delivery-'));
   const key = {
     tenantId: 'tenant-a',
@@ -187,7 +184,9 @@ async function rig() {
         }),
       },
     );
-  expect((await install(1)).status).toBe(200);
+  if (options.install !== false) {
+    expect((await install(1)).status).toBe(200);
+  }
 
   const executionCallId = 'execution-bg';
   await orchestrator.admit({
@@ -417,4 +416,58 @@ it('worker monitor policy delivers an observation entry the applier commits once
   expect(record.notifiedThrough).toBe(1);
   expect(record.run.state).toBe('settled');
   expect(record.stopReason).toBe('exited');
+});
+
+it('keeps the capture in held mode while the publisher is unavailable and resumes on registration', async () => {
+  // No publisher installed yet: the worker owns the capture and must not lose
+  // it (the legacy RemoteShellCapture would failCapture on a lost publisher).
+  const r = await rig({ install: false });
+  const prepared = await r.registry.prepare(
+    r.request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  const sink = prepared.sink as WorkerBackgroundCaptureSink;
+  sink.setStarted(7);
+  await sink.write('stdout', Buffer.from('part1\n'));
+  // Finishing the stream flushes a manifest revision while no publisher is
+  // attached: the entry is retained in held mode, the capture is not lost.
+  await sink.finish('stdout', true);
+  expect(sink.run.deliveryMode).toBe('held');
+  expect(sink.run.pendingCount).toBeGreaterThan(0);
+  expect(sink.isLostCaptureResult({} as never)).toBe(false);
+
+  // A publisher registers (the Harness comes back): delivery resumes from the
+  // oldest unacknowledged entry, the same capture continues.
+  expect((await r.install(1)).status).toBe(200);
+  await sink.write('stderr', Buffer.from('part2\n'));
+  await sink.finish('stderr', true);
+  sink.setProcessResult({
+    exitCode: 0,
+    signal: null,
+    rawOutput: Buffer.from('part1\n'),
+    output: 'part1\n',
+    error: null,
+    aborted: false,
+    pid: 7,
+    executionMethod: 'child_process',
+  });
+  const envelope = await sink.finalize('success', []);
+  const receipt = await r.registry.accept(prepared.identity, envelope);
+  expect(receipt.deliveryStatus).toBe('blocked');
+
+  const record = r.orchestrator.record(r.executionCallId)!;
+  expect(record.run.state).toBe('settled');
+  expect(record.exitCode).toBe(0);
+  const manifest = parseToolResultManifestBytes(
+    await r.resources.read(record.outputRef!),
+  );
+  const stdout = manifest.contents.find((c) => c.streamId === 'stdout')!;
+  const stderr = manifest.contents.find((c) => c.streamId === 'stderr')!;
+  expect(stdout.byteLength).toBe(Buffer.byteLength('part1\n'));
+  expect(stdout.digest).toBe(
+    createHash('sha256').update(Buffer.from('part1\n')).digest('hex'),
+  );
+  expect(stderr.digest).toBe(
+    createHash('sha256').update(Buffer.from('part2\n')).digest('hex'),
+  );
+  expect(manifest.captureId).toBe(prepared.identity.captureId);
 });
