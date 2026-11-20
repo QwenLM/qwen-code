@@ -187,16 +187,18 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
 ## 待决问题
 
 - 无阻塞项。活性收益是可观测/可恢复性：投递后在 prepare 被杀的 head 现在留下
-  在飞标记，操作者或下一次 head move 可恢复，而非消失。修复**收窄**静默丢弃窗口，
-  并未消除。三条残余仍存，跟踪于 #17371：(1) 闸门先写游标再打印事件
-  （`packages/cli/src/commands/autofix-pr/snapshot.ts`），故会话在闸门投递与首次
-  `--start` 之间被杀仍使 head 无记录——窗口收窄到该「投递→--start」区间，并未
-  闭合（闭合需把标记写在闸门侧，那里本就握着 headSha）；(2) watch prompt 是任务上
-  的持久快照，故本改动前安装的 watch 仍按 prepare→register 旧顺序，直到任务手动
-  迁移——标准安装无法重建（步骤 3 被探针游标与 claim 共同阻挡、`--release` 只清
-  claim），而 `--start --artifact-dir` 仍被接受，无机制强制升级；(3) 死轮恢复把
-  `--release` 与重启成对，两命令之间被杀会使 head 失去记录——瞬时路径通过对完好
-  标记重试 prepare、不 release 来避免此窗口，但死轮恢复仍带该窗口。watch 只在
-  head move 时醒来，故*最后一个* head 上被杀的轮仍等待新 move，或手动
-  `--release --head <H> [--round <r>] --repo <owner>/<repo>` **后再重启**
-  （`--start … --round <r+1>`）——单独 release 会让 head 失去记录。
+  在飞标记，操作者或下一次 head move 可恢复，而非消失。此前由 #17371 跟踪的
+  三条残余现已在代码层闭合：
+  1. `scripts/verify-pr-watch-gate.mjs`（`deliverGateOutput` → `scripts/verify-pr-watch-state.mjs`
+     中的 `recordDelivery`）会在打印 `resync` 事件唤醒模型之前，先把投递的
+     `headSha` 预记入 `deferredHeads`，从而闭合「投递→`--start`」之间的静默
+     丢弃窗口（`startRound` 会按保留的 `seq` 将该条目晋升为在飞）。
+  2. `scripts/verify-pr-watch-gate.mjs --release --reset-cursor`（`resetWatchCursor`）
+     在确认当前 PR 由 `verify-pr` 声明所有权且不存在 `autofix-pr-<n>-state.json`
+     时，同时清理所有权声明与 `autofix-pr-<n>-gate.json` 探针游标，支持既有
+     `verify-pr` watch 的就地迁移，同时禁止误删其他消费者的游标。
+  3. `scripts/verify-pr-watch-state.mjs --restart --head <oid> [--from-round <r>] --round <r+1>`
+     （`restartRound`）在单次状态锁内原子替换死轮次的在飞标记，消除 `--release`
+     与 `--start` 之间失去记录的窗口（原有的 `--release` 后接 `--start` 仍保留
+     兼容；watch 仅在 head move 时唤醒，故*最后一个* head 上被杀的轮次仍需等待
+     新 move，或手动执行 `--restart` / `--release` + `--start`）。

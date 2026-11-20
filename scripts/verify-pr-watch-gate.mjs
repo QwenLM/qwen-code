@@ -21,7 +21,7 @@
  * Usage:
  *   node verify-pr-watch-gate.mjs <pr> --repo <owner>/<repo> [--cli <qwen>]
  *   node verify-pr-watch-gate.mjs <pr> --check [--claim] [--state-root <dir>]
- *   node verify-pr-watch-gate.mjs <pr> --release [--state-root <dir>]
+ *   node verify-pr-watch-gate.mjs <pr> --release [--reset-cursor] [--state-root <dir>]
  *
  * `--check` exits 3 when another consumer owns the PR; `--claim` reserves it.
  */
@@ -34,10 +34,22 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isEntryPoint } from './lib/entry-point.js';
+import { recordDelivery } from './verify-pr-watch-state.mjs';
 
 export { isEntryPoint } from './lib/entry-point.js';
+
+const SCRIPT_CLONE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+function isGitWorktree(dir) {
+  return (
+    spawnSync('git', ['-C', dir, 'rev-parse', '--git-dir'], {
+      encoding: 'utf8',
+    }).status === 0
+  );
+}
 
 /** The probe's action values that justify a model turn. */
 export const PASSING_ACTIONS = new Set(['resync', 'stop']);
@@ -64,6 +76,66 @@ export function filterGateOutput(text) {
     return trimmed;
   }
   return '';
+}
+
+/**
+ * Extracts the moved head SHA from a `resync` gate payload, or null for any
+ * other action or malformed payload.
+ */
+export function extractDeliveredHead(text) {
+  const trimmed = String(text ?? '').trim();
+  if (trimmed === '') return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || parsed.action !== 'resync') {
+    return null;
+  }
+  const sha =
+    typeof parsed.headSha === 'string'
+      ? parsed.headSha
+      : Array.isArray(parsed.events)
+        ? parsed.events.find(
+            (e) =>
+              e?.type === 'head_moved_externally' && typeof e.sha === 'string',
+          )?.sha
+        : null;
+  return typeof sha === 'string' && /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
+}
+
+/**
+ * Filters probe output and pre-records a delivered `resync` head in
+ * `deferredHeads` before waking the model. Fail-open on state lock/I/O errors
+ * so a transient contention never suppresses an already-consumed cursor event.
+ */
+export function deliverGateOutput(
+  text,
+  { stateRoot = null, pr = null, repo = null } = {},
+) {
+  const kept = filterGateOutput(text);
+  const head = extractDeliveredHead(kept);
+  if (head && stateRoot && Number.isInteger(pr) && pr > 0) {
+    try {
+      const res = recordDelivery(stateRoot, { pr, head, repo });
+      if (res?.repoMismatch) {
+        process.stderr.write(
+          `verify-pr watch: pre-delivery skipped for ${head} (state belongs to ${res.recordedRepo}${repo ? `, not ${repo}` : ''})\n`,
+        );
+      } else if (res?.locked) {
+        process.stderr.write(
+          `verify-pr watch: pre-delivery skipped for ${head} (state lock held)\n`,
+        );
+      }
+    } catch (error) {
+      process.stderr.write(
+        `verify-pr watch: could not pre-record delivered head ${head}: ${error.message}\n`,
+      );
+    }
+  }
+  return kept;
 }
 
 /** File names `autofix-pr` uses under `.qwen/tmp` for one PR. */
@@ -143,6 +215,38 @@ export function releaseOwnership(stateRoot, prNumber) {
   }
 }
 
+/**
+ * Releases a `verify-pr` ownership claim and its probe gate cursor so a
+ * `verify-pr` watch can be migrated/re-created in place. Refuses when an
+ * `autofix-pr` prepared state file exists or when a gate cursor exists without
+ * a `verify-pr` claim.
+ */
+export function resetWatchCursor(stateRoot, prNumber) {
+  const tmp = join(stateRoot, '.qwen', 'tmp');
+  const [gateName, stateName] = ownedStateFiles(prNumber);
+  const gateFile = join(tmp, gateName);
+  const stateFile = join(tmp, stateName);
+  const ownerFile = ownershipPath(stateRoot, prNumber);
+  if (existsSync(stateFile)) {
+    return { ok: false, reason: 'autofix-state', conflict: stateFile };
+  }
+  if (!existsSync(ownerFile)) {
+    if (existsSync(gateFile)) {
+      return { ok: false, reason: 'unclaimed-cursor', conflict: gateFile };
+    }
+    return { ok: true, released: false, cursorRemoved: false };
+  }
+  const released = releaseOwnership(stateRoot, prNumber);
+  let cursorRemoved = false;
+  try {
+    unlinkSync(gateFile);
+    cursorRemoved = true;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  return { ok: true, released, cursorRemoved };
+}
+
 /** Every file that blocks installation: probe state plus a live claim. */
 export function checkConflicts(stateRoot, prNumber) {
   const conflicts = conflictingStateFiles(stateRoot, prNumber);
@@ -172,6 +276,7 @@ function parseArgs(argv) {
     check: false,
     claim: false,
     release: false,
+    resetCursor: false,
     stateRoot: null,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -179,6 +284,7 @@ function parseArgs(argv) {
     if (arg === '--check') out.check = true;
     else if (arg === '--claim') out.claim = true;
     else if (arg === '--release') out.release = true;
+    else if (arg === '--reset-cursor') out.resetCursor = true;
     else if (arg === '--repo') out.repo = argv[++i];
     else if (arg === '--cli') out.cli = argv[++i];
     else if (arg === '--state-root') out.stateRoot = argv[++i];
@@ -186,8 +292,11 @@ function parseArgs(argv) {
   }
   if (!Number.isInteger(out.pr) || out.pr <= 0) {
     throw new Error(
-      'usage: verify-pr-watch-gate.mjs <pr> [--repo <owner>/<repo>] [--cli <qwen>] [--check [--claim]] [--release]',
+      'usage: verify-pr-watch-gate.mjs <pr> [--repo <owner>/<repo>] [--cli <qwen>] [--check [--claim]] [--release [--reset-cursor]]',
     );
+  }
+  if (out.resetCursor && !out.release) {
+    throw new Error('usage: --reset-cursor requires --release');
   }
   // Claiming is a check that also reserves; accepting `--claim` alone would
   // otherwise fall through to the probe path and demand `--repo`.
@@ -209,6 +318,23 @@ function main() {
   const root = args.stateRoot ? resolve(args.stateRoot) : mainWorktree();
 
   if (args.release) {
+    if (args.resetCursor) {
+      const res = resetWatchCursor(root, args.pr);
+      if (!res.ok) {
+        const detail =
+          res.reason === 'autofix-state'
+            ? `PR ${args.pr} has prepared autofix-pr state (${res.conflict}); refusing to reset another consumer's cursor`
+            : `PR ${args.pr} has a probe cursor (${res.conflict}) with no verify-pr claim; refusing to reset a cursor this watch did not claim`;
+        process.stderr.write(`verify-pr watch: ${detail}\n`);
+        process.exit(3);
+      }
+      const parts = [
+        res.released ? `released PR ${args.pr}` : `no claim for PR ${args.pr}`,
+      ];
+      if (res.cursorRemoved) parts.push('removed probe cursor');
+      process.stderr.write(`verify-pr watch: ${parts.join('; ')}\n`);
+      return;
+    }
     const released = releaseOwnership(root, args.pr);
     process.stderr.write(
       released
@@ -253,7 +379,20 @@ function main() {
     // failure must not look like a quiet tick.
     process.exit(probe.status ?? 1);
   }
-  const kept = filterGateOutput(probe.stdout ?? '');
+  let deliveryRoot = args.stateRoot ? resolve(args.stateRoot) : null;
+  if (!deliveryRoot) {
+    const scriptRoot = mainWorktree(SCRIPT_CLONE);
+    deliveryRoot = isGitWorktree(scriptRoot)
+      ? scriptRoot
+      : isGitWorktree(root)
+        ? root
+        : null;
+  }
+  const kept = deliverGateOutput(probe.stdout ?? '', {
+    stateRoot: deliveryRoot,
+    pr: args.pr,
+    repo: args.repo,
+  });
   if (kept !== '') process.stdout.write(`${kept}\n`);
 }
 

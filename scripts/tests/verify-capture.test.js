@@ -5,7 +5,14 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -103,6 +110,26 @@ describe('verify-capture helper', () => {
       const res = run(['--out', out, '--cols', '40'], {
         input: `${ESC}[32mPASS${ESC}[0m 64/64\n`,
       });
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+    }));
+
+  it('resolves @xterm/headless and sharp from cwd when executed from an isolated directory (/trusted-scripts mount)', () =>
+    withDir((dir) => {
+      const isolatedDir = path.join(dir, 'trusted-scripts');
+      mkdirSync(isolatedDir, { recursive: true });
+      const isolatedScript = path.join(isolatedDir, 'verify-capture.mjs');
+      copyFileSync(HELPER, isolatedScript);
+      const out = path.join(dir, 'isolated.png');
+      const res = spawnSync(
+        process.execPath,
+        [isolatedScript, '--out', out, '--cols', '40'],
+        {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          input: `${ESC}[32mPASS${ESC}[0m isolated\n`,
+        },
+      );
       expect(res.status).toBe(0);
       expect(isPng(out)).toBe(true);
     }));

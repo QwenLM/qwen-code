@@ -44,11 +44,20 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 
-const require = createRequire(import.meta.url);
+const scriptRequire = createRequire(import.meta.url);
+
+function loadDependency(id) {
+  try {
+    return scriptRequire(id);
+  } catch (error) {
+    if (error?.code !== 'MODULE_NOT_FOUND') throw error;
+    return createRequire(resolve(process.cwd(), 'package.json'))(id);
+  }
+}
 
 // xterm's headless build is CommonJS; a named ESM import of `Terminal` throws.
-const { Terminal } = require('@xterm/headless');
-const sharp = require('sharp');
+const { Terminal } = loadDependency('@xterm/headless');
+const sharp = loadDependency('sharp');
 
 // The 16 ANSI colours as xterm reports them from getFgColor()/getBgColor().
 const ANSI = [

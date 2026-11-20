@@ -4,27 +4,42 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   checkConflicts,
   claimOwnership,
   conflictingStateFiles,
+  deliverGateOutput,
+  extractDeliveredHead,
   filterGateOutput,
   isEntryPoint,
   ownedStateFiles,
   ownershipPath,
   releaseOwnership,
+  resetWatchCursor,
 } from '../../scripts/verify-pr-watch-gate.mjs';
+import {
+  readState,
+  startRound,
+  statePath,
+} from '../../scripts/verify-pr-watch-state.mjs';
+
+const GATE_SCRIPT = fileURLToPath(
+  new URL('../../scripts/verify-pr-watch-gate.mjs', import.meta.url),
+);
 
 let tmpDirs = [];
 afterEach(() => {
@@ -201,4 +216,221 @@ describe('isEntryPoint', () => {
       expect(isEntryPoint(pathToFileURL(target).href, link)).toBe(true);
     },
   );
+});
+
+describe('deliverGateOutput and #17371 pre-delivery', () => {
+  const HEAD = 'b'.repeat(40);
+  const runGateCli = (args) =>
+    spawnSync(process.execPath, [GATE_SCRIPT, ...args], {
+      encoding: 'utf8',
+    });
+
+  it('extracts headSha from a resync payload and ignores non-resync actions', () => {
+    const moved = JSON.stringify({
+      headSha: HEAD,
+      action: 'resync',
+      events: [{ type: 'head_moved_externally', sha: HEAD }],
+    });
+    const eventOnly = JSON.stringify({
+      action: 'resync',
+      events: [{ type: 'head_moved_externally', sha: HEAD }],
+    });
+    expect(extractDeliveredHead(moved)).toBe(HEAD);
+    expect(extractDeliveredHead(eventOnly)).toBe(HEAD);
+    expect(
+      extractDeliveredHead(JSON.stringify({ action: 'stop', headSha: HEAD })),
+    ).toBeNull();
+    expect(
+      extractDeliveredHead(JSON.stringify({ action: 'fix', headSha: HEAD })),
+    ).toBeNull();
+    expect(extractDeliveredHead('not json')).toBeNull();
+  });
+
+  it('pre-records resync headSha in deferredHeads and promotes on startRound', () => {
+    const root = makeRoot();
+    const moved = JSON.stringify({
+      headSha: HEAD,
+      action: 'resync',
+      events: [{ type: 'head_moved_externally', sha: HEAD }],
+    });
+    expect(
+      deliverGateOutput(moved, {
+        stateRoot: root,
+        pr: 123,
+        repo: 'QwenLM/qwen-code',
+      }),
+    ).toBe(moved);
+    const preState = readState(root, 123);
+    expect(preState.deferredHeads.map((e) => e.head)).toEqual([HEAD]);
+    const preSeq = preState.deferredHeads[0].seq;
+    expect(preSeq).toBe(1);
+
+    const started = startRound(root, {
+      pr: 123,
+      head: HEAD,
+      round: 1,
+      artifactDir: null,
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(started.duplicate).toBeUndefined();
+    const afterState = readState(root, 123);
+    expect(afterState.deferredHeads).toEqual([]);
+    expect(afterState.inFlightHeads[0]).toMatchObject({
+      head: HEAD,
+      round: 1,
+      seq: preSeq,
+    });
+  });
+
+  it('leaves state untouched on stop, fix, wait, or non-JSON output', () => {
+    const root = makeRoot();
+    for (const payload of [
+      JSON.stringify({ action: 'stop', reason: 'merged' }),
+      JSON.stringify({ action: 'fix', headSha: HEAD }),
+      JSON.stringify({ action: 'wait', events: [] }),
+      'not json',
+    ]) {
+      deliverGateOutput(payload, {
+        stateRoot: root,
+        pr: 123,
+        repo: 'QwenLM/qwen-code',
+      });
+    }
+    expect(existsSync(statePath(root, 123))).toBe(false);
+  });
+
+  it('still returns kept output if state file is corrupt or lock is held', () => {
+    const moved = JSON.stringify({
+      headSha: HEAD,
+      action: 'resync',
+      events: [{ type: 'head_moved_externally', sha: HEAD }],
+    });
+    const corruptRoot = makeRoot();
+    mkdirSync(join(corruptRoot, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(statePath(corruptRoot, 123), '{corrupt');
+    expect(
+      deliverGateOutput(moved, {
+        stateRoot: corruptRoot,
+        pr: 123,
+        repo: 'QwenLM/qwen-code',
+      }),
+    ).toBe(moved);
+
+    const lockedRoot = makeRoot();
+    mkdirSync(join(lockedRoot, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(`${statePath(lockedRoot, 123)}.lock`, '99999:held\n');
+    expect(
+      deliverGateOutput(moved, {
+        stateRoot: lockedRoot,
+        pr: 123,
+        repo: 'QwenLM/qwen-code',
+      }),
+    ).toBe(moved);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'pre-records delivered resync head through the gate CLI',
+    () => {
+      const root = makeRoot();
+      const cli = join(root, 'stub-qwen');
+      const moved = JSON.stringify({
+        headSha: HEAD,
+        action: 'resync',
+        events: [{ type: 'head_moved_externally', sha: HEAD }],
+      });
+      writeFileSync(cli, `#!/usr/bin/env bash\nprintf '%s\\n' '${moved}'\n`, {
+        mode: 0o755,
+      });
+      const res = runGateCli([
+        '123',
+        '--repo',
+        'QwenLM/qwen-code',
+        '--cli',
+        cli,
+        '--state-root',
+        root,
+      ]);
+      expect(res.status).toBe(0);
+      expect(res.stdout.trim()).toBe(moved);
+      expect(readState(root, 123).deferredHeads.map((e) => e.head)).toEqual([
+        HEAD,
+      ]);
+    },
+  );
+});
+
+describe('resetWatchCursor and --release --reset-cursor', () => {
+  const runGateCli = (args) =>
+    spawnSync(process.execPath, [GATE_SCRIPT, ...args], {
+      encoding: 'utf8',
+    });
+
+  it('removes both ownership claim and probe cursor so --check --claim succeeds', () => {
+    const root = makeRoot();
+    expect(
+      runGateCli(['123', '--check', '--claim', '--state-root', root]).status,
+    ).toBe(0);
+    const [gateName] = ownedStateFiles(123);
+    const gateFile = join(root, '.qwen', 'tmp', gateName);
+    writeFileSync(gateFile, '{"headSha":"abc"}');
+
+    // Claim and cursor both exist; --check blocks re-install before reset.
+    expect(runGateCli(['123', '--check', '--state-root', root]).status).toBe(3);
+
+    const reset = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--state-root',
+      root,
+    ]);
+    expect(reset.status).toBe(0);
+    expect(reset.stderr).toContain('removed probe cursor');
+    expect(existsSync(ownershipPath(root, 123))).toBe(false);
+    expect(existsSync(gateFile)).toBe(false);
+    expect(
+      runGateCli(['123', '--check', '--claim', '--state-root', root]).status,
+    ).toBe(0);
+  });
+
+  it('refuses when autofix-pr state exists or cursor has no verify-pr claim', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    const [gateName, stateName] = ownedStateFiles(123);
+    const gateFile = join(root, '.qwen', 'tmp', gateName);
+    const autofixState = join(root, '.qwen', 'tmp', stateName);
+    writeFileSync(gateFile, '{"headSha":"abc"}');
+
+    const unclaimed = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--state-root',
+      root,
+    ]);
+    expect(unclaimed.status).toBe(3);
+    expect(existsSync(gateFile)).toBe(true);
+
+    claimOwnership(root, 123);
+    writeFileSync(autofixState, '{}');
+    const withState = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--state-root',
+      root,
+    ]);
+    expect(withState.status).toBe(3);
+    expect(existsSync(gateFile)).toBe(true);
+    expect(existsSync(ownershipPath(root, 123))).toBe(true);
+    expect(readFileSync(gateFile, 'utf8')).toBe('{"headSha":"abc"}');
+  });
+
+  it('rejects --reset-cursor without --release', () => {
+    const root = makeRoot();
+    expect(resetWatchCursor(root, 999).ok).toBe(true);
+    const bad = runGateCli(['123', '--reset-cursor', '--state-root', root]);
+    expect(bad.status).not.toBe(0);
+    expect(bad.stderr).toContain('--reset-cursor requires --release');
+  });
 });

@@ -262,24 +262,21 @@ existing dead-round recovery (`--release` for a round that died after
 
 - None blocking. The liveness gain is observability/recoverability: a head
   delivered then killed in prepare now leaves an in-flight marker an operator
-  or the next head move can recover, instead of vanishing. The fix **narrows**
-  the silent-drop window; it does not eliminate it. Three residuals remain, tracked
-  in #17371: (1) the gate writes its cursor before it prints the event
-  (`packages/cli/src/commands/autofix-pr/snapshot.ts`), so a session killed
-  between the gate's delivery and the first `--start` still leaves the head
-  unrecorded — the window is narrowed to that delivery→`--start` interval, not
-  closed (closing it would put the marker in the gate, which already holds
-  `headSha`); (2) the watch prompt is a persisted task snapshot, so a watch
-  installed before this change keeps the prepare-then-register order until its
-  task is manually migrated — the standard install cannot re-create it (step 3
-  is blocked by the probe cursor as well as the claim, and `--release` clears
-  only the claim), and `--start --artifact-dir` remains accepted, so nothing
-  forces the upgrade; (3) the dead-round recovery pairs `--release` with a
-  restart, and a kill between those two commands leaves the head unregistered —
-  the transient path avoids this by retrying prepare against the intact marker
-  without releasing, but a dead round's recovery still carries that window. A
-  watch only wakes on head moves, so a killed round on the
-  _last_ head still awaits a new move, or a manual
-  `--release --head <H> [--round <r>] --repo <owner>/<repo>` **followed by a
-  restart** (`--start … --round <r+1>`) — a release alone leaves the head
-  unregistered.
+  or the next head move can recover, instead of vanishing. The three residuals
+  formerly tracked in #17371 are now closed in code:
+  1. `scripts/verify-pr-watch-gate.mjs` (`deliverGateOutput` → `recordDelivery`
+     in `scripts/verify-pr-watch-state.mjs`) pre-records every delivered
+     `resync` `headSha` into `deferredHeads` before printing the event to wake
+     the model, closing the delivery-to-`--start` silent-drop window (`startRound`
+     promotes that entry at its preserved `seq`).
+  2. `scripts/verify-pr-watch-gate.mjs --release --reset-cursor`
+     (`resetWatchCursor`) removes both the `verify-pr` ownership claim and the
+     `autofix-pr-<n>-gate.json` probe cursor when `verify-pr` owns the claim
+     and `autofix-pr-<n>-state.json` is absent, enabling in-place migration of
+     existing `verify-pr` watches without allowing cross-consumer cursor removal.
+  3. `scripts/verify-pr-watch-state.mjs --restart --head <oid> [--from-round <r>] --round <r+1>`
+     (`restartRound`) atomically replaces a dead round's in-flight marker under
+     one state lock, eliminating the unregistered window between `--release` and
+     `--start`. (`--release` followed by `--start` remains supported, and a watch
+     only wakes on head moves, so a killed round on the _last_ head still awaits
+     a new move or a manual `--restart` / `--release` + `--start`.)

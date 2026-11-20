@@ -25,7 +25,9 @@ import {
   completeRound,
   duplicateHead,
   readState,
+  recordDelivery,
   releaseRound,
+  restartRound,
   sameCommit,
   startRound,
   statePath,
@@ -3516,5 +3518,317 @@ describe('R17-2 register ahead of prepare', () => {
     ]);
     expect(res.status).toBe(0);
     expect(res.stderr).not.toMatch(/no artifact directory/);
+  });
+});
+
+describe('#17371 recordDelivery and --restart', () => {
+  it('recordDelivery records unseen heads, skips verified/in-flight/terminal, and enforces repo', () => {
+    const root = makeRoot();
+    const first = recordDelivery(root, {
+      pr: 1,
+      head: HEAD,
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(first.recorded).toBe(true);
+    expect(readState(root, 1).deferredHeads.map((e) => e.head)).toEqual([HEAD]);
+
+    // Wrong or omitted repo is refused once a repo is recorded.
+    expect(
+      recordDelivery(root, { pr: 1, head: PREV, repo: 'other/repo' })
+        .repoMismatch,
+    ).toBe(true);
+    expect(recordDelivery(root, { pr: 1, head: PREV }).repoMismatch).toBe(true);
+
+    // startRound promotes HEAD from deferredHeads keeping its seq.
+    const seqBefore = readState(root, 1).deferredHeads[0].seq;
+    const started = startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 1,
+      artifactDir: null,
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(started.duplicate).toBeUndefined();
+    expect(readState(root, 1).deferredHeads).toEqual([]);
+    expect(readState(root, 1).inFlightHeads[0]).toMatchObject({
+      head: HEAD,
+      seq: seqBefore,
+    });
+
+    // In-flight head itself is a no-op; another head is deferred.
+    expect(
+      recordDelivery(root, { pr: 1, head: HEAD, repo: 'QwenLM/qwen-code' })
+        .duplicate,
+    ).toBe('in-flight');
+    expect(
+      recordDelivery(root, { pr: 1, head: PREV, repo: 'QwenLM/qwen-code' })
+        .recorded,
+    ).toBe(true);
+    expect(readState(root, 1).deferredHeads.map((e) => e.head)).toEqual([PREV]);
+
+    // Verified head is a no-op.
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 1,
+      verdict: 'merge-ready',
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(
+      recordDelivery(root, { pr: 1, head: HEAD, repo: 'QwenLM/qwen-code' })
+        .duplicate,
+    ).toBe('verified');
+
+    // Twice-inconclusive terminal head is not re-opened by recordDelivery,
+    // even while another head is in flight.
+    startRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 2,
+      artifactDir: null,
+      repo: 'QwenLM/qwen-code',
+    });
+    completeRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 2,
+      verdict: 'inconclusive',
+      repo: 'QwenLM/qwen-code',
+    });
+    startRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 3,
+      artifactDir: null,
+      repo: 'QwenLM/qwen-code',
+    });
+    completeRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 3,
+      verdict: 'inconclusive',
+      repo: 'QwenLM/qwen-code',
+    });
+    startRound(root, {
+      pr: 1,
+      head: OLDER,
+      round: 4,
+      artifactDir: null,
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(
+      recordDelivery(root, { pr: 1, head: PREV, repo: 'QwenLM/qwen-code' })
+        .duplicate,
+    ).toBe('not-covered');
+  });
+
+  it('restartRound and CLI --restart atomically replace a dead marker preserving seq, retries, and deferrals', () => {
+    const root = makeRoot();
+    // Round 11 inconclusive -> retries=1, seq=1; round 12 starts HEAD -> inFlight with retries=1, seq=1.
+    expect(
+      run(root, [...START, '--repo', 'o/r', '--artifact-dir', 'r11']).status,
+    ).toBe(0);
+    expect(
+      run(root, [
+        '16866',
+        '--complete',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--verdict',
+        'inconclusive',
+        '--repo',
+        'o/r',
+      ]).status,
+    ).toBe(0);
+    expect(
+      run(root, [
+        '16866',
+        '--start',
+        '--head',
+        HEAD,
+        '--round',
+        '12',
+        '--repo',
+        'o/r',
+      ]).status,
+    ).toBe(0);
+    // PREV pushed while round 12 runs -> deferred at seq=2.
+    expect(
+      run(root, [
+        '16866',
+        '--start',
+        '--head',
+        PREV,
+        '--round',
+        '13',
+        '--repo',
+        'o/r',
+      ]).status,
+    ).toBe(3);
+
+    const restarted = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      HEAD,
+      '--from-round',
+      '12',
+      '--round',
+      '13',
+      '--repo',
+      'o/r',
+    ]);
+    expect(restarted.status).toBe(0);
+    expect(restarted.stdout).toContain(
+      `restarted ${HEAD} as round 13 (from round 12)`,
+    );
+    expect(restarted.stdout).toContain(
+      `deferred heads awaiting a round: ${PREV}`,
+    );
+
+    const st = readState(root, 16866);
+    expect(st.inFlightHeads).toHaveLength(1);
+    expect(st.inFlightHeads[0]).toMatchObject({
+      head: HEAD,
+      round: 13,
+      seq: 1,
+      retries: 1,
+      artifactDir: null,
+    });
+    expect(st.releasedHeads).toEqual([]);
+    expect(st.deferredHeads.map((e) => e.head)).toEqual([PREV]);
+  });
+
+  it('refuses --restart on missing marker, head mismatch, from-round mismatch, same round, or repo mismatch', () => {
+    const root = makeRoot();
+    // No marker at all -> exit 3.
+    const empty = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      HEAD,
+      '--round',
+      '12',
+    ]);
+    expect(empty.status).toBe(3);
+    expect(empty.stderr).toMatch(/nothing to restart/);
+
+    expect(run(root, [...START, '--repo', 'o/r']).status).toBe(0);
+    // Different head -> exit 3.
+    const wrongHead = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      PREV,
+      '--round',
+      '12',
+      '--repo',
+      'o/r',
+    ]);
+    expect(wrongHead.status).toBe(3);
+    expect(wrongHead.stderr).toMatch(
+      /refusing to restart another round's marker/,
+    );
+
+    // Stale --from-round -> exit 3.
+    const wrongFrom = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      HEAD,
+      '--from-round',
+      '10',
+      '--round',
+      '12',
+      '--repo',
+      'o/r',
+    ]);
+    expect(wrongFrom.status).toBe(3);
+    expect(wrongFrom.stderr).toMatch(/refusing a stale restart/);
+
+    // Same round as live marker -> exit 3.
+    const sameRound = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--repo',
+      'o/r',
+    ]);
+    expect(sameRound.status).toBe(3);
+    expect(sameRound.stderr).toMatch(/already in flight as round 11/);
+
+    // Foreign repo -> exit 3.
+    const foreign = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      HEAD,
+      '--from-round',
+      '11',
+      '--round',
+      '12',
+      '--repo',
+      'other/repo',
+    ]);
+    expect(foreign.status).toBe(3);
+    expect(foreign.stderr).toMatch(/state belongs to o\/r/);
+
+    // Usage errors -> exit 2.
+    for (const badArgs of [
+      [
+        '16866',
+        '--start',
+        '--head',
+        HEAD,
+        '--round',
+        '12',
+        '--from-round',
+        '11',
+      ],
+      [
+        '16866',
+        '--restart',
+        '--head',
+        HEAD,
+        '--from-round',
+        '0',
+        '--round',
+        '12',
+      ],
+      [
+        '16866',
+        '--restart',
+        '--head',
+        HEAD,
+        '--from-round',
+        '11',
+        '--round',
+        '11',
+      ],
+      ['16866', '--restart', '--head', HEAD],
+    ]) {
+      expect(run(root, badArgs).status, badArgs.join(' ')).toBe(2);
+    }
+
+    // Legacy round-less marker can be restarted via restartRound.
+    writeFileSync(
+      statePath(root, 16866),
+      JSON.stringify({ pr: 16866, repo: 'o/r', inFlightHead: HEAD }),
+    );
+    expect(
+      restartRound(root, {
+        pr: 16866,
+        head: HEAD,
+        fromRound: 11,
+        round: 12,
+        repo: 'o/r',
+      }).restarted,
+    ).toBe(true);
+    expect(readState(root, 16866).inFlightHeads[0].round).toBe(12);
   });
 });

@@ -742,7 +742,13 @@ Build the task in this order and stop at the first failure:
    blocked by the probe cursor as well as the claim, and `--release` clears only
    the claim — so such a watch keeps the old order until it is manually migrated
    (a residual tracked in #17371). Do not delete another session's live watch to
-   make room; the claim guard forbids it.
+   make room; the claim guard forbids it. To migrate this PR's own `verify-pr`
+   watch in place after `cron_delete`, run
+   `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor`
+   (which requires the `verify-pr` ownership claim and refuses when
+   `autofix-pr` state exists) and re-run steps 3–4. When a `resync` event
+   fires, the gate pre-records its `headSha` in `deferredHeads` before waking
+   the model, closing the delivery-to-`--start` window.
 
 The prompt consumes the gate's JSON and nothing else. On
 `head_moved_externally`, take `headSha` and run the round for that sha.
@@ -774,7 +780,10 @@ A transient prepare failure (the round still runs) leaves the marker intact —
 prepare never reads the watch state — so retrying prepare against it and
 completing at the original round recovers the head with no release; the
 release + restart is for a round that died, and a kill between its two commands
-would re-open the silent drop. `--repo` is required on both: `--start` recorded
+would re-open the silent drop. To avoid that two-command window on a dead
+round, prefer the atomic form
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --restart --head <headSha> --from-round <r> --round <r+1> --repo <owner>/<repo>`,
+which replaces the dead marker in one lock acquisition. `--repo` is required on both: `--start` recorded
 it, and every verb refuses an omitted `--repo` once a repo is recorded. The
 restarted round's number (`<r+1>`) becomes this round's number — repeat that
 value in `--complete`. Do not recover with `--complete inconclusive` instead —
@@ -1046,7 +1055,10 @@ ambiguous rather than verify a guessed PR. Then, in order:
    recorded it). A transient prepare failure (the round still runs) leaves the
    marker intact — prepare never reads the watch state — so retrying prepare
    against it and completing at the original round recovers `H` with no
-   release; the release + restart is for a round that died. The restarted
+   release; the release + restart is for a round that died. For a dead round,
+   the single-command atomic form
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --restart --head <H> --from-round <r> --round <r+1> --repo <owner>/<repo>`
+   replaces the marker in one lock acquisition with no unregistered window. The restarted
    round's number (`<r+1>`) becomes this round's number — repeat that value in
    `--complete`. Do not recover with `--complete
 inconclusive` instead: it increments the retry counter whose cap is the
@@ -2424,6 +2436,10 @@ workflow globs). It must contain:
     --title 'A/B: the gate flips on noisy data' -- node my-harness.mjs
   # or pipe:  my-harness | node scripts/verify-capture.mjs --out …/02-matrix.png
   ```
+
+  In the local container recipe, run the trusted copy instead
+  (`node /trusted-scripts/verify-capture.mjs --out …`, which resolves
+  `@xterm/headless` and `sharp` from the `/work` working tree).
 
   It runs the command, parses its ANSI through `@xterm/headless`, and
   rasterises the cell grid with `sharp` — the 16 base ANSI colours and bold
