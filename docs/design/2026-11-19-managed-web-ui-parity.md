@@ -2,9 +2,10 @@
 
 [English](2026-11-19-managed-web-ui-parity.md) | [简体中文](2026-11-19-managed-web-ui-parity.zh-CN.md)
 
-- Status: implemented locally with real Managed terminal and focused verification complete; CI pending (2026-11-19)
+- Status: merged through [#17795](https://github.com/QwenLM/qwen-code/pull/17795) as squash commit [`2ebaac20284be8dbc3aff308bfc3867481f0b2d2`](https://github.com/QwenLM/qwen-code/commit/2ebaac20284be8dbc3aff308bfc3867481f0b2d2) on 2026-11-20 (UTC); #17717 is closed.
+- Delivery verification: see the [local real-browser and selected MySQL/Spring ledger](https://github.com/QwenLM/qwen-code/pull/17795#issuecomment-7027767699). In the [first-approval full run 44680245797](https://github.com/QwenLM/qwen-code/actions/runs/44680245797), the native Windows/Java 21 job and its `Run Runtime Broker state tests` step passed. Other full profiles and main workflows are monitored separately; this status does not presume their completion.
 - Baseline: `3f7b6088d9` (`origin/main`); issue claims were re-checked at this revision
-- Parent trackers: #15084, with existing owners #13396 and #16546
+- Parent trackers: #15084, with existing owners #13396 and #16546. All three remain open and cover the Table A follow-up; this status update does not create a new deferred-review issue.
 
 ## Problem statement and current state
 
