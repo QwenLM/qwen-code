@@ -27,11 +27,19 @@ gate) are the next increment.
   updated each render, so the long-lived controller always sees current provider
   state without being rebuilt.
 - **Transports wrap the session actions.** `submitPrompt` maps the composer input
-  to `actions.submitPrompt`, forwards the daemon's `onAdmitted` prompt id, and
+  to `actions.submitPrompt` and binds the prompt id from the action's **resolved
+  result**: `submitPrompt` is non-blocking and resolves `{ promptId }` — it does not
+  invoke an `onAdmitted` option (only `sendPrompt` does) — so the binding reports
+  `accepted.promptId` through `onAdmitted` for settlement correlation. It also
   forwards `metadata.inputAnnotations` (the only channel for the composer's
-  `@`-file references); `cancelPrompt`, `submitPermission`, and
+  `@`-file references). `cancelPrompt`, `submitPermission`, and
   `submitQuestionAnswers` wrap the corresponding actions and map their result to an
-  admission (`accepted` / `rejected` / `unknown` on a thrown transport). A rejected
+  admission (`accepted` / `rejected` / `unknown` on a thrown transport). A plan
+  approval (`isExitPlanApprovalRequest` with an `allow_once` / `allow_always` option)
+  is voted through `respondToPermission` carrying the current
+  `connection.planExecutionMode` as `expectedPlanExecutionMode`, because
+  `submitPermission` cannot carry that field and the core denies an ExitPlanMode
+  approve without it; the mode is read per call so it is never stale. A rejected
   or thrown answer is untracked so it cannot seed a decision signal (a thrown
   transport's attempt is abandoned by the controller, so retaining the answer would
   be useless). A question answer must vote the request's submit (`allow_once`)
@@ -45,7 +53,9 @@ gate) are the next increment.
   AskUserQuestion prompts (`isAskUserPermission`) are published as
   `pendingQuestions`; the rest as `pendingApprovals`, matching the existing UI split
   so a question is answered with answers rather than routed through the approval
-  lane as a bare vote.
+  lane as a bare vote. The split is memoized on the pending-permission set so the
+  payload extraction and the array identities stay stable while the set is unchanged
+  across streaming ticks.
 - **Prompt settlement** is bridged from `useDaemonPromptSettled` (the terminal
   `turn_complete` / `turn_error` / cancelled event) to the controller's
   `subscribePromptSettlement`, keyed by `promptId`.
@@ -67,8 +77,10 @@ gate) are the next increment.
   exhaustive `DAEMON_CHAT_CAPABILITY_MAP`; unknown tags are skipped, and an
   `Object.hasOwn` guard keeps an unvalidated wire tag naming an `Object.prototype`
   member (e.g. `toString`) from resolving to a non-iterable inherited value.
-- **Transcript state** is `error` when the connection reports a missing session or
-  an error, `loading` while the transcript loads, else `ready`.
+- **Transcript state** is `error` only when the connection reports a missing
+  session, `loading` while the transcript loads, else `ready`. A plain connection
+  error keeps the transcript readable (the surfaces render a banner over it), so it
+  must not collapse the transcript to an error view.
 
 ## Bound conservatively (follow-ups for the ChatSurface increment)
 

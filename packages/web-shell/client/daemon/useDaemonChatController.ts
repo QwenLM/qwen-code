@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type {
   ChatCapabilities,
   ChatStatusFacts,
@@ -16,6 +16,7 @@ import { useMessagesFromBlocks } from '../hooks/useMessages.js';
 import { getComposerDraftStorageKey } from '../hooks/useComposerCore.js';
 import { extractPendingPermission } from '../adapters/transcriptAdapter.js';
 import { isAskUserPermission } from '../utils/askUserPermission.js';
+import { isExitPlanApprovalRequest } from '../utils/todos.js';
 import {
   useDaemonActions,
   useDaemonConnection,
@@ -85,18 +86,24 @@ export function useDaemonChatController(): SessionChatController {
   const sessionId = connection.sessionId;
   // Questions are permission blocks too; split them from tool approvals the same
   // way the existing UI does, so a question is answered with answers rather than
-  // routed through the approval lane as a bare vote.
-  const approvals: PendingApproval[] = [];
-  const questions: PendingQuestion[] = [];
-  for (const permission of pendingPermissions) {
-    if (isAskUserPermission(extractPendingPermission([permission]))) {
-      questions.push({ id: permission.requestId });
-    } else {
-      approvals.push({ id: permission.requestId, status: 'pending' });
+  // routed through the approval lane as a bare vote. Memoized so the payload
+  // extraction and the array identities are stable while the pending set is
+  // unchanged across streaming ticks.
+  const { pendingApprovals, pendingQuestions } = useMemo(() => {
+    const approvals: PendingApproval[] = [];
+    const questions: PendingQuestion[] = [];
+    for (const permission of pendingPermissions) {
+      if (isAskUserPermission(extractPendingPermission([permission]))) {
+        questions.push({ id: permission.requestId });
+      } else {
+        approvals.push({ id: permission.requestId, status: 'pending' });
+      }
     }
-  }
-  const pendingApprovals: readonly PendingApproval[] = approvals;
-  const pendingQuestions: readonly PendingQuestion[] = questions;
+    return {
+      pendingApprovals: approvals as readonly PendingApproval[],
+      pendingQuestions: questions as readonly PendingQuestion[],
+    };
+  }, [pendingPermissions]);
 
   const factsRef = useRef<LiveFacts>({
     messages,
@@ -109,12 +116,14 @@ export function useDaemonChatController(): SessionChatController {
   });
   factsRef.current = {
     messages,
-    transcriptState:
-      connection.missingSession || connection.error
-        ? 'error'
-        : connection.loadingTranscript
-          ? 'loading'
-          : 'ready',
+    // Only a missing session makes the transcript unavailable; a plain
+    // connection error keeps the transcript readable (the surfaces render a
+    // banner over it), so it must not collapse the transcript to an error view.
+    transcriptState: connection.missingSession
+      ? 'error'
+      : connection.loadingTranscript
+        ? 'loading'
+        : 'ready',
     pendingApprovals,
     pendingQuestions,
     // Queue length and goal activity are surfaced by the ChatSurface increment;
@@ -128,6 +137,9 @@ export function useDaemonChatController(): SessionChatController {
 
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
+
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
 
   const pendingPermissionsRef = useRef(pendingPermissions);
   pendingPermissionsRef.current = pendingPermissions;
@@ -182,7 +194,10 @@ export function useDaemonChatController(): SessionChatController {
         liveApprovalRequestIds: pendingApprovals.map((approval) => approval.id),
         async submitPrompt(input, onAdmitted) {
           try {
-            await actionsRef.current.submitPrompt(input.text, {
+            // submitPrompt is non-blocking and resolves the prompt id; it does
+            // not invoke an onAdmitted option (only sendPrompt does), so bind
+            // the id from the resolved result.
+            const accepted = await actionsRef.current.submitPrompt(input.text, {
               images: input.images ? [...input.images] : undefined,
               files: input.files ? [...input.files] : undefined,
               // The composer's @-file references reach the daemon only through
@@ -190,8 +205,8 @@ export function useDaemonChatController(): SessionChatController {
               ...(input.metadata?.inputAnnotations?.length
                 ? { inputAnnotations: [...input.metadata.inputAnnotations] }
                 : {}),
-              onAdmitted: ({ promptId }) => onAdmitted(promptId),
             });
+            onAdmitted(accepted.promptId);
             return 'accepted';
           } catch {
             return 'unknown';
@@ -208,10 +223,27 @@ export function useDaemonChatController(): SessionChatController {
         async submitPermission(requestId, optionId) {
           answeredRef.current.add(requestId);
           try {
-            const applied = await actionsRef.current.submitPermission(
-              requestId,
-              optionId,
+            // A plan approval must carry the CURRENT expectedPlanExecutionMode;
+            // the core denies an ExitPlanMode approve without it. submitPermission
+            // cannot carry that field, so vote through respondToPermission with
+            // the mode read per call, exactly like the existing surfaces.
+            const block = pendingPermissionsRef.current.find(
+              (candidate) => candidate.requestId === requestId,
             );
+            const permission = block ? extractPendingPermission([block]) : null;
+            const option = permission?.options.find((o) => o.id === optionId);
+            const planMode = connectionRef.current.planExecutionMode;
+            const approvesPlan =
+              isExitPlanApprovalRequest(permission) &&
+              (option?.kind === 'allow_once' ||
+                option?.kind === 'allow_always') &&
+              planMode !== undefined;
+            const applied = approvesPlan
+              ? await actionsRef.current.respondToPermission(requestId, {
+                  outcome: { outcome: 'selected', optionId },
+                  expectedPlanExecutionMode: planMode,
+                })
+              : await actionsRef.current.submitPermission(requestId, optionId);
             if (!applied) answeredRef.current.delete(requestId);
             return applied ? 'accepted' : 'rejected';
           } catch {

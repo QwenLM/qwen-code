@@ -22,11 +22,17 @@ provider 即可测试的组装。本切片落地**绑定 hook** `useDaemonChatCo
   状态事实）经 getter 读取一个每次渲染更新的 ref，故长生命周期的控制器总能看到当前
   provider 状态而无需重建。
 - **transport 包装会话动作。** `submitPrompt` 把 composer 输入映射到
-  `actions.submitPrompt`，转发 daemon 的 `onAdmitted` prompt id，并转发
-  `metadata.inputAnnotations`（composer `@` 文件引用的唯一通道）；`cancelPrompt`、
+  `actions.submitPrompt`，并从动作的**解析结果**绑定 prompt id：`submitPrompt` 非阻塞、
+  解析出 `{ promptId }`——它不调用 `onAdmitted` 选项（只有 `sendPrompt` 会）——故绑定把
+  `accepted.promptId` 经 `onAdmitted` 上报，供结算关联。它还转发
+  `metadata.inputAnnotations`（composer `@` 文件引用的唯一通道）。`cancelPrompt`、
   `submitPermission`、`submitQuestionAnswers` 包装对应动作并把结果映射为 admission
-  （`accepted`/`rejected`/抛错时 `unknown`）。被拒或抛错的应答不再跟踪，故不会播种
-  决策信号（抛错 transport 的尝试已被控制器 abandon，保留应答也无用）。问题应答应
+  （`accepted`/`rejected`/抛错时 `unknown`）。计划审批（`isExitPlanApprovalRequest` 且
+  选项为 `allow_once`/`allow_always`）经 `respondToPermission` 投票，携带当前
+  `connection.planExecutionMode` 作为 `expectedPlanExecutionMode`，因为
+  `submitPermission` 无法携带该字段、而 core 会拒绝缺少它的 ExitPlanMode 批准；模式按
+  每次调用读取，故不会陈旧。被拒或抛错的应答不再跟踪，故不会播种决策信号（抛错
+  transport 的尝试已被控制器 abandon，保留应答也无用）。问题应答应
   投票该请求的提交（`allow_once`）选项并附带答案——与 `AskUserQuestion` 相同的 wire
   形状，由 `questionSubmitOptionId` 查找；不带 optionId 投票会发出 `cancelled` 结果，
   丢弃答案并取消问题，故缺失提交选项时是 `rejected` admission，而非取消投票。答案键
@@ -34,7 +40,8 @@ provider 即可测试的组装。本切片落地**绑定 hook** `useDaemonChatCo
   丢弃的条目。
 - **问题与审批拆分。** 属于 AskUserQuestion 的待处理权限块（`isAskUserPermission`）
   发布为 `pendingQuestions`，其余为 `pendingApprovals`，与既有 UI 拆分一致，使问题
-  带答案应答，而非经审批通道作为裸投票。
+  带答案应答，而非经审批通道作为裸投票。拆分按待处理权限集合 memoize，使集合在流式
+  tick 间不变时，载荷提取与数组身份保持稳定。
 - **prompt 结算**由 `useDaemonPromptSettled`（终态 `turn_complete`/`turn_error`/
   cancelled 事件）桥接到控制器的 `subscribePromptSettlement`，按 `promptId` 键控。
 - **approval 时效与决策结算是派生的**，因为 provider 没有显式通道。纯助手
@@ -51,8 +58,9 @@ provider 即可测试的组装。本切片落地**绑定 hook** `useDaemonChatCo
 - **能力**由 `connection.capabilities.features` 经穷举的
   `DAEMON_CHAT_CAPABILITY_MAP` 派生；未知 tag 跳过，且 `Object.hasOwn` 守卫防止未校验
   的 wire tag 命中 `Object.prototype` 成员（如 `toString`）而解析到不可迭代的继承值。
-- **transcript 态**在 connection 报告缺失会话或错误时为 `error`，加载中为 `loading`，
-  否则 `ready`。
+- **transcript 态**仅在 connection 报告缺失会话时为 `error`，加载中为 `loading`，
+  否则 `ready`。普通连接错误下 transcript 仍可读（表面在其上渲染横幅），故不得把
+  transcript 折叠成错误视图。
 
 ## 保守绑定（ChatSurface 增量的后续）
 
