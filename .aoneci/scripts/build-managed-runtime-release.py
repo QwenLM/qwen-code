@@ -169,6 +169,9 @@ def main():
 
     os.environ["COREPACK_NPM_REGISTRY"] = "https://registry.npmmirror.com"
     os.environ["npm_config_registry"] = "https://registry.npmmirror.com"
+    # The release script runs the CLI build and bundle explicitly below. Without
+    # this, the root prepare hook performs the same work during pnpm install.
+    os.environ["QWEN_SKIP_PREPARE"] = "1"
     run("node-prerequisites", ["corepack", "pnpm", "--config.registry=https://registry.npmmirror.com", "install",
                                "--frozen-lockfile", "--prefer-offline", "--reporter=append-only"])
     # dist 一律从本次 checkout 重建；不保留任何「已构建就跳过」的复用。

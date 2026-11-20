@@ -131,20 +131,20 @@ def main():
         # 沿用现有 native producer 的包镜像，保留 Corepack 签名与锁文件校验。
         os.environ["COREPACK_NPM_REGISTRY"] = "https://registry.npmmirror.com"
         os.environ["npm_config_registry"] = "https://registry.npmmirror.com"
+        os.environ["QWEN_SKIP_PREPARE"] = "1"
         node_prerequisites = ["corepack", "pnpm", "--config.registry=https://registry.npmmirror.com",
                               "install", "--frozen-lockfile", "--prefer-offline", "--reporter=append-only"]
         if args.mode == "verify":
             run("node-prerequisites", node_prerequisites)
         common = ["mvn", "-B", "-ntp", "-Dmaven.javadoc.skip=true", "-Dgpg.skip=true"]
         run("sdk-install", common + ["-f", "packages/sdk-java/qwencode/pom.xml"]
-            + (["-DskipTests"] if args.mode == "package" else []) + ["install"])
+            + (["-Dmaven.test.skip=true"] if args.mode == "package" else []) + ["install"])
         native = common + ["-f", "packages/managed-agent-server/pom.xml"]
         if args.mode == "package":
-            # Compile Java before the lengthy JS prepare; package does not execute JS-backed tests.
-            # Keep the same JS build gate before publishing any native artifact.
-            run("native-package", native + ["--fail-at-end", "-DskipTests", "package"])
-            run("node-prerequisites", node_prerequisites)
-            validation = "SDK and native compile/package including test compilation; native tests pending verify run"
+            # The parallel runtime producer owns the JavaScript build gate. Native packaging
+            # consumes only Maven outputs and checked-in resources.
+            run("native-package", native + ["--fail-at-end", "-Dmaven.test.skip=true", "package"])
+            validation = "SDK and native compile/package with tests skipped; native tests pending verify run"
         else:
             ports = []
             for fork in (1, 2):
