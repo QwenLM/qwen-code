@@ -1610,7 +1610,7 @@ export function createDaemonSessionActions({
       // for it, so a refusal there must not surface a `Continue failed`
       // notice the user never triggered; the banner stays as the affordance.
       const notify: AddDaemonSessionNotice = options.silent
-        ? () => {}
+        ? ignoreStaleNotice
         : addNotice;
       const session = requireSessionForAction(
         notify,
