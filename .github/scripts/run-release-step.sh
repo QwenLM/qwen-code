@@ -187,17 +187,54 @@ case "${step}" in
       # pushed the branch, so the per-package skip never got to run.
       remote_branch="$(git ls-remote --heads origin "refs/heads/${release_branch_name}")"
       if [[ -n "${remote_branch}" ]]; then
-        # A newer stable may have shipped since this run started. Resuming
-        # would publish the remaining packages under the old version and
-        # move latest back to it, while the already-published packages keep
-        # pointing at the newer release.
-        if [[ "${NPM_TAG}" == "latest" ]]; then
-          current_latest="$(npm view @qwen-code/qwen-code dist-tags.latest 2>/dev/null || true)"
-          if [[ -n "${current_latest}" && "${current_latest}" != "${RELEASE_VERSION}" ]]; then
-            echo "::error::npm latest is ${current_latest}, past ${RELEASE_VERSION}. Resuming this run would regress the dist-tag; recover the remaining packages manually."
+        # A newer version may have shipped on this channel since this run
+        # started. Resuming would publish the remaining packages under the
+        # old version and regress the dist-tag. Probe with bounded retries
+        # and refuse when the channel state cannot be confirmed.
+        current_tag=""
+        probe_ok=false
+        for attempt in 1 2 3; do
+          if current_tag="$(npm view @qwen-code/qwen-code "dist-tags.${NPM_TAG}" 2>/dev/null)"; then
+            probe_ok=true
+            break
+          fi
+          if [[ "${attempt}" -lt 3 ]]; then
+            sleep $(( attempt * 5 ))
+          fi
+        done
+        if [[ "${probe_ok}" == "false" ]]; then
+          echo "::error::Cannot confirm npm dist-tag ${NPM_TAG} state after 3 attempts; refusing to resume."
+          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
+        if [[ -n "${current_tag}" ]]; then
+          # Reject only when the channel has moved PAST this version. A
+          # channel still on an older version is the normal partial-publish
+          # retry: resuming moves it forward.
+          if node -e "
+            const [a,b] = ['${current_tag}', '${RELEASE_VERSION}'].map(v => v.replace(/^v/,'').split(/[.-]/).map(Number));
+            for (let i = 0; i < Math.max(a.length, b.length); i++) {
+              const d = (a[i]||0) - (b[i]||0);
+              if (d > 0) process.exit(1);
+              if (d < 0) process.exit(0);
+            }
+            process.exit(0);
+          " 2>/dev/null; then
+            : # channel is at or behind the release version — safe to resume
+          else
+            echo "::error::npm ${NPM_TAG} is ${current_tag}, past ${RELEASE_VERSION}. Resuming would regress the dist-tag."
             echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
+        fi
+        # Skip tree comparison when the release is already complete (tag +
+        # GitHub Release exist): the finalize workflow may have pushed a
+        # CHANGELOG commit that makes the tree differ, but the version is
+        # done and should not be reported as a failure.
+        if gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx 'false'; then
+          echo "::notice::Release ${RELEASE_TAG} is already published; nothing to resume."
+          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+          exit 1
         fi
         git fetch --no-tags origin "refs/heads/${release_branch_name}"
         release_commit="$(git rev-parse FETCH_HEAD)"
@@ -300,8 +337,8 @@ case "${step}" in
     ;;
 
   create-github-release)
-    if gh release view "${RELEASE_TAG}" --json tagName --jq .tagName >/dev/null 2>&1; then
-      echo "::notice::Release ${RELEASE_TAG} already exists; skipping creation."
+    if gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx 'false'; then
+      echo "::notice::Release ${RELEASE_TAG} already published; skipping creation."
       exit 0
     fi
     prerelease_flag=""

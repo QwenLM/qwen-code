@@ -69,6 +69,14 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
         git('commit', '--allow-empty', '-m', `Retry\n\n${trailer}`);
       }
       writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      // Stub npm so the dist-tag guard does not hit the real registry.
+      // Report the previous version (behind the release) — safe to resume.
+      writeFileSync(join(bin, 'npm'), '#!/bin/sh\necho "1.2.2"\n', {
+        mode: 0o755,
+      });
+      writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', {
+        mode: 0o755,
+      });
       const result = spawnSync('bash', [script, 'push-release-branch'], {
         cwd: checkout,
         encoding: 'utf8',
@@ -145,6 +153,9 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
 
     // Stub npm to report a newer latest; stub gh for auth setup.
     writeFileSync(join(bin, 'npm'), '#!/bin/sh\necho "1.2.4"\n', {
+      mode: 0o755,
+    });
+    writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 1\n', {
       mode: 0o755,
     });
     writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });

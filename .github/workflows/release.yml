@@ -853,10 +853,6 @@ jobs:
           CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh push-release-branch'
 
-      - name: 'Rebuild artifacts for the reused release commit'
-        if: "${{ steps.push_release_branch.outputs.reused_commit == 'true' }}"
-        run: '.release-workflow/.github/scripts/run-release-step.sh build-package'
-
       - *reset_release_workflow_scripts
       - *checkout_release_workflow_scripts
       - *verify_reused_audio
@@ -864,6 +860,13 @@ jobs:
       - *download_fresh_audio
 
       - *validate_audio
+
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+
+      - name: 'Rebuild artifacts for the reused release commit'
+        if: "${{ steps.push_release_branch.outputs.reused_commit == 'true' }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh build-package'
 
       - *reset_release_workflow_scripts
       - *checkout_release_workflow_scripts
