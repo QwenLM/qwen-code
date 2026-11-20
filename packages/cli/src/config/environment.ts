@@ -22,6 +22,8 @@ import {
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
+import { readConfigFile } from './read-config-file.js';
+import { getGlobalQwenDirLite } from './storage-paths-lite.js';
 import { VERIFY_PR_COORDINATE_ENV } from './verify-pr-coordinates.js';
 import { isWithinRoot } from './path-comparison.js';
 import { publishPendingCompileCache } from './compile-cache.js';
@@ -186,9 +188,10 @@ let lastReloadSnapshotSeeded = false;
  * left there continue to load (and the trust check in untrusted workspaces
  * still allows reading it).
  */
-function getUserLevelEnvPaths(): Set<string> {
-  const homeDir = os.homedir();
-  const globalQwenDir = Storage.getGlobalQwenDir();
+function getUserLevelEnvPaths(
+  globalQwenDir = Storage.getGlobalQwenDir(),
+  homeDir = os.homedir(),
+): Set<string> {
   const paths = new Set([
     path.normalize(path.join(homeDir, '.env')),
     path.normalize(path.join(globalQwenDir, '.env')),
@@ -392,15 +395,14 @@ export function findEnvFiles(
   startDir: string,
   userLevelPaths: Set<string> = getUserLevelEnvPaths(),
   workspaceTrusted?: boolean,
+  { globalQwenDir = Storage.getGlobalQwenDir(), homeDir = os.homedir() } = {},
 ): string[] {
-  const homeDir = os.homedir();
   let realStartDir = path.resolve(startDir);
   try {
     realStartDir = fs.realpathSync(realStartDir);
   } catch {
     // Match loadSettings(): use the resolved path when realpath is unavailable.
   }
-  const globalQwenDir = Storage.getGlobalQwenDir();
   const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
   const hasCustomConfigDir = path.normalize(globalQwenDir) !== legacyQwenDir;
   const found: string[] = [];
@@ -603,13 +605,16 @@ export function readProjectEnvFiles(
 function parseEnvFiles(
   envFilePaths: readonly string[],
   userLevelPaths: ReadonlySet<string>,
+  readEnvFile: (filePath: string) => string | undefined = (filePath) =>
+    fs.readFileSync(filePath, 'utf-8'),
 ): ParsedEnvFilesResult {
   const files: ParsedEnvFile[] = [];
   const readFailures: EnvFileReadFailure[] = [];
 
   for (const envFilePath of envFilePaths) {
     try {
-      const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
+      const envFileContent = readEnvFile(envFilePath);
+      if (envFileContent === undefined) continue;
       const parsedEnv = dotenv.parse(envFileContent);
       const normalizedEnvFilePath = path.normalize(envFilePath);
       const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
@@ -746,14 +751,55 @@ export function buildRuntimeEnvironment(
   baseEnv: Readonly<NodeJS.ProcessEnv> = process.env,
   workspaceTrusted?: boolean,
 ): RuntimeEnvironmentSnapshot {
-  const userLevelPaths = getUserLevelEnvPaths();
+  return buildEnvironmentSnapshot(
+    settings,
+    startDir,
+    baseEnv,
+    workspaceTrusted,
+  );
+}
+
+/** Project the environment that initial ACP settings loading adds to its launch env. */
+export function readStartupEnvironment(
+  settings: Settings,
+  startDir: string,
+  baseEnv: Readonly<NodeJS.ProcessEnv>,
+  homeDir: string,
+): Readonly<NodeJS.ProcessEnv> | undefined {
+  const snapshot = buildEnvironmentSnapshot(
+    settings,
+    startDir,
+    baseEnv,
+    true,
+    homeDir,
+  );
+  return snapshot.envFileReadFailed ? undefined : snapshot.effectiveEnv;
+}
+
+function buildEnvironmentSnapshot(
+  settings: Settings,
+  startDir: string,
+  baseEnv: Readonly<NodeJS.ProcessEnv>,
+  workspaceTrusted?: boolean,
+  startupHomeDir?: string,
+): RuntimeEnvironmentSnapshot {
+  const startup = startupHomeDir !== undefined;
+  const globalQwenDir = startup
+    ? getGlobalQwenDirLite(baseEnv, startupHomeDir)
+    : Storage.getGlobalQwenDir();
+  const userLevelPaths = getUserLevelEnvPaths(globalQwenDir, startupHomeDir);
   const envFilePaths = findEnvFiles(
     settings,
     startDir,
     userLevelPaths,
     workspaceTrusted,
+    { globalQwenDir, homeDir: startupHomeDir },
   );
-  const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
+  const parsedEnvFiles = parseEnvFiles(
+    envFilePaths,
+    userLevelPaths,
+    startup ? readConfigFile : undefined,
+  );
   const effectiveEnv: NodeJS.ProcessEnv = { ...baseEnv };
 
   if (baseEnv['CLOUD_SHELL'] === 'true') {
@@ -764,7 +810,9 @@ export function buildRuntimeEnvironment(
     const excludedVars =
       settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
     for (const key in envFile.parsedEnv) {
-      if (!canApplyParsedEnvKey(envFile, key, excludedVars, { reload: true })) {
+      if (
+        !canApplyParsedEnvKey(envFile, key, excludedVars, { reload: !startup })
+      ) {
         continue;
       }
       setRuntimeEnvIfUnset(effectiveEnv, key, envFile.parsedEnv[key]!);
@@ -772,10 +820,12 @@ export function buildRuntimeEnvironment(
     // The daemon reaches per-workspace .env files only through this loop
     // (its loadSettings calls pass skipLoadEnvironment), so the rejection
     // report must fire here too or it vanishes for those workspaces.
-    reportRejectedLoaderKeys(
-      `.env file ${envFile.path}`,
-      Object.keys(envFile.parsedEnv),
-    );
+    if (!startup) {
+      reportRejectedLoaderKeys(
+        `.env file ${envFile.path}`,
+        Object.keys(envFile.parsedEnv),
+      );
+    }
   }
 
   if (settings.env) {
@@ -785,11 +835,11 @@ export function buildRuntimeEnvironment(
       if (isLoaderEnvKey(key)) continue;
       if (isReloadExcludedKey(key)) continue;
       if (isHardcodedProjectEnvExclusion(key)) continue;
-      if (excludedVars.includes(key)) continue;
+      if (!startup && excludedVars.includes(key)) continue;
       if (typeof value !== 'string') continue;
       setRuntimeEnvIfUnset(effectiveEnv, key, value);
     }
-    reportRejectedSettingsEnv(settings.env, startDir);
+    if (!startup) reportRejectedSettingsEnv(settings.env, startDir);
   }
 
   const overlayKeys = Object.keys(effectiveEnv)

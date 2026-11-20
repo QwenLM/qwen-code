@@ -47,6 +47,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import type { ManagedExecutionEngine } from './session-execution-engine-selector.js';
 import type { SubSessionLauncher } from './create-sub-session.js';
 import * as toolCallsReader from './session-tool-calls.js';
 import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
@@ -6211,9 +6212,51 @@ describe('createServeApp', () => {
       },
     );
 
-    it('uses the owned paired bridge’s default engine for Workflow availability', async () => {
+    it('reads user settings and .env from the owned ACP child’s effective home', async () => {
+      const home = path.join(serverTestEnvironmentRoot, 'acp-child-home');
+      const userConfig = path.join(home, '.qwen');
+      const workspace = path.join(
+        serverTestEnvironmentRoot,
+        'acp-child-workspace',
+      );
+      await fsp.mkdir(userConfig, { recursive: true });
+      await fsp.mkdir(workspace);
+      const settingsPath = path.join(userConfig, 'settings.json');
+      await fsp.writeFile(
+        settingsPath,
+        JSON.stringify({ tools: { workflowsEnabled: false } }),
+      );
+      const homeKey = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+      const app = createServeApp({ ...baseOpts, workspace }, undefined, {
+        primaryWorkspaceTrusted: true,
+        daemonEnv: { [homeKey]: home },
+      });
+      const workflowCapability = async () => {
+        const response = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .expect(200);
+        return response.body.workspaces[0].workflowsEnabled;
+      };
+
+      expect(await workflowCapability()).toBe(false);
+      await fsp.unlink(settingsPath);
+      expect(await workflowCapability()).toBe(true);
+      await fsp.writeFile(
+        path.join(userConfig, '.env'),
+        'QWEN_CODE_SAFE_MODE=1\n',
+      );
+      expect(await workflowCapability()).toBe(false);
+    });
+
+    it('passes the effective default session scope to the owned engine probe', async () => {
       const factory = vi.fn();
-      const evaluate = vi.fn(() => ({ status: 'compatible' as const }));
+      const evaluate = vi.fn<ManagedExecutionEngine['evaluate']>(
+        ({ request }) =>
+          'sessionScope' in request && request.sessionScope === 'single'
+            ? { status: 'compatible' }
+            : { status: 'deferred', reason: 'requires single scope' },
+      );
       const app = createServeApp(
         { ...baseOpts, experimentalPairedEngines: true },
         undefined,
@@ -6235,7 +6278,10 @@ describe('createServeApp', () => {
       ]);
       expect(evaluate).toHaveBeenCalledWith({
         operation: 'spawn',
-        request: { workspaceCwd: response.body.workspaceCwd },
+        request: {
+          workspaceCwd: response.body.workspaceCwd,
+          sessionScope: 'single',
+        },
         daemonOwnedStandalone: false,
       });
       expect(factory).not.toHaveBeenCalled();

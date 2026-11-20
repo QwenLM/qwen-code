@@ -224,9 +224,6 @@ describe('createServeApp default bridge wiring', () => {
       };
     });
     const { createServeApp } = await import('./server.js');
-    const { defaultSpawnChannelFactory } = await import(
-      './acp-session-bridge.js'
-    );
     const managed = {
       factory: vi.fn(),
       evaluate: vi.fn(() => ({ status: 'compatible' as const })),
@@ -326,8 +323,8 @@ describe('createServeApp default bridge wiring', () => {
     ]) {
       expect(options.executionEngines).toBeUndefined();
     }
-    expect(plain.channelFactory).toBeUndefined();
-    expect(engineOnly.channelFactory).toBeUndefined();
+    expect(plain.channelFactory).toBe(spawnedBy.get(plain)![0]);
+    expect(engineOnly.channelFactory).toBe(spawnedBy.get(engineOnly)![0]);
     expect(plainWithArgs.channelFactory).toBe(withArgs[0]!.factory);
     expect(plainWithChildren.channelFactory).toBe(
       spawnedBy.get(plainWithChildren)![0],
@@ -359,7 +356,7 @@ describe('createServeApp default bridge wiring', () => {
     ]) {
       expect(options.channelFactory).toBeUndefined();
     }
-    expect(paired.executionEngines!.legacy).toBe(defaultSpawnChannelFactory);
+    expect(paired.executionEngines!.legacy).toBe(spawnedBy.get(paired)![0]);
     expect(pairedWithArgs.executionEngines!.legacy).toBe(withArgs[1]!.factory);
     expect(pairedWithChildren.executionEngines!.legacy).toBe(
       spawnedBy.get(pairedWithChildren)![0],

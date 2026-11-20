@@ -5428,7 +5428,12 @@ async function runQwenServeImpl(
       resolvedCliVersion,
       trustPolicy,
       workflowTrust,
-      { readTrustedWorkflowSettings, bindDefaultSessionEngine },
+      {
+        anchorAcpQwenHome,
+        bindDefaultSessionEngine,
+        DEFAULT_DAEMON_SESSION_SCOPE,
+        readTrustedWorkflowSettings,
+      },
     ] = await Promise.all([
       loadServeRuntimeModules(),
       loadCoreRuntime(),
@@ -5608,7 +5613,9 @@ async function runQwenServeImpl(
       runtimeEnvSnapshot.effectiveEnv,
     );
     const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
-      ...runtimeEnvSnapshot.effectiveEnv,
+      ...(deps.bridge
+        ? runtimeEnvSnapshot.effectiveEnv
+        : anchorAcpQwenHome(runtimeEnvSnapshot.effectiveEnv)),
       QWEN_RUNTIME_DIR: primarySessionRuntimeBaseDir,
     };
     const replaceRuntimeEffectiveEnv = (
@@ -5617,7 +5624,10 @@ async function runQwenServeImpl(
       for (const key of Object.keys(runtimeEffectiveEnv)) {
         delete runtimeEffectiveEnv[key];
       }
-      Object.assign(runtimeEffectiveEnv, nextEnv);
+      Object.assign(
+        runtimeEffectiveEnv,
+        deps.bridge ? nextEnv : anchorAcpQwenHome(nextEnv),
+      );
       runtimeEffectiveEnv['QWEN_RUNTIME_DIR'] = primarySessionRuntimeBaseDir;
     };
     type RuntimeEnvMetadata = {
@@ -6597,6 +6607,7 @@ async function runQwenServeImpl(
           ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
         sessionRestoreTimeoutMs,
+        sessionScope: DEFAULT_DAEMON_SESSION_SCOPE,
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -6808,12 +6819,16 @@ async function runQwenServeImpl(
         removable: false,
         registrationIds: workspaceInputs[0]?.registrationIds ?? [],
         env: primaryRuntimeEnv,
-        ...(deps.bridge ? {} : { sessionBareMode: false }),
         readWorkflowSettings: () =>
-          readTrustedWorkflowSettings(boundWorkspace, runtimeEffectiveEnv),
+          readTrustedWorkflowSettings(
+            boundWorkspace,
+            runtimeEffectiveEnv,
+            deps.bridge ? undefined : childEnvOverrides,
+          ),
         selectDefaultSessionEngine: bindDefaultSessionEngine(
           primaryExecutionEngines,
           boundWorkspace,
+          DEFAULT_DAEMON_SESSION_SCOPE,
         ),
         bridge,
         workspaceService,
@@ -6872,7 +6887,7 @@ async function runQwenServeImpl(
         snapshot.effectiveEnv,
       );
       const effectiveEnv: NodeJS.ProcessEnv = {
-        ...snapshot.effectiveEnv,
+        ...anchorAcpQwenHome(snapshot.effectiveEnv),
         QWEN_RUNTIME_DIR: sessionRuntimeBaseDir,
       };
       const metadata: RuntimeEnvMetadata = {
@@ -6891,7 +6906,7 @@ async function runQwenServeImpl(
           for (const key of Object.keys(effectiveEnv)) {
             delete effectiveEnv[key];
           }
-          Object.assign(effectiveEnv, nextEnv);
+          Object.assign(effectiveEnv, anchorAcpQwenHome(nextEnv));
           effectiveEnv['QWEN_RUNTIME_DIR'] = sessionRuntimeBaseDir;
         },
       };
@@ -7235,6 +7250,7 @@ async function runQwenServeImpl(
           ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
         sessionRestoreTimeoutMs,
+        sessionScope: DEFAULT_DAEMON_SESSION_SCOPE,
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -7454,15 +7470,16 @@ async function runQwenServeImpl(
         removable: workspaceInput.removable,
         registrationIds: workspaceInput.registrationIds,
         env: secondaryEnv.metadata,
-        sessionBareMode: false,
         readWorkflowSettings: () =>
           readTrustedWorkflowSettings(
             workspaceInput.cwd,
             secondaryEnv.effectiveEnv,
+            childEnvOverrides,
           ),
         selectDefaultSessionEngine: bindDefaultSessionEngine(
           secondaryExecutionEngines,
           workspaceInput.cwd,
+          DEFAULT_DAEMON_SESSION_SCOPE,
         ),
         bridge: secondaryBridge,
         workspaceService: secondaryWorkspaceService,
@@ -8289,6 +8306,7 @@ async function runQwenServeImpl(
             ? { initializeTimeoutMs: opts.initializeTimeoutMs }
             : {}),
           sessionRestoreTimeoutMs,
+          sessionScope: DEFAULT_DAEMON_SESSION_SCOPE,
           ...(opts.sessionReapIntervalMs !== undefined
             ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
             : {}),
@@ -8564,12 +8582,16 @@ async function runQwenServeImpl(
           buildOptions?.removable ?? provenance !== 'live-conversation',
         registrationIds: [...(buildOptions?.registrationIds ?? [])],
         env: wsEnv.metadata,
-        sessionBareMode: false,
         readWorkflowSettings: () =>
-          readTrustedWorkflowSettings(cwd, wsEnv.effectiveEnv),
+          readTrustedWorkflowSettings(
+            cwd,
+            wsEnv.effectiveEnv,
+            childEnvOverrides,
+          ),
         selectDefaultSessionEngine: bindDefaultSessionEngine(
           wsExecutionEngines,
           cwd,
+          DEFAULT_DAEMON_SESSION_SCOPE,
         ),
         bridge: wsBridge,
         workspaceService: wsService,

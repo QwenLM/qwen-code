@@ -93,7 +93,6 @@ import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
   createSpawnChannelFactory,
-  defaultSpawnChannelFactory,
   MAX_SESSION_RESTORE_TIMEOUT_MS,
   resolveSessionRestoreTimeoutMs,
   SessionNotFoundError,
@@ -217,7 +216,9 @@ import {
 import { registerBrandRoutes } from './routes/brand.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
+  anchorAcpQwenHome,
   bindDefaultSessionEngine,
+  DEFAULT_DAEMON_SESSION_SCOPE,
   readTrustedWorkflowSettings,
 } from './workspace-workflow-capabilities.js';
 import {
@@ -1373,42 +1374,43 @@ export function createServeApp(
     ? createWorkspaceSessionOwnerIndex()
     : undefined;
   const acpChildArgs = acpChildExtraArgs(opts);
+  const directAcpSourceEnv = ownsDefaultBridge
+    ? anchorAcpQwenHome(primaryEffectiveEnv ?? daemonEnvAtBoot)
+    : undefined;
   const attachmentsRoots = sessionAttachmentsRoots(
     boundWorkspace,
     Storage.getRuntimeBaseDir(),
   );
-  const createDefaultBridgeChannels = () => {
-    const channelFactory =
-      acpChildArgs || deps.managedChildProcesses
-        ? createSpawnChannelFactory({
-            processRegistry: deps.managedChildProcesses?.registry,
-            childHeapPolicy: deps.managedChildProcesses?.policy,
-            ...(deps.managedChildProcesses
-              ? {
-                  reclaimIdleChild: async (signal?: AbortSignal) => {
-                    await reclaimIdleAcp?.(
-                      hashDaemonWorkspace(boundWorkspace),
-                      signal,
-                    );
-                  },
-                }
-              : {}),
-            extraArgs: acpChildArgs,
-          })
-        : undefined;
-    if (!opts.experimentalPairedEngines) {
-      return channelFactory ? { channelFactory } : {};
-    }
+  const createDefaultBridgeChannels = (
+    sourceEnv: Readonly<NodeJS.ProcessEnv>,
+  ) => {
+    const channelFactory = createSpawnChannelFactory({
+      sourceEnv,
+      processRegistry: deps.managedChildProcesses?.registry,
+      childHeapPolicy: deps.managedChildProcesses?.policy,
+      ...(deps.managedChildProcesses
+        ? {
+            reclaimIdleChild: async (signal?: AbortSignal) => {
+              await reclaimIdleAcp?.(
+                hashDaemonWorkspace(boundWorkspace),
+                signal,
+              );
+            },
+          }
+        : {}),
+      extraArgs: acpChildArgs,
+    });
+    if (!opts.experimentalPairedEngines) return { channelFactory };
     return {
       executionEngines: createPairedExecutionEngines({
-        legacy: channelFactory ?? defaultSpawnChannelFactory,
+        legacy: channelFactory,
         runtimeBaseDir: Storage.getRuntimeBaseDir(),
         managed: deps.managedExecutionEngine,
       }),
     };
   };
-  const defaultBridgeChannels = ownsDefaultBridge
-    ? createDefaultBridgeChannels()
+  const defaultBridgeChannels = directAcpSourceEnv
+    ? createDefaultBridgeChannels(directAcpSourceEnv)
     : undefined;
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
@@ -1454,6 +1456,7 @@ export function createServeApp(
         ? { restoreAskUserQuestion: true }
         : {}),
       ...defaultBridgeChannels,
+      sessionScope: DEFAULT_DAEMON_SESSION_SCOPE,
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -1624,14 +1627,15 @@ export function createServeApp(
         readWorkflowSettings: () =>
           readTrustedWorkflowSettings(
             boundWorkspace,
-            primaryEffectiveEnv ?? daemonEnvAtBoot,
+            directAcpSourceEnv ?? primaryEffectiveEnv ?? daemonEnvAtBoot,
+            ownsDefaultBridge ? {} : undefined,
           ),
         ...(ownsDefaultBridge
           ? {
-              sessionBareMode: false,
               selectDefaultSessionEngine: bindDefaultSessionEngine(
                 defaultBridgeChannels?.executionEngines,
                 boundWorkspace,
+                DEFAULT_DAEMON_SESSION_SCOPE,
               ),
             }
           : {}),

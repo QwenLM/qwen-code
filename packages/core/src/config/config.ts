@@ -11300,6 +11300,14 @@ export class Config {
     disabledTools?: ReadonlySet<string>,
   ): Promise<void> {
     const wasEnabled = this.isWorkflowsEnabled();
+    this.stageWorkflowsEnabledSetting(enabled, disabledTools);
+    await this.reconcileWorkflowToolAvailability(wasEnabled);
+  }
+
+  stageWorkflowsEnabledSetting(
+    enabled: boolean | undefined,
+    disabledTools?: ReadonlySet<string>,
+  ): void {
     if (disabledTools && !this.bareMode && !this.safeMode) {
       this.setDisabledTools(disabledTools);
     }
@@ -11307,7 +11315,6 @@ export class Config {
       this.workflowsEnabledByReviewSkill = false;
       this.workflowsEnabled = enabled;
     }
-    await this.reconcileWorkflowToolAvailability(wasEnabled);
   }
 
   /** Omit the previous state to retry a refresh after a partial failure. */

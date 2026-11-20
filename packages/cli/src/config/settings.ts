@@ -1168,9 +1168,11 @@ export function readSettingsSnapshot(
   options: {
     environment: Readonly<NodeJS.ProcessEnv>;
     workspaceTrusted: boolean;
+    /** Home directory as seen by an owned child at startup. */
+    startupHomeDir?: string;
   },
 ): LoadedSettings {
-  const { environment } = options;
+  const { environment, startupHomeDir } = options;
   if (typeof environment !== 'object' || environment === null) {
     throw new TypeError('A settings snapshot needs an environment.');
   }
@@ -1182,7 +1184,7 @@ export function readSettingsSnapshot(
       skipWorkspaceSettings: !options.workspaceTrusted,
       workspaceTrusted: options.workspaceTrusted,
     },
-    { environment },
+    { environment, startupHomeDir },
   );
 }
 
@@ -1215,7 +1217,10 @@ export function resolveHomeDirectory(home: string = homedir()): string {
 function readSettingsLayers(
   workspaceDir: string,
   opts: LoadSettingsOptions,
-  snapshotOf?: { readonly environment?: Readonly<NodeJS.ProcessEnv> },
+  snapshotOf?: {
+    readonly environment?: Readonly<NodeJS.ProcessEnv>;
+    readonly startupHomeDir?: string;
+  },
 ): LoadedSettings {
   // A snapshot reads through the given environment and writes nothing. Every
   // step below that writes a file or `process.env` must be skipped when
@@ -1233,7 +1238,10 @@ function readSettingsLayers(
     ? undefined
     : readOperatorSandboxSettings().tools?.executionSandbox;
   const userSettingsPath = snapshotEnvironment
-    ? path.join(getGlobalQwenDirLite(snapshotEnvironment), 'settings.json')
+    ? path.join(
+        getGlobalQwenDirLite(snapshotEnvironment, snapshotOf?.startupHomeDir),
+        'settings.json',
+      )
     : getUserSettingsPath();
   const qwenHomeRedirectWarning = snapshot
     ? null
@@ -1262,9 +1270,10 @@ function readSettingsLayers(
   // The home directory may not exist (e.g. a container user created without
   // `-m`); like the workspace path above, that's a valid state. Fall back to
   // the unresolved path so the home-vs-workspace comparison still works.
-  let realHomeDir = path.resolve(homedir());
+  const homeDir = snapshotOf?.startupHomeDir ?? homedir();
+  let realHomeDir = path.resolve(homeDir);
   try {
-    realHomeDir = resolveHomeDirectory();
+    realHomeDir = resolveHomeDirectory(homeDir);
   } catch (_e) {
     // This is okay. The path might not exist yet, and that's a valid state.
   }

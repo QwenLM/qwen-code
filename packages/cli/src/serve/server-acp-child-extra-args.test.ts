@@ -53,6 +53,7 @@ describe('createServeApp default ACP child extraArgs', () => {
     harness.spawnFactoryCalls.length = 0;
     harness.createAcpSessionBridge.mockReset();
     harness.reclaimIdleAcp.mockReset();
+    vi.unstubAllEnvs();
   });
 
   it('does not spawn extraArgs when restore is off', () => {
@@ -62,11 +63,39 @@ describe('createServeApp default ACP child extraArgs', () => {
       mode: 'http-bridge',
     });
 
-    expect(harness.spawnFactoryCalls).toEqual([]);
-    expect(
-      harness.createAcpSessionBridge.mock.calls[0]?.[0],
-    ).not.toHaveProperty('channelFactory');
+    expect(harness.spawnFactoryCalls).toHaveLength(1);
+    expect(harness.spawnFactoryCalls[0]?.extraArgs).toBeUndefined();
   });
+
+  it.each(['daemon', 'overlay'] as const)(
+    'launches owned ACP with the %s environment instead of process.env',
+    (source) => {
+      vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '1');
+      const daemonEnv = { QWEN_CODE_SAFE_MODE: '1' };
+      const overlayEnv = { QWEN_CODE_ENABLE_WORKFLOWS: '1' };
+      createServeApp(
+        { hostname: '127.0.0.1', port: 4170, mode: 'http-bridge' },
+        undefined,
+        {
+          daemonEnv,
+          ...(source === 'overlay'
+            ? {
+                primaryRuntimeEnv: {
+                  mode: 'runtime-overlay',
+                  overlayKeys: ['QWEN_CODE_ENABLE_WORKFLOWS'],
+                  effectiveEnv: overlayEnv,
+                },
+              }
+            : {}),
+        },
+      );
+
+      expect(harness.spawnFactoryCalls[0]?.sourceEnv).toEqual(
+        source === 'overlay' ? overlayEnv : daemonEnv,
+      );
+      expect(process.env['QWEN_CODE_DISABLE_WORKFLOWS']).toBe('1');
+    },
+  );
 
   it('binds a managed default factory to the shared reclaimer', async () => {
     const boundWorkspace = process.cwd();
@@ -102,8 +131,9 @@ describe('createServeApp default ACP child extraArgs', () => {
       restoreAskUserQuestion: true,
     });
 
-    expect(harness.spawnFactoryCalls).toEqual([
-      { extraArgs: ['--restore-ask-user-question'] },
+    expect(harness.spawnFactoryCalls).toHaveLength(1);
+    expect(harness.spawnFactoryCalls[0]?.extraArgs).toEqual([
+      '--restore-ask-user-question',
     ]);
     expect(harness.createAcpSessionBridge.mock.calls[0]?.[0]).toMatchObject({
       restoreAskUserQuestion: true,

@@ -468,15 +468,7 @@ export function createSpawnChannelFactory(
     if (!cliEntry) {
       throw new MissingCliEntryError();
     }
-    const childEnv = scrubChildEnv(
-      sourceEnv,
-      SCRUBBED_CHILD_ENV_KEYS,
-      childEnvOverrides,
-    );
-    childEnv['QWEN_CODE_NO_RELAUNCH'] = 'true';
-    // Marks the child as daemon-spawned so its ACP channel fallback reports
-    // channel=daemon in usage statistics (see cli/src/config/acp-channel-fallback.ts).
-    childEnv['QWEN_CODE_SERVE'] = '1';
+    const childEnv = buildSpawnChildEnv(sourceEnv, childEnvOverrides);
 
     const execArgs = process.execArgv.filter(
       (a) => !/^--inspect(-brk)?($|=)/.test(a),
@@ -761,6 +753,17 @@ const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   'QWEN_MANAGED_RUNTIME_BROKER_TOKEN',
 ]);
+
+export function buildSpawnChildEnv(
+  sourceEnv: Readonly<NodeJS.ProcessEnv>,
+  overrides?: Readonly<NodeJS.ProcessEnv>,
+): NodeJS.ProcessEnv {
+  const env = scrubChildEnv(sourceEnv, SCRUBBED_CHILD_ENV_KEYS, overrides);
+  env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+  // The ACP channel fallback uses this marker to attribute daemon usage.
+  env['QWEN_CODE_SERVE'] = '1';
+  return env;
+}
 
 /**
  * Build the env passed to the `qwen --acp` child. Pure function, exported

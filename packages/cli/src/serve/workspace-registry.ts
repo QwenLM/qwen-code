@@ -47,6 +47,7 @@ export interface WorkspaceRuntime {
   /** Bare mode after applying the session launcher's environment policy. */
   readonly sessionBareMode?: boolean;
   readonly readWorkflowSettings?: () => {
+    startupEnvironment?: Readonly<NodeJS.ProcessEnv>;
     enabled: boolean | undefined;
     toolDenied: boolean;
   } | null;

@@ -600,6 +600,48 @@ describe('createDaemonWorkspaceService', () => {
       },
     );
 
+    it.each([false, true])(
+      'clears a recovered Workflow refresh across scopes and keeps independent rule failures (%s)',
+      async (rulesSyncIncomplete) => {
+        await withIsolatedWorkspace(async ({ workspace }) => {
+          const svc = createDaemonWorkspaceService(
+            makeDeps({
+              boundWorkspace: workspace,
+              invokeWorkspaceCommand: vi
+                .fn()
+                .mockResolvedValueOnce({
+                  liveSyncIncomplete: true,
+                  permissionRulesSyncIncomplete: rulesSyncIncomplete,
+                  pendingPermissionWorkflowSync: ['user'],
+                })
+                .mockResolvedValueOnce({ pendingPermissionWorkflowSync: [] }),
+            }),
+          );
+          const setRules = (scope: 'user' | 'workspace') =>
+            svc.setWorkspacePermissionRules(makeCtx(), {
+              scope,
+              ruleType: 'deny',
+              rules: [],
+            });
+
+          await expect(setRules('user')).rejects.toMatchObject({
+            code: 'permission_sync_incomplete',
+          });
+          await expect(
+            svc.getWorkspacePermissionsStatus(makeCtx()),
+          ).resolves.toMatchObject({ pendingLiveSync: ['user'] });
+
+          await expect(setRules('workspace')).resolves.not.toHaveProperty(
+            'pendingPermissionWorkflowSync',
+          );
+          const status = await svc.getWorkspacePermissionsStatus(makeCtx());
+          expect(status.pendingLiveSync).toEqual(
+            rulesSyncIncomplete ? ['user'] : undefined,
+          );
+        });
+      },
+    );
+
     it('rejects permission updates when ACP has no live session', async () => {
       await withIsolatedQwenHome(async () => {
         const invokeWorkspaceCommand = vi

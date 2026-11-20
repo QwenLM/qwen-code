@@ -69,19 +69,21 @@ async function workflowsEnabledForRuntime(
     runtime.routeFileSystemFactory.sshWorkspace
   )
     return false;
-  const env =
+  const settings = runtime.readWorkflowSettings?.();
+  if (settings === null) return false;
+  const runtimeEnv =
     runtime.env.mode === 'runtime-overlay'
       ? (runtime.env.effectiveEnv ?? {})
       : (runtime.env.effectiveEnv ?? daemonEnv);
+  const env = settings?.startupEnvironment ?? runtimeEnv;
   const safeMode = isSafeModeEnv(env);
   const bareMode =
     runtime.sessionBareMode ?? isTruthy(env[QWEN_CODE_SIMPLE_ENV_VAR]);
-  if (env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
-  const settings = runtime.readWorkflowSettings?.();
-  if (settings === null || (!safeMode && settings?.toolDenied)) return false;
+  if (bareMode || env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
+  if (!safeMode && settings?.toolDenied) return false;
   const enabled =
     env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1' ||
-    (settings?.enabled ?? !(bareMode || safeMode));
+    (settings?.enabled ?? !safeMode);
   if (!enabled) return false;
   const engine = await runtime.selectDefaultSessionEngine?.();
   return !runtime.generationGuard?.closed && engine !== 'managed';

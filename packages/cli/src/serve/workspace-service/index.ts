@@ -303,6 +303,17 @@ export function createDaemonWorkspaceService(
     PermissionSettingsScope,
     { sequence: number; incomplete: boolean }
   >();
+  let lastWorkflowSyncSequence = 0;
+  let pendingPermissionWorkflowSync: PermissionSettingsScope[] = [];
+  const observeWorkflowSync = (
+    sequence: number,
+    pending: PermissionSettingsScope[] | undefined,
+  ) => {
+    if (pending !== undefined && sequence > lastWorkflowSyncSequence) {
+      lastWorkflowSyncSequence = sequence;
+      pendingPermissionWorkflowSync = pending;
+    }
+  };
   const loggedPreheatFailures = new WeakSet<object>();
   const logPreheatFailure = (err: unknown) => {
     if (typeof err === 'object' && err !== null) {
@@ -898,14 +909,15 @@ export function createDaemonWorkspaceService(
       opts?: { skipLoadEnvironment?: boolean },
     ) {
       assertActiveGeneration();
-      const pendingLiveSync = [...lastPermissionSync]
-        .filter(([, sync]) => sync.incomplete)
-        .map(([scope]) => scope);
+      const pending = new Set(pendingPermissionWorkflowSync);
+      for (const [scope, sync] of lastPermissionSync) {
+        if (sync.incomplete) pending.add(scope);
+      }
       return {
         ...buildPermissionSettings(
           loadBoundSettings(opts?.skipLoadEnvironment),
         ),
-        ...(pendingLiveSync.length > 0 && { pendingLiveSync }),
+        ...(pending.size > 0 && { pendingLiveSync: [...pending] }),
       };
     },
 
@@ -978,6 +990,8 @@ export function createDaemonWorkspaceService(
       const sequence = ++permissionWriteSequence;
       type ChildPermissionResult = QwenPermissionSettings & {
         liveSyncIncomplete?: boolean;
+        permissionRulesSyncIncomplete?: boolean;
+        pendingPermissionWorkflowSync?: PermissionSettingsScope[];
       };
       let result: ChildPermissionResult;
       let bridgePartial: WorkspaceChangePartiallyAppliedError | undefined;
@@ -1006,10 +1020,16 @@ export function createDaemonWorkspaceService(
       }
       assertActiveGeneration();
       const liveSyncIncomplete = result?.liveSyncIncomplete === true;
+      const pendingWorkflowSync = result?.pendingPermissionWorkflowSync;
+      observeWorkflowSync(sequence, pendingWorkflowSync);
       if (sequence > (lastPermissionSync.get(request.scope)?.sequence ?? 0)) {
         lastPermissionSync.set(request.scope, {
           sequence,
-          incomplete: liveSyncIncomplete || bridgePartial !== undefined,
+          incomplete:
+            bridgePartial !== undefined ||
+            (pendingWorkflowSync === undefined
+              ? liveSyncIncomplete
+              : result.permissionRulesSyncIncomplete === true),
         });
       }
       publishWorkspaceEvent({
@@ -1021,7 +1041,13 @@ export function createDaemonWorkspaceService(
         throw new WorkspacePermissionSyncIncompleteError(bridgePartial);
       }
       if (bridgePartial) throw bridgePartial;
-      return result;
+      if (pendingWorkflowSync === undefined) return result;
+      const {
+        pendingPermissionWorkflowSync: _pending,
+        permissionRulesSyncIncomplete: _rulesIncomplete,
+        ...settings
+      } = result;
+      return settings;
     },
 
     async setWorkspaceVoiceSettings(
@@ -1732,11 +1758,14 @@ export function createDaemonWorkspaceService(
       let sessionsRefreshed: string[] | undefined;
       let sessionsSkipped: string[] | undefined;
       let childError: string | undefined;
+      let pendingWorkflowSync: PermissionSettingsScope[] | undefined;
+      const sequence = ++permissionWriteSequence;
       type ChildReloadResult = {
         env: { updatedKeys: string[]; removedKeys: string[] };
         changedKeys: string[];
         sessionsRefreshed: string[];
         sessionsSkipped: string[];
+        pendingPermissionWorkflowSync?: PermissionSettingsScope[];
       };
       const applyChildResult = (childResult: ChildReloadResult) => {
         childReloaded = true;
@@ -1744,6 +1773,7 @@ export function createDaemonWorkspaceService(
         changedKeys = childResult.changedKeys;
         sessionsRefreshed = childResult.sessionsRefreshed;
         sessionsSkipped = childResult.sessionsSkipped;
+        pendingWorkflowSync = childResult.pendingPermissionWorkflowSync;
       };
       try {
         applyChildResult(
@@ -1769,6 +1799,7 @@ export function createDaemonWorkspaceService(
       }
 
       assertActiveGeneration();
+      observeWorkflowSync(sequence, pendingWorkflowSync);
       publishWorkspaceEvent({
         type: 'settings_reloaded',
         data: {

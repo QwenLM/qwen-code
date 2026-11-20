@@ -84,6 +84,8 @@ import type {
 } from '@qwen-code/acp-bridge/status';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import * as managedEngineModule from './managed-execution-engine.js';
+import type { ManagedExecutionEngine } from './session-execution-engine-selector.js';
 import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import * as pemCertificateBlocks from './pem-certificate-blocks.js';
@@ -6954,6 +6956,135 @@ describe('runQwenServe paired execution engines', () => {
     }
   }
 
+  it.each(['settings.env', '.env'] as const)(
+    'keeps Workflow off when the spawned ACP reloads bare mode from %s at startup',
+    async (source) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-workflow-bare-')),
+      );
+      const workspace = path.join(tmpDir, 'workspace');
+      fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+      vi.stubEnv('QWEN_HOME', path.join(tmpDir, 'home'));
+      vi.stubEnv('QWEN_CODE_SIMPLE', '1');
+      vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', '1');
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+        },
+        { trustedWorkspace: true, preheatBridge: false },
+      );
+      try {
+        const workflowCapability = async () => {
+          const response = await fetch(`${handle.url}/capabilities`);
+          expect(response.status).toBe(200);
+          const capabilities = await response.json();
+          return capabilities.workspaces.find(
+            (entry: { cwd: string }) => entry.cwd === workspace,
+          )?.workflowsEnabled;
+        };
+        expect(await workflowCapability()).toBe(true);
+        if (source === '.env') {
+          fs.writeFileSync(
+            path.join(workspace, '.env'),
+            'QWEN_CODE_SIMPLE=1\n',
+          );
+        } else {
+          fs.writeFileSync(
+            path.join(workspace, '.qwen', 'settings.json'),
+            JSON.stringify({ env: { QWEN_CODE_SIMPLE: '1' } }),
+          );
+        }
+        expect(await workflowCapability()).toBe(false);
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
+  it('pins relative QWEN_HOME for ACP and probes the shipped bridge scope', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-workflow-home-')),
+    );
+    const workspace = path.join(tmpDir, 'workspace');
+    const home = path.join(tmpDir, 'home');
+    fs.mkdirSync(workspace);
+    fs.mkdirSync(home);
+    const settingsPath = path.join(home, 'settings.json');
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ tools: { workflowsEnabled: false } }),
+    );
+    vi.stubEnv('QWEN_HOME', path.relative(process.cwd(), home));
+    const createBridge = vi.spyOn(acpBridge, 'createAcpSessionBridge');
+    const evaluate = vi.fn<ManagedExecutionEngine['evaluate']>(() => ({
+      status: 'deferred',
+      reason: 'exercise the Legacy launcher',
+    }));
+    vi.spyOn(
+      managedEngineModule,
+      'createManagedExecutionEngine',
+    ).mockReturnValue({
+      evaluate,
+      factory: vi.fn(),
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+        experimentalPairedEngines: true,
+      },
+      { trustedWorkspace: true, preheatBridge: false },
+    );
+    try {
+      const workflowCapability = async () => {
+        const response = await fetch(`${handle.url}/capabilities`);
+        expect(response.status).toBe(200);
+        const capabilities = await response.json();
+        return capabilities.workspaces.find(
+          (entry: { cwd: string }) => entry.cwd === workspace,
+        )?.workflowsEnabled;
+      };
+      const bridgeOptions = createBridge.mock.calls.find(
+        ([options]) => options.boundWorkspace === workspace,
+      )?.[0];
+      const legacyFactory = bridgeOptions?.executionEngines?.legacy;
+      const factoryIndex = vi
+        .mocked(spawnChannelModule.createSpawnChannelFactory)
+        .mock.results.findIndex(({ value }) => value === legacyFactory);
+      expect(factoryIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        vi.mocked(spawnChannelModule.createSpawnChannelFactory).mock.calls[
+          factoryIndex
+        ]?.[0]?.sourceEnv,
+      ).toMatchObject({ QWEN_HOME: home });
+      expect(await workflowCapability()).toBe(false);
+
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({ tools: { workflowsEnabled: true } }),
+      );
+      expect(await workflowCapability()).toBe(true);
+      expect(bridgeOptions?.sessionScope).toBe('single');
+      expect(evaluate).toHaveBeenCalledWith({
+        operation: 'spawn',
+        request: {
+          workspaceCwd: workspace,
+          sessionScope: bridgeOptions?.sessionScope,
+        },
+        daemonOwnedStandalone: false,
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('pairs the startup, added and scratch runtimes from their own factory and storage, changing nothing else', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-paired-engines-')),
@@ -10758,13 +10889,12 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
-      expect(secondaryRuntime?.sessionBareMode).toBe(false);
-      expect(secondaryRuntime?.readWorkflowSettings?.()).toEqual({
+      expect(secondaryRuntime?.readWorkflowSettings?.()).toMatchObject({
         enabled: true,
         toolDenied: false,
       });
       secondaryPermissionUpdated = true;
-      expect(secondaryRuntime?.readWorkflowSettings?.()).toEqual({
+      expect(secondaryRuntime?.readWorkflowSettings?.()).toMatchObject({
         enabled: false,
         toolDenied: true,
       });
@@ -10789,13 +10919,12 @@ describe('runQwenServe runtime startup failures', () => {
       const dynamicRuntime = await createWorkspaceRuntime!(dynamic, {
         provenance: 'existing',
       });
-      expect(dynamicRuntime.sessionBareMode).toBe(false);
-      expect(dynamicRuntime.readWorkflowSettings?.()).toEqual({
+      expect(dynamicRuntime.readWorkflowSettings?.()).toMatchObject({
         enabled: true,
         toolDenied: true,
       });
       dynamicReloaded = true;
-      expect(dynamicRuntime.readWorkflowSettings?.()).toEqual({
+      expect(dynamicRuntime.readWorkflowSettings?.()).toMatchObject({
         enabled: false,
         toolDenied: false,
       });

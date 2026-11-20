@@ -19,7 +19,11 @@ export function expandsAgainstHome(dir: string): boolean {
   return dir === '~' || dir.startsWith('~/') || dir.startsWith('~\\');
 }
 
-export function resolveConfigPathLite(dir: string, cwd?: string): string {
+export function resolveConfigPathLite(
+  dir: string,
+  cwd?: string,
+  homeDir = os.homedir(),
+): string {
   let resolved = dir;
   if (expandsAgainstHome(resolved)) {
     const relativeSegments =
@@ -29,7 +33,7 @@ export function resolveConfigPathLite(dir: string, cwd?: string): string {
             .slice(2)
             .split(/[/\\]+/)
             .filter(Boolean);
-    resolved = path.join(os.homedir(), ...relativeSegments);
+    resolved = path.join(homeDir, ...relativeSegments);
   }
   if (!path.isAbsolute(resolved)) {
     resolved = path.resolve(cwd || process.cwd(), resolved);
@@ -156,12 +160,12 @@ export function isFullyQualifiedPath(location: string): boolean {
 
 export function getGlobalQwenDirLite(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
+  homeDir = os.homedir(),
 ): string {
   const envDir = readEnvironmentVariable(env, 'QWEN_HOME');
   if (envDir) {
-    return resolveConfigPathLite(envDir);
+    return resolveConfigPathLite(envDir, undefined, homeDir);
   }
-  const homeDir = os.homedir();
   if (!homeDir) {
     return path.join(os.tmpdir(), SETTINGS_DIRECTORY_NAME);
   }
