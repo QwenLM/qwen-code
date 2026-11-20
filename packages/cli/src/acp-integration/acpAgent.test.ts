@@ -6291,6 +6291,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           ),
           deleteWorkflowHistory: vi.fn().mockResolvedValue(false),
           noteExternalWorkflowDeletion: vi.fn(),
+          sendAvailableCommandsUpdateOrThrow: vi
+            .fn()
+            .mockResolvedValue(undefined),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -24111,6 +24114,68 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['tool declarations', 'commands'] as const)(
+    'retries permission-triggered Workflow %s after the rule was applied',
+    async (failure) => {
+      const settings = makeCoreSettings();
+      const config = await setupSessionMocks('test-session-id');
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        const session = vi.mocked(Session).mock.results.at(-1)
+          ?.value as Session;
+        const sendCommands = vi.mocked(
+          session.sendAvailableCommandsUpdateOrThrow,
+        );
+        sendCommands.mockClear();
+        let workflowsEnabled = true;
+        const addPersistentRule = vi.fn(() => {
+          workflowsEnabled = false;
+        });
+        const reconcile = vi.fn(async (_wasEnabled?: boolean) => {});
+        if (failure === 'tool declarations') {
+          reconcile.mockRejectedValueOnce(new Error('Tool refresh failed'));
+        } else {
+          sendCommands.mockRejectedValueOnce(new Error('Command push failed'));
+        }
+        Object.assign(config, {
+          getPermissionManager: () => ({ addPersistentRule }),
+          isWorkflowsEnabled: () => workflowsEnabled,
+          reconcileWorkflowToolAvailability: reconcile,
+          getWorkflowRunRegistry: () => ({ cancelBackgroundRuns: () => [] }),
+        });
+        const denyWorkflow = () =>
+          agent.extMethod('qwen/permissions/setRules', {
+            scope: 'user',
+            ruleType: 'deny',
+            rules: ['Workflow'],
+          });
+
+        await expect(denyWorkflow()).resolves.toMatchObject({
+          liveSyncIncomplete: true,
+          user: { rules: { deny: ['Workflow'] } },
+        });
+        await expect(denyWorkflow()).resolves.not.toHaveProperty(
+          'liveSyncIncomplete',
+        );
+        expect(addPersistentRule).toHaveBeenCalledExactlyOnceWith(
+          'Workflow',
+          'deny',
+        );
+        expect(reconcile.mock.calls).toEqual([[true], [undefined]]);
+        expect(sendCommands).toHaveBeenCalledTimes(
+          failure === 'commands' ? 2 : 1,
+        );
+
+        await denyWorkflow();
+        expect(reconcile).toHaveBeenCalledTimes(2);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it.each([
     [SettingScope.User, SettingScope.Workspace, 'user', 'workspace'],

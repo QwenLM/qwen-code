@@ -11310,7 +11310,8 @@ export class Config {
     await this.reconcileWorkflowToolAvailability(wasEnabled);
   }
 
-  async reconcileWorkflowToolAvailability(wasEnabled: boolean): Promise<void> {
+  /** Omit the previous state to retry a refresh after a partial failure. */
+  async reconcileWorkflowToolAvailability(wasEnabled?: boolean): Promise<void> {
     this.refreshWorkflowMode();
     const isEnabled = this.isWorkflowsEnabled();
     if (!this.initialized || wasEnabled === isEnabled) return;

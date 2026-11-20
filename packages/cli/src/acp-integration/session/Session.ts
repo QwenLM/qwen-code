@@ -15576,7 +15576,7 @@ export class Session implements SessionContext {
     );
   }
 
-  private sendAvailableCommandsUpdateOrThrow(
+  sendAvailableCommandsUpdateOrThrow(
     readWorkflowStatus?: () => Promise<WorkflowCommandsStatus>,
   ): Promise<void> {
     const pending = this.availableCommandsUpdateTail.then(async () => {

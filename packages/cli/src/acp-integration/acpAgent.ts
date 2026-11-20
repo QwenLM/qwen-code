@@ -3991,6 +3991,10 @@ class QwenAgent implements Agent {
     Session,
     Partial<Record<SettingScope, PermissionRuleSet>>
   >();
+  private readonly pendingPermissionWorkflowRefresh = new WeakMap<
+    Session,
+    { wasEnabled: boolean | undefined }
+  >();
   /**
    * Cross-session messaging for every session this process hosts.
    *
@@ -7911,8 +7915,10 @@ class QwenAgent implements Agent {
     requestSettings: LoadedSettings,
     strict = false,
   ): Promise<boolean> {
-    const workflowChanges: Array<{ session: Session; wasEnabled: boolean }> =
-      [];
+    const workflowChanges: Array<{
+      session: Session;
+      refresh: { wasEnabled: boolean | undefined };
+    }> = [];
     const errors: unknown[] = [];
     const otherScope =
       settingScope === SettingScope.User
@@ -7985,6 +7991,10 @@ class QwenAgent implements Agent {
       applied[settingScope] = next;
       this.appliedPermissionRules.set(session, applied);
 
+      let workflowRefresh: { wasEnabled: boolean | undefined } | undefined =
+        this.pendingPermissionWorkflowRefresh.has(session)
+          ? { wasEnabled: undefined }
+          : undefined;
       for (const ruleType of PERMISSION_RULE_TYPES) {
         const oldRules = new Set(before[ruleType]);
         const newRules = new Set(after[ruleType]);
@@ -8045,10 +8055,11 @@ class QwenAgent implements Agent {
             ...pendingRemovals,
           ];
           if (
+            !workflowRefresh &&
             ruleType === 'deny' &&
             workflowsWereEnabled !== config.isWorkflowsEnabled()
           ) {
-            workflowChanges.push({ session, wasEnabled: workflowsWereEnabled });
+            workflowRefresh = { wasEnabled: workflowsWereEnabled };
           }
         } catch (error) {
           debugLogger.warn(
@@ -8059,15 +8070,22 @@ class QwenAgent implements Agent {
           errors.push(error);
         }
       }
+      if (workflowRefresh) {
+        this.pendingPermissionWorkflowRefresh.set(session, workflowRefresh);
+        workflowChanges.push({ session, refresh: workflowRefresh });
+      }
     }
     await Promise.all(
-      workflowChanges.map(async ({ session, wasEnabled }) => {
+      workflowChanges.map(async ({ session, refresh }) => {
         try {
           this.cancelDisabledWorkflowRuns(session);
           await session
             .getConfig()
-            .reconcileWorkflowToolAvailability(wasEnabled);
-          await this.refreshWorkflowCommands(session);
+            .reconcileWorkflowToolAvailability(refresh.wasEnabled);
+          await this.refreshWorkflowCommands(session, true);
+          if (this.pendingPermissionWorkflowRefresh.get(session) === refresh) {
+            this.pendingPermissionWorkflowRefresh.delete(session);
+          }
         } catch (error) {
           debugLogger.warn(
             'Failed to reconcile the live Workflow tool:',
@@ -8102,15 +8120,16 @@ class QwenAgent implements Agent {
     }
   }
 
-  private async refreshWorkflowCommands(session: Session): Promise<void> {
-    try {
-      await session.sendAvailableCommandsUpdate(() =>
-        this.buildWorkflowCommandsStatus(session.getConfig()),
-      );
-    } catch (err) {
-      debugLogger.warn(
-        `sendAvailableCommandsUpdate failed for session ${session.getId()}: ${err}`,
-      );
+  private async refreshWorkflowCommands(
+    session: Session,
+    strict = false,
+  ): Promise<void> {
+    const readStatus = () =>
+      this.buildWorkflowCommandsStatus(session.getConfig());
+    if (strict) {
+      await session.sendAvailableCommandsUpdateOrThrow(readStatus);
+    } else {
+      await session.sendAvailableCommandsUpdate(readStatus);
     }
   }
 
