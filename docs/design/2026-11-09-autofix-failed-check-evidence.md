@@ -136,11 +136,16 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    run of selected lines: the selected windows need not be adjacent in the log,
    and joining them all would let the private-key rule pair a BEGIN in one
    window with an END in another and delete every selected line between them —
-   including the failure the excerpt was fetched for. A real multi-line key
-   lives inside one window, so grouping keeps that repair while a synthetic
-   cross-window pair cannot form. Every difference from the first pass is
-   forced by the strip deleting characters that rules use as separators or
-   terminators. The `\b` anchors are dropped: a control byte INSIDE a credential
+   including the failure the excerpt was fetched for. Grouping keeps the
+   private-key repair only when the WHOLE BEGIN…END span falls inside one
+   selected window; a synthetic cross-window pair cannot form. A realistic
+   2048-bit RSA PEM is 27–29 lines, longer than the selection window (at most
+   24 lines around a match, plus the last 20), so a control-split key that long
+   loses its BEGIN label, the group starts mid-key, and the body ships
+   unredacted — the merge base ships the same body, so this is a window limit,
+   not a regression (recorded in Costs below). Every difference from the first
+   pass is forced by the strip deleting characters that rules use as separators
+   or terminators. The `\b` anchors are dropped: a control byte INSIDE a credential
    (`npm_\rABC…`) defeats every anchor on the first pass, and the same strip can
    weld a word character onto the token's front (`x\rnpm_…` becomes `xnpm_…`),
    leaving `\b` nothing to match. Over-redaction is the safe direction for a
@@ -165,12 +170,17 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    passes, so the welded value stays unredacted, and an empty-value header
    (`Cookie:` then CR) already loses the next line in the first pass, in base
    too; the `TOKEN`/`KEY`/… rule is quadratic on a long word run in base (about a
-   second at 40k characters); the repair pass clamps its input to the shipped
-   300-character width so it does not add a second copy of that cost, leaving
-   only the first pass's base cost on an adversarial long line (a control-split
-   token straddling column 300 can be cut below its rule's minimum length and
-   ship a short prefix fragment, but never the whole token — the fragment is
-   below the usable length, so this is not a credential leak); a value cannot
+   second at 40k characters); the repair pass clamps its input to 300
+   PRE-strip characters (the shipped 300-character slice is applied post-strip)
+   so it does not add a second copy of that cost, leaving only the first pass's
+   base cost on an adversarial long line. The clamp is NOT a no-leak guarantee:
+   a value that is itself cut can only ship a sub-minimum fragment, but a
+   credential whose TERMINATOR (the `-----END …-----` label, the URL `@`) falls
+   past the cut never matches its rule and ships its COMPLETE value in clear —
+   the strip welds it contiguous where the merge base shipped it split by the
+   control. A repair can also lengthen a line, so a near-300-character line can
+   lose its tail to the final slice, including a trailing `##[error]` marker.
+   These are recorded as limits, not closed; a value cannot
    tell a weld INSIDE the credential from a weld BEFORE following word-like
    text, so a bare failure keyword (no `##[error]`) welded onto a value is still
    consumed (the message tail survives); and a `##[error]` inside a BEGIN…END
@@ -312,9 +322,12 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   paragraph above — notably any split by a character OUTSIDE the strip class
   (the broader Unicode whitespace/format families such as NBSP, U+2000–U+200A,
   U+3000, zero-width and tab, not just the ones named there), a bare failure
-  keyword welded onto a value, and a split header keyword. That list is
-  illustrative, not closed: this criterion does not claim to cover splits the
-  strip class does not remove.
+  keyword welded onto a value, a split header keyword, a credential whose
+  terminator falls past the 300-character repair clamp (its complete value
+  ships), and a control-split key longer than the selection window (its body
+  ships). That list is illustrative, not closed: this criterion does not claim
+  to cover splits the strip class does not remove, nor shapes the clamp or the
+  selection window cut off.
 - A NON-EMPTY whitespace-bounded credential value terminated by a bare CR
   leaves the failure line that follows it in the excerpt, and a control that
   splits the credential keyword does not consume the `##[error]` marker. An
