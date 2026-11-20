@@ -27,7 +27,10 @@ import {
   type DaemonPromptSettlement,
 } from './chat-controller.js';
 import { DAEMON_CHAT_CAPABILITY_MAP } from './chat-capabilities.js';
-import { derivePermissionSignals } from './permission-signals.js';
+import {
+  derivePermissionSignals,
+  questionSubmitOptionId,
+} from './permission-signals.js';
 
 interface LiveFacts {
   messages: SessionChatController['messages'];
@@ -106,6 +109,9 @@ export function useDaemonChatController(): SessionChatController {
 
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
+
+  const pendingPermissionsRef = useRef(pendingPermissions);
+  pendingPermissionsRef.current = pendingPermissions;
 
   const promptListenerRef = useRef<
     ((e: DaemonPromptSettlement) => void) | undefined
@@ -191,6 +197,15 @@ export function useDaemonChatController(): SessionChatController {
           }
         },
         async submitQuestionAnswers(requestId, answers) {
+          // A question is answered by voting its submit (allow_once) option with
+          // the answers attached — the same wire shape AskUserQuestion uses.
+          // Voting with no optionId sends a 'cancelled' outcome, which discards
+          // the answers and cancels the question, so require the submit option.
+          const submitOptionId = questionSubmitOptionId(
+            pendingPermissionsRef.current,
+            requestId,
+          );
+          if (!submitOptionId) return 'rejected';
           answeredRef.current.add(requestId);
           const record: Record<string, string> = {};
           for (const answer of answers)
@@ -198,7 +213,7 @@ export function useDaemonChatController(): SessionChatController {
           try {
             const applied = await actionsRef.current.submitPermission(
               requestId,
-              undefined,
+              submitOptionId,
               record,
             );
             if (!applied) answeredRef.current.delete(requestId);

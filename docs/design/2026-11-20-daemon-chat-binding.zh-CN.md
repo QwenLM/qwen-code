@@ -25,6 +25,10 @@ provider 即可测试的组装。本切片落地**绑定 hook** `useDaemonChatCo
   `actions.submitPrompt` 并转发 daemon 的 `onAdmitted` prompt id；`cancelPrompt`、
   `submitPermission`、`submitQuestionAnswers` 包装对应动作并把结果映射为 admission
   （`accepted`/`rejected`/抛错时 `unknown`）。被拒的应答不再跟踪，故不会播种决策信号。
+  问题应答应投票该请求的提交（`allow_once`）选项并附带答案——与
+  `AskUserQuestion.handleSubmit` 相同的 wire 形状，由 `questionSubmitOptionId`
+  查找；不带 optionId 投票会发出 `cancelled` 结果，丢弃答案并取消问题，故缺失提交
+  选项时是 `rejected` admission，而非取消投票。
 - **prompt 结算**由 `useDaemonPromptSettled`（终态 `turn_complete`/`turn_error`/
   cancelled 事件）桥接到控制器的 `subscribePromptSettlement`，按 `promptId` 键控。
 - **approval 时效与决策结算是派生的**，因为 provider 没有显式通道。纯助手

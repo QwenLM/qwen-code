@@ -1,4 +1,29 @@
+import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import { extractPendingPermission } from '../adapters/transcriptAdapter.js';
 import type { DaemonDecisionSettlement } from './chat-controller.js';
+
+/**
+ * The option id a question answer must vote to be applied. A question is
+ * answered by selecting its submit (`allow_once`) option with the answers
+ * attached — the same wire shape `AskUserQuestion.handleSubmit` uses. Voting
+ * with no option id sends a `cancelled` outcome, which discards the answers and
+ * cancels the question, so the submit option is required. Returns undefined when
+ * the request is not pending or has no submit option.
+ */
+export function questionSubmitOptionId(
+  pendingPermissions: ReadonlyArray<
+    Extract<DaemonTranscriptBlock, { kind: 'permission' }>
+  >,
+  requestId: string,
+): string | undefined {
+  const permission = pendingPermissions.find(
+    (candidate) => candidate.requestId === requestId,
+  );
+  if (!permission) return undefined;
+  return extractPendingPermission([permission])?.options.find(
+    (option) => option.kind === 'allow_once',
+  )?.id;
+}
 
 /**
  * The permission-derived signals the daemon controller needs but the provider

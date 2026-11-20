@@ -31,7 +31,12 @@ gate) are the next increment.
   `cancelPrompt`, `submitPermission`, and `submitQuestionAnswers` wrap the
   corresponding actions and map their result to an admission (`accepted` /
   `rejected` / `unknown` on a thrown transport). A rejected answer is untracked so
-  it cannot seed a decision signal.
+  it cannot seed a decision signal. A question answer must vote the request's
+  submit (`allow_once`) option with the answers attached — the same wire shape
+  `AskUserQuestion.handleSubmit` uses, looked up by `questionSubmitOptionId`;
+  voting with no option id would send a `cancelled` outcome, which discards the
+  answers and cancels the question, so a missing submit option is a `rejected`
+  admission rather than a cancel vote.
 - **Prompt settlement** is bridged from `useDaemonPromptSettled` (the terminal
   `turn_complete` / `turn_error` / cancelled event) to the controller's
   `subscribePromptSettlement`, keyed by `promptId`.
