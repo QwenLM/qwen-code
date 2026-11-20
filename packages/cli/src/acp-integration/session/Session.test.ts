@@ -1801,7 +1801,7 @@ describe('Session', () => {
       session.beginClose();
       vi.mocked(mockChatRecordingService.recordNotification).mockClear();
 
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       const landedBefore = vi.mocked(
         mockChatRecordingService.recordNotification,
       ).mock.calls.length;
@@ -1922,7 +1922,7 @@ describe('Session', () => {
         .fn()
         .mockResolvedValue(createEmptyStream());
       const releaseClose = session.beginClose();
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       vi.mocked(
         mockChatRecordingService.recordBackgroundTaskCompleted,
       ).mockClear();
@@ -1988,7 +1988,7 @@ describe('Session', () => {
       });
       const releaseClose = session.beginClose();
       vi.mocked(mockChatRecordingService.recordNotification).mockClear();
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledTimes(
         1,
       );
@@ -2022,7 +2022,7 @@ describe('Session', () => {
         .mockResolvedValue(createEmptyStream());
       const releaseClose = session.beginClose();
       vi.mocked(mockChatRecordingService.recordNotification).mockClear();
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       manager.leaderCallback?.(
         'report inside the window',
         'report inside the window',
@@ -2054,7 +2054,7 @@ describe('Session', () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       vi.mocked(
         mockChatRecordingService.recordBackgroundTaskCompleted,
       ).mockClear();
@@ -2299,7 +2299,7 @@ describe('Session', () => {
       session.dispose();
     });
 
-    it('lands a rejected peer report when every queued notification is protected', () => {
+    it('lands a rejected peer report when every queued notification is protected', async () => {
       const manager = makeFakeTeamManager();
       session.dispose();
       vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
@@ -2351,7 +2351,7 @@ describe('Session', () => {
         expect.objectContaining({ kind: 'peer', status: 'message' }),
       );
       expect(internals.droppedNotifications.take()?.status).toBe('recorded');
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       session.dispose();
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledTimes(
         1,
@@ -2392,7 +2392,7 @@ describe('Session', () => {
 
       // The stored-session close path runs this before `recorder.finalize()`,
       // the last point where the write is both accepted and then flushed.
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
         [
           {
@@ -2425,7 +2425,7 @@ describe('Session', () => {
 
       // Landing marks the report durable, so neither a second flush nor the
       // `dispose()` fallback writes the same report twice.
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       session.dispose();
       expect(
         vi.mocked(mockChatRecordingService.recordNotification),

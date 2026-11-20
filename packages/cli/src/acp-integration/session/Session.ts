@@ -5521,6 +5521,12 @@ export class Session implements SessionContext {
       // irreversible managed-shutdown path never runs this closure, so its
       // seal holds, and `disposed` returns above keep the terminal one.
       this.peerNotificationsSealed = false;
+      // The flush stopped leader-inbox intake before sealing; a rolled-back
+      // close makes the session live again, and `ensureLeaderInboxPolling`
+      // otherwise runs only when a teammate is spawned. Without this the
+      // session stays deaf for the rest of its life to reports that are
+      // already marked read in the mailbox.
+      this.config.getTeamManager()?.resumeLeaderInboxPolling?.();
       // The close was rolled back after a pre-close flush: those reports are
       // about to be delivered warm, so their persisted mark must not suppress
       // the warm record (R2-21). A cold copy alone describes a report the
@@ -5633,7 +5639,23 @@ export class Session implements SessionContext {
     items: readonly QueuedBackgroundNotification[] = this.notificationQueue,
   ): void {
     const recording = this.config.getChatRecordingService();
-    if (!recording) return;
+    if (!recording) {
+      // A hidden-workspace session has no recording service, so a report in
+      // this queue is already read on disk and can never be persisted here.
+      // Returning silently would erase the last trace of it, so record the
+      // drop the same way the overflow path does: the warning for the log and
+      // the tally for the leader's next turn. The tally goes through
+      // `toAdmissibleNotification` so the noun still follows the producer
+      // (`teammate report`, not `cross-session message`).
+      for (const item of items) {
+        if (item.kind !== 'peer' || item.persisted) continue;
+        debugLogger.warn(
+          `Peer report lost: no recording service available for task=${item.taskId}`,
+        );
+        this.droppedNotifications.record(toAdmissibleNotification(item));
+      }
+      return;
+    }
     for (const item of items) {
       if (item.kind !== 'peer' || item.persisted) continue;
       // Only cold copies get the task envelope: recovery trims these because
@@ -5663,10 +5685,21 @@ export class Session implements SessionContext {
 
   /**
    * Pre-close hook for {@link #landUndrainedPeerNotifications}. The
-   * stored-session close sequence calls this before the recorder is finalized,
-   * which is the last point where the write is both accepted and then flushed.
+   * stored-session close sequence awaits this before the recorder is
+   * finalized, which is the last point where the write is both accepted and
+   * then flushed.
+   *
+   * Intake stops before the seal: the leader-inbox poll marks a mailbox row
+   * read as it consumes it, and `notificationQueue` is the report's only
+   * carrier after that, so a report consumed past the seal would be read on
+   * disk, landed into a writer that no longer accepts records, and lost.
+   * `quiesceLeaderInbox` stops the interval, waits out a poll already in
+   * flight and drains once more, so everything a teammate wrote before the
+   * close is queued here and landed by the loop below. A report written after
+   * the quiesce lands through the sealed-window cold copy instead.
    */
-  flushPendingPeerNotifications(): void {
+  async flushPendingPeerNotifications(): Promise<void> {
+    await this.config.getTeamManager()?.quiesceLeaderInbox?.();
     this.peerNotificationsSealed = true;
     // Remember what this flush lands: the mark is cleared if the close is
     // rolled back and the report is delivered warm afterwards (R2-21).
