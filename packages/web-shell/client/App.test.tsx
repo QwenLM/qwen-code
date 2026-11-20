@@ -31239,6 +31239,12 @@ describe('App session callbacks', () => {
   it('names a new session from a short first prompt', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.displayName = undefined;
+    const titleWrite = deferred<{ displayName: string }>();
+    const updateMetadata = vi.fn(() => titleWrite.promise);
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'session-1',
+      updateMetadata,
+    });
     renderApp();
     await flush();
 
@@ -31249,22 +31255,10 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
     });
 
-    expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
-      '修复登录按钮在移动端错位',
-    );
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      mockSessionActions.attachSession.mock.invocationCallOrder[0],
-    );
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(mockSessionActions.sendPrompt.mock.invocationCallOrder[0]);
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      sessionCatalogController.sessionCreated.mock.invocationCallOrder[0],
-    );
+    expect(updateMetadata).toHaveBeenCalledExactlyOnceWith({
+      initialDisplayName: '修复登录按钮在移动端错位',
+    });
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
     expect(
       sessionCatalogController.setPendingSessionTitle,
     ).toHaveBeenCalledWith(
@@ -31275,14 +31269,9 @@ describe('App session callbacks', () => {
     expect(
       sessionCatalogController.setPendingSessionTitle.mock
         .invocationCallOrder[0],
-    ).toBeLessThan(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    );
-    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
-      '/workspace',
-      'session-1',
-      '修复登录按钮在移动端错位',
-    );
+    ).toBeLessThan(updateMetadata.mock.invocationCallOrder[0]);
+    await act(async () => titleWrite.resolve({ displayName: '已手动改名' }));
+    expect(sessionCatalogController.renamed).not.toHaveBeenCalled();
   });
 
   it('leaves a long first prompt to the automatic session title', async () => {
@@ -31380,7 +31369,7 @@ describe('App session callbacks', () => {
     );
     // Naming goes through the created client, not the current-session action.
     expect(detachedClient.updateMetadata).toHaveBeenCalledWith({
-      displayName: 'run while I am away',
+      initialDisplayName: 'run while I am away',
     });
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });

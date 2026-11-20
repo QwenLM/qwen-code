@@ -15,6 +15,7 @@ import express from 'express';
 import { createServeApp } from './server.js';
 import { getServeAppLifecycle } from './serve-app-lifecycle.js';
 import {
+  forwardManagedTerminalUpgrade,
   signedManagedHeaders,
   mountManagedLocalWeb,
 } from './managed-local-web.js';
@@ -184,6 +185,28 @@ describe('Managed local front door', () => {
     expect(capabilities).toHaveProperty('workspaces');
     expect(capabilities).toHaveProperty('features');
     expect(calls).toHaveLength(0);
+  });
+
+  it('refuses an ACP-disabled configuration instead of advertising an unreachable terminal', () => {
+    vi.stubEnv('QWEN_SERVE_ACP_HTTP', '0');
+    try {
+      expect(() =>
+        createServeApp(
+          {
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            port: 0,
+            workspace: directory,
+            token: 'browser-token',
+            requireAuth: true,
+          },
+          () => 0,
+          { webShellDir: directory, managedLocalWeb: options() },
+        ),
+      ).toThrow(/requires the ACP WebSocket dispatcher/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('preserves exact raw bytes and query while replacing browser identity and private headers', async () => {
@@ -358,6 +381,71 @@ describe('Managed local front door', () => {
     controller.abort();
     await reader.cancel().catch(() => undefined);
     await vi.waitFor(() => expect(disconnected).toBe(true));
+  });
+
+  it('closes repeated keep-alive 401 responses without leaking upstream listeners', async () => {
+    handler = (_request, response) => {
+      response.setHeader('Connection', 'keep-alive');
+      response.setHeader('Content-Length', '0');
+      response.writeHead(401);
+      response.end();
+    };
+    const tracked = new Set<import('node:stream').Duplex>();
+    const front = createServer();
+    front.on('upgrade', (request, socket, head) =>
+      forwardManagedTerminalUpgrade(
+        new URL(javaUrl),
+        request,
+        socket,
+        head,
+        tracked,
+      ),
+    );
+    await new Promise<void>((resolve) => front.listen(0, '127.0.0.1', resolve));
+    const address = front.address();
+    if (!address || typeof address === 'string')
+      throw new Error('missing front port');
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => {
+      if (warning.name === 'MaxListenersExceededWarning')
+        warnings.push(warning.message);
+    };
+    process.on('warning', onWarning);
+    try {
+      for (let index = 0; index < 12; index++) {
+        const status = await new Promise<number>((resolve, reject) => {
+          const upgrade = httpRequest(
+            `http://127.0.0.1:${address.port}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=ticket-${index}`,
+            {
+              headers: {
+                Connection: 'Upgrade',
+                Upgrade: 'websocket',
+                'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+                'Sec-WebSocket-Version': '13',
+                'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.invalid-ticket',
+              },
+            },
+          );
+          upgrade.on('upgrade', () =>
+            reject(new Error('rejected ticket was upgraded')),
+          );
+          upgrade.on('response', (response) => {
+            response.resume();
+            resolve(response.statusCode ?? 0);
+          });
+          upgrade.on('error', reject);
+          upgrade.end();
+        });
+        expect(status).toBe(401);
+      }
+      await vi.waitFor(() => expect(tracked.size).toBe(0));
+      expect(warnings).toEqual([]);
+    } finally {
+      process.off('warning', onWarning);
+      front.closeAllConnections();
+      for (const socket of tracked) socket.destroy();
+      await new Promise<void>((resolve) => front.close(() => resolve()));
+    }
   });
 
   it('refuses non-loopback Java targets', () => {
