@@ -53,6 +53,8 @@ export type ModelGenerationConfig = Pick<
   | 'retryInitialDelayMs'
   | 'retryMaxDelayMs'
   | 'retryErrorCodes'
+  | 'maxOutputValidationRetries'
+  | 'outputValidationRetryDisabled'
   | 'enableCacheControl'
   | 'enableRequestMetadata'
   | 'forceGlobalCacheScope'

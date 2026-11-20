@@ -112,6 +112,23 @@ export type ContentGeneratorConfig = {
   retryInitialDelayMs?: number; // Initial delay for stream rate-limit retries
   retryMaxDelayMs?: number; // Maximum delay for stream rate-limit retries
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
+  /**
+   * Overrides the model-output validation retry budget (`INVALID_STREAM_RETRY_CONFIG.transientMaxRetries`)
+   * when set to a positive integer. `undefined` or a non-positive value means
+   * "use the built-in default". The model-output validation retry retries
+   * recoverable, transient failures — the model occasionally produces output
+   * that does not match the expected format (a protocol-tag leak, malformed
+   * tool call, etc.) — without consuming HTTP-retry or rate-limit budgets.
+   */
+  maxOutputValidationRetries?: number;
+  /**
+   * Opt out of the model-output validation retry entirely. When `true`, an
+   * {@link InvalidStreamError} is surfaced to the caller instead of being
+   * retried. Default: `false` — the retry stays ON so an unattended YOLO run
+   * recovers automatically (backoff 2s, 4s, 8s, …) rather than stalling on
+   * manual recovery.
+   */
+  outputValidationRetryDisabled?: boolean;
   enableCacheControl?: boolean; // Enable provider prompt-cache controls
   /**
    * Whether to send DashScope's request-body `metadata` object (sessionId /
