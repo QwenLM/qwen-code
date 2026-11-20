@@ -111,8 +111,12 @@ class ExternalWorkspaceRetirementServiceTest {
                 Instant.now(), "audit-original", "a".repeat(64));
     }
 
-    @Test
-    void preservesActiveSessionsAndMakesRetirementReplayIndependentOfNextGeneration() {
+    @ParameterizedTest
+    @ValueSource(strings = {"RECOVERY_BLOCKED", "LOST"})
+    void preservesActiveSessionsAndMakesRetirementReplayIndependentOfNextGeneration(String state) {
+        if ("LOST".equals(state)) {
+            makeLost();
+        }
         var first = service.retire(request, this::terminated);
         assertThat(first.resumed()).isFalse();
         assertThat(first.state()).isEqualTo("RELEASED");
@@ -129,12 +133,24 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThat(bindings.findActive(placement).getBindingId()).isEqualTo(next.getBindingId());
     }
 
-    @Test
-    void readyHistoryWithSettledToolReleasedSessionAndExactHolderRetiresOnce() {
+    @ParameterizedTest
+    @ValueSource(strings = {"READY", "LOST"})
+    void terminalWorkerWithSettledToolReleasedSessionAndExactHolderRetiresOnce(String state) {
         var observations = new AtomicInteger();
         makeReady();
         var runtime = claimExactHolder(runtimeSession(RuntimeSessionRecord.State.READY));
         settleTool(runtime);
+        if ("LOST".equals(state)) {
+            makeLost();
+            assertThat(original.getResourceHandle().getVersion()).isEqualTo(1);
+            assertThat(original.getAttestationGeneration()).isEqualTo(1);
+            assertThat(original.getLossEvidence()).isNull();
+            assertThat(original.getStopEvidence()).isNull();
+            assertThatThrownBy(() -> original.requireSafeReplacement(original.withState(
+                    RuntimeBindingRecord.State.RELEASED, original.getLease(), Instant.now())))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("Lost binding requires atomic recovery");
+        }
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         assertThat(owner.get("holder_key")).isNotNull();
         assertThat(owner.get("binding_id")).isEqualTo(original.getBindingId());
@@ -181,11 +197,15 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThat(observations).hasValue(1);
     }
 
-    @Test
-    void nonterminalToolPreventsEveryRetirementWrite() {
+    @ParameterizedTest
+    @ValueSource(strings = {"READY", "LOST"})
+    void nonterminalToolPreventsEveryRetirementWrite(String state) {
         makeReady();
         var runtime = claimExactHolder(runtimeSession(RuntimeSessionRecord.State.READY));
         var prepared = executions.findOrCreate(preparedTool(runtime));
+        if ("LOST".equals(state)) {
+            makeLost();
+        }
         var before = durableState();
         var observations = new AtomicInteger();
 
@@ -203,8 +223,9 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThat(observations).hasValue(1);
     }
 
-    @Test
-    void nonterminalRuntimeSessionPreventsEveryRetirementWrite() {
+    @ParameterizedTest
+    @ValueSource(strings = {"READY", "LOST"})
+    void nonterminalRuntimeSessionPreventsEveryRetirementWrite(String state) {
         makeReady();
         claimExactHolder(runtimeSession(RuntimeSessionRecord.State.READY));
         var active = sessions.findOrCreate(new RuntimeSessionRecord(new RuntimeSession(
@@ -214,6 +235,9 @@ class ExternalWorkspaceRetirementServiceTest {
         active = sessions.compareAndSet(active, active.withState(
                 RuntimeSessionRecord.State.READY, Instant.now()));
         var activeId = active.getRuntimeSessionId();
+        if ("LOST".equals(state)) {
+            makeLost();
+        }
         var before = durableState();
 
         assertThatThrownBy(() -> service.retire(request, this::terminated))
@@ -227,12 +251,37 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThat(service.inspect(request)).isNull();
     }
 
-    @Test
-    void holderForACompetingBindingIsNeitherClearedNorRetired() {
+    @ParameterizedTest
+    @ValueSource(strings = {"READY", "LOST"})
+    void holderForACompetingBindingIsNeitherClearedNorRetired(String state) {
         makeReady();
         claimExactHolder(runtimeSession(RuntimeSessionRecord.State.READY));
         jdbc.update("UPDATE ma_storage_owner SET binding_id = ?, runtime_generation = ?",
                 "competing-binding", original.getGeneration());
+        if ("LOST".equals(state)) {
+            makeLost();
+        }
+        var before = durableState();
+
+        assertThatThrownBy(() -> service.retire(request, this::terminated))
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("statusCode", 409)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
+
+        assertThat(durableState()).isEqualTo(before);
+        assertThat(service.inspect(request)).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"READY", "LOST"})
+    void maintenanceHolderPreventsEveryRetirementWrite(String state) {
+        makeReady();
+        claimExactHolder(runtimeSession(RuntimeSessionRecord.State.READY));
+        jdbc.update("UPDATE ma_storage_owner SET maintenance_id = ?, maintenance_generation = ?",
+                "a".repeat(32), 1);
+        if ("LOST".equals(state)) {
+            makeLost();
+        }
         var before = durableState();
 
         assertThatThrownBy(() -> service.retire(request, this::terminated))
@@ -245,20 +294,46 @@ class ExternalWorkspaceRetirementServiceTest {
     }
 
     @Test
-    void maintenanceHolderPreventsEveryRetirementWrite() {
+    void lostWithoutTerminationProofCannotRetire() {
         makeReady();
-        claimExactHolder(runtimeSession(RuntimeSessionRecord.State.READY));
-        jdbc.update("UPDATE ma_storage_owner SET maintenance_id = ?, maintenance_generation = ?",
-                "a".repeat(32), 1);
+        makeLost();
         var before = durableState();
 
-        assertThatThrownBy(() -> service.retire(request, this::terminated))
+        assertThatThrownBy(() -> service.retire(request, identity ->
+                new ExternalWorkspaceRetirementService.TerminationProof(identity, "sandbox-original", "Running",
+                        Instant.now(), "audit-original", "a".repeat(64))))
                 .isInstanceOf(RuntimeBrokerException.class)
-                .hasFieldOrPropertyWithValue("statusCode", 409)
                 .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
 
         assertThat(durableState()).isEqualTo(before);
         assertThat(service.inspect(request)).isNull();
+    }
+
+    @Test
+    void lostRetirementPrimitiveRejectsDurableStorage() {
+        makeReady();
+        makeLost();
+        jdbc.update("UPDATE ma_storage SET storage_kind = 'EXTERNAL'");
+        var before = durableState();
+        var transaction = new org.springframework.transaction.support.TransactionTemplate(
+                new DataSourceTransactionManager(jdbc.getDataSource()));
+
+        assertThatThrownBy(() -> transaction.execute(status -> jdbc.execute(
+                (org.springframework.jdbc.core.ConnectionCallback<RuntimeBindingRecord>) connection ->
+                        bindings.retireUnacquiredExternal(connection, original))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Lost external retirement requires ephemeral storage");
+
+        assertThat(durableState()).isEqualTo(before);
+        assertThat(service.inspect(request)).isNull();
+    }
+
+    private void makeLost() {
+        original = bindings.claimOperation(original.getBindingId(), "lost", Duration.ofMinutes(1));
+        original = bindings.compareAndSet(original, original.withState(
+                RuntimeBindingRecord.State.LOST, original.getLease(), Instant.now()));
+        original = bindings.releaseOperation(original.getBindingId(), "lost", original.getOperationGeneration());
+        request = requestForOriginal();
     }
 
     private void makeReady() {
