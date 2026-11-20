@@ -12,6 +12,14 @@ import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
 
 const SESSION_CREATED_CALLBACK_TIMEOUT_MS = 30_000;
 
+type CreatedPromptSession = {
+  sessionId: string;
+  worktree?: { slug: string; path: string; branch: string };
+  branch?: { name: string; baseBranch: string };
+  modelApplied?: boolean;
+  updateMetadata?: DaemonSessionClient['updateMetadata'];
+};
+
 type PromptSessionActions = {
   createSession: (options?: {
     workspaceCwd?: string;
@@ -27,12 +35,7 @@ type PromptSessionActions = {
     navigationOutcome?: { bound: boolean };
     sourceVersion?: number;
     getCurrentSourceVersion?: () => number;
-  }) => Promise<{
-    sessionId: string;
-    worktree?: { slug: string; path: string; branch: string };
-    branch?: { name: string; baseBranch: string };
-    modelApplied?: boolean;
-  }>;
+  }) => Promise<CreatedPromptSession>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
@@ -102,7 +105,7 @@ export async function createAndAttachSessionForPrompt({
   onSessionCreated?: (
     sessionId: string,
     detachedSession: DaemonSessionClient | undefined,
-    createdSession: DaemonSessionClient,
+    createdSession: CreatedPromptSession,
   ) => Promise<void> | void;
   onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
@@ -166,8 +169,9 @@ export async function createAndAttachSessionForPrompt({
   onSessionAllocated?.(sessionId);
   // The unbound keepOnNavigation path always returns the created session
   // client; the declared create result type only names its data fields.
-  const createdSession = created as unknown as DaemonSessionClient;
-  const detachedSession = navigationOutcome.bound ? undefined : createdSession;
+  const detachedSession = navigationOutcome.bound
+    ? undefined
+    : (created as unknown as DaemonSessionClient);
   let preparationStep = 'prepare new session';
   try {
     if (onSessionCreated) {
@@ -175,7 +179,7 @@ export async function createAndAttachSessionForPrompt({
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
-          onSessionCreated(sessionId, detachedSession, createdSession),
+          onSessionCreated(sessionId, detachedSession, created),
           new Promise<never>((_, reject) => {
             timeout = setTimeout(
               () => reject(new Error('onSessionCreated timed out')),

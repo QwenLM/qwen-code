@@ -81,7 +81,7 @@ async function setup(page: Page, baseURL: string | undefined) {
   };
 }
 
-test('submits the first prompt while the automatic title is held', async ({
+test('submits the first prompt while the automatic title is held @smoke', async ({
   page,
   baseURL,
 }) => {
@@ -108,7 +108,7 @@ test('submits the first prompt while the automatic title is held', async ({
   }
 });
 
-test('sends to the allocated session when switching away during creation', async ({
+test('sends to the allocated session when switching away during creation @smoke', async ({
   page,
   baseURL,
 }) => {
@@ -166,7 +166,7 @@ test('sends to the allocated session when switching away during creation', async
   }
 });
 
-test('keeps a manual rename when the delayed automatic title reaches the daemon', async ({
+test('keeps a manual rename when the delayed automatic title reaches the daemon @smoke', async ({
   page,
   baseURL,
 }) => {

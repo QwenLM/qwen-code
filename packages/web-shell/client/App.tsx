@@ -13093,7 +13093,7 @@ export function App({
                 } catch {
                   pendingManualTitleRef.current = undefined;
                 }
-              } else if (initialTitle) {
+              } else if (initialTitle && createdSession.updateMetadata) {
                 // The catalog already has a provisional title. Reconcile
                 // through daemon events and reads, since a manual rename can
                 // land while this request is still in flight.
