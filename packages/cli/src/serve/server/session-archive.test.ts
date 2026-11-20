@@ -2629,6 +2629,31 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     expect(warnings()).toContain('is still live');
   });
 
+  it('preserves the checkout when only the owner was archived and an older predecessor is live', async () => {
+    const ids = {
+      sessionId: '550e8400-e29b-41d4-a716-44665544a0ea',
+      middleId: '550e8400-e29b-41d4-a716-44665544a0eb',
+      firstId: '550e8400-e29b-41d4-a716-44665544a0ec',
+    };
+    const { service, worktreePath } = setupTwoResetChain(ids);
+    expect(await service.archiveSessions([ids.sessionId])).toMatchObject({
+      archived: [ids.sessionId],
+    });
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [ids.sessionId],
+      service,
+      bridge: cleanupBridge([ids.firstId]),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([ids.sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain(
+      `superseded session ${ids.firstId} is still live`,
+    );
+  });
+
   it('keeps a checkout while its direct predecessor is live behind older tombstones', async () => {
     const ids = {
       sessionId: '550e8400-e29b-41d4-a716-44665544a0d6',
@@ -2749,7 +2774,7 @@ describe('deleteDaemonSessions worktree cleanup', () => {
       expect(fs.existsSync(worktreePath)).toBe(live);
       if (live) {
         expect(warnings()).toContain(
-          `session ${activeId} naming the checkout is still live`,
+          `superseded session ${activeId} is still live`,
         );
       }
     },

@@ -4034,13 +4034,24 @@ export function createSessionControlPlane(
     if (owner) drainQuarantinedChannel(owner);
   }
 
+  function assertSessionAdmitsSideRequest(entry: SessionEntry): void {
+    if (isClosingOrAuthorizingClose(entry)) {
+      throw new SessionNotFoundError(
+        entry.sessionId,
+        'The session is closing; retry after close completes',
+        'session_closing',
+      );
+    }
+    assertChannelAdmitsPrompts(entry);
+  }
+
   /**
    * Admit a request for a Session that is not a turn but still starts work in
    * the child, the way a prompt is admitted, and count it until it answers so
    * idle cleanup and quarantine drains do not close the Session under it.
    */
   function beginSideRequest(entry: SessionEntry): () => void {
-    assertChannelAdmitsPrompts(entry);
+    assertSessionAdmitsSideRequest(entry);
     entry.sideRequestCount += 1;
     let ended = false;
     return () => {
@@ -16461,8 +16472,7 @@ export function createSessionControlPlane(
       const endSideRequest = beginSideRequest(entry);
       return entry.promptQueue.then(async () => {
         try {
-          // A quarantine that began while this waited still refuses it.
-          assertChannelAdmitsPrompts(entry);
+          assertSessionAdmitsSideRequest(entry);
           return await launchForkAgent();
         } finally {
           endSideRequest();
