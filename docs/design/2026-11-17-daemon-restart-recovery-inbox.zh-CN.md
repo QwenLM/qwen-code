@@ -2,8 +2,25 @@
 
 [English](2026-11-17-daemon-restart-recovery-inbox.md) | [简体中文](2026-11-17-daemon-restart-recovery-inbox.zh-CN.md)
 
-状态：本次改动已实现。包含只读扫描、两个恢复路由、daemon SDK 客户端方法、
-Web Shell 面板以及 REST 参考/协议条目。下文代码引用使用符号名，不使用行号。
+状态：已实现并合入
+[`b22dccd36d`](https://github.com/QwenLM/qwen-code/commit/b22dccd36d523b8699f4418ddda0208bbcf1b900)。
+包含只读扫描、两个恢复路由、daemon SDK 客户端方法、Web Shell 面板以及 REST
+参考/协议条目。下文代码引用使用符号名，不使用行号。
+
+## 合入与验证记录
+
+合并前及集成验证包括完整构建与类型检查、103 项恢复定向测试、1,525 项 serve
+server 测试、84 项 telemetry 测试、使用 loopback fake model 的真实 daemon
+探针，以及三个 Chromium DOM 工作流。[已发布的验证报告](https://github.com/QwenLM/qwen-code/pull/17677#issuecomment-7030887477)
+绑定了生产代码 head
+[`988dbcd182`](https://github.com/QwenLM/qwen-code/commit/988dbcd182073b0659203edeaaaeddb173e63b9f)。
+这些证据对应上述被测树，不表示所有 main CI 或平台 profile 均已通过。
+
+其余范围和归属决策由
+[#17939](https://github.com/QwenLM/qwen-code/issues/17939) 跟踪。macOS SIGKILL
+E2E 的间歇性失败另由
+[#17934](https://github.com/QwenLM/qwen-code/issues/17934)
+跟踪。该失败仍待独立调查，先前的测试通过不能证明其已修复。
 
 ## 问题与范围
 
