@@ -24,11 +24,17 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
+import { HostedMonitorSession } from './hosted-monitor-session.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import {
   MANAGED_SHELL_PUBLISHER_ROUTE,
   ManagedShellPublisherRegistry,
 } from './managed-shell-publisher.js';
+import type {
+  WorkerBackgroundCaptureSink} from './managed-background-delivery.js';
+import {
+  WorkerMonitorPolicy,
+} from './managed-background-delivery.js';
 
 let root: string | undefined;
 let session: ManagedSession | undefined;
@@ -114,11 +120,16 @@ async function rig() {
     { authority: session.authority, resources },
     key,
   );
+  const monitors = new HostedMonitorSession(
+    { authority: session.authority, resources },
+    key,
+  );
   publisher = new HostedShellPublisher(
     session,
     resources,
     async () => {},
     orchestrator,
+    monitors,
   );
   const descriptor = await publisher.start();
   publisher.register(
@@ -215,6 +226,7 @@ async function rig() {
   return {
     key,
     orchestrator,
+    monitors,
     registry,
     resources,
     request,
@@ -304,4 +316,105 @@ it('refuses a publisher registration from an older writer generation', async () 
   const refused = await r.install(3);
   expect(refused.status).toBe(409);
   expect((await r.install(5)).status).toBe(200);
+});
+
+it('worker monitor policy delivers an observation entry the applier commits once', async () => {
+  const r = await rig();
+  const monitorId = 'execution-mon';
+  await r.monitors.admit({
+    monitorId,
+    ownerScopeId: r.key.sessionId,
+    executionCallId: monitorId,
+    args: { command: 'tail -f log', description: 'watch log' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted(monitorId, {
+    runtimeBindingId: 'binding-a',
+    generation: '1',
+  });
+  await r.monitors.attach(
+    monitorId,
+    { runtimeBindingId: 'binding-a', generation: '1' },
+    { pid: 9 },
+  );
+  publisher!.register(
+    {
+      reference: {
+        sessionId: r.key.sessionId,
+        promptId: 'prompt-a',
+        callId: 'worker-call-mon',
+        argsDigest: `sha256:${'b'.repeat(64)}`,
+      },
+      capture: {
+        tenantId: r.key.tenantId,
+        sessionId: r.key.sessionId,
+        turnId: 'turn-a',
+        executionCallId: monitorId,
+        bindingGeneration: '1',
+        capturePolicy: 'complete_required',
+        background: true,
+        monitoring: true,
+      },
+    } as Parameters<HostedShellPublisher['register']>[0],
+    'model-call-mon',
+    'prompt-a',
+  );
+  const prepared = await r.registry.prepare({
+    reference: {
+      sessionId: r.key.sessionId,
+      promptId: 'prompt-a',
+      callId: 'worker-call-mon',
+      argsDigest: `sha256:${'b'.repeat(64)}`,
+    },
+    capture: {
+      tenantId: r.key.tenantId,
+      sessionId: r.key.sessionId,
+      turnId: 'turn-a',
+      executionCallId: monitorId,
+      bindingGeneration: '1',
+      capturePolicy: 'complete_required',
+      background: true,
+      monitoring: true,
+    },
+  } as Parameters<ManagedShellPublisherRegistry['prepare']>[0]);
+  const sink = prepared.sink as WorkerBackgroundCaptureSink;
+  sink.attachMonitorPolicy(
+    new WorkerMonitorPolicy(
+      sink,
+      sink.run,
+      {
+        monitorId,
+        executionCallId: monitorId,
+        description: 'watch log',
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1_000,
+        startSequence: 0,
+      },
+      async () => true,
+    ),
+  );
+  sink.setStarted(9);
+  await sink.write('stdout', Buffer.from('line1\nline2\n'));
+  await sink.finish('stdout', true);
+  await sink.finish('stderr', true);
+  sink.setProcessResult({
+    exitCode: 0,
+    signal: null,
+    rawOutput: Buffer.from('line1\nline2\n'),
+    output: 'line1\nline2\n',
+    error: null,
+    aborted: false,
+    pid: 9,
+    executionMethod: 'child_process',
+  });
+  const envelope = await sink.finalize('success', []);
+  await r.registry.accept(prepared.identity, envelope);
+  const record = r.monitors.record(monitorId)!;
+  expect(record.observationSequence).toBe(1);
+  expect(record.notifiedThrough).toBe(1);
+  expect(record.run.state).toBe('settled');
+  expect(record.stopReason).toBe('exited');
 });
