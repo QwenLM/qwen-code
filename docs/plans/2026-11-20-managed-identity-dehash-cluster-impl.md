@@ -6,7 +6,8 @@ Companion to the design: [design EN](../design/2026-11-20-managed-identity-varch
 Status: execution spec. Increment 1 (tenant guard) merged in #17927. This plan covers the
 remaining join-connected cluster, which must be converted atomically. Revision
 (2026-11-20): updated with the
-[duplicate business key survey](../design/2026-11-20-managed-identity-varchar-dehash.md#duplicate-business-keys).
+[duplicate business key survey](../design/2026-11-20-managed-identity-varchar-dehash.md#duplicate-business-keys)
+and its decisions.
 
 ## Why the cluster is atomic (no green sub-step)
 
@@ -90,10 +91,12 @@ the ripple plus the hash-drop/rebuild/cursor/generated/CHECK/meta-test work belo
    columns; rewrite the three CHECKs (`ck_ma_resource_capture`, `ck_ma_ref_binding`,
    `ck_ma_storage_registered`) over raw columns. Keep the registered-Session restriction
    explicit when joins move off the `ma_session` hash columns, and add raw `tenant_id` /
-   `session_id` to `ma_read_lease`. Do not drop `operation_key` until the SSH and child
-   workspace derivations are unified or `operation_id` is shown unique per tenant and kind,
-   and keep a unique key that preserves today's constraint. Do not drop `receipt_key` until
-   the design's open question on receipt-minted workspace and storage ids is decided.
+   `session_id` to `ma_read_lease`. Before dropping `operation_key`, add the generated
+   `tenant_operation_id` column with `UNIQUE (tenant_id, operation_kind, tenant_operation_id)`
+   for the tenant-addressed kinds and move their lookups to it (design decision 3). Keep
+   `ma_request_receipt.receipt_key` and its unique key as a minted identifier (decision 1).
+   Size `workspace_id` and `storage_id` as `VARBINARY(128)` and `VARBINARY(256)`; these
+   columns keep their byte binds (decision 2).
 2. **Cross-table references.** For each referencing table add the raw scope+resource columns it
    lacks (`tenant_id`, `workspace_id`, `session_id`, `resource_id` as applicable) and populate them
    on write; replace the hash reference column with those raw columns in joins/uniques. Where a
@@ -117,22 +120,23 @@ the ripple plus the hash-drop/rebuild/cursor/generated/CHECK/meta-test work belo
    boundary (tenant/actor ≤36, UUID/prefixed forms, external ≤512); align verification fixtures and
    dev defaults to the budgets (replace 43-char tenants and over-long `ws-<cwd>` workspace ids);
    keep multi-byte and trailing-space semantics tests; bind a real receipt-minted
-   `workspace_id` (74 characters) and `storage_id` (73 characters) and a 128-character
-   registration-chosen workspace id in regression tests.
+   `workspace_id` (74 characters) and `storage_id` (73 characters), a 128-character
+   registration-chosen workspace id and a 256-character storage id in regression tests.
 6. **Meta-tests.** Update schema-shape pins, catalog validation, and any surface fixture
    (`managed-surface.txt`) with the DDL; add per-key width assertion (<3072) and per-store
    cursor/lock-order equivalence tests (same rows, same order, no deadlock under concurrency).
 
 ## Budgets (index bytes = 4×chars, utf8mb4)
 
-| Class                                                                        | Budget         | Bytes |
-| ---------------------------------------------------------------------------- | -------------- | ----- |
-| tenant / actor (numeric ≤20 upstream)                                        | VARCHAR(36)    | 144   |
-| UUID-class ids                                                               | VARCHAR(64)    | 256   |
-| workspace_id, storage_id (contract allows 128 chars; receipt-minted 74 / 73) | VARCHAR(128)   | 512   |
-| external channel account/sender/chat/thread                                  | VARCHAR(512)   | 2048  |
-| canonical readable resource key (fallback)                                   | VARCHAR(256)   | 1024  |
-| binary payloads / OSS object keys                                            | keep VARBINARY | n/a   |
+| Class                                          | Budget         | Bytes |
+| ---------------------------------------------- | -------------- | ----- |
+| tenant / actor (numeric ≤20 upstream)          | VARCHAR(36)    | 144   |
+| UUID-class ids                                 | VARCHAR(64)    | 256   |
+| workspace_id (ASCII contract, up to 128 chars) | VARBINARY(128) | 128   |
+| storage_id (ASCII contract, up to 256 chars)   | VARBINARY(256) | 256   |
+| external channel account/sender/chat/thread    | VARCHAR(512)   | 2048  |
+| canonical readable resource key (fallback)     | VARCHAR(256)   | 1024  |
+| binary payloads / OSS object keys              | keep VARBINARY | n/a   |
 
 Guard exception (already landed): `ma_tenant_guard.tenant_id VARCHAR(96)` readable scope carries
 sentinels (`local-storage-host/<64-hex>` = 83 chars); PK `(tenant_id, guard_domain)`. A regression
@@ -159,5 +163,6 @@ test binds a real 64-hex host sentinel; `ManagedSchemaMySqlIT` pins the column w
   fixtures/dev aligned; full H2 + compile + double Checkstyle green; MySQL race + sqlperf evidence
   (local or CI).
 - Receipt-minted workspace and storage ids round-trip at their real length; joins moved off the
-  `ma_session` hash columns keep the registered-Session restriction; `operation_key`
-  uniqueness for SSH and child workspace operations is preserved.
+  `ma_session` hash columns keep the registered-Session restriction; tenant-addressed
+  operation uniqueness is preserved by the generated unique key (a retried SSH creation yields
+  one operation); `created-` / `imported-` roots still resolve through `receipt_key`.

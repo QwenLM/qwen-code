@@ -6,8 +6,8 @@
 
 - 状态：**提案**。本文不改动任何代码或 schema。实施需要各自的改动、基线复现与 MySQL 证据。
 - 修订（2026-11-20）：对"与同表另一唯一键重复的哈希键"做了后续调研，修正了 `workspace_id`
-  预算，并补充了回执、operation、Session 哈希列与 read lease 的约束
-  （见[重复业务键](#重复业务键)）。
+  预算，补充了回执、operation、Session 哈希列与 read lease 的约束，并对调研提出的三个
+  问题作出决定（见[重复业务键](#重复业务键)）。
 - 日期：2026-11-20。源码基线：`origin/main` 的 `7ef9d6decb`。分析在 `f10299764e` 上
   执行；其间 3 个提交不触及任何 `packages/managed-agent-server` 文件，共享 V1 schema
   与 `ManagedSchemaKeys` 在两者间逐字节相同（`git diff` 核实），故全部计数与宽度在
@@ -40,6 +40,7 @@
 目标：
 
 - 身份改存 `VARCHAR`，按类给预算（真实长度 + buffer），等值比较保持字节精确（NO PAD）。
+  契约只含 ASCII 的身份类也可保留按契约定长的字节类型（见[重复业务键](#重复业务键)下的决策 2）。
 - 移除身份哈希键层；协调、唯一性、跨表引用改键在原始身份列上。
 - 保留所有隔离、fencing、幂等、锁序、replay 不变量。
 
@@ -55,15 +56,15 @@
 
 ## 身份证据与预算
 
-| 身份                                                       | 实际形态 / 长度                                                        | 证据                                                                                                                        | 预算                       | 索引字节 |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | -------------------------- | -------- |
-| `tenant_id`、`actor_id`                                    | 数值型，≤20 位                                                         | 上游库表定义 `tenant_id bigint(20) unsigned`、`act_id` 同类（维护者提供，2026-11-20）；以十进制串经 `X-Qwen-Tenant-Id` 注入 | `VARCHAR(36)`              | 144      |
-| `session_id`                                               | UUID，36                                                               | 转录文件即 `<uuid>.jsonl`（`packages/core/src/services/sessionService.ts:1841`）                                            | `VARCHAR(64)`              | 256      |
-| `workspace_id`                                             | `workspace-` + 64 位十六进制 receipt key（创建回执元组的 SHA-256），74 | `WorkspaceCreationStore`（回执派生的 id）、`WorkspaceCreationRoots`                                                         | `VARCHAR(128)`（现行契约） | 512      |
-| `storage_id`（回执派生）                                   | `created-` / `imported-` + 同一个 64 位十六进制 receipt key，72 / 73   | `WorkspaceCreationStore`、`WorkspaceCreationRoots.IMPORTED_PREFIX`                                                          | `VARCHAR(128)`（现行契约） | 512      |
-| `resource_id`、`operation_id`、`activation_id` 等生成 id   | `randomUUID()`，36                                                     | `http-managed-session-store.ts`、`managed-session-assembly.ts`、Java `UUID.randomUUID()`                                    | `VARCHAR(64)`              | 256      |
-| 外部渠道 `account_id`、`sender_id`、`chat_id`、`thread_id` | 平台 opaque、变长                                                      | schema 注释 "External platform … identity"                                                                                  | `VARCHAR(512)`             | 2048     |
-| `object_key`、`capture_object_key`                         | OSS key、长、不进索引                                                  | `ma_resource`、`ma_journal_pack`                                                                                            | 保持 `VARBINARY`           | 不适用   |
+| 身份                                                       | 实际形态 / 长度                                                                                                               | 证据                                                                                                                                      | 预算                           | 索引字节 |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | -------- |
+| `tenant_id`、`actor_id`                                    | 数值型，≤20 位                                                                                                                | 上游库表定义 `tenant_id bigint(20) unsigned`、`act_id` 同类（维护者提供，2026-11-20）；以十进制串经 `X-Qwen-Tenant-Id` 注入               | `VARCHAR(36)`                  | 144      |
+| `session_id`                                               | UUID，36                                                                                                                      | 转录文件即 `<uuid>.jsonl`（`packages/core/src/services/sessionService.ts:1841`）                                                          | `VARCHAR(64)`                  | 256      |
+| `workspace_id`                                             | `workspace-` + 64 位十六进制 receipt key，74；`ws_` + UUID（SSH），39；32 位十六进制子 workspace id，32；注册方指定，最长 128 | `WorkspaceCreationStore`、`JdbcSshWorkspaceStore`、`ChildWorkspaceStore`、`WorkspaceValues.requireIdentifier`（`[A-Za-z0-9._:-]{1,128}`） | `VARBINARY(128)`（ASCII 契约） | 128      |
+| `storage_id`                                               | `created-` / `imported-` + 同一个 receipt key，72 / 73；`ssh_` + UUID，40；注册方指定或配置，最长 256                         | `WorkspaceCreationStore`、`JdbcSshWorkspaceStore`、`WorkspaceRecord.MAXIMUM_STORAGE_ID_LENGTH`（可打印 ASCII）                            | `VARBINARY(256)`（ASCII 契约） | 256      |
+| `resource_id`、`operation_id`、`activation_id` 等生成 id   | `randomUUID()`，36                                                                                                            | `http-managed-session-store.ts`、`managed-session-assembly.ts`、Java `UUID.randomUUID()`                                                  | `VARCHAR(64)`                  | 256      |
+| 外部渠道 `account_id`、`sender_id`、`chat_id`、`thread_id` | 平台 opaque、变长                                                                                                             | schema 注释 "External platform … identity"                                                                                                | `VARCHAR(512)`                 | 2048     |
+| `object_key`、`capture_object_key`                         | OSS key、长、不进索引                                                                                                         | `ma_resource`、`ma_journal_pack`                                                                                                          | 保持 `VARBINARY`               | 不适用   |
 
 utf8mb4 下 `VARCHAR(N)` 按 `4×N` 字节计入索引键算术；磁盘存储为实际字节。类表给出
 默认值；实施须枚举每个身份列的生成格式并定稿逐列预算，显式列出例外（如复合
@@ -75,8 +76,8 @@ turn/event id）。
 落地会在严格模式下让生产环境的 workspace 创建 fail closed，与 83 字符 guard 哨兵属同一
 类错误。不过真正起约束作用的是公开契约，而不是回执派生的形态：外部存储注册接受最长 128
 字符的 `tenantWorkspaceId`（`[A-Za-z0-9._-]{1,128}`），它同时成为 `workspace_id` 与
-`storage_id`；workspace 选择也接受最长 128 字符的 workspace id。在这一契约下两列都需要
-`VARCHAR(128)`；要用更小的预算，得先收紧契约，而那是公开 API 变更。去掉 `workspace-` /
+`storage_id`；workspace 选择也接受最长 128 字符的 workspace id。storage id 还要更宽：契约
+类型接受最长 256 个可打印 ASCII 字符。下文决策 2 保留这两个契约，并按契约确定列宽。去掉 `workspace-` /
 `created-` / `imported-` 前缀也无济于事：注册表靠 `workspace-` 加 64 位十六进制来区分回执
 派生的 id 与注册方指定的 id，storage 前缀记录 workspace 是新建还是导入，而注册方指定的 id
 仍可长达 128 字符。
@@ -107,10 +108,10 @@ turn/event id）。
 actor 改数值型 `VARCHAR(36)` 后降到 ≈2304（`actor_key` 展开为 tenant+actor = 288
 字节）。没有任何键需要保留哈希。
 
-以上估算按 `VARCHAR(64)` 计 `workspace_id`。改用更正后的预算后，凡直接或经展开的 scope
-元组包含 workspace 身份的键，每出现一次增加 256 字节（下文回执最坏情形变为 ≈1504 字节）。
-2800 与 2784 字节这两个估算须在定稿预算前精确重算：接近 2800 字节的键若含一次 workspace
-身份只剩约 16 字节余量，含两次则超过 3072 字节。
+以上估算按 `VARCHAR(64)` 计 `workspace_id`，即 256 索引字节。按决策 2，workspace 身份
+占 128 字节（`VARBINARY(128)`），storage 身份占 256 字节（`VARBINARY(256)`），因此凡直接或
+经展开的 scope 元组包含 workspace 身份的键，每含一次就收窄 128 字节（下文回执最坏情形变为
+≈1120 字节）。最终宽度仍以精确重算为准。
 
 ## 方案：schema 变更
 
@@ -167,16 +168,15 @@ actor 改数值型 `VARCHAR(36)` 后降到 ≈2304（`actor_key` 展开为 tenan
   标识，而不只是索引键：对 `WORKSPACE_CREATE`，它被嵌入 `workspace_id`
   （`workspace-<receipt_key>`）、created/imported 的 `storage_id`，以及磁盘上的
   workspace 根目录 `<base>/<key(tenant)>/<receipt_key>`；workspace 注册表会从 workspace
-  id 中去掉前缀，再按 `receipt_key` 反查回执。这种反查无法还原为原始回执元组，因此要么
-  保留 `receipt_key` 作为生成的标识，要么先让 workspace 创建把回执的原始元组记录到
-  workspace 行上，再删除该列。两种做法下，这些公开 id 与路径背后的派生函数都要保留。
+  id 中去掉前缀，再按 `receipt_key` 反查回执。这种反查无法还原为原始回执元组；下文决策 1
+  保留 `receipt_key` 作为生成的标识。
 - **Operation 身份。** `operation_key` 的派生方式不统一。多数写入方使用
-  `operationKey(kind, scope_key, target_key, operation_id)`，但 SSH workspace
-  operation 使用 `key(OPERATION, tenant, id)`，子 workspace operation 使用
-  `hash(kind, tenant, id)`。对这两类，`operation_key` 比 `uk_ma_operation_identity`
-  更严，因为它不含 target：同一 tenant 与 operation id 落在两个不同 target 上，现在会被
-  拒绝，只靠身份唯一键时则会被接受。删除 `operation_key` 之前，要么统一这些派生，要么
-  证明 `operation_id` 在每个 tenant 与 kind 内唯一，并保留一个维持现有约束的唯一键。
+  `operationKey(kind, scope_key, target_key, operation_id)`，但有三组写入方按 tenant、
+  kind 与 id 定位 operation：SSH workspace 创建使用 `key(OPERATION, tenant, id)`，
+  `WorkspaceOperations` 的各 kind 与 workspace 上传使用 `key(kind, tenant, id)`。对它们，
+  `operation_key` 比 `uk_ma_operation_identity` 更严，因为它不含 target：同一 tenant 与
+  operation id 落在两个不同 target 上，现在会被拒绝，只靠身份唯一键时则会被接受。下文
+  决策 3 用一个显式唯一键保留这一约束。
 
 ### 外部渠道身份与 OSS key
 
@@ -245,12 +245,45 @@ resource_key`）、`JdbcHostedCleanupDebtStore`（`owner_key > ?`）、
 | `ma_session` 的 `tenant_key` / `session_key` | 主键 `(tenant_id, session_id)`                       | 是与 `ma_session_head (tenant_key, harness_key)` 的 join 桥，而 head 的原始键 `(tenant_id, harness_session_id)` 为 4096 字节；另有上文的已登记 Session 限制。                                                                                      |
 | `ma_operation.operation_key`                 | `uk_ma_operation_identity`                           | `ma_operation_work` 没有 operation 身份列，在其上重建 `idx_ma_work_pending` 约 3200 字节；另有上文的派生不统一问题。                                                                                                                               |
 | `ma_resource.resource_key`                   | `uk_ma_resource_id (session_scope_key, resource_id)` | 原始三元组为 4608 字节。`(session_scope_key, resource_id)` 放得下，但 6 张引用表（7 个引用列）需要补 resource 身份列（只有 `ma_resource_ref` 已有可空的 `resource_id`），两处 `FOR UPDATE` 游标要改，且在 `session_scope_key` 转换时还得再改一遍。 |
-| `ma_request_receipt.receipt_key`             | `uk_ma_request`（6 个写入方逐一核实）                | 被生成进 workspace 与 storage id 以及 workspace 根目录（见上文）。                                                                                                                                                                                 |
+| `ma_request_receipt.receipt_key`             | `uk_ma_request`（6 个写入方逐一核实）                | 被生成进 workspace 与 storage id 以及 workspace 根目录（见上文）；作为生成的标识保留（决策 1）。                                                                                                                                                   |
 | `ma_delivery.delivery_key`                   | `uk_ma_delivery_identity`                            | 可在 `ma_channel_segment` 上改用 `(source_scope_key, delivery_id)`（2624 字节），但只是把一个哈希列换成哈希列加原始列；随转换一起做。                                                                                                              |
 
 数据库行 `id` 不能作为替代引用：业务身份、租户隔离、幂等与 fencing 继续使用业务键
 （[schema conventions](2026-11-02-managed-schema-conventions.md)）。因此本次调研确认，
 剩余工作是一个原子簇（[实施计划](../plans/2026-11-20-managed-identity-dehash-cluster-impl.zh-CN.md)）。
+
+### 决策
+
+1. **回执派生的 id：`receipt_key` 作为生成的标识保留。** 它是新建或导入 workspace 的
+   身份根：workspace id、storage id 与磁盘根目录都在回执仍处于 pending 时由它派生，这使重试的
+   创建能找回同一个目录。有两处查找依赖它：`created-` / `imported-` storage id 经回执解析其本地
+   根目录；workspace 列表从回执读取回执派生 workspace 的默认工作目录；两者都会用回执的原始
+   列重新派生 `receiptKey` 来校验该行。若改为在 workspace 与 storage 行上记录回执元组或
+   创建详情，只为删掉一个 64 字符的列就要新增列并改动创建协议，而且生成 id 仍然需要这一
+   派生。因此去哈希保留 `ma_request_receipt.receipt_key` 及其唯一键，把它当作标识而非
+   索引键，并保留 `receiptKey` 与 `key(tenant)` 派生；幂等仍由 `uk_ma_request` 保证。
+2. **workspace 与 storage id 预算：保留契约，按契约确定字节列宽。** 契约类型接受匹配
+   `[A-Za-z0-9._:-]{1,128}` 的 workspace id 与最长 256 个可打印 ASCII 字符的 storage id，
+   外部注册已经接受完整的 128 字符 workspace 范围。没有任何生成方需要更窄的契约：生成的
+   workspace id 为 74（回执）、39（SSH）、32（子 workspace）字符，storage id 为 72/73 与
+   40 字符。收紧契约是没有收益的公开契约变更。由于两个契约都只含 ASCII，`workspace_id` 与
+   `storage_id` 保留按契约定长的字节类型 `VARBINARY(128)` 与 `VARBINARY(256)`，而不是
+   utf8mb4 `VARCHAR`：等值天然字节精确，索引占 128 与 256 字节而非 512 与 1024 字节，且
+   这两列无需改动绑定。其他 ASCII 契约的身份类是否采用同一规则，由精确宽度重算决定。
+3. **按 tenant 定位的 operation 通过显式唯一键保持唯一性。** 有三组写入方通过重新计算
+   `key(kind, tenant, id)` 来读写 operation：SSH workspace 创建（`WORKSPACE_CREATE`）、
+   `WorkspaceOperations` 的六种 kind（`WORKSPACE_RECOVERY`、`WORKSPACE_OPERATOR_RECOVERY`、
+   `STORAGE_MIGRATION`、`WORKSPACE_RETIREMENT`、`CHILD_WORKSPACE`、`SESSION_WORKTREE`）
+   与 `WORKSPACE_UPLOAD`。对 SSH 创建，该唯一键是幂等在数据库层的兜底：operation id 由
+   tenant、actor 与幂等键派生，而每次尝试都会生成一个新的随机 workspace 作为 target，因此
+   仅靠 `uk_ma_operation_identity` 拦不住重复。其余写入方都使用
+   `operationKey(kind, scope_key, target_key, operation_id)`，与 `uk_ma_operation_identity`
+   完全一致。去哈希新增生成列 `tenant_operation_id`：对这些 kind 等于 `operation_id`，
+   其余为 NULL，并加 `UNIQUE (tenant_id, operation_kind, tenant_operation_id)`，这是 schema
+   已用于 `publication_command_id` 的模式；它们的查找改为
+   `tenant_id = ? AND operation_kind = ? AND operation_id = ?`。这样无需统一派生、也不依赖
+   未经证明的 id 唯一性，就能精确保持现有约束。kind 清单写在 DDL 里，新增按 tenant 定位的
+   kind 时必须同步加入。
 
 ## 保留的不变量
 
@@ -280,8 +313,12 @@ resource_key`）、`JdbcHostedCleanupDebtStore`（`owner_key > ?`）、
 - 跨引擎身份等值测试：大小写、尾随空格、多字节；MySQL NO PAD 与 H2 对齐行为。
 - Admission 拒绝测试：超长/畸形 tenant/actor/外部 id。
 - workspace 创建与准入测试绑定真实的回执派生 `workspace_id`（74 字符）与 `storage_id`
-  （73 字符），以及一个 128 字符的注册方指定 workspace id，如同 guard 回归测试绑定真实的
-  64 位十六进制主机哨兵。
+  （73 字符）、一个 128 字符的注册方指定 workspace id 与一个 256 字符的 storage id，如同
+  guard 回归测试绑定真实的 64 位十六进制主机哨兵。
+- 用同一幂等键重试 SSH workspace 创建只产生一个 operation；并发的重复插入即使 target
+  workspace 不同，也会被按 tenant 定位的唯一键拒绝。
+- `created-` / `imported-` storage 根目录与回执派生 workspace 的默认值仍经 `receipt_key`
+  解析。
 - 从 `ma_session` 哈希列迁走的 join 保留已登记 Session 限制：retention 路径从未登记过的
   Session 不被匹配。
 - MySQL 竞态套件：guard 获取（租户 + 哨兵域）、head claim/drain/renew、rename 结算、
@@ -304,9 +341,3 @@ resource_key`）、`JdbcHostedCleanupDebtStore`（`owner_key > ?`）、
 - 是否有 TypeScript 消费方派生身份哈希（须同步移动）。
 - 生产 tenant/actor 注入：在定死 `VARCHAR(36)` 前确认十进制串契约与各部署最大位数。
 - 是否有外部平台 id 可能超 512 字符（残留压缩情形）。
-- 回执派生的 workspace 与 storage id：保留 `receipt_key` 作为生成的标识，还是在 workspace
-  行上记录回执的原始元组？
-- `workspace_id` 与 `storage_id` 的预算：保留 128 字符契约并按 `VARCHAR(128)` 预算，还是在
-  枚举全部生成格式后收紧契约（公开 API 变更）？
-- SSH 与子 workspace operation 的 `operation_key` 唯一性：统一派生，还是证明
-  `operation_id` 在每个 tenant 与 kind 内唯一？
