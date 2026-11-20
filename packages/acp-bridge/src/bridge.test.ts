@@ -18901,6 +18901,223 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('rejects a tool-turn mismatch after the async continuation precheck', async () => {
+      const entered = deferred<void>();
+      const precheck = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionContinue) {
+            entered.resolve(undefined);
+            return precheck.promise;
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const pending = bridge.continueSession(session.sessionId, {
+        promptId: 'tool-turn-mismatch',
+        expectedInterruption: 'interrupted_prompt',
+      });
+      await entered.promise;
+      precheck.resolve({
+        accepted: true,
+        interruption: 'interrupted_turn',
+      });
+
+      expect(await pending).toEqual({
+        accepted: false,
+        interruption: 'interrupted_turn',
+        reason: 'interruption_mismatch',
+      });
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
+    it('fences continuation admission after its async precheck', async () => {
+      const entered = deferred<void>();
+      const precheck = deferred<Record<string, unknown>>();
+      let generationClosed = false;
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionContinue) {
+            entered.resolve(undefined);
+            return precheck.promise;
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const pending = bridge.continueSession(session.sessionId, {
+        promptId: 'old-generation',
+        expectedInterruption: 'interrupted_prompt',
+        assertCanContinue: () => {
+          if (generationClosed) throw new Error('generation closed');
+        },
+      });
+      await entered.promise;
+      generationClosed = true;
+      precheck.resolve({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+
+      await expect(pending).rejects.toThrow('generation closed');
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
+    it('passes the continuation dispatch fence into the tracked prompt', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionContinue) {
+            return {
+              accepted: true,
+              interruption: 'interrupted_prompt',
+            };
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const assertCanDispatch = vi.fn();
+
+      const decision = await bridge.continueSession(session.sessionId, {
+        promptId: 'dispatch-fenced',
+        expectedInterruption: 'interrupted_prompt',
+        assertCanDispatch,
+      });
+
+      expect(decision.accepted).toBe(true);
+      await vi.waitFor(() => {
+        expect(assertCanDispatch).toHaveBeenCalled();
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      await bridge.shutdown();
+    });
+
+    it('rejects the continuation when its first dispatch fence fails', async () => {
+      const precheck = deferred<Record<string, unknown>>();
+      let entered: (() => void) | undefined;
+      const enteredPrecheck = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionContinue) {
+            entered?.();
+            return precheck.promise;
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const pending = bridge.continueSession(session.sessionId, {
+        promptId: 'rejected-dispatch',
+        requireDispatchAck: true,
+        assertCanDispatch: () => {
+          throw new Error('dispatch fence rejected');
+        },
+      });
+      await enteredPrecheck;
+      precheck.resolve({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+
+      await expect(pending).rejects.toThrow('dispatch fence rejected');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
+    it('acknowledges first dispatch without waiting for turn completion', async () => {
+      const turn = deferred<PromptResponse>();
+      const precheck = deferred<Record<string, unknown>>();
+      let entered: (() => void) | undefined;
+      const enteredPrecheck = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: () => turn.promise,
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionContinue) {
+            entered?.();
+            return precheck.promise;
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const pending = bridge.continueSession(
+        session.sessionId,
+        Object.freeze({
+          promptId: 'write-acknowledged',
+          requireDispatchAck: true,
+        }),
+      );
+      await enteredPrecheck;
+      precheck.resolve({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+
+      const decision = await pending;
+      expect(decision.accepted).toBe(true);
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      turn.resolve({ stopReason: 'end_turn' });
+      await vi.waitFor(() => {
+        expect(
+          bridge.getSessionSummary(session.sessionId).hasActivePrompt,
+        ).toBe(false);
+      });
+      await bridge.shutdown();
+    });
+
+    it('settles first dispatch even when the write observer throws', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionContinue) {
+            return {
+              accepted: true,
+              interruption: 'interrupted_prompt',
+            };
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const decision = bridge.continueSession(session.sessionId, {
+        promptId: 'throwing-observer',
+        requireDispatchAck: true,
+        onPromptWriteStarted: () => {
+          throw new Error('observer failed');
+        },
+      });
+
+      await expect(decision).resolves.toMatchObject({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      await bridge.shutdown();
+    });
+
     it('rejects continueSession with an unregistered client id before running the pre-check', async () => {
       const handle = makeChannel({
         extMethodImpl: (method) => {

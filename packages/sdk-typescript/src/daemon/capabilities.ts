@@ -601,6 +601,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Trusted, memory-only live-state snapshots for selected workspaces in one
   // request (`POST /sessions/live-state`).
   workspace_session_live_state_batch: { since: 'v1' },
+  // Restart recovery: `POST /sessions/recovery` lists sessions whose newest
+  // prompt ledger record did not settle, and `POST /sessions/recovery/continue`
+  // resumes a selected batch. The scan is read-only; continuation reuses the
+  // ordinary restore and live-session-owner continuation paths.
+  restart_recovery: { since: 'v1' },
   // Workspace-qualified metadata updates for active, inactive, and archived
   // persisted sessions.
   workspace_session_metadata: { since: 'v1' },
