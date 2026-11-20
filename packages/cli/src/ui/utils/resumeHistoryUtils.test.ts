@@ -1651,6 +1651,41 @@ describe('resumeHistoryUtils', () => {
 
       expect(tool?.renderOutputAsMarkdown).toBe(false);
     });
+
+    it('leaves the flag unset when no registry is available at all', () => {
+      // SessionPreview builds the pane with `config: null` — there is no
+      // registry to ask, so every result would otherwise be forced to plain
+      // text and the pane would lose the markdown the live view shows.
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-1',
+                    name: 'lsp',
+                    args: { query: 'symbols' },
+                  },
+                } as unknown as Part,
+              ],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        null,
+        10,
+      );
+      const tool = (
+        items.find((i) => i.type === 'tool_group') as ToolGroupItem | undefined
+      )?.tools[0];
+
+      expect(tool?.renderOutputAsMarkdown).toBeUndefined();
+    });
   });
 
   it('does not render an unpaired sibling as successful when only selected A has a real result', () => {

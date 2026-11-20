@@ -598,12 +598,17 @@ function convertToHistoryItems(
             args: fc.args,
             resultDisplay: undefined,
             // Carried from the registry so a resumed result renders with the
-            // depth its tool declared, mirroring the live builder's
-            // `= false` default: a registry miss (the tool's MCP server or
-            // plugin is gone) must fall back to false, not leave it unset
-            // for ToolMessage's `= true` default to markdown-parse a tool
-            // that opted out.
-            renderOutputAsMarkdown: tool ? tool.isOutputMarkdown : false,
+            // depth its tool declared. With no registry to consult (the
+            // SessionPreview pane passes `config: null`) the field is left
+            // unset so ToolMessage's `= true` default applies; a registry
+            // that exists but misses the name (an MCP server or plugin is
+            // gone) still resolves to false, because there the tool is known
+            // to be absent rather than merely unknown.
+            renderOutputAsMarkdown: tool
+              ? tool.isOutputMarkdown
+              : config
+                ? false
+                : undefined,
             // Without a recorded result, completion cannot be established.
             status: ToolCallStatus.Error,
             confirmationDetails: undefined,
