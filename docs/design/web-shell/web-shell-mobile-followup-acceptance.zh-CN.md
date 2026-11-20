@@ -37,7 +37,7 @@
 ## 验证
 
 - `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):23/23 通过——chip 填入不发送、忽略、未聚焦时忽略不拉焦点、空输入直发、打字隐藏、前缀补全、编辑行不带 follow-up 专用键而 chip 接受(default 变体)、chip 可见时 placeholder 保持普通文案(单 surface)、空草稿展开对话框由 placeholder 承载建议、光标上/下/右移动、字素安全右移加斜杠不拆 emoji、上移到折行行尾保持 emoji 完整且与原生等价、150 连续字符软折行草稿上上/下与原生方向键落在同一光标、水平后下移重算列而非回写旧列、50k 草稿右/上按键 <200ms 且不重测全篇、短中间行的连续垂直移动保持目标列、长草稿滚回高度上限窗口、→ 接受可见建议、前缀草稿下右键标签/接受同步与完全匹配落到光标移动、字面斜杠插入、CDP 驱动的 IME 组合期间按键让路、390px 同行/240px 自占行且无横向溢出,以及两条 zh-CN 用例钉住本地化 chip 文本、忽略标签与光标键标签并截中文 UI 图。这些用例传 `?language=`,由 App 的 `getInitialLanguage` 直接读取(无需 harness prop);spec 会把取证截图写入其 test-results 输出目录。
-- `ChatEditor.test.tsx` mobile composer actions:单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)、accept/dismiss 接线、忽略不调用外层聚焦、composition 与选区重置接线、编辑键接线与 → 的动态 aria-label(含完全匹配判据);`useComposerCore.test.ts` 钉字素/视觉行光标计算、折行行尾钳制与目标列保持;`useComposerCore.mobile.dom.test.tsx` 对真实钩子钉完全匹配接受门、前缀接受、IME 让路、列保持与用户跳选区重置及水平后重算、滚动揭示;四个文件(含 `i18n.test.ts`)483/483 通过。
+- `ChatEditor.test.tsx` mobile composer actions:单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)、accept/dismiss 接线、忽略不调用外层聚焦、composition 与选区重置接线、编辑键接线与 → 的动态 aria-label(含完全匹配判据);`useComposerCore.test.ts` 钉字素/视觉行光标计算、折行行尾钳制与目标列保持;`useComposerCore.mobile.dom.test.tsx` 对真实钩子钉完全匹配接受门、前缀接受、IME 让路、列保持与用户跳选区重置及水平后重算、滚动揭示;四个文件(含 `i18n.test.ts`)484/484 通过。
 - web-shell `tsc --noEmit` 与改动文件 ESLint:干净。
 - 未覆盖:mobile-webkit / iOS 真机(本机缺 WebKit 运行库);软键盘弹起时新增行的高度挤压;iPad 外接键盘 Tab/→ 接受(后置)。
 
