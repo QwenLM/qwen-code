@@ -23787,6 +23787,14 @@ describe('Session', () => {
         modeAfterDestination: ApprovalMode.YOLO,
       },
       {
+        label: 'replacement YOLO callback overrides an older DEFAULT snapshot',
+        replacement: true,
+        initialMode: ApprovalMode.DEFAULT,
+        shouldBlock: false,
+        launches: true,
+        modeAfterPermissionSnapshot: ApprovalMode.YOLO,
+      },
+      {
         label: 'direct call follows the completed AUTO decision',
         replacement: false,
         initialMode: ApprovalMode.YOLO,
@@ -23827,6 +23835,7 @@ describe('Session', () => {
         launches,
         modeAfterClassification,
         modeAfterDestination,
+        modeAfterPermissionSnapshot,
         changeBeforeExecution,
       }) => {
         const toolName = core.ToolNames.CREATE_SUB_SESSION;
@@ -23844,6 +23853,8 @@ describe('Session', () => {
             releaseDestination = resolve;
           },
         );
+        let releasePermissionSnapshot!: () => void;
+        const permissionSnapshot = vi.fn();
         const resolveWorkspace = vi.fn().mockReturnValue(destination);
         const spawn = vi.fn().mockResolvedValue({ sessionId: 'child-id' });
         const pm = new core.PermissionManager({
@@ -23914,9 +23925,31 @@ describe('Session', () => {
           shouldAllow: true,
           ...(replacement ? { updatedInput } : {}),
         });
-        mockToolRegistry.getTool.mockReturnValue(
-          new core.CreateSubSessionTool(mockConfig),
-        );
+        const realTool = new core.CreateSubSessionTool(mockConfig);
+        if (modeAfterPermissionSnapshot) {
+          const permissionSnapshotGate = new Promise<void>((resolve) => {
+            releasePermissionSnapshot = resolve;
+          });
+          const build = realTool.build.bind(realTool);
+          vi.spyOn(realTool, 'build').mockImplementation((params) => {
+            const invocation = build(params);
+            const getDefaultPermission =
+              invocation.getDefaultPermission.bind(invocation);
+            vi.spyOn(invocation, 'getDefaultPermission').mockImplementation(
+              async (signal) => {
+                const permission = await getDefaultPermission(signal);
+                if (invocation.requiresAutoReviewOnAllow()) {
+                  expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+                  permissionSnapshot();
+                  await permissionSnapshotGate;
+                }
+                return permission;
+              },
+            );
+            return invocation;
+          });
+        }
+        mockToolRegistry.getTool.mockReturnValue(realTool);
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           createStreamWithChunks([
             {
@@ -23941,13 +23974,23 @@ describe('Session', () => {
             ),
           { timeout: 1_000 },
         );
-        approvalMode = modeAfterDestination ?? ApprovalMode.AUTO;
+        approvalMode =
+          modeAfterDestination ??
+          (modeAfterPermissionSnapshot ? initialMode : ApprovalMode.AUTO);
         releaseDestination({
           workspaceId: 'repo-b-id',
           workspaceCwd: '/repo-b',
           workspaceGeneration: 'generation-b',
           sameWorkspace: false,
         });
+        if (modeAfterPermissionSnapshot) {
+          await vi.waitFor(
+            () => expect(permissionSnapshot).toHaveBeenCalledOnce(),
+            { timeout: 1_000 },
+          );
+          approvalMode = modeAfterPermissionSnapshot;
+          releasePermissionSnapshot();
+        }
         if (modeAfterClassification) {
           await vi.waitFor(() => expect(classify).toHaveBeenCalledOnce(), {
             timeout: 1_000,
@@ -23957,8 +24000,10 @@ describe('Session', () => {
         }
         await prompting;
 
-        const expectedClassifierCalls =
-          modeAfterDestination === ApprovalMode.YOLO ? 0 : 1;
+        const expectsYoloWaiver =
+          modeAfterDestination === ApprovalMode.YOLO ||
+          modeAfterPermissionSnapshot === ApprovalMode.YOLO;
+        const expectedClassifierCalls = expectsYoloWaiver ? 0 : 1;
         expect(classify).toHaveBeenCalledTimes(expectedClassifierCalls);
         if (expectedClassifierCalls === 1) {
           expect(classify.mock.calls[0]?.[0]).toMatchObject({
@@ -23970,9 +24015,7 @@ describe('Session', () => {
             ...args,
             ...(replacement ? { workspace: updatedInput.workspace } : {}),
             workspaceGeneration: 'generation-b',
-            ...(modeAfterDestination === ApprovalMode.YOLO
-              ? { requiresYolo: true }
-              : {}),
+            ...(expectsYoloWaiver ? { requiresYolo: true } : {}),
             ...(!replacement && approvalMode === ApprovalMode.AUTO
               ? { requiresAutoMode: true }
               : {}),
