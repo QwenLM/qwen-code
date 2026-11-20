@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.repository.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Artifact;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -26,8 +27,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Semaphore;
 import java.util.regex.Pattern;
 
@@ -42,15 +45,18 @@ public class ManagedArtifactService {
     private final ManagedToolResultStore results;
     private final ManagedArtifactReader reader;
     private final ManagedArtifactPolicy policy;
+    private final ManagedWorkspaceRegistry workspaces;
     private final ManagedAgentSettings.Artifacts settings;
     private final Semaphore readers;
 
     public ManagedArtifactService(ManagedAgentService sessions, ManagedToolResultStore results,
-            ManagedArtifactReader reader, ManagedArtifactPolicy policy, ManagedAgentSettings properties) {
+            ManagedArtifactReader reader, ManagedArtifactPolicy policy, ManagedAgentSettings properties,
+            ManagedWorkspaceRegistry workspaces) {
         this.sessions = sessions;
         this.results = results;
         this.reader = reader;
         this.policy = policy;
+        this.workspaces = workspaces;
         this.settings = properties.getArtifacts();
         if (settings.getMaxConcurrentReads() < 1 || settings.getReadTimeout() == null
                 || settings.getReadTimeout().isNegative() || settings.getReadTimeout().isZero()) {
@@ -137,6 +143,69 @@ public class ManagedArtifactService {
         }
         return new WebShellPage<>(page.artifacts().stream().map(a -> view(a,
                 availability.get(a.descriptor().path("id").asText()), sessionRead)).toList(), next, page.hasMore());
+    }
+
+    public WebShellPage<ArtifactResponse> workspacePage(TenantContext tenant, String workspaceId,
+            String cursor, int limit) {
+        String actor = tenant.requireActorId();
+        if (!workspaces.canRead(tenant.tenantId(), actor, workspaceId)) {
+            throw workspaceNotFound();
+        }
+        if (!settings.isEnabled() || !reader.supported()) {
+            throw notFound();
+        }
+        if (limit < 1 || limit > 100) {
+            throw badRequest("invalid_limit", "Limit must be between 1 and 100.");
+        }
+        Long watermark = null;
+        Long before = null;
+        if (StringUtils.isNotBlank(cursor)) {
+            try {
+                if (cursor.length() > 2048) {
+                    throw new IllegalArgumentException();
+                }
+                var decoded = JSON.readTree(Base64.getUrlDecoder().decode(cursor));
+                if (decoded.size() != 6 || decoded.path("v").asInt() != 1
+                        || !tenant.tenantId().equals(decoded.path("tenant").asText())
+                        || !actor.equals(decoded.path("actor").asText())
+                        || !workspaceId.equals(decoded.path("workspace").asText())
+                        || !decoded.path("watermark").canConvertToLong()
+                        || !decoded.path("before").canConvertToLong()) {
+                    throw new IllegalArgumentException();
+                }
+                watermark = decoded.path("watermark").longValue();
+                before = decoded.path("before").longValue();
+                if (watermark < 0 || before < 0 || before > watermark) {
+                    throw new IllegalArgumentException();
+                }
+            } catch (IOException | IllegalArgumentException error) {
+                throw badRequest("invalid_cursor", "Workspace artifact cursor is invalid.");
+            }
+        }
+        var page = results.listWorkspaceArtifacts(tenant.tenantId(),
+                ManagedWorkspaceRegistry.actorKey(tenant.tenantId(), actor), workspaceId,
+                watermark, before, limit);
+        String next = null;
+        if (page.hasMore()) {
+            var position = JSON.createObjectNode().put("v", 1).put("tenant", tenant.tenantId())
+                    .put("actor", actor).put("workspace", workspaceId)
+                    .put("watermark", page.watermark()).put("before", page.lastId());
+            next = Base64.getUrlEncoder().withoutPadding().encodeToString(
+                    position.toString().getBytes(StandardCharsets.UTF_8));
+        }
+        Map<String, Boolean> sessionRead = new HashMap<>();
+        for (Artifact artifact : page.artifacts()) {
+            sessionRead.computeIfAbsent(artifact.source().sessionId(),
+                    session -> policy.readOriginal(tenant.tenantId(), actor, workspaceId, session));
+        }
+        var availability = reader.availability(page.artifacts());
+        if (availability.containsValue(false)
+                && !workspaces.canRead(tenant.tenantId(), actor, workspaceId)) {
+            throw workspaceNotFound();
+        }
+        return new WebShellPage<>(page.artifacts().stream().map(a -> view(a,
+                availability.get(a.descriptor().path("id").asText()),
+                sessionRead.get(a.source().sessionId()))).toList(), next, page.hasMore());
     }
 
     private ArtifactResponse view(TenantContext tenant, SessionRecord session, Artifact artifact) {
@@ -375,6 +444,10 @@ public class ManagedArtifactService {
 
     private static ManagedAgentException notFound() {
         return new ManagedAgentException(404, "artifact_not_found", "The resource was not found.");
+    }
+
+    private static ManagedAgentException workspaceNotFound() {
+        return new ManagedAgentException(404, "workspace_not_found", "Workspace not found.");
     }
 
     private static ManagedAgentException unavailable() {

@@ -132,9 +132,7 @@ import { TranscriptViewport } from './TranscriptViewport';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { SessionRecoveryBanner } from './SessionRecoveryBanner';
-import { QueuedPromptDisplay } from './QueuedPromptDisplay';
-import { GoalStatusStrip } from './GoalStatusStrip';
-import composerStatusStyles from './ComposerStatusStack.module.css';
+import { ComposerStatusStack } from './ComposerStatusStack';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { nextApprovalMode, parsePlanCommand } from '../utils/planMode';
 import { useApprovalModes } from '../hooks/useApprovalModes';
@@ -1026,6 +1024,7 @@ export function ChatPane({
         return false;
       if (admissionPayloadLocked || planPreparationRef.current?.isCurrent())
         return false;
+      if (connectionRef.current.loadingTranscript) return false;
       // Same fence as App's composer: a stopped runtime keeps the draft in
       // the composer (the pane banner offers Resume); a submit here would
       // only race the dead runtime. The parked state retains sessionId, so
@@ -2061,40 +2060,38 @@ export function ChatPane({
             }
           />
           {showComposerStatus && (
-            <div
-              className={composerStatusStyles.root}
-              data-testid="composer-status-stack"
-            >
-              <QueuedPromptDisplay
-                prompts={queuedPrompts}
-                t={t}
-                canMutateMidTurn={canMutateMidTurn}
-                canInsertMidTurn={
-                  streamingState !== 'idle' || sessionHasActivePrompt
-                }
-                onDelete={removeQueuedPrompt}
-                canSendMidTurnNow={canSendMidTurnNow}
-                onInsert={insertQueuedPrompt}
-                onSendNow={sendQueuedPromptNow}
-                onEdit={editQueuedPrompt}
-                onImagePreview={handleImagePreview}
-                onAttachmentPreview={handleAttachmentPreview}
-              />
-              {liveGoalSnapshot?.goal && (
-                <GoalStatusStrip
-                  snapshot={liveGoalSnapshot}
-                  busy={goalControlBusy}
-                  onEdit={() => {
-                    setGoalEditError(null);
-                    setGoalEditOpen(true);
-                  }}
-                  onPause={() => runGoalControl('pause')}
-                  onResume={() => runGoalControl('resume')}
-                  onClear={() => runGoalControl('clear')}
-                  onOpenGoals={onOpenGoals}
-                />
-              )}
-            </div>
+            <ComposerStatusStack
+              queued={{
+                prompts: queuedPrompts,
+                t,
+                canMutateMidTurn,
+                canInsertMidTurn:
+                  streamingState !== 'idle' || sessionHasActivePrompt,
+                onDelete: removeQueuedPrompt,
+                canSendMidTurnNow,
+                onInsert: insertQueuedPrompt,
+                onSendNow: sendQueuedPromptNow,
+                onEdit: editQueuedPrompt,
+                onImagePreview: handleImagePreview,
+                onAttachmentPreview: handleAttachmentPreview,
+              }}
+              goal={
+                liveGoalSnapshot?.goal
+                  ? {
+                      snapshot: liveGoalSnapshot,
+                      busy: goalControlBusy,
+                      onEdit: () => {
+                        setGoalEditError(null);
+                        setGoalEditOpen(true);
+                      },
+                      onPause: () => runGoalControl('pause'),
+                      onResume: () => runGoalControl('resume'),
+                      onClear: () => runGoalControl('clear'),
+                      onOpenGoals,
+                    }
+                  : undefined
+              }
+            />
           )}
           {unknownPromptAdmission && (
             <div
@@ -2184,6 +2181,7 @@ export function ChatPane({
               onSelectReasoningEffort={handleSelectReasoningEffort}
               dialogOpen={approvalActive}
               disabled={approvalActive || admissionPayloadLocked}
+              submitDisabled={connection.loadingTranscript}
               voiceTarget={hidden ? undefined : voiceTarget}
               voiceStatusRevision={voiceStatusRevision}
               followupState={followupState}

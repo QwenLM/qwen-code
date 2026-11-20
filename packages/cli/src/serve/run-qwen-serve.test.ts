@@ -47,6 +47,7 @@ import {
   verifyWorkerTlsTrust,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
+import { countSseStream } from './sse-occupancy.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import * as nativeDirectoryPicker from './native-directory-picker.js';
 import * as localPathOpen from './local-path-open.js';
@@ -18006,6 +18007,91 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('reports the SSE admission caps and live stream occupancy on bootstrap daemon status', async () => {
+    // The bootstrap window must carry the same cap/occupancy pairing as the
+    // runtime status (issue #17554, review R1-6): per-listener caps derived
+    // from the flags, and a LIVE occupancy read — not a frozen zero snapshot.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-sse-caps-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        token: 'secret',
+        serveWebShell: false,
+        maxConnections: 10,
+        maxSseConnections: 5,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    // A synthetic counted stream proves the bootstrap reads live occupancy.
+    const release = countSseStream('generation', {
+      socket: {},
+    } as never);
+    try {
+      const status = (await (
+        await fetch(`${handle.url}/daemon/status`, {
+          headers: { Authorization: 'Bearer secret' },
+        })
+      ).json()) as {
+        limits: {
+          maxSseConnections: number | null;
+          maxSseConnectionsPerListener: Record<string, number | null>;
+        };
+        runtime: {
+          transport: {
+            restSseActive: number;
+            streamOccupancy: {
+              total: number;
+              bySurface: Record<string, number>;
+              byListener: Record<string, number>;
+            };
+          };
+        };
+        issues: Array<{ code: string }>;
+      };
+      expect(
+        status.issues.some((issue) => issue.code === 'daemon_runtime_starting'),
+      ).toBe(true);
+      expect(status.limits.maxSseConnections).toBe(5);
+      expect(status.limits.maxSseConnectionsPerListener).toEqual({
+        primary: 5,
+        'local-control': 51,
+        'remote-access': 51,
+      });
+      expect(status.runtime.transport.restSseActive).toBe(0);
+      expect(
+        status.runtime.transport.streamOccupancy.total,
+      ).toBeGreaterThanOrEqual(1);
+      expect(
+        status.runtime.transport.streamOccupancy.bySurface['generation'],
+      ).toBeGreaterThanOrEqual(1);
+      expect(
+        status.runtime.transport.streamOccupancy.byListener['primary'],
+      ).toBeGreaterThanOrEqual(1);
+    } finally {
+      release();
+      await handle.close();
+    }
+  });
+
   it('hosts a shared channel definition in the workspace that asked for it', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-shared-startup-')),
@@ -21316,6 +21402,250 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(await capabilities.json()).toHaveProperty('workspaces');
     } finally {
       await handle.close();
+    }
+  });
+
+  it('relays a Managed terminal upgrade through the real local front door without leaking browser credentials', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-managed-terminal-')),
+    );
+    const java = createServer();
+    let peerWire = '';
+    const clientHead = new Promise<void>((resolve) => {
+      java.on('connection', (socket) => {
+        socket.on('data', (chunk) => {
+          peerWire += chunk.toString();
+          if (peerWire.endsWith('client-head')) resolve();
+        });
+      });
+    });
+    await new Promise<void>((resolve) => java.listen(0, '127.0.0.1', resolve));
+    const javaAddress = java.address();
+    if (!javaAddress || typeof javaAddress === 'string')
+      throw new Error('missing Java port');
+    let handle: RunHandle | undefined;
+    let clientSocket: import('node:stream').Duplex | undefined;
+    let peerSocket: import('node:stream').Duplex | undefined;
+    const terminalUrl = () =>
+      `${handle!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`;
+    const upgradeHeaders = () => ({
+      Connection: 'Upgrade',
+      Upgrade: 'websocket',
+      'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+      'Sec-WebSocket-Version': '13',
+      'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+      'Sec-WebSocket-Extensions': 'permessage-deflate',
+      Authorization: 'Bearer deliberately-invalid-daemon-token',
+      Cookie: 'browser-secret=must-not-reach-java',
+      'X-Qwen-Tenant-Id': 'forged-tenant',
+      'X-Qwen-Actor-Id': 'forged-actor',
+      'X-Qwen-Signature': 'forged-signature',
+      'X-Qwen-Signature-Timestamp': '1',
+      Origin: handle!.url,
+    });
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: tmpDir,
+          token: 'unified-token',
+          mode: 'http-bridge',
+          requireAuth: true,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          installSignalHandlers: false,
+          managedLocalWeb: {
+            javaUrl: `http://127.0.0.1:${javaAddress.port}`,
+            signingKey: 'private-signing-key',
+            tenantId: 'local',
+            actorId: 'owner',
+            agentId: 'qwen-code',
+            productScope: 'local:installation',
+          },
+        },
+      );
+      for (const headers of [
+        { ...upgradeHeaders(), Host: 'attacker.invalid' },
+        { ...upgradeHeaders(), Origin: 'https://attacker.example' },
+      ]) {
+        const target = new URL(terminalUrl());
+        const host =
+          Object.entries(headers).find(
+            ([name]) => name.toLowerCase() === 'host',
+          )?.[1] ?? target.host;
+        const response = await new Promise<string>((resolve, reject) => {
+          const socket = net.connect(
+            Number(target.port),
+            target.hostname,
+            () => {
+              const lines = [
+                `GET ${target.pathname}${target.search} HTTP/1.1`,
+                `Host: ${host}`,
+                ...Object.entries(headers)
+                  .filter(([name]) => name.toLowerCase() !== 'host')
+                  .map(([name, value]) => `${name}: ${value}`),
+                '',
+                '',
+              ];
+              socket.write(lines.join('\r\n'));
+            },
+          );
+          let raw = '';
+          socket.on('data', (chunk) => {
+            raw += chunk.toString();
+            if (raw.includes('\r\n\r\n')) {
+              socket.destroy();
+              resolve(raw);
+            }
+          });
+          socket.on('error', reject);
+        });
+        expect(response.startsWith('HTTP/1.1 403 ')).toBe(true);
+      }
+      expect(peerWire).toBe('');
+
+      let peerHeaders: IncomingMessage['headers'] | undefined;
+      let peerPath: string | undefined;
+      let forwardedUpgrades = 0;
+      java.on('upgrade', (request, socket) => {
+        forwardedUpgrades++;
+        peerSocket = socket;
+        peerHeaders = request.headers;
+        peerPath = request.url;
+        socket.resume();
+        socket.write(
+          'HTTP/1.1 101 Switching Protocols\r\n' +
+            'Upgrade: websocket\r\n' +
+            'Connection: Upgrade\r\n' +
+            'Sec-WebSocket-Accept: test-accept\r\n' +
+            'Sec-WebSocket-Protocol: qwen-ws\r\n' +
+            'Sec-WebSocket-Extensions: permessage-deflate\r\n\r\n' +
+            'java-head',
+        );
+      });
+      const result = await new Promise<{
+        status: number;
+        protocol: string | undefined;
+        accept: string | undefined;
+        extensions: string | undefined;
+        echo: string;
+      }>((resolve, reject) => {
+        const target = new URL(terminalUrl());
+        const socket = net.connect(Number(target.port), target.hostname, () => {
+          const lines = [
+            `GET ${target.pathname}${target.search} HTTP/1.1`,
+            `Host: ${target.host}`,
+            ...Object.entries(upgradeHeaders()).map(
+              ([name, value]) => `${name}: ${value}`,
+            ),
+            '',
+            '',
+          ];
+          // One write makes client-head part of the server's upgrade head,
+          // rather than a later WebSocket data frame.
+          socket.write(lines.join('\r\n') + 'client-head');
+        });
+        clientSocket = socket;
+        let buffer = '';
+        let upgraded = false;
+        let status = 0;
+        let protocol: string | undefined;
+        let accept: string | undefined;
+        let extensions: string | undefined;
+        socket.on('data', (chunk) => {
+          buffer += chunk.toString();
+          let echo = '';
+          if (!upgraded) {
+            const boundary = buffer.indexOf('\r\n\r\n');
+            if (boundary < 0) return;
+            upgraded = true;
+            const header = buffer.slice(0, boundary);
+            status = Number(header.split('\r\n')[0]!.split(' ')[1]);
+            protocol = /^Sec-WebSocket-Protocol:\s*(.+)$/im
+              .exec(header)?.[1]
+              ?.trim();
+            accept = /^Sec-WebSocket-Accept:\s*(.+)$/im
+              .exec(header)?.[1]
+              ?.trim();
+            extensions = /^Sec-WebSocket-Extensions:\s*(.+)$/im
+              .exec(header)?.[1]
+              ?.trim();
+            echo = buffer.slice(boundary + 4);
+            if (!echo.includes('java-head')) return;
+            resolve({
+              status,
+              protocol,
+              accept,
+              extensions,
+              echo: 'java-head',
+            });
+            return;
+          }
+          if (buffer.includes('java-head'))
+            resolve({
+              status,
+              protocol,
+              accept,
+              extensions,
+              echo: 'java-head',
+            });
+        });
+        socket.on('error', reject);
+      });
+      expect(result).toEqual({
+        status: 101,
+        protocol: 'qwen-ws',
+        accept: 'test-accept',
+        extensions: 'permessage-deflate',
+        echo: 'java-head',
+      });
+      expect(peerPath).toBe(
+        '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+      );
+      await clientHead;
+      expect(peerWire.endsWith('client-head')).toBe(true);
+      expect(peerHeaders).toBeDefined();
+      expect(peerHeaders!['sec-websocket-key']).toBe(
+        'dGhlIHNhbXBsZSBub25jZQ==',
+      );
+      expect(peerHeaders!['sec-websocket-version']).toBe('13');
+      expect(peerHeaders!['sec-websocket-protocol']).toBe(
+        'qwen-ws, qwen-bearer.ticket-abc',
+      );
+      expect(peerHeaders!['sec-websocket-extensions']).toBe(
+        'permessage-deflate',
+      );
+      expect(peerHeaders!['authorization']).toBeUndefined();
+      expect(peerHeaders!['cookie']).toBeUndefined();
+      expect(peerHeaders!['x-qwen-tenant-id']).toBeUndefined();
+      expect(peerHeaders!['x-qwen-actor-id']).toBeUndefined();
+      expect(peerHeaders!['x-qwen-signature']).toBeUndefined();
+      expect(peerHeaders!['x-qwen-signature-timestamp']).toBeUndefined();
+      expect(peerHeaders!['origin']).toBeUndefined();
+
+      expect(forwardedUpgrades).toBe(1);
+
+      const browserClosed = new Promise<void>((resolve) =>
+        clientSocket!.once('close', resolve),
+      );
+      const upstreamClosed = new Promise<void>((resolve) => {
+        // The peer reads EOF as 'end'; a full 'close' also requires its
+        // writable side to close, so either proves the tunnel was torn down.
+        peerSocket!.once('close', resolve);
+        peerSocket!.once('end', resolve);
+      });
+      await handle.close();
+      handle = undefined;
+      await Promise.all([browserClosed, upstreamClosed]);
+    } finally {
+      clientSocket?.destroy();
+      peerSocket?.destroy();
+      if (handle) await handle.close();
+      java.closeAllConnections();
+      await new Promise<void>((resolve) => java.close(() => resolve()));
     }
   });
 

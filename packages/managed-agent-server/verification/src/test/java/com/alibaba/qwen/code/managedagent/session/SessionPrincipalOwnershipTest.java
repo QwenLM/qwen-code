@@ -119,6 +119,9 @@ class SessionPrincipalOwnershipTest {
         f.tx.executeWithoutResult(status -> {
             String owned = f.create(OWNER, "owned");
             for (var call : List.<org.junit.jupiter.api.function.Executable>of(
+                    () -> f.service.submitTurn(null, "null-submit", owned, List.of()),
+                    () -> f.service.cancelTurn(null, "null-cancel", owned, "turn"),
+                    () -> f.service.renameSession(null, "null-rename", owned, "title"),
                     () -> f.service.queryWebShellSessionModels(null, owned),
                     () -> f.service.queryWebShellSessionApproval(null, owned),
                     () -> f.service.changeWebShellSessionModel(null, owned,
@@ -140,10 +143,42 @@ class SessionPrincipalOwnershipTest {
             String id = f.create(OWNER, "create");
             var foreign = SessionPrincipal.of("other-tenant", "user", "actor-A");
             assertThat(f.store.ownsSession("tenant", id, foreign)).isFalse();
+            assertThat(ManagedSessionPrincipal.permits(f.jdbc, "tenant", id, foreign)).isFalse();
             denied(() -> f.store.requireSessionOwnership("tenant", id, foreign));
             denied(() -> f.store.insertSessionCommand("tenant", foreign, "CREATE_SESSION",
                     "foreign", "digest", "qwen-code", null, null, List.of(), null));
             assertThat(f.count("ma_session")).isEqualTo(1);
+        });
+    }
+
+    @Test
+    void revokedPrincipalWithNullCreatorKeyDoesNotLeakThroughListing() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(OWNER, "create");
+            f.jdbc.update("UPDATE ma_session SET creator_actor_key = NULL"
+                    + " WHERE tenant_id=? AND session_id=?", "tenant", id);
+            f.jdbc.update("UPDATE ma_request_receipt SET actor_id='raw-creator'"
+                    + " WHERE tenant_id=? AND session_id=? AND namespace='SESSION_COMMAND'"
+                    + " AND operation='CREATE_SESSION'", "tenant", id);
+            f.jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id=?"
+                    + " AND session_id=?", "tenant", id);
+            denied(() -> f.service.getPublicSession(SessionPrincipal.ofUser("tenant", "user"), id));
+            assertThat(f.service.listPublicSessions(SessionPrincipal.ofUser("tenant", "user"),
+                    null, 10, null, null).data()).isEmpty();
+        });
+    }
+
+    @Test
+    void deletedSessionRenameCannotRevealAnotherSessionsLiveKey() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String live = f.create(OWNER, "live");
+            f.service.renameSession(OWNER, "shared-rename", live, "live title");
+            String deleted = f.create(OWNER, "deleted");
+            f.jdbc.update("UPDATE ma_session SET status='DELETED', deleted_at=1"
+                    + " WHERE tenant_id=? AND session_id=?", "tenant", deleted);
+            denied(() -> f.service.renameSession(OWNER, "shared-rename", deleted, "deleted title"));
         });
     }
 
@@ -338,7 +373,10 @@ class SessionPrincipalOwnershipTest {
         var skills =
                 new com.alibaba.qwen.code.managedagent.catalog.ManagedSkillCatalogService(
                         f.service, mock(
-                                com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills.class));
+                                com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills.class),
+                        mock(com.alibaba.qwen.code.managedagent.catalog.ManagedSessionResourcesService.class),
+                        mock(com.alibaba.qwen.code.managedagent.repository.ExtensionPackageRepository.class),
+                        new ObjectMapper());
         var extensions =
                 new com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionManagementService(
                         f.store, f.service, records,

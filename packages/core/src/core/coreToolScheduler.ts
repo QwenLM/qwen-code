@@ -50,6 +50,7 @@ import type { EditorType } from '../utils/editor.js';
 import type { Config } from '../config/config.js';
 import type { ModToolCheck } from '../mods/tool-events.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
+import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
@@ -438,6 +439,15 @@ function extractTextFromPartListUnion(c: PartListUnion): string {
     }
   }
   return '';
+}
+
+export function getToolResultErrorMessage(
+  result: ToolResult,
+): string | undefined {
+  if (result.error) return result.error.message;
+  if (result.isError !== true) return undefined;
+  const body = extractTextFromPartListUnion(result.llmContent);
+  return body.trim() ? body : 'Tool reported an error.';
 }
 
 function extractCodeModeToolOutput(parts: Part[]): string {
@@ -1268,7 +1278,7 @@ const createErrorResponse = (
   };
 };
 
-const createCancelledResponse = (
+export const createCancelledResponse = (
   request: ToolCallRequestInfo,
   reason: string,
   executionStatus: ToolExecutionStatus,
@@ -1543,12 +1553,20 @@ function withPostToolBatchStop(
 }
 
 interface CoreToolSchedulerOptions {
+  onManagedRuntimeOutcomeUnknown?: (
+    error: ManagedRuntimeOutcomeUnknownError,
+    callId: string,
+  ) => void;
+  onManagedRuntimeBatchFailed?: (
+    error: ManagedRuntimeOutcomeUnknownError,
+  ) => void;
   onToolExecutionStarted?: (callId: string, startedAt: number) => void;
   onToolExecutionSettled?: (
     callId: string,
     status: ToolExecutionStatus,
     durationMs: number,
   ) => void;
+  onManagedToolExecutionSettled?: (callId: string) => void;
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
@@ -3558,6 +3576,30 @@ export class CoreToolScheduler {
               reqInfo.name,
               rejectionMessage,
             );
+            // The budget note is appended after the rejectionMessage key was
+            // recorded, for the same reason as the directive below: the
+            // numbers vary call-to-call, so folding them into the key would
+            // reset the retry count at every truncation (#16417).
+            // The "size each part" guidance is emitted only when the usage
+            // corroborates the cut (used ≥ half the limit) — a provider can
+            // cut far below the configured ceiling (#16417's own DeepSeek
+            // case: cut near 3K against a 64K ceiling), and telling the
+            // model to size parts "well under 64K" when 95% of that budget
+            // was never spent licenses a retry an order of magnitude too
+            // large (#16417 R1-2).
+            const budget = reqInfo.outputBudgetAtTruncation;
+            const usageCorroboratesCut =
+              budget !== undefined &&
+              budget.usedTokens >= budget.limitTokens / 2;
+            const budgetNote =
+              truncated && budget
+                ? ` This response used ${budget.usedTokens} of the ` +
+                  `${budget.limitTokens}-token output limit.` +
+                  (usageCorroboratesCut
+                    ? ` No single response can carry the whole file — size ` +
+                      `each part well under that limit.`
+                    : '')
+                : '';
             // The directive is appended after the rejectionMessage key was
             // recorded: recordRetryableToolError prunes the tool's other keys,
             // so folding the directive into the key would reset the count at
@@ -3572,7 +3614,7 @@ export class CoreToolScheduler {
                       ? TRUNCATION_RETRY_LOOP_DIRECTIVE
                       : INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE
                   }`
-                : rejectionMessage,
+                : `${rejectionMessage}${budgetNote}`,
             );
             newToolCalls.push({
               status: 'error',
@@ -5568,6 +5610,23 @@ export class CoreToolScheduler {
   private async attemptExecutionOfScheduledCalls(
     signal: AbortSignal,
   ): Promise<void> {
+    try {
+      await this.executeScheduledCalls(signal);
+    } catch (error) {
+      if (
+        error instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        if (this.postToolBatchSpanCallId !== undefined) {
+          this.finalizeToolSpan(this.postToolBatchSpanCallId, true);
+        }
+        this.schedulerOptions.onManagedRuntimeBatchFailed?.(error);
+      }
+      throw error;
+    }
+  }
+
+  private async executeScheduledCalls(signal: AbortSignal): Promise<void> {
     // Re-check after each pass for a call that became 'scheduled' meanwhile.
     // Each iteration either drains ≥1 'scheduled' call or returns, so this
     // cannot spin.
@@ -5665,30 +5724,36 @@ export class CoreToolScheduler {
     );
     const executing = new Set<Promise<void>>();
     const admitted: ScheduledToolCall[] = [];
+    let failure: { error: unknown } | undefined;
     const launchAdmitted = () => {
       for (const call of admitted.splice(0)) {
-        const p = this.executeSingleToolCall(call, signal).finally(() => {
-          executing.delete(p);
-        });
-        executing.add(p);
+        const execution = this.executeSingleToolCall(call, signal)
+          .catch((error: unknown) => {
+            failure ??= { error };
+          })
+          .finally(() => {
+            executing.delete(execution);
+          });
+        executing.add(execution);
       }
     };
 
     for (const call of calls) {
-      if (
+      if (failure) break;
+      const refused =
         this.schedulerOptions.beforeToolLaunch &&
-        (await this.launchRefused(call))
-      ) {
-        continue;
-      }
+        (await this.launchRefused(call));
+      if (failure) break;
+      if (refused) continue;
       admitted.push(call);
       if (executing.size + admitted.length >= maxConcurrency) {
         launchAdmitted();
         await Promise.race(executing);
       }
     }
-    launchAdmitted();
+    if (!failure) launchAdmitted();
     await Promise.all(executing);
+    if (failure) throw failure.error;
   }
 
   private async executeSingleToolCall(
@@ -5775,6 +5840,14 @@ export class CoreToolScheduler {
         TOOL_FAILURE_KIND_TOOL_EXCEPTION,
         errorMessage,
       );
+      if (
+        error instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        this.finalizeToolSpan(callId, true);
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown(error, callId);
+        throw error;
+      }
       this.setStatusInternal(
         callId,
         'error',
@@ -6470,27 +6543,33 @@ export class CoreToolScheduler {
       let schedulerTimeoutResultSelected = false;
       let schedulerTimeoutWon = false;
       if (timeoutController) {
+        const waitForManagedSettlement =
+          this.schedulerOptions.onManagedRuntimeOutcomeUnknown !== undefined &&
+          this.config
+            .getManagedRuntimeEnvironment?.()
+            ?.toolNames?.has(canonicalName) === true;
         let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
         try {
           toolResult = await new Promise<ToolResult>((resolve, reject) => {
             timeoutTimer = setTimeout(() => {
-              schedulerTimeoutResultSelected = true;
-              schedulerTimeoutWon = !signal.aborted;
+              schedulerTimeoutResultSelected = !waitForManagedSettlement;
+              schedulerTimeoutWon =
+                schedulerTimeoutResultSelected && !signal.aborted;
               debugLogger.warn(
                 `Tool ${canonicalName} (${callId}) timed out after ` +
                   `${toolExecutionTimeoutMs}ms — aborting`,
               );
-              // Cancel the in-flight tool via the derived signal, then resolve
-              // with a timeout error so the scheduler is unblocked even if the
-              // tool ignores the abort. A later settle from `promise` is a
-              // no-op once this wrapper Promise has already resolved.
+              // Cancel via the derived signal. Only non-Managed tools may
+              // resolve with a synthetic timeout before their actual outcome.
               timeoutController?.abort(
                 new DOMException(
                   `Tool execution timed out after ${toolExecutionTimeoutMs}ms`,
                   'TimeoutError',
                 ),
               );
-              resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
+              if (!waitForManagedSettlement) {
+                resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
+              }
             }, toolExecutionTimeoutMs);
             timeoutTimer.unref?.();
             promise.then(resolve, reject);
@@ -6650,17 +6729,15 @@ export class CoreToolScheduler {
         (!schedulerTimeoutResultSelected || schedulerTimeoutWon);
       const parentAbortedAtExecutionSettle = signal.aborted;
       const aborted = parentAbortedAtExecutionSettle && !isTimeout;
-      const executionErrorType = toolResult.error
-        ? (toolResult.error.type ??
+      const failureMessage = getToolResultErrorMessage(toolResult);
+      const failed = failureMessage !== undefined;
+      const executionErrorType = failed
+        ? (toolResult.error?.type ??
           (scheduledCall.tool instanceof DiscoveredMCPTool
             ? ToolErrorType.MCP_TOOL_ERROR
             : ToolErrorType.UNKNOWN))
         : undefined;
-      executionStatus = aborted
-        ? 'cancelled'
-        : toolResult.error
-          ? 'error'
-          : 'success';
+      executionStatus = aborted ? 'cancelled' : failed ? 'error' : 'success';
       executionSettled = true;
       try {
         this.schedulerOptions.onToolExecutionSettled?.(
@@ -6671,6 +6748,7 @@ export class CoreToolScheduler {
       } catch (error) {
         debugLogger.warn('Tool lifecycle end observer failed:', error);
       }
+      this.schedulerOptions.onManagedToolExecutionSettled?.(callId);
       if (execSpan) {
         const completedExecSpan = execSpan;
         execSpan = undefined;
@@ -6680,7 +6758,7 @@ export class CoreToolScheduler {
             ? TOOL_SPAN_STATUS_TOOL_CANCELLED
             : isTimeout
               ? TOOL_SPAN_STATUS_TOOL_TIMEOUT
-              : toolResult.error
+              : failed
                 ? TOOL_SPAN_STATUS_TOOL_ERROR
                 : undefined,
           cancelled: aborted,
@@ -6779,7 +6857,7 @@ export class CoreToolScheduler {
         return true;
       };
 
-      if (toolResult.error === undefined) {
+      if (!failed) {
         let content = toolResult.llmContent ?? '';
         let persistedOutputFiles = toolResult.persistedOutputFiles
           ? [...toolResult.persistedOutputFiles]
@@ -7352,8 +7430,10 @@ export class CoreToolScheduler {
       } else {
         // It is a failure
         // PostToolUseFailure Hook
-        const operationalErrorMessage = toolResult.error.message;
-        let errorMessage = operationalErrorMessage;
+        const preserveErrorBody =
+          isTimeout ||
+          (toolResult.isError === true && toolResult.error === undefined);
+        let errorMessage = failureMessage;
         let errorPersistedOutputFiles = toolResult.persistedOutputFiles
           ? [...toolResult.persistedOutputFiles]
           : toolResult.persistedOutputFiles;
@@ -7373,7 +7453,7 @@ export class CoreToolScheduler {
                 toolUseId,
                 canonicalName,
                 toolInput,
-                toolResult.error!.message,
+                failureMessage,
                 false,
                 this.config.getApprovalMode(),
                 callId,
@@ -7392,7 +7472,7 @@ export class CoreToolScheduler {
               failureHookResult.additionalContext,
             )
           ) {
-            if (isTimeout) {
+            if (preserveErrorBody) {
               failureHookAdditionalContext =
                 failureHookResult.additionalContext;
             } else {
@@ -7402,8 +7482,8 @@ export class CoreToolScheduler {
           failureHookArtifacts = failureHookResult.artifacts;
         }
 
-        if (isTimeout) {
-          // The generic gate stands down for a marked body; bound the timeout
+        if (preserveErrorBody) {
+          // The generic gate stands down for a marked body; bound the failure
           // detail at the producer's own declared budget instead — char-only,
           // mirroring the success path's per-tool pass. An honest producer is
           // a no-op under its own budget; anything appended after the mark
@@ -7413,7 +7493,7 @@ export class CoreToolScheduler {
             toolResult.outputBudgetApplied === true
               ? scheduledCall.tool.maxOutputChars
               : undefined;
-          let timeoutContent: {
+          let errorContent: {
             content: PartListUnion;
             persistedOutputFiles?: string[];
           };
@@ -7437,7 +7517,7 @@ export class CoreToolScheduler {
                 markedProducerBudget,
                 'per_tool',
               );
-              timeoutContent = {
+              errorContent = {
                 content: truncated.content,
                 persistedOutputFiles: persistedOutputFilesForTruncation(
                   toolResult.llmContent,
@@ -7448,16 +7528,16 @@ export class CoreToolScheduler {
               // A truncation/IO failure must never demote the result — keep
               // the detail and warn, same as the success-path pass.
               debugLogger.warn(
-                `TRUNCATION (timeout detail) failed for ${toolName}: ${
+                `TRUNCATION (failure detail) failed for ${toolName}: ${
                   truncErr instanceof Error
                     ? truncErr.message
                     : String(truncErr)
                 }`,
               );
-              timeoutContent = { content: toolResult.llmContent };
+              errorContent = { content: toolResult.llmContent };
             }
           } else {
-            timeoutContent = await this.maybePersistLargeToolResult(
+            errorContent = await this.maybePersistLargeToolResult(
               callId,
               toolName,
               toolResult.llmContent,
@@ -7469,16 +7549,18 @@ export class CoreToolScheduler {
           if (markedProducerBudget === undefined)
             recordBudgetReduction(
               toolResult.llmContent,
-              timeoutContent.content,
+              errorContent.content,
               this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM,
               globalBudgetSource,
             );
           let responseParts = convertToFunctionErrorResponse(
             getModelFacingToolName(scheduledCall.request),
             callId,
-            timeoutContent.content,
-            operationalErrorMessage,
+            errorContent.content,
+            failureMessage,
           );
+          const bodyError =
+            responseParts[0]?.functionResponse?.response?.['error'];
           if (failureHookAdditionalContext && responseParts.length > 0) {
             const lastIndex = responseParts.length - 1;
             responseParts = [...responseParts];
@@ -7503,36 +7585,47 @@ export class CoreToolScheduler {
             ...(toolResult.artifacts ?? []),
             ...(failureHookArtifacts ?? []),
           ];
-          const timeoutPersistedOutputFiles =
+          const persistedOutputFiles =
             errorPersistedOutputFiles === undefined &&
-            timeoutContent.persistedOutputFiles === undefined
+            errorContent.persistedOutputFiles === undefined
               ? undefined
               : Array.from(
                   new Set([
                     ...(errorPersistedOutputFiles ?? []),
-                    ...(timeoutContent.persistedOutputFiles ?? []),
+                    ...(errorContent.persistedOutputFiles ?? []),
                   ]),
                 );
           if (
             cancelAfterPostProcessing(artifacts, {
-              persistedOutputFiles: timeoutPersistedOutputFiles,
+              persistedOutputFiles,
               visionBridgeNotice: processedImages.visionBridgeNotice,
             })
           ) {
             return;
           }
-          const timeoutResponse: CoreToolCallResponseInfo = {
+          const settledErrorMessage =
+            !isTimeout && typeof bodyError === 'string'
+              ? bodyError
+              : failureMessage;
+          let resultDisplay = toolResult.returnDisplay;
+          if (
+            !isTimeout &&
+            typeof resultDisplay === 'string' &&
+            !resultDisplay.trim()
+          ) {
+            resultDisplay = settledErrorMessage;
+          }
+          const errorResponse: CoreToolCallResponseInfo = {
             callId,
             responseParts,
-            resultDisplay: this.compactResultDisplayForInteractiveHistory(
-              toolResult.returnDisplay,
-            ),
-            error: new Error(operationalErrorMessage),
-            errorType: ToolErrorType.EXECUTION_TIMEOUT,
+            resultDisplay:
+              this.compactResultDisplayForInteractiveHistory(resultDisplay),
+            error: new Error(settledErrorMessage),
+            errorType: executionErrorType ?? ToolErrorType.UNKNOWN,
             executionStatus,
             contentLength,
-            ...(timeoutPersistedOutputFiles !== undefined
-              ? { persistedOutputFiles: timeoutPersistedOutputFiles }
+            ...(persistedOutputFiles !== undefined
+              ? { persistedOutputFiles }
               : {}),
             ...(processedImages.modelOverride !== undefined
               ? { modelOverride: processedImages.modelOverride }
@@ -7542,12 +7635,16 @@ export class CoreToolScheduler {
               : {}),
             ...(artifacts.length > 0 ? { artifacts } : {}),
           };
-          observeProducerOutput(timeoutResponse);
-          this.setStatusInternal(callId, 'error', timeoutResponse);
+          observeProducerOutput(errorResponse);
+          this.setStatusInternal(callId, 'error', errorResponse);
           setToolSpanFailure(
             span,
-            TOOL_FAILURE_KIND_TIMEOUT,
-            TOOL_SPAN_STATUS_TOOL_TIMEOUT,
+            isTimeout
+              ? TOOL_FAILURE_KIND_TIMEOUT
+              : TOOL_FAILURE_KIND_TOOL_ERROR,
+            isTimeout
+              ? TOOL_SPAN_STATUS_TOOL_TIMEOUT
+              : TOOL_SPAN_STATUS_TOOL_ERROR,
           );
           return;
         }
@@ -7742,6 +7839,16 @@ export class CoreToolScheduler {
           errorType:
             executionStatus === 'error' ? exceptionErrorType : undefined,
         });
+      }
+
+      if (
+        executionError instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        throw executionError;
+      }
+      if (executionThrew) {
+        this.schedulerOptions.onManagedToolExecutionSettled?.(callId);
       }
 
       const cancelMessage = executionThrew

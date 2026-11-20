@@ -109,6 +109,9 @@ public final class ManagedSessionPrincipal {
         if (principal == null) {
             return true;
         }
+        if (!principal.tenantId().equals(tenantId)) {
+            return false;
+        }
         AuthorityRow authority = fetchAuthority(jdbc, tenantId, sessionId);
         if (authority == null) {
             return true;

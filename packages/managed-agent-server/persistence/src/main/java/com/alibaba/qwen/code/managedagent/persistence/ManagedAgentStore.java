@@ -449,6 +449,13 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
 
     @Override
     @Transactional
+    public String creationToolProfile(String tenantId, String actorId,
+            String agentId, String requestedRevision, String workspaceId) {
+        return sessionAdmissions.creationToolProfile(tenantId, actorId, agentId, requestedRevision, workspaceId);
+    }
+
+    @Override
+    @Transactional
     public OperationAdmission beginWorkspaceClose(String tenantId, String sessionId, String actorId, String actorDigest, String key, String digest, boolean supported) {
         return lifecycleOperations.beginWorkspaceClose(tenantId, sessionId, actorId, actorDigest, key, digest, supported);
     }

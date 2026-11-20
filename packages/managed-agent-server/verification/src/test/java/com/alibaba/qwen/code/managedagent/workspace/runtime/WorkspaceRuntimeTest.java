@@ -1440,7 +1440,10 @@ class WorkspaceRuntimeTest {
         authority.releaseMaintenance(session.workspace(), maintenance, generation, maintenanceStep);
 
         authority.claim(session.workspace(), turn);
+        var refusedStorage = new java.util.ArrayList<String>();
+        authority.onMaintenanceBusy(refusedStorage::add);
         assertBusy(() -> authority.holdForMaintenance(session.workspace(), maintenance, generation));
+        assertThat(refusedStorage).hasSize(1);
         authority.release(session.workspace(), turn);
         maintenanceStep = authority.holdForMaintenance(session.workspace(), maintenance, generation);
         assertThat(jdbc.queryForList("SELECT maintenance_id FROM ma_storage_owner"

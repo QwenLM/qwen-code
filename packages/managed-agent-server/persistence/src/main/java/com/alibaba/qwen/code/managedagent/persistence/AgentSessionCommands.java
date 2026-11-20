@@ -540,11 +540,13 @@ final class AgentSessionCommands {
                         "metadata", Map.of("title", title));
             }
             // An archived Session was closed first, so it stays closed.
-            case UNARCHIVE -> jdbc.update("UPDATE ma_session SET"
-                            + " status = 'CLOSED', gmt_modified = ?, version ="
-                            + " version + 1 WHERE tenant_id = ? AND"
-                            + " session_id = ?",
-                    now, tenantId, sessionId);
+            case UNARCHIVE -> {
+                jdbc.update("UPDATE ma_session SET"
+                                + " status = 'CLOSED', gmt_modified = ?, version ="
+                                + " version + 1 WHERE tenant_id = ? AND" + " session_id = ?",
+                        now, tenantId, sessionId);
+                JdbcManagedUserMessageStore.retireQueued(jdbc, tenantId, sessionId);
+            }
         }
         jdbc.update(
                 "UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ? WHERE"

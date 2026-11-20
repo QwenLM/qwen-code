@@ -146,7 +146,7 @@ class ConsolidatedActionStoreTest {
     }
 
     private void project(String state, JsonNode answer, long sequence) throws Exception {
-        ObjectNode options = JSON.createObjectNode().put("v", 1).put("requestId", ACTION).put("turnId", "turn")
+        ObjectNode options = JSON.createObjectNode().put("v", 3).put("requestId", ACTION).put("turnId", "turn")
                 .put("functionCallId", "call").put("toolName", "write_file").put("policyRevision", "hosted-tool-approval/1")
                 .put("inputRevision", 1).put("createdAt", 1).put("expiresAt", 1000);
         options.putArray("options").addObject().put("id", "allow").put("label", "Allow");

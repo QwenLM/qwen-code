@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
@@ -11,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentMatchers;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -18,10 +20,13 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -38,6 +43,10 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.spy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -116,6 +125,59 @@ class ManagedTurnQueryTest {
                     assertThat(event.turnId()).isEqualTo("turn_a");
                     assertThat(event.type()).isEqualTo("environment.ready");
                 });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TASK", "SESSION"})
+    void latestTurnIgnoresOtherStreamsWithTheSameSequence(String streamKind) {
+        assertLatestTurnStreamIsolation(jdbc, objectMapper, streamKind);
+    }
+
+    static void assertLatestTurnStreamIsolation(JdbcTemplate jdbc, ObjectMapper mapper, String streamKind) {
+        List<Object> mappedRows = new ArrayList<>();
+        JdbcTemplate observed = spy(new ManagedSchemaJdbcTemplate(jdbc.getDataSource()));
+        doAnswer(call -> {
+            List<?> rows = (List<?>) call.callRealMethod();
+            mappedRows.addAll(rows);
+            return rows;
+        }).when(observed).query(anyString(), ArgumentMatchers.<RowMapper<Object>>any(), any(Object[].class));
+        var reader = VerificationFixtures.managedAgentStore(observed, mapper, Clock.systemUTC(), ignored -> {},
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(),
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var tx = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
+        String tenant = tenant();
+        String sessionId = tx.execute(status -> reader.insertSessionCommand(tenant, "CREATE_SESSION",
+                "stream-isolation-create", "digest", "qwen-code", null, null, List.of(), null).sessionId());
+        for (String turnId : List.of("turn_z", "turn_a")) {
+            long created = turnId.equals("turn_z") ? 2_000 : 1_000;
+            jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json,"
+                            + " payload_digest, status, gmt_create, gmt_modified, completed_at)"
+                            + " VALUES (?, ?, ?, ?, '[]', 'digest', 'COMPLETED', ?, ?, 3000)",
+                    tenant, sessionId, turnId, UUID.randomUUID().toString(), created, created);
+            tx.executeWithoutResult(status -> reader.appendPublicEventIfAbsent(tenant, sessionId, turnId,
+                    "turn.accepted", Map.of("input", List.of()), false, "accepted:" + turnId));
+        }
+        long sequence = jdbc.queryForObject("SELECT sequence_id FROM ma_public_event WHERE tenant_id = ?"
+                        + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                        + " AND event_type = 'turn.accepted' AND turn_id = ?",
+                Long.class, tenant, sessionId, "turn_a");
+        String eventId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id, stream_kind, stream_id, sequence_id,"
+                        + " event_id, event_type, data_json, is_terminal, gmt_create)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, '{}', 0, 4000)",
+                tenant, sessionId, streamKind, "other-stream", sequence, eventId,
+                streamKind.equals("TASK") ? "task.updated" : "turn.accepted");
+        var expected = new TurnSummary(sessionId, "turn_a", "COMPLETED", 1_000, 3_000L, null);
+        assertThat(reader.findLatestTurns(tenant, List.of(sessionId))).isEqualTo(Map.of(sessionId, expected));
+
+        // Normal TASK events have null turn_id. A real Turn reference here deliberately simulates
+        // pollution to test join isolation; SESSION with a nonempty stream_id is noncanonical too.
+        assertThat(jdbc.update("UPDATE ma_public_event SET turn_id = 'turn_z' WHERE event_id = ?", eventId))
+                .isEqualTo(1);
+        mappedRows.clear();
+        assertThat(reader.findLatestTurns(tenant, List.of(sessionId))).isEqualTo(Map.of(sessionId, expected));
+        // A Map can hide an extra joined Turn by overwriting it in an unspecified SQL row order.
+        assertThat(mappedRows).containsExactly(expected);
     }
 
     /**
