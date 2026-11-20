@@ -56,7 +56,8 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
         writeFileSync(join(checkout, file), '{}\n');
       }
       git('add', '.');
-      const trailer = 'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>';
+      const trailer =
+        'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>';
       git('commit', '-m', `Release\n\n${trailer}`);
       const original = git('rev-parse', 'HEAD');
       git('init', '--bare', remote);
