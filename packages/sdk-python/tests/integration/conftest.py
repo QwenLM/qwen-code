@@ -240,6 +240,8 @@ def fake_qwen_path(tmp_path: Path) -> str:
                     prompt = parse_user_content(message)
 
                     if "exit nonzero" in prompt:
+                        send(build_assistant_message("first"))
+                        send(build_assistant_message("buffered second"))
                         sys.exit(9)
 
                     if "request unknown control" in prompt:
