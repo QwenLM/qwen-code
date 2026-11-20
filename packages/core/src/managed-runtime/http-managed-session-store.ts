@@ -4006,6 +4006,10 @@ function isReferenceContainer(kind: string): boolean {
       'managed-hook-message-chunks',
       MANAGED_MESSAGE_CHUNKS_KIND,
       'managed-tool-outcome-chunks',
+      // Phase 3b: a draining Harness commits a manifest it never staged in
+      // memory, so the closure must walk its pages server-side exactly like
+      // the resident staged arm does, or the pages stay unreferenced.
+      MANAGED_TOOL_RESULT_KINDS.manifest,
     ].includes(kind)
   );
 }

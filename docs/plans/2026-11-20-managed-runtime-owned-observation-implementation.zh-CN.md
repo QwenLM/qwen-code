@@ -40,7 +40,7 @@
 - **资源 owner kind**：新增 `RUNTIME_STAGE` ref owner kind；staging 在其下写 `REFERENCED` 资源，段字节用 `PUBLISHED` 形态（`persistence/.../JournalResourceWrites.java:117,159`）。stage ref 随条目携带；仅在该条目的 journal commit 后删除。
 - **Transport**：在 `RuntimeTransport`/`HttpRuntimeTransport` 上新增 `observation-pull` 操作（lease 围栏、long poll、`ackThrough`），路由进 `ManagedContextProtocol`；attached 时 worker 回 `attached` 无条目。每 binding 单拉取者 claim（复用 Broker operation-claim 形态）；worker 每 run 仅保留最新 long poll。
 - **Staging 事务**：单事务写自带资源 + 每条目一行 `ma_runtime_stage` +（wake-worthy 条目）将 `wake_retry_at` 拉到 now 并置 `is_wake_pending=1` + 用 terminal 证据结算 `ma_tool_execution` 行（`RuntimeExecutionRecovery.settleUnprovenBackgroundRows` 规则）。仅在 commit 后确认。
-- **manifest 闭包遍历（TS）**：`http-managed-session-store.ts:3993` 的 `isReferenceContainer` 增加 `managed-tool-result-manifest`，使 drain 的 Harness 提交 manifest 时其页的嵌套 `JOURNAL` ref 由服务端收集（无内存 staged 集）。
+- **manifest 闭包遍历（TS）**：已落地 — `http-managed-session-store.ts` 的 `isReferenceContainer` 现已包含 `managed-tool-result-manifest`，使 drain 的 Harness 提交 manifest 时其页的嵌套 `JOURNAL` ref 由服务端收集（无内存 staged 集）。ref-collector 的 manifest→页分支早已存在；246 个 store 测试全绿。
 - **wake hint 围栏**：seal（`JournalWriterLifecycle.java:421`）写 `is_wake_pending = journalPending OR EXISTS(未提交 wake-worthy staged 行)`，存在该行时保持 `wake_retry_at ≤ now`；backstop `recordPending(candidate,false)`（`JdbcWakeRecoveryStore.java:314`）仅在无 wake-worthy staged 行时清除。staged 候选跳过 journal proof，经被动 `recoverForWake` 加载。
 - **re-attach-then-drain（TS）**：加载时先注册 publisher；worker 每 run 报 `stagedThrough`；Harness 按序 drain staged 条目后从 `stagedThrough+1` 接受推送；确认删除至 applied 点的行。publisher/detach/drain/cancel 路由的持久化 adoption（像 `reclaimParkedMcp` 一样从持久记录 adopt，`RuntimeBrokerService.java:554`）， survives Broker 重启/副本。
 
