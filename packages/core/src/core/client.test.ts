@@ -1963,7 +1963,7 @@ describe('Gemini Client (client.ts)', () => {
       const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
       // The prompt part also carries the typed-prompt mark (#9455).
       expect(parts).toContainEqual(
-        expect.objectContaining({ text: 'expanded request' }),
+        markTypedPrompt({ text: 'expanded request' }),
       );
       expect(
         parts.some(
