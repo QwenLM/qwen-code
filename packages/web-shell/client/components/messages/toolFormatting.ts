@@ -333,53 +333,28 @@ export function getToolDescription(
   const fromTitle = getDescriptionFromTitle(tool, workspaceCwd);
   if (fromTitle) return truncateText(fromTitle, MAX_DESCRIPTION_LENGTH);
   const fromArgs = getDescriptionFromArgs(tool, workspaceCwd);
-  if (fromArgs) return truncateText(fromArgs, MAX_DESCRIPTION_LENGTH);
-  return '';
+  return truncateText(fromArgs.text, MAX_DESCRIPTION_LENGTH);
 }
 
+// The producer reports whether it emitted machine text, so a decorated
+// command (` [background]`, ` [timeout: …ms]`, ` [in …]`) stays isolated.
+// Shell rows render the summary variant, which omits the timeout suffix.
 export function isMachineToolDescription(
   tool: ACPToolCall,
   description: string,
   workspaceCwd?: string,
 ): boolean {
-  if (getStringArg(tool.args, 'description')) return false;
-  const command = tool.args?.command;
-  if (
-    isShellToolName(tool.toolName) &&
-    typeof command === 'string' &&
-    command
-  ) {
-    const renderedCommand = truncateText(command, MAX_DESCRIPTION_LENGTH);
-    return (
-      description === renderedCommand ||
-      description === truncateText(renderedCommand, 120)
-    );
-  }
-  const name = tool.toolName.toLowerCase();
-  if (
-    ![
-      'read',
-      'read_file',
-      'readfile',
-      'edit',
-      'editfile',
-      'write',
-      'write_file',
-      'writefile',
-      'list_directory',
-      'listfiles',
-    ].includes(name)
-  )
-    return false;
-  const path = tool.args?.file_path ?? tool.args?.path ?? tool.args?.directory;
-  if (typeof path !== 'string' || !path) return false;
-  const renderedPath = truncateText(
-    pathForDisplay(path, workspaceCwd),
-    MAX_DESCRIPTION_LENGTH,
+  if (!description) return false;
+  const produced = getDescriptionFromArgs(
+    tool,
+    workspaceCwd,
+    isShellToolName(tool.toolName) ? { includeTimeout: false } : {},
   );
+  // Both public getters cap the text, so compare against the capped form.
+  const text = truncateText(produced.text, MAX_DESCRIPTION_LENGTH);
   return (
-    description === renderedPath ||
-    description === truncateText(renderedPath, 120)
+    produced.machine &&
+    (description === text || description === truncateText(text, 120))
   );
 }
 
@@ -397,8 +372,7 @@ export function getToolSummaryDescription(
   const fromArgs = getDescriptionFromArgs(tool, workspaceCwd, {
     includeTimeout: false,
   });
-  if (fromArgs) return truncateText(fromArgs, MAX_DESCRIPTION_LENGTH);
-  return '';
+  return truncateText(fromArgs.text, MAX_DESCRIPTION_LENGTH);
 }
 
 export function getShellToolSemanticDescription(tool: ACPToolCall): string {
@@ -621,7 +595,7 @@ function getDescriptionFromArgs(
   tool: ACPToolCall,
   workspaceCwd?: string,
   options: { includeTimeout?: boolean } = {},
-): string {
+): { text: string; machine: boolean } {
   const args = tool.args || {};
   const name = tool.toolName.toLowerCase();
   const includeTimeout = options.includeTimeout ?? true;
@@ -640,7 +614,10 @@ function getDescriptionFromArgs(
     if (argDescription) {
       description += ` (${argDescription})`;
     }
-    return truncateText(description, MAX_DESCRIPTION_LENGTH);
+    return {
+      text: truncateText(description, MAX_DESCRIPTION_LENGTH),
+      machine: !argDescription,
+    };
   }
   if (name === 'grep_search' || name === 'grep' || name === 'search') {
     const pattern = args.pattern ?? args.query;
@@ -652,7 +629,7 @@ function getDescriptionFromArgs(
         description += ` in path './'`;
       }
       if (args.glob) description += ` (filter: '${String(args.glob)}')`;
-      return description;
+      return { text: description, machine: true };
     }
   }
   if (name === 'glob' && args.pattern) {
@@ -660,29 +637,40 @@ function getDescriptionFromArgs(
     if (args.path) {
       description += ` in path '${String(args.path)}'`;
     }
-    return description;
+    return { text: description, machine: true };
   }
   if (args.file_path) {
     const description = getStringArg(args, 'description');
-    if (description) return description;
-    return pathForDisplay(String(args.file_path), workspaceCwd);
+    if (description) return { text: description, machine: false };
+    return {
+      text: pathForDisplay(String(args.file_path), workspaceCwd),
+      machine: true,
+    };
   }
   if (args.url) {
     const url = String(args.url);
     const prompt =
       typeof args.prompt === 'string' ? (args.prompt as string) : undefined;
     const desc = prompt ? `${url} — "${truncateText(prompt, 40)}"` : url;
-    return truncateText(desc, 80);
+    return { text: truncateText(desc, 80), machine: !prompt };
   }
-  if (args.path) return pathForDisplay(String(args.path), workspaceCwd);
+  if (args.path) {
+    return {
+      text: pathForDisplay(String(args.path), workspaceCwd),
+      machine: true,
+    };
+  }
   if (args.query) {
-    return truncateText(String(args.query), 60);
+    return { text: truncateText(String(args.query), 60), machine: false };
   }
   if (name === 'list_directory' || name === 'listfiles') {
     const candidate = args.path || args.directory || '';
-    return pathForDisplay(String(candidate), workspaceCwd);
+    return {
+      text: pathForDisplay(String(candidate), workspaceCwd),
+      machine: true,
+    };
   }
-  return getStringArg(args, 'description');
+  return { text: getStringArg(args, 'description'), machine: false };
 }
 
 function getStringArg(

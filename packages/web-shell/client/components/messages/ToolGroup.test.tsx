@@ -221,6 +221,87 @@ describe('tool header description direction', () => {
     },
   );
 
+  it.each([
+    {
+      name: 'background shell command',
+      toolName: 'Shell',
+      args: { command: 'tail -f /tmp/سجل/server.log', is_background: true },
+      expected: 'tail -f /tmp/سجل/server.log [background]',
+    },
+    {
+      name: 'shell command with a timeout',
+      toolName: 'Shell',
+      args: { command: 'tail -f /tmp/سجل/server.log', timeout: 5000 },
+      expected: 'tail -f /tmp/سجل/server.log',
+    },
+    {
+      name: 'shell command in another directory',
+      toolName: 'run_shell_command',
+      args: { command: 'tail -f server.log', directory: '/tmp/سجل' },
+      expected: 'tail -f server.log [in سجل]',
+    },
+    {
+      name: 'Arabic grep pattern',
+      toolName: 'Grep',
+      args: { pattern: 'سجل' },
+      expected: "'سجل' in path './'",
+    },
+    {
+      name: 'Arabic glob pattern',
+      toolName: 'Glob',
+      args: { pattern: '**/سجل/*.ts' },
+      expected: "'**/سجل/*.ts'",
+    },
+    {
+      name: 'Arabic fetch URL',
+      toolName: 'WebFetch',
+      args: { url: 'https://example.com/سجل' },
+      expected: 'https://example.com/سجل',
+    },
+  ])(
+    'isolates machine descriptions carrying producer metadata: $name',
+    ({ toolName, args, expected }) => {
+      const container = renderToolLine(
+        makeTool({ toolName, args }),
+        {},
+        {},
+        'ar',
+      );
+      expect(
+        container.querySelector('bdi[class*="lineArg"][dir="ltr"]')
+          ?.textContent,
+      ).toBe(expected);
+    },
+  );
+
+  it('keeps a fetch URL with a prose prompt auto-direction', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'WebFetch',
+        args: { url: 'https://example.com/سجل', prompt: 'لخص الصفحة' },
+      }),
+      {},
+      {},
+      'ar',
+    );
+    const arg = container.querySelector('[class*="lineArg"]');
+    expect(arg?.getAttribute('dir')).toBe('auto');
+    expect(arg?.querySelector('bdi')).toBeNull();
+  });
+
+  it('isolates a path longer than the description cap', () => {
+    const path = 'مجلد/' + 'nested/'.repeat(400) + 'file.ts';
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', args: { file_path: path } }),
+      {},
+      {},
+      'ar',
+    );
+    expect(
+      container.querySelector('bdi[class*="lineArg"][dir="ltr"]')?.textContent,
+    ).toBe(`${path.slice(0, 2000)}...`);
+  });
+
   it('isolates an Arabic-first path fallback without treating prose as a path', () => {
     const container = renderToolLine(
       makeTool({ toolName: 'ReadFile', args: { file_path: 'مجلد/file.ts' } }),
