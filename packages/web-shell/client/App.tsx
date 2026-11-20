@@ -22405,13 +22405,14 @@ export function App({
       standaloneDirectoryErrorCode === 'working_directory_missing' ||
       standaloneDirectoryErrorCode === 'working_directory_compromised',
   );
-  const isDisabled =
-    sessionWriteBlocked ||
+  const composerInputDisabled =
+    rewindSyncBlocked ||
     standaloneInteractionBlocked ||
     shouldDisableComposerInput({
       pendingApproval: pendingApproval !== null,
       isPreparingPrompt,
     });
+  const isDisabled = sessionWriteBlocked || composerInputDisabled;
   const retryableTurnErrorIdentity = retryableTurnErrorIdentityRef.current;
   const showCurrentRetryHint = Boolean(
     showRetryHint &&
@@ -23403,6 +23404,7 @@ export function App({
   const submitAgentChat = agentChatEntry.submit;
   const submitComposerInput = useCallback(
     (...args: Parameters<typeof handleEditorSubmit>) => {
+      if (sessionWriteBlockedRef.current) return false;
       if (
         !collaborationAvailable ||
         (sendCommandAvailable && /^\/send(?:\s|$)/i.test(args[0]))
@@ -27167,12 +27169,13 @@ export function App({
                           cancelArmed={cancelArmed}
                           disabled={
                             (collaborationAvailable && agentChatEntry.pending) ||
-                            isDisabled ||
+                            composerInputDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
                             approvalOverlayActive ||
                             unknownPromptAdmission?.payloadAvailable === true
                           }
+                          submitDisabled={sessionWriteBlocked}
                           commands={commands}
                           skills={composerSkills}
                           onSkillsOpenChange={
