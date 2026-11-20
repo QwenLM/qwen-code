@@ -32,21 +32,21 @@ import {
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
 } from './llm.js';
-import {
+import type {
+ ChatRecord, Config ,
   persistSessionUsage,
   uiTelemetryService,
   EVENT_API_RESPONSE,
-
+  type UiEvent,
   ApprovalMode,
   InputFormat,
   OutputFormat,
-  Storage} from '@qwen-code/qwen-code-core';
+  Storage } from '@qwen-code/qwen-code-core';
 import { startInteractiveUI } from './ui/startInteractiveUI.js';
 import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
-import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
@@ -5332,19 +5332,20 @@ describe('persistRunUsageOnExit', () => {
     getSessionId: () => 'exit-session',
     getProjectRoot: () => '/exit/project',
   } as unknown as Config;
-  const apiResponseEvent = (tokens: number) => ({
-    'event.name': EVENT_API_RESPONSE,
-    'event.timestamp': new Date().toISOString(),
-    response_id: `r-${tokens}`,
-    model: 'm',
-    duration_ms: 1,
-    input_token_count: tokens,
-    output_token_count: 0,
-    cached_content_token_count: 0,
-    thoughts_token_count: 0,
-    total_token_count: tokens,
-    prompt_id: 'exit-session',
-  });
+  const apiResponseEvent = (tokens: number) =>
+    ({
+      'event.name': EVENT_API_RESPONSE,
+      'event.timestamp': new Date().toISOString(),
+      response_id: `r-${tokens}`,
+      model: 'm',
+      duration_ms: 1,
+      input_token_count: tokens,
+      output_token_count: 0,
+      cached_content_token_count: 0,
+      thoughts_token_count: 0,
+      total_token_count: tokens,
+      prompt_id: 'exit-session',
+    }) as UiEvent;
 
   beforeEach(() => {
     uiTelemetryService.reset();

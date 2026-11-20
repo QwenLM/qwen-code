@@ -641,6 +641,28 @@ describe('loadStatsData — per-request ledger accounting', () => {
     expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the previous window disjoint from the current one', async () => {
+    const now = Date.now();
+    const startDay = now - 7 * DAY;
+    const dayBefore = startDay - DAY;
+    mockedLoadUsageHistory.mockResolvedValue([makeRecord({ timestamp: now })]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
+      new Map([
+        [dayKey(startDay), ledgerDay({ requests: 4, inputTokens: 1000 })],
+        [dayKey(dayBefore), ledgerDay({ requests: 2, inputTokens: 500 })],
+        [dayKey(now), ledgerDay({ requests: 2, inputTokens: 330 })],
+      ]),
+    );
+
+    const result = await loadStatsData('week');
+
+    // Current is 1330 (the day before the window start is outside it);
+    // previous is 500. If the previous window also held the current start day
+    // it would be 1500 and the delta would read about -11%.
+    expect(reportTokens(result.report)).toBe(1330);
+    expect(result.delta?.tokens).toBeCloseTo(166);
+  });
+
   it('builds the delta when only the ledger covers the previous window', async () => {
     const now = new Date();
     const todayStart = new Date(

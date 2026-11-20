@@ -201,6 +201,13 @@ though it may cover earlier runs, because it may also be replay-inflated.
 Undercounting that ambiguous overlap is the safe direction; double counting is
 not.
 
+**Session counts now count runs, not conversations.** Keeping every disjoint run
+means the sessions tile, the TUI Sessions number and the per-day session counts
+read two runs of one conversation as 2 sessions, where last-wins previously read
+
+1. That is the more honest number once each record is a delta rather than a
+   cumulative copy, but it is a semantic shift, not an invariant the tiles preserve.
+
 ## Implemented solution (TUI cross-session view)
 
 `/stats`'s historical ranges read `loadUsageHistory` + `aggregateUsage` with no

@@ -400,6 +400,28 @@ describe('loadUsageDashboard', () => {
     expect(week.heatmap[dayKey(yesterday)]?.tokens).toBe(600);
   });
 
+  it('keeps record-derived totals when the ledger cannot be read at all', async () => {
+    // A regular file where the usage directory belongs makes the ledger
+    // enumeration fail with ENOTDIR. That must not blank the dashboard: the
+    // session records loaded fine, so they still supply every tile.
+    fs.writeFileSync(
+      path.join(process.env['QWEN_HOME']!, 'usage'),
+      'not a directory',
+      'utf8',
+    );
+    seed([
+      rec({
+        sessionId: 'a',
+        timestamp: Date.now(),
+        model: { totalTokens: 1200, inputTokens: 1200 },
+      }),
+    ]);
+
+    const dash = await loadUsageDashboard({ range: 'today' });
+
+    expect(dash.summary.totalTokens).toBe(1200);
+  });
+
   it('counts a boundary-day session beside its tokens instead of reporting zero', () => {
     const now = Date.now();
     // 00:00:00.001 local on the day the 30-day window starts: inside the day

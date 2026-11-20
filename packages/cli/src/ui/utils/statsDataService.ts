@@ -362,8 +362,14 @@ export async function loadStatsData(
         r.timestamp < prevBounds.end.getTime(),
     );
     const prevStartKey = localDateKey(prevBounds.start.getTime());
-    // `end` is exclusive, so the window's last day is the one before it.
-    const prevEndKey = localDateKey(prevBounds.end.getTime() - 1);
+    // `end` is exclusive, so the window's last day is the one before it. When
+    // that day is also the current window's first day, step back once more:
+    // overlapping windows would share the boundary day and dilute the delta.
+    const rawPrevEndKey = localDateKey(prevBounds.end.getTime() - 1);
+    const prevEndKey =
+      rawPrevEndKey === localDateKey(start.getTime())
+        ? localDateKey(start.getTime() - 24 * 60 * 60 * 1000)
+        : rawPrevEndKey;
     // A run killed before exit writes no record, so the ledger alone can cover
     // the previous window. Gate on either source, not on records only.
     const ledgerCoversPrev = [...ledgerDaily.keys()].some(
