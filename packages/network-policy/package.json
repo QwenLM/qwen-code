@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/network-policy",
   "private": true,
-  "version": "0.28.0",
+  "version": "0.28.0-nightly.20261120.19b31401f5",
   "description": "Shared URL policy and DNS-pinned network targets for Qwen Code",
   "repository": {
     "type": "git",
