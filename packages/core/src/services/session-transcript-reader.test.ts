@@ -3676,7 +3676,7 @@ describe('SessionTranscriptReader', () => {
     expect(builds.count).toBe(0);
   });
 
-  it.each(['resident', 'lru-evicted', 'over-cap'] as const)(
+  it.each(['resident', 'entry-cleared', 'over-cap'] as const)(
     'fails every sharer of a rebuild closed when the frozen snapshot is rewritten under it (%s)',
     async (condition) => {
       if (condition === 'over-cap') {
@@ -3703,17 +3703,16 @@ describe('SessionTranscriptReader', () => {
       await vi.waitFor(() => expect(firstBuild).toBe(false));
       // A second request with the same frozen cursor shares the pending build.
       const waiter = readAfter(reader, state, { limit: 1 });
-      if (condition === 'lru-evicted') {
-        // The global 32-entry count cap evicts the pending entry mid-build;
-        // the verification must still run for every sharer.
-        for (let i = 0; i < 32; i++) {
-          const sid = `770e8400-e29b-41d4-a716-${String(i).padStart(12, '0')}`;
-          await writeRecords(
-            linear('f-', 0, 1, null, () => 'filler', sid),
-            sid,
-          );
-          await reader.readPage(sid, { limit: 1 });
-        }
+      // Mark both promises handled before releasing the build so no
+      // rejection window is left unhandled; the assertions follow below.
+      void initiator.catch(() => {});
+      void waiter.catch(() => {});
+      if (condition === 'entry-cleared') {
+        // The placeholder loses its cache slot mid-build (via the test clear
+        // seam; count-cap eviction of in-flight placeholders is prevented by
+        // design). The completion must still verify for every sharer instead
+        // of serving the torn build uncached.
+        clearSessionTranscriptIndexCacheEntriesForTest();
       }
       const raw = await fs.readFile(filePath, 'utf8');
       const rewritten = raw.replace('"text":"reply"', '"text":"REPLY"');
@@ -3732,6 +3731,70 @@ describe('SessionTranscriptReader', () => {
       });
     },
   );
+
+  it('retains an in-flight build placeholder under count pressure and admits its completion', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply', 'third'));
+    const reader = newReader();
+    let releaseBuild: (() => void) | undefined;
+    const buildBlocked = new Promise<void>((resolve) => {
+      releaseBuild = resolve;
+    });
+    let firstBuild = true;
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (builtPath === filePath && firstBuild) {
+        firstBuild = false;
+        await buildBlocked;
+      }
+    });
+    const pendingRead = reader.readPage(sessionId, { limit: 1 });
+    await vi.waitFor(() => expect(firstBuild).toBe(false));
+    // Admit more distinct sessions than the count cap while the build is
+    // awaited: the placeholder must survive the LRU prune (it holds no
+    // bytes and its build is still in flight).
+    for (let i = 0; i < 33; i++) {
+      const sid = `770e8400-e29b-41d4-a716-${String(i).padStart(12, '0')}`;
+      await writeRecords(
+        linear('f-', 0, 1, null, () => 'filler', sid),
+        sid,
+      );
+      await reader.readPage(sid, { limit: 1 });
+    }
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+    releaseBuild!();
+    await pendingRead;
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    // The completion admitted the index instead of returning it uncached.
+    expect(builds.count).toBe(0);
+  });
+
+  it('evicts a same-mtime smaller prefix to admit the live snapshot when the class is full', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    // Pin a whole-millisecond mtime and restore it after the append, so the
+    // equal-mtime/smaller-size arm (a same-millisecond append) is the only
+    // one that can reclaim the old prefix.
+    await pinMtime(filePath);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    await fs.utimes(filePath, frozen.atime, frozen.mtime);
+    // Fits the grown snapshot alone, but not it plus the old prefix.
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 2048);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+    // The superseded frozen prefix still reads its original content.
+    const oldPage = await readAfter(reader, oldState, { limit: 1 });
+    expect(uuids(oldPage.records)).toEqual(['large-1']);
+  });
 
   it('does not let a frozen-prefix admission reclaim the live newer index', async () => {
     setSessionTranscriptIndexCacheMaxBytesForTest(1);
@@ -4131,11 +4194,73 @@ describe('SessionTranscriptReader', () => {
       await expect(
         reader.readRestoreProjection(sessionId, NONE),
       ).resolves.toBeDefined();
-      // The offer reclaimed the superseded slot; the next page hits it.
+      // The offer reclaimed the superseded slot instead of overflowing the
+      // cap (the offer door does not run the count prune itself).
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+      // The next page hits the offered index.
       await reader.readPage(sessionId, { limit: 1 });
       expect(builds.count).toBe(1);
     },
   );
+
+  it('offers into a full count cap by reclaiming a superseded entry in the other class', async () => {
+    const reader = newReader();
+    const large = (i: number) => `large transcript ${i}`;
+    const filePath = await writeRecords(linear('large-', 0, 1999, null, large));
+    const oldRaw = await fs.readFile(filePath, 'utf8');
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    // Truncate to half the records: the new estimate is shared-class once
+    // the shared budget is tightened below the old oversized estimate.
+    const lines = oldRaw.trimEnd().split('\n');
+    const newRaw = lines.slice(0, 1000).join('\n') + '\n';
+    await fs.writeFile(filePath, newRaw);
+    await reader.readPage(sessionId, { limit: 1 });
+    const newBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    // 31 one-record fillers, all shared-class. Calibrate the filler
+    // estimate from a single read: reading all 31 here would push the map
+    // past the count cap and LRU-evict the old/new entries being measured.
+    const fillerSids: string[] = [];
+    for (let i = 0; i < 31; i++) {
+      fillerSids.push(`770e8400-e29b-41d4-a716-${String(i).padStart(12, '0')}`);
+    }
+    const beforeFiller = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await writeRecords(
+      linear('f-', 0, 0, null, () => 'filler', fillerSids[0]),
+      fillerSids[0],
+    );
+    await reader.readPage(fillerSids[0], { limit: 1 });
+    const fillerBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - beforeFiller;
+    const fillersTotal = fillerBytes * 31;
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    // Shared budget fits the new index plus the fillers exactly, and stays
+    // below the old estimate so the old prefix is oversized-class.
+    setSessionTranscriptIndexCacheMaxBytesForTest(newBytes + fillersTotal);
+    expect(oldBytes).toBeGreaterThan(newBytes + fillersTotal);
+    // Re-cache the old (oversized) prefix, then fill the count cap.
+    await fs.writeFile(filePath, oldRaw);
+    await reader.readPage(sessionId, { limit: 1 });
+    for (const sid of fillerSids) {
+      await writeRecords(
+        linear('f-', 0, 0, null, () => 'filler', sid),
+        sid,
+      );
+      await reader.readPage(sid, { limit: 1 });
+    }
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+    // Truncate again and offer the new shared-class snapshot: the count
+    // slot must come from the superseded oversized entry (other class).
+    await fs.writeFile(filePath, newRaw);
+    const builds = countBuilds(filePath);
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+  });
 
   it('accounts a restore-offered Managed projection against the index budget class', async () => {
     const bigText = 'x'.repeat(256 * 1024);

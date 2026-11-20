@@ -2022,10 +2022,21 @@ function pruneCache(now = Date.now()): void {
     }
   }
   while (indexCache.size > INDEX_CACHE_MAX_ENTRIES) {
-    const oldest = indexCache.keys().next().value;
-    if (typeof oldest !== 'string') break;
-    indexCache.delete(oldest);
-    debugLogger.debug(`index cache evicted LRU ${oldest}`);
+    // In-flight build placeholders hold no bytes and are bounded by their
+    // own TTL; evicting one discards a completed index when its build
+    // finishes (the stale-completion path returns it uncached). The count
+    // cap stays authoritative over completed entries: skip placeholders
+    // while their build is still awaited.
+    let oldestValue: string | undefined;
+    for (const [key, entry] of indexCache) {
+      if (entry.value) {
+        oldestValue = key;
+        break;
+      }
+    }
+    if (oldestValue === undefined) break;
+    indexCache.delete(oldestValue);
+    debugLogger.debug(`index cache evicted LRU ${oldestValue}`);
   }
   pruneCacheByteBudget(false);
   pruneCacheByteBudget(true);
@@ -2735,6 +2746,10 @@ async function getCachedIndex(params: {
     return cached.value;
   }
   if (cached?.pending && cached.expiresAt > now) {
+    // Refresh recency like the value-hit path so an actively awaited build
+    // is not the LRU victim of unrelated admissions.
+    indexCache.delete(key);
+    indexCache.set(key, cached);
     debugLogger.debug(`index cache pending hit ${key}`);
     params.onCacheState?.('pending');
     return cached.pending;
@@ -3073,8 +3088,9 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
   ) {
     // Same fit-before-evict judgment as getCachedIndex, extended to the
     // 32-entry count cap: a refused offer must not evict the superseded
-    // prefix it cannot replace, and reclaiming a superseded entry frees a
-    // count slot as well as class bytes.
+    // prefix it cannot replace. The byte arm stays class-scoped, but count
+    // slots are class-agnostic — a superseded same-file entry in the other
+    // class frees a slot too.
     const reclaimable = supersededSnapshotBytes(
       index.filePath,
       index.snapshotSize,
@@ -3082,12 +3098,21 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
       index.fileIdentity,
       oversized,
     );
+    const reclaimableOtherClass = countFull
+      ? supersededSnapshotBytes(
+          index.filePath,
+          index.snapshotSize,
+          index.lastUpdated,
+          index.fileIdentity,
+          !oversized,
+        )
+      : 0;
     if (
       (oversized ? classBytes.oversized : classBytes.shared) -
         reclaimable +
         byteSize >
         classBudget ||
-      (countFull && reclaimable === 0)
+      (countFull && reclaimable + reclaimableOtherClass === 0)
     ) {
       debugLogger.debug(
         `fresh index cache offer skipped ${key} byteSize=${byteSize}`,
@@ -3101,6 +3126,15 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
       index.fileIdentity,
       oversized,
     );
+    if (countFull && reclaimable === 0) {
+      evictSupersededSnapshots(
+        index.filePath,
+        index.snapshotSize,
+        index.lastUpdated,
+        index.fileIdentity,
+        !oversized,
+      );
+    }
   }
   const entry: CacheEntry = {
     value: index,

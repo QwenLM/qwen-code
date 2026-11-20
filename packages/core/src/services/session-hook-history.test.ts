@@ -348,11 +348,39 @@ describe('persisted hook turn pages', () => {
     expect(
       getSessionTranscriptIndexCacheStatsForTest().byteSize,
     ).toBeGreaterThan(sharedBytes + 2048);
+    // Both entries survive the prune: the shared one stays put because the
+    // other index is accounted against the oversized class. A total-bytes
+    // prune would evict the warm shared entry here (entries === 1).
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
     read.mockClear();
     await reader.readTurnHooksPage(sessionId, promptId, {
       snapshot: anchor.snapshot,
     });
     expect(read).not.toHaveBeenCalled();
+  });
+  it('refuses hook growth when the shared class is full and the oversized class cannot take the crossing', async () => {
+    append(event('one'));
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const anchor = await reader.readTurnIndexPage(sessionId);
+    const indexBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    // The aggregate does not fit the shared class, and the oversized class
+    // is too tight to take the crossing: retention must be refused.
+    setSessionTranscriptIndexCacheMaxBytesForTest(indexBytes + 1);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+    const read = vi.fn();
+    setSessionTranscriptSelectedLineReadHookForTest(read);
+    for (let i = 0; i < 2; i++) {
+      expect(
+        await reader.readTurnHooksPage(sessionId, promptId, {
+          snapshot: anchor.snapshot,
+        }),
+      ).toMatchObject({ totalExecutions: 1, coverage: 'recorded' });
+    }
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      indexBytes,
+    );
   });
   it('moves a shared entry into the oversized class when its hook aggregate crosses the shared budget', async () => {
     append(event('one'));
