@@ -92,6 +92,7 @@ class Query:
             asyncio.Queue()
         )
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
         self._close_reason: Exception | None = None
         self._started = False
         self._start_lock = asyncio.Lock()
@@ -603,9 +604,22 @@ class Query:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def close(self) -> None:
-        if self._closed:
-            return
+        if self._close_task is None:
+            if self._closed:
+                return
+            self._close_task = asyncio.create_task(self._close())
+        elif self._closed:
+            current_task = _incoming_control_task.get() or asyncio.current_task()
+            # Teardown may be waiting for this query's callback/input cleanup.
+            if asyncio.current_task() is self._input_task or any(
+                incoming.task is current_task
+                for incoming in self._incoming_control_requests.values()
+            ):
+                return
 
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
         async with self._start_lock:
             if self._closed:
                 return

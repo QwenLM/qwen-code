@@ -17,6 +17,7 @@ Issue #17493 records a real child from the official CLI 0.27.4 still alive after
 9. A peer that exits cleanly before replying to initialization must not receive the single-turn or streaming prompt. Both input tasks must complete without a broken-pipe error.
 10. Let the peer send a permission request, wait for its callback to start, and exit cleanly. Before iteration ends, the callback must have finished cancellation and the incoming request registry must be empty, without requiring an explicit close first. Repeat with the callback awaiting close in its own cleanup; the callback, iteration, and surrounding query context must all complete.
 11. Keep the peer alive after a permission request and have the callback await close before returning its result, without any prior cancellation. On Python 3.10, 3.11, and 3.12, close must return normally with the transport closed and child reaped; iteration and the surrounding query context must finish, and no incoming request may remain registered.
+12. Repeat with a peer that ignores SIGTERM and remains alive after stdin closes, and set the permission callback timeout to 0.2 seconds. The callback must time out while teardown is pending. A subsequent external close must wait for teardown to reap the child; iteration and context exit must finish, and no incoming request may remain registered. Keep the ordinary peer as a control where the callback returns normally.
 
 ## Validation boundary
 

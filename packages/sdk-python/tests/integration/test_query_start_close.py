@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import sys
 import textwrap
 import traceback
 from collections.abc import AsyncIterator
@@ -344,52 +345,81 @@ async def test_clean_exit_cancels_incoming_permission_callback(
 
 
 @pytest.mark.asyncio
-async def test_permission_callback_can_close_query(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "slow_shutdown",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.platform == "win32", reason="requires ignoring SIGTERM"
+            ),
+        ),
+    ],
+)
+async def test_permission_callback_can_close_query(
+    tmp_path: Path, slow_shutdown: bool
+) -> None:
     peer = tmp_path / "permission_then_wait.py"
     peer.write_text(
         textwrap.dedent(
-            """
+            f"""
             import json
+            import signal
             import sys
+            import time
+
+            if {slow_shutdown!r}:
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
             request = json.loads(sys.stdin.readline())
-            print(json.dumps({
+            print(json.dumps({{
                 "type": "control_response",
-                "response": {
+                "response": {{
                     "subtype": "success",
                     "request_id": request["request_id"],
-                    "response": {},
-                },
-            }), flush=True)
-            print(json.dumps({
+                    "response": {{}},
+                }},
+            }}), flush=True)
+            print(json.dumps({{
                 "type": "control_request",
                 "request_id": "permission-1",
-                "request": {
-                    "subtype": "can_use_tool", "tool_name": "Read", "input": {},
-                },
-            }), flush=True)
+                "request": {{
+                    "subtype": "can_use_tool", "tool_name": "Read", "input": {{}},
+                }},
+            }}), flush=True)
             sys.stdin.read()
+            if {slow_shutdown!r}:
+                time.sleep(60)
             """
         ),
         encoding="utf-8",
     )
     callback_finished = asyncio.Event()
     close_returned = False
+    close_cancelled = False
 
     async def can_use_tool(
         name: str, tool_input: dict[str, Any], context: CanUseToolContext
     ) -> PermissionResult:
-        nonlocal close_returned
+        nonlocal close_returned, close_cancelled
         try:
             await result.close()
             close_returned = True
+        except asyncio.CancelledError:
+            close_cancelled = True
+            raise
         finally:
             callback_finished.set()
         return {"behavior": "deny", "message": "Closed by callback"}
 
     result = query(
         "unused",
-        {"path_to_qwen_executable": str(peer), "can_use_tool": can_use_tool},
+        {
+            "path_to_qwen_executable": str(peer),
+            "can_use_tool": can_use_tool,
+            "timeout": {"can_use_tool": 0.2 if slow_shutdown else 60.0},
+        },
     )
 
     async def consume() -> None:
@@ -399,13 +429,23 @@ async def test_permission_callback_can_close_query(tmp_path: Path) -> None:
     consumer = asyncio.create_task(consume())
     try:
         await asyncio.wait_for(callback_finished.wait(), timeout=5)
-        assert close_returned
+        assert close_returned is not slow_shutdown
+        assert close_cancelled is slow_shutdown
         assert result._transport.is_closed
         child = result._transport._process
-        assert child is not None and child.returncode is not None
+        assert child is not None
+        if slow_shutdown:
+            assert child.returncode is None
+            assert not consumer.done()
+        await asyncio.wait_for(result.close(), timeout=10)
+        assert child.returncode is not None
         await asyncio.wait_for(consumer, timeout=2)
         assert result._incoming_control_requests == {}
     finally:
+        child = result._transport._process
+        if child is not None and child.returncode is None:
+            child.kill()
+            await child.wait()
         await result._transport.close()
         if not consumer.done():
             consumer.cancel()

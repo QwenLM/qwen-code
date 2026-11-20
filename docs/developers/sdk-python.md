@@ -397,7 +397,10 @@ pending response waits immediately, without waiting for
 iteration ends. Already queued messages remain readable after a clean
 exit; use `close()` or the query context manager to finish input-task cleanup.
 Permission callbacks may also await `close()` before returning their result;
-shutdown reaps the child without cancelling the callback that initiated it.
+shutdown does not cancel the callback that initiated it. The configured
+`timeout.can_use_tool` still applies to that callback. If its wait for `close()`
+is cancelled, shutdown continues reaping the child and ending iteration;
+subsequent external `close()` calls wait for that cleanup to finish.
 
 ## Session Resume
 
