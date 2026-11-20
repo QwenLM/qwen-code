@@ -65,7 +65,13 @@ interface Fixture {
   ): void;
 }
 
-function makeFixture(trusted = true, primary = true): Fixture {
+function makeFixture(
+  trusted = true,
+  primary = true,
+  onSessionRestored?: Parameters<
+    typeof registerSessionRoutes
+  >[1]['onSessionRestored'],
+): Fixture {
   const root = mkdtempSync(path.join(tmpdir(), 'restart-recovery-continue-'));
   roots.push(root);
   const workspaceDir = path.join(root, 'workspace');
@@ -131,6 +137,7 @@ function makeFixture(trusted = true, primary = true): Fixture {
     boundWorkspace: workspaceDir,
     bridge,
     workspaceRegistry: registry,
+    ...(onSessionRestored ? { onSessionRestored } : {}),
     archiveCoordinator: {
       runSharedMany,
     } as unknown as Parameters<
@@ -276,6 +283,64 @@ describe('POST /sessions/recovery/continue', () => {
         requireDispatchAck: true,
       },
     );
+  });
+
+  it('notifies the PR-watch drain of a cold restore without letting a hook failure cancel continuation', async () => {
+    const onSessionRestored = vi.fn(() => {
+      throw new Error('drain scheduling failed');
+    });
+    const fixture = makeFixture(true, true, onSessionRestored);
+    fixture.seed([inFlight('p1', Date.now())]);
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0].status).toBe('accepted');
+    expect(onSessionRestored).toHaveBeenCalledOnce();
+    expect(onSessionRestored).toHaveBeenCalledWith({
+      runtime: fixture.runtime,
+      workspaceCwd: fixture.runtime.workspaceCwd,
+      sessionId: 'restored',
+    });
+  });
+
+  it('does not notify the PR-watch drain when the cold restore fails', async () => {
+    const onSessionRestored = vi.fn();
+    const fixture = makeFixture(true, true, onSessionRestored);
+    fixture.seed([inFlight('p1', Date.now())]);
+    restoreMocks.restoreSessionCore.mockRejectedValueOnce(
+      new Error('bridge restore failed'),
+    );
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'error',
+      code: 'continue_failed',
+    });
+    expect(restoreMocks.restoreSessionCore).toHaveBeenCalledOnce();
+    expect(onSessionRestored).not.toHaveBeenCalled();
+  });
+
+  it('does not restore or schedule a new drain for an already live session', async () => {
+    const onSessionRestored = vi.fn();
+    const fixture = makeFixture(true, true, onSessionRestored);
+    fixture.seed([inFlight('p1', Date.now())], undefined, 'channel');
+    vi.mocked(fixture.bridge.getSessionSummary).mockReturnValue({
+      sessionId: fixture.sessionId,
+      sourceType: 'channel',
+    } as ReturnType<AcpSessionBridge['getSessionSummary']>);
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0].status).toBe('accepted');
+    expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
+    expect(onSessionRestored).not.toHaveBeenCalled();
   });
 
   it('holds the archive shared lock while continuing', async () => {
@@ -1097,7 +1162,8 @@ describe('POST /sessions/recovery/continue', () => {
   it.each(['agent', 'agent-host'])(
     'refuses a %s source visible only after cold restore',
     async (sourceType) => {
-      const fixture = makeFixture();
+      const onSessionRestored = vi.fn();
+      const fixture = makeFixture(true, true, onSessionRestored);
       fixture.seed([inFlight('p1', Date.now())]);
       restoreMocks.restoreSessionCore.mockResolvedValueOnce({
         kind: 'restored',
@@ -1121,6 +1187,7 @@ describe('POST /sessions/recovery/continue', () => {
         'restored',
         'batch-client',
       );
+      expect(onSessionRestored).not.toHaveBeenCalled();
     },
   );
 

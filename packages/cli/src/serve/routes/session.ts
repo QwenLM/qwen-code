@@ -11837,6 +11837,7 @@ export function registerSessionRoutes(
           let restoreAttachment:
             | { sessionId: string; clientId: string }
             | undefined;
+          let restoredSessionId: string | undefined;
           if (!loaded) {
             const outcome = await restoreSessionCore({
               action: 'load',
@@ -11861,6 +11862,7 @@ export function registerSessionRoutes(
             if (outcome.kind === 'cancelled') {
               return { ...base, status: 'error', code: 'cancelled' };
             }
+            restoredSessionId = outcome.session.sessionId;
             if (outcome.session.sourceType !== undefined) {
               sourceTypes.push(outcome.session.sourceType);
             }
@@ -11892,6 +11894,19 @@ export function registerSessionRoutes(
                 status: 'not_continuable',
                 code: 'hidden_session',
               };
+            }
+            if (restoredSessionId !== undefined) {
+              try {
+                deps.onSessionRestored?.({
+                  runtime,
+                  workspaceCwd: runtime.workspaceCwd,
+                  sessionId: restoredSessionId,
+                });
+              } catch (err) {
+                daemonLog?.warn(
+                  `session restored hook failed for ${restoredSessionId}: ${String(err)}`,
+                );
+              }
             }
 
             const context = await runtime.bridge.getSessionContextStatus(
