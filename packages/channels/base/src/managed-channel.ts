@@ -16,6 +16,17 @@
 /** The adapters the managed path enables. */
 export type ManagedChannelAdapter = 'email' | 'dingtalk' | 'github' | 'wecom';
 
+/**
+ * What a managed adapter can render beyond plain text segments (H5e of
+ * #12827). An adapter that declares `cards` renders one delivery as a single
+ * provider-native card and edits it per segment; an adapter that declares
+ * nothing keeps the text path. The declaration is a gate the adapter's own
+ * send path consumes, not a field the control plane reads.
+ */
+export interface ManagedChannelCapabilities {
+  cards: boolean;
+}
+
 /** The route policy pinned with the first binding of each route. */
 export interface ManagedChannelPolicy {
   adapter: ManagedChannelAdapter;
@@ -166,15 +177,14 @@ export interface ManagedChannelControlPlane {
    * A stable key of the registration this client talks to — the control-plane
    * base URL, tenant, channel, and the owning actor, workspace and cwd-relative.
    * A persisting adapter that needs cross-registration isolation keys its ledger
-   * by it (the WeCom and DingTalk adapters do), so a ledger staged for one
+   * by it (the WeCom, DingTalk and GitHub adapters do), so a ledger staged for one
    * registration is never replayed into another when the same configured entry
    * is restarted against a different destination or owner. Binding only the
    * tenant/channel is not enough: a new actor/workspace of the same tenant/channel
    * must not inherit the prior owner's pending. This is a capability a persisting
-   * adapter opts into, not an invariant every sibling already satisfies — the
-   * GitHub store keys by name+endpoint only and email is a separate variant, so
-   * each is its own follow-up. Optional so test doubles that do not persist may
-   * omit it.
+   * adapter opts into, not an invariant every sibling already satisfies — email
+   * is a separate variant and its own follow-up. Optional so test doubles that do
+   * not persist may omit it.
    */
   readonly destinationKey?: string;
   register(request: {
@@ -188,5 +198,12 @@ export interface ManagedChannelControlPlane {
     event: ManagedInboundEvent,
   ): Promise<{ inputId: string; sessionId: string; replayed: boolean }>;
   claimDeliveries(limit: number): Promise<ManagedClaimedDelivery[]>;
-  receipt(deliveryId: string, receipt: ManagedReceipt): Promise<void>;
+  /**
+   * Report one segment's outcome. Resolves to the control plane's settled
+   * delivery view (an object carrying `state`) when it provides one, so a
+   * persisting adapter can prune a completed delivery's card progress on
+   * `delivered` (H5e, R1-4); implementations that do not surface it resolve to
+   * undefined. Widened from void; callers that ignore the result are unchanged.
+   */
+  receipt(deliveryId: string, receipt: ManagedReceipt): Promise<unknown>;
 }

@@ -33,6 +33,7 @@
     "dist/*.js",
     "dist/types",
     "!dist/types/components/artifacts/excel-preview-parser.d.ts",
+    "!dist/types/components/artifacts/pdf-preview.worker.d.ts",
     "!dist/types/components/artifacts/pierre-*.d.ts",
     "!dist/types/managed-host.d.ts"
   ],
@@ -107,6 +108,7 @@
     "docx-preview",
     "exceljs",
     "mermaid",
+    "pdfjs-dist",
     "rehype-katex",
     "remark-math",
     "shiki-files"
@@ -133,6 +135,7 @@
     "jszip": "3.10.2",
     "mermaid": "^11.15.0",
     "openapi-typescript": "^7.13.0",
+    "pdfjs-dist": "6.5.438",
     "postcss": "^8.5.17",
     "postcss-selector-parser": "^7.1.4",
     "react": "^19.2.0",

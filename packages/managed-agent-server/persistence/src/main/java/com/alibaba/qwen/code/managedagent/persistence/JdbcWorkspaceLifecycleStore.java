@@ -492,8 +492,18 @@ public class JdbcWorkspaceLifecycleStore
     }
 
     private JsonNode header(String tenant, String session) {
-        var rows = jdbc.queryForList("SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                + " ORDER BY journal_revision LIMIT 1", byte[].class, tenant, session);
+        var rows = jdbc.query("SELECT journal_revision, record_bytes, record_digest, byte_length FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                + " ORDER BY journal_revision LIMIT 1", (row, index) -> {
+                    byte[] bytes = row.getBytes("record_bytes");
+                    if (bytes == null && packs != null) {
+                        bytes = packs.resolveBytes(tenant, session, row.getLong("journal_revision"),
+                                row.getString("record_digest"), row.getLong("byte_length"));
+                    }
+                    if (bytes == null) {
+                        throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_journal_unverified");
+                    }
+                    return bytes;
+                }, tenant, session);
         if (rows.isEmpty()) {
             return null;
         }

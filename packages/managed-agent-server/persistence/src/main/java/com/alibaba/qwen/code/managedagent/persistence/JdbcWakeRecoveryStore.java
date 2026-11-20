@@ -30,7 +30,7 @@ public class JdbcWakeRecoveryStore
             "workflow", "automation", "session_message", "loop", "pr_event");
     private static final int JOURNAL_PAGE = 1;
     private static final int PROOF_PAGES = 32;
-    private static final long RETRY_MS = 30_000;
+    static final long RETRY_MS = 30_000;
     private static final String UNOWNED = " (h.state = 'SEALED' OR (h.state = 'ACTIVE'"
             + " AND (h.writer_lease_until IS NULL OR h.writer_lease_until <= " + ManagedSchemaTime.SQL_NOW + ")))";
     private final JdbcTemplate jdbc;
@@ -91,7 +91,7 @@ public class JdbcWakeRecoveryStore
     private List<Candidate> findPending(String defaultWorkspace, int limit, boolean hinted) {
         return jdbc.query("SELECT h.tenant_id, h.workspace_id, h.session_id, h.journal_revision,"
                         + " h.committed_sequence, h.compacted_through_revision, s.parent_session_id,"
-                        + " s.parent_child_run_id FROM ma_session_head h JOIN ma_session s ON"
+                        + " s.parent_child_run_id, h.wake_seal_revision FROM ma_session_head h JOIN ma_session s ON"
                         + " s.tenant_id = h.tenant_id AND s.session_id = h.session_id WHERE"
                         + " h.head_kind = 'MANAGED_SESSION' AND h.is_wake_scan_pending = TRUE"
                         + " AND h.compacted_through_revision = 0"
@@ -103,7 +103,9 @@ public class JdbcWakeRecoveryStore
                 (row, index) -> new Candidate(row.getString("tenant_id"), row.getString("workspace_id"),
                         row.getString("session_id"), row.getLong("journal_revision"),
                         row.getLong("committed_sequence"), row.getLong("compacted_through_revision"),
-                        row.getString("parent_session_id"), row.getString("parent_child_run_id")),
+                        row.getString("parent_session_id"), row.getString("parent_child_run_id"),
+                        Long.valueOf(row.getLong("journal_revision"))
+                                .equals(row.getObject("wake_seal_revision", Long.class))),
                 hinted, defaultWorkspace, limit);
     }
 
