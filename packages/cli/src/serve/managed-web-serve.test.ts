@@ -276,6 +276,400 @@ describe('dedicated Managed Web gateway', () => {
     });
   });
 
+  it('forwards the terminal upgrade to the control plane with its ticket subprotocol', async () => {
+    let peerPath: string | undefined;
+    let peerProtocol: string | undefined;
+    let peerAuthorization: string | undefined;
+    let peerSocket: import('node:stream').Duplex | undefined;
+    peer.on('upgrade', (req, socket) => {
+      peerSocket = socket;
+      peerPath = req.url;
+      peerProtocol = req.headers['sec-websocket-protocol'];
+      peerAuthorization = req.headers['authorization'];
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: test-accept\r\n' +
+          'Sec-WebSocket-Protocol: qwen-ws\r\n\r\n',
+      );
+      socket.on('data', (chunk) => socket.write(chunk));
+    });
+    await start();
+    const result = await new Promise<{
+      status: number;
+      protocol?: string;
+    }>((resolve, reject) => {
+      const upgrade = request(
+        `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+        {
+          headers: {
+            Connection: 'Upgrade',
+            Upgrade: 'websocket',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version': '13',
+            'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+            Authorization: `Bearer ${browserToken}`,
+          },
+        },
+      );
+      upgrade.on('upgrade', (res, socket) => {
+        socket.destroy();
+        resolve({
+          status: res.statusCode ?? 0,
+          protocol: res.headers['sec-websocket-protocol'],
+        });
+      });
+      upgrade.on('response', (res) => resolve({ status: res.statusCode ?? 0 }));
+      upgrade.on('error', reject);
+      upgrade.end();
+    });
+    expect(result.status).toBe(101);
+    expect(result.protocol).toBe('qwen-ws');
+    expect(peerPath).toBe(
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    );
+    expect(peerProtocol).toBe('qwen-ws, qwen-bearer.ticket-abc');
+    // The gateway bearer must not leak to the control-plane upgrade.
+    expect(peerAuthorization).toBeUndefined();
+    peerSocket?.destroy();
+  });
+
+  it('rejects dot-only selectors at the standalone gateway while preserving ordinary dotted ids', async () => {
+    const peerPaths: string[] = [];
+    const peerSockets = new Set<import('node:stream').Duplex>();
+    peer.on('upgrade', (_req, socket) => {
+      peerSockets.add(socket);
+      peerPaths.push(_req.url ?? '');
+      socket.resume();
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: test-accept\r\n' +
+          'Sec-WebSocket-Protocol: qwen-ws\r\n\r\n',
+      );
+    });
+    await start();
+    try {
+      const statuses: number[] = [];
+      for (const selector of ['.', '..', 'tenant.v1']) {
+        statuses.push(
+          await new Promise<number>((resolve, reject) => {
+            const upgrade = request(
+              {
+                host: new URL(gateway!.url).hostname,
+                port: Number(new URL(gateway!.url).port),
+                path: `/api/agent/web-shell/v1/sessions/${selector}/terminal?terminalId=t1`,
+                headers: {
+                  Connection: 'Upgrade',
+                  Upgrade: 'websocket',
+                  'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+                  'Sec-WebSocket-Version': '13',
+                  'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+                  Authorization: `Bearer ${browserToken}`,
+                },
+              },
+              (res) => {
+                res.resume();
+                res.once('end', () => resolve(res.statusCode ?? 0));
+              },
+            );
+            upgrade.on('upgrade', (res, socket) => {
+              socket.destroy();
+              resolve(res.statusCode ?? 0);
+            });
+            upgrade.on('error', (error: Error) => {
+              if (error.message === 'selector probe timed out') reject(error);
+              else resolve(0);
+            });
+            upgrade.on('close', () => resolve(0));
+            upgrade.setTimeout(5_000, () =>
+              upgrade.destroy(new Error('selector probe timed out')),
+            );
+            upgrade.end();
+          }),
+        );
+      }
+      expect(statuses).toEqual([0, 0, 101]);
+      expect(peerPaths).toEqual([
+        '/api/agent/web-shell/v1/sessions/tenant.v1/terminal?terminalId=t1',
+      ]);
+    } finally {
+      for (const socket of peerSockets) socket.destroy();
+    }
+  });
+
+  it('relays distinct post-upgrade payloads in both directions', async () => {
+    let peerSocket: import('node:stream').Duplex | undefined;
+    let browserSocket: import('node:stream').Duplex | undefined;
+    peer.on('upgrade', (_req, socket) => {
+      peerSocket = socket;
+      socket.resume();
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: test-accept\r\n' +
+          'Sec-WebSocket-Protocol: qwen-ws\r\n\r\n',
+      );
+      socket.on('data', (chunk) => {
+        if (chunk.toString().includes('browser-to-java'))
+          socket.write('java-to-browser');
+      });
+    });
+    await start();
+    try {
+      const echoed = await new Promise<string>((resolve, reject) => {
+        const upgrade = request(
+          `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+          {
+            headers: {
+              Connection: 'Upgrade',
+              Upgrade: 'websocket',
+              'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+              'Sec-WebSocket-Version': '13',
+              'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+              Authorization: `Bearer ${browserToken}`,
+            },
+          },
+        );
+        upgrade.on('upgrade', (_res, socket) => {
+          browserSocket = socket;
+          socket.on('data', (chunk) => {
+            if (chunk.toString().includes('java-to-browser'))
+              resolve('java-to-browser');
+          });
+          socket.write('browser-to-java');
+        });
+        upgrade.on('response', (res) => {
+          res.resume();
+          reject(new Error(`upgrade refused: ${res.statusCode}`));
+        });
+        upgrade.on('error', reject);
+        upgrade.end();
+      });
+      expect(echoed).toBe('java-to-browser');
+    } finally {
+      browserSocket?.destroy();
+      peerSocket?.destroy();
+    }
+  });
+
+  it('forwards the control-plane refusal status instead of completing a 101 relay', async () => {
+    handler = (_req, res) => {
+      res.writeHead(401);
+      res.end();
+    };
+    await start();
+    const status = await new Promise<number>((resolve, reject) => {
+      const upgrade = request(
+        `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+        {
+          headers: {
+            Connection: 'Upgrade',
+            Upgrade: 'websocket',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version': '13',
+            'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+            Authorization: `Bearer ${browserToken}`,
+          },
+        },
+      );
+      upgrade.on('upgrade', () =>
+        reject(new Error('refused ticket was upgraded')),
+      );
+      upgrade.on('response', (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      upgrade.on('error', reject);
+      upgrade.end();
+    });
+    expect(status).toBe(401);
+  });
+
+  it('tears down the upstream tunnel when the browser drops abruptly after the 101', async () => {
+    let peerSocket: import('node:stream').Duplex | undefined;
+    peer.on('upgrade', (_req, socket) => {
+      peerSocket = socket;
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: test-accept\r\n' +
+          'Sec-WebSocket-Protocol: qwen-ws\r\n\r\n',
+      );
+      socket.on('data', (chunk) => socket.write(chunk));
+    });
+    await start();
+    const clientSocket = await new Promise<import('node:net').Socket>(
+      (resolve, reject) => {
+        const upgrade = request(
+          `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+          {
+            headers: {
+              Connection: 'Upgrade',
+              Upgrade: 'websocket',
+              'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+              'Sec-WebSocket-Version': '13',
+              'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+              Authorization: `Bearer ${browserToken}`,
+            },
+          },
+        );
+        upgrade.on('upgrade', (_res, socket) => resolve(socket));
+        upgrade.on('response', (res) =>
+          reject(new Error(`upgrade refused: ${res.statusCode}`)),
+        );
+        upgrade.on('error', reject);
+        upgrade.end();
+      },
+    );
+    expect(peerSocket).toBeDefined();
+    // The control-plane relay reads EOF on its browser leg as 'end' (a full
+    // 'close' needs the peer's writable side closed too); either proves the
+    // tunnel was torn down rather than left half-open.
+    const peerClosed = new Promise<void>((resolve) => {
+      peerSocket!.once('close', () => resolve());
+      peerSocket!.once('end', () => resolve());
+    });
+    const timeout = (message: string) =>
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(message)), 5_000).unref(),
+      );
+    // An abrupt browser teardown (RST) emits 'close' without 'end'; after the
+    // 101 Node has detached the socket from the ClientRequest, so the tunnel
+    // must be destroyed explicitly or the control-plane relay never sees EOF
+    // and the PTY plus its durable hold leak.
+    clientSocket.resetAndDestroy();
+    await Promise.race([
+      peerClosed,
+      timeout('upstream tunnel survived an abrupt browser teardown'),
+    ]);
+    peerSocket?.destroy();
+  });
+
+  it('shutdown destroys an attached terminal instead of hanging', async () => {
+    let peerSocket: import('node:stream').Duplex | undefined;
+    peer.on('upgrade', (_req, socket) => {
+      peerSocket = socket;
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: test-accept\r\n' +
+          'Sec-WebSocket-Protocol: qwen-ws\r\n\r\n',
+      );
+      socket.on('data', (chunk) => socket.write(chunk));
+    });
+    await start();
+    const clientSocket = await new Promise<import('node:stream').Duplex>(
+      (resolve, reject) => {
+        const upgrade = request(
+          `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+          {
+            headers: {
+              Connection: 'Upgrade',
+              Upgrade: 'websocket',
+              'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+              'Sec-WebSocket-Version': '13',
+              'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+              Authorization: `Bearer ${browserToken}`,
+            },
+          },
+        );
+        upgrade.on('upgrade', (_res, socket) => resolve(socket));
+        upgrade.on('response', (res) =>
+          reject(new Error(`upgrade refused: ${res.statusCode}`)),
+        );
+        upgrade.on('error', reject);
+        upgrade.end();
+      },
+    );
+    const clientClosed = new Promise<void>((resolve) =>
+      clientSocket.once('close', () => resolve()),
+    );
+    const timeout = (message: string) =>
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(message)), 5_000).unref(),
+      );
+    // An attached, idle terminal is an upgraded socket closeAllConnections()
+    // does not reach; shutdown must destroy it rather than wait on it.
+    await Promise.race([
+      gateway!.close(),
+      timeout('gateway close hung with a terminal attached'),
+    ]);
+    await Promise.race([
+      clientClosed,
+      timeout('terminal socket survived gateway shutdown'),
+    ]);
+    peerSocket?.destroy();
+  });
+
+  it('shutdown tears down an in-flight upgrade whose 101 is withheld', async () => {
+    let peerSocket: import('node:stream').Duplex | undefined;
+    const peerReceived = new Promise<void>((resolve) => {
+      peer.on('upgrade', (_req, socket) => {
+        peerSocket = socket;
+        socket.resume();
+        // Withhold the 101 so the upgrade stays in flight at shutdown.
+        resolve();
+      });
+    });
+    await start();
+    const clientSocket = await new Promise<import('node:stream').Duplex>(
+      (resolve, reject) => {
+        const upgrade = request(
+          `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+          {
+            headers: {
+              Connection: 'Upgrade',
+              Upgrade: 'websocket',
+              'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+              'Sec-WebSocket-Version': '13',
+              'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+              Authorization: `Bearer ${browserToken}`,
+            },
+          },
+        );
+        upgrade.on('socket', (socket) => resolve(socket));
+        upgrade.on('error', reject);
+        upgrade.end();
+      },
+    );
+    let relayed101 = false;
+    clientSocket.on('data', (chunk) => {
+      if (chunk.toString().includes('101')) relayed101 = true;
+    });
+    const clientClosed = new Promise<void>((resolve) =>
+      clientSocket.once('close', () => resolve()),
+    );
+    const timeout = (message: string) =>
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(message)), 5_000).unref(),
+      );
+    // Ensure the control-plane leg is actually established before shutdown.
+    await Promise.race([
+      peerReceived,
+      timeout('peer never received the upgrade'),
+    ]);
+    await Promise.race([
+      gateway!.close(),
+      timeout('gateway close hung with an in-flight upgrade'),
+    ]);
+    // Shutdown must tear the browser end down rather than wait on the in-flight
+    // upgrade, and no late 101 may be relayed to a client that no longer exists.
+    await Promise.race([
+      clientClosed,
+      timeout('client socket survived gateway shutdown'),
+    ]);
+    expect(relayed101).toBe(false);
+    // The control-plane leg is destroyed by shutdown; drop our reference so the
+    // peer server can close cleanly.
+    peerSocket?.destroy();
+  });
+
   it('fails before listening for invalid configuration or missing, weak, shared credentials', async () => {
     for (const token of [
       undefined,

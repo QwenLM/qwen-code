@@ -14,6 +14,7 @@ import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { requestToast } from '../components/ToastHost';
 import { readReportedArtifacts } from '../adapters/reported-artifacts';
 import { useI18n } from '../i18n';
+import { useWebShellPortalRoot } from '../portalRoot';
 import { extractErrorDetail } from '../utils/errorDetail';
 import { useAnimationFrameTranscriptSnapshot } from './useAnimationFrameTranscriptBlocks';
 
@@ -59,6 +60,9 @@ export function useReportedArtifactRegistration(
 ): void {
   const { t: contextTranslate } = useI18n();
   const t = translateError ?? contextTranslate;
+  // Scope the failure toast to this shell: an unscoped dispatch is dropped
+  // when a host page mounts several shells and nothing holds focus.
+  const toastScope = useWebShellPortalRoot();
   const actions = useActions();
   const connection = useConnection();
   const guard = useDaemonSessionOwnerGuard();
@@ -128,8 +132,19 @@ export function useReportedArtifactRegistration(
           t('artifact.registrationFailed', {
             message: extractErrorDetail(error),
           }),
+          toastScope,
         );
       });
     }
-  }, [actions, blocks, owner, ready, refresh, registered, sessionId, t]);
+  }, [
+    actions,
+    blocks,
+    owner,
+    ready,
+    refresh,
+    registered,
+    sessionId,
+    t,
+    toastScope,
+  ]);
 }

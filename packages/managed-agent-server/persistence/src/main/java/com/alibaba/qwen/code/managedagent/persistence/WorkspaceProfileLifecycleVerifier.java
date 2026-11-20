@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -85,6 +86,13 @@ public class WorkspaceProfileLifecycleVerifier {
         verifyEffects(operation);
         verifyMcpResources(operation, bindings);
         if (WorkspaceToolProfiles.MCP.equals(profile)) {
+            return;
+        }
+        // D3: ordinary files has no Shell capture/publication/monitor; its
+        // close invariants are the settled executions and owed file history
+        // already verified above, so it settles like MCP. External-files keeps
+        // v1 and never reaches this v2 resource phase.
+        if (WorkspaceToolProfiles.FILES.equals(profile)) {
             return;
         }
         if (!WorkspaceToolProfiles.isPublicShell(profile)) {
@@ -347,8 +355,8 @@ public class WorkspaceProfileLifecycleVerifier {
     }
 
     private static boolean hold(ToolExecutionRecord execution) {
-        Object mode = execution.getReference().get("dispatchMode");
-        return "background_v3_process".equals(mode) || "background_v3_monitor".equals(mode);
+        return ManagedHoldFamily.ofDispatchMode(
+                execution.getReference().get("dispatchMode")) != null;
     }
 
     private static void known(JsonNode record) {

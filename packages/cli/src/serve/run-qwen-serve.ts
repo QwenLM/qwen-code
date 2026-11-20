@@ -28,6 +28,7 @@ import express, {
   type RequestHandler,
   type Response,
 } from 'express';
+import { resolveChannelLocale } from '../utils/channel-locale.js';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import {
   validateHostedHarnessProfile,
@@ -186,6 +187,8 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { SessionArchiveCoordinator } from './server/session-archive.js';
+import type { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
+import type { RequestedSessionIdAdmission } from './session-id-admission.js';
 import type {
   DaemonTrustPolicySnapshot,
   DaemonWorkspaceTrustDecision,
@@ -218,6 +221,7 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
+import { enableSocketKeepalive } from './socket-keepalive.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import { recoverBranchWorktreePreparations } from './branch-worktree-preparation.js';
@@ -229,12 +233,16 @@ import {
   parseDaemonStatusDetail,
   positiveFiniteOrNull,
   pushChannelRestoreIssues,
+  resolveWriterIdleBudgetMs,
+  sseListenerCapsForStatus,
+  sseMaxConnections,
   toDaemonStatusMemoryLimits,
   type DaemonStatusIssue,
   type DaemonPerfSnapshot,
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
+import { getSseOccupancy } from './sse-occupancy.js';
 import { DaemonMetricsRing } from './daemon-metrics-ring.js';
 import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
@@ -2929,6 +2937,14 @@ function createBootstrapServeApp(input: {
           opts.maxPendingPromptsPerSession,
         ),
         listenerMaxConnections: listenerMaxConnections(opts.maxConnections),
+        maxSseConnections: sseMaxConnections(
+          opts.maxConnections,
+          opts.maxSseConnections,
+        ),
+        maxSseConnectionsPerListener: sseListenerCapsForStatus(
+          opts.maxConnections,
+          opts.maxSseConnections,
+        ),
         eventRingSize: opts.eventRingSize ?? DEFAULT_RING_SIZE,
         eventRingMaxBytes: opts.eventRingMaxBytes!,
         compactedReplayMaxBytes:
@@ -2936,7 +2952,9 @@ function createBootstrapServeApp(input: {
         maxJournalEvents: opts.maxJournalEvents ?? DEFAULT_MAX_JOURNAL_EVENTS,
         maxJournalBytes: opts.maxJournalBytes ?? DEFAULT_MAX_JOURNAL_BYTES,
         promptDeadlineMs: positiveFiniteOrNull(opts.promptDeadlineMs),
-        writerIdleTimeoutMs: positiveFiniteOrNull(opts.writerIdleTimeoutMs),
+        writerIdleTimeoutMs: positiveFiniteOrNull(
+          resolveWriterIdleBudgetMs(opts.writerIdleTimeoutMs),
+        ),
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
         sessionPromptSettledCloseGraceMs: sessionPromptSettledCloseGraceMs(
@@ -2993,6 +3011,7 @@ function createBootstrapServeApp(input: {
         ...(channelWorkers.length > 0 ? { channelWorkers } : {}),
         transport: {
           restSseActive: 0,
+          streamOccupancy: getSseOccupancy(),
           acp: {
             enabled: false,
             connections: 0,
@@ -4298,6 +4317,23 @@ async function runQwenServeImpl(
     bootSettings ?? {},
     'serve / ACP / web terminals',
   );
+  // Resolved here, outside the settings try/catch, so an invalid action
+  // template refuses startup the way an invalid policy does: a typo that
+  // silently disabled delivery would be worse than a loud failure. The
+  // module is imported dynamically to stay out of the fast path's pre-listen
+  // closure, like every other runtime server module.
+  const prWatchConfigMod = await import('./server/pr-watch-config.js');
+  const sessionPrWatchConfig = prWatchConfigMod.resolveSessionPrWatchConfig(
+    bootSettings?.serve?.sessionPrWatch,
+    process.env,
+    writeStderrLine,
+  );
+  // One locale for both PR-watch seams, read once at boot like the channel
+  // worker reads it at startup. The resolver is import-free so it stays out of
+  // the channel runtime's dependency chain.
+  const sessionPrWatchLanguage = resolveChannelLocale(
+    bootSettings?.general?.language,
+  );
   // Init daemon logger early so all subsequent lifecycle events
   // (bridge spawn diagnostics, shutdown errors) are captured to file.
   const daemonLogBaseDir = await resolveDaemonLogBaseDirForRun({
@@ -4912,9 +4948,17 @@ async function runQwenServeImpl(
   // pulls the SessionService chain, which must stay out of the pre-listen
   // static closure; the generation guards dispose-vs-async-start races.
   let sessionPrRefreshTimer:
-    | { dispose(): void; stopWatch(): Promise<void> }
+    | {
+        dispose(): void;
+        stopWatch(): Promise<void>;
+        drainNow(workspaceCwd: string, sessionId?: string): Promise<void>;
+      }
     | undefined;
   let sessionPrRefreshGeneration = 0;
+  // Deferred until the timer handle exists AND the hosted channels committed:
+  // the timer is created before listen and the alias needs the channel groups,
+  // so checking either earlier reports the wrong thing. One-shot.
+  let warnPrWatchWithoutTimer: (() => void) | undefined;
   // Kept separately from the timer handle: the event-loop-monitor cleanup
   // disposes and clears that handle before the lifecycle close runs its drains,
   // but the watch still has to stop in order (timer, in-flight work, owner
@@ -6373,11 +6417,23 @@ async function runQwenServeImpl(
     // from a child's agent turn and (for 'first-turn') return its result.
     // Dynamic-imported (not at module scope) so the serve fast-path bundle
     // closure check doesn't trace create-sub-session's transitive deps.
-    const [{ createSubSessionLauncher }, scheduledTaskRoutes] =
-      await Promise.all([
-        import('./create-sub-session.js'),
-        import('./routes/scheduled-tasks.js'),
-      ]);
+    const [
+      { createSubSessionLauncher, createSubSessionWorkspaceIndex },
+      scheduledTaskRoutes,
+    ] = await Promise.all([
+      import('./create-sub-session.js'),
+      import('./routes/scheduled-tasks.js'),
+    ]);
+    // Lets a session's sub-session run in another registered workspace.
+    const subSessionWorkspaces = createSubSessionWorkspaceIndex(
+      () => workspaceRegistryForPersistence.current,
+    );
+    const getSubSessionArchiveCoordinator = () =>
+      (
+        (runtimeApp ?? runtimeAppForCleanup)?.locals as
+          | { sessionArchiveCoordinator?: SessionArchiveCoordinator }
+          | undefined
+      )?.sessionArchiveCoordinator;
     const { sessionAttachmentsRoots } = await import(
       './session-attachments-root.js'
     );
@@ -6432,11 +6488,15 @@ async function runQwenServeImpl(
     // brings its own options.
     const subSessionLauncher = createSubSessionLauncher({
       getBridge: () => bridgeRef,
+      getArchiveCoordinator: getSubSessionArchiveCoordinator,
       boundWorkspace,
       runtimeBaseDir: primarySessionRuntimeBaseDir,
       ...subSessionConcurrencyCapsFromSettings(
         runtimeBootSettings?.merged.serve ?? {},
       ),
+      resolveWorkspace: subSessionWorkspaces.resolve,
+      isTrusted: (bridge) =>
+        subSessionWorkspaces.isTrusted(boundWorkspace, bridge),
     });
     const attachmentsRoots = sessionAttachmentsRoots(
       boundWorkspace,
@@ -6463,6 +6523,7 @@ async function runQwenServeImpl(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         onCreateSubSession: subSessionLauncher.launch,
+        onResolveSubSessionWorkspace: subSessionLauncher.resolveDestination,
         onCreateCurrentSessionScheduledTask:
           createCurrentSessionScheduledTaskHandler(
             boundWorkspace,
@@ -6966,10 +7027,6 @@ async function runQwenServeImpl(
     // (primary + secondaries). Called during shutdown so no new sub-sessions
     // are admitted while bridges are being torn down.
     const subSessionStoppers: Array<() => void> = [];
-    const subSessionStoppersByRuntime = new WeakMap<
-      WorkspaceRuntime,
-      () => void
-    >();
     const runtimeCleanupPromises = new WeakMap<
       WorkspaceRuntime,
       Promise<void>
@@ -7086,11 +7143,15 @@ async function runQwenServeImpl(
         | undefined;
       const secondarySubSessionLauncher = createSubSessionLauncher({
         getBridge: () => secondaryBridgeRef,
+        getArchiveCoordinator: getSubSessionArchiveCoordinator,
         boundWorkspace: workspaceInput.cwd,
         runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         ...subSessionConcurrencyCapsFromSettings(
           secondarySettings?.merged.serve ?? {},
         ),
+        resolveWorkspace: subSessionWorkspaces.resolve,
+        isTrusted: (bridge) =>
+          subSessionWorkspaces.isTrusted(workspaceInput.cwd, bridge),
       });
       const secondaryAttachmentsRoots = sessionAttachmentsRoots(
         workspaceInput.cwd,
@@ -7113,6 +7174,8 @@ async function runQwenServeImpl(
         sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
+        onResolveSubSessionWorkspace:
+          secondarySubSessionLauncher.resolveDestination,
         onCreateCurrentSessionScheduledTask:
           createCurrentSessionScheduledTaskHandler(
             workspaceInput.cwd,
@@ -7415,9 +7478,9 @@ async function runQwenServeImpl(
           boundWorkspaces: [workspaceInput.cwd],
         }),
       };
-      subSessionStoppersByRuntime.set(
+      subSessionWorkspaces.register(
         secondaryRuntime,
-        secondarySubSessionLauncher.stop,
+        secondarySubSessionLauncher,
       );
       workspaceRuntimes.push(secondaryRuntime);
     }
@@ -7428,6 +7491,10 @@ async function runQwenServeImpl(
         scanUnindexedOwners: deps.bridge !== undefined,
       });
     workspaceRegistryForPersistence.current = workspaceRegistry;
+    subSessionWorkspaces.register(
+      workspaceRegistry.primary,
+      subSessionLauncher,
+    );
     const workspaceVoiceCoordinator = new WorkspaceVoiceCoordinator();
 
     core.registerDaemonGaugeCallbacks({
@@ -7629,8 +7696,278 @@ async function runQwenServeImpl(
     const refreshGeneration = ++sessionPrRefreshGeneration;
     if (opts.profile !== 'hosted-harness') {
       void import('./server/session-pr-refresh.js')
-        .then((mod) => {
+        .then(async (mod) => {
           if (refreshGeneration !== sessionPrRefreshGeneration) return;
+          // The module and the channel-config loader are async and loaded
+          // once; the deps are rebuilt whenever the hosted channels change.
+          // Building them only once would freeze the allowed set before the
+          // channels commit at listen — this load usually wins that race — and
+          // would never pick up a channel added later.
+          let prWatchDeps:
+            | import('./server/pr-watch-deps.js').PrWatchDeps
+            | undefined;
+          let prWatchHostsSignature: string | undefined;
+          let prWatchBuildResolved = false;
+          let prWatchSources:
+            | Omit<
+                import('./server/pr-watch-deps.js').PrWatchDepsSources,
+                'hostedGithubChannels' | 'subscription'
+              >
+            | undefined;
+          let createPrWatchDeps:
+            | typeof import('./server/pr-watch-deps.js').createPrWatchDeps
+            | undefined;
+          let readHostedGithubChannels:
+            | (() => ReadonlyArray<
+                import('./server/pr-watch-config.js').HostedGithubChannel
+              >)
+            | undefined;
+          let resolvePrWatchSubscription:
+            | typeof import('./server/pr-watch-config.js').resolvePrWatchSubscription
+            | undefined;
+          let prWatchChannelsSignature:
+            | typeof import('./server/pr-watch-config.js').prWatchChannelsSignature
+            | undefined;
+          const resolvePrWatchDeps = () => {
+            if (
+              !createPrWatchDeps ||
+              !prWatchSources ||
+              !readHostedGithubChannels ||
+              !resolvePrWatchSubscription ||
+              !prWatchChannelsSignature
+            ) {
+              return undefined;
+            }
+            const channels = readHostedGithubChannels();
+            // The whole alias input, not only its hosts: editing a channel's
+            // PR Watch Events, its Bound Session Actions or its bound-delivery
+            // switch while the daemon runs must rebuild the subscription, or
+            // the read would be frozen at startup.
+            const signature = prWatchChannelsSignature(channels);
+            // One build shared by both getters: two builds would hand the
+            // observation and the drain different lock registries. A cached
+            // build with no events is a result too, so an unchanged channel
+            // list is not parsed again every tick.
+            if (prWatchBuildResolved && signature === prWatchHostsSignature) {
+              return prWatchDeps;
+            }
+            prWatchBuildResolved = true;
+            prWatchHostsSignature = signature;
+            // createPrWatchDeps returns undefined when the subscription has
+            // no event; deps presence is the single gate both the tick and
+            // the on-demand drain read, so an operator who configures nothing
+            // gets no view, no watch file and no ownership claim.
+            const subscription = resolvePrWatchSubscription(
+              sessionPrWatchConfig,
+              channels,
+              (message) => daemonLog.warn(message),
+            );
+            prWatchDeps = createPrWatchDeps({
+              ...prWatchSources,
+              subscription,
+              hostedGithubChannels: () => channels,
+              // Keep the registry across rebuilds: a channel committing
+              // between the observation's and the drain's read must not hand
+              // them different locks for the same files.
+              ...(prWatchDeps ? { locks: prWatchDeps.watch.locks } : {}),
+            });
+            return prWatchDeps;
+          };
+          void (async () => {
+            try {
+              const [depsMod, webhookRuntime, settingsRuntime, configMod] =
+                await Promise.all([
+                  import('./server/pr-watch-deps.js'),
+                  loadChannelWebhookConfigRuntime(),
+                  loadSettingsRuntimeModules(),
+                  import('./server/pr-watch-config.js'),
+                ]);
+              if (refreshGeneration !== sessionPrRefreshGeneration) return;
+              createPrWatchDeps = depsMod.createPrWatchDeps;
+              resolvePrWatchSubscription = configMod.resolvePrWatchSubscription;
+              prWatchChannelsSignature = configMod.prWatchChannelsSignature;
+              const resolveChannelWatchHost =
+                depsMod.resolveGithubChannelWatchHost;
+              prWatchSources = {
+                workspaceRegistry,
+                wakeDormant: sessionPrWatchConfig.wakeDormant,
+                language: sessionPrWatchLanguage,
+                archiveCoordinator: () =>
+                  (
+                    app.locals as {
+                      sessionArchiveCoordinator?: SessionArchiveCoordinator;
+                    }
+                  ).sessionArchiveCoordinator,
+                conversationRuntimeActivity: () =>
+                  (
+                    app.locals as {
+                      conversationRuntimeActivity?: ConversationRuntimeActivityGate;
+                    }
+                  ).conversationRuntimeActivity,
+                restore: async (input) => {
+                  const admission = (
+                    app.locals as {
+                      requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+                    }
+                  ).requestedSessionIdAdmission;
+                  if (!admission) {
+                    throw new Error('PR watch: no session-id admission');
+                  }
+                  const restoreMod = await import(
+                    './server/session-restore.js'
+                  );
+                  return restoreMod.restoreSessionCore({
+                    action: 'resume',
+                    ...input,
+                    requestedSessionIdAdmission: admission,
+                    assertRuntimeGenerationOpen: () =>
+                      input.runtime.generationGuard?.assertOpen(),
+                    daemonLog,
+                    materializeLiveConversationDirectory: (
+                      app.locals as {
+                        materializeLiveConversationDirectory?: (
+                          sessionId: string,
+                        ) => Promise<string>;
+                      }
+                    ).materializeLiveConversationDirectory,
+                    historyPageSize: undefined,
+                    liveReplayMode: undefined,
+                    compactedReplayMode: undefined,
+                    clientId: undefined,
+                    approvalMode: undefined,
+                    restoreSource: {},
+                    isCancelled: () => false,
+                  });
+                },
+                daemonLog,
+                log: (message) => daemonLog.warn(message),
+                // The same operator cap the routes pass to their admissions, so
+                // a relayed prompt cannot outlive a route-admitted one.
+                ...(opts.promptDeadlineMs !== undefined
+                  ? { promptDeadlineMs: opts.promptDeadlineMs }
+                  : {}),
+              };
+              // Only the groups the channel grouping already attributed to a
+              // trusted workspace, so an untrusted workspace's settings never
+              // widen the allowed set or contribute to the alias.
+              readHostedGithubChannels = () => {
+                const channels: Array<
+                  import('./server/pr-watch-config.js').HostedGithubChannel
+                > = [];
+                const runtimes = workspaceRegistry.listAll();
+                for (const group of channelWorkspaceGroups ?? []) {
+                  const runtime = runtimes.find(
+                    (candidate) =>
+                      candidate.workspaceCwd === group.workspaceCwd,
+                  );
+                  if (!runtime) continue;
+                  let merged: Record<string, unknown>;
+                  try {
+                    // loadChannelsConfig defaults its second argument to
+                    // loadSettings(cwd), which loads that workspace's .env
+                    // into process.env — daemon-wide. A GH_CONFIG_DIR there
+                    // would redirect every gh read this daemon makes and so
+                    // widen the watch's allowed hosts. Load settings the way
+                    // the channel grouping does: no env injection, and no
+                    // workspace settings for an untrusted workspace.
+                    const settings = settingsRuntime.settings.loadSettings(
+                      group.workspaceCwd,
+                      {
+                        skipLoadEnvironment: true,
+                        skipWorkspaceSettings: !runtime.trusted,
+                        workspaceTrusted: runtime.trusted,
+                        // This runs on a background timer, so it must never
+                        // rewrite the user's file: without this an invalid
+                        // settings.json takes the corruption-recovery path and
+                        // is moved aside. Every other read-only load in the
+                        // daemon passes it too.
+                        preserveInvalidWorkspaceSettings: true,
+                      },
+                    );
+                    merged = webhookRuntime.loadChannelsConfig(
+                      group.workspaceCwd,
+                      settings,
+                    );
+                  } catch {
+                    continue;
+                  }
+                  // Only the channels this group actually hosts. The grouping
+                  // keys the merged config by channel name, so the selection
+                  // names are the same keys; without this every github entry
+                  // in the workspace would widen the allowed set, including
+                  // channels this daemon was never asked to host.
+                  const selected =
+                    group.selection.mode === 'all'
+                      ? undefined
+                      : new Set(group.selection.names);
+                  for (const [name, entry] of Object.entries(merged)) {
+                    if (selected && !selected.has(name)) continue;
+                    if (!entry || typeof entry !== 'object') continue;
+                    const config = entry as Record<string, unknown>;
+                    if (config['type'] !== 'github') continue;
+                    const host = resolveChannelWatchHost(config['baseUrl']);
+                    if (host === undefined) continue;
+                    channels.push({
+                      name,
+                      host,
+                      prWatchEvents: config['prWatchEvents'],
+                      boundSessionActions: config['boundSessionActions'],
+                      deliverToBoundSessions: config['deliverToBoundSessions'],
+                    });
+                  }
+                }
+                return channels;
+              };
+              // Resolve once here so the subscription is warm and the alias
+              // is logged. The "configured but unobservable" warning cannot
+              // run at this point: the timer handle is assigned after this
+              // block, and the hosted channels commit even later, so the check
+              // is deferred to the listen path below.
+              warnPrWatchWithoutTimer = () => {
+                if (sessionPrRefreshTimer) {
+                  // The timer observes; there is nothing to warn about.
+                  warnPrWatchWithoutTimer = undefined;
+                  return;
+                }
+                let deps: ReturnType<typeof resolvePrWatchDeps>;
+                try {
+                  deps = resolvePrWatchDeps();
+                } catch (error) {
+                  daemonLog.warn(
+                    `PR watch deps unavailable: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                  warnPrWatchWithoutTimer = undefined;
+                  return;
+                }
+                if (!deps) {
+                  // No subscription yet. The alias needs the worker's
+                  // committed groups, which land after listen; keep the check
+                  // armed for that callback instead of consuming it here.
+                  if ((channelWorkspaceGroups?.length ?? 0) > 0) {
+                    warnPrWatchWithoutTimer = undefined;
+                  }
+                  return;
+                }
+                warnPrWatchWithoutTimer = undefined;
+                daemonLog.warn(
+                  'PR watch: an effective subscription exists but the session PR refresh timer is not running (QWEN_SESSION_PR_REFRESH_MINUTES=0); no PR-state transition will be observed.',
+                );
+              };
+              // The timer handle exists by now, and the channels may already
+              // have committed before this import finished; run the one-shot
+              // check for that ordering instead of waiting for a callback that
+              // has already fired.
+              warnPrWatchWithoutTimer();
+            } catch (error) {
+              daemonLog.warn(
+                `PR watch deps unavailable: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
+          })();
           sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
             workspaceRegistry,
             // The coordinator lives on the serve app (createServeApp below),
@@ -7642,9 +7979,30 @@ async function runQwenServeImpl(
                   sessionArchiveCoordinator?: SessionArchiveCoordinator;
                 }
               ).sessionArchiveCoordinator,
+            getPrWatchDeps: () => resolvePrWatchDeps()?.watch,
+            getPrDrainDeps: () => resolvePrWatchDeps()?.drain,
           });
           const handle = sessionPrRefreshTimer;
           stopPrWatchOnShutdown = handle ? () => handle.stopWatch() : undefined;
+          // Design §2: a user's resume delivers the session's pending
+          // transitions now instead of at the next tick. Read the timer at call
+          // time so a re-entry that replaced it is honoured, and never await —
+          // the watch's per-PR lock is not re-entrant.
+          (
+            app.locals as {
+              prWatchDrainNow?: (cwd: string, sessionId?: string) => void;
+            }
+          ).prWatchDrainNow = (workspaceCwd, sessionId) => {
+            void sessionPrRefreshTimer
+              ?.drainNow(workspaceCwd, sessionId)
+              .catch((error: unknown) => {
+                daemonLog.warn(
+                  `PR watch resume drain failed: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+              });
+          };
         })
         .catch((error) => {
           // Degrade to "no PR-state sweep" instead of leaking an unhandled
@@ -7806,6 +8164,7 @@ async function runQwenServeImpl(
         | undefined;
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
+        getArchiveCoordinator: getSubSessionArchiveCoordinator,
         boundWorkspace: cwd,
         runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
         ...(provenance === 'live-conversation'
@@ -7830,6 +8189,8 @@ async function runQwenServeImpl(
         ...subSessionConcurrencyCapsFromSettings(
           wsSettings?.merged.serve ?? {},
         ),
+        resolveWorkspace: subSessionWorkspaces.resolve,
+        isTrusted: (bridge) => subSessionWorkspaces.isTrusted(cwd, bridge),
       });
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
@@ -7854,6 +8215,7 @@ async function runQwenServeImpl(
           sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
+          onResolveSubSessionWorkspace: wsSubSessionLauncher.resolveDestination,
           onCreateCurrentSessionScheduledTask:
             createCurrentSessionScheduledTaskHandler(
               cwd,
@@ -8216,7 +8578,7 @@ async function runQwenServeImpl(
             boundWorkspaces: [...runtimeBoundWorkspaces].sort(),
           }),
       };
-      subSessionStoppersByRuntime.set(wsRuntime, wsSubSessionLauncher.stop);
+      subSessionWorkspaces.register(wsRuntime, wsSubSessionLauncher);
       if (provenance === 'existing' && !buildOptions?.snapshot) {
         const latest = await trustPolicy.readDaemonTrustPolicySnapshot();
         if (latest.revision !== snapshot.revision) {
@@ -8231,7 +8593,6 @@ async function runQwenServeImpl(
                 // Continue removing the stale unpublished runtime.
               }
             });
-          subSessionStoppersByRuntime.delete(wsRuntime);
           removeArrayValue(subSessionStoppers, wsSubSessionLauncher.stop);
           removeArrayValue(runtimeBridges, wsBridge);
           removeArrayValue(internalRuntimeBridgesForCleanup, wsBridge);
@@ -8514,9 +8875,11 @@ async function runQwenServeImpl(
             );
           }
           const stopSubSessions =
-            subSessionStoppersByRuntime.get(runtimeToDrain);
+            subSessionWorkspaces.getLauncher(runtimeToDrain)?.stop;
           try {
-            stopSubSessions?.();
+            stopSubSessions?.(
+              reason === 'daemon_shutdown' ? undefined : 'workspace_stopped',
+            );
           } catch {
             // Continue to bridge teardown.
           }
@@ -8631,7 +8994,6 @@ async function runQwenServeImpl(
             bridgeStopped = true;
           } finally {
             if (bridgeStopped) {
-              subSessionStoppersByRuntime.delete(runtimeToDrain);
               if (stopSubSessions) {
                 removeArrayValue(subSessionStoppers, stopSubSessions);
               }
@@ -8975,11 +9337,14 @@ async function runQwenServeImpl(
     (
       app.locals as { subSessionStoppers?: Array<() => void> }
     ).subSessionStoppers = subSessionStoppers;
+    // `POST /session/:id/sub-sessions` runs a person's send on the launcher of
+    // the caller's workspace.
+    (
+      app.locals as {
+        subSessionLauncherFor?: typeof subSessionWorkspaces.getLauncher;
+      }
+    ).subSessionLauncherFor = subSessionWorkspaces.getLauncher;
     subSessionStoppers.push(subSessionLauncher.stop);
-    subSessionStoppersByRuntime.set(
-      workspaceRegistry.primary,
-      subSessionLauncher.stop,
-    );
     if (workspaceTrustHotReloadAvailable) {
       const [
         { createWorkspaceTrustReconciler },
@@ -9315,6 +9680,17 @@ async function runQwenServeImpl(
   ) {
     throw new TypeError(
       `Invalid maxConnections: ${opts.maxConnections}. Must be >= 0 ` +
+        `(0 / Infinity = unlimited).`,
+    );
+  }
+  // Same fail-loud contract as maxConnections: a typo must reject the
+  // boot promise, not silently disable the SSE admission cap.
+  if (
+    opts.maxSseConnections !== undefined &&
+    (Number.isNaN(opts.maxSseConnections) || opts.maxSseConnections < 0)
+  ) {
+    throw new TypeError(
+      `Invalid maxSseConnections: ${opts.maxSseConnections}. Must be >= 0 ` +
         `(0 / Infinity = unlimited).`,
     );
   }
@@ -10234,6 +10610,9 @@ async function runQwenServeImpl(
             initialLeaseReserved: channelPidfileReserved,
             onCommittedSelection: (_selection, groups) => {
               channelWorkspaceGroups = groups;
+              // The hosted channels are readable only after this commit, so
+              // the alias-without-timer check has its first real chance here.
+              warnPrWatchWithoutTimer?.();
               channelOwnerHints = new Map([
                 ...bootChannelOwnerHints,
                 ...groups.flatMap((group) =>
@@ -10908,6 +11287,10 @@ async function runQwenServeImpl(
       try {
         const resolved = resolveChannelWorkspaceGroupsAtListen();
         channelWorkspaceGroups = resolved?.groups;
+        // Deferred-runtime listens commit the groups before this point; the
+        // worker path commits later and re-runs the same one-shot check from
+        // its callback.
+        warnPrWatchWithoutTimer?.();
         if (resolved) {
           for (const skip of resolved.skipped) {
             const detail = sanitizeLogText(
@@ -11264,6 +11647,10 @@ async function runQwenServeImpl(
     } else {
       server = deps.httpServerFactory?.(app) ?? createServer(app);
     }
+    // TCP keepalive on every accepted socket; the LAN listeners register
+    // the same helper. Boundary with the SSE writer-stall reaper: see
+    // socket-keepalive.ts.
+    enableSocketKeepalive(server);
     serveAppLifecycle.bindServer(server, {
       startupReady: serveAppStartupReady,
       drainHost: () => {

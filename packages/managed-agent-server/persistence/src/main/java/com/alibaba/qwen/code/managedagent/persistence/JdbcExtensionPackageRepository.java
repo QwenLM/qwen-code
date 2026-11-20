@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionP
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SettingsCommand;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SourceImport;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SourceOrigin;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.StandaloneSkill;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ExtensionPackageRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -20,12 +21,14 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 
 @org.springframework.stereotype.Repository
@@ -34,6 +37,7 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
     private static final TypeReference<List<String>> KEYS = new TypeReference<>() { };
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
+    private final TransactionTemplate readTransaction;
     private final ObjectMapper json;
     private final SecretProtector secrets;
     public JdbcExtensionPackageRepository(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
@@ -41,11 +45,14 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
             @Qualifier("managedAgentObjectMapper") ObjectMapper json, ObjectProvider<SecretProtector> secrets) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(manager);
+        this.readTransaction = new TransactionTemplate(manager);
+        this.readTransaction.setReadOnly(true);
+        this.readTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         this.json = json;
         this.secrets = secrets.getIfAvailable();
     }
     public Operation preparePublish(String tenant, String actor, String workspace, String extensionId,
-            String id, String digest, String operationId, String requestDigest, String encodedManifest, SourceOrigin source, Access access) {
+            String id, String digest, String operationId, String requestDigest, String encodedManifest, SourceOrigin source, StandaloneSkill skill, boolean sessionDefault, Access access) {
         return transaction.execute(status -> {
             lockWorkspace(tenant, actor, workspace, access);
             Operation existing = existingOperation(tenant, actor, workspace, operationId, requestDigest, access);
@@ -57,10 +64,14 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
                 }
                 return existing;
             }
-            var bindings = jdbc.query("SELECT source_json, manifest_json FROM ma_extension_package WHERE scope_key = ? AND extension_id = ?",
-                    (row, index) -> new Package(null, decode(row.getString(2), Manifest.class), 0, decodeSource(row.getString(1))),
+            record Binding(SourceOrigin source, Manifest manifest, long revision, String digest, String state, boolean listed, String metadata) { }
+            var manifest = decode(encodedManifest, Manifest.class);
+            var bindings = jdbc.query("SELECT source_json, manifest_json, package_revision, package_digest, state, is_catalog_listed, standalone_skill_json"
+                            + " FROM ma_extension_package WHERE scope_key = ? AND extension_id = ? ORDER BY package_revision",
+                    (row, index) -> new Binding(decodeSource(row.getString(1)), decode(row.getString(2), Manifest.class),
+                            row.getLong(3), row.getString(4), row.getString(5), row.getBoolean(6), row.getString(7)),
                     scope(tenant, workspace), id);
-            for (Package binding : bindings) {
+            for (var binding : bindings) {
                 SourceOrigin previous = binding.source();
                 if ((previous == null) != (source == null)
                         || previous != null && (!sameResource(previous, source)
@@ -68,8 +79,20 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
                         && !previous.sourceDigest().equals(source.sourceDigest()))) {
                     throw new ManagedAgentException(409, "extension_source_conflict", "Extension source bindings and revision contents are immutable.");
                 }
-                if (!binding.manifest().name().equals(decode(encodedManifest, Manifest.class).name())) {
+                if (!binding.manifest().name().equals(manifest.name())) {
                     throw new ManagedAgentException(409, "extension_namespace_conflict", "An update must retain the package namespace.");
+                }
+            }
+            if (sessionDefault) {
+                for (var binding : bindings) {
+                    boolean published = "PUBLISHED".equals(binding.state());
+                    if ((published || !binding.listed()) && source.equals(binding.source())
+                            && manifest.equals(binding.manifest()) && digest.equals(binding.digest())
+                            && binding.metadata() != null && skill.equals(decode(binding.metadata(), StandaloneSkill.class))) {
+                        String state = published ? "settled" : "pending";
+                        insertOperation(tenant, actor, workspace, operationId, id, "publish", binding.revision(), digest, requestDigest, state);
+                        return new Operation(operationId, id, "publish", state, binding.revision(), digest);
+                    }
                 }
             }
             if (extensionId != null) {
@@ -81,10 +104,10 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
             }
             long revision = nextPackageRevision(tenant, workspace, id);
             jdbc.update("INSERT INTO ma_extension_package (package_key, scope_key, tenant_id, workspace_id, extension_id,"
-                            + " package_revision, package_digest, manifest_json, source_json, byte_length, state, gmt_create)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'PREPARING', " + ManagedSchemaTime.SQL_NOW + ")",
+                            + " package_revision, package_digest, manifest_json, source_json, standalone_skill_json, is_catalog_listed, byte_length, state, gmt_create)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'PREPARING', " + ManagedSchemaTime.SQL_NOW + ")",
                     packageKey(tenant, workspace, id, revision), scope(tenant, workspace), tenant, workspace, id, revision,
-                    digest, encodedManifest, source == null ? null : encode(source));
+                    digest, encodedManifest, source == null ? null : encode(source), skill == null ? null : encode(skill), !sessionDefault);
             insertOperation(tenant, actor, workspace, operationId, id, "publish", revision, digest, requestDigest, "pending");
             return new Operation(operationId, id, "publish", "pending", revision, digest);
         });
@@ -366,11 +389,37 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
         return rows.getFirst();
     }
 
+    public StandaloneSkill standaloneSkill(String tenant, String workspace, Pin pin) {
+        var rows = jdbc.query("SELECT standalone_skill_json FROM ma_extension_package WHERE package_key = ?"
+                        + " AND package_digest = ? AND state = 'PUBLISHED' AND standalone_skill_json IS NOT NULL",
+                (row, index) -> decode(row.getString(1), StandaloneSkill.class),
+                packageKey(tenant, workspace, pin.extensionId(), pin.packageRevision()), pin.packageDigest());
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    public Optional<Package> findLatestCatalogPackage(String tenant, String workspace, String extensionId) {
+        return readTransaction.execute(status -> {
+            String scopeKey = scope(tenant, workspace);
+            var ids = jdbc.queryForList("SELECT DISTINCT extension_id FROM ma_extension_package WHERE scope_key = ?"
+                            + " AND state = 'PUBLISHED' AND is_catalog_listed = TRUE LIMIT 257", String.class, scopeKey);
+            if (ids.size() > 256) {
+                throw new ManagedAgentException(409, "extension_catalog_too_large",
+                        "The Workspace extension catalog exceeds 256 extensions.");
+            }
+            return jdbc.query("SELECT package_revision, package_digest, manifest_json, byte_length, source_json"
+                            + " FROM ma_extension_package WHERE scope_key = ? AND extension_id = ?"
+                            + " AND state = 'PUBLISHED' AND is_catalog_listed = TRUE ORDER BY package_revision DESC LIMIT 1",
+                    (row, index) -> new Package(new Pin(extensionId, row.getLong(1), row.getString(2), null),
+                            decode(row.getString(3), Manifest.class), row.getLong(4), decodeSource(row.getString(5))),
+                    scopeKey, extensionId).stream().findFirst();
+        });
+    }
+
     public List<Package> list(String tenant, String workspace) {
         var packages = jdbc.query("SELECT p.extension_id, p.package_revision, p.package_digest, p.manifest_json, p.byte_length, p.source_json"
-                        + " FROM ma_extension_package p WHERE p.scope_key = ? AND p.state = 'PUBLISHED'"
+                        + " FROM ma_extension_package p WHERE p.scope_key = ? AND p.state = 'PUBLISHED' AND p.is_catalog_listed = TRUE"
                         + " AND p.package_revision = (SELECT MAX(v.package_revision) FROM ma_extension_package v"
-                        + " WHERE v.scope_key = p.scope_key AND v.extension_id = p.extension_id AND v.state = 'PUBLISHED')"
+                        + " WHERE v.scope_key = p.scope_key AND v.extension_id = p.extension_id AND v.state = 'PUBLISHED' AND v.is_catalog_listed = TRUE)"
                         + " ORDER BY extension_id, package_revision DESC LIMIT 257",
                 (row, index) -> new Package(new Pin(row.getString(1), row.getLong(2), row.getString(3), null),
                         decode(row.getString(4), Manifest.class), row.getLong(5), decodeSource(row.getString(6))), scope(tenant, workspace));

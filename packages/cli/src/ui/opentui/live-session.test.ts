@@ -23,6 +23,7 @@ import { createRestoreToolResponseBinding } from '../utils/restore-tool-response
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import {
   mkdtemp,
   readdir,
@@ -139,11 +140,13 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     CoreToolScheduler: class FakeScheduler {
       private readonly opts: {
         onAllToolCallsComplete: (calls: unknown[]) => unknown;
+        onNativeAttempt?: (call: unknown) => unknown;
         onToolCallsUpdate?: (calls: unknown[]) => unknown;
         outputUpdateHandler?: (callId: string, chunk: unknown) => unknown;
       };
       constructor(opts: {
         onAllToolCallsComplete: (calls: unknown[]) => unknown;
+        onNativeAttempt?: (call: unknown) => unknown;
         onToolCallsUpdate?: (calls: unknown[]) => unknown;
         outputUpdateHandler?: (callId: string, chunk: unknown) => unknown;
       }) {
@@ -237,6 +240,26 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         ) {
           schedulerControl.finish = () =>
             this.schedule(calls.map((c) => ({ ...c, args: {} })));
+          return;
+        }
+        if (calls.some((c) => (c.args as { __heldMod?: boolean })?.__heldMod)) {
+          for (const call of calls) {
+            const chunks = (call.args as { __liveChunks?: unknown[] })
+              .__liveChunks;
+            for (const chunk of chunks ?? [])
+              this.opts.outputUpdateHandler?.(call.callId, chunk);
+          }
+          schedulerControl.finish = async () => {
+            const request = calls[0];
+            const completed = {
+              status: 'success',
+              request,
+              response: { executionStatus: 'success', responseParts: [] },
+              nativeAttemptsObserved: true,
+            };
+            await this.opts.onNativeAttempt?.(completed);
+            await this.opts.onAllToolCallsComplete([completed]);
+          };
           return;
         }
         const bounce = calls.some(
@@ -952,10 +975,10 @@ describe('livePromptEvents', () => {
       'terminal tool.call',
     );
     expect(sendMessageStream).not.toHaveBeenCalled();
-    // OpenTUI offers the band and reply rows, raises prompt.submit and runs
+    // OpenTUI offers the band and transcript rows, raises prompt.submit and runs
     // the prompts the Mods submit.
     expect(initializeMods).toHaveBeenCalledExactlyOnceWith(
-      ['AbovePrompt', 'AssistantMessage'],
+      ['AbovePrompt', 'AssistantMessage', 'Thinking'],
       {
         prompts: true,
         runsPrompts: true,
@@ -4332,8 +4355,8 @@ describe.each([false, true])(
       client['recordCompletedToolCall'] ??= vi.fn();
       return {
         ...config,
-        isUnifiedAgentLoopEnabled: () => true,
-        isEventBusAgentLoopEnabled: () => kernel,
+        isUnifiedAgentLoopEnabled: vi.fn(() => true),
+        isEventBusAgentLoopEnabled: vi.fn(() => kernel),
       } as unknown as Config;
     };
     // Each round of the turn ran as one loop call, on the kernel when it is on.
@@ -4355,24 +4378,27 @@ describe.each([false, true])(
         );
 
     it('sends the same requests and yields the same events as the current path', async () => {
+      const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
       const runs = [];
+      let sharedConfig: Config | undefined;
       for (const onShared of [false, true]) {
+        // Assert per arm so the legacy arm losing its entry log is caught,
+        // not masked by the shared arm's call in an accumulated spy.
+        entrySpy.mockClear();
         const send = oneToolBatchStream({
           callId: 't1',
           name: 'test_tool',
           args: {},
         });
         const config = createFakeConfig(send);
+        const effective = onShared ? shared(config) : config;
+        if (onShared) sharedConfig = effective;
         const events = await drain(
-          livePromptEvents(
-            onShared ? shared(config) : config,
-            'start',
-            undefined,
-            {
-              promptId: 'p1',
-            },
-          ),
+          livePromptEvents(effective, 'start', undefined, {
+            promptId: 'p1',
+          }),
         );
+        expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'opentui');
         runs.push({
           events,
           requests: send.mock.calls.map(([parts, , promptId, options]) => ({
@@ -4386,6 +4412,20 @@ describe.each([false, true])(
       expect(runs[1]).toEqual(runs[0]);
       // Only the run on the shared loop ran its two rounds as loop calls.
       expect(vi.mocked(runAgentLoop)).toHaveBeenCalledTimes(2);
+      // OpenTUI must resolve both switches for the 'opentui' surface.
+      const runtime = sharedConfig as unknown as {
+        isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+        isEventBusAgentLoopEnabled: ReturnType<typeof vi.fn>;
+      };
+      const loopCalls = runtime.isUnifiedAgentLoopEnabled.mock.calls;
+      expect(loopCalls.length).toBeGreaterThan(0);
+      expect(loopCalls.every(([surface]) => surface === 'opentui')).toBe(true);
+      const kernelCalls = runtime.isEventBusAgentLoopEnabled.mock.calls;
+      expect(kernelCalls.length).toBeGreaterThan(0);
+      expect(kernelCalls.every(([surface]) => surface === 'opentui')).toBe(
+        true,
+      );
+      entrySpy.mockRestore();
     });
 
     it.each(['retry', 'model_fallback'])(
@@ -4818,6 +4858,122 @@ describe.each([false, true])(
       expect(recordCompletedToolCall).not.toHaveBeenCalled();
       expect(send).toHaveBeenCalledOnce();
     });
+
+    it.skipIf(!kernel)(
+      'settles tool cards and tasks owned by the turn at the cancellation cap',
+      async () => {
+        vi.useFakeTimers();
+        try {
+          schedulerControl.finish = null;
+          const abort = new AbortController();
+          const running = {
+            type: 'task_execution',
+            subagentName: 'worker',
+            taskDescription: 'Run a task',
+            taskPrompt: 'Run a task',
+            executionMode: 'foreground',
+            status: 'running',
+          };
+          const send = batchStream([
+            {
+              callId: 'foreground',
+              name: 'agent',
+              args: { __heldMod: true, __liveChunks: [running] },
+            },
+            {
+              callId: 'completed',
+              name: 'agent',
+              args: {
+                __liveChunks: [running, { ...running, status: 'completed' }],
+              },
+            },
+            {
+              callId: 'background',
+              name: 'agent',
+              args: {
+                __liveChunks: [
+                  { ...running, executionMode: 'background' },
+                  {
+                    ...running,
+                    executionMode: 'background',
+                    status: 'background',
+                  },
+                ],
+              },
+            },
+            {
+              callId: 'starting-background',
+              name: 'agent',
+              args: {
+                __liveChunks: [{ ...running, executionMode: 'background' }],
+              },
+            },
+            {
+              callId: 'starting-teammate',
+              name: 'agent',
+              args: {
+                __liveChunks: [{ ...running, executionMode: undefined }],
+              },
+            },
+          ]);
+          const config = shared(createFakeConfig(send));
+          const recordCompletedToolCall = vi.fn();
+          const client = config.getGeminiClient();
+          Object.assign(config, {
+            getLlmClient: () => client,
+            getProjectRoot: () => '/tmp',
+          });
+          Object.assign(client, { recordCompletedToolCall });
+          const turn = drain(
+            livePromptEvents(config, 'start', abort.signal, {
+              checkpointHistory: { allocateId: () => 1, snapshot: () => [] },
+            }),
+          );
+          await vi.advanceTimersByTimeAsync(0);
+          expect(schedulerControl.finish).not.toBeNull();
+          abort.abort();
+          await vi.advanceTimersByTimeAsync(10_000);
+          const events = await turn;
+          const rows = events.reduce<readonly LiveHistoryItem[]>(
+            foldLiveEvent,
+            [],
+          );
+          expect(rows.find((row) => row.kind === 'tool')).toMatchObject({
+            id: 'foreground',
+            done: true,
+            success: false,
+            summary: 'cancelled',
+            canonicalPending: false,
+            canonicalHistoryItem: {
+              tools: [
+                'foreground',
+                'completed',
+                'background',
+                'starting-background',
+                'starting-teammate',
+              ].map((callId) => ({
+                callId,
+                status: ToolCallStatus.Canceled,
+              })),
+            },
+          });
+          expect(events.filter((ev) => ev.type === 'task-end')).toEqual([
+            { type: 'task-end', id: 'completed' },
+            { type: 'task-end', id: 'foreground' },
+            { type: 'task-end', id: 'starting-background' },
+            { type: 'task-end', id: 'starting-teammate' },
+          ]);
+          expect(
+            rows.filter((row) => row.kind === 'task').map((row) => row.id),
+          ).toEqual(['background']);
+          await schedulerControl.finish!();
+          expect(recordCompletedToolCall).not.toHaveBeenCalled();
+          expect(send).toHaveBeenCalledOnce();
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
 
     /** The calls made to the fake sidecar, by method. */
     const calls: Record<string, ReturnType<typeof vi.fn>> = {};

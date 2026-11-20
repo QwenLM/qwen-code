@@ -83,10 +83,12 @@ import {
   ManagedSessionCommitRejectedError,
   scanManagedSessionJournal,
   type ManagedSessionActivationLease,
+  type ManagedSessionCommitProof,
   type ManagedSessionJournalHandle,
   type ManagedSessionJournalScan,
   type ManagedSessionJournalStore,
   type ManagedSessionResourceStore,
+  type ManagedSessionWakeStamp,
 } from './managed-session-storage.js';
 
 export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
@@ -188,6 +190,8 @@ export interface ManagedMemoryQuery {
 export interface HttpManagedSessionStores {
   supportsModelDiagnostics(): boolean;
   supportsExecutionDiagnostics(): boolean;
+  /** Whether the control plane delivers a suspended Session's wake inputs. */
+  supportsWakeDispatch(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -202,6 +206,14 @@ export interface HttpManagedSessionStores {
   };
   assertWritable(): Promise<void>;
   stopLocal(): Promise<void>;
+  /**
+   * Ends the writer lease's renewal timer without fencing the client. A
+   * suspension that cannot confirm its seal needs the lease to lapse so a
+   * successor generation fences the old writer, while the same client must
+   * still be able to reconcile that seal — `stopLocal()` refuses those
+   * requests too. An on-demand renewal for a commit still runs.
+   */
+  stopWriterRenewal(): void;
   quiesceOwnership(placement: HostedHarnessPlacement): Promise<void>;
   releaseOwnership(
     request: HostedHarnessReleaseRequest,
@@ -215,6 +227,18 @@ export interface HttpManagedSessionStores {
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
   modelConfig(expectedDigest: string, kind?: 'legacy-close'): Promise<unknown>;
   memory(query: ManagedMemoryQuery): Promise<unknown>;
+  automationsCreate(
+    definition: ManagedAutomationDefinitionInput,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult>;
+  automationsList(
+    cursor?: string,
+    limit?: number,
+  ): Promise<ManagedAutomationPage>;
+  automationsRetire(
+    automationId: string,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult>;
   claimUserMessages(
     promptId: string,
     initialOnly?: boolean,
@@ -261,6 +285,114 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
 export class ManagedSessionStoreTransportError extends ManagedSessionRecordError {}
 
 /**
+ * The fixed-interval /loop definition the internal `automations:create`
+ * route admits (the H6 snake_case wire shape). The Session id is forced to
+ * the bound Session by the route, so the tool omits it.
+ */
+export interface ManagedAutomationDefinitionInput {
+  readonly cron: string;
+  readonly prompt: string;
+  readonly goal?: string;
+  readonly timezone?: string;
+  readonly session_mode: 'persistent';
+  readonly overlap?: string;
+  readonly catch_up?: string;
+  readonly catch_up_limit?: number;
+  readonly enabled?: boolean;
+  readonly gate?: unknown;
+}
+
+/** One H6 definition as the internal routes answer it (PublicAutomation). */
+export interface ManagedPublicAutomation {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly cron: string;
+  readonly timezone: string;
+  readonly goal: string | null;
+  readonly state: string;
+  readonly enabled: boolean;
+}
+
+/** A create/retire answer: the definition plus the Idempotency-Key replay mark. */
+export interface ManagedAutomationResult {
+  readonly automation: ManagedPublicAutomation;
+  readonly replayed: boolean;
+}
+
+/** One page of the bound Session's definitions (PublicList). */
+export interface ManagedAutomationPage {
+  readonly data: readonly ManagedPublicAutomation[];
+  readonly hasMore: boolean;
+  readonly nextCursor: string | null;
+}
+
+async function readAutomationJson(response: Response): Promise<unknown> {
+  try {
+    return (await response.json()) as unknown;
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof DOMException)
+      throw new ManagedSessionStoreTransportError(
+        'Managed automation response failed.',
+      );
+    if (error instanceof SyntaxError)
+      throw corrupt('Managed automation response is invalid JSON.');
+    throw error;
+  }
+}
+
+function asPublicAutomation(value: unknown): ManagedPublicAutomation {
+  const record = asRecord(value, 'automation definition');
+  if (
+    typeof record['id'] !== 'string' ||
+    typeof record['session_id'] !== 'string' ||
+    typeof record['cron'] !== 'string' ||
+    typeof record['timezone'] !== 'string' ||
+    typeof record['state'] !== 'string' ||
+    typeof record['enabled'] !== 'boolean'
+  )
+    throw corrupt('invalid automation definition.');
+  return {
+    id: record['id'],
+    sessionId: record['session_id'],
+    cron: record['cron'],
+    timezone: record['timezone'],
+    goal: typeof record['goal'] === 'string' ? record['goal'] : null,
+    state: record['state'],
+    enabled: record['enabled'],
+  };
+}
+
+function parseAutomationResult(
+  value: unknown,
+  route: string,
+): ManagedAutomationResult {
+  const record = asRecord(value, `automation result from ${route}`);
+  if (typeof record['replayed'] !== 'boolean')
+    throw corrupt(`invalid automation result from ${route}.`);
+  return {
+    automation: asPublicAutomation(record['body']),
+    replayed: record['replayed'],
+  };
+}
+
+function parseAutomationPage(
+  value: unknown,
+  route: string,
+): ManagedAutomationPage {
+  const record = asRecord(value, `automation list from ${route}`);
+  if (!Array.isArray(record['data']) || typeof record['has_more'] !== 'boolean')
+    throw corrupt(`invalid automation list from ${route}.`);
+  const next = record['next_cursor'];
+  if (next !== null && next !== undefined && typeof next !== 'string')
+    throw corrupt(`invalid automation list cursor from ${route}.`);
+  return {
+    data: record['data'].map((entry) => asPublicAutomation(entry)),
+    hasMore: record['has_more'],
+    nextCursor: typeof next === 'string' ? next : null,
+  };
+}
+
+/**
  * Failures that leave the commit's outcome unknown: the request may have
  * reached the store. A retry is safe only against a proved head, which the
  * writer re-establishes after its lease lapses.
@@ -303,6 +435,7 @@ export function createHttpManagedSessionStores(
   return {
     supportsModelDiagnostics: () => client.supportsModelDiagnostics(),
     supportsExecutionDiagnostics: () => client.supportsExecutionDiagnostics(),
+    supportsWakeDispatch: () => client.supportsWakeDispatch(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -325,6 +458,7 @@ export function createHttpManagedSessionStores(
     },
     assertWritable: () => client.assertWritable(),
     stopLocal: () => client.stopLocal(),
+    stopWriterRenewal: () => client.stopWriterRenewal(),
     quiesceOwnership: (placement) => client.quiesceOwnership(placement),
     releaseOwnership: (request) => client.releaseOwnership(request),
     close: () => client.seal(),
@@ -336,6 +470,11 @@ export function createHttpManagedSessionStores(
     modelConfig: (expectedDigest, kind) =>
       client.modelConfig(expectedDigest, kind),
     memory: (query) => client.memory(query),
+    automationsCreate: (definition, idempotencyKey) =>
+      client.automationsCreate(definition, idempotencyKey),
+    automationsList: (cursor, limit) => client.automationsList(cursor, limit),
+    automationsRetire: (automationId, idempotencyKey) =>
+      client.automationsRetire(automationId, idempotencyKey),
     claimUserMessages: (promptId, initialOnly) =>
       client.claimUserMessages(promptId, initialOnly),
   };
@@ -353,7 +492,6 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   );
   const head = parseRestoreHead(snapshot['head']);
   if (
-    ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
     head.recoveryStatus !== 'READY' ||
     head.compactedThroughRevision !== 0
@@ -515,45 +653,6 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   if (resources.size !== references.size) {
     throw corrupt('snapshot resource enumeration conflicts.');
   }
-  if (
-    head.storageVersion < 5 &&
-    [...resources.values()].some(
-      ({ ref }) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
-    )
-  )
-    throw corrupt('Tool measurements require storage version 5.');
-  const executionPresent = [...resources.values()].some(
-    ({ ref }) => ref.kind === EXECUTION_DIAGNOSTICS_KIND,
-  );
-  if (executionPresent && head.storageVersion < 4)
-    throw corrupt('Execution diagnostics require storage version 4.');
-  const diagnosticsPresent = [...resources.values()].some(({ ref }) =>
-    MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind),
-  );
-  if (diagnosticsPresent && head.storageVersion < 3)
-    throw corrupt('snapshot diagnostics require storage version 3.');
-  const definitionResource = resources.get(
-    scan.header.definitionRef.resourceId,
-  );
-  const profile =
-    definitionResource?.ref.kind === 'managed-definition'
-      ? (
-          JSON.parse(definitionResource.bytes.toString('utf8')) as {
-            toolProfile?: string;
-          }
-        ).toolProfile
-      : undefined;
-  if (
-    (profile === 'csi-files-retirement/1' &&
-      (diagnosticsPresent || head.storageVersion !== 1)) ||
-    (profile === 'csi-files-retirement/2' &&
-      (executionPresent ||
-        head.storageVersion !== (diagnosticsPresent ? 3 : 1))) ||
-    (profile === 'csi-files-retirement/3' &&
-      head.storageVersion !==
-        (executionPresent ? 4 : diagnosticsPresent ? 3 : 1))
-  )
-    throw corrupt('snapshot CSI profile storage floor conflicts.');
   for (const [resourceId, revisions] of references) {
     const actual = resourceRevisions.get(resourceId)!;
     if (actual.some((revision) => !revisions.has(revision))) {
@@ -684,8 +783,11 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
     return this.client.blockRecovery(request);
   }
 
-  seal(): Promise<void> {
-    return this.client.seal();
+  seal(
+    _commit?: ManagedSessionCommitProof,
+    wake?: ManagedSessionWakeStamp,
+  ): Promise<void> {
+    return this.client.seal(wake);
   }
 
   get writerSealed(): boolean {
@@ -871,8 +973,8 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 
 interface WriterGrant {
   readonly activationLeaseRenewal: boolean;
+  readonly wakeDispatch: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
-  readonly supportedStorageVersion: number;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
   readonly journalRevision: number;
@@ -884,7 +986,6 @@ interface WriterGrant {
 interface RestoreHead {
   readonly activationLease?: ManagedSessionActivationLease;
   readonly state: string;
-  readonly storageVersion: number;
   readonly writerGeneration: number;
   readonly journalRevision: number;
   readonly committedSequence: number;
@@ -934,10 +1035,13 @@ interface TransactionDescriptor {
 
 class ManagedSessionStoreHttpClient {
   supportsExecutionDiagnostics(): boolean {
-    return (this.grant?.supportedStorageVersion ?? 1) >= 4;
+    return true;
   }
   supportsModelDiagnostics(): boolean {
-    return (this.grant?.supportedStorageVersion ?? 1) >= 3;
+    return true;
+  }
+  supportsWakeDispatch(): boolean {
+    return this.grant?.wakeDispatch === true;
   }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
@@ -1100,6 +1204,107 @@ class ManagedSessionStoreHttpClient {
         reader.releaseLock();
       }
     });
+  }
+
+  /**
+   * Fixed-interval /loop: create an H6 definition bound to this Session.
+   * The Idempotency-Key derives from the tool execution's identity, so a
+   * re-drive meets the claim or the replay rather than minting a second
+   * definition. A transport fault is not retried here — the tool execution
+   * stays pending and its re-drive reuses the key (design decision 9).
+   */
+  async automationsCreate(
+    definition: ManagedAutomationDefinitionInput,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:create',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:create',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            definition,
+          },
+          timeoutMs,
+          'application/json',
+          { 'Idempotency-Key': idempotencyKey },
+        );
+        return parseAutomationResult(
+          await readAutomationJson(response),
+          'POST /automations:create',
+        );
+      },
+    );
+  }
+
+  /** One page of the bound Session's definitions (ungated, Session-scoped). */
+  async automationsList(
+    cursor?: string,
+    limit?: number,
+  ): Promise<ManagedAutomationPage> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:list',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:list',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            ...(cursor === undefined ? {} : { cursor }),
+            ...(limit === undefined ? {} : { limit }),
+          },
+          timeoutMs,
+        );
+        return parseAutomationPage(
+          await readAutomationJson(response),
+          'POST /automations:list',
+        );
+      },
+    );
+  }
+
+  /** Retire a definition of the bound Session; a retired id answers the replay. */
+  async automationsRetire(
+    automationId: string,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:retire',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:retire',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            automationId,
+          },
+          timeoutMs,
+          'application/json',
+          { 'Idempotency-Key': idempotencyKey },
+        );
+        return parseAutomationResult(
+          await readAutomationJson(response),
+          'POST /automations:retire',
+        );
+      },
+    );
   }
 
   async modelConfig(
@@ -1333,7 +1538,7 @@ class ManagedSessionStoreHttpClient {
     // writer stayed fenced; the lease-active verdict is implied by the
     // acquire itself succeeding.
     debugLogger.debug(
-      `Managed Session Store restore head matches grant: session=${this.sessionKey.sessionId} writerId=${this.writerId} acquiredWriterGeneration=${this.requireGrant().writerGeneration} headGeneration=${head.writerGeneration} journalRevision=${head.journalRevision} committedSequence=${head.committedSequence} state=${head.state} storageVersion=${head.storageVersion}`,
+      `Managed Session Store restore head matches grant: session=${this.sessionKey.sessionId} writerId=${this.writerId} acquiredWriterGeneration=${this.requireGrant().writerGeneration} headGeneration=${head.writerGeneration} journalRevision=${head.journalRevision} committedSequence=${head.committedSequence} state=${head.state}`,
     );
     const chunks: Buffer[] = [];
     let afterRevision = 0;
@@ -1366,25 +1571,6 @@ class ManagedSessionStoreHttpClient {
         this.sessionKey,
       );
       requireStoredTransactionMatches(transaction, descriptor);
-      if (
-        head.storageVersion < 5 &&
-        descriptor.refs.some(
-          (ref) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
-        )
-      )
-        throw corrupt('Tool measurements require storage version 5.');
-      if (
-        head.storageVersion < 4 &&
-        descriptor.refs.some((ref) => ref.kind === EXECUTION_DIAGNOSTICS_KIND)
-      )
-        throw corrupt('Execution diagnostics require storage version 4.');
-      if (
-        head.storageVersion < 3 &&
-        descriptor.refs.some((ref) =>
-          MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind),
-        )
-      )
-        throw corrupt('journal diagnostics require storage version 3.');
       if (
         usesSnapshot &&
         (transaction.previousCommitDigest !== lastCommitDigest ||
@@ -1597,10 +1783,6 @@ class ManagedSessionStoreHttpClient {
       resourceCount: safeCounter(raw['resourceCount'], 'resourceCount'),
       lastPageDigest: digest(raw['lastPageDigest'], 'lastPageDigest'),
     };
-    const storageVersion = safeCounter(
-      raw['storageVersion'],
-      'snapshot storageVersion',
-    );
     if (
       raw['format'] !== 'qwen-managed-native-session-snapshot/1' ||
       raw['payloadFormat'] !== 'committed-prefix-v1' ||
@@ -1609,8 +1791,6 @@ class ManagedSessionStoreHttpClient {
       raw['sessionId'] !== this.sessionKey.sessionId ||
       snapshot.snapshotId.length === 0 ||
       Buffer.byteLength(snapshot.snapshotId, 'utf8') > 512 ||
-      ![1, 2, 3, 4, 5].includes(storageVersion) ||
-      storageVersion > head.storageVersion ||
       snapshot.coveredJournalRevision < 1 ||
       snapshot.coveredJournalRevision > head.journalRevision ||
       snapshot.committedSequence > head.committedSequence ||
@@ -1722,29 +1902,6 @@ class ManagedSessionStoreHttpClient {
         const nested: typeof declared = [];
         for (const resource of added) {
           const body = await this.readResource(resource);
-          if (
-            storageVersion < 5 &&
-            resource.kind === MANAGED_TOOL_MEASUREMENTS_KIND
-          )
-            throw corrupt('Tool measurements require storage version 5.');
-          if (
-            storageVersion < 4 &&
-            resource.kind === EXECUTION_DIAGNOSTICS_KIND
-          )
-            throw corrupt('Execution diagnostics require storage version 4.');
-          if (
-            storageVersion < 3 &&
-            (MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(resource.kind) ||
-              (resource.kind === 'managed-history_maintenance' &&
-                (
-                  JSON.parse(body.toString('utf8')) as {
-                    schemaVersion?: number;
-                  }
-                ).schemaVersion === 2))
-          )
-            throw corrupt(
-              'native snapshot diagnostics require storage version 3.',
-            );
           nested.push(...collectNestedResourceRefs(resource, body));
         }
         // Direct references are the transaction's own census: a missing one is
@@ -2146,37 +2303,6 @@ class ManagedSessionStoreHttpClient {
           event.payload?.['sourceBootId'] !== undefined
         );
       });
-    if (needsVersionTwo && grant.supportedStorageVersion < 2)
-      throw new ManagedSessionRecordError(
-        'Managed Session Store does not support Hosted recovery storage version 2.',
-      );
-    const needsVersionThree = commitResources.some(
-      (resource) =>
-        MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(resource.kind) ||
-        (resource.kind === 'managed-history_maintenance' &&
-          resource.bytesBase64 &&
-          JSON.parse(
-            Buffer.from(resource.bytesBase64, 'base64').toString('utf8'),
-          ).schemaVersion === 2),
-    );
-    if (needsVersionThree && grant.supportedStorageVersion < 3)
-      throw new ManagedSessionRecordError(
-        'Managed Session Store does not support model diagnostics storage version 3.',
-      );
-    if (
-      commitResources.some(
-        (resource) => resource.kind === EXECUTION_DIAGNOSTICS_KIND,
-      ) &&
-      grant.supportedStorageVersion < 4
-    )
-      throw corrupt('Execution diagnostics require storage version 4.');
-    if (
-      descriptor.refs.some(
-        (ref) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
-      ) &&
-      grant.supportedStorageVersion < 5
-    )
-      throw corrupt('Tool measurements require storage version 5.');
     const publicationIds = new Set(
       descriptor.refs.flatMap((ref) => {
         const id = this.publicationAdmissions.get(ref.resourceId);
@@ -2454,7 +2580,6 @@ class ManagedSessionStoreHttpClient {
           method,
           headers: {
             Accept: 'application/json',
-            'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
             ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
             [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
               this.sessionKey.tenantId,
@@ -2669,14 +2794,14 @@ class ManagedSessionStoreHttpClient {
     }
   }
 
-  async seal(): Promise<void> {
+  async seal(wake?: ManagedSessionWakeStamp): Promise<void> {
     if (this.retirementJoin)
       throw corrupt('original CSI retirement owns the final boundary.');
     // The seal joins sealsAnswered before it waits on acquirePromise, so a
     // reacquire that starts meanwhile still waits for it.
     const sealing = (async () => {
       await this.acquirePromise?.catch(() => undefined);
-      await this.sealGrant();
+      await this.sealGrant(wake);
     })();
     const answered = sealing.then(
       () => undefined,
@@ -2699,7 +2824,7 @@ class ManagedSessionStoreHttpClient {
     return sealing;
   }
 
-  private async sealGrant(): Promise<void> {
+  private async sealGrant(wake?: ManagedSessionWakeStamp): Promise<void> {
     if (this.sealed) return;
     const grant = this.grant;
     this.stopWriterRenewal();
@@ -2713,6 +2838,10 @@ class ManagedSessionStoreHttpClient {
         workspaceId: this.sessionKey.workspaceId,
         writerId: this.writerId,
         writerGeneration: grant.writerGeneration,
+        // The Store refuses a stamp whose revision is not the head's.
+        ...(wake === undefined
+          ? {}
+          : { wake: { revision: grant.journalRevision, ...wake } }),
       }),
       'seal receipt',
     );
@@ -2987,7 +3116,7 @@ class ManagedSessionStoreHttpClient {
       this.grant = {
         ...this.requireGrant(),
         leaseUntil: renewed.leaseUntil,
-        supportedStorageVersion: renewed.supportedStorageVersion,
+        wakeDispatch: renewed.wakeDispatch,
       };
       this.scheduleRenewal();
     })();
@@ -3084,8 +3213,6 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (
       head.state !== 'ACTIVE' ||
-      ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
-      head.storageVersion > grant.supportedStorageVersion ||
       head.writerGeneration !== grant.writerGeneration ||
       head.recoveryStatus !== 'READY' ||
       head.compactedThroughRevision !== 0
@@ -3283,6 +3410,7 @@ class ManagedSessionStoreHttpClient {
     body?: Readonly<Record<string, unknown>>,
     timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
+    extraHeaders?: Readonly<Record<string, string>>,
   ): Promise<Response> {
     if (this.ownershipRelease && path !== '/writers:release-ownership')
       throw corrupt('ownership release has fenced this writer.');
@@ -3298,7 +3426,6 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: accept,
-          'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
@@ -3313,6 +3440,7 @@ class ManagedSessionStoreHttpClient {
               }
             : {}),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          ...(extraHeaders ?? {}),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(timeoutMs),
@@ -3631,16 +3759,10 @@ function parseWriterGrant(value: unknown): WriterGrant {
   const record = asRecord(value, 'writer grant');
   return {
     activationLeaseRenewal: record['activationLeaseRenewal'] === true,
+    wakeDispatch: record['wakeDispatch'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),
-    supportedStorageVersion:
-      record['supportedStorageVersion'] === undefined
-        ? 1
-        : safeCounter(
-            record['supportedStorageVersion'],
-            'supportedStorageVersion',
-          ),
     writerGeneration: safeCounter(
       record['writerGeneration'],
       'writerGeneration',
@@ -3666,7 +3788,6 @@ function parseRestoreHead(value: unknown): RestoreHead {
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),
     state: string(record['state'], 'state'),
-    storageVersion: safeCounter(record['storageVersion'], 'storageVersion'),
     writerGeneration: safeCounter(
       record['writerGeneration'],
       'writerGeneration',

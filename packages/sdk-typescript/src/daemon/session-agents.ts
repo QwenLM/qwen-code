@@ -63,7 +63,16 @@ export interface QwenAgentMessageMeta {
   totalTokens?: number;
   mentionedAgentIds?: string[];
   mentionedSquadIds?: string[];
+  /** On an `agent_mention`: the other session the message was sent to. */
+  sentTo?: SessionMessageTarget;
   squadOutcome?: SessionSquadOutcome;
+}
+
+/** Another session a message in this one was sent to (`/send`). */
+export interface SessionMessageTarget {
+  sessionId: string;
+  workspaceCwd: string;
+  title?: string;
 }
 
 export const QWEN_AGENT_MESSAGE_META_KEY = 'qwenAgentMessage';
@@ -226,8 +235,23 @@ export function parseQwenAgentMessageMeta(
         (id): id is string => typeof id === 'string',
       )
     : undefined;
+  const sentTo = record['sentTo'] as Record<string, unknown> | undefined;
   return {
     kind: record['kind'],
+    ...(sentTo &&
+    typeof sentTo === 'object' &&
+    typeof sentTo['sessionId'] === 'string' &&
+    typeof sentTo['workspaceCwd'] === 'string'
+      ? {
+          sentTo: {
+            sessionId: sentTo['sessionId'],
+            workspaceCwd: sentTo['workspaceCwd'],
+            ...(typeof sentTo['title'] === 'string'
+              ? { title: sentTo['title'] }
+              : {}),
+          },
+        }
+      : {}),
     ...(author ? { author } : {}),
     ...(typeof record['runId'] === 'string' ? { runId: record['runId'] } : {}),
     ...(status ? { status } : {}),

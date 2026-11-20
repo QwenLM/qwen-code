@@ -43,13 +43,7 @@ public class JdbcWorkspaceLifecycleStore
     private final JdbcManagedExtensionRecordStore records;
     private final ObjectProvider<RuntimeBindingRepository> bindings;
     private WorkspaceProfileLifecycleVerifier profiles;
-    private ResidentWorkspaces residents = new ResidentWorkspaces(java.util.List.of());
     private JdbcJournalPacks packs;
-
-    @org.springframework.beans.factory.annotation.Autowired
-    void setResidentConfiguration(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties) {
-        residents = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
-    }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     void setJournalPacks(JdbcJournalPacks packs) {
@@ -314,12 +308,6 @@ public class JdbcWorkspaceLifecycleStore
                 && ((Number) writers.getFirst().get("live_writer")).intValue() != 0) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
         }
-        if (residents.verifyClosed(jdbc, operation.tenantId(), operation.sessionId())) {
-            if (!writers.isEmpty() && !"SEALED".equals(writers.getFirst().get("state"))) {
-                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
-            }
-            return;
-        }
         RuntimeBindingRepository repository = bindings.getIfAvailable();
         if (!(repository instanceof com.alibaba.qwen.code.runtimebroker.persistence.JdbcHarnessResources)) {
             throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
@@ -504,8 +492,18 @@ public class JdbcWorkspaceLifecycleStore
     }
 
     private JsonNode header(String tenant, String session) {
-        var rows = jdbc.queryForList("SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                + " ORDER BY journal_revision LIMIT 1", byte[].class, tenant, session);
+        var rows = jdbc.query("SELECT journal_revision, record_bytes, record_digest, byte_length FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                + " ORDER BY journal_revision LIMIT 1", (row, index) -> {
+                    byte[] bytes = row.getBytes("record_bytes");
+                    if (bytes == null && packs != null) {
+                        bytes = packs.resolveBytes(tenant, session, row.getLong("journal_revision"),
+                                row.getString("record_digest"), row.getLong("byte_length"));
+                    }
+                    if (bytes == null) {
+                        throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_journal_unverified");
+                    }
+                    return bytes;
+                }, tenant, session);
         if (rows.isEmpty()) {
             return null;
         }

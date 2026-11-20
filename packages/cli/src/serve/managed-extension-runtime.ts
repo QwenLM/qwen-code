@@ -1019,7 +1019,9 @@ function validateExtensionToolProfile(
   const shell =
     profile === 'hosted-workspace-shell/1' ||
     profile === 'hosted-workspace-shell/3' ||
-    profile === 'hosted-workspace-team-lead/1';
+    profile === 'hosted-workspace-shell/4' ||
+    profile === 'hosted-workspace-team-lead/1' ||
+    profile === 'hosted-workspace-team-lead/2';
   const mcp = shell || profile === 'hosted-workspace-mcp/1';
   if (!mcp && Object.keys(value.mcpServers).length)
     throw new Error('Session profile does not admit extension MCP.');

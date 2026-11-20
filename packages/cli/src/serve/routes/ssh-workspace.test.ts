@@ -584,6 +584,7 @@ describe.skipIf(process.platform === 'win32')(
         '/session/id/transcript',
         '/session/id/turn-index',
         '/session/id/tool-calls',
+        '/session/id/turns/prompt/hooks',
         '/trust',
         '/permissions',
         '/runtime/status',

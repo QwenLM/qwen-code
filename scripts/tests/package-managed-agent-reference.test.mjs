@@ -87,12 +87,12 @@ async function fixture(root) {
       'select 1;',
     'packages/managed-agent-server/src/main/java/db/migration/V9__latest.java':
       'class Latest {}',
-    'packages/cli/src/serve/capabilities.ts':
+    'packages/sdk-typescript/src/daemon/capabilities.ts':
       "export const SERVE_PROTOCOL_VERSION = 'v1' as const;\n",
     'packages/cli/src/serve/managed-runtime-broker-client.ts':
       'export const MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = 2 as const;\n',
     'packages/cli/src/serve/hosted-harness-contract.ts':
-      "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n).split(',');\n",
+      "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ??\n  'hosted-workspace-files/1,hosted-workspace-shell/1'\n).split(',');\n",
     'docs/users/managed-agent-reference-deployment.md': 'deploy\n',
     'docs/users/managed-agent-reference-deployment.zh-CN.md': '部署\n',
     'docs/users/hosted-workspace-recovery.md': 'recover\n',
@@ -1107,9 +1107,9 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
       name: 'commented lifecycle v2 default',
       file: 'packages/cli/src/serve/hosted-harness-contract.ts',
       contents:
-        "/*\nprocess.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n*/\nconst profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
+        "/*\nprocess.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-files/1,hosted-workspace-shell/1'\n*/\nconst profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
       error:
-        /Hosted lifecycle v2 profiles must default to canonical Shell only/,
+        /Hosted lifecycle v2 profiles must default to canonical files and Shell/,
     },
     {
       name: 'duplicate public Shell default',

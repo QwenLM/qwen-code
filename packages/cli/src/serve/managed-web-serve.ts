@@ -7,6 +7,7 @@
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { isAbsolute } from 'node:path';
 import express from 'express';
 import {
@@ -15,7 +16,11 @@ import {
   hostAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
-import { mountManagedLocalWeb } from './managed-local-web.js';
+import {
+  forwardManagedTerminalUpgrade,
+  isManagedTerminalUpgradePath,
+  mountManagedLocalWeb,
+} from './managed-local-web.js';
 import { resolveServeToken } from './serve-token.js';
 import { isLoopbackAddress } from './loopback-binds.js';
 import {
@@ -165,7 +170,22 @@ export async function runManagedWebServe(
 
   const server = createServer(app);
   server.maxConnections = 256;
-  server.on('upgrade', (_request, socket) => socket.destroy());
+  const java = new URL(config.apiUrl);
+  const upgradedSockets = new Set<Duplex>();
+  server.on('upgrade', (request, socket, head) => {
+    const path = (request.url ?? '').split('?')[0] ?? '';
+    if (isManagedTerminalUpgradePath(path)) {
+      forwardManagedTerminalUpgrade(
+        java,
+        request,
+        socket,
+        head,
+        upgradedSockets,
+      );
+    } else {
+      socket.destroy();
+    }
+  });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(options.port, options.hostname, () => {
@@ -192,6 +212,10 @@ export async function runManagedWebServe(
         else resolve();
       });
       server.closeAllConnections();
+      // Upgraded terminal sockets are not covered by closeAllConnections();
+      // destroy them so a connected terminal cannot block shutdown.
+      for (const socket of upgradedSockets) socket.destroy();
+      upgradedSockets.clear();
     });
     return closing;
   };
