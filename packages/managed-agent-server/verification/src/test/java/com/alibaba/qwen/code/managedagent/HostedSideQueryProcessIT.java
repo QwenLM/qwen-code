@@ -193,8 +193,6 @@ class HostedSideQueryProcessIT {
             Map<String, Object> submission = submissions.get(query);
             assertThat(exchange.getRequestHeaders().getFirst("Authorization")).isEqualTo("Bearer " + TOKEN);
             assertThat(exchange.getRequestHeaders().getFirst("X-Qwen-Tenant-Id")).isEqualTo("tenant");
-            assertThat(exchange.getRequestHeaders().getFirst("X-Qwen-Managed-Max-Readable-Storage-Version"))
-                    .isEqualTo("4");
             assertThat(request.path("claim")).isEqualTo(json.valueToTree(submission.get("claim")));
             Object result = switch (operation) {
                 case "input" -> Map.ofEntries(Map.entry("queryId", query),

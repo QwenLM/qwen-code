@@ -3547,6 +3547,25 @@ describe('PR 21 — auth device-flow events', () => {
     });
   });
 
+  describe('mod_log', () => {
+    it("recognizes a Mod's log line and rejects one without its plugin", () => {
+      const event = {
+        id: 4,
+        v: 1,
+        type: 'mod_log',
+        data: { sessionId: 's-1', plugin: 'zh-display', text: 'translated' },
+      } satisfies DaemonEvent;
+      expect(asKnownDaemonEvent(event)).toBe(event);
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'mod_log',
+          data: { sessionId: 's-1', text: 'translated' },
+        }),
+      ).toBeUndefined();
+    });
+  });
+
   describe('followup_suggestion (daemon assist push)', () => {
     it('recognizes followup_suggestion frames as known events', () => {
       const event = {

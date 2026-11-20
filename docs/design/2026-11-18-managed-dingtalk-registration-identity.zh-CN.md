@@ -24,11 +24,11 @@
 
 锁刻意保持按条目：按目的地的锁会让一个配置机器人应用的两个注册各拿一把锁并发运行，重复入站处理。账本键控在不收窄锁的前提下加跨注册隔离。
 
-`channel-base` 的共享 `destinationKey` 注释更新为点名 WeCom **与 DingTalk** 为绑定注册身份的适配器，并指 GitHub（仅 name+endpoint）与 email（独立变体）为剩余后续，使契约文档不再把 DingTalk 列为缺乏键控的兄弟。
+`channel-base` 的共享 `destinationKey` 注释更新为点名 WeCom **与 DingTalk** 为绑定注册身份的适配器，并指 GitHub（仅 name+endpoint）与 email（独立变体）为剩余后续，使契约文档不再把 DingTalk 列为缺乏键控的兄弟。_（更新：GitHub 已在 #17775 中加入绑定者；注释现点名 WeCom、DingTalk 与 GitHub，留 email 为后续。）_
 
 ## 涉及文件
 
-- `packages/channels/base/src/managed-channel.ts` —— `destinationKey` 注释：点名 WeCom 与 DingTalk 为绑定者；GitHub/email 仍为后续。
+- `packages/channels/base/src/managed-channel.ts` —— `destinationKey` 注释：点名 WeCom 与 DingTalk 为绑定者；GitHub 已在 #17775 加入，email 仍为后续。
 - `packages/channels/dingtalk/src/managed-state.ts` —— 存储构造函数：条目键控目录 + 身份键控账本文件。
 - `packages/channels/dingtalk/src/managed-dingtalk-adapter.ts` —— 传 `destinationKey` 给存储。
 - `packages/channels/dingtalk/src/managed-state.test.ts` —— 更新文件路径期望；加键控与隔离见证。
@@ -48,7 +48,7 @@ webhook 回复目标缓存（`state.webhooks`）位于身份键控账本内，�
 - DingTalk 流连接与准入/出站纪律不变。webhook 回复*机制*不变，但 webhook 缓存现按身份作用域（见升级后果）：身份变更后的无 webhook 帧被丢弃，而非从跨注册缓存准入。
 - `disconnect()` 的行注销门控是独立 concern，本次不动。
 - 无控制面（Java）改动；无 `channel-base` 契约/API 改动——仅更新 `destinationKey` 注释以点名 WeCom 与 DingTalk 为绑定注册身份的适配器。
-- email 与 GitHub 存储不在范围。GitHub 仅按 name + endpoint（`baseUrl`）键控其单一账本，email 是独立变体；两者都未绑定完整注册身份，故各自是独立后续而非本 DingTalk 改动的一部分。
+- email 与 GitHub 存储不在本 DingTalk 改动范围。当时 GitHub 仅按 name + endpoint（`baseUrl`）键控其单一账本，email 是独立变体。_（更新：GitHub 注册身份键控已在 #17775 落地；email 仍为后续。）_
 
 ## 开放问题
 

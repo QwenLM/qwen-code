@@ -78,6 +78,44 @@ describe('session history media continuations', () => {
     expect(result).not.toContain('[Recorded media omitted]');
   });
 
+  it.each(['image/svg+xml', 'audio/wav', 'video/mp4', 'application/pdf'])(
+    'R11-2 omits parameterized or folded %s data URLs in every text projection',
+    async (mime) => {
+      for (const whitespace of [' ', '\r\n']) {
+        const text =
+          `BEFORE_MEDIA <img src="data:${mime};${whitespace}charset=utf-8;` +
+          'base64,PHN2Zz4="> AFTER_MEDIA';
+        for (const kind of ['text', 'response', 'json-text'] as const) {
+          const part: Part =
+            kind === 'text'
+              ? { text }
+              : kind === 'json-text'
+                ? { text: JSON.stringify({ output: text }) }
+                : {
+                    functionResponse: {
+                      name: 'read_file',
+                      response: { output: text },
+                    },
+                  };
+          const ref = await append(
+            kind === 'response' ? 'tool_result' : 'user',
+            part,
+          );
+          const result = await service.query({ action: 'read', ref }, signal);
+          expect.soft(result).not.toContain('PHN2Zz4=');
+          expect.soft(result).toContain('[Recorded media omitted]');
+          expect.soft(result).toContain('BEFORE_MEDIA');
+          expect.soft(result).toContain('AFTER_MEDIA');
+        }
+      }
+      const search = await service.query(
+        { action: 'search', query: 'PHN2Zz4=' },
+        signal,
+      );
+      expect(JSON.parse(search).entries).toEqual([]);
+    },
+  );
+
   it.each(['text', 'response', 'json-response'] as const)(
     'redacts media keys without changing numeric evidence in %s',
     async (kind) => {

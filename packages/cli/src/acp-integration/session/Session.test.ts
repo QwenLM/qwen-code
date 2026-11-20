@@ -2233,6 +2233,37 @@ describe('Session', () => {
     expect(provider?.()).toBe(true);
   });
 
+  it('answers a Mod row unhooked once the session started without Mods', async () => {
+    const merged: Record<string, unknown> = { experimental: { mods: true } };
+    const modSettings = {
+      get merged() {
+        return merged;
+      },
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    const row = { text: 'Hello', isFirstOfReply: true };
+    const modSession = new Session(
+      'mod-row-session-id',
+      mockConfig,
+      mockClient,
+      modSettings,
+    );
+
+    // Before the history is replayed, the Mods have yet to start.
+    expect(await modSession.askModRow('AssistantMessage', row)).toEqual({
+      status: 'unanswered',
+    });
+    merged['experimental'] = { mods: false };
+    modSession.installRewriter();
+    merged['experimental'] = { mods: true };
+    expect(await modSession.askModRow('AssistantMessage', row)).toEqual({
+      status: 'unhooked',
+    });
+  });
+
   it('does not create approval transcript state during construction', () => {
     expect(
       mockChatRecordingService.recordSessionApprovalMode,
@@ -23374,7 +23405,7 @@ describe('Session', () => {
       );
     });
 
-    it('forwards a target workspace and surfaces the daemon refusal text', async () => {
+    it('forwards a target workspace and its YOLO requirement, surfacing the daemon refusal text', async () => {
       const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
         .calls[0]?.[0];
       expect(spawn).toBeTypeOf('function');
@@ -23389,6 +23420,7 @@ describe('Session', () => {
           completion: 'first-turn',
           workspace: '/x',
           workspaceGeneration: 'generation-x',
+          requiresYolo: true,
         }),
       ).rejects.toThrow('No registered workspace matches "/x".');
       expect(mockClient.extMethod).toHaveBeenLastCalledWith(
@@ -23398,6 +23430,7 @@ describe('Session', () => {
           completion: 'first-turn',
           workspace: '/x',
           workspaceGeneration: 'generation-x',
+          requiresYolo: true,
           callerSessionId: 'test-session-id',
         },
       );
@@ -23453,7 +23486,7 @@ describe('Session', () => {
         launches: true,
       },
       { label: 'Auto', mode: ApprovalMode.AUTO, asks: true, launches: true },
-      { label: 'YOLO', mode: ApprovalMode.YOLO, asks: true, launches: true },
+      { label: 'YOLO', mode: ApprovalMode.YOLO, asks: false, launches: true },
       { label: 'Plan', mode: ApprovalMode.PLAN, asks: false, launches: false },
       {
         label: 'deny rule on requested selector',
@@ -23589,6 +23622,9 @@ describe('Session', () => {
           expect(spawn).toHaveBeenCalledExactlyOnceWith({
             ...args,
             ...(local ? {} : { workspaceGeneration: 'generation-b' }),
+            ...(!local && mode === ApprovalMode.YOLO
+              ? { requiresYolo: true }
+              : {}),
             completion: 'first-turn',
           });
           if (asks) {
@@ -29425,7 +29461,7 @@ describe('Session', () => {
     });
 
     describe('tool outcome telemetry (#4602 review)', () => {
-      it('records a soft tool failure (toolResult.error) as error, not success', async () => {
+      it.each([false, true])('failure (isError=%s)', async (isError) => {
         const logToolCallSpy = vi
           .spyOn(core, 'logToolCall')
           .mockImplementation(() => {});
@@ -29438,9 +29474,11 @@ describe('Session', () => {
             params: { path: '/tmp/test.txt' },
             getDefaultPermission: vi.fn().mockResolvedValue('allow'),
             execute: vi.fn().mockResolvedValue({
-              llmContent: 'nope',
+              llmContent: 'SLOT_CLOSED: Choose another slot.',
               returnDisplay: 'failed',
-              error: { message: 'tool blew up' },
+              ...(isError
+                ? { isError: true }
+                : { error: { message: 'tool blew up' } }),
               artifacts: [
                 {
                   title: 'Failure artifact',
@@ -29518,8 +29556,22 @@ describe('Session', () => {
           message: Part[];
         };
         expect(followUp.message[0].functionResponse?.response).toEqual({
-          error: 'nope',
+          error: 'SLOT_CLOSED: Choose another slot.',
         });
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            update: expect.objectContaining({
+              toolCallId: 'call-1',
+              _meta: expect.objectContaining({
+                toolLifecycle: expect.objectContaining({
+                  phase: 'ended',
+                  executionStatus: 'error',
+                  outcome: 'error',
+                }),
+              }),
+            }),
+          }),
+        );
         expect(
           followUp.message[0].functionResponse?.response,
         ).not.toHaveProperty('output');

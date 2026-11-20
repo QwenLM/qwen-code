@@ -23,6 +23,7 @@ import type {
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { MODEL_SHEET_QUERY } from '../hooks/useIsTouchComposer';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import styles from './ChatEditor.module.css';
 import type { VoiceButtonHandle } from '../voice/VoiceButton';
 import type {
   WebShellUnavailableModel,
@@ -581,6 +582,17 @@ function renderChatEditorInto(
   });
 }
 
+function touchComposer() {
+  composerCoreState.mobileComposer = {
+    textareaRef: createRef<HTMLTextAreaElement>(),
+    expandedTextareaRef: createRef<HTMLTextAreaElement>(),
+    value: '',
+    onChange: vi.fn(),
+    onBlur: vi.fn(),
+    placeholder: 'Ask anything',
+  } satisfies MobileComposerBackend;
+}
+
 function renderChatEditor(props: ChatEditorRenderProps) {
   const container = document.createElement('div');
   container.dataset.webShellRoot = '';
@@ -605,6 +617,41 @@ function rerenderChatEditor(
   if (!entry) throw new Error('container is not mounted by renderChatEditor');
   renderChatEditorInto(entry.root, entry.portalRoot, props);
 }
+
+describe('ChatEditor composer glow', () => {
+  it('removes the glow and stops responding to keystrokes when disabled', () => {
+    const contentDOM = document.createElement('div');
+    composerCoreState.viewRef.current = { contentDOM };
+    const container = renderChatEditor({});
+    const surface = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-surface]',
+    )!;
+
+    expect(surface.querySelector(`.${styles.dacAura}`)).not.toBeNull();
+    expect(surface.querySelector(`.${styles.dacHalo}`)).not.toBeNull();
+    contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'a' }));
+    expect(surface.hasAttribute('data-dac-typing')).toBe(true);
+    expect(surface.style.getPropertyValue('--dac-glow-pulse')).toBe('1.0000');
+
+    rerenderChatEditor(container, {
+      customization: { composerGlowEnabled: false },
+    });
+
+    expect(surface.querySelector(`.${styles.dacAura}`)).toBeNull();
+    expect(surface.querySelector(`.${styles.dacHalo}`)).toBeNull();
+    expect(surface.style.getPropertyValue('--dac-glow-pulse')).toBe('0.0000');
+    contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'b' }));
+    expect(surface.hasAttribute('data-dac-typing')).toBe(false);
+    expect(surface.style.getPropertyValue('--dac-glow-pulse')).toBe('0.0000');
+
+    rerenderChatEditor(container, {
+      customization: { composerGlowEnabled: true },
+    });
+    expect(surface.querySelector(`.${styles.dacHalo}`)).not.toBeNull();
+    contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'c' }));
+    expect(surface.hasAttribute('data-dac-typing')).toBe(true);
+  });
+});
 
 describe('ChatEditor simple composer', () => {
   const simple = { composerVariant: 'simple' } as const;
@@ -652,6 +699,33 @@ describe('ChatEditor simple composer', () => {
     expect(
       compact.querySelector('[data-web-shell-composer-editor]'),
     ).not.toBeNull();
+  });
+
+  it('requests editor focus after expanding and collapsing the mobile composer', () => {
+    touchComposer();
+    const container = renderChatEditor({ customization: simple });
+    const composer = container.querySelector('[data-web-shell-composer]')!;
+    expect(composer.getAttribute('data-web-shell-composer-variant')).toBe(
+      'simple',
+    );
+
+    for (const [action, variant] of [
+      ['expand', 'default'],
+      ['collapse', 'simple'],
+    ]) {
+      const toggle = composer.querySelector<HTMLButtonElement>(
+        `[data-web-shell-composer-${action}]`,
+      )!;
+      composerCoreState.focus.mockClear();
+      act(() => toggle.click());
+      expect(composer.getAttribute('data-web-shell-composer-variant')).toBe(
+        variant,
+      );
+      expect(
+        composerCoreState.focus,
+        `focus after ${action}`,
+      ).toHaveBeenCalled();
+    }
   });
 
   it('preserves the editor mount when switching between variants', () => {
@@ -1131,17 +1205,6 @@ describe('ChatEditor add menu (+)', () => {
     });
     expect(trigger(container)).toBeNull();
   });
-
-  function touchComposer() {
-    composerCoreState.mobileComposer = {
-      textareaRef: createRef<HTMLTextAreaElement>(),
-      expandedTextareaRef: createRef<HTMLTextAreaElement>(),
-      value: '',
-      onChange: vi.fn(),
-      onBlur: vi.fn(),
-      placeholder: 'Ask anything',
-    } satisfies MobileComposerBackend;
-  }
 
   it('yields the touch commands-only entry to the host too', () => {
     touchComposer();

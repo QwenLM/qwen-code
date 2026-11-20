@@ -450,6 +450,8 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
    * all of it arrived in one chunk.
    */
   generation_ms?: number;
+  /** Time from request start to first user-visible content, for local replay. */
+  first_visible_offset_ms?: number;
   /**
    * Name of the subagent that issued this request, or undefined when the
    * request originates from the main conversation.
@@ -468,6 +470,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     ttft_ms?: number,
     execution_id?: string,
     generation_ms?: number,
+    first_visible_offset_ms?: number,
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
@@ -487,6 +490,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.subagent_name = subagent_name;
     this.ttft_ms = ttft_ms;
     this.generation_ms = generation_ms;
+    this.first_visible_offset_ms = first_visible_offset_ms;
   }
 }
 

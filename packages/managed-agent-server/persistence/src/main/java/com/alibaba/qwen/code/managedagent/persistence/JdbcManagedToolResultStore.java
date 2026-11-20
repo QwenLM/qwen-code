@@ -578,21 +578,12 @@ public class JdbcManagedToolResultStore
         require(
                 limit >= 1 && limit <= 100 && (watermark == null) == (beforeId == null),
                 "Invalid workspace artifact page");
-        long through =
-                watermark == null
-                        ? jdbc.queryForObject(
-                                "SELECT COALESCE(MAX(a.id), 0)" + WORKSPACE_ARTIFACT_SOURCE,
-                                Long.class,
-                                tenant,
-                                workspace,
-                                workspace,
-                                actorKey)
-                        : watermark;
-        require(through >= 0, "Invalid workspace artifact watermark");
-        List<Object> args = new ArrayList<>(List.of(tenant, workspace, workspace, actorKey, through));
+        require(watermark == null || watermark >= 0, "Invalid workspace artifact watermark");
+        List<Object> args = new ArrayList<>(List.of(tenant, workspace, workspace, actorKey));
         String cursor = "";
-        if (beforeId != null) {
-            cursor = " AND a.id < ?";
+        if (watermark != null) {
+            cursor = " AND a.id <= ? AND a.id < ?";
+            args.add(watermark);
             args.add(beforeId);
         }
         args.add(limit + 1);
@@ -600,9 +591,11 @@ public class JdbcManagedToolResultStore
                 jdbc.query(
                         "SELECT a.id, " + ManagedSchemaProjection.ARTIFACT.columns("a")
                                 + ", r.request_json" + WORKSPACE_ARTIFACT_SOURCE
-                                + " AND a.id <= ?" + cursor + " ORDER BY a.id DESC LIMIT ?",
+                                + cursor + " ORDER BY a.id DESC LIMIT ?",
                         (row, index) -> new WorkspaceRow(artifact(row, index), row.getLong("id")),
                         args.toArray());
+        // The watermark bounds row ids; visibility is re-evaluated on every page.
+        long through = watermark == null ? (rows.isEmpty() ? 0 : rows.getFirst().id()) : watermark;
         List<WorkspaceRow> page = rows.subList(0, Math.min(rows.size(), limit));
         List<Artifact> artifacts = page.stream().map(WorkspaceRow::artifact).toList();
         long lastId = page.isEmpty() ? 0 : page.getLast().id();

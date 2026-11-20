@@ -1025,6 +1025,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
                         if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                                && !WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
                                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
                             executionRepository.settlePrepared(record, Map.of(

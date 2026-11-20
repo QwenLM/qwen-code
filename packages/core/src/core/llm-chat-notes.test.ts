@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { LlmChat } from './llm-chat.js';
+import { LlmChat, StreamEventType } from './llm-chat.js';
 import { CompressionStatus } from './turn.js';
 import { ChatCompressionService } from '../services/chatCompressionService.js';
 import { SessionNotesService } from '../services/session-notes-service.js';
@@ -15,13 +15,19 @@ import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { SESSION_CONTEXT_TOOL_NAMES } from '../services/session-notes-state.js';
 import * as sideQuery from '../utils/sideQuery.js';
 import { estimateContentTokens } from '../services/tokenEstimation.js';
+import {
+  wrapUserPromptSubmitContext,
+  createUserPromptSubmitContextPart,
+} from '../hooks/user-prompt-submit-context.js';
+import { getApiHistoryPromptId } from '../services/session-api-history.js';
+import { markApiHistoryPrompt } from '../utils/api-history-metadata.js';
 
 vi.mock('../telemetry/loggers.js');
 
 describe('notes compaction commit boundary', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  function fixture() {
+  function fixture(strategy: 'notes' | 'summary' = 'notes') {
     const revision = {
       version: 1 as const,
       revision: 'note',
@@ -64,7 +70,7 @@ describe('notes compaction commit boundary', () => {
       }),
       getModel: () => 'test',
       getChatCompression: () => ({
-        strategy: 'notes',
+        strategy,
         maxRecentFilesToRetain: 0,
         maxRecentImagesToRetain: 0,
       }),
@@ -232,6 +238,414 @@ describe('notes compaction commit boundary', () => {
     );
     expect(recorder.recordChatCompression).not.toHaveBeenCalled();
   });
+
+  function sendingFixture(strategy: 'notes' | 'summary' = 'notes') {
+    const result = fixture(strategy);
+    const modalities = {
+      image: false,
+      audio: false,
+      video: false,
+      pdf: false,
+    };
+    Object.assign(result.config, {
+      getModelRouteIdentity: () => '',
+      getEffectiveInputModalities: () => modalities,
+      getBaseLlmClient: () => undefined,
+      getModelFallbacks: () => [],
+      getUsageStatisticsEnabled: () => false,
+      getTelemetryLogPromptsEnabled: () => false,
+      getDebugMode: () => false,
+      getCliVersion: () => 'test',
+      getClearContextOnIdle: () => undefined,
+      getRestoreAskUserQuestion: () => false,
+    });
+    Object.assign(result.recorder, {
+      observeNotesInput: vi.fn(),
+      recordAssistantTurn: vi.fn(),
+    });
+    return result;
+  }
+
+  const hookCount = (
+    history: readonly Content[],
+    context = 'DURABLE_HOOK_CONTEXT',
+  ) =>
+    history
+      .flatMap((entry) => entry.parts ?? [])
+      .filter((part) => part.text === wrapUserPromptSubmitContext(context))
+      .length;
+  const restoredHookTokens = estimateContentTokens([
+    {
+      role: 'user',
+      parts: [createUserPromptSubmitContextPart('DURABLE_HOOK_CONTEXT')],
+    },
+  ]);
+
+  it('R11-1 persists the suppressed hook context before the notes send checkpoint freezes', async () => {
+    const { chat, recorder } = sendingFixture();
+    vi.spyOn(SessionNotesService.prototype, 'peekPendingReset').mockReturnValue(
+      'note',
+    );
+    let durableHistory: Content[] = [];
+    let durablePromptId: string | undefined;
+    vi.mocked(recorder.recordChatCompressionStrict).mockImplementation(
+      async ({ compressedHistory }) => {
+        durablePromptId = getApiHistoryPromptId(compressedHistory.at(-1)!);
+        durableHistory = structuredClone(compressedHistory);
+        return 'committed-window';
+      },
+    );
+    const stream = await chat.sendMessageStream(
+      'test',
+      {
+        message: [
+          {
+            functionResponse: {
+              id: 'reset',
+              name: 'new_context',
+              response: { status: 'pending' },
+            },
+          },
+        ],
+      },
+      'suppressed-hook-notes',
+      undefined,
+      {
+        suppressedHookContext: 'DURABLE_HOOK_CONTEXT',
+        promptId: 'initial-hook-prompt',
+      },
+    );
+    try {
+      expect((await stream.next()).value?.type).toBe(
+        StreamEventType.COMPRESSED,
+      );
+      expect(durablePromptId).toBe('initial-hook-prompt');
+      expect(hookCount(chat.getHistory())).toBe(1);
+      expect(hookCount(durableHistory)).toBe(1);
+    } finally {
+      await stream.return(undefined);
+    }
+  });
+
+  it('R11-1 gives a notes-mode summary fallback the same durable hook context', async () => {
+    const { chat, recorder } = sendingFixture();
+    vi.mocked(
+      SessionNotesService.prototype.getNotesForHandoff,
+    ).mockResolvedValue(undefined);
+    vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+      newHistory: [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ],
+      info: {
+        strategy: 'summary',
+        compressionStatus: CompressionStatus.COMPRESSED,
+        originalTokenCount: 22000,
+        newTokenCount: 100,
+      },
+    });
+    let durableHistory: Content[] = [];
+    vi.mocked(recorder.recordChatCompressionStrict).mockImplementation(
+      async ({ compressedHistory }) => {
+        durableHistory = structuredClone(compressedHistory);
+        return 'summary-window';
+      },
+    );
+    const stream = await chat.sendMessageStream(
+      'test',
+      { message: 'continue' },
+      'summary-hook',
+      undefined,
+      {
+        suppressedHookContext: 'DURABLE_HOOK_CONTEXT',
+      },
+    );
+    try {
+      expect((await stream.next()).value).toMatchObject({
+        type: StreamEventType.COMPRESSED,
+        info: { newTokenCount: 100 + restoredHookTokens },
+      });
+      expect(hookCount(chat.getHistory())).toBe(1);
+      expect(hookCount(durableHistory)).toBe(1);
+    } finally {
+      await stream.return(undefined);
+    }
+  });
+
+  it.each(['context', 'payload'] as const)(
+    'R11-1 freezes hook context before a reactive %s checkpoint',
+    async (kind) => {
+      const { chat, config, recorder } = sendingFixture();
+      const error =
+        kind === 'context'
+          ? new Error('prompt is too long: 135000 tokens > 128000 maximum')
+          : Object.assign(new Error('Request Entity Too Large'), {
+              status: 413,
+            });
+      const generateContentStream = vi.fn().mockRejectedValue(error);
+      Object.assign(config, {
+        getContentGenerator: () => ({ generateContentStream }),
+      });
+      vi.spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            compressionStatus: CompressionStatus.NOOP,
+            originalTokenCount: 22000,
+            newTokenCount: 22000,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: [
+            { role: 'user', parts: [{ text: 'notes handoff' }] },
+            { role: 'model', parts: [{ text: 'ack' }] },
+          ],
+          info: {
+            strategy: 'notes',
+            compressionStatus: CompressionStatus.COMPRESSED,
+            originalTokenCount: 22000,
+            newTokenCount: 100,
+          },
+        });
+      let durableHistory: Content[] = [];
+      let durableSummaryPrefix: number | undefined;
+      vi.mocked(recorder.recordChatCompressionStrict).mockImplementation(
+        async ({ compressedHistory, summaryPrefixLength }) => {
+          durableSummaryPrefix = summaryPrefixLength;
+          durableHistory = structuredClone(compressedHistory);
+          return 'reactive-window';
+        },
+      );
+      const stream = await chat.sendMessageStream(
+        'test',
+        { message: 'continue' },
+        'reactive-hook-' + kind,
+        undefined,
+        {
+          suppressedHookContext: 'DURABLE_HOOK_CONTEXT',
+        },
+      );
+      try {
+        expect((await stream.next()).value).toMatchObject({
+          type: StreamEventType.COMPRESSED,
+          info: { newTokenCount: 100 + restoredHookTokens },
+        });
+        expect(generateContentStream).toHaveBeenCalledOnce();
+        expect(durableSummaryPrefix).toBe(2);
+        expect(hookCount(chat.getHistory())).toBe(1);
+        expect(hookCount(durableHistory)).toBe(1);
+      } finally {
+        await stream.return(undefined);
+      }
+    },
+  );
+
+  it('R11-1 preserves a pre-existing hook and API prompt metadata in the pending checkpoint', async () => {
+    const { chat, recorder } = fixture();
+    const pending: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'reset',
+            name: 'new_context',
+            response: { status: 'pending' },
+          },
+        },
+        createUserPromptSubmitContextPart('DURABLE_HOOK_CONTEXT'),
+      ],
+    };
+    markApiHistoryPrompt(pending, 'preserved-prompt');
+    let durableHistory: Content[] = [];
+    let durablePromptId: string | undefined;
+    vi.mocked(recorder.recordChatCompressionStrict).mockImplementation(
+      async ({ compressedHistory }) => {
+        durablePromptId = getApiHistoryPromptId(compressedHistory.at(-1)!);
+        durableHistory = structuredClone(compressedHistory);
+        return 'single-hook-window';
+      },
+    );
+    const options = {
+      notesRevision: 'note',
+      pendingUserMessage: pending,
+      suppressedHookContext: 'DURABLE_HOOK_CONTEXT',
+    };
+    await chat.tryCompress('single-hook', true, undefined, options);
+    expect(hookCount(durableHistory)).toBe(1);
+    expect(hookCount(chat.getHistory())).toBe(1);
+    expect(durablePromptId).toBe('preserved-prompt');
+  });
+
+  it.each(['rejected', 'inflated'] as const)(
+    'R11-1 leaves input and history untouched when its candidate is %s',
+    async (kind) => {
+      const { chat, recorder, original, post } = fixture();
+      const pending: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'reset',
+              name: 'new_context',
+              response: { status: 'pending' },
+            },
+          },
+        ],
+      };
+      const before = structuredClone(pending);
+      const included = vi.fn();
+      if (kind === 'rejected')
+        vi.mocked(recorder.recordChatCompressionStrict).mockRejectedValue(
+          new Error('strict writer failed'),
+        );
+      else
+        vi.spyOn(
+          ChatCompressionService.prototype,
+          'compress',
+        ).mockResolvedValue({
+          newHistory: [{ role: 'user', parts: [{ text: 'inflated' }] }],
+          info: {
+            strategy: 'notes',
+            compressionStatus: CompressionStatus.COMPRESSED,
+            originalTokenCount: 22000,
+            newTokenCount: 100000,
+          },
+        });
+      const options = {
+        notesRevision: 'note',
+        pendingUserMessage: pending,
+        onPendingMessageIncluded: included,
+        suppressedHookContext: 'DURABLE_HOOK_CONTEXT',
+      };
+      const compress = chat.tryCompress(
+        'unchanged-candidate',
+        true,
+        undefined,
+        options,
+      );
+      if (kind === 'rejected')
+        await expect(compress).rejects.toThrow('strict writer failed');
+      else
+        expect((await compress).compressionStatus).toBe(
+          CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+        );
+      expect(pending).toEqual(before);
+      expect(chat.getHistory()).toEqual(original);
+      expect(included).not.toHaveBeenCalled();
+      expect(post).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['rejected', 'inflated'] as const)(
+    'R11-1 leaves retained source content untouched when its candidate is %s',
+    async (kind) => {
+      const { chat, recorder, original } = fixture();
+      const before = structuredClone(original);
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: [original[0]],
+        info: {
+          strategy: 'notes',
+          compressionStatus: CompressionStatus.COMPRESSED,
+          originalTokenCount: 22000,
+          newTokenCount: kind === 'inflated' ? 100000 : 100,
+        },
+      });
+      if (kind === 'rejected')
+        vi.mocked(recorder.recordChatCompressionStrict).mockRejectedValue(
+          new Error('strict writer failed'),
+        );
+      const options = {
+        trigger: 'auto' as const,
+        suppressedHookContext: 'DURABLE_HOOK_CONTEXT',
+      };
+      const compress = chat.tryCompress(
+        'retained-candidate',
+        true,
+        undefined,
+        options,
+      );
+      if (kind === 'rejected')
+        await expect(compress).rejects.toThrow('strict writer failed');
+      else
+        expect((await compress).compressionStatus).toBe(
+          CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+        );
+      expect(original).toEqual(before);
+      expect(chat.getHistory()).toEqual(before);
+    },
+  );
+
+  it.each(['auto', 'hard', 'context', 'payload'] as const)(
+    'R11-1 keeps the final legacy %s checkpoint aligned without counting pending input twice',
+    async (kind) => {
+      const { chat, config, recorder } = sendingFixture('summary');
+      const compressed = {
+        newHistory: [
+          { role: 'user' as const, parts: [{ text: 'legacy summary' }] },
+          { role: 'model' as const, parts: [{ text: 'ack' }] },
+        ],
+        info: {
+          compressionStatus: CompressionStatus.COMPRESSED,
+          originalTokenCount: 22000,
+          newTokenCount: 100,
+        },
+      };
+      const compression = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      if (kind === 'context' || kind === 'payload') {
+        compression.mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            compressionStatus: CompressionStatus.NOOP,
+            originalTokenCount: 22000,
+            newTokenCount: 22000,
+          },
+        });
+        const error =
+          kind === 'context'
+            ? new Error('prompt is too long: 135000 tokens > 128000 maximum')
+            : Object.assign(new Error('Request Entity Too Large'), {
+                status: 413,
+              });
+        Object.assign(config, {
+          getContentGenerator: () => ({
+            generateContentStream: vi.fn().mockRejectedValue(error),
+          }),
+        });
+      } else if (kind === 'hard') chat.setLastPromptTokenCount(115000, false);
+      compression.mockResolvedValueOnce(compressed);
+      const checkpoints: Content[][] = [];
+      vi.mocked(recorder.recordChatCompression).mockImplementation(
+        ({ compressedHistory }) => {
+          checkpoints.push(structuredClone(compressedHistory));
+        },
+      );
+      const stream = await chat.sendMessageStream(
+        'test',
+        { message: 'continue' },
+        'legacy-hook-' + kind,
+        undefined,
+        {
+          suppressedHookContext: 'DURABLE_HOOK_CONTEXT',
+        },
+      );
+      try {
+        expect((await stream.next()).value?.type).toBe(
+          StreamEventType.COMPRESSED,
+        );
+        expect(checkpoints.length).toBeGreaterThan(0);
+        expect(recorder.recordChatCompressionStrict).not.toHaveBeenCalled();
+        if (kind === 'auto' || kind === 'hard')
+          expect(chat.getLastPromptTokenCount()).toBe(100);
+        expect(hookCount(chat.getHistory())).toBe(1);
+        expect(hookCount(checkpoints.at(-1)!)).toBe(1);
+      } finally {
+        await stream.return(undefined);
+      }
+    },
+  );
 
   it('does not install history or fire PostCompact until its exact checkpoint is durable', async () => {
     const { chat, recorder, original, post, invalidatePendingExtract } =

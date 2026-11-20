@@ -1788,7 +1788,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
     });
   });
 
-  it('forwards a target workspace and rejects an unusable one', async () => {
+  it('forwards a target workspace and its YOLO requirement', async () => {
     const onCreate = vi.fn(async () => ({
       sessionId: 'sub-11',
       workspaceCwd: '/repos/b',
@@ -1801,6 +1801,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
         completion: 'sent',
         workspace: 'workspace-id',
         workspaceGeneration,
+        requiresYolo: true,
         callerSessionId: 'caller-1',
       }),
     ).resolves.toEqual({ sessionId: 'sub-11', workspaceCwd: '/repos/b' });
@@ -1809,11 +1810,14 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       completion: 'sent',
       workspace: 'workspace-id',
       workspaceGeneration,
+      requiresYolo: true,
       callerSessionId: 'caller-1',
     });
     for (const extra of [
       { workspace: 'workspace-id' },
       { workspaceGeneration },
+      { requiresYolo: true },
+      { workspace: 'workspace-id', workspaceGeneration, requiresYolo: false },
       { workspace: 'workspace-id', workspaceGeneration: '' },
       { workspace: '' },
       { workspace: 7 },

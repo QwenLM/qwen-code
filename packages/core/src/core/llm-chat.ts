@@ -847,6 +847,7 @@ interface TryCompressOptions {
    * history). See `estimatePromptTokens` for the fallback math.
    */
   pendingUserMessage?: Content;
+  suppressedHookContext?: string;
   /**
    * Pre-computed all-inclusive effective prompt count from the caller. When
    * set, the cheap-gate uses this instead of recomputing — avoids a second
@@ -2529,6 +2530,19 @@ export class LlmChat {
     return this.historyReplacementRevision;
   }
 
+  /**
+   * The per-response output-token limit the send layer last used — clamp,
+   * escalation, or user override. `Turn` reads it when a `MAX_TOKENS` cut
+   * truncates a tool call so the scheduler's rejection can name the budget
+   * (#16417). One send stale is fine: the value is refreshed at every clamp
+   * and every escalation before the retry goes out.
+   */
+  private lastRequestMaxOutputTokens: number | undefined;
+
+  getLastRequestMaxOutputTokens(): number | undefined {
+    return this.lastRequestMaxOutputTokens;
+  }
+
   // A promise to represent the current state of the message being sent to the
   // model.
   private sendPromise: Promise<void> = Promise.resolve();
@@ -3404,15 +3418,47 @@ export class LlmChat {
       // for older/custom implementations that omit the field, but preserve an
       // explicit authoritative `false`.
       info.newTokenCountIsEstimated ??= true;
+      const summaryPrefixLength = info.summaryPrefixLength ?? newHistory.length;
+      let pendingUserMessage = options?.pendingUserMessage;
+      if (options?.suppressedHookContext) {
+        const target = pendingUserMessage ?? newHistory.at(-1);
+        if (
+          !hasUserPromptSubmitContext(target, options.suppressedHookContext)
+        ) {
+          const hookPart = createUserPromptSubmitContextPart(
+            options.suppressedHookContext,
+          );
+          const restored =
+            target?.role === 'user'
+              ? { ...target, parts: [...(target.parts ?? []), hookPart] }
+              : createUserContent([hookPart]);
+          if (pendingUserMessage) {
+            pendingUserMessage = restored;
+          } else {
+            newHistory =
+              target?.role === 'user'
+                ? [...newHistory.slice(0, -1), restored]
+                : [...newHistory, restored];
+          }
+          // A legacy pending message is counted by the caller after append.
+          if (notesRecorder || !pendingUserMessage) {
+            info.newTokenCount += estimateContentTokens(
+              [createUserContent([hookPart])],
+              resolveSlimmingConfig(this.config.getChatCompression())
+                .imageTokenEstimate,
+            );
+            info.newTokenCountIsEstimated = true;
+          }
+        }
+      }
       if (notesRecorder) {
         notesRecorder.assertNotesWriterReady();
-        const summaryPrefixLength =
-          info.summaryPrefixLength ?? newHistory.length;
-        if (options?.pendingUserMessage) {
-          newHistory = [...newHistory, options.pendingUserMessage];
+        if (pendingUserMessage) {
+          newHistory = [...newHistory, pendingUserMessage];
           // Effective/override counts already include the pending prompt.
           // Only the stored API baseline still needs its contribution.
           if (
+            options?.pendingUserMessage &&
             info.strategy !== 'notes' &&
             originalTokenCountOverride === undefined &&
             !originalTokenCountIsEstimated
@@ -3459,10 +3505,10 @@ export class LlmChat {
         // question and do not share the live array mutated later in the turn.
         await this.recordCompression({
           info,
-          compressedHistory: options?.pendingUserMessage
-            ? [...newHistory, options.pendingUserMessage]
+          compressedHistory: pendingUserMessage
+            ? [...newHistory, pendingUserMessage]
             : newHistory,
-          summaryPrefixLength: info.summaryPrefixLength ?? newHistory.length,
+          summaryPrefixLength,
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -4408,6 +4454,7 @@ export class LlmChat {
             params.config?.abortSignal,
             {
               pendingUserMessage: userContent,
+              suppressedHookContext: options?.suppressedHookContext,
               notesRevision: pendingNotesRevision,
               onPendingMessageIncluded: () => {
                 pendingMessageIncluded = true;
@@ -4664,6 +4711,7 @@ export class LlmChat {
           contextWindowForClamp,
           promptTokensForClamp,
         );
+        this.lastRequestMaxOutputTokens = clampedMaxOutputTokens;
         params = {
           ...params,
           config: {
@@ -5516,6 +5564,7 @@ export class LlmChat {
                       requestRouteKey,
                       trigger: 'auto',
                       requestPayloadTooLarge: requestPayloadOverflow.isTooLarge,
+                      suppressedHookContext: options?.suppressedHookContext,
                     },
                   );
 
@@ -5555,7 +5604,13 @@ export class LlmChat {
 
                     // Same one-copy problem for a suppressed hook block: the
                     // compaction replaced the history entry that held it.
-                    if (options?.suppressedHookContext) {
+                    if (
+                      options?.suppressedHookContext &&
+                      !hasUserPromptSubmitContext(
+                        self.history.at(-1),
+                        options.suppressedHookContext,
+                      )
+                    ) {
                       const lastContent = self.history.at(-1);
                       const hookContextPart = createUserPromptSubmitContextPart(
                         options.suppressedHookContext,
@@ -5925,6 +5980,7 @@ export class LlmChat {
           let recoveryParams: SendMessageParameters = params;
 
           if (shouldEscalateMaxOutputTokens) {
+            self.lastRequestMaxOutputTokens = escalatedLimit;
             debugLogger.info(
               `Output truncated at ${effectiveInitialMaxOutputTokens} tokens. ` +
                 `Escalating to ${escalatedLimit} tokens.`,
@@ -6068,15 +6124,21 @@ export class LlmChat {
             // defensive fallback that never fires in practice.
             const recoveryCeiling =
               recoveryParams.config?.maxOutputTokens ?? outputCeiling;
+            const iterationClampedMaxOutputTokens = clampOutputTokensToWindow(
+              recoveryCeiling,
+              contextWindowForClamp,
+              recoveryPromptEstimate,
+            );
+            // Refresh the per-response limit the Turn reads (#16417): a
+            // recovery iteration can end at MAX_TOKENS, and the rejection
+            // must name the limit *this* iteration used, not the one from
+            // before the recovery loop started.
+            self.lastRequestMaxOutputTokens = iterationClampedMaxOutputTokens;
             const iterationParams: SendMessageParameters = {
               ...recoveryParams,
               config: {
                 ...recoveryParams.config,
-                maxOutputTokens: clampOutputTokensToWindow(
-                  recoveryCeiling,
-                  contextWindowForClamp,
-                  recoveryPromptEstimate,
-                ),
+                maxOutputTokens: iterationClampedMaxOutputTokens,
               },
             };
 

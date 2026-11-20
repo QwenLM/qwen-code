@@ -80,7 +80,7 @@ function redactRecordedMediaText(text: string): string {
     /data:(?:image|audio|video)\/(?![^,:]*;base64,)[^,:]*,/iu.test(text)
   )
     return omitted;
-  return text.replace(/data:[^,:\s"'<>]*;base64,[^"'<>)\]}]*/giu, omitted);
+  return text.replace(/data:[^,:"'<>]*;base64,[^"'<>)\]}]*/giu, omitted);
 }
 
 function redactRecordedMediaValue(key: string, entry: unknown): unknown {

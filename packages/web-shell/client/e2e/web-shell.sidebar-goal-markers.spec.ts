@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
@@ -67,6 +68,51 @@ async function openSidebar(
 
 const row = (page: Page, name: string) =>
   page.locator('[class*="sessionRow"]').filter({ hasText: name });
+
+// Both transition cases need this exact wiring. workspace_session_live_state
+// is the switch: without it the client never refetches the catalog and both
+// cases stop exercising the notification path. The repaint case then fails as
+// a bare locator timeout with nothing naming the missing capability; the
+// clearing case may still pass, because a slower catalog refresh can drop the
+// marker inside its timeout. The interval only sets the cadence —
+// resolveSessionLiveStatePollInterval rejects anything below 1_000 and falls
+// back to 5_000, so the 250 this block used to advertise was silently ignored.
+// File-local on purpose: the other specs inline different feature subsets.
+const liveGoalScenario = () =>
+  createWebShellDaemonScenario({
+    sessions: goalSessions,
+    capabilities: {
+      sessionLiveStatePollIntervalMs: 1_000,
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+        'session_btw_stream',
+        'workspace_settings',
+        'workspace_voice',
+        'workspace_session_live_state',
+      ],
+    },
+  });
+
+// The child's journal hook persists the projection and bumps the catalog
+// clock — the effect of the goal-changed notification. Mutate the scenario the
+// mock routes read by reference; no manual refresh follows.
+function applyHarnessGoal(
+  scenario: ReturnType<typeof createWebShellDaemonScenario>,
+  goal: DaemonSessionSummary['goal'],
+) {
+  const target = scenario.sessions.find(
+    (item) => item.sessionId === 'web-shell-e2e-session',
+  )!;
+  target.goal = goal;
+  scenario.sessionCatalogVersion = {
+    ...scenario.sessionCatalogVersion,
+    revision: scenario.sessionCatalogVersion.revision + 1,
+  };
+}
 
 test('sidebar shows lifecycle-tinted goal markers from the catalog @smoke', async ({
   page,
@@ -162,23 +208,7 @@ test('a goal-changed catalog bump repaints the marker without a reload @smoke', 
   // Live-state polling drives the catalog clock: a goal transition writes
   // the sidecar in the child and bumps the catalog version, and the
   // polling client must refetch and repaint the marker on its own.
-  const scenario = createWebShellDaemonScenario({
-    sessions: goalSessions,
-    capabilities: {
-      sessionLiveStatePollIntervalMs: 250,
-      features: [
-        'session_events',
-        'permission_vote',
-        'session_permission_vote',
-        'session_scope_override',
-        'session_source_metadata',
-        'session_btw_stream',
-        'workspace_settings',
-        'workspace_voice',
-        'workspace_session_live_state',
-      ],
-    },
-  });
+  const scenario = liveGoalScenario();
   await openSidebar(page, baseURL!, scenario);
 
   const activeMarker = row(page, 'E2E Harness Session').getByTestId(
@@ -190,21 +220,11 @@ test('a goal-changed catalog bump repaints the marker without a reload @smoke', 
     { timeout: 30000 },
   );
 
-  // The child's journal hook persisted a paused projection and bumped the
-  // catalog clock (the effect of the goal-changed notification). Mutate the
-  // scenario the mock routes read by reference; no manual refresh follows.
-  const target = scenario.sessions.find(
-    (item) => item.sessionId === 'web-shell-e2e-session',
-  )!;
-  target.goal = {
+  applyHarnessGoal(scenario, {
     status: 'paused',
     objective: 'keep the loop running',
     updatedAt: '2026-11-17T00:01:00.000Z',
-  };
-  scenario.sessionCatalogVersion = {
-    ...scenario.sessionCatalogVersion,
-    revision: scenario.sessionCatalogVersion.revision + 1,
-  };
+  });
 
   await expect(activeMarker.locator('svg')).toHaveAttribute(
     'data-status',
@@ -215,4 +235,37 @@ test('a goal-changed catalog bump repaints the marker without a reload @smoke', 
     'aria-label',
     'Goal: Paused — keep the loop running',
   );
+});
+
+test('a goal-changed catalog bump removes the marker when the goal is cleared @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  // Clearing is the transition a maintainer most wants witnessed: the child
+  // deletes the sidecar and bumps the clock, and the polling client must drop
+  // the marker on its own. Driven like the repaint case above — by-reference
+  // mutation plus a revision bump — because a reload would assert the load
+  // path instead of the notification path this covers.
+  const scenario = liveGoalScenario();
+  await openSidebar(page, baseURL!, scenario);
+
+  const activeMarker = row(page, 'E2E Harness Session').getByTestId(
+    'session-goal-marker',
+  );
+  await expect(activeMarker.locator('svg')).toHaveAttribute(
+    'data-status',
+    'running',
+    { timeout: 30000 },
+  );
+  await expect(page.getByTestId('session-goal-marker')).toHaveCount(2);
+
+  applyHarnessGoal(scenario, undefined);
+
+  await expect(activeMarker).toHaveCount(0, { timeout: 30000 });
+  // activeMarker is a descendant of an ancestor-filtered row locator, so a
+  // count of 0 is also satisfied when the row itself unmounts. Pin the
+  // survivors: the session must stay listed, and the other goal-bearing row
+  // must keep its marker (2 before the clear, 1 after).
+  await expect(row(page, 'E2E Harness Session')).toHaveCount(1);
+  await expect(page.getByTestId('session-goal-marker')).toHaveCount(1);
 });

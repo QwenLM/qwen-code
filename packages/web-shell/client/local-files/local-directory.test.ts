@@ -400,6 +400,43 @@ describe('LocalDirectory.write', () => {
     expect(root.files.has('out.txt')).toBe(false);
   });
 
+  it('writes content starting with a UTF-8 BOM verbatim', async () => {
+    const root = tree();
+    const bom = String.fromCodePoint(0xfeff);
+    const result = await new LocalDirectory(root).write(
+      'README.md',
+      `${bom}hello\n`,
+    );
+    expect(result).toEqual({ path: 'README.md', bytes: 9, created: false });
+    expect(root.files.get('README.md')?.file.content).toBe(`${bom}hello\n`);
+  });
+
+  it('writes content that is only a UTF-8 BOM', async () => {
+    const root = tree();
+    const bom = String.fromCodePoint(0xfeff);
+    const result = await new LocalDirectory(root).write('out.txt', bom);
+    expect(result).toEqual({ path: 'out.txt', bytes: 3, created: true });
+    expect(root.files.get('out.txt')?.file.content).toBe(bom);
+  });
+
+  it('writes content with an embedded BOM', async () => {
+    const root = tree();
+    const bom = String.fromCodePoint(0xfeff);
+    const result = await new LocalDirectory(root).write('out.txt', `a${bom}b`);
+    expect(result.bytes).toBe(5);
+    expect(root.files.get('out.txt')?.file.content).toBe(`a${bom}b`);
+  });
+
+  it('still refuses a lone surrogate hiding behind a leading BOM', async () => {
+    const root = tree();
+    const bom = String.fromCodePoint(0xfeff);
+    const lone = String.fromCharCode(0xd800);
+    await expect(
+      new LocalDirectory(root).write('out.txt', `${bom}a${lone}`),
+    ).rejects.toMatchObject({ code: 'invalid_path' });
+    expect(root.files.has('out.txt')).toBe(false);
+  });
+
   it('round-trips whitespace-padded names verbatim', async () => {
     const root = new FakeDir('root');
     root.withFile('notes.txt', 'A');
