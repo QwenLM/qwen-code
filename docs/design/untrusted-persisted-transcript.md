@@ -1,5 +1,7 @@
 # Untrusted persisted transcript reader
 
+[English](untrusted-persisted-transcript.md) | [简体中文](untrusted-persisted-transcript.zh-CN.md)
+
 ## Context
 
 The daemon already exposes persisted-only session and group catalogs for registered untrusted secondary workspaces. Transcript paging remains unavailable because the legacy `GET /session/:id/transcript` route resolves a session owner through live bridge state and delegates replay to an ACP child. That path can start a process, load workspace settings and project-defined capabilities, and create or repair a persisted cursor signing key.
@@ -28,7 +30,7 @@ The direct replay context contains only a session id, an update sink, optional m
 
 The core reader accepts an explicit cursor codec. Existing callers continue to use the file-backed codec. The daemon creates one random master key per process, derives a separate 32-byte HMAC key from workspace id and canonical cwd, and caches an in-memory codec per registered runtime. Cursors from the new route therefore expire on daemon restart and cannot be replayed across workspaces.
 
-The cursor freezes file identity, byte size, active leaf, replay position and replay state. Appends after page one do not change the snapshot. Delete, archive, truncate, replacement, leaf change, or session-id mismatch returns `transcript_snapshot_unavailable`.
+The cursor freezes file identity, byte size, active leaf, replay position and replay state. Appends after page one do not change the snapshot. Delete, archive, truncate, replacement, an equal-size in-place rewrite (the frozen size still matches but mtime moved), leaf change, or session-id mismatch returns `transcript_snapshot_unavailable`.
 
 ## Failure and race handling
 
@@ -39,6 +41,8 @@ Replay is page-transactional at the protocol boundary: updates emitted before a 
 ## Compatibility and limits
 
 The old singular route, persisted cursor key and ACP error mapping remain intact. The new route keeps the existing default requested window of 100, maximum requested window of 500, 256 MiB snapshot cap, 32-entry index cache with a 64 MiB shared byte budget plus a separate 256 MiB oversized-index budget (worst-case byte retention is the sum, 320 MiB) and five-minute cache lifetime. The workspace-qualified route additionally caps each page at 4 MiB of persisted source records, 32 MiB of serialized response JSON and 64 KiB of cursor state. `limit` is a record-count ceiling for forward pages; backward pages may expand to at most `3 * limit` records to preserve turn and tool-call/result boundaries. A single aggregate record over the source budget returns `transcript_page_too_large`; an oversized replay cursor terminates the otherwise successful page as partial without issuing a continuation cursor. The first index scan remains linear in the frozen snapshot size.
+
+When a class budget is full, admitting a newer snapshot evicts older snapshots of the same file; frozen cursors to an evicted prefix rebuild on demand, so eviction costs latency, never correctness. Managed message projections retained alongside a cached index are accounted against the same class budget and are not retained when the decoded bodies do not fit.
 
 The TypeScript SDK exposes the method on `WorkspaceDaemonClient`. It forces native REST transport and has no ACP route mapping. Older daemons can be detected through the new capability and continue returning 404 for the route.
 

@@ -9,17 +9,41 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockDebugLogger, mockAddDaemonRequestAttribute, statFault } =
-  vi.hoisted(() => ({
-    mockDebugLogger: {
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    },
-    mockAddDaemonRequestAttribute: vi.fn(),
-    statFault: { zeroInode: false },
-  }));
+const {
+  mockDebugLogger,
+  mockAddDaemonRequestAttribute,
+  statFault,
+  projectionReads,
+} = vi.hoisted(() => ({
+  mockDebugLogger: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+  mockAddDaemonRequestAttribute: vi.fn(),
+  statFault: { zeroInode: false },
+  projectionReads: { count: 0 },
+}));
+
+vi.mock(
+  '../managed-runtime/managed-session-message-projection.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('../managed-runtime/managed-session-message-projection.js')
+      >();
+    return {
+      ...actual,
+      readManagedSessionRecordsAndTitle: async (
+        options: Parameters<typeof actual.readManagedSessionRecordsAndTitle>[0],
+      ) => {
+        projectionReads.count++;
+        return actual.readManagedSessionRecordsAndTitle(options);
+      },
+    };
+  },
+);
 
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
@@ -3360,6 +3384,166 @@ describe('SessionTranscriptReader', () => {
     const builds = countBuilds(filePath);
     await reader.readPage(sessionId, { limit: 1 });
     expect(builds.count).toBe(0);
+  });
+
+  it.each([
+    ['oversized', true],
+    ['shared', false],
+  ] as const)(
+    'rejects a frozen cursor after an equal-size in-place rewrite (%s class)',
+    async (_label, forceOversized) => {
+      const filePath = await writeRecords(chain('hello', 'reply', 'third'));
+      if (forceOversized) setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      const reader = newReader();
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const state = first.nextCursorState!;
+      const raw = await fs.readFile(filePath, 'utf8');
+      const rewritten = raw
+        .replace('"text":"reply"', '"text":"REPLY"')
+        .replace('"uuid":"u2"', '"uuid":"x2"');
+      expect(Buffer.byteLength(rewritten, 'utf8')).toBe(
+        Buffer.byteLength(raw, 'utf8'),
+      );
+      await fs.writeFile(filePath, rewritten, 'utf8');
+      const stats = await fs.stat(filePath);
+      await fs.utimes(filePath, stats.atime, new Date(stats.mtimeMs + 1000));
+      await expect(
+        readAfter(reader, state, { limit: 1 }),
+      ).rejects.toMatchObject({
+        name: 'SessionTranscriptSnapshotUnavailableError',
+      });
+    },
+  );
+
+  it('makes room for a newer snapshot of the same file when the class budget is full', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    // Calibrate the new snapshot's estimate under the default budget, then
+    // tighten the class so one snapshot fits but two do not.
+    await reader.readPage(sessionId, { limit: 1 });
+    const newBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    expect(newBytes).toBeGreaterThan(0);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(newBytes + 1);
+    await readAfter(reader, oldState, { limit: 1 });
+
+    const builds = countBuilds(filePath);
+    const newFirst = await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    await reader.readPage(sessionId, { limit: 1 });
+    const continuation = await readAfter(reader, newFirst.nextCursorState!, {
+      limit: 1,
+    });
+    expect(builds.count).toBe(1);
+    expect(uuids(continuation.records)).toEqual(['large-1']);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      newBytes,
+    );
+    // The superseded frozen cursor still reads its original prefix; its
+    // index may rebuild, but the page contract holds.
+    const oldPage = await readAfter(reader, oldState, { limit: 1 });
+    expect(uuids(oldPage.records)).toEqual(['large-1']);
+  });
+
+  it('accounts a retained Managed projection against the index budget class', async () => {
+    const file = await writeRawTranscript('');
+    const sessionKey = localManagedSessionKey(workspaceDir, sessionId);
+    const store = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: runtimeDir,
+      sessionKey,
+    });
+    const lease = await LocalManagedSessionAuthority.acquireWriter({
+      runtimeBaseDir: runtimeDir,
+      sessionId,
+      transcriptPath: file,
+    });
+    const reference = {
+      resourceId: 'test-ref',
+      kind: 'test',
+      schemaVersion: 1,
+      byteLength: 4,
+      digest: 'e'.repeat(64),
+    };
+    const authority = await LocalManagedSessionAuthority.open({
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
+      sessionKey,
+      cwd: workspaceDir,
+      version: 'test',
+      resources: store,
+      create: {
+        definitionRef: reference,
+        rootSnapshotRef: reference,
+        createdBy: 'daemon',
+      },
+    });
+    const projection = new ManagedSessionMessageProjection(authority, store);
+    const bigText = 'x'.repeat(256 * 1024);
+    const items = [
+      record('u1', null, 'short prompt'),
+      record('a1', 'u1', 'short reply'),
+      record('u2', 'a1', bigText),
+    ];
+    try {
+      for (const item of items)
+        await projection.commit(
+          {
+            operation: 'commitMessage',
+            commandId: item.uuid,
+            sessionKey,
+            contentDigest: 'e'.repeat(64),
+          },
+          { record: item },
+          { class: 'trusted_entry' },
+        );
+    } finally {
+      await authority.close();
+    }
+
+    const reader = newReader();
+    // readTurnHooksPage caches the physical index without projecting the
+    // Managed log (it reports unsupported), so the calibration below measures
+    // the physical hints alone.
+    await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+    const physicalBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    expect(physicalBytes).toBeGreaterThan(0);
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    // Room for the physical index but not for the decoded message bodies.
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      physicalBytes + 1024,
+    );
+    projectionReads.count = 0;
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      physicalBytes,
+    );
+    const tightPage = await reader.readPage(sessionId, { limit: 3 });
+    expect(uuids(tightPage.records)).toEqual(['u1', 'a1', 'u2']);
+    // The bodies do not fit the class budget, so the projection is not
+    // retained and the next page projects the log again.
+    expect(projectionReads.count).toBe(2);
+
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+    projectionReads.count = 0;
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(1);
+    expect(
+      getSessionTranscriptIndexCacheStatsForTest().byteSize,
+    ).toBeGreaterThan(physicalBytes + bigText.length);
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(1);
   });
 
   it('accounts for retained projection hints in the cache byte estimate', async () => {

@@ -2013,6 +2013,32 @@ function pruneCacheByteBudget(oversizedClass: boolean): void {
   }
 }
 
+// Evicts older snapshots of the same transcript when a newer one cannot be
+// admitted: a superseded frozen prefix would otherwise hold the class budget
+// and force every page of the live snapshot to reparse the whole JSONL.
+// Frozen cursors to an evicted prefix rebuild on demand — eviction costs
+// latency, never correctness.
+function evictSupersededSnapshots(
+  filePath: string,
+  snapshotSize: number,
+  oversizedClass: boolean,
+): boolean {
+  const sharedBudget = getIndexCacheMaxBytes();
+  let evicted = false;
+  for (const [key, entry] of indexCache) {
+    const value = entry.value;
+    if (!value || !entry.byteSize) continue;
+    if (value.filePath !== filePath || value.snapshotSize >= snapshotSize) {
+      continue;
+    }
+    if (entry.byteSize > sharedBudget !== oversizedClass) continue;
+    indexCache.delete(key);
+    debugLogger.debug(`index cache evicted superseded snapshot ${key}`);
+    evicted = true;
+  }
+  return evicted;
+}
+
 async function forEachLineInSnapshot(
   filePath: string,
   snapshotSize: number,
@@ -2616,16 +2642,30 @@ async function getCachedIndex(params: {
       debugLogger.debug(`index cache skipped stale completion ${key}`);
       return value;
     }
-    const classBytes = getIndexCacheBytesByClass();
+    let classBytes = getIndexCacheBytesByClass();
     if (
       (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
       classBudget
     ) {
-      indexCache.delete(key);
-      debugLogger.debug(
-        `index cache skipped byte-budget admission ${key} byteSize=${byteSize}`,
-      );
-      return value;
+      if (
+        evictSupersededSnapshots(
+          params.filePath,
+          params.snapshotSize,
+          oversized,
+        )
+      ) {
+        classBytes = getIndexCacheBytesByClass();
+      }
+      if (
+        (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
+        classBudget
+      ) {
+        indexCache.delete(key);
+        debugLogger.debug(
+          `index cache skipped byte-budget admission ${key} byteSize=${byteSize}`,
+        );
+        return value;
+      }
     }
     indexCache.set(key, {
       value,
@@ -2831,23 +2871,39 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
   const classBudget = oversized
     ? getIndexCacheOversizedMaxBytes()
     : getIndexCacheMaxBytes();
-  const classBytes = getIndexCacheBytesByClass();
-  if (
-    byteSize > classBudget ||
-    (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
-      classBudget ||
-    indexCache.size >= INDEX_CACHE_MAX_ENTRIES
-  ) {
+  if (byteSize > classBudget || indexCache.size >= INDEX_CACHE_MAX_ENTRIES) {
     debugLogger.debug(
       `fresh index cache offer skipped ${key} byteSize=${byteSize}`,
     );
     return;
   }
-  indexCache.set(key, {
+  let classBytes = getIndexCacheBytesByClass();
+  if (
+    (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
+    classBudget
+  ) {
+    if (
+      evictSupersededSnapshots(index.filePath, index.snapshotSize, oversized)
+    ) {
+      classBytes = getIndexCacheBytesByClass();
+    }
+    if (
+      (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
+      classBudget
+    ) {
+      debugLogger.debug(
+        `fresh index cache offer skipped ${key} byteSize=${byteSize}`,
+      );
+      return;
+    }
+  }
+  const entry: CacheEntry = {
     value: index,
     byteSize,
     expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
-  });
+  };
+  indexCache.set(key, entry);
+  accountManagedProjection(index, entry);
 }
 
 function lastUuidMatching(
@@ -2986,6 +3042,40 @@ const managedProjections = new WeakMap<
     readonly titleInfo: { title?: string; source?: 'auto' | 'manual' };
   }
 >();
+
+function estimateManagedProjectionBytes(projection: {
+  readonly records: ChatRecord[];
+  readonly titleInfo: { title?: string; source?: 'auto' | 'manual' };
+}): number {
+  return (
+    INDEX_CONTAINER_BASE_BYTES +
+    estimateStringBytes(JSON.stringify(projection.records)) +
+    estimateStringBytes(JSON.stringify(projection.titleInfo))
+  );
+}
+
+// A restore projection can be decoded while its index is not yet cached and
+// then offered to the cache; account the retained bodies at admission, or
+// drop them when they do not fit the entry's budget class.
+function accountManagedProjection(index: TranscriptIndex, entry: CacheEntry) {
+  const projection = managedProjections.get(index);
+  if (!projection) return;
+  const projectionBytes = estimateManagedProjectionBytes(projection);
+  const entryOversized = (entry.byteSize ?? 0) > getIndexCacheMaxBytes();
+  const classBytes = getIndexCacheBytesByClass();
+  const classBudget = entryOversized
+    ? getIndexCacheOversizedMaxBytes()
+    : getIndexCacheMaxBytes();
+  if (
+    (entryOversized ? classBytes.oversized : classBytes.shared) +
+      projectionBytes <=
+    classBudget
+  ) {
+    entry.byteSize = (entry.byteSize ?? 0) + projectionBytes;
+  } else {
+    managedProjections.delete(index);
+  }
+}
 
 /**
  * An index over projected records, shaped like the physical one.
@@ -4254,7 +4344,41 @@ export class SessionTranscriptReader {
           }
           throw error;
         }
-        managedProjections.set(index, projection);
+        // The projection holds every decoded message body, while the cache
+        // accounts only the physical hints. Retain it only while the index is
+        // cache-resident and the bodies fit the entry's budget class; else
+        // the bodies would outlive the request off-budget. A non-resident
+        // index dies with the request, so retaining against it is
+        // request-scoped and safe.
+        const projectionCacheKey = makeCacheKey(
+          index.filePath,
+          index.fileIdentity,
+          index.snapshotSize,
+          index.lastUpdated,
+        );
+        const cachedEntry = indexCache.get(projectionCacheKey);
+        if (cachedEntry?.value !== index) {
+          managedProjections.set(index, projection);
+        } else if (!managedProjections.has(index)) {
+          // A concurrent page may have decoded and retained the projection
+          // while this read was decoding; it is already accounted then.
+          const projectionBytes = estimateManagedProjectionBytes(projection);
+          const entryOversized =
+            (cachedEntry.byteSize ?? 0) > getIndexCacheMaxBytes();
+          const classBytes = getIndexCacheBytesByClass();
+          const classBudget = entryOversized
+            ? getIndexCacheOversizedMaxBytes()
+            : getIndexCacheMaxBytes();
+          if (
+            (entryOversized ? classBytes.oversized : classBytes.shared) +
+              projectionBytes <=
+            classBudget
+          ) {
+            managedProjections.set(index, projection);
+            cachedEntry.byteSize =
+              (cachedEntry.byteSize ?? 0) + projectionBytes;
+          }
+        }
       }
       return [...projection.records];
     } finally {
@@ -4523,6 +4647,23 @@ export class SessionTranscriptReader {
           `currentSize=${stats.size} cursorSize=${snapshotSize} ` +
           `currentIdentity=${currentIdentity.dev}:${currentIdentity.ino} ` +
           `cursorIdentity=${fileIdentity.dev}:${fileIdentity.ino}`,
+      );
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
+    // A cached index is keyed by the frozen mtime, so an equal-size in-place
+    // rewrite would otherwise serve new bytes under the old snapshot; the
+    // segment uuid check only catches rewrites of the selected records.
+    // Mirrors readTurnIndexSnapshot; pure appends (size grew) stay readable.
+    const frozenLastUpdated = cursor?.lastUpdated ?? snapshot?.lastUpdated;
+    if (
+      frozenLastUpdated !== undefined &&
+      stats.size === snapshotSize &&
+      new Date(stats.mtimeMs).toISOString() !== frozenLastUpdated
+    ) {
+      debugLogger.warn(
+        `snapshot unavailable: equal-size rewrite session=${sessionId} ` +
+          `frozenUpdated=${frozenLastUpdated} ` +
+          `currentUpdated=${new Date(stats.mtimeMs).toISOString()}`,
       );
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
