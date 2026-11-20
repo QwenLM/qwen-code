@@ -104,11 +104,14 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     await choose('A');
     await editor.fill('  Accepted A input  ');
     await editor.press('Enter');
+    // The failed send is an ordinary conversation error carrying the retry
+    // link; there is no separate unconfirmed-request box beside the input.
+    const stream = page.locator('[data-web-shell-message-list]');
     await expect(
-      page.getByText('The previous message was not confirmed as submitted', {
-        exact: false,
-      }),
+      stream.locator('pre').filter({ hasText: 'Unconfirmed admission' }),
     ).toBeVisible();
+    const retry = stream.getByRole('button', { name: /Ctrl\+Y/ });
+    await expect(retry).toBeVisible();
     await choose('B');
     await expect(editor).toContainText('Unrelated B draft');
     if (retryFrom === 'restored-foreign') {
@@ -127,7 +130,7 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
         .click();
     }
 
-    await page.getByRole('button', { name: 'Retry the same request' }).click();
+    await retry.click();
 
     await expect(
       page.getByRole('button', { name: /^Conversation A\b/ }),
@@ -239,9 +242,9 @@ test('a foreign pending keeps its composer editable and resolves through its own
   await editor.fill('For session A only');
   await editor.press('Enter');
   await expect(
-    page.getByText('The previous message was not confirmed as submitted', {
-      exact: false,
-    }),
+    page
+      .locator('[data-web-shell-message-list] pre')
+      .filter({ hasText: 'Unconfirmed admission' }),
   ).toBeVisible();
 
   await choose('B');

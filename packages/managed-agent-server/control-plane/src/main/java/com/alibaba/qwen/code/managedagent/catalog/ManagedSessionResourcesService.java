@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtension
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedMcpRecords;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSkill;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
@@ -59,6 +60,27 @@ public class ManagedSessionResourcesService {
         return new Query(tenant, sessionId).get(session);
     }
 
+    java.util.Optional<List<WebShellSkill>> installedSkills(SessionRecord session) {
+        var query = new Query(session.tenantId(), session.sessionId());
+        query.attempt("configCoverage", () -> query.configuration(true));
+        if (!"complete".equals(query.result.path("configCoverage").asText())) {
+            throw new ManagedAgentException(409, "session_skills_unavailable", "The installed Skill catalog could not be read.");
+        }
+        if (query.result.path("activeConfigRevision").asLong(0) == 0) {
+            return java.util.Optional.empty();
+        }
+        var visible = new java.util.ArrayList<WebShellSkill>();
+        for (JsonNode skill : query.skillItems) {
+            // Bundle commands share the skill item list but are not Skills;
+            // admitting them here would show them as Skills and count them
+            // against the Session Skill catalog limit.
+            if ("skill".equals(skill.path("kind").asText()) && skill.path("userInvocable").asBoolean()) {
+                visible.add(new WebShellSkill(skill.get("name").textValue(), skill.get("description").textValue()));
+            }
+        }
+        return java.util.Optional.of(visible);
+    }
+
     private final class Query {
         private final String tenant;
         private final String sessionId;
@@ -75,7 +97,6 @@ public class ManagedSessionResourcesService {
             this.tenant = tenant;
             this.sessionId = sessionId;
             result = json.createObjectNode().put("schemaVersion", 1).put("sessionId", sessionId)
-                    .put("readRevision", records.diagnosticReadRevision(tenant, sessionId))
                     .put("availability", "available").put("configCoverage", "complete").put("historyCoverage", "complete")
                     .putNull("activeConfigRevision").putNull("activeOperationPhase").put("outputTruncated", false);
             reasons = result.putArray("coverageReasons");
@@ -84,6 +105,7 @@ public class ManagedSessionResourcesService {
         }
 
         JsonNode get(SessionRecord session) {
+            result.put("readRevision", records.diagnosticReadRevision(tenant, sessionId));
             if (session.workspace() == null || WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
                 return result.put("availability", "unsupported");
             }
@@ -99,7 +121,7 @@ public class ManagedSessionResourcesService {
                         basePins.put(node.path("serverId").asText(), node);
                     }
                 }
-                configuration();
+                configuration(false);
             });
             Map<String, JsonNode> attempts = new LinkedHashMap<>();
             Map<String, JsonNode> published = new LinkedHashMap<>();
@@ -174,7 +196,7 @@ public class ManagedSessionResourcesService {
             return result;
         }
 
-        private void configuration() {
+        private void configuration(boolean skillsOnly) {
             var latest = records.diagnosticConfigRef(tenant, sessionId);
             if (latest.isEmpty()) {
                 selected.putAll(basePins);
@@ -183,7 +205,9 @@ public class ManagedSessionResourcesService {
             JsonNode current = read(latest.get(), "managed-config_install");
             if (!ManagedConfigInstall.isPackageConfig(current)) {
                 require("hosted-mcp-settings".equals(current.path("kind").asText()), "Invalid MCP settings");
-                select(current.path("servers"));
+                if (!skillsOnly) {
+                    select(current.path("servers"));
+                }
                 return;
             }
             Set<String> seen = new HashSet<>();
@@ -194,12 +218,12 @@ public class ManagedSessionResourcesService {
                     result.set("activeOperationPhase", current.get("phase"));
                 }
                 if ("active".equals(current.path("phase").asText())) {
-                    bundle(current.get("bundleRef"));
+                    bundle(current.get("bundleRef"), skillsOnly);
                     return;
                 }
                 JsonNode previous = current.get("previousRecordRef");
                 if (previous.isNull()) {
-                    bundle(current.get("previousBundleRef"));
+                    bundle(current.get("previousBundleRef"), skillsOnly);
                     return;
                 }
                 if (count == MAX_CONFIG_RECORDS) {
@@ -209,14 +233,14 @@ public class ManagedSessionResourcesService {
                 require(seen.add(previous.path("resourceId").asText()), "Configuration history cycle");
                 JsonNode predecessor = read(previous, "managed-config_install");
                 if (!ManagedConfigInstall.isPackageConfig(predecessor)) {
-                    bundle(current.get("previousBundleRef"));
+                    bundle(current.get("previousBundleRef"), skillsOnly);
                     return;
                 }
                 current = predecessor;
             }
         }
 
-        private void bundle(JsonNode ref) {
+        private void bundle(JsonNode ref, boolean skillsOnly) {
             if (ref == null || ref.isNull()) {
                 selected.putAll(basePins);
                 return;
@@ -225,7 +249,9 @@ public class ManagedSessionResourcesService {
             require("managed-extension-config-bundle".equals(bundle.path("kind").asText())
                     && bundle.path("formatVersion").asInt() == 1, "Invalid configuration bundle");
             result.put("activeConfigRevision", ManagedExtensionRecords.count(bundle.get("configRevision"), 0, MAX_REVISION, "Configuration revision"));
-            select(bundle.path("independentMcpSelections"));
+            if (!skillsOnly) {
+                select(bundle.path("independentMcpSelections"));
+            }
             require(bundle.path("packages").isArray() && bundle.path("packages").size() <= 32, "Invalid package list");
             for (JsonNode pkg : bundle.path("packages")) {
                 attempt("configCoverage", () -> {
@@ -247,9 +273,15 @@ public class ManagedSessionResourcesService {
                     JsonNode contributions = records.readExtensionContributions(tenant, sessionId, contributionRef);
                     appendSkills(contributions.path("skills"), "skill", extension);
                     appendSkills(contributions.path("commands"), "command", extension);
+                    if (skillsOnly) {
+                        return;
+                    }
                     require(contributions.path("mcpServers").isObject(), "Invalid package MCP servers");
                     contributions.path("mcpServers").fieldNames().forEachRemaining(name -> extensions.put(extension + ":" + name, extension));
                 });
+            }
+            if (skillsOnly) {
+                return;
             }
             JsonNode effective = bundle.path("mcpServers");
             require(effective.isArray() && effective.size() <= 32, "Invalid effective MCP list");

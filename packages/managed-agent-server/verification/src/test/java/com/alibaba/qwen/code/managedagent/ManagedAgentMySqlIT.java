@@ -98,6 +98,16 @@ class ManagedAgentMySqlIT {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"TASK", "SESSION"})
+    void latestTurnIgnoresOtherStreamsWithTheSameSequence(String streamKind) {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+        ManagedTurnQueryTest.assertLatestTurnStreamIsolation(
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source),
+                new ObjectMapper(), streamKind);
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"default", "auto-edit", "yolo"})
     @Order(0)
     void freezesInitialCatalogModelAndApprovalInOneTransaction(String mode) {

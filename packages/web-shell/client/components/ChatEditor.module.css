@@ -506,6 +506,33 @@
   min-width: min(280px, var(--radix-popover-content-available-width));
 }
 
+:global([data-web-shell-model-sheet]) .dropdownItemLabel {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The sheet is portaled out of .editorShell, so the mobile composer's 44px
+   overrides never reach its controls. The section row keeps its own taller
+   floor. The sheet also stands in for the popover in narrow desktop windows,
+   where a mouse needs none of this, so the floor is keyed on the pointer. */
+@media (hover: none) and (pointer: coarse) {
+  :global([data-web-shell-model-sheet]) .dropdownItem:not(.sheetSectionRow),
+  :global([data-web-shell-model-sheet]) .reasoningThinkingRow,
+  :global([data-web-shell-model-sheet]) .reasoningEffortRow,
+  :global([data-web-shell-model-sheet]) [data-web-shell-model-sheet-done],
+  :global([data-web-shell-model-sheet]) .dropdownSearchRow > button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* The Thinking row is not itself a control: its switch is. Growing the row
+     alone would add dead space, so the switch's own hit rect grows with it. */
+  :global([data-web-shell-model-sheet])
+    [data-web-shell-thinking-toggle]::after {
+    inset-block: -13px;
+  }
+}
+
 .slashPanel {
   max-height: min(
     460px,
@@ -1787,7 +1814,6 @@
 
 .dropdownItemActive {
   color: var(--foreground);
-  background: var(--accent);
 }
 
 .dropdownItemIcon,
@@ -1873,6 +1899,33 @@
   border-top: 1px solid var(--border);
 }
 
+.sheetSectionRow {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.sheetSectionValue {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  color: var(--muted-foreground);
+  text-align: right;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.sheetSectionValue svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
 .reasoningOptions {
   display: flex;
   flex-direction: column;
@@ -1908,6 +1961,23 @@
 
 .reasoningEffortRow:hover:not(:disabled) {
   background: var(--accent);
+}
+
+.dropdownItemActive,
+.dropdownItemActive:hover,
+.reasoningEffortRowActive,
+.reasoningEffortRowActive:hover:not(:disabled) {
+  font-weight: 500;
+  background: color-mix(in oklab, var(--accent), var(--foreground) 6%);
+}
+
+.dropdownItemActive .dropdownItemLabel {
+  font-weight: 500;
+}
+
+.reasoningEffortRowActive:disabled {
+  font-weight: inherit;
+  background: transparent;
 }
 
 .reasoningEffortRow:disabled {

@@ -159,6 +159,8 @@ describe('defaultModalities', () => {
         IMAGE_VIDEO,
         'bailian-token-plan/qwen3.8-max-preview',
       ],
+      ['qwen4-max', IMAGE_VIDEO],
+      ['qwen4-max-2026-10-01', IMAGE_VIDEO],
     ]);
 
     casesFor('returns text-only for', [

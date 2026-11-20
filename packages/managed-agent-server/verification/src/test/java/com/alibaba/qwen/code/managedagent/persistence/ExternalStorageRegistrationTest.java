@@ -63,7 +63,8 @@ public class ExternalStorageRegistrationTest {
         properties.getRuntimeBroker().setToken("operator-secret");
         server = new ServerProperties();
         server.setAddress(InetAddress.getByName("127.0.0.1"));
-        mvc = MockMvcBuilders.standaloneSetup(new ExternalStorageRegistrationController(store, properties, server))
+        mvc = MockMvcBuilders.standaloneSetup(new ExternalStorageRegistrationController(store,
+                new ExternalWorkspaceMaterializationStore(jdbc, manager), properties, server))
                 .setControllerAdvice(new ApiExceptionHandler())
                 .addFilters(new RequestIdFilter(), new TenantContextFilter(json)).build();
     }
@@ -238,6 +239,52 @@ public class ExternalStorageRegistrationTest {
                     assertThat(error.getStatusCode()).isEqualTo(400);
                     assertThat(error.getCode()).isEqualTo("invalid_external_storage_registration");
                 });
+    }
+
+    @Test
+    public void batchStatesUseCanonicalAliasesForEachPageAndIgnoreDuplicateInputs() {
+        store.registerExternalStorage("tenant", "one", registration("provider", "one", "one", "/aliases/one"));
+        store.registerExternalStorage("tenant", "two", registration("provider", "two", "two", "/aliases/two"));
+        store.registerExternalStorage("other-tenant", "one", registration("other-provider", "one", "one", "/other/one"));
+        var trace = new StoreLockTrace(jdbc.getDataSource());
+        var reader = new ExternalStorageRegistrationStore(new ManagedSchemaJdbcTemplate(trace), manager);
+        assertThat(reader.states("tenant", List.of())).isEmpty();
+        assertThat(trace.events()).isEmpty();
+        assertThat(reader.states("tenant", List.of("one", "one", "missing")))
+                .containsOnlyKeys("one").containsEntry("one",
+                        new ExternalStorageRegistrationStore.RegistrationState(true, "provider", "one"));
+        assertThat(reader.states("tenant", List.of("two"))).containsOnlyKeys("two");
+        assertThat(reader.states("other-tenant", List.of("one", "two")))
+                .containsOnlyKeys("one").containsEntry("one",
+                        new ExternalStorageRegistrationStore.RegistrationState(true, "other-provider", "one"));
+        assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .map(StoreLockTrace.Event::sql)).hasSize(3).allSatisfy(sql -> assertThat(sql)
+                        .contains("s.alias_key in (", "s.tenant_id = ?", "s.storage_id in ("));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"alias", "tenant", "storage", "json", "revision", "owner", "mount", "retired"})
+    public void batchStatesIsolateCorruptOrMismatchedRegistrations(String corruption) {
+        store.registerExternalStorage("tenant", "good", registration("provider", "good", "good", "/aliases/good"));
+        store.registerExternalStorage("tenant", "bad", registration("provider", "bad", "bad", "/aliases/bad"));
+        String alias = RuntimeAdmissionFences.storageAliasKey("tenant", "bad");
+        switch (corruption) {
+            case "alias" -> jdbc.update("UPDATE ma_storage SET alias_key = ? WHERE alias_key = ?",
+                    RuntimeAdmissionFences.storageAliasKey("other-tenant", "bad"), alias);
+            case "tenant" -> jdbc.update("UPDATE ma_storage SET tenant_id = 'other-tenant' WHERE alias_key = ?", alias);
+            case "storage" -> jdbc.update("UPDATE ma_storage SET storage_id = 'other-storage' WHERE alias_key = ?", alias);
+            case "json" -> jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE alias_key = ?", alias);
+            case "revision" -> jdbc.update("UPDATE ma_storage SET registration_revision = 2 WHERE alias_key = ?", alias);
+            case "owner" -> jdbc.update("UPDATE ma_storage SET physical_key = ? WHERE alias_key = ?",
+                    registration("provider", "good", "good", "/aliases/good").identity().ownerKey(), alias);
+            case "mount" -> jdbc.update("UPDATE ma_storage_owner SET mount_root = '/changed' WHERE storage_key = ?",
+                    registration("provider", "bad", "bad", "/aliases/bad").identity().ownerKey());
+            case "retired" -> jdbc.update("UPDATE ma_storage SET registration_state = 'RETIRED' WHERE alias_key = ?", alias);
+            default -> throw new AssertionError(corruption);
+        }
+        assertThat(store.states("tenant", List.of("bad", "good", "bad"))).containsOnlyKeys("good");
+        assertThat(store.states("tenant", List.of("good"))).containsOnlyKeys("good");
+        assertThat(store.states("tenant", List.of("bad"))).isEmpty();
     }
 
     @Test

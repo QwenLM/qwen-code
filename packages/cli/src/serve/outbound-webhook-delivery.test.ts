@@ -10,6 +10,7 @@ import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { getPlugin } from '../commands/channel/channel-registry.js';
 import {
   runChannelDaemonWorker,
   type ChannelDaemonWorkerHandle,
@@ -40,6 +41,11 @@ it.each([
     type: 'feishu-webhook',
     url: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-token',
     response: '{"code":0}',
+  },
+  {
+    type: 'wecom-webhook',
+    url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-token',
+    response: '{"errcode":0}',
   },
 ])('delivers authorized results through the $type worker', async (platform) => {
   const root = fs.realpathSync(
@@ -132,6 +138,11 @@ it.each([
       }),
     });
     expect(worker.channels).toEqual(['reports']);
+    expect(await getPlugin(platform.type)).toMatchObject({
+      channelType: platform.type,
+      outboundOnly: true,
+      defaultDeliveryTarget: { type: 'chat', id: 'default' },
+    });
     const runningWorker = worker;
     // Replace process transport only; the daemon and worker do their own mapping.
     const manager = {
@@ -218,15 +229,20 @@ it.each([
         body:
           platform.type === 'dingtalk-webhook'
             ? { msgtype: 'markdown', markdown }
-            : {
-                msg_type: 'interactive',
-                card: {
-                  schema: '2.0',
-                  body: {
-                    elements: [{ tag: 'markdown', content: markdown.text }],
+            : platform.type === 'wecom-webhook'
+              ? {
+                  msgtype: 'markdown_v2',
+                  markdown_v2: { content: markdown.text },
+                }
+              : {
+                  msg_type: 'interactive',
+                  card: {
+                    schema: '2.0',
+                    body: {
+                      elements: [{ tag: 'markdown', content: markdown.text }],
+                    },
                   },
                 },
-              },
       })),
     );
   } finally {

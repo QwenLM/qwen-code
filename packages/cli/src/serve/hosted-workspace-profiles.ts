@@ -9,6 +9,13 @@
 // persisted by one and refused by another.
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
+export const HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE =
+  'hosted-workspace-external-files/1';
+// #15512 slice C: registered external storage plus foreground Shell. Its own
+// profile and capability, never a reinterpretation of the files placement:
+// the Shell capture must be drained before that storage can be released.
+export const HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE =
+  'hosted-workspace-external-shell/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
 export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
 // #15076: `files/3` adds `todo_write` to its `/2` counterpart.
@@ -35,6 +42,8 @@ export const HOSTED_WORKSPACE_READ_PROFILE = 'hosted-workspace-read/1';
 
 export type HostedWorkspaceToolProfile =
   | typeof HOSTED_WORKSPACE_FILE_PROFILE
+  | typeof HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+  | typeof HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE
   | typeof HOSTED_WORKSPACE_SHELL_PROFILE
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V3
@@ -50,6 +59,8 @@ export function isHostedWorkspaceProfile(
 ): profile is HostedWorkspaceToolProfile {
   return (
     profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
@@ -69,6 +80,26 @@ export function isHostedWorkspaceShellProfile(profile: unknown): boolean {
     profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4 ||
     profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE ||
     profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE_V2
+  );
+}
+
+/**
+ * The external foreground-Shell placement. Deliberately absent from
+ * isHostedWorkspaceShellProfile: that predicate selects the local Shell lane
+ * with its background processes and monitors, neither of which this
+ * single-worker drain can prove.
+ */
+export function isHostedWorkspaceExternalShellProfile(
+  profile: unknown,
+): profile is string {
+  return profile === HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE;
+}
+
+/** Either external placement: registered storage, one worker per Session. */
+export function isHostedWorkspaceExternalProfile(profile: unknown): boolean {
+  return (
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+    isHostedWorkspaceExternalShellProfile(profile)
   );
 }
 
@@ -116,10 +147,47 @@ export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
 export function isHostedWorkspaceGlobProfile(profile: unknown): boolean {
   return (
     isHostedWorkspaceSearchProfile(profile) ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+    isHostedWorkspaceExternalShellProfile(profile) ||
     profile === HOSTED_WORKSPACE_READ_PROFILE
   );
 }
 
 export function isHostedWorkspaceReadProfile(profile: unknown): boolean {
   return profile === HOSTED_WORKSPACE_READ_PROFILE;
+}
+
+/**
+ * The options neither external lane admits. The Shell lane differs on
+ * `captureBytes` alone: the files lane refuses it, while the Shell lane
+ * requires it, and that requirement is checked where the reservation is made.
+ */
+export function hasHostedExternalExcludedOptions(
+  value: Record<string, unknown> | null | undefined,
+  profile: unknown,
+): boolean {
+  const keys = [
+    'agentDefinition',
+    'sessionSkillsRef',
+    'hookCatalog',
+    'mcpServers',
+    'initialSelection',
+    'publicChildModelRoute',
+    'publicChildExtensionAgent',
+    'lineage',
+    'memoryStoreId',
+  ];
+  if (!isHostedWorkspaceExternalShellProfile(profile))
+    keys.push('captureBytes');
+  return (
+    keys.some((key) => value?.[key] !== undefined) ||
+    value?.['childWorkspaces'] === true ||
+    value?.['childSnapshots'] === true ||
+    (value?.['publicChildAgentsVersion'] ?? 0) !== 0 ||
+    value?.['planMode'] === true ||
+    (typeof value?.['approvalSelection'] === 'object' &&
+      value['approvalSelection'] !== null &&
+      (value['approvalSelection'] as Record<string, unknown>)['planMode'] ===
+        true)
+  );
 }
