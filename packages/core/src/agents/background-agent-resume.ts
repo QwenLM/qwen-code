@@ -1242,6 +1242,7 @@ export class BackgroundAgentResumeService {
       });
       const additionalContext = contextState.get('hook_context');
       if (additionalContext) {
+        // hook_context feeds systemPrompt; the initial user turn needs it too.
         contextState.set(
           'task_prompt',
           `${String(contextState.get('task_prompt'))}\n\n${String(additionalContext)}`,

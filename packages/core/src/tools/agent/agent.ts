@@ -2538,6 +2538,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const additionalContext = startHookOutput?.getAdditionalContext();
           if (additionalContext) {
             contextState.set('hook_context', additionalContext);
+            // hook_context feeds systemPrompt; the initial user turn needs it too.
             contextState.set(
               'task_prompt',
               `${String(contextState.get('task_prompt'))}\n\n${additionalContext}`,
