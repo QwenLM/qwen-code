@@ -9,7 +9,7 @@ Use this extension when an interactive calculation, comparison or small list wou
 
 - The user wants to change values and see the effect: "let me adjust", "I want to try different numbers", a calculator, a simulator, a what-if.
 - Comparing options under adjustable assumptions, such as plans, prices, weights or capacities.
-- A small list the user keeps editing in the conversation, such as a meeting checklist that should still be there after a reload.
+- A small list the user keeps editing in the conversation, such as a meeting checklist.
 
 Do not use it in these cases:
 
@@ -17,7 +17,7 @@ Do not use it in these cases:
 - The user asks for a file, a web page, a component or code in their project: write the files they asked for.
 - The answer needs live data, network access or more than a small local calculation.
 
-When the user wants to interact and has not asked for a file, show the view here instead of writing a standalone HTML file to the workspace. A card can keep a small saved state with the conversation (see Saved state below), so a request to keep items after a reload is not a reason to write a file. This tool creates a new complete card; it cannot update an older card, open files, fetch data, send messages or perform actions on the user's behalf.
+When the user wants to interact and has not asked for a file, show the view here instead of writing a standalone HTML file to the workspace. If the user needs edits to survive a reload, use a bundled card with a state-capable host and daemon. When persistence is unavailable or support is unknown, explain the limitation before relying on the card for saved work. This tool creates a new complete card; it cannot update an older card, open files, fetch data, send messages or perform actions on the user's behalf.
 
 1. Establish the actual question, supplied data, units and assumptions from the conversation. Label illustrative data and uncertain inputs. Do not turn model guesses into measured facts.
 2. Produce one complete set of `title`, `summary`, `html`, `css`, and `javascript` strings for `generated_ui_show`. The summary must remain useful without the interface: include the initial result, the assumptions, and what can be varied.
@@ -67,18 +67,19 @@ The guest has 32 MiB of heap, a 256 KiB stack and 250 ms for each initialization
 
 ## Saved state
 
-`ui.state` keeps one small JSON value for this card with the conversation. Use it when the user expects the view to remember what they did, such as checklist items, their checked state and undo history. A calculator whose inputs the user can simply set again usually needs none.
+`ui.state` holds one small JSON value for this card. A bundled card can persist it with the conversation when both its host and daemon support view state. In the manually installed extension and on hosts without view-state support, the value stays in the current activation. Use it for data the user expects the view to remember, such as checklist items, their checked state and undo history. A calculator whose inputs the user can simply set again usually needs none.
 
 ```js
 var saved = ui.state.get(); // a fresh copy of the saved value, or null
-ui.state.set({ items: items, history: history }); // replaces the saved value
+// Inside a handler, request that the host save the replacement value:
+ui.state.set({ items: items, history: history });
 ```
 
 - Restore once at initialization. `ui.state.get()` returns `null` the first time the card runs, after the user resets the card, and in hosts that cannot save, so check the saved value's shape (types, array lengths, bounds) and fall back to the initial data when it does not match. Then render.
-- Call `ui.state.set(value)` in the handlers that change what should be kept, not during initialization. Save meaningful changes, such as adding, checking, deleting, a committed rename or undo, rather than every keystroke: each saved change is recorded in the conversation. The last value set in a round is saved, even when a newer edit discards the round's display update, so render from the same data you save. An unchanged value is not saved again.
+- Call `ui.state.set(value)` in the handlers that change what should be kept, not during initialization. Request saves for meaningful changes, such as adding, checking, deleting, a committed rename or undo, rather than every keystroke. The host receives the last value set in a successful round, even when a newer edit discards the round's display update. A successful `set` only updates the guest value. The host confirms what it actually saved in its own bar, and may coalesce changes while a write is in flight.
 - The value must be plain data: objects, arrays without holes, strings, finite numbers, booleans and `null`. Functions, `undefined` fields, `NaN`, dates, maps and objects with getters or `toJSON` throw a `TypeError`, and a value whose JSON exceeds 16 KiB (UTF-8) throws a `RangeError`. Unlike other `ui` failures, both can be caught without ending the activation. Cap lists such as undo history, and when `set` throws a `RangeError`, drop the oldest entries and set again.
 - The saved value comes back after a reload, when the conversation is reopened, and in a fork of it. Rewinding the conversation to before a change brings back the earlier value. Other conversations and other cards never see it, even an identical card shown again.
-- The host shows outside the card whether each change was saved. Do not add your own save confirmation. You do not see the saved value, and Continue analysis sends only control values, so keep the summary about the initial view.
+- Rely on the host bar for persistence outcomes. Do not add your own save confirmation. You do not see the saved value, and Continue analysis sends only control values, so keep the summary about the initial view.
 
 ## Styling
 

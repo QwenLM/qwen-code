@@ -291,8 +291,10 @@ Step 3:
   `ui.state`, and the persistence, save acknowledgement and isolation pins
   pass; all other pins are unchanged.
 - Evaluator tests with a controlled host: the save acknowledgement passes when
-  the host shows `saved`, fails on any other outcome or when items persisted
-  without an outcome, and does not apply when nothing persisted.
+  the host shows a fresh `saved` outcome for the last change. It fails on any
+  other outcome or when items persisted without a fresh outcome. It does not
+  apply when nothing persisted and the host showed no outcome. A delayed
+  re-save after testing undo must complete before the harness opens a new tab.
 - A live run of the checklist case with the gating model, reported in the PR.
 
 ## Acceptance criteria

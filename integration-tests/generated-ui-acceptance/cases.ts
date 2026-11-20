@@ -644,33 +644,37 @@ export async function runChecklist(
   );
   const sameState = (a: typeof saved, b: typeof saved) =>
     JSON.stringify(a) === JSON.stringify(b);
+  const checkAndSave = async (target: Card, slot: string) => {
+    const box = target.view.locator(`#${slot}-check`);
+    await waitForStill(box);
+    return saveOutcome(target, () => box.click());
+  };
   const notesSlot = await itemSlot(view, 'Notes');
-  let prepared = false;
-  if (
+  const canPrepare =
     notesSlot &&
-    beforeSave.some((item) => item.text === 'Notes' && !item.checked)
-  ) {
-    await checkBox(view, `${notesSlot}-check`).catch(() => {});
-    await env.page.waitForTimeout(300);
-    prepared = sameState(
+    beforeSave.some((item) => item.text === 'Notes' && !item.checked);
+  const acknowledged = canPrepare
+    ? await checkAndSave(card, notesSlot).then(
+        (outcome) => ({ outcome }),
+        (error: unknown) => ({ error }),
+      )
+    : { outcome: undefined };
+  const prepared =
+    canPrepare &&
+    sameState(
       await settle(
         () => itemStates(view),
         (value) => sameState(value, saved),
       ),
       saved,
     );
-  }
-  // Read before the reload: the outcome belongs to this mount's last change.
-  const acknowledged = await saveOutcome(card).then(
-    (outcome) => ({ outcome }),
-    (error: unknown) => ({ error }),
-  );
   let hasPersistedItems = false;
   const pages: Page[] = [];
   const persistenceChecks = async (
     id: string,
     label: string,
     open: () => Promise<Card>,
+    restoreForNextRead = false,
   ) =>
     checks.guard(id, 'case 2 / R4', async () => {
       if (!prepared) {
@@ -702,18 +706,17 @@ export async function runChecklist(
         () => itemStates(reopened.view),
         (value) => sameState(value, beforeSave),
       );
-      const restoredSlot = await itemSlot(reopened.view, 'Notes');
-      await checkBox(reopened.view, `${restoredSlot}-check`);
-      await reopened.view.page().waitForTimeout(300);
-      const resaved = await settle(
-        () => itemStates(reopened.view),
-        (value) => sameState(value, saved),
-      );
+      if (restoreForNextRead && sameState(undone, beforeSave)) {
+        const restoredSlot = await itemSlot(reopened.view, 'Notes');
+        if (!restoredSlot) throw new Error('could not find Notes after undo');
+        // The new tab reads from the daemon, independently of this card's DOM.
+        await checkAndSave(reopened, restoredSlot);
+      }
       return checks.expect(
         id,
         'case 2 / R4',
-        sameState(undone, beforeSave) && sameState(resaved, saved),
-        `${label}: undo expected ${JSON.stringify(beforeSave)}, saw ${JSON.stringify(undone)}; state restored for the next check=${sameState(resaved, saved)}`,
+        sameState(undone, beforeSave),
+        `${label}: undo expected ${JSON.stringify(beforeSave)}, saw ${JSON.stringify(undone)}`,
       );
     });
 
@@ -724,6 +727,7 @@ export async function runChecklist(
       await env.page.reload();
       return env.waitForCard(0);
     },
+    true,
   );
 
   await persistenceChecks(
@@ -760,7 +764,7 @@ export async function runChecklist(
       'case 2 / R4',
       outcome === 'saved',
       outcome === undefined
-        ? 'the items persisted, but the host showed no save outcome for this card'
+        ? 'the items persisted, but the host showed no new save outcome for the last change'
         : `after the last change the host showed "${outcome}"`,
     );
   });

@@ -598,12 +598,12 @@ export async function waitForCardOn(
 }
 
 /**
- * The save outcome the host shows for a card (`data-generated-ui-save` in its
- * bar outside the sandbox) once it has stopped saving, or undefined when the
- * host shows none.
+ * Observe the host's save bar before making a change, so an earlier `saved`
+ * outcome cannot count as a receipt for this change.
  */
 export async function saveOutcome(
   card: Card,
+  change: () => Promise<void>,
   timeoutMs = 10_000,
 ): Promise<string | undefined> {
   let frame = card.view;
@@ -612,24 +612,68 @@ export async function saveOutcome(
     frame = frame.parentFrame()!;
   }
   const element = await frame.frameElement();
-  let previous: string | null | undefined = null;
-  const { value } = await settle(
-    async () => {
-      const value = await element.evaluate(
-        (iframe) =>
-          (iframe as Element)
-            .closest('[data-testid="mcp-app"]')
-            ?.querySelector('[data-generated-ui-save]')
-            ?.getAttribute('data-generated-ui-save') ?? undefined,
-      );
-      const held = value === previous;
-      previous = value;
-      return { value, held };
-    },
-    ({ value, held }) => held && value !== 'saving',
-    timeoutMs,
-  );
-  return value;
+  const observation = await element.evaluateHandle((iframe) => {
+    const host = (iframe as Element).closest('[data-testid="mcp-app"]');
+    const attribute = 'data-generated-ui-save';
+    const marker = () => host?.querySelector(`[${attribute}]`);
+    let previous = marker();
+    let current = previous?.getAttribute(attribute) ?? undefined;
+    let changed = false;
+    const observer = new MutationObserver((records) => {
+      const next = marker();
+      const value = next?.getAttribute(attribute) ?? undefined;
+      changed ||=
+        next !== previous ||
+        value !== current ||
+        records.some(
+          (record) =>
+            record.type === 'attributes' &&
+            record.target === next &&
+            record.oldValue !== value,
+        );
+      previous = next;
+      current = value;
+    });
+    if (host) {
+      observer.observe(host, {
+        subtree: true,
+        childList: true,
+        attributeFilter: [attribute],
+        attributeOldValue: true,
+      });
+    }
+    return {
+      status: () => current,
+      reset: () => {
+        changed = false;
+      },
+      outcome: () => (changed ? current : undefined),
+      disconnect: () => observer.disconnect(),
+    };
+  });
+  try {
+    const previous = await settle(
+      () => observation.evaluate((tracker) => tracker.status()),
+      (status) => status !== 'saving',
+      timeoutMs,
+    );
+    await observation.evaluate((tracker) => tracker.reset());
+    await change();
+    if (previous === 'saving') return 'saving';
+    const outcome = await settle(
+      () => observation.evaluate((tracker) => tracker.outcome()),
+      (status) => status !== undefined && status !== 'saving',
+      timeoutMs,
+    );
+    // A persistent failure can stay visible across edits without a mutation.
+    const status =
+      outcome ?? (await observation.evaluate((tracker) => tracker.status()));
+    return status === 'saved' ? outcome : status;
+  } finally {
+    await observation.evaluate((tracker) => tracker.disconnect());
+    await observation.dispose();
+    await element.dispose();
+  }
 }
 
 /** Sets a control's value in the generated view and lets the round settle. */
