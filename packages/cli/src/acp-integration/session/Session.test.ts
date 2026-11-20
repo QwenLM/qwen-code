@@ -23938,7 +23938,7 @@ describe('Session', () => {
             vi.spyOn(invocation, 'getDefaultPermission').mockImplementation(
               async (signal) => {
                 const permission = await getDefaultPermission(signal);
-                if (invocation.requiresAutoReviewOnAllow()) {
+                if (invocation.requiresAutoReviewOnAllow?.()) {
                   expect(approvalMode).toBe(ApprovalMode.DEFAULT);
                   permissionSnapshot();
                   await permissionSnapshotGate;
