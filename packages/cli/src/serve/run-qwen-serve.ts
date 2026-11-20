@@ -2135,7 +2135,10 @@ function channelServiceStartingConflictError(): Error {
     new Error(
       'Channel service is already starting. Retry after the current startup finishes.',
     ),
-    { code: 'channel_service_conflict' },
+    // `starting` distinguishes the transient exclusive-create race (no holder
+    // record was ever read) from a real holder conflict, so the boot decline
+    // gate does not latch on it — the runtime lease re-check handles the race.
+    { code: 'channel_service_conflict', starting: true },
   );
 }
 
@@ -9893,7 +9896,8 @@ async function runQwenServeImpl(
       if (
         error &&
         typeof error === 'object' &&
-        (error as { code?: unknown }).code === 'channel_service_conflict'
+        (error as { code?: unknown }).code === 'channel_service_conflict' &&
+        !(error as { starting?: unknown }).starting
       ) {
         channelHostingDeclinedByConflict = true;
         channelDeclineReason = sanitizeLogText(

@@ -70,6 +70,10 @@ afterAll(() => {
   fs.rmSync(isolatedTestRuntimeDir, { recursive: true, force: true });
 });
 
+// The first case pays this file's cold module load (~12.5s idle); the default
+// 15s timeout leaves too little margin under CI shard load.
+vi.setConfig({ testTimeout: 60_000 });
+
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
     maxSessions: 20,
@@ -293,6 +297,13 @@ describe('issue #17479 B.2: boot channel downgrade vs late workspace registratio
   }
 
   // The registration hook skips a declined restore before consuming the
+  // renderCtx JSON.stringify-quotes values containing whitespace or '=', so a
+  // TMPDIR with a space renders workspaceCwd="…"; match the rendered form so
+  // the assertions pass under any temporary directory.
+  function renderedCtxValue(value: string): string {
+    return /[\s=]/.test(value) ? JSON.stringify(value) : value;
+  }
+
   // workspace's once-per-run mark; the skip log is the deterministic settle
   // marker for the absence assertions below.
   async function waitForDeclineSkip(workspace: string) {
@@ -309,7 +320,7 @@ describe('issue #17479 B.2: boot channel downgrade vs late workspace registratio
           ),
         );
       expect(skip).toContain(
-        `workspaceCwd=${canonicalizeWorkspace(workspace)}`,
+        `workspaceCwd=${renderedCtxValue(canonicalizeWorkspace(workspace))}`,
       );
       // The skip restates the boot decline reason (the conflicting holder's
       // PID) so it stays diagnosable after the boot warn rotates out.
@@ -435,6 +446,57 @@ describe('issue #17479 B.2: boot channel downgrade vs late workspace registratio
     }
   });
 
+  it('does not latch the gate on the transient already-starting race', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-17479-starting-')),
+    );
+    const pidfile = makePidfileDeps();
+    // The exclusive-create race: no holder record is ever readable, and the
+    // reservation hits EEXIST twice (boot's two attempts) before the race
+    // clears. This downgrades the boot restore but must NOT latch the gate —
+    // no instance ever held the lease, so once the race clears a registering
+    // workspace restores normally.
+    pidfile.reserveServeServiceInfo
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+      })
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+      });
+    const daemon = makeDowngradedDaemon(pidfile);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const written = stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('');
+      expect(written).toContain('Continuing without channels.');
+      expect(written).toContain('already starting');
+      expect(daemon.factory).not.toHaveBeenCalled();
+
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      // The race cleared (third reservation succeeds): the restore fires
+      // because the transient decline did not latch the gate.
+      await vi.waitFor(() =>
+        expect(daemon.factory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspace: canonicalizeWorkspace(daemon.secondary),
+            selection: { mode: 'names', names: ['feishu'] },
+          }),
+        ),
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('lets an explicit operator selection commit clear the conflict gate', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-17479-override-')),
@@ -527,7 +589,7 @@ describe('issue #17479 B.2: boot channel downgrade vs late workspace registratio
             ),
           );
         expect(failure).toContain(
-          `workspaceCwd=${canonicalizeWorkspace(daemon.secondary)}`,
+          `workspaceCwd=${renderedCtxValue(canonicalizeWorkspace(daemon.secondary))}`,
         );
       });
       expect(daemon.factory).not.toHaveBeenCalled();
