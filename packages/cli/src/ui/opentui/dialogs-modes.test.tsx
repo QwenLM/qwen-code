@@ -1791,6 +1791,7 @@ describe('OpenTuiEffortDialog', () => {
 
   it('persists through the same path as ink and preserves static provider knobs', () => {
     const harness = renderEffortDialog('max');
+    const before = structuredClone(harness.userSettings);
     press('down');
     press('return');
 
@@ -1803,6 +1804,7 @@ describe('OpenTuiEffortDialog', () => {
     expect(harness.setValue.mock.calls.map(([, key]) => key)).toEqual([
       'model.reasoningEffort',
     ]);
+    expect(harness.userSettings).toEqual(before);
     expect(harness.generation.extra_body).toEqual({
       reasoning_effort: 'max',
       temperature: 1,
@@ -1826,12 +1828,14 @@ describe('OpenTuiEffortDialog', () => {
         samplingParams: { reasoning: { effort: 'max' } },
       },
     });
+    const before = structuredClone(harness.userSettings);
     press('down');
     press('return');
 
     expect(harness.setValue.mock.calls.map(([, key]) => key)).toEqual([
       'model.reasoningEffort',
     ]);
+    expect(harness.userSettings).toEqual(before);
     expect(harness.generation.extra_body).toEqual({
       reasoning: { effort: 'max' },
       temperature: 1,
