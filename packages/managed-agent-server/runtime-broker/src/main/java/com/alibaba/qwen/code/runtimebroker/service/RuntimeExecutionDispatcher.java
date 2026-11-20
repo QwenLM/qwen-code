@@ -7,7 +7,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
-import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
@@ -466,7 +465,7 @@ final class RuntimeExecutionDispatcher {
         return RuntimeToolMeasurements.selected(executing.getReference())
                 ? safeStage(() -> transport.executeV4(
                         context.lease(), context.session(),
-                        dispatchReference(executing, context.binding().getRequest().getScope()),
+                        dispatchReference(executing),
                         payload, grant == null ? null : capture(grant)))
                         .thenCompose(answer -> {
                             if ("settled".equals(answer.get("state"))
@@ -481,7 +480,7 @@ final class RuntimeExecutionDispatcher {
                 ? safeStage(() -> payload == null
                         ? transport.execute(context.lease(), context.session(), executing.getReference())
                         : transport.execute(context.lease(), context.session(),
-                                dispatchReference(executing, context.binding().getRequest().getScope()), payload))
+                                dispatchReference(executing), payload))
                 : safeStage(() -> transport.executeV3(context.lease(), context.session(),
                         executing.getReference(), payload, capture(grant)))
                         .handle((answer, error) -> {

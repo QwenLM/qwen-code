@@ -148,12 +148,6 @@ public final class ToolPublicationStore {
                 ToolPublicationContract.tokenHash(publicationToken), null, Access.DISPATCH);
     }
 
-    private ProducerBinding producerGrantLocked(String scope, String publicationId,
-            String publicationToken) {
-        return producerBindingWithHashLocked(scope, publicationId,
-                ToolPublicationContract.tokenHash(publicationToken), null, Access.DISPATCH);
-    }
-
     JsonNode producerMutationBindingLocked(String scope, String publicationId, String publicationToken) {
         return producerBindingLocked(scope, publicationId, publicationToken, Access.PRODUCE).binding();
     }
