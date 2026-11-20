@@ -13517,9 +13517,31 @@ exit 1
     // loud before the first record. Probed on all five cases: restoring the
     // unguarded export makes each record a gh call and drop the ::error
     // abort — the command steps get as far as the PAT identity check.
-    const realMktemp = spawnSync('bash', ['-c', 'command -v mktemp'], {
-      encoding: 'utf8',
-    }).stdout.trim();
+    const startupDir = mkdtempSync(join(tmpdir(), 'autofix-startup-env-'));
+    const startupFile = join(startupDir, 'startup.sh');
+    writeFileSync(startupFile, "printf 'runner-startup-noise\\n'\n");
+    const previousBashEnv = process.env.BASH_ENV;
+    let realMktempProbe;
+    let realMktemp;
+    try {
+      process.env.BASH_ENV = startupFile;
+      // Keep startup-file environment out of the command lookup.
+      realMktempProbe = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '-c', 'command -v mktemp'],
+        { env: { PATH: process.env.PATH }, encoding: 'utf8' },
+      );
+      expect(realMktempProbe.status).toBe(0);
+      realMktemp = realMktempProbe.stdout.trim();
+      expect(realMktemp).not.toContain('\n');
+    } finally {
+      if (previousBashEnv === undefined) {
+        delete process.env.BASH_ENV;
+      } else {
+        process.env.BASH_ENV = previousBashEnv;
+      }
+      rmSync(startupDir, { recursive: true, force: true });
+    }
     const cases = [
       {
         name: 'route',
@@ -13568,52 +13590,34 @@ exit 1
       expect(block, name).toBeTruthy();
       const dir = mkdtempSync(join(tmpdir(), 'autofix-ghcfg-'));
       try {
-        const bin = join(dir, 'bin');
-        mkdirSync(bin);
-        writeFileSync(
-          join(bin, 'mktemp'),
-          [
-            '#!/bin/bash',
-            'for a in "$@"; do',
-            '  case "$a" in *autofix-gh-config*) echo "mktemp: simulated failure: $a" >&2; exit 1 ;; esac',
-            'done',
-            `exec '${realMktemp}' "$@"`,
-            '',
-          ].join('\n'),
-        );
         const callsFile = join(dir, 'gh-calls');
-        writeFileSync(
-          join(bin, 'gh'),
-          `#!/bin/bash\nprintf '%s\\n' "$*" >> '${callsFile}'\nexit 0\n`,
-        );
-        chmodSync(join(bin, 'mktemp'), 0o755);
-        chmodSync(join(bin, 'gh'), 0o755);
-        const proc = spawnSync(
-          'bash',
-          [
-            // Runner-local startup files can prepend PATH entries ahead of
-            // the executable shims this probe owns.
-            '--noprofile',
-            '--norc',
-            '-e',
-            '-o',
-            'pipefail',
-            '-c',
-            // The scan's forced-PR retry loop sleeps between attempts on the
-            // mutant path; keep the probe fast without touching the block.
-            `sleep() { :; }\n${block.replace(/^ {10}/gm, '')}`,
-          ],
-          {
-            env: {
-              PATH: `${bin}:${process.env.PATH}`,
-              RUNNER_TEMP: dir,
-              WORKDIR: join(dir, 'workdir'),
-              GITHUB_OUTPUT: join(dir, 'github-output'),
-              ...env,
-            },
-            encoding: 'utf8',
+        // Install the command overrides in this shell, so PATH resolution
+        // cannot select a real mktemp or gh before these fixtures.
+        const script = [
+          'mktemp() {',
+          '  for arg in "$@"; do',
+          '    case "${arg}" in *autofix-gh-config*) echo "mktemp: simulated failure: ${arg}" >&2; return 1 ;; esac',
+          '  done',
+          `  command '${realMktemp}' "$@"`,
+          '}',
+          'gh() {',
+          `  printf '%s\\n' "$*" >> '${callsFile}'`,
+          '}',
+          // The scan's forced-PR retry loop sleeps between attempts on the
+          // mutant path; keep the probe fast without touching the block.
+          'sleep() { :; }',
+          block.replace(/^ {10}/gm, ''),
+        ].join('\n');
+        const proc = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
+          env: {
+            PATH: process.env.PATH,
+            RUNNER_TEMP: dir,
+            WORKDIR: join(dir, 'workdir'),
+            GITHUB_OUTPUT: join(dir, 'github-output'),
+            ...env,
           },
-        );
+          encoding: 'utf8',
+        });
         expect(proc.stdout, name).toContain(
           '::error::could not create gh config dir',
         );
