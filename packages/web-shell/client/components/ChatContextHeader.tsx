@@ -61,6 +61,12 @@ interface ChatContextHeaderProps {
   artifactsTabActive?: boolean;
   /** Shows the Local Control QR entry; hidden when omitted. */
   onOpenLocalControlSettings?: () => void;
+  /**
+   * Workspace picker for the header, used by a view whose composer leaves the
+   * workspace to the header (a live session) so the next session can start in
+   * another workspace without leaving the one being watched.
+   */
+  workspacePicker?: ReactNode;
 }
 
 export function ChatContextHeader({
@@ -83,6 +89,7 @@ export function ChatContextHeader({
   onOpenArtifacts,
   artifactsTabActive,
   onOpenLocalControlSettings,
+  workspacePicker,
 }: ChatContextHeaderProps) {
   const { t } = useI18n();
   const workspaceLabel = workspaceName ?? t('sidebar.noWorkspace');
@@ -126,6 +133,9 @@ export function ChatContextHeader({
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>
+      )}
+      {workspacePicker && (
+        <div className={styles.workspacePicker}>{workspacePicker}</div>
       )}
       <div className={styles.content}>{content}</div>
       {location && (

@@ -280,6 +280,7 @@ import type {
   ManagedAgentProvider,
   ManagedAgentWorkspace,
 } from './components/managed/managed-agent-provider';
+import { WorkspaceSelector } from './components/WorkspaceSelector';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 import { DropdownMenuItem } from './components/ui/dropdown-menu';
 import {
@@ -25063,6 +25064,40 @@ export function App({
                       }
                       workspaceName={headerWorkspaceName}
                       workspacePath={activeWorkspaceCwd}
+                      workspacePicker={
+                        effectiveSessionContext?.kind === 'live' &&
+                        composerWorkspaceSelectEnabled &&
+                        composerWorkspaces ? (
+                          <WorkspaceSelector
+                            workspaces={composerWorkspaces}
+                            disabled={!composerWorkspaceSelectEnabled}
+                            busy={workspaceMutationBusy}
+                            alwaysVisible
+                            scratchSupported={
+                              composerWorkspaceSelectEnabled &&
+                              scratchWorkspaceRegistrationSupported
+                            }
+                            existingFolderSupported={
+                              composerWorkspaceSelectEnabled &&
+                              dynamicWorkspaceRegistrationSupported
+                            }
+                            standaloneSupported={
+                              composerWorkspaceSelectEnabled &&
+                              standaloneSessionsSupported &&
+                              !lockedWorkspaceCwd
+                            }
+                            onSelectWorkspace={handleSelectComposerWorkspace}
+                            onSelectHostedWorkspace={handleSelectHostedWorkspace}
+                            onSelectStandalone={handleSelectComposerStandalone}
+                            onCreateScratch={
+                              handleCreateComposerScratchWorkspace ?? (() => {})
+                            }
+                            onOpenExistingFolder={
+                              handleOpenExistingWorkspace ?? (() => {})
+                            }
+                          />
+                        ) : undefined
+                      }
                       hideWorkspaceIcon={isChatEmptyState && composerNamesWorkspace}
                       environmentOpen={environmentPanelVisible}
                       environmentAvailable={

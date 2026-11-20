@@ -25507,6 +25507,28 @@ describe('App session callbacks', () => {
     ).toEqual(['/workspace', '/workspace-other']);
   });
 
+  it('puts a workspace picker in the header of a live session', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.sessionContext = { kind: 'live' };
+    mockWorkspace.capabilities = {
+      features: [],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/workspace-other', primary: false, trusted: true },
+      ],
+    };
+    const { container } = renderApp();
+    await flush();
+
+    const header = container.querySelector(
+      '[data-testid="chat-context-header"]',
+    );
+    expect(header).not.toBeNull();
+    expect(
+      header!.querySelector('button[aria-label="Workspace"]'),
+    ).not.toBeNull();
+  });
+
   it('keeps the workspace picker hidden in an attached projectless session', async () => {
     mockConnection.sessionId = 'session-1';
     mockConnection.sessionContext = { kind: 'standalone' };
