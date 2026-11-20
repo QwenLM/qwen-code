@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { DaemonStatusResponse } from '../serve/daemon-status.js';
 import { commandMetadata } from './command-metadata.js';
 import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -57,7 +58,15 @@ interface StatusArgs {
   detail?: boolean;
 }
 
-interface DaemonDetailSummary {
+type PartialMemory<T> = T extends object
+  ? { [K in keyof T]?: PartialMemory<T[K]> }
+  : T;
+type DaemonMemoryDetail = PartialMemory<{
+  runtime: Pick<DaemonStatusResponse['runtime'], 'process' | 'memory'>;
+  limits: Pick<DaemonStatusResponse['limits'], 'memory'>;
+}>;
+
+interface DaemonDetailSummary extends DaemonMemoryDetail {
   status: string;
   version?: string;
   uptimeMs?: number;
@@ -333,6 +342,17 @@ export async function probeHealth(
   }
 }
 
+function nonemptyStatusObject(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  return value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).length > 0
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 export function summarizeDaemonStatus(
   value: unknown,
 ): DaemonDetailSummary | undefined {
@@ -366,11 +386,32 @@ export function summarizeDaemonStatus(
   const starting = issueRecords.some(
     (issue) => issue['code'] === 'daemon_runtime_starting',
   );
+  // Preserve only the endpoint's established memory subtrees, not the rest
+  // of the runtime/limits diagnostics. Older daemons may omit any of them.
+  const process = nonemptyStatusObject(runtime?.['process']);
+  const memory = nonemptyStatusObject(runtime?.['memory']);
+  const limits = nonemptyStatusObject(response['limits']);
+  const memoryLimits =
+    limits?.['memory'] === null
+      ? null
+      : nonemptyStatusObject(limits?.['memory']);
+  const memoryDetail = {
+    ...(process || memory
+      ? {
+          runtime: {
+            ...(process ? { process } : {}),
+            ...(memory ? { memory } : {}),
+          },
+        }
+      : {}),
+    ...(memoryLimits !== undefined ? { limits: { memory: memoryLimits } } : {}),
+  } as DaemonMemoryDetail;
   const version = daemon?.['qwenCodeVersion'];
   const uptimeMs = daemon?.['uptimeMs'];
   const active = sessions?.['active'];
   const admissionInFlight = sessions?.['admissionInFlight'];
   return {
+    ...memoryDetail,
     status: response['status'],
     ...(typeof version === 'string' ? { version } : {}),
     ...(typeof uptimeMs === 'number' ? { uptimeMs } : {}),
