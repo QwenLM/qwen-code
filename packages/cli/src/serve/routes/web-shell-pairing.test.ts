@@ -102,6 +102,7 @@ describe('Web Shell pairing', () => {
       warn: vi.fn(),
       error: vi.fn(),
       raw: vi.fn(),
+      setPort: vi.fn(),
       getLogPath: () => '',
       getDaemonId: () => 'pairing-test',
       getStatus: () => ({

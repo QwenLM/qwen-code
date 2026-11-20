@@ -201,11 +201,9 @@ class WorkspaceMigrationMySqlIT {
         var otherClaim = cwd ? transaction.execute(status -> store.claimOperation("unrelated", other.sessionId(),
                 otherCwd.operation().operationId(), "owner", Duration.ofSeconds(60)).orElseThrow()) : null;
         // Keep the unrelated probe outside the uncommitted fence insert's index gap.
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id)"
-                        + " VALUES (?, ?, ?, 'unrelated', 'storage')",
-                RuntimeAdmissionFences.storageAliasKey("unrelated", "storage"),
-                RuntimeAdmissionFences.storageFenceKey("unrelated"),
-                RuntimeAdmissionFences.storageFenceKey("storage"));
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id)"
+                        + " VALUES (?, 'unrelated', 'storage')",
+                RuntimeAdmissionFences.storageAliasKey("unrelated", "storage"));
         var binding = store.findSession("migrating", original.sessionId()).orElseThrow().workspace();
         try (var migration = data.getConnection(); var pool = Executors.newFixedThreadPool(2)) {
             migration.setAutoCommit(false);
@@ -278,13 +276,11 @@ class WorkspaceMigrationMySqlIT {
 
     private void installMigrationFence(Connection migration) throws SQLException {
         try (var fence = migration.prepareStatement(
-                "INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?,"
+                "INSERT INTO ma_storage (alias_key,"
+                        + " tenant_id, storage_id, fence_operation_id) VALUES (?,"
                         + " 'migrating', 'storage', ?)")) {
             fence.setString(1, RuntimeAdmissionFences.storageAliasKey("migrating", "storage"));
-            fence.setString(2, RuntimeAdmissionFences.storageFenceKey("migrating"));
-            fence.setString(3, RuntimeAdmissionFences.storageFenceKey("storage"));
-            fence.setBytes(4, UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
+            fence.setBytes(2, UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
             fence.executeUpdate();
         }
     }
