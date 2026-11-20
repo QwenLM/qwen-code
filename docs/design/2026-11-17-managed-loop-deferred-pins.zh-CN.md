@@ -297,6 +297,13 @@ core 邻近面在本 head 整面跑而非抽样：`src/managed-runtime` 加 `src
 
 尽管如此，整栈仍在本 head 重建并重跑双臂而非承接：全量构建 **rc=0** 且 core 与 cli 的 dist 断言已刷新，jar 重建且其**四个** sidecar 与已提交契约逐字节相等，`ManagedLoopSkillTest` **19/19**（`Tests run: 19, Failures: 0, Errors: 0, Skipped: 0`），bundle 重建并断言已刷新。臂：`--loop-skill` success（session `0b114926-4cb5-48c1-b416-a99349d97dc2`、modelRounds 6、cronToolResults 3、create/list/delete 均见证）；`--loop-fire` success（session `edcbeb63-68fb-41cb-85cb-2b22ca825d5c`、schedule `asch_074e80c825c4318812ca2a13b7b121b0`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-19T17:15:00Z`、modelRounds 5）。本 head 套件：core **35/35**、scripts 元 **185/185**、cli i18n **22/22**；core `tsc --build`、eslint 与 prettier 净。第 14 轮修复只动测试，且上面那些生产变异是在链结束之后做的并字节级还原，故没有任一条臂跑在被变异的生产文本上。
 
+第十一次合入 main（合并提交 `1fb243e8dd`，2 个 incoming 提交——`7f0a4f0e06`（#17856，改 71 个 Java 文件的热路径 SQL 变更）与 `f8d4f706ea`（#17869，docs）——以 merge base `adca3e7ddc` 判定零文件重叠，delta 仍恰好 11 文件，lockfile 未变）。因 Java 面变了，整栈再次重建并重跑双臂而非承接：构建 **rc=0** 且 core 与 cli 的 dist 断言已刷新，jar 重建且其四个 sidecar 逐字节相等，`ManagedLoopSkillTest` **19/19**，bundle 重建并断言已刷新。臂：`--loop-skill` success（session `78f20402-0a2f-441d-9615-21b66959ad1a`、modelRounds 6、cronToolResults 3、create/list/delete 均见证）；`--loop-fire` success（session `8d2a1796-8e93-4765-97c6-21ef29f1a4c1`、schedule `asch_d3c527e66b9ae0c2a8a59bfc280315c2`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-19T19:28:00Z`、modelRounds 5）。套件：core **35/35**、scripts 元 **185/185**、cli i18n **22/22**。**本 head 四项必需检查全部通过。**
+
+另有两条 CI 红按实测归因，均非本 diff 所致：
+
+- **`SDK Java (full) / windows-latest / Java 21`** 红在 `ExternalShellWorkerProtocolTest.copiesALargeCaptureBlockByBlockWithoutLosingOrReorderingBytes`，报 `java.io.IOException: Cannot run program "node": CreateProcess error=206, The filename or extension is too long`，抛点在 `ProcessBuilder.start`、测试逻辑尚未执行。该用例构造 **32780 字符**的载荷，而 `ExternalShellWorkerFixture.boot` 把它作为 `--stdout=` argv 传入，故单这一个参数就 **32789 字符**——超过 Windows 的 32767 上限。引入提交是 main 的 `a27b12becf`（#17478，2026-11-19 14:04:39 +0800）；main 最近一次定时 windows run（`d9ac287c9f`，03:41:35 +0800）**早于**它，跑了 120 个类 / 1069 测试且该类 0 次出现，而此处是 121 个类 / 1091 测试。本 delta 的 `.java` 文件为 **0**、Java 模块下路径为 **0**。该上限是算术性的，故失败确定性、重跑无用；已带实测开 **#17885**，此处不改 Java。
+- **`Managed host bundle` 与 `Managed loop (shared)`** 各自红在 self-hosted 的 `Disk floor gate`——主机 `ecs-qwen-hk4-17` 85%、`ecs-qwen-hk4-11` 86%，上限 85%——该门自己的消息就指明应重跑以换到有剩余磁盘的主机（#16003）。两者均已重跑，host bundle 已通过。两者都不是必需检查。
+
 ## 开放问题
 
 无阻塞项。
