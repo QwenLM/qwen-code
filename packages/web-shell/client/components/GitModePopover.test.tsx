@@ -84,7 +84,7 @@ describe('GitModePopover worktree selection', () => {
     expect(worktreeOption().textContent).toContain('✓');
     expect(
       document.querySelector('[data-slot="popover-content"]')?.textContent,
-    ).toContain('$ git worktree add .qwen/worktrees/<slug>');
+    ).toContain('$ git worktree add --detach .qwen/worktrees/<slug>');
     expect(
       document.querySelector('[data-testid="git-mode-confirm-worktree"]'),
     ).toBeNull();

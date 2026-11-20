@@ -283,6 +283,24 @@ export class SessionOrganizationService {
     return { groups: this.sortGroups(store.groups), sessions };
   }
 
+  /** Returns undefined when the store cannot establish whether a session was organized. */
+  async hasStoredSessionOrganization(
+    sessionId: string,
+  ): Promise<boolean | undefined> {
+    try {
+      const store = await this.readStoreDocument();
+      if (!isPlainRecord(store['sessions'])) return undefined;
+      const id = sessionId.toLowerCase();
+      return Object.keys(store['sessions']).some(
+        (key) => key.toLowerCase() === id,
+      );
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? false
+        : undefined;
+    }
+  }
+
   async createGroup(input: CreateSessionGroupInput): Promise<SessionGroup> {
     const name = normalizeGroupName(input.name);
     const color = normalizeGroupColor(input.color);
@@ -466,21 +484,26 @@ export class SessionOrganizationService {
     return next;
   }
 
+  private async readStoreDocument(): Promise<Record<string, unknown>> {
+    const raw = JSON.parse(
+      await fs.readFile(this.getStorePath(), 'utf8'),
+    ) as unknown;
+    if (!isPlainRecord(raw)) {
+      throw new Error('store root is not an object');
+    }
+    if (raw['schemaVersion'] !== SCHEMA_VERSION) {
+      throw new Error(
+        `store schema is unsupported (found schemaVersion ${String(
+          raw['schemaVersion'],
+        )}, expected ${SCHEMA_VERSION})`,
+      );
+    }
+    return raw;
+  }
+
   private async readStore(): Promise<SessionOrganizationStoreV1> {
     try {
-      const raw = JSON.parse(
-        await fs.readFile(this.getStorePath(), 'utf8'),
-      ) as unknown;
-      if (!isPlainRecord(raw)) {
-        return this.handleUnreadableStore('store root is not an object');
-      }
-      if (raw['schemaVersion'] !== SCHEMA_VERSION) {
-        return this.handleUnreadableStore(
-          `store schema is unsupported (found schemaVersion ${String(
-            raw['schemaVersion'],
-          )}, expected ${SCHEMA_VERSION})`,
-        );
-      }
+      const raw = await this.readStoreDocument();
       const groups: SessionGroup[] = [];
       if (Array.isArray(raw['groups'])) {
         for (const rawGroup of raw['groups']) {

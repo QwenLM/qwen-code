@@ -16,6 +16,10 @@ From a user point of view, Qwen Code’s “internationalization” spans multip
 
 This is the CLI’s UI localization layer (i18n/l10n): it controls the language of menus, prompts, and system messages.
 
+### Web Shell and Desktop
+
+The Web Shell (including Qwen Code Desktop) reads the same `general.language` setting. Built-in UI catalogs are `en`, `zh-CN`, and `ru`. Custom packs in `~/.qwen/locales/` apply to the CLI only; they are not loaded by the Web Shell.
+
 ### Setting the UI Language
 
 Use the `/language ui` command:

@@ -111,11 +111,23 @@ async function getDependencyLicense(depName, depVersion, packageDir) {
         `--- lib/zlib/inflate.js (Zlib) ---\n\n${zlibLicense.trim()}`,
       );
     }
-    for (const supplementaryFile of await findSupplementaryLicenseFiles(
-      packageDir,
-    )) {
+    const supplementaryFiles = await findSupplementaryLicenseFiles(packageDir);
+    if (depName === 'pdfjs-dist') {
+      supplementaryFiles.push(
+        ...[
+          'LICENSE_JBIG2',
+          'LICENSE_OPENJPEG',
+          'LICENSE_PDFJS_JBIG2',
+          'LICENSE_PDFJS_OPENJPEG',
+        ].map((file) => path.join(packageDir, 'wasm', file)),
+      );
+    }
+    for (const supplementaryFile of supplementaryFiles) {
       try {
-        const content = await fs.readFile(supplementaryFile, 'utf-8');
+        const content = (await fs.readFile(supplementaryFile, 'utf-8')).replace(
+          /[ \t]+$/gm,
+          '',
+        );
         const relativeName = path
           .relative(packageDir, supplementaryFile)
           .split(path.sep)

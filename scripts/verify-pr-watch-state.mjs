@@ -18,7 +18,7 @@
  *
  * Usage:
  *   node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> \
- *     --artifact-dir <dir> [--repo <owner>/<repo>] [--state-root <dir>]
+ *     [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
  *   node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> \
  *     --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] \
  *     [--repo <owner>/<repo>] [--state-root <dir>]
@@ -135,45 +135,91 @@ export function readState(stateRoot, prNumber) {
       `state file ${path} is not a JSON object; inspect or remove it before the next round`,
     );
   }
-  // A well-formed object whose keys are ALL unknown is not a state this
-  // helper can migrate: reading it as "no state" would let --start rewrite
-  // the file from empty lists and erase a live in-flight record (R16-2).
-  // Fail closed on shape, like corrupt JSON, rather than silently reset.
-  // The legacy `inFlight` key counts only as a string head: `inFlight:true`
-  // (the old flag) or `inFlight:{…}` alone is not a migratable marker.
-  const keys = Object.keys(parsed);
-  const knownPresent = keys.some((key) =>
-    key === 'inFlight' ? typeof parsed[key] === 'string' : STATE_KEYS.has(key),
+  // A well-formed object the migration ladder cannot consume is not a state
+  // this helper can migrate: reading it as "no state" would let --start
+  // rewrite the file from empty lists and erase a live in-flight record
+  // (R16-2). The guard is DERIVED from what the ladder actually consumes, so
+  // the two cannot drift (R2-1): a key whose value the ladder rejects (a
+  // string under an array key, an empty list with no legacy marker) does not
+  // count, and an identity key plus a misspelled head marker fails closed like
+  // corrupt JSON. Every state the helper writes goes through deriveView, which
+  // emits the lists as arrays plus an integer seqCounter, so a legitimate file
+  // is never refused.
+  const bearingPresent =
+    inFlightEntries(parsed).length > 0 ||
+    verifiedEntries(parsed).length > 0 ||
+    deferredEntries(parsed).length > 0 ||
+    releasedEntries(parsed).length > 0 ||
+    Number.isInteger(parsed.seqCounter) ||
+    (parsed.retiredSeqs != null &&
+      typeof parsed.retiredSeqs === 'object' &&
+      Object.keys(parsed.retiredSeqs).length > 0);
+  // A legacy resting body predates the list/seqCounter format: it carries only
+  // identity keys and the pre-list single-marker head keys, all holding resting
+  // values (null/empty/false). The ladder consumes it as resting (every
+  // *Entries returns []), so refusing it would strand a PR whose state file
+  // holds no dedup history at all — --start/--complete/--release could never
+  // run again (R7-1). Admit it as no-state. The clause is scoped to the legacy
+  // single-marker keys: a body carrying a *Heads LIST key (even empty) is the
+  // new format, which always writes seqCounter, so an empty list with no
+  // bearing entry stays refused. An UNKNOWN key (a misspelled head marker) is
+  // neither identity nor legacy-head, so the R16-2 refusal still fires for an
+  // identity key plus an unknown spelling.
+  const IDENTITY_KEYS = new Set([
+    'pr',
+    'repo',
+    'round',
+    'artifactDir',
+    'startedAt',
+    'completedAt',
+    'verdict',
+    'commentId',
+  ]);
+  const LEGACY_HEAD_KEYS = new Set([
+    'inFlightHead',
+    'inFlight',
+    'verifiedHead',
+    'previousHead',
+  ]);
+  const restingValue = (value) =>
+    value === null ||
+    value === false ||
+    value === '' ||
+    (Array.isArray(value) && value.length === 0) ||
+    (typeof value === 'object' &&
+      value !== null &&
+      Object.keys(value).length === 0);
+  const restingView = Object.entries(parsed).every(
+    ([key, value]) =>
+      IDENTITY_KEYS.has(key) ||
+      (LEGACY_HEAD_KEYS.has(key) && restingValue(value)),
   );
-  if (keys.length > 0 && !knownPresent) {
+  if (Object.keys(parsed).length > 0 && !bearingPresent && !restingView) {
     throw new Error(
-      `state file ${path} has no recognised state key; inspect or remove it before the next round`,
+      `state file ${path} carries no state-bearing entry the migration ladder can consume (a *Heads key must hold an array of {head} entries; inFlight/inFlightHead a non-empty string head); inspect it before removing — removal discards the verified/deferred dedup history`,
+    );
+  }
+  // A *Heads key that is PRESENT but holds a non-array value is a marker the
+  // ladder cannot consume and would silently erase on the next --start, even
+  // when another bearing key (an integer seqCounter, which every written file
+  // carries) admits the file above. Refuse it independently so the guard's
+  // "fails closed rather than admitted and erased" claim holds for every
+  // written shape, not only the identity-only one (R6-1). The list keys are
+  // always arrays in a written state; an empty array is the legitimate resting
+  // shape and stays admitted via seqCounter.
+  const unusableListKey = [
+    'inFlightHeads',
+    'verifiedHeads',
+    'deferredHeads',
+    'releasedHeads',
+  ].find((key) => parsed[key] !== undefined && !Array.isArray(parsed[key]));
+  if (unusableListKey) {
+    throw new Error(
+      `state file ${path} carries a ${unusableListKey} value the migration ladder cannot consume (a *Heads key must hold an array of {head} entries, not a bare string or other non-array); inspect it before removing — removal discards the verified/deferred dedup history`,
     );
   }
   return parsed;
 }
-
-/** The state keys the migration ladder recognises (R16-2 shape guard). */
-const STATE_KEYS = new Set([
-  'pr',
-  'repo',
-  'round',
-  'artifactDir',
-  'startedAt',
-  'completedAt',
-  'verdict',
-  'commentId',
-  'seqCounter',
-  'verifiedHeads',
-  'verifiedHead',
-  'previousHead',
-  'inFlightHeads',
-  'inFlightHead',
-  'inFlight',
-  'deferredHeads',
-  'releasedHeads',
-  'retiredSeqs',
-]);
 
 /**
  * OIDs are quoted at every length from 7 to 40; compare by prefix. An
@@ -197,19 +243,23 @@ function hasHead(entry) {
 
 /** In-flight entries, migrating the pre-list single-marker shape. */
 function inFlightEntries(existing) {
-  if (Array.isArray(existing?.inFlightHeads)) {
-    return existing.inFlightHeads.filter(hasHead);
-  }
-  // A hand-written legacy marker may name the head in `inFlight` itself
-  // (a string) rather than `inFlightHead`; accept either spelling so it
-  // still blocks a second round instead of reading as "no round in flight".
+  const list = Array.isArray(existing?.inFlightHeads)
+    ? existing.inFlightHeads.filter(hasHead)
+    : null;
+  // A non-empty list is authoritative (it is what deriveView writes). Only
+  // when the list is absent or EMPTY does a hand-written legacy marker name
+  // the head — in `inFlightHead` alone or in `inFlight` itself (a string).
+  // Consuming it even alongside an empty `inFlightHeads: []` (the helper's
+  // resting shape) is what makes the marker block a second round instead of
+  // being read as empty and erased (R1-1, R2-1).
+  if (list && list.length > 0) return list;
   const legacyHead =
     typeof existing?.inFlightHead === 'string' && existing.inFlightHead !== ''
       ? existing.inFlightHead
       : typeof existing?.inFlight === 'string' && existing.inFlight !== ''
         ? existing.inFlight
         : null;
-  if (existing?.inFlight && legacyHead) {
+  if (legacyHead) {
     return [
       {
         head: legacyHead,
@@ -217,12 +267,12 @@ function inFlightEntries(existing) {
         // operation wrote last, verified or in-flight — so the migrated
         // marker matches completion by head alone (round null).
         round: null,
-        artifactDir: existing.artifactDir ?? null,
-        startedAt: existing.startedAt ?? null,
+        artifactDir: existing?.artifactDir ?? null,
+        startedAt: existing?.startedAt ?? null,
       },
     ];
   }
-  return [];
+  return list ?? [];
 }
 
 /** Verified entries, migrating the pre-list verifiedHead/previousHead pair. */
@@ -765,6 +815,7 @@ export function completeRound(
       state,
       deferred,
       keptVerdict,
+      artifactDir: dir,
     };
   });
 }
@@ -843,11 +894,19 @@ export function releaseRound(stateRoot, { pr, head, round, repo }) {
 }
 
 const HELP = `Usage:
-  node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> --artifact-dir <dir> [--repo <owner>/<repo>] [--state-root <dir>]
+  node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
   node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
   node verify-pr-watch-state.mjs <pr> --release --head <oid> [--round <n>] [--repo <owner>/<repo>] [--state-root <dir>]
 
 Owns .qwen/tmp/verify-pr-watch-<pr>.json so rounds never hand-write it.
+Register with --start AHEAD of prepare (R17-2): --artifact-dir is optional on
+--start because prepare has not printed the directory yet; a round killed in
+the prepare window then leaves a recoverable in-flight marker, not a silently
+dropped head. Record the directory prepare printed at --complete
+(--artifact-dir <dir>). A completion that omits it inherits the in-flight
+marker's directory when the start carried one, else an earlier verdict's
+directory for the same head, else none — a non-inconclusive verdict that
+resolves to none warns that it has no evidence directory.
 --start exits 3 when the head is already verified or any round is in flight
 for the PR (one round per PR). Every verb exits 3 when the state belongs to
 another repo (a PR number is only unique within its repository); an omitted
@@ -926,9 +985,9 @@ function parseArgs(argv) {
   if (out.round !== null && (!Number.isInteger(out.round) || out.round <= 0)) {
     throw new Error(`--round must be a positive integer\n\n${HELP}`);
   }
-  if (out.start && !out.artifactDir) {
-    throw new Error(`--start requires --artifact-dir\n\n${HELP}`);
-  }
+  // --artifact-dir is optional on --start: registration runs ahead of prepare
+  // (R17-2), before the directory exists. The directory is recorded at
+  // --complete; a start that already knows it may still pass it.
   // A valueless or empty --artifact-dir on --complete would blank the
   // recorded directory ('' is not null, so the ?? fallback never fires);
   // reject it like every sibling flag.
@@ -1095,6 +1154,16 @@ function main(argv) {
               : `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded inconclusive for ${args.head} (not verified; the head stays startable and is re-deferred for the next round) at ${result.path}\n`
           : `verify-pr watch-state: PR ${args.pr} round ${args.round} verified ${args.head} (${args.verdict}) at ${result.path}\n`,
       );
+      // Registration runs ahead of prepare, so the in-flight marker carries no
+      // directory; a non-inconclusive completion that resolves to no directory
+      // files a verdict with no machine-readable pointer to its evidence (R1-3).
+      // Disclose it rather than silently dropping the link; --artifact-dir stays
+      // optional so a replayed completion can still inherit a prior directory.
+      if (args.verdict !== 'inconclusive' && result.artifactDir === null) {
+        process.stderr.write(
+          `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded ${args.verdict} with no artifact directory (--artifact-dir omitted and the marker carries none); pass --artifact-dir <dir> prepare printed to link the verdict to its evidence\n`,
+        );
+      }
       printDeferred(args.pr, result.deferred);
     } else {
       const result = releaseRound(root, args);

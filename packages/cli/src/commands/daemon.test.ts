@@ -69,6 +69,7 @@ import {
 } from './daemon.js';
 import {
   readDaemonToken,
+  writeDaemonDiscovery,
   writeDaemonToken,
   type DaemonDiscoveryEntry,
   type DaemonDiscoveryRecord,
@@ -835,6 +836,157 @@ describe('qwen daemon command', () => {
     ).toBe(true);
   });
 
+  it('emits memory only with detail JSON through the status command', async () => {
+    const dir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-memory-status-'),
+    );
+    vi.stubEnv('QWEN_RUNTIME_DIR', dir);
+    const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request) =>
+        new Response(
+          JSON.stringify({
+            v: 1,
+            status: 'ok',
+            runtime: { process: { rss: 4096 } },
+            limits: { memory: null },
+          }),
+        ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      writeDaemonDiscovery({ ...entry(4170).record, pidNamespace: 'pid:[2]' });
+      const run = (detail: boolean) =>
+        yargs([])
+          .exitProcess(false)
+          .fail(false)
+          .command(daemonCommand)
+          .parseAsync([
+            'daemon',
+            'status',
+            '--json',
+            ...(detail ? ['--detail'] : []),
+          ]);
+      await run(true);
+      const detailed = JSON.parse(
+        stdout.mock.calls.map(([text]) => String(text)).join(''),
+      );
+      expect(detailed.detail).toMatchObject({
+        runtime: { process: { rss: 4096 } },
+        limits: { memory: null },
+      });
+      stdout.mockClear();
+      fetchMock.mockClear();
+      await run(false);
+      expect(
+        JSON.parse(stdout.mock.calls.map(([text]) => String(text)).join('')),
+      ).not.toHaveProperty('detail');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/health');
+    } finally {
+      stdout.mockRestore();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves memory figures, nulls and missing fields in JSON detail', () => {
+    const process = {
+      rss: 1024,
+      heapTotal: 128,
+      heapUsed: 64,
+      external: 0,
+      arrayBuffers: 0,
+    };
+    const memory = {
+      registeredWorkspaces: 3,
+      activeAcpChildren: 2,
+      committedAcpChildren: 2,
+      childRssCoverage: 'active_children',
+      children: {
+        rssBytes: 1048576,
+        sampled: 1,
+        oldestReadingAgeMs: 42,
+        heap: null,
+      },
+      modeled: {
+        recommendedShareAtRegisteredMb: 512,
+        recommendedShareAtActiveMb: 768,
+      },
+    };
+    const limits = {
+      enforced: false,
+      configuredBudgetMb: 4096,
+      effectiveBudgetMb: 2048,
+      journalGrowth: null,
+      childHeap: null,
+    };
+    const summary = summarizeDaemonStatus({
+      v: 1,
+      status: 'ok',
+      runtime: { process, memory, secret: 'omit' },
+      limits: { memory: limits, secret: 'omit' },
+    });
+    expect(summary).toMatchObject({
+      runtime: { process, memory },
+      limits: { memory: limits },
+    });
+    expect(JSON.stringify(summary)).not.toContain('secret');
+    expect(formatDaemonDetail(entry(4170).record, summary!)).toEqual(
+      formatDaemonDetail(entry(4170).record, { status: 'ok', issues: [] }),
+    );
+    expect(summarizeDaemonStatus({ v: 1, status: 'ok' })).toEqual({
+      status: 'ok',
+      issues: [],
+    });
+    expect(
+      summarizeDaemonStatus({
+        v: 1,
+        status: 'ok',
+        limits: { memory: null },
+        runtime: {
+          memory: {
+            childRssCoverage: 'primary_only',
+            children: {
+              rssBytes: 0,
+              sampled: 0,
+              oldestReadingAgeMs: null,
+              heap: null,
+            },
+          },
+        },
+      }),
+    ).toMatchObject({
+      limits: { memory: null },
+      runtime: {
+        memory: {
+          childRssCoverage: 'primary_only',
+          children: {
+            rssBytes: 0,
+            sampled: 0,
+            oldestReadingAgeMs: null,
+            heap: null,
+          },
+        },
+      },
+    });
+  });
+
+  it.each([undefined, [], {}, 'unavailable', 0])(
+    'omits unavailable memory blocks: %j',
+    (value) => {
+      expect(
+        summarizeDaemonStatus({
+          v: 1,
+          status: 'ok',
+          runtime: { process: value, memory: value },
+          limits: { memory: value },
+        }),
+      ).toEqual({ status: 'ok', issues: [] });
+    },
+  );
+
   it('reads daemon status detail over HTTP', async () => {
     vi.stubGlobal(
       'fetch',
@@ -845,7 +997,11 @@ describe('qwen daemon command', () => {
               v: 1,
               status: 'ok',
               daemon: { qwenCodeVersion: '0.25.3', uptimeMs: 1_000 },
-              runtime: { sessions: { active: 0 } },
+              runtime: {
+                sessions: { active: 0 },
+                process: { rss: 1024, heapUsed: 64 },
+              },
+              limits: { memory: null },
               issues: [],
             }),
             { status: 200 },
@@ -855,7 +1011,15 @@ describe('qwen daemon command', () => {
     try {
       await expect(
         fetchDaemonDetail(entry(4170).record, true),
-      ).resolves.toMatchObject({ status: 'ok', version: '0.25.3' });
+      ).resolves.toMatchObject({
+        status: 'ok',
+        version: '0.25.3',
+        runtime: { process: { rss: 1024, heapUsed: 64 } },
+        limits: { memory: null },
+      });
+      expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain(
+        '/daemon/status?detail=summary',
+      );
     } finally {
       vi.unstubAllGlobals();
     }

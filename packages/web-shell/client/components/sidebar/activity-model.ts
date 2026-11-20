@@ -1,4 +1,5 @@
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import { hasLiveWork } from '../../session-catalog/session-live-work';
 import { getScheduledTaskSessionGroup } from './scheduled-task-session-groups';
 import { comparePinnedSectionSessions } from './pinned-session-order';
 
@@ -51,12 +52,7 @@ export function activityState(entry: ActivityEntry): ActivityState {
   if (session.isWaitingForPermission) return 'approval';
   if (session.hasTurnError) return 'error';
   if (isActivityUnread(entry)) return 'unread';
-  if (
-    session.hasActivePrompt ||
-    session.activeWorkState === 'active' ||
-    session.hasRunningBackgroundTasks
-  )
-    return 'active';
+  if (hasLiveWork(session)) return 'active';
   return 'idle';
 }
 
@@ -69,13 +65,16 @@ export function activityNeedsAttention(entry: ActivityEntry): boolean {
 export function isActivityEligible(
   entry: ActivityEntry,
   preferences: ActivityPreferences,
+  includeChildren = false,
 ): boolean {
   const { session } = entry;
   return (
     !session.isArchived &&
     session.sourceType !== 'qwen-live' &&
     !session.sourceId?.startsWith('realtime_voice:') &&
-    (!session.parentSessionId || session.isPinned === true) &&
+    (includeChildren ||
+      !session.parentSessionId ||
+      session.isPinned === true) &&
     (preferences.scheduled ||
       (session.sourceType !== 'scheduled_task' &&
         !getScheduledTaskSessionGroup(session)))

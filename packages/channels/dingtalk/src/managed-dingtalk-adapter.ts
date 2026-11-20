@@ -4,25 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
+  fitInboundText,
   MANAGED_OUTBOUND_LIMIT,
   resolvePrivatePolicy,
 } from '@qwen-code/channel-base';
 import type {
+  ManagedChannelCapabilities,
   ManagedChannelPolicy,
   ManagedInboundEvent,
   ManagedClaimedDelivery,
   ManagedChannelControlPlane,
 } from '@qwen-code/channel-base';
 import {
+  MANAGED_CARD_PROGRESS_LIMIT,
   MANAGED_DINGTALK_PENDING_LIMIT,
   ManagedDingtalkStateStore,
   RECENT_LIMIT,
   WEBHOOK_LIMIT,
 } from './managed-state.js';
-import type { ManagedDingtalkState, ManagedReceipt } from './managed-state.js';
+import type {
+  ManagedDingtalkCardProgress,
+  ManagedDingtalkState,
+  ManagedReceipt,
+} from './managed-state.js';
 
 export type { ManagedReceipt } from './managed-state.js';
 
@@ -46,6 +53,12 @@ export interface DingtalkSettings {
   clientId: string;
   clientSecret: string;
   pollInterval: number;
+  /**
+   * True when a configured pollInterval was rejected and the default used.
+   * Reported by dingtalkSettings itself so the constructor's diagnostic
+   * never re-derives the clamp decision (#17396 R1-3).
+   */
+  pollIntervalRewritten?: boolean;
 }
 
 /** A connected stream the adapter reads robot messages from. */
@@ -65,6 +78,20 @@ export interface ManagedDingtalkAdapterDeps {
     onMessage: (messageId: string, data: string) => boolean,
   ) => ManagedDingtalkStreamClient;
   readonly sendWebhook: (webhook: string, text: string) => Promise<void>;
+  /**
+   * Render one segment into the delivery's provider-native card (H5e).
+   * `create` selects createAndDeliver versus a full-snapshot updateInstance
+   * edit. Failures carry `.definitive` exactly like sendWebhook, so the
+   * adapter's rejected/unknown arm is surface-agnostic. Optional: an adapter
+   * without card deps keeps the text path.
+   */
+  readonly sendCardSegment?: (input: {
+    outTrackId: string;
+    templateId: string;
+    target: { chatId: string; isGroup: boolean };
+    body: string;
+    create: boolean;
+  }) => Promise<void>;
   readonly lock: (
     directory: string,
     onCompromised: () => void,
@@ -84,6 +111,12 @@ export interface ManagedDingtalkAdapterOptions {
 }
 
 const CLAIM_BATCH = 16;
+const DEFAULT_POLL_INTERVAL = 2_000;
+// Shared by the clamp and the operator-facing diagnostic so a bound change
+// cannot leave the message stating a range the code no longer enforces
+// (#17396 R1-3).
+const MIN_POLL_INTERVAL = 250;
+const MAX_POLL_INTERVAL = 2_147_483_647;
 const INSTANCE_SCOPED_REFUSALS = new Set([
   'workspace_not_found',
   'workspace_forbidden',
@@ -92,18 +125,68 @@ const INSTANCE_SCOPED_REFUSALS = new Set([
 ]);
 const INSTANCE_REFUSAL_DROP_LIMIT = 1;
 const CHANNEL_NOT_FOUND = 'channel_not_found';
-// The wire's text bound (the control plane's Jakarta @Size) and the Harness
-// envelope's byte line, mirrored locally to keep this package free of core
-// imports; the overhead allowance covers the event's JSON metadata around the
-// text. Both match the email reference adapter's clamp.
-const MAX_WIRE_TEXT_CHARS = 32_000;
-const ENVELOPE_BYTE_LIMIT = 64 * 1024;
-const TEXT_ENVELOPE_OVERHEAD_BYTES = 4096;
+
+// H5e of #12827: the card body bound, in UTF-16 units, mirroring the Legacy
+// status card's CONTENT_LIMIT. A ledger segment can be 48 KiB of UTF-8 and a
+// reply up to 64 of them, so a card cannot carry every reply; the overflow
+// falls back to the text path rather than truncating content the receipts
+// would then claim as delivered.
+export const MANAGED_CARD_CONTENT_LIMIT = 20_000;
+
+/**
+ * The deterministic provider-side handle of one delivery's card. A pure
+ * function of the delivery identity, so a restart re-derives the same handle
+ * and never creates a second card, while a resend (a new deliveryId) gets its
+ * own. 45 characters, inside the provider's 64-character outTrackId bound; the
+ * prefix mirrors the Legacy qwen-status-/qwen-result- convention.
+ */
+export function managedCardOutTrackId(deliveryId: string): string {
+  return `qwen-managed-${createHash('sha256')
+    .update(deliveryId)
+    .digest('hex')
+    .slice(0, 32)}`;
+}
+
+/**
+ * The operator-authored card template id from the channel config, or undefined
+ * when absent or unusable. Reuses the credential rule (validCredential) rather
+ * than restating its CR/LF/NUL predicate, so the next hardening of that rule
+ * lands in one copy (R1-10); a copy-paste artifact cannot reach the card API.
+ */
+export function dingtalkCardTemplateId(
+  config: Readonly<Record<string, unknown>>,
+): string | undefined {
+  const raw = config['cardTemplateId'];
+  if (!validCredential(raw)) return undefined;
+  return raw.trim();
+}
+
+/**
+ * The settled delivery state a receipt answer surfaces, if any. The control
+ * plane returns the delivery view (carrying `state`); a double that does not
+ * surface it resolves to undefined, which reads as "not provably terminal".
+ */
+function settledDeliveryState(settled: unknown): string | undefined {
+  if (settled && typeof settled === 'object') {
+    const state = (settled as { state?: unknown }).state;
+    if (typeof state === 'string') return state;
+  }
+  return undefined;
+}
 
 interface InboxItem {
   messageId: string;
   data: string;
 }
+
+/**
+ * The surface one segment renders into. A text decision carries the prior card
+ * progress when the text is an overflow fallback, so the loop persists the
+ * `mode: 'text'` switch; a plain text decision (no card engaged) carries none.
+ */
+type CardDecision =
+  | { render: 'text'; fallback?: ManagedDingtalkCardProgress }
+  | { render: 'card'; outTrackId: string; body: string; create: boolean };
 
 export function dingtalkSettings(
   config: Readonly<Record<string, unknown>>,
@@ -114,16 +197,17 @@ export function dingtalkSettings(
     throw new Error('DingTalk channel requires a clientId.');
   if (!validCredential(clientSecret))
     throw new Error('DingTalk channel requires a clientSecret.');
-  const pollInterval = Number(config['pollInterval'] ?? 2_000);
+  const rawInterval = config['pollInterval'];
+  const pollInterval = Number(rawInterval ?? DEFAULT_POLL_INTERVAL);
+  const intervalAccepted =
+    Number.isSafeInteger(pollInterval) &&
+    pollInterval >= MIN_POLL_INTERVAL &&
+    pollInterval <= MAX_POLL_INTERVAL;
   return {
     clientId: (clientId as string).trim(),
     clientSecret: (clientSecret as string).trim(),
-    pollInterval:
-      Number.isSafeInteger(pollInterval) &&
-      pollInterval >= 250 &&
-      pollInterval <= 2_147_483_647
-        ? pollInterval
-        : 2_000,
+    pollInterval: intervalAccepted ? pollInterval : DEFAULT_POLL_INTERVAL,
+    pollIntervalRewritten: rawInterval !== undefined && !intervalAccepted,
   };
 }
 
@@ -137,6 +221,9 @@ function validCredential(value: unknown): value is string {
 export class ManagedDingtalkAdapter {
   readonly settings: DingtalkSettings;
   readonly policy: ManagedChannelPolicy;
+  /** H5e: DingTalk renders one delivery as one card, edited per segment. */
+  readonly capabilities: ManagedChannelCapabilities = { cards: true };
+  private readonly cardTemplateId?: string;
   private readonly store: ManagedDingtalkStateStore;
   private readonly controlPlane: ManagedChannelControlPlane;
   private readonly deps: ManagedDingtalkAdapterDeps;
@@ -151,9 +238,14 @@ export class ManagedDingtalkAdapter {
   private abort?: AbortController;
   private registeredGeneration?: number;
   private instanceStalled = false;
+  private loggedNoClaimSlot = false;
+  private loggedAcceptFailure = false;
+  private loggedNoReplyTarget = false;
+  private loggedSettleFailure = false;
 
   constructor(options: ManagedDingtalkAdapterOptions) {
     this.settings = dingtalkSettings(options.config);
+    this.cardTemplateId = dingtalkCardTemplateId(options.config);
     const senderPolicy = resolvePrivatePolicy(options.config);
     if (senderPolicy === 'pairing') {
       // The managed policy shape has no pairing arm; silently coercing it to
@@ -179,11 +271,34 @@ export class ManagedDingtalkAdapter {
       options.name,
       options.cwd,
       this.settings.clientId,
+      options.controlPlane.destinationKey ?? '',
     );
     this.controlPlane = options.controlPlane;
     this.deps = options.deps;
     this.log =
       options.deps.log ?? ((line) => process.stderr.write(`${line}\n`));
+    // The clamp in dingtalkSettings is silent; say so when it reports a
+    // rewrite, or an operator tuning the poll rate sees no effect and no
+    // explanation (#17173 R12). The decision and the bounds come from the
+    // settings clamp itself, never re-derived here (#17396 R1-3).
+    if (this.settings.pollIntervalRewritten) {
+      this.log(
+        `Managed DingTalk pollInterval ${String(options.config['pollInterval'])} is not an integer in [${MIN_POLL_INTERVAL}, ${MAX_POLL_INTERVAL}]; using ${this.settings.pollInterval} ms.`,
+      );
+    }
+    // A configured-but-unusable template id silently disables cards forever;
+    // announce the refusal once (the fact, not the value) so "cards never
+    // appear" has a diagnosable cause, like the pollInterval rewrite above.
+    // Non-fatal: without a usable template the adapter stays on the text path
+    // (R1-10).
+    if (
+      options.config['cardTemplateId'] !== undefined &&
+      this.cardTemplateId === undefined
+    ) {
+      this.log(
+        'Managed DingTalk cardTemplateId is configured but unusable (not a non-empty string, or it contains CR/LF/NUL); cards are disabled and replies use the text path.',
+      );
+    }
     this.pollLoop = options.pollLoop ?? true;
   }
 
@@ -215,7 +330,41 @@ export class ManagedDingtalkAdapter {
       );
     }
     try {
-      this.state = this.store.load() ?? {
+      const loaded = this.store.load();
+      // The upgrade to per-registration ledgers strands the legacy
+      // managed-state.json: make the drop explicit, never silent. Detect it
+      // even when a keyed ledger already exists — a rollback to the
+      // pre-upgrade build can stage fresh legacy claims after the upgrade
+      // (R2-6). The legacy ledger is not adopted — that would replay one
+      // registration's pending into another. It is archived only once the
+      // start succeeds (below), so a failed first start leaves the file for a
+      // rollback to recover (R3-2).
+      const legacy = this.store.strandedLegacyLedger();
+      if (legacy) {
+        // An unreadable legacy is not an empty one: its counts are unknown and
+        // any claims it held are stranded (R3-1). Name the inbound and outbound
+        // consequences separately so an outbound-only strand does not report
+        // lost inbound messages, and a quiescent 0/0 legacy reports no loss
+        // (R2-1).
+        const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
+        const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
+        let consequence = '';
+        if (!legacy.readable) {
+          consequence =
+            ' Its contents could not be read, so any staged-but-unadmitted claims it held are stranded.';
+        } else {
+          if (legacy.pending > 0)
+            consequence +=
+              ' Its staged-but-unadmitted claims were acked to the provider and are lost.';
+          if (legacy.outbound > 0)
+            consequence +=
+              ' Its un-receipted outbound segments were dropped, so their delivery status is unknown.';
+        }
+        this.log(
+          `Managed DingTalk upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
+        );
+      }
+      this.state = loaded ?? {
         version: 1,
         generation: 1,
         pending: [],
@@ -233,6 +382,10 @@ export class ManagedDingtalkAdapter {
       this.persist();
       this.abort = new AbortController();
       this.running = true;
+      this.loggedNoClaimSlot = false;
+      this.loggedAcceptFailure = false;
+      this.loggedNoReplyTarget = false;
+      this.loggedSettleFailure = false;
       this.registeredGeneration = undefined;
       this.stream = this.deps.createStreamClient(
         this.settings,
@@ -249,6 +402,22 @@ export class ManagedDingtalkAdapter {
       // adapter the CLI would then park on.
       if (!this.running || this.ownershipLost)
         throw new Error('Managed DingTalk adapter stopped during connection.');
+      // The start succeeded, so archive the reported legacy: a static legacy is
+      // not re-announced on every later start, and a second registration of the
+      // entry is not told the first registration's claims were its own (R2-6).
+      // A failed start above leaves it untouched for a rollback to recover
+      // (R3-2); the notice then simply repeats on the retry.
+      if (legacy) {
+        const archived = this.store.archiveStrandedLegacy();
+        // The notice above names the legacy path, which this rename moves; name
+        // the archived path too so an operator following the notice can still
+        // find the preserved claims instead of hitting ENOENT (R4-1).
+        if (archived) {
+          this.log(
+            `Managed DingTalk archived the legacy ledger to ${archived}; the claims it held are preserved there for inspection.`,
+          );
+        }
+      }
       if (this.pollLoop) this.loop = this.runLoop();
     } catch (error) {
       this.stop();
@@ -292,15 +461,37 @@ export class ManagedDingtalkAdapter {
       this.registeredGeneration === 0 ||
       (this.state?.pending.length ?? 0) >= MANAGED_DINGTALK_PENDING_LIMIT
     ) {
-      this.log(
-        `Managed DingTalk has no durable claim slot; message ${messageId} is left unacked for redelivery.`,
-      );
+      // Log only on the transition into the outage: during a stall every
+      // redelivery meets this gate, and a line per frame would drown the
+      // log (#17173 R12). The next accepted frame re-arms the line.
+      if (!this.loggedNoClaimSlot) {
+        this.loggedNoClaimSlot = true;
+        this.log(
+          `Managed DingTalk has no durable claim slot; message ${messageId} is left unacked for redelivery.`,
+        );
+      }
       return false;
     }
     try {
-      this.stageInbound({ messageId, data });
+      // Only a staged claim is an acceptance: a skipped frame also returns
+      // normally (it is acked), and must not re-arm the outage latches.
+      if (this.stageInbound({ messageId, data })) {
+        this.loggedNoClaimSlot = false;
+        this.loggedAcceptFailure = false;
+        this.loggedNoReplyTarget = false;
+      }
       return true;
-    } catch {
+    } catch (error) {
+      // A failed save leaves the frame unacked (LATER); say why, or a disk
+      // outage reads as silent message loss (#17173 R10). Latched like the
+      // no-slot line: a persistent store failure redelivers every frame, and
+      // a line per redelivery would drown the log (#17396 R1-2).
+      if (!this.loggedAcceptFailure) {
+        this.loggedAcceptFailure = true;
+        this.log(
+          `Managed DingTalk could not durably accept message ${messageId}: ${persistErrorText(error)}; it is left unacked for redelivery.`,
+        );
+      }
       return false;
     }
   }
@@ -339,8 +530,9 @@ export class ManagedDingtalkAdapter {
   // before the provider is told the frame was received and a hard kill in the
   // window before the next tick cannot lose it. The async submit() is left to
   // the tick (resubmitPending). A store.save() failure throws and onMessage
-  // returns false (LATER) so the provider redelivers.
-  private stageInbound(item: InboxItem): void {
+  // returns false (LATER) so the provider redelivers. Returns whether a claim
+  // was staged: a skipped frame is acked too, but is not an acceptance.
+  private stageInbound(item: InboxItem): boolean {
     const state = this.state!;
     let parsed: Record<string, unknown>;
     try {
@@ -349,7 +541,7 @@ export class ManagedDingtalkAdapter {
       this.log(
         `Managed DingTalk message ${item.messageId} is not JSON; skipped.`,
       );
-      return;
+      return false;
     }
     const conversationId = str(parsed['conversationId']);
     const sessionWebhook = str(parsed['sessionWebhook']);
@@ -375,11 +567,32 @@ export class ManagedDingtalkAdapter {
         `Managed DingTalk group message ${item.messageId} is skipped; the managed path serves private chats only.`,
       );
       skip();
-      return;
+      return false;
     }
     if (!conversationId || !senderId || !text) {
+      // A non-text or unroutable frame is acked and dropped; leave a line so
+      // the drop is visible instead of silent (#17173 R12). Name the actual
+      // cause: a non-text frame carrying both ids is the common trigger and
+      // must not read as a malformed frame (#17396 R1-4). Only the messageId
+      // and the field/msgtype are logged — never the text or the webhook.
+      const msgtype = str(parsed['msgtype']);
+      const missing = [
+        !conversationId ? 'conversationId' : undefined,
+        !senderId ? 'senderId' : undefined,
+        !text ? 'text' : undefined,
+      ].filter((field): field is string => field !== undefined);
+      const reason =
+        missing.length === 1 &&
+        missing[0] === 'text' &&
+        msgtype &&
+        msgtype !== 'text'
+          ? `is not a text frame (msgtype ${msgtype})`
+          : `is missing ${missing.join(', ')}`;
+      this.log(
+        `Managed DingTalk message ${item.messageId} ${reason}; skipped.`,
+      );
       skip();
-      return;
+      return false;
     }
     // Evaluate the allowlist before touching the cache: a sender the policy
     // refuses must not spend the webhook-cache budget admission depends on
@@ -389,7 +602,7 @@ export class ManagedDingtalkAdapter {
         `Managed DingTalk sender ${senderId} is not allowed; message skipped.`,
       );
       skip();
-      return;
+      return false;
     }
     // Remember the newest webhook for the conversation: the reply may arrive
     // after this webhook's own message is long gone. Only private frames from
@@ -401,19 +614,28 @@ export class ManagedDingtalkAdapter {
     // A frame with no usable reply target — neither a committed sessionWebhook
     // nor one cached for the conversation — can never be answered; drop it at
     // admission instead of spending a claim slot and control-plane work on a
-    // reply the send path would only reject (#17173 R1-32). Own-key membership,
-    // not truthiness: a conversationId naming an Object.prototype member
-    // ('constructor', 'toString', ...) must not resolve on an empty cache
-    // (#17173 R2-2).
-    if (!Object.hasOwn(state.webhooks, conversationId)) {
+    // reply the send path would only reject (#17173 R1-32).
+    const cached = this.cachedWebhook(conversationId);
+    if (cached === undefined) {
+      // Eviction of a definitively refused webhook makes this a routine
+      // path; leave a line so the acked drop is diagnosable (#17396 R1-1).
+      // Latched: a dead cache entry lands a whole burst here, and the gate
+      // runs before the recent-window dedupe. Only ids are logged — the
+      // webhook is a bearer capability.
+      if (!this.loggedNoReplyTarget) {
+        this.loggedNoReplyTarget = true;
+        this.log(
+          `Managed DingTalk message ${item.messageId} has no sessionWebhook and none cached for conversation ${conversationId}; skipped.`,
+        );
+      }
       skip();
-      return;
+      return false;
     }
     // A webhook-less frame admitted on the cached entry still counts as seen:
     // refresh its recency so the busiest conversation is not the one evicted
     // (#17173 R3-4).
     if (!sessionWebhook) {
-      this.touchWebhook(conversationId, state.webhooks[conversationId]);
+      this.touchWebhook(conversationId, cached);
     }
     // Dedupe against both the settled window and the in-flight claims: a frame
     // redelivered while its claim is still pending (its admission answer was
@@ -422,7 +644,7 @@ export class ManagedDingtalkAdapter {
       state.recent.includes(eventId) ||
       state.pending.some((entry) => entry.eventId === eventId)
     ) {
-      return;
+      return false;
     }
     const event: ManagedInboundEvent = {
       accountGeneration: state.generation,
@@ -446,7 +668,7 @@ export class ManagedDingtalkAdapter {
         // cached webhook must not lose its reply if the cache entry is evicted
         // before the answer is claimed. send() still prefers the live cache, so
         // a fresher webhook keeps winning (#17173 R3-3).
-        sessionWebhook: sessionWebhook ?? state.webhooks[conversationId] ?? '',
+        sessionWebhook: sessionWebhook ?? cached,
         senderId,
         robotCode: this.settings.clientId,
       } satisfies DingtalkReplyContext,
@@ -465,6 +687,7 @@ export class ManagedDingtalkAdapter {
       state.pending = previousPending;
       throw error;
     }
+    return true;
   }
 
   private async submit(
@@ -477,17 +700,51 @@ export class ManagedDingtalkAdapter {
       const wasHeld = state.pending.some(
         (entry) => entry.eventId === eventId && entry.held === true,
       );
+      // The streak reset and the settle share ONE write: a split would let a
+      // crash (or a failed second write) leave disk with pending:[] and the
+      // pre-reset streak, so the first transient refusal after a restart
+      // would immediately re-hold instead of paying the first-occurrence
+      // drop (#17432 R1-2).
+      const previousPending = state.pending;
+      const previousRecent = state.recent;
+      const previousRefusals = state.instanceRefusals;
+      const previousStalled = this.instanceStalled;
       state.pending = state.pending.filter(
         (entry) => entry.eventId !== eventId,
       );
       state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
+      // The stall logic reads the POST-settle pending: the lift arm must not
+      // see the held claim this settle is removing.
       if (!admitted.replayed && wasHeld) {
         state.instanceRefusals = 0;
         this.instanceStalled = false;
       } else {
         this.liftStallWhenNothingHeld();
       }
-      this.persist();
+      try {
+        this.persist();
+        this.loggedSettleFailure = false;
+      } catch (error) {
+        // The admission answer arrived but the settle never reached disk.
+        // Roll back everything the settle touched so the next tick re-drives
+        // the identical event into the idempotent replayed answer; a
+        // half-settled memory state would drop the claim from this process's
+        // re-drive while disk still holds it (#17173 R10).
+        state.pending = previousPending;
+        state.recent = previousRecent;
+        state.instanceRefusals = previousRefusals;
+        this.instanceStalled = previousStalled;
+        // Latched like the other outage lines: the rollback keeps the claim
+        // pending, so every tick re-drives it and an unlatched line would
+        // re-log per claim per tick (#17432 R1-1).
+        if (!this.loggedSettleFailure) {
+          this.loggedSettleFailure = true;
+          this.log(
+            `Managed DingTalk could not persist the admission of ${eventId}: ${persistErrorText(error)}; it re-drives on the next tick.`,
+          );
+        }
+        return;
+      }
     } catch (error) {
       const status = (error as { status?: unknown }).status;
       const code = (error as { code?: unknown }).code;
@@ -513,7 +770,16 @@ export class ManagedDingtalkAdapter {
               state.pending = state.pending.map((p) =>
                 p.eventId === eventId ? { ...p, held: true } : p,
               );
-              this.persist();
+              try {
+                this.persist();
+              } catch (error) {
+                // The hold stays armed in memory for this process; a restart
+                // before the write lands re-arms it after one refusal, which
+                // is the bounded first-occurrence tradeoff, never a loss.
+                this.log(
+                  `Managed DingTalk could not persist the held claim ${eventId}: ${persistErrorText(error)}; the stall stays armed in memory.`,
+                );
+              }
             }
             // Log only on the transition: a stalled adapter re-probes the held
             // claim every tick, and re-emitting the line would drown the log.
@@ -532,7 +798,16 @@ export class ManagedDingtalkAdapter {
         state.pending = state.pending.filter((p) => p.eventId !== eventId);
         state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
         this.liftStallWhenNothingHeld();
-        this.persist();
+        try {
+          this.persist();
+        } catch (error) {
+          // The drop is already applied in memory; disk keeps the claim, so a
+          // restart re-drives it into the same deterministic refusal and drops
+          // it again. Never abort the batch over the failed write.
+          this.log(
+            `Managed DingTalk could not persist the refused admission of ${eventId}: ${persistErrorText(error)}; a restart re-drives it into the same refusal.`,
+          );
+        }
         return;
       }
       // A lost answer or a transient refusal: the claim, with its persisted
@@ -583,7 +858,15 @@ export class ManagedDingtalkAdapter {
           (p) => p.eventId !== entry.eventId,
         );
         this.liftStallWhenNothingHeld();
-        this.persist();
+        try {
+          this.persist();
+        } catch (error) {
+          // Same shape as the refusal drop: memory applied, disk keeps the
+          // claim, a restart re-drives it into the same policy refusal.
+          this.log(
+            `Managed DingTalk could not persist the policy drop of ${entry.eventId}: ${persistErrorText(error)}; a restart re-drives it into the same refusal.`,
+          );
+        }
         continue;
       }
       await this.submit(entry.eventId, entry.event);
@@ -641,6 +924,21 @@ export class ManagedDingtalkAdapter {
   }
 
   /**
+   * The single own-key read of the webhook cache, shared by the admission
+   * gate and the send path so the two cannot drift (#17173 round 5).
+   * Own-key membership, not truthiness: a conversationId naming an
+   * Object.prototype member ('constructor', 'toString', ...) must not
+   * resolve the inherited value on an empty cache (#17173 R2-2). Cached
+   * values are non-empty by the state validator, so undefined ⇔ absent.
+   */
+  private cachedWebhook(conversationId: string): string | undefined {
+    const webhooks = this.state!.webhooks;
+    return Object.hasOwn(webhooks, conversationId)
+      ? webhooks[conversationId]
+      : undefined;
+  }
+
+  /**
    * Record a conversation's webhook as the most recently seen. Reinsert at the
    * end so the overflow evicts the least-recently-seen key, not the
    * first-inserted one (#17173 R1-20). defineProperty writes an own key even
@@ -661,23 +959,119 @@ export class ManagedDingtalkAdapter {
     this.persist();
   }
 
+  /**
+   * Decide the surface for one segment (H5e). Card mode engages only when the
+   * adapter declares cards, a template is configured and the deps provide the
+   * card send. The first segment creates the card; later segments edit it with
+   * the accumulated body. An overflow — or a missing progress entry for a
+   * non-first segment, which is what makes eviction safe — falls back to text
+   * rather than re-creating a card the provider may already hold.
+   */
+  private cardDecision(
+    deliveryId: string,
+    segment: { ordinal: number; text: string },
+  ): CardDecision {
+    if (
+      !this.capabilities.cards ||
+      !this.cardTemplateId ||
+      !this.deps.sendCardSegment
+    ) {
+      return { render: 'text' };
+    }
+    const progress = this.cardProgress(deliveryId);
+    if (progress?.mode === 'text') return { render: 'text' };
+    if (segment.ordinal === 0) {
+      if (segment.text.length > MANAGED_CARD_CONTENT_LIMIT) {
+        return { render: 'text', fallback: progress };
+      }
+      return {
+        render: 'card',
+        outTrackId: managedCardOutTrackId(deliveryId),
+        body: segment.text,
+        create: !progress,
+      };
+    }
+    if (progress?.mode === 'card') {
+      const body = progress.body + segment.text;
+      if (body.length > MANAGED_CARD_CONTENT_LIMIT) {
+        return { render: 'text', fallback: progress };
+      }
+      return {
+        render: 'card',
+        outTrackId: progress.outTrackId,
+        body,
+        create: false,
+      };
+    }
+    return { render: 'text' };
+  }
+
+  /** Own-key read of one delivery's card progress, never an inherited member. */
+  private cardProgress(
+    deliveryId: string,
+  ): ManagedDingtalkCardProgress | undefined {
+    const cards = this.state!.cards;
+    return cards && Object.hasOwn(cards, deliveryId)
+      ? cards[deliveryId]
+      : undefined;
+  }
+
+  /**
+   * Record a delivery's card progress as most-recently-touched, evicting the
+   * least-recently-touched entry over the bound (the touchWebhook discipline:
+   * delete, redefine as an own enumerable key, evict the first key). An evicted
+   * in-flight delivery is safe — cardDecision reads its absence as text.
+   */
+  private touchCardProgress(
+    deliveryId: string,
+    progress: ManagedDingtalkCardProgress,
+  ): void {
+    const state = this.state!;
+    const cards = state.cards ?? {};
+    delete cards[deliveryId];
+    Object.defineProperty(cards, deliveryId, {
+      value: progress,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    const keys = Object.keys(cards);
+    if (keys.length > MANAGED_CARD_PROGRESS_LIMIT) delete cards[keys[0]!];
+    state.cards = cards;
+  }
+
+  private pruneCardProgress(deliveryId: string): void {
+    const cards = this.state!.cards;
+    if (cards && Object.hasOwn(cards, deliveryId)) {
+      delete cards[deliveryId];
+      if (Object.keys(cards).length === 0) this.state!.cards = undefined;
+    }
+  }
+
   private async send(delivery: ManagedClaimedDelivery): Promise<void> {
     const state = this.state!;
     const context =
       delivery.replyContext as Partial<DingtalkReplyContext> | null;
     const conversationId = context?.conversationId;
-    // Own-key membership, not truthiness: a conversationId naming an
-    // Object.prototype member must not resolve the inherited value as a
-    // webhook on an empty cache (#17173 R2-2).
     const webhook =
-      (conversationId && Object.hasOwn(state.webhooks, conversationId)
-        ? state.webhooks[conversationId]
-        : undefined) ?? context?.sessionWebhook;
+      (conversationId ? this.cachedWebhook(conversationId) : undefined) ??
+      context?.sessionWebhook;
     if (
       !conversationId ||
       !webhook ||
       !this.senderAllowed(context?.senderId ?? '')
     ) {
+      // The delivery is rejected terminally; drop any card body it retained
+      // from earlier segments (deferred round-3). Persist best-effort so the
+      // prune is durable even though the rejection receipt may stay unreported.
+      this.pruneCardProgress(delivery.deliveryId);
+      try {
+        this.persist();
+      } catch (error) {
+        this.log(
+          `Managed DingTalk could not persist the card prune for ${delivery.deliveryId}: ${persistErrorText(error)}.`,
+        );
+      }
       // One delivery's unreportable rejection receipt must never abort the
       // claimed batch: the deliveries behind it were already moved to sending
       // server-side and would settle unknown (lost) if the tick escaped here.
@@ -701,7 +1095,16 @@ export class ManagedDingtalkAdapter {
     }
     for (const segment of delivery.segments) {
       if (!this.running) return;
-      const messageId = randomUUID();
+      const card = this.cardDecision(delivery.deliveryId, segment);
+      // A card segment's provider handle is the card's outTrackId — the durable
+      // key that resolves it for editing — shared by every segment rendered
+      // into the same card. A text segment keeps a local id, as before.
+      const messageId = card.render === 'card' ? card.outTrackId : randomUUID();
+      const previousOutbound = state.outbound;
+      // touchCardProgress mutates the live map in place, so the rollback
+      // snapshot must be a copy — a bare reference would already carry the
+      // new entry when the persist fails.
+      const previousCards = state.cards && { ...state.cards };
       state.outbound = [
         ...state.outbound,
         {
@@ -710,10 +1113,52 @@ export class ManagedDingtalkAdapter {
           messageId,
         },
       ].slice(-MANAGED_OUTBOUND_LIMIT);
-      this.persist();
+      if (card.render === 'card') {
+        this.touchCardProgress(delivery.deliveryId, {
+          outTrackId: card.outTrackId,
+          body: card.body,
+          mode: 'card',
+        });
+      } else if (card.fallback) {
+        // The overflow switch is persisted so the whole tail stays text after
+        // the first segment that no longer fits, in order, across a restart.
+        // The accumulated body is never read again once mode is text, so drop
+        // it rather than re-serialising up to 20 000 dead units on every later
+        // persist (R3-1). The validator still requires a string body.
+        this.touchCardProgress(delivery.deliveryId, {
+          ...card.fallback,
+          body: '',
+          mode: 'text',
+        });
+      }
+      try {
+        this.persist();
+      } catch (error) {
+        // The ledger entry is the double-send guard: without it on disk, a
+        // crash after the send would re-send on restart. Roll back both the
+        // outbound entry and the card progress and abandon this delivery
+        // before the side effect; the lease reconciler settles it unknown
+        // (#17173 R10).
+        state.outbound = previousOutbound;
+        state.cards = previousCards;
+        this.log(
+          `Managed DingTalk could not persist the outbound ledger for ${delivery.deliveryId}: ${persistErrorText(error)}; the send is abandoned and the lease reconciler settles it.`,
+        );
+        return;
+      }
       let outcome: ManagedReceipt;
       try {
-        await this.deps.sendWebhook(webhook, segment.text);
+        if (card.render === 'card') {
+          await this.deps.sendCardSegment!({
+            outTrackId: card.outTrackId,
+            templateId: this.cardTemplateId!,
+            target: { chatId: context!.senderId!, isGroup: false },
+            body: card.body,
+            create: card.create,
+          });
+        } else {
+          await this.deps.sendWebhook(webhook, segment.text);
+        }
         outcome = {
           outcome: 'accepted',
           ordinal: segment.ordinal,
@@ -721,9 +1166,43 @@ export class ManagedDingtalkAdapter {
           acceptedAt: (this.deps.now ?? Date.now)(),
         };
       } catch (error) {
-        outcome = (error as DingtalkWebhookFailure).definitive
-          ? { outcome: 'rejected' }
-          : { outcome: 'unknown' };
+        const definitive = (error as DingtalkWebhookFailure).definitive;
+        // A definitively refused webhook (expired/invalid) is dead: evict it
+        // so the admission gate stops admitting frames that can only be
+        // answered into a dead target — the next frame must re-commit a fresh
+        // webhook. Only evict the entry this send actually used; a fresher
+        // webhook committed mid-send stays (#17173 round 5). The receipt
+        // persist below carries the eviction to disk. A card refusal is the
+        // card API's verdict, not the webhook's, so it never evicts the webhook.
+        if (
+          card.render === 'text' &&
+          definitive &&
+          conversationId &&
+          this.cachedWebhook(conversationId) === webhook
+        ) {
+          delete state.webhooks[conversationId];
+          // The eviction is load-bearing for admission; make it visible.
+          // Only the conversation id is logged — the webhook is a bearer
+          // capability and the provider errmsg is not trusted text.
+          this.log(
+            `Managed DingTalk evicted the cached webhook for conversation ${conversationId} after a definitive send refusal; the next frame must commit a fresh webhook.`,
+          );
+        }
+        if (card.render === 'card' && definitive) {
+          // A definitive card refusal settles the delivery rejected; make it
+          // diagnosable. Log the fact, not the provider errmsg (untrusted text).
+          this.log(
+            `Managed DingTalk card send for ${delivery.deliveryId} was definitively refused; the delivery is rejected.`,
+          );
+        }
+        outcome = definitive ? { outcome: 'rejected' } : { outcome: 'unknown' };
+      }
+      if (outcome.outcome !== 'accepted') {
+        // The delivery is terminal server-side once this receipt lands; no
+        // later segment renders into its card. Drop the progress so the map
+        // does not retain a dead delivery's body. The receipt persist below
+        // carries the prune to disk.
+        this.pruneCardProgress(delivery.deliveryId);
       }
       const entry = state.outbound.find(
         (candidate) =>
@@ -731,9 +1210,20 @@ export class ManagedDingtalkAdapter {
           candidate.ordinal === segment.ordinal,
       );
       if (entry) entry.receipt = outcome;
-      this.persist();
       try {
-        await this.controlPlane.receipt(delivery.deliveryId, outcome);
+        this.persist();
+      } catch (error) {
+        // The send already happened: report the outcome to the control plane
+        // even if the local write failed — the server-side settle is the
+        // durable record, and the orphan re-drive replays the in-memory
+        // receipt until the local write lands (#17173 R10).
+        this.log(
+          `Managed DingTalk could not persist the receipt for ${delivery.deliveryId}: ${persistErrorText(error)}; it is still reported and re-driven locally.`,
+        );
+      }
+      let settled: unknown;
+      try {
+        settled = await this.controlPlane.receipt(delivery.deliveryId, outcome);
       } catch (error) {
         // One delivery's unreportable receipt never aborts the claimed
         // batch: the entry stays outbound with the outcome persisted, so
@@ -745,6 +1235,15 @@ export class ManagedDingtalkAdapter {
         );
         return;
       }
+      // A `delivered` receipt proves the whole delivery terminal: drop its card
+      // body now rather than retaining it on disk until 64 newer card deliveries
+      // evict it (R1-4). The removal persist below carries the prune to disk.
+      if (
+        outcome.outcome === 'accepted' &&
+        settledDeliveryState(settled) === 'delivered'
+      ) {
+        this.pruneCardProgress(delivery.deliveryId);
+      }
       state.outbound = state.outbound.filter(
         (candidate) =>
           !(
@@ -752,7 +1251,15 @@ export class ManagedDingtalkAdapter {
             candidate.ordinal === segment.ordinal
           ),
       );
-      this.persist();
+      try {
+        this.persist();
+      } catch (error) {
+        // The receipt is already reported; disk keeps the entry, so the next
+        // tick's orphan re-drive replays the receipt and removes it again.
+        this.log(
+          `Managed DingTalk could not persist the settled segment of ${delivery.deliveryId}: ${persistErrorText(error)}; the orphan re-drive removes it on the next tick.`,
+        );
+      }
       if (outcome.outcome !== 'accepted') return;
     }
   }
@@ -766,11 +1273,11 @@ export class ManagedDingtalkAdapter {
       // receipt — the control plane may already hold it (its answer was
       // lost) and settles idempotently. Only a segment whose send never
       // produced an outcome settles unknown.
+      const replay = entry.receipt ?? { outcome: 'unknown' };
+      let settled: unknown;
+      let dropped = false;
       try {
-        await this.controlPlane.receipt(
-          entry.deliveryId,
-          entry.receipt ?? { outcome: 'unknown' },
-        );
+        settled = await this.controlPlane.receipt(entry.deliveryId, replay);
       } catch (error) {
         const status = (error as { status?: unknown }).status;
         const code = (error as { code?: unknown }).code;
@@ -801,11 +1308,32 @@ export class ManagedDingtalkAdapter {
         this.log(
           `Managed DingTalk receipt for ${entry.deliveryId} was refused (${String(status)}); it is dropped.`,
         );
+        dropped = true;
+      }
+      // A replayed non-accepted receipt (or a delivered one) settles the
+      // delivery terminal: drop its card body so a post-restart settle does not
+      // retain it on disk (R1-4). A deterministically dropped entry is terminal
+      // too even if its replayed receipt was accepted (deferred round-3). The
+      // removal persist below carries the prune.
+      if (
+        dropped ||
+        replay.outcome !== 'accepted' ||
+        settledDeliveryState(settled) === 'delivered'
+      ) {
+        this.pruneCardProgress(entry.deliveryId);
       }
       state.outbound = state.outbound.filter(
         (candidate) => candidate !== entry,
       );
-      this.persist();
+      try {
+        this.persist();
+      } catch (error) {
+        // Disk keeps the entry; the next tick replays the same idempotent
+        // receipt and retries the removal. Never abort the remaining orphans.
+        this.log(
+          `Managed DingTalk could not persist the orphan removal of ${entry.deliveryId}: ${persistErrorText(error)}; it re-drives on the next tick.`,
+        );
+      }
     }
   }
 
@@ -837,6 +1365,13 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+// The store rethrows a fixed sentence shared with the email channel; the fs
+// error rides on `cause`. Log the cause so ENOSPC, EACCES and a read-only
+// mount stay distinguishable (#17432 R1-3).
+function persistErrorText(error: unknown): string {
+  return String((error as Error).cause ?? error);
+}
+
 function extractText(parsed: Record<string, unknown>): string | undefined {
   const msgtype = str(parsed['msgtype']);
   if (msgtype && msgtype !== 'text') return undefined;
@@ -846,38 +1381,4 @@ function extractText(parsed: Record<string, unknown>): string | undefined {
     if (typeof content === 'string' && content.trim()) return content.trim();
   }
   return undefined;
-}
-
-/**
- * The wire admits at most MAX_WIRE_TEXT_CHARS characters and the Harness
- * envelope at most ENVELOPE_BYTE_LIMIT bytes of event JSON. Clamp to both so
- * an over-long message is admitted truncated instead of meeting a
- * deterministic 400 and being dropped whole — the same choice the email
- * reference makes. A CJK message can sit under the character line yet
- * overflow the byte envelope, so the byte cut lands on a code-point boundary.
- */
-function fitInboundText(text: string): string {
-  // The cap counts UTF-16 units (the server's maxTextChars does too), so a
-  // code-point cap could overshoot it; but a UTF-16 slice can land inside a
-  // surrogate pair, so back off a trailing high surrogate to keep the text
-  // well-formed.
-  let bounded = text.slice(0, MAX_WIRE_TEXT_CHARS);
-  if (/[\uD800-\uDBFF]$/.test(bounded)) bounded = bounded.slice(0, -1);
-  const byteLimit = ENVELOPE_BYTE_LIMIT - TEXT_ENVELOPE_OVERHEAD_BYTES;
-  // The bound is enforced on the JSON-serialized envelope, where a control
-  // character costs six bytes and a quote/backslash two — not on the raw UTF-8
-  // length. Budget the escaped length and cut by code points until it fits, so
-  // escape-heavy text is admitted truncated instead of refused whole.
-  const encodedBytes = (s: string): number =>
-    Buffer.byteLength(JSON.stringify(s), 'utf8') - 2;
-  if (encodedBytes(bounded) <= byteLimit) return bounded;
-  const chars = Array.from(bounded);
-  let lo = 0;
-  let hi = chars.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (encodedBytes(chars.slice(0, mid).join('')) <= byteLimit) lo = mid;
-    else hi = mid - 1;
-  }
-  return chars.slice(0, lo).join('');
 }

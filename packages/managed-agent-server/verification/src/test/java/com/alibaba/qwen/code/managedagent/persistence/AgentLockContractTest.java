@@ -57,10 +57,8 @@ class AgentLockContractTest extends RecoverySettlementStoreTest {
         invoke(route, OWNER);
         trace.assertSessionBeforeTurn(TENANT, sessionId);
         trace.assertOneTransaction(TENANT, sessionId);
-        // Same exclusion as StoreLockTrace.root(): pin-index probes are not
-        // root locks; the legacy guard's primary-key current read is one.
         var locks = trace.successful(TENANT, sessionId).stream()
-                .filter(event -> event.sql().contains("for update") && !event.sql().contains("is_csi_guard = true"))
+                .filter(event -> event.sql().contains("for update"))
                 .map(event -> event.root() ? "root" : event.turn() ? "turn" : "stream").toList();
         assertThat(locks.subList(0, 3)).containsExactly("root", "stream", "turn");
         assertThat(trace.events()).anyMatch(event -> event.phase() == StoreLockTrace.Phase.COMMIT);
@@ -94,14 +92,9 @@ class AgentLockContractTest extends RecoverySettlementStoreTest {
     }
 
     @Test
-    void emptyBatchNeverReachesThePairAndCsiRefusesBeforeIt() {
+    void emptyBatchNeverReachesThePair() {
         proxy.recordHarnessEvents(TENANT, sessionId, "missing", OWNER, "epoch-original", List.of());
         assertThat(trace.successful(TENANT, sessionId)).noneMatch(event -> event.turn() || event.root());
-        jdbc.update("UPDATE ma_session SET tool_profile = 'csi-files-retirement/1' WHERE tenant_id = ? AND session_id = ?", TENANT, sessionId);
-        trace.clear();
-        assertThatThrownBy(() -> proxy.recordHarnessEvents(TENANT, sessionId, turnId, OWNER, "epoch-original", List.of()))
-                .isInstanceOf(RuntimeException.class);
-        assertThat(trace.successful(TENANT, sessionId)).noneMatch(StoreLockTrace.Event::turn);
     }
 
     @ParameterizedTest
@@ -151,10 +144,6 @@ class AgentLockContractTest extends RecoverySettlementStoreTest {
         assertThatThrownBy(() -> proxy.bindHarness(TENANT, sessionId, "missing", OWNER, "boot"))
                 .isInstanceOf(IllegalStateException.class).hasMessage("Session stream is unavailable.");
         assertThat(trace.successful(TENANT, sessionId)).noneMatch(StoreLockTrace.Event::turn);
-        jdbc.update("UPDATE ma_session SET tool_profile = 'csi-files-retirement/1' WHERE tenant_id = ? AND session_id = ?", TENANT, sessionId);
-        assertThatThrownBy(() -> proxy.bindHarness(TENANT, sessionId, "missing", OWNER, "boot"))
-                .isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
-                        error -> assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
     }
 
     @Test

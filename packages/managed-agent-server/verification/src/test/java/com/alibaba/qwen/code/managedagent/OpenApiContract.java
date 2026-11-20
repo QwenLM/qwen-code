@@ -2,13 +2,13 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.networknt.schema.AnnotationKeyword;
-import com.networknt.schema.JsonMetaSchema;
-import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.Error;
 import com.networknt.schema.SchemaLocation;
-import com.networknt.schema.SchemaValidatorsConfig;
-import com.networknt.schema.SpecVersion.VersionFlag;
-import com.networknt.schema.ValidationMessage;
+import com.networknt.schema.SchemaRegistry;
+import com.networknt.schema.SchemaRegistryConfig;
+import com.networknt.schema.dialect.Dialect;
+import com.networknt.schema.dialect.Dialects;
+import com.networknt.schema.keyword.AnnotationKeyword;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -27,14 +27,13 @@ final class OpenApiContract {
     private static final String STATUS = "x-qwen-implementation-status";
 
     private final JsonNode spec;
-    private final JsonSchemaFactory factory = JsonSchemaFactory.getInstance(
-            VersionFlag.V202012, builder -> builder.metaSchema(JsonMetaSchema
-                    .builder(JsonMetaSchema.getV202012())
+    private final SchemaRegistry registry = SchemaRegistry.withDefaultDialect(
+            Dialect.builder(Dialects.getDraft202012())
                     .unknownKeywordFactory((keyword, context) ->
                             new AnnotationKeyword(keyword))
-                    .build()));
-    private final SchemaValidatorsConfig config = SchemaValidatorsConfig
-            .builder().formatAssertionsEnabled(true).build();
+                    .build(),
+            builder -> builder.schemaRegistryConfig(SchemaRegistryConfig
+                    .builder().formatAssertionsEnabled(true).build()));
 
     record Operation(String method, String path, String operationId,
             String status, JsonNode node) {
@@ -129,9 +128,9 @@ final class OpenApiContract {
         return spec.at(pointer);
     }
 
-    Set<ValidationMessage> validate(String pointer, JsonNode instance) {
-        return factory.getSchema(SchemaLocation.of(
-                "classpath:" + RESOURCE + "#" + pointer), config)
+    List<Error> validate(String pointer, JsonNode instance) {
+        return registry.getSchema(SchemaLocation.of(
+                "classpath:" + RESOURCE + "#" + pointer))
                 .validate(instance);
     }
 

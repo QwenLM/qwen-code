@@ -1281,6 +1281,63 @@ describe('ChatPane', () => {
     expect(controlGoal).toHaveBeenCalledTimes(1);
   });
 
+  it('renders the Goals-page affordance in the pane strip when wired', () => {
+    // Split-view panes reach the Goals page through this forward; deleting
+    // the `onOpenGoals={onOpenGoals}` line must turn this case red.
+    const onOpenGoals = vi.fn();
+    connectionState.goalState = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    render({ onOpenGoals });
+
+    const openGoals = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] [data-testid="goal-open-goals"]',
+    );
+    if (!openGoals) throw new Error('goals-page affordance was not rendered');
+    act(() => openGoals.click());
+    expect(onOpenGoals).toHaveBeenCalledOnce();
+  });
+
+  it('hides the Goals-page affordance in a pane without the Goals surface', () => {
+    connectionState.goalState = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    render();
+
+    expect(
+      container!.querySelector('[data-testid="goal-open-goals"]'),
+    ).toBeNull();
+    // The strip itself still renders — only the navigation affordance is
+    // absent, so the pane keeps its controls.
+    expect(
+      container!.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+  });
+
   it('builds the control request from the freshly fetched Goal', async () => {
     // `expectedGoalId`/`expectedRevision` must come from the getGoal round trip,
     // not from the possibly-stale snapshot in connection state, or every
@@ -1656,6 +1713,30 @@ describe('ChatPane', () => {
       expect.any(Error),
       'Failed to edit the goal',
     );
+  });
+
+  it('read-only allows tool approvals and hides queue mutations', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    queuedPromptsMock = [
+      {
+        id: 1,
+        text: 'queued next',
+        midTurnState: 'queued',
+        midTurnMessageId: '1',
+      },
+    ];
+    render({ readOnly: true });
+    expect(latestChatEditorProps).toBeUndefined();
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(testid('pane-queue')).toBeNull();
+  });
+
+  it('read-only keeps the stopped status without offering resume', () => {
+    connectionState.runtimeStopped = true;
+    render({ readOnly: true });
+    const stopped = testid('workspace-runtime-stopped');
+    expect(stopped).not.toBeNull();
+    expect(stopped?.querySelector('button')).toBeNull();
   });
 
   it('opens a pane monitor in the shared right panel', async () => {
@@ -4024,6 +4105,24 @@ describe('ChatPane', () => {
     expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
   });
 
+  it('keeps a named sub-session approval pending when switching to yolo', async () => {
+    pendingPermission = {
+      id: 'perm-sub-session',
+      toolName: 'create_sub_session',
+      toolKind: 'other',
+      options: [{ id: 'allow-1', label: 'Allow once', kind: 'allow_once' }],
+      rawInput: { workspace: '/repos/b' },
+    };
+    render();
+    await act(async () => {
+      testid('pane-pick-mode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: false });
+    expect(submitPermission).not.toHaveBeenCalled();
+  });
+
   it('resolves host at mention providers through a pane ChatEditor', () => {
     renderRealChatEditor = true;
     const atProviders = [
@@ -4197,6 +4296,27 @@ it('requires an explicit resume for a stopped pane', async () => {
   expect(loadSession).toHaveBeenCalledWith('stopped', {
     sessionContext: { kind: 'workspace', cwd: '/workspace' },
   });
+});
+
+it('keeps the pane editor available while deferring sends until history loads', async () => {
+  connectionState.loadingTranscript = true;
+  render();
+
+  expect(latestChatEditorProps?.disabled).toBe(false);
+  expect(latestChatEditorProps?.submitDisabled).toBe(true);
+  expect(latestOnSubmit!('pane draft')).toBe(false);
+  expect(sendPrompt).not.toHaveBeenCalled();
+
+  connectionState.loadingTranscript = false;
+  rerender();
+  expect(latestChatEditorProps?.submitDisabled).toBe(false);
+  await act(async () => {
+    latestOnSubmit!('pane draft');
+  });
+  expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(
+    'pane draft',
+    expect.objectContaining({ submittedPrompt: 'pane draft' }),
+  );
 });
 
 it('fences pane submits while the runtime is stopped and says why', async () => {

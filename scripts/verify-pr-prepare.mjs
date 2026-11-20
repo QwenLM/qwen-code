@@ -49,17 +49,19 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -193,8 +195,13 @@ export function detectCredentialSignals(
   for (const name of CREDENTIAL_ENV) {
     if (env[name]) signals.push(name);
   }
-  for (const [relative, label] of CREDENTIAL_PATHS) {
-    if (exists(join(home, relative))) signals.push(label);
+  // An unresolvable home (null/empty) has no credential paths to scan; the
+  // gate fails on it at the nonce write below. join(home, …) on a non-string
+  // would throw, and on '' would scan the PR-writable CWD instead (R5-1).
+  if (typeof home === 'string' && home !== '') {
+    for (const [relative, label] of CREDENTIAL_PATHS) {
+      if (exists(join(home, relative))) signals.push(label);
+    }
   }
   return signals;
 }
@@ -340,6 +347,7 @@ export function parseArgs(argv) {
     repo: null,
     requireIsolation: false,
     artifactDir: null,
+    contextOut: null,
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -352,6 +360,11 @@ export function parseArgs(argv) {
       options.artifactDir = argv[(index += 1)] ?? null;
       if (!options.artifactDir) {
         return { error: '--artifact-dir needs <round-dir>' };
+      }
+    } else if (arg === '--context-out') {
+      options.contextOut = argv[(index += 1)] ?? null;
+      if (!options.contextOut) {
+        return { error: '--context-out needs <host-snapshot-path>' };
       }
     } else if (arg === '--repo') {
       options.repo = argv[(index += 1)] ?? null;
@@ -691,6 +704,22 @@ function main(argv) {
   const contextDir = join(root, 'tmp', 'verify-context');
   const contextPath = join(contextDir, `pr${context.pr}.json`);
   const artifacts = join(root, 'tmp', artifactDirName(context.pr));
+  // The tmp/ container is PR-controlled: a PR-committed symlink there would
+  // redirect every mkdir/write below before any leaf guard runs (R5-1). Refuse
+  // it before anything is created. A fresh clone has no tmp/ — that is fine.
+  const tmpDir = join(root, 'tmp');
+  try {
+    if (lstatSync(tmpDir).isSymbolicLink()) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a symlink: ${tmpDir}`,
+      );
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      return fail(3, `could not inspect ${tmpDir}: ${error.message}`);
+    }
+  }
   try {
     mkdirSync(contextDir, { recursive: true });
     // Recursive, so a retry within the same second lands in the directory this
@@ -700,14 +729,99 @@ function main(argv) {
   } catch (error) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
+  // The snapshot dir/file live in the PR-controlled tree: a symlink at either
+  // path redirects the host-side write, and a hard link at the snapshot path
+  // would make writeFileSync truncate a file the round does not own (R5-4).
+  // Refuse both rather than follow them.
+  for (const p of [contextDir, contextPath]) {
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the snapshot path ${p}: ${error.message}`,
+        );
+      }
+      continue; // not created yet (first run) — nothing to redirect
+    }
+    if (st.isSymbolicLink()) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a symlink: ${p}`,
+      );
+    }
+    if (p === contextPath && (!st.isFile() || st.nlink !== 1)) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a non-single-link file: ${p}`,
+      );
+    }
+  }
   // The host-held snapshot carries the slug too: the checker compares a
   // waiver's approval permalink against these coordinates, and gh's field
   // selector has no repo member, so it is added where the snapshot is
   // written, not to FIELDS.
-  writeFileSync(
-    contextPath,
-    `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`,
-  );
+  const contextBytes = `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`;
+  writeFileSync(contextPath, contextBytes);
+  // Structural fix (R5-1): the authoritative snapshot also goes to a host
+  // destination outside the clone (--context-out), so the trusted source the
+  // checker reads never depends on the PR-writable in-tree copy, which stays
+  // only as the checker's untrusted no---context default.
+  let reportedContextPath = contextPath;
+  if (options.contextOut) {
+    // The host destination must be outside the PR-writable clone: step 1 runs
+    // with the clone as cwd, so a relative --context-out resolves inside it,
+    // where a PR-committed symlink would redirect this host-side write (R7-1).
+    // Apply the same containment + leaf guards the in-tree snapshot path uses.
+    const outPath = resolve(options.contextOut);
+    const realRoot = realpathSync(root);
+    if (outPath === realRoot || outPath.startsWith(realRoot + sep)) {
+      return fail(
+        3,
+        `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+      );
+    }
+    try {
+      const st = lstatSync(outPath);
+      if (st.isSymbolicLink()) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a symlink: ${outPath}`,
+        );
+      }
+      if (!st.isFile() || st.nlink !== 1) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a non-single-link file: ${outPath}`,
+        );
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the host snapshot path ${outPath}: ${error.message}`,
+        );
+      }
+    }
+    try {
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, contextBytes);
+    } catch (error) {
+      return fail(
+        3,
+        `could not write the host snapshot to ${outPath}: ${error.message}`,
+      );
+    }
+    reportedContextPath = outPath;
+  }
+  // The digest binds the snapshot's content for the checker (--context-sha256):
+  // it is computed here host-side, before the round runs, so a later rewrite of
+  // the clone-side file cannot produce matching bytes (R2-1).
+  const contextSha256 = createHash('sha256')
+    .update(contextBytes, 'utf8')
+    .digest('hex');
   // Best-effort, like the lane: the round reads a missing file as "review
   // state unknown", so an earlier prepare's copy must not outlive a failed
   // fetch.
@@ -738,7 +852,8 @@ function main(argv) {
     `  base       ${context.base}`,
     `  head       ${context.head}`,
     '  tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
-    `  context    ${contextPath}`,
+    `  context    ${reportedContextPath}`,
+    `  context-sha256  ${contextSha256}`,
     review.state
       ? `  review     ${reviewPath} (${review.state.threads.filter((thread) => !thread.resolved).length} of ${review.state.threads.length} threads unresolved, ${review.state.changeRequests.length} change requests)`
       : `  review     not written — ${printable(review.error)}; the round lists review findings as not covered`,
@@ -764,8 +879,13 @@ function main(argv) {
     'The path is the in-container one: the gate runs from the read-only',
     "/trusted-scripts mount, never the PR head's own copy of the script,",
     'and the record lands in the mounted artifact directory so it survives',
-    'the container. A VM boundary runs the same file from its trusted copy',
-    'with its own artifact path. The gate writes boundary-gate.json into',
+    'the container. A VM boundary takes the same trusted copy but runs',
+    'NO --require-isolation gate (a VM carries no observed container marker):',
+    'there is no in-boundary gate command and no boundary-gate.json for a VM.',
+    'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
+    'reason, attestation (what the operator confirmed: nothing mounted,',
+    "no host credentials), and approval (a permalink to the maintainer's",
+    'approval comment). The container gate writes boundary-gate.json into',
     'the artifact directory; the checker requires that record alongside',
     'the container declaration.',
   ]);
@@ -785,7 +905,23 @@ function main(argv) {
  * operator who skipped the gate — the incident's shape — not against PR
  * code that forges it; the CI publisher writes its own lane record.)
  */
-function requireBoundary(artifactDir = null) {
+export function requireBoundary(artifactDir = null, options = {}) {
+  const env = options.env ?? process.env;
+  const exists = options.exists ?? existsSync;
+  // Resolve home lazily and defensively: os.homedir() throws SystemError when
+  // the UID has no passwd entry and HOME is unset (the arbitrary-UID container
+  // shape --user <uid>:<gid> invites), and returns '' when HOME is set but
+  // empty. Evaluating it in a default parameter let the throw escape as exit 1
+  // before invalidateRecord could run, leaving a stale pass record behind;
+  // both shapes must reach the gate's exit-3 refusal below (R5-1).
+  let home = options.home;
+  if (home === undefined) {
+    try {
+      home = homedir();
+    } catch {
+      home = null;
+    }
+  }
   const recordPath = artifactDir
     ? join(artifactDir, 'boundary-gate.json')
     : null;
@@ -800,9 +936,9 @@ function requireBoundary(artifactDir = null) {
       // Best-effort; the refusal exit is the contract.
     }
   };
-  const isolation = detectIsolation();
-  const credentials = detectCredentialSignals();
-  const attested = process.env[CREDENTIAL_FREE_ATTESTATION] === '1';
+  const isolation = detectIsolation(env, exists);
+  const credentials = detectCredentialSignals(env, exists, home);
+  const attested = env[CREDENTIAL_FREE_ATTESTATION] === '1';
 
   // A refusal from OUTSIDE any boundary does not contradict a record minted
   // INSIDE one: a host-side sanity re-run must not destroy the in-container
@@ -853,14 +989,15 @@ function requireBoundary(artifactDir = null) {
   }
   if (artifactDir) {
     // A per-round nonce ties the declaration to execution inside THIS
-    // container (R16-1). It is written to a container-local path (the
-    // process home, NOT the shared artifact mount) so the round must read
-    // it from inside the container and echo it into its raw harness logs;
-    // step 7 refuses mode:"container" unless the logs carry it. The nonce
-    // also rides the gate record so the host check can read it after the
-    // container stops. Like the record itself, this corroborates an
-    // operator who ran the round in the container — it is not proof
-    // against a round that forges both.
+    // container (R16-1). The plaintext is written to a container-local path
+    // (the process home, NOT the shared artifact mount) so the round must
+    // read it from inside the container and echo it into its raw harness
+    // logs; the checker refuses mode:"container" unless a log line's sha256
+    // matches the record. Only the HASH rides the gate record: a host
+    // battery cannot recover the plaintext from the hash, so it cannot copy
+    // it out of the PR-writable record into a forged log line. Like the
+    // record itself, this corroborates an operator who ran the round in the
+    // container — it is not proof against a round that forges both.
     const nonce = randomBytes(16).toString('hex');
     const record = {
       gate: 'require-isolation',
@@ -871,13 +1008,35 @@ function requireBoundary(artifactDir = null) {
       // the checker requires one to back a container claim.
       observed: isolation.observed,
       credentialFree: true,
-      nonce,
+      nonceSha256: createHash('sha256').update(nonce).digest('hex'),
     };
+    // An unresolvable $HOME (no passwd entry for this UID with HOME unset, or
+    // HOME set but empty) cannot host the container-local plaintext:
+    // join('', …) would write it into the PR-writable CWD instead, and a
+    // homedir() throw would escape as exit 1. Refuse with exit 3 and
+    // invalidate any stale record before the pass line (R5-1).
+    if (typeof home !== 'string' || home === '') {
+      invalidateRecord();
+      return fail(
+        3,
+        'could not resolve a container-local $HOME (no passwd entry for this UID and HOME unset or empty): the nonce plaintext cannot be written outside the PR-writable mount, so the round cannot declare mode:"container"',
+      );
+    }
+    // The plaintext must exist somewhere the battery can read it, or the
+    // record's hash binds a nonce nobody can echo and the round is silently
+    // uncertifiable after the whole battery ran (R1-4). Fail the gate now,
+    // before the pass line, naming $HOME. This refusal is reached only inside
+    // the boundary (a host re-run exits 4 above), so invalidating the record
+    // here does not contradict a record minted inside one.
+    const noncePath = join(home, '.qwen-verify-nonce');
     try {
-      writeFileSync(join(homedir(), '.qwen-verify-nonce'), `${nonce}\n`);
-    } catch {
-      // Best-effort: the record still carries the nonce; a home that
-      // cannot be written does not fail the gate.
+      writeFileSync(noncePath, `${nonce}\n`);
+    } catch (error) {
+      invalidateRecord();
+      return fail(
+        3,
+        `could not write the container-local nonce to ${noncePath} ($HOME unwritable or absent): the round cannot declare mode:"container" without it: ${error.message}`,
+      );
     }
     const tmp = `${recordPath}.${process.pid}.tmp`;
     // A filesystem failure here is the documented exit-3 path, not an

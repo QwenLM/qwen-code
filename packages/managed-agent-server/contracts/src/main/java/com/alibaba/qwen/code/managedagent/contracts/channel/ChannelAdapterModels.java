@@ -115,4 +115,46 @@ public final class ChannelAdapterModels {
     public record ResendResponse(String deliveryId, String resentFrom,
             boolean possibleDuplicate, DeliveryView delivery) {
     }
+
+    /** PR-watch binding create: the target Session is caller-chosen here,
+     * validated against the channel instance's Workspace; injection later
+     * forces the bound Session. Bounds mirror the TS envelope contract. */
+    public record PrWatchCreateRequest(
+            @NotBlank @Size(max = 512) String sessionId,
+            @NotBlank @Size(max = 512) String owner,
+            @NotBlank @Size(max = 512) String repo,
+            @Min(1) long prNumber,
+            @NotNull @Size(min = 1, max = 3) List<@NotBlank String> events) {
+    }
+
+    public record PrWatchRetireRequest(
+            @NotBlank @Size(max = 512) String owner,
+            @NotBlank @Size(max = 512) String repo,
+            @Min(1) long prNumber) {
+    }
+
+    public record PrWatchInjectRequest(
+            @NotBlank @Size(max = 512) String owner,
+            @NotBlank @Size(max = 512) String repo,
+            @Min(1) long prNumber,
+            @NotBlank @Size(max = 64) String transition,
+            @NotBlank @Size(max = 512) String headSha,
+            @Min(1) long episode,
+            @NotNull @Size(max = 4_000) String evidence,
+            @NotNull @Size(min = 1, max = 32_000) String text) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PrWatchBindingView(String bindingId, String owner,
+            String repo, long prNumber, String sessionId,
+            List<String> events, long createdAt) {
+    }
+
+    public record PrWatchBindingList(List<PrWatchBindingView> bindings) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PrWatchAdmission(String inputId, String turnId,
+            String sessionId, String bindingId, boolean replayed) {
+    }
 }

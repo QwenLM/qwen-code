@@ -282,6 +282,213 @@ describe('SessionArtifactStore', () => {
     }) as typeof fs.lstat);
   }
 
+  it('listRestored returns the current artifacts in insert order for the load response', async () => {
+    const sessionId = 's-early';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const urlA = 'https://example.com/alpha';
+    const urlB = 'https://example.com/beta';
+    const idA = stableSessionArtifactId(sessionId, `url:${urlA}`);
+    const idB = stableSessionArtifactId(sessionId, `url:${urlB}`);
+    const link = (id: string, url: string, title: string) => ({
+      id,
+      kind: 'link' as const,
+      storage: 'external_url' as const,
+      source: 'client' as const,
+      status: 'available' as const,
+      title,
+      url,
+      retention: 'restorable' as const,
+      clientRetained: true,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    // The repeated identity (idA) is re-set during restore: it keeps its early
+    // Map slot but receives a later insertSeq, so Map iteration order diverges
+    // from insertSeq order. Only a real sort yields ['Beta', 'Alpha final'];
+    // dropping the sort would return the Map order ['Alpha final', 'Beta'].
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [
+        link(idA, urlA, 'Alpha'),
+        link(idB, urlB, 'Beta'),
+        link(idA, urlA, 'Alpha final'),
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    const restored = await store.listRestored();
+    expect(restored.map((item) => item.title)).toEqual(['Beta', 'Alpha final']);
+    expect(restored).toEqual((await store.list()).artifacts);
+  });
+
+  it('listRestored skips the workspace status refresh that list performs', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's-early-nostat',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'early.txt'), 'content');
+    await store.upsertMany([{ title: 'Early', workspacePath: 'early.txt' }]);
+
+    // Age the recorded stat past the refresh TTL so list() must re-stat.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const lstatSpy = spyOnLstatForwarding(() => {});
+    try {
+      await store.listRestored();
+      expect(lstatSpy).not.toHaveBeenCalled();
+      await store.list();
+      expect(lstatSpy).toHaveBeenCalled();
+    } finally {
+      lstatSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('count() returns the live public count synchronously, including ephemeral artifacts', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's-live-count',
+      workspaceCwd: workspace,
+    });
+    expect(store.count()).toBe(0);
+    const created = await store.upsertMany([
+      {
+        title: 'Restorable',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/restorable',
+        retention: 'restorable',
+      },
+      {
+        title: 'Ephemeral',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/ephemeral',
+        retention: 'ephemeral',
+      },
+    ]);
+    expect(store.count()).toBe(2);
+    expect(store.count()).toBe((await store.list()).artifacts.length);
+    // A monotonically growing counter would pass the additions above; the
+    // removal pins count() to the live map size, which is what the header
+    // renders.
+    await store.remove(created.changes[0]!.artifactId);
+    expect(store.count()).toBe(1);
+    expect(store.count()).toBe((await store.list()).artifacts.length);
+  });
+
+  it('stamps the restorable count on durable event payloads, excluding ephemeral artifacts', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's-event-count',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await store.upsertMany([
+      {
+        title: 'A',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/count-a',
+        retention: 'restorable',
+      },
+      {
+        title: 'B',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/count-b',
+        retention: 'restorable',
+      },
+    ]);
+    expect(events.at(-1)?.artifactCount).toBe(2);
+
+    // Ephemeral-only changes are not durable: no new event is recorded, and
+    // the restorable count stays put even though the live count grows.
+    await store.upsertMany([
+      {
+        title: 'E',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/count-e',
+        retention: 'ephemeral',
+      },
+    ]);
+    expect(events).toHaveLength(1);
+    expect(store.count()).toBe(3);
+
+    const restorable = (await store.list()).artifacts.find(
+      (artifact) => artifact.title === 'A',
+    );
+    await store.remove(restorable!.id);
+    expect(events.at(-1)?.artifactCount).toBe(1);
+  });
+
+  it('pins the stamped-count lag on the live-only downgrade path and its convergence', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    let calls = 0;
+    const store = new SessionArtifactStore({
+      sessionId: 's-downgrade-count',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          calls++;
+          if (calls === 2) throw new Error('disk full');
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const input = (n: string) => ({
+      title: n,
+      kind: 'link' as const,
+      storage: 'external_url' as const,
+      url: `https://example.com/downgrade-${n}`,
+      retention: 'restorable' as const,
+    });
+    // A lands in the journal (count 1).
+    await store.upsertMany([input('a')], { strict: true });
+    expect(events.at(-1)?.artifactCount).toBe(1);
+    // A's update fails to persist: the live-only downgrade keeps A
+    // ephemeral in the live map while the journal still holds it
+    // restorable. (Metadata, not title: link merges keep the existing
+    // title, so a metadata change is what makes the update durable.)
+    const downgraded = await store.upsertMany([
+      { ...input('a'), metadata: { revision: '2' } },
+    ]);
+    expect(downgraded.warnings).toEqual([
+      'artifact persistence unavailable; durable artifacts kept ephemeral',
+    ]);
+    // B's durable event stamps the LIVE restorable set: the documented
+    // best-effort lag — the journal replays A+B while the stamp says 1 —
+    // until a snapshot converges the journal or the load-time seed heals
+    // the sidecar from the rebuilt snapshot.
+    await store.upsertMany([input('b')], { strict: true });
+    expect(events.at(-1)?.artifactCount).toBe(1);
+    const rebuilt = rebuildSessionArtifactSnapshot(
+      events.map((systemPayload) => ({
+        type: 'system',
+        subtype: 'session_artifact_event',
+        systemPayload,
+      })),
+    )!;
+    expect(rebuilt.artifacts).toHaveLength(2);
+    // Re-journaling A converges the stamp with the journal again.
+    await store.upsertMany([{ ...input('a'), metadata: { revision: '3' } }], {
+      strict: true,
+    });
+    expect(events.at(-1)?.artifactCount).toBe(2);
+  });
+
   it('lists, removes, and idempotently ignores missing artifact deletes', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1',

@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_137_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_976;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -105,7 +105,81 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_137_000;
 // deferred-change notice, across two locales) measures 2,136,115 bytes on
 // head 6286c8cb11 in CI, 115 above the previous 2,136,000 ceiling. The warning
 // sits 885 above that measurement and the ceiling 1,885 above it.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_138_000;
+// The composer task-explain side question (#17398: the explain display line,
+// the "?" aria label and tooltip, and the panel copy, across two locales, plus
+// the transcript-reachable explain wiring) adds 904 bytes: main d41eda5123
+// measures 2,137,893 (107 below the previous 2,138,000 ceiling) and head
+// d5f6a103a6 measures 2,138,797 in CI, 797 above it. The warning sits 203 above
+// that measurement and the ceiling 1,203 above it.
+// The document runtime measured 2,138,044 bytes on head 2ef7af8e69, 44 above
+// the previous 2,138,000 ceiling. SessionGoalMarker is NOT reachable from the
+// document entry (it is imported only by WebShellSidebar) and the RU catalog
+// is stubbed in transcript mode, so the sidebar goal marker feature (#17515)
+// contributes only its EN/ZH `sidebar.sessionGoal` label strings (~151 bytes)
+// to this bundle. This PR's deliberate budget raise was folded into main's
+// larger `/send` ceilings below when merging, so the CURRENT caps apply: the
+// warning sits 7,056 above that measurement and the ceiling 8,056 above it.
+// Those two figures price THIS feature against the caps, not the remaining
+// headroom: after merging main the same tree measures 2,145,649 locally,
+// already over the warning and 451 below the ceiling. Size new copy against
+// that 451, and re-measure in CI before trusting it.
+// The `/send` command, its composer chip and session tab copy (ten keys
+// across two locales) add 1,283: 2,137,893 against 2,139,176 locally on main
+// 039ed577fb without and with the change. Recording the exchange in the
+// caller (the "To" and "From" lines on a user message, the waiting chip, and
+// the parsing of where a message went; four keys added and one removed,
+// across two locales) adds 1,497 more. Merged with the explain side question
+// above, the branch measured 2,141,606 locally on main 5fc5a98ecc; marking a
+// turn another session's reply starts (its card label, keeping the card in a
+// folded turn, and opening that session from it) brings it to 2,142,326. The
+// warning sits 774 above that measurement and the ceiling 1,774 above it.
+// Generic Webhook copy (#17405: ten keys across two locales) adds 2,154:
+// the same tree with main 7a9b270d's dictionary measures 2,142,233 bytes,
+// against 2,144,387 with the new copy. CSS and third-party inputs are unchanged,
+// and the forbidden-input guard passes. Leave 713 bytes to the warning and
+// 1,713 to the ceiling.
+// The Goal sidebar marker (#17515) and the background-task composer chips
+// (#17398) then grew the transcript dictionary past that ceiling: the Lint &
+// Static / Build lane on main d83fa2154e measures 2,146,529 JS bytes (CSS
+// 2,423,645, separate), 429 over the old 2,146,100 cap, which reddened every
+// PR's build. The bundle pulls web-shell's whole i18n table, so these legitimate
+// first-party strings land here; the third-party input mix is unchanged and the
+// forbidden-input guard passes. Re-track the lane measurement: leave 671 bytes
+// to the warning and 1,671 to the ceiling. (A local build against the worktree's
+// own node_modules measures lower — 2,138,797 — but the lane's absolute number
+// is what these constants track.)
+//
+// The restart recovery inbox (#17677: panel copy and state strings across
+// three locales) measures 2,145,251 bytes on the merged 0c28638cc7 tree;
+// combined with the Generic Webhook copy the merged 9de5d9a311 tree measures
+// 2,147,405, 1,295 above the previous 2,146,100 ceiling. Main 3d75b8ee60
+// measures 2,147,740; adding the mid-batch failure notice brings the current
+// tree to 2,148,000. Merging the latest main and its transcript-reachable
+// additions raises the measurement to 2,148,696, so the warning sits 104
+// above that figure and the ceiling 904 above it. Workspace-lock scoping,
+// capped-result retry guidance, and stale-callback invalidation then add 220
+// bytes, bringing that tree to 2,148,976. This merge's artifact-library stub
+// registration adds 46 bytes, for 2,149,022 measured bytes. The warning sits
+// 713 above that measurement, while the existing ceiling retains 1,713 bytes.
+//
+// The workspace artifact library copy (nine keys across three locales) is
+// interactive-only: managed-artifact-library-messages.transcript-stub.ts
+// replaces it in transcript mode, so it contributes no document bytes. Its
+// upstream branch measured 2,148,522 JS bytes with the copy inlined and
+// 2,146,575 with the stub (CSS 2,423,645, separate), 46 above the 2,146,529
+// lane measurement #17746 re-tracked. The forbidden-input guard passes and
+// the third-party input mix is unchanged. The merged branch's ceiling follows
+// the recovery-inbox measurements above, rather than lowering that branch's
+// budget or reserving space for interactive-only copy.
+//
+// Main 73bdaa349c's declared workflow phases add 660 bytes. This tree
+// measures 2,149,682 bytes of renderer JS and 2,425,151 bytes of separate
+// CSS; the third-party input mix is unchanged and the forbidden-input guard
+// passes. The warning and ceiling retain 713- and 1,713-byte margins.
+// The merged catalog-loading tree measures 2,149,263 JS bytes, down 419,
+// with 2,425,802 bytes of separate CSS and the same third-party input mix.
+// The warning and ceiling keep 713 and 1,713 bytes above that measurement.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_150_976;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

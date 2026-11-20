@@ -32,13 +32,10 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 final class JournalStoreRows {
-    private final com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion;
     private final JdbcTemplate jdbc;
     private final ToolPublicationObjectStore objects;
 
-    JournalStoreRows(com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
-            JdbcTemplate jdbc, ToolPublicationObjectStore objects) {
-        this.readerVersion = readerVersion;
+    JournalStoreRows(JdbcTemplate jdbc, ToolPublicationObjectStore objects) {
         this.jdbc = jdbc;
         this.objects = objects;
         this.headMapper = (result, row) ->
@@ -46,7 +43,7 @@ final class JournalStoreRows {
                         result.getString("workspace_id"),
                         result.getString("session_id"),
                         result.getString("state"),
-                        result.getInt("storage_version"),
+                        result.getBoolean("has_activity_diagnostics"),
                         result.getLong("writer_generation"),
                         result.getString("writer_id"),
                         ManagedSchemaTime.timestamp(result, "writer_lease_until"),
@@ -94,9 +91,9 @@ final class JournalStoreRows {
 
     static final int STORAGE_VERSION = 1;
 
-    static final ObjectMapper CSI_JSON = new ObjectMapper();
+    static final ObjectMapper JSON = new ObjectMapper();
 
-    static final ObjectMapper CSI_TERMINAL_JSON = CSI_JSON.copy().enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+    static final ObjectMapper TERMINAL_JSON = JSON.copy().enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
@@ -142,7 +139,7 @@ final class JournalStoreRows {
                         + " AND activation_epoch = ? AND activation_lease_until IS NOT NULL LIMIT 1",
                 head.tenantId(), head.sessionId(), head.activationEpoch()).isEmpty();
         var lease = renewed ? activationLeaseRow(head).lease() : null;
-        return new RestoreHead(head.state(), head.storageVersion(),
+        return new RestoreHead(head.state(), head.activityDiagnostics(),
                 head.writerGeneration(), head.journalRevision(),
                 head.committedSequence(), head.lastCommitDigest(),
                 head.activationEpoch(), head.latestCheckpointResourceId(),
@@ -177,7 +174,7 @@ final class JournalStoreRows {
                                     throw journalCorrupt();
                                 }
                                 String first = new String(raw, StandardCharsets.UTF_8).split("\n", 2)[0];
-                                JsonNode event = CSI_TERMINAL_JSON.readTree(first).path("managedSession");
+                                JsonNode event = TERMINAL_JSON.readTree(first).path("managedSession");
                                 JsonNode payload = event.path("payload");
                                 if (!"activation.changed".equals(event.path("kind").asText())
                                         || !"active".equals(payload.path("phase").asText())) {
@@ -611,11 +608,6 @@ final class JournalStoreRows {
                 || !sessionId.equals(head.sessionId())) {
             throw sessionNotFound();
         }
-        if (head.storageVersion() < 1 || head.storageVersion() > com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED) {
-            throw conflict("managed_session_storage_version_unsupported",
-                    "The Managed Session storage version is unsupported.");
-        }
-        readerVersion.requireReadable(head.storageVersion());
         if (!HEAD_STATES.contains(head.state())
                 || !RECOVERY_STATES.contains(head.recoveryStatus())
                 || head.writerGeneration() < 1
@@ -728,7 +720,7 @@ final class JournalStoreRows {
     }
 
     record HeadRow(String tenantId, String workspaceId,
-            String sessionId, String state, int storageVersion,
+            String sessionId, String state, boolean activityDiagnostics,
             long writerGeneration, String writerId,
             Timestamp writerLeaseUntil, String leaseTokenHash,
             long journalRevision, long committedSequence,
