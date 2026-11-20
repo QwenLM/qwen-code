@@ -18,10 +18,18 @@ fork 包剥掉 hook，或为几个 skills 启用完整进程运行时。
 
 - 扩展契约允许七种组件（`ManagedPackageComponent`：`skills, commands, agents,
 context, mcp, hooks, settings`）；拒绝是运行时策略门，不是编译限制。
-- MCP/Hook contributions 的唯一消费点是 staging 路径
-  （`managed-extension-manifests.ts`），位于 `stage` 之后。无 `stage` 时 prepared
-  catalogs 恒为 `{ mcpServers: [], hookCatalog: null }`，`install` 是 no-op：
-  这些组件在结构上就是惰性的。
+- MCP/Hook contributions 仅由 staging 路径（`managed-extension-manifests.ts`）
+  激活，位于 `stage` 之后；无 `stage` 时 prepared catalogs 恒为
+  `{ mcpServers: [], hookCatalog: null }`，什么都不 staged。但它们在生产接线中
+  并非结构上惰性：生产 `compile` 闭包无条件调用
+  `preflightManagedExtensionPackage`（`managed-context-worker.ts:814`），解析
+  每个 MCP server 命令与每个 `type: "command"` hook，解析不到即抛
+  `Extension executable is unavailable`
+  （`managed-extension-preflight.ts:168-188`）；生产 `drain`/`install` 在无
+  staged manifest 时抛错（`managed-context-worker.ts:853-855`、`:876-879`）。
+  因此惰性仅对无 stage 运行时形态成立，且前提是其接线提供不对惰性组件做
+  preflight 的 compile、以及容忍无 staged manifest 的 `drain`/`install`——
+  这正是 harness 测试所验证的形态。
 - Java 服务器对 `extension-prepare` 是校验转发器：
   `ManagedExtensionProtocol.response()` 只检查 envelope、`state`、`revision`、
   `executionMode`；结果的 `packages` 数组 opaque 透传。Java 从不读 prepare 结果
@@ -149,8 +157,10 @@ false` 对每个服务 snapshot 的公开与 WebShell 扩展管理操作保持�
 
 ## 风险
 
-- worst-case 字节余量薄（429 字节）：未来任何 bundle 新字段必须重跑字节预算
-  测试。缓解：更新后的 worst-case fixture 钉住它。
+- 字节预算：不含 `settingsRevision` 的 worst case 余量薄（429 字节）；全选项
+  合成最坏情况（每个包 pin 带 `settingsRevision`）超出 inline 上限，由发布期
+  容量守卫 fail-closed 拒绝；content-only 可达形状在上限内。未来任何 bundle
+  新字段必须重跑字节边界测试。
 - 版本偏斜：旧 TS harness 解析新 bundle 会拒绝未知包视图键——恢复也不例外，
   因为 `prepareRuntime` 先经同一个闭合 bundle parser 加载基线，再投影 pins。
   真实缓解是 harness 与运行时同在一个 CLI 二进制发布，会话的已提交 bundle
@@ -186,7 +196,9 @@ false` 对每个服务 snapshot 的公开与 WebShell 扩展管理操作保持�
    成功，包括 `hosted-workspace-mcp/1`；skills、commands、agents、context
    正常服务；prepare 结果与已提交 bundle 上报
    `degradedComponents: ["hooks"]`（声明 MCP 时再加 `"mcp"`）。
-2. hooks/MCP 保持惰性：catalogs 为空、`install` no-op、无进程 spawn。
+2. 对无 stage 运行时形态（compile 不对惰性组件 preflight、容忍性
+   `drain`/`install`），hooks/MCP 保持惰性：catalogs 为空、`install` no-op、
+   无进程 spawn。生产 content-only 接线必须保持该不变量（#17424）。
 3. exact re-prepare 与重启恢复返回完全相同的视图；漂移校验保持绿。
 4. 带 `stage` 时不发射 `degradedComponents`，行为不变。
 5. 扩展 API snapshot 对 active 降级配置展示 `degradedComponents` map，其余情况
@@ -202,4 +214,9 @@ false` 对每个服务 snapshot 的公开与 WebShell 扩展管理操作保持�
 
 ## 开放问题
 
-无阻塞项。content-only 生产能力接线仍由 #17424 跟踪。
+无阻塞项。content-only 生产能力接线仍由 #17424 跟踪，本变更明确了其两条
+要求：接线的 compile 必须跳过 `preflightManagedExtensionPackage` 中的 MCP/hook
+可执行性检查（staged 路径保留），其 `drain`/`install` 必须容忍无 staged
+manifest。其验收标准：用真实生产 compile 闭包（非 stub）驱动无 stage 运行时 +
+hook 命令不在 PATH 的混合包，必须 prepare 成功并上报 `["hooks"]`；今天会抛
+`Extension executable is unavailable`。

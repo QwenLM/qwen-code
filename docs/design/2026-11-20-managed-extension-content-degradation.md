@@ -21,10 +21,21 @@ the package or admitting a full process-capable runtime.
 - The extension contract admits seven component kinds
   (`ManagedPackageComponent`: `skills, commands, agents, context, mcp, hooks,
 settings`); the rejection is a runtime-policy gate, not a compile limit.
-- MCP/Hook contributions are consumed only by the staging path
-  (`managed-extension-manifests.ts`), which runs behind `stage`. Without
+- MCP/Hook contributions are activated only by the staging path
+  (`managed-extension-manifests.ts`), which runs behind `stage`; without
   `stage`, prepared catalogs are always `{ mcpServers: [], hookCatalog: null }`
-  and `install` is a no-op: the components are structurally inert.
+  and nothing is staged. They are not structurally inert in the production
+  wiring, however: the production `compile` closure runs
+  `preflightManagedExtensionPackage` unconditionally
+  (`managed-context-worker.ts:814`), resolving every MCP server command and
+  every `type: "command"` hook and throwing `Extension executable is
+unavailable` when one does not resolve
+  (`managed-extension-preflight.ts:168-188`), and the production
+  `drain`/`install` throw when no staged manifest exists
+  (`managed-context-worker.ts:853-855`, `:876-879`). Inertness therefore holds
+  for the stage-less runtime form only when its wiring supplies a compile that
+  does not preflight inert components and `drain`/`install` that tolerate the
+  absence of a staged manifest — the form the harness tests exercise.
 - The Java server is a validating forwarder for `extension-prepare`:
   `ManagedExtensionProtocol.response()` checks the envelope, `state`,
   `revision`, and `executionMode` only; the result's `packages` array passes
@@ -189,8 +200,11 @@ Out of scope:
 
 ## Risks
 
-- Thin worst-case byte margin (429 bytes): any future bundle field must re-run
-  the byte-budget test. Mitigation: the updated worst-case fixture pins it.
+- Byte budget: the without-`settingsRevision` worst case has a thin 429-byte
+  margin, and the fully-optioned synthetic worst case (`settingsRevision` on
+  every package pin) exceeds the inline bound and is rejected fail-closed by
+  the publish-time capacity guard; the reachable content-only shape stays
+  inside. Any future bundle field must re-run the byte-boundary tests.
 - Version skew: an old TS harness parsing a new bundle rejects the unknown
   package-view key — recovery is not exempt, because `prepareRuntime` loads
   the baseline through the same closed bundle parser before projecting pins.
@@ -237,8 +251,10 @@ Out of scope:
    the prepare result and the committed bundle report
    `degradedComponents: ["hooks"]` (plus `"mcp"` when MCP servers are
    declared).
-2. Hooks/MCP remain inert: catalogs empty, `install` a no-op, no process
-   spawned.
+2. For the stage-less runtime form (compile without inert-component preflight,
+   tolerant `drain`/`install`), hooks/MCP remain inert: catalogs empty,
+   `install` a no-op, no process spawned. Production content-only wiring must
+   preserve this invariant (#17424).
 3. Exact re-prepare and restart recovery return the identical view; drift
    checks stay green.
 4. With `stage`, no `degradedComponents` is emitted and behavior is unchanged.
@@ -259,4 +275,11 @@ Out of scope:
 ## Open questions
 
 None blocking. Production content-only capability wiring remains tracked by
-#17424.
+#17424, with two requirements this change surfaces: the wiring's compile must
+skip the MCP/hook resolvability checks in `preflightManagedExtensionPackage`
+(the staged path keeps them), and its `drain`/`install` must tolerate the
+absence of a staged manifest. Its acceptance criterion: a harness-level case
+driving the production compile closure — not a stub — with a stage-less
+runtime and a mixed package whose hook command is absent from PATH must
+prepare and report `["hooks"]`; today it throws `Extension executable is
+unavailable`.
