@@ -4409,6 +4409,13 @@ async function runQwenServeImpl(
   // it actually stopped something, and cleared only by a selection that
   // commits.
   let channelHostingStoppedByOperator = false;
+  // A boot restore declined because another instance held the channel-service
+  // lease must bind late restores for the whole run: the runtime lease re-check
+  // only sees the pidfile's current state, so once the holder's record is gone
+  // (holder exit, stale sweep) a registering workspace would otherwise re-admit
+  // the very channels boot refused (#17479). Cleared only by a selection that
+  // commits, like the operator stop above.
+  let channelHostingDeclinedByConflict = false;
   const reportConfiguredChannelStartupFailure = (error: unknown): void => {
     const message = sanitizeLogText(
       redactLogCredentials(
@@ -5095,6 +5102,7 @@ async function runQwenServeImpl(
     // Cleared after the commit, not before: a selection that fails leaves
     // hosting exactly as stopped as it was.
     channelHostingStoppedByOperator = false;
+    channelHostingDeclinedByConflict = false;
     // The operator chose the whole selection; what the restores did before it
     // is no longer the state anyone needs to act on.
     channelRestoreFailures.clearAll();
@@ -5138,13 +5146,26 @@ async function runQwenServeImpl(
         message: reported.get(channel) ?? message,
       }));
   };
-  // The same entry checks as `setChannelWorkerSelection`, for a change that
-  // adds names instead of replacing the selection: the manager computes the
-  // delta inside its lane, and an operator's recorded stop is honored there.
+  // The same entry checks as `setChannelWorkerSelection` plus the boot-conflict
+  // gate, for a change that adds names instead of replacing the selection: the
+  // manager computes the delta inside its lane, and an operator's recorded stop
+  // is honored there. The gate is deliberately NOT in `setChannelWorkerSelection`:
+  // an explicit selection commit is the escape hatch that clears it.
   const addChannelsToSelection = async (
     names: readonly string[],
   ): Promise<void> => {
     if (channelControlDraining) throw daemonDrainingError();
+    // Defense in depth: the registration hook already skips before its
+    // once-per-run mark while the decline stands; this keeps any other caller
+    // from re-admitting what boot refused.
+    if (channelHostingDeclinedByConflict) {
+      throw Object.assign(
+        new Error(
+          'Channel service hosting was declined at boot because another instance held the channel-service lease. Commit an explicit channel selection or restart the daemon to host channels here.',
+        ),
+        { code: 'channel_service_conflict' },
+      );
+    }
     const manager = await ensureChannelWorkerManager?.();
     if (!manager) throw new Error('Channel worker manager is unavailable.');
     if (channelControlDraining) {
@@ -8708,6 +8729,17 @@ async function runQwenServeImpl(
           );
           return;
         }
+        if (channelHostingDeclinedByConflict) {
+          // Skipped before the once-per-run mark below, like the operator
+          // stop: a workspace refused while the boot decline stands must get
+          // its restore back when an explicit commit clears the gate and it
+          // registers again (#17479).
+          daemonLog.info(
+            'skipping serve.channels for a workspace registered after boot: channel hosting was declined at boot',
+            { workspaceCwd },
+          );
+          return;
+        }
         if (channelWorkerManager?.state().selection?.mode === 'all') {
           // One flat selection cannot say "everything the primary workspace
           // has, plus these two"; `all` stays what it is.
@@ -9852,6 +9884,13 @@ async function runQwenServeImpl(
       reserveChannelServicePidfile(opts.channelSelection);
     } catch (error) {
       if (!channelSelectionFromSettings) throw error;
+      if (
+        error &&
+        typeof error === 'object' &&
+        (error as { code?: unknown }).code === 'channel_service_conflict'
+      ) {
+        channelHostingDeclinedByConflict = true;
+      }
       removeCurrentServePidfile();
       opts.channelSelection = undefined;
       reportConfiguredChannelStartupFailure(error);
