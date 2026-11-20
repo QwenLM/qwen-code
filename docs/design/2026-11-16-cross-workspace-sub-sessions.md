@@ -88,9 +88,9 @@ invent a classifier approval, and a stale `default` decision cannot bypass the
 classifier after the mode changes. If the selector resolves to a different
 runtime at launch, the caller must request approval again. Existing permanent
 grants continue to apply to calls that omit the selector. In `yolo` mode the
-tool resolves the selector itself when the call runs, so the deny rules and the
-generation check still apply. The tool checks the calling mode again after
-resolution. For a call requiring AUTO review, both the ACP permission host and
+same pre-permission resolution applies. After resolution, the tool rechecks the
+calling mode and resolved binding before execution; deny and generation checks
+still apply. For a call requiring AUTO review, both the ACP permission host and
 the unified-agent-loop Core scheduler compare the current mode with the one used
 for the automatic decision immediately before their automatic `ProceedOnce`. A
 changed mode rejects the stale automatic grant as not started, rather than

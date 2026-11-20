@@ -360,9 +360,10 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
                 ? this.destination
                 : undefined));
         const requiresYolo =
-          approvedDestination === undefined &&
           approvalMode === ApprovalMode.YOLO &&
-          autoApproved;
+          autoApproved &&
+          (approvedDestination === undefined ||
+            this.automaticApprovalMode === ApprovalMode.YOLO);
         const requiresAutoMode =
           this.params.workspace !== undefined &&
           this.destination?.sameWorkspace !== true &&

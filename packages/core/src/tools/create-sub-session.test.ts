@@ -220,6 +220,27 @@ describe('CreateSubSessionTool', () => {
     });
   });
 
+  it('keeps the launcher YOLO guard for an automatic callback approval', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const invocation = new CreateSubSessionTool(
+      makeConfig(spawner, ApprovalMode.YOLO),
+    ).build({ prompt: 'do X', workspace: '/repos/b' });
+    await invocation.getDefaultPermission();
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    expect(confirmation.onAutoConfirm).toBeDefined();
+    await confirmation.onAutoConfirm!(ApprovalMode.YOLO);
+    await invocation.execute(new AbortController().signal);
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b',
+      requiresYolo: true,
+    });
+  });
+
   it('keeps an explicitly named current workspace blocked in Plan mode', async () => {
     const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
     const invocation = new CreateSubSessionTool(

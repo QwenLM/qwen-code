@@ -23779,6 +23779,14 @@ describe('Session', () => {
 
     it.each([
       {
+        label: 'replacement preserves the automatic YOLO launcher guard',
+        replacement: true,
+        initialMode: ApprovalMode.DEFAULT,
+        shouldBlock: false,
+        launches: true,
+        modeAfterDestination: ApprovalMode.YOLO,
+      },
+      {
         label: 'direct call follows the completed AUTO decision',
         replacement: false,
         initialMode: ApprovalMode.YOLO,
@@ -23818,6 +23826,7 @@ describe('Session', () => {
         shouldBlock,
         launches,
         modeAfterClassification,
+        modeAfterDestination,
         changeBeforeExecution,
       }) => {
         const toolName = core.ToolNames.CREATE_SUB_SESSION;
@@ -23932,7 +23941,7 @@ describe('Session', () => {
             ),
           { timeout: 1_000 },
         );
-        approvalMode = ApprovalMode.AUTO;
+        approvalMode = modeAfterDestination ?? ApprovalMode.AUTO;
         releaseDestination({
           workspaceId: 'repo-b-id',
           workspaceCwd: '/repo-b',
@@ -23948,14 +23957,22 @@ describe('Session', () => {
         }
         await prompting;
 
-        expect(classify).toHaveBeenCalledOnce();
-        expect(classify.mock.calls[0]?.[0]).toMatchObject({
-          toolParams: replacement ? updatedInput : args,
-        });
+        const expectedClassifierCalls =
+          modeAfterDestination === ApprovalMode.YOLO ? 0 : 1;
+        expect(classify).toHaveBeenCalledTimes(expectedClassifierCalls);
+        if (expectedClassifierCalls === 1) {
+          expect(classify.mock.calls[0]?.[0]).toMatchObject({
+            toolParams: replacement ? updatedInput : args,
+          });
+        }
         if (launches) {
           expect(spawn).toHaveBeenCalledExactlyOnceWith({
             ...args,
+            ...(replacement ? { workspace: updatedInput.workspace } : {}),
             workspaceGeneration: 'generation-b',
+            ...(modeAfterDestination === ApprovalMode.YOLO
+              ? { requiresYolo: true }
+              : {}),
             ...(!replacement && approvalMode === ApprovalMode.AUTO
               ? { requiresAutoMode: true }
               : {}),
