@@ -189,11 +189,15 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    fully redacted (an intact-label block containing a marker is redacted whole
    by the first pass, as in base). The strip class also does not cover the
    wider Unicode whitespace/format families — zero-width (U+200B, U+2060,
-   U+FEFF), NBSP (U+00A0), U+2000–U+200A, U+3000 — so a credential split by any
-   character outside the strip class is neither welded nor redacted; and a tab
-   inside a credential is preserved by the strip and terminates both passes'
-   value classes, so that shape is unmatched too. These are recorded as gaps,
-   not closed here; the list is illustrative, not exhaustive.
+   U+FEFF), NBSP (U+00A0), U+2000–U+200A, U+3000. Whether a split by one of
+   these leaks depends on the rule: a character that breaks the contiguity a
+   fixed-prefix token rule needs (`npm_`, `sk-`, `ghp_`, AKIA, JWT) leaves the
+   token unredacted, and a whitespace-family character terminates the
+   whitespace-bounded value classes; but a non-whitespace format character
+   INSIDE an env / Bearer / URL value is part of that value and is redacted. A
+   tab inside a credential is preserved by the strip and terminates both
+   passes' value classes, so that shape is unmatched too. These are recorded as
+   gaps, not closed here; the list is illustrative, not exhaustive.
    Living in
    `skillLog`, the strip covers both the collector's excerpt and the patrol's
    rendered evidence (its only `jobLog` caller goes through `skillLog`). The
