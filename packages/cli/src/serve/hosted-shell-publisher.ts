@@ -34,6 +34,11 @@ import {
   type ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
+  parseManagedDeliveryEntry,
+  type ManagedDeliveryEntry,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-delivery-entry.js';
+import type { ManagedSessionInputRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
+import {
   boundedShellPreview,
   HOSTED_SHELL_PUBLISHER_PATH,
   SHELL_PUBLISHER_BODY_LIMIT,
@@ -102,6 +107,8 @@ const REDRIVE_BACKOFF_MS = 250;
 export class HostedShellPublisher {
   private readonly token = randomBytes(32).toString('base64url');
   private readonly captures = new Map<string, RegisteredCapture>();
+  /** Phase 3b: the highest contiguous delivery sequence applied per run. */
+  private readonly appliedThrough = new Map<string, number>();
   private readonly operations = new Set<Promise<unknown>>();
   private server?: Server;
   private descriptor?: ShellPublisherDescriptor;
@@ -311,6 +318,9 @@ export class HostedShellPublisher {
       ));
       entry.sink = (await prepared).sink;
       return entry.sink.identity;
+    }
+    if (body['operation'] === 'deliver') {
+      return this.applyDelivery(body);
     }
     const id = body['executionCallId'];
     const entry = typeof id === 'string' ? this.captures.get(id) : undefined;
@@ -1005,6 +1015,194 @@ export class HostedShellPublisher {
     );
     if (typeof redrive.unref === 'function') redrive.unref();
     background.redrive = redrive;
+  }
+
+  /**
+   * Phase 3b: applies a batch of worker-owned delivery entries in order.
+   * Each entry carries the complete resources it introduces; the applier
+   * publishes them idempotently, then advances or settles the record exactly
+   * as the resident capture path does. A gap is refused; the worker re-sends
+   * from its oldest unacknowledged entry.
+   */
+  private async applyDelivery(body: Record<string, unknown>): Promise<unknown> {
+    publisherFields(body, ['operation', 'executionCallId', 'entries']);
+    const executionCallId = String(body['executionCallId']);
+    const entry = this.captures.get(executionCallId);
+    if (!entry?.background) {
+      throw new Error('Delivery names an unregistered background capture.');
+    }
+    if (!Array.isArray(body['entries']) || body['entries'].length === 0) {
+      throw new Error('Delivery batch is empty.');
+    }
+    const entries = body['entries'].map(parseManagedDeliveryEntry);
+    let applied = this.appliedThrough.get(executionCallId) ?? 0;
+    let receipt: LocalShellReceipt | undefined;
+    for (const delivered of entries) {
+      if (delivered.executionCallId !== executionCallId) {
+        throw new Error('Delivery entry names another execution.');
+      }
+      if (delivered.deliverySeq <= applied) continue; // already applied
+      if (delivered.deliverySeq !== applied + 1) {
+        throw new Error('Delivery sequence is not contiguous.');
+      }
+      await this.publishDeliveryResources(delivered);
+      receipt = await this.applyDeliveryEntry(
+        entry,
+        delivered,
+        executionCallId,
+      );
+      applied = delivered.deliverySeq;
+      this.appliedThrough.set(executionCallId, applied);
+    }
+    return {
+      appliedThrough: applied,
+      ...(receipt ? { receipt } : {}),
+    };
+  }
+
+  private async publishDeliveryResources(
+    entry: ManagedDeliveryEntry,
+  ): Promise<void> {
+    for (const resource of entry.resources) {
+      await this.resources.publish(
+        resource.ref.kind,
+        Buffer.from(resource.bytesBase64, 'base64'),
+        resource.ref.resourceId,
+      );
+    }
+  }
+
+  private async applyDeliveryEntry(
+    entry: RegisteredCapture,
+    delivered: ManagedDeliveryEntry,
+    executionCallId: string,
+  ): Promise<LocalShellReceipt | undefined> {
+    const background = entry.background!;
+    const domain = background.recordDomain;
+    const owner =
+      domain === 'monitor_run'
+        ? this.monitors?.record(executionCallId)
+        : this.childRuns?.record(executionCallId);
+    if (!owner) {
+      throw new Error(
+        `The ${domain} record for ${executionCallId} is missing.`,
+      );
+    }
+    if (delivered.kind === 'output') {
+      if (owner.startReceiptRef === null) return undefined;
+      if (domain === 'monitor_run') {
+        await this.monitors!.advanceOutput(
+          executionCallId,
+          delivered.manifestRef,
+        );
+      } else {
+        await this.childRuns!.advanceOutput(
+          executionCallId,
+          delivered.manifestRef,
+        );
+      }
+      background.lastManifest = delivered.manifestRef;
+      return undefined;
+    }
+    if (delivered.kind === 'observation') {
+      if (domain !== 'monitor_run' || !this.monitors) {
+        throw new Error('Observation delivery requires a monitor_run record.');
+      }
+      const input: ManagedSessionInputRequest | undefined =
+        delivered.notification && !this.lifecyclePrepared
+          ? {
+              inputId: delivered.notification.inputId,
+              turnId: delivered.notification.turnId,
+              source: 'monitor',
+              contentRef: delivered.notification.contentRef,
+              admissionRef: delivered.notification.admissionRef,
+              deadline: null,
+              wakeReason: 'input',
+            }
+          : undefined;
+      await this.monitors.observe(
+        executionCallId,
+        { lines: delivered.lines },
+        input ? { input } : undefined,
+      );
+      if (input) this.onNotification?.();
+      return undefined;
+    }
+    // terminal: advance the final manifest, then settle the record.
+    if (delivered.manifestRef && owner.startReceiptRef !== null) {
+      if (domain === 'monitor_run') {
+        await this.monitors!.advanceOutput(
+          executionCallId,
+          delivered.manifestRef,
+        );
+      } else {
+        await this.childRuns!.advanceOutput(
+          executionCallId,
+          delivered.manifestRef,
+        );
+      }
+      background.lastManifest = delivered.manifestRef;
+    }
+    entry.envelope = delivered.envelope;
+    if (domain === 'monitor_run') {
+      if (!this.monitors) {
+        throw new Error(
+          `The monitor_run record for ${executionCallId} has no session.`,
+        );
+      }
+      const record = this.monitors.record(executionCallId);
+      if (record?.run.state === 'recovery_blocked') {
+        if (delivered.evidence !== null) {
+          if (delivered.stopRequested) {
+            await this.monitors.settleStopRequested(executionCallId);
+          } else {
+            await this.monitors.settleQuiet(executionCallId, 'exited');
+          }
+        }
+      } else if (delivered.evidence === null) {
+        await this.monitors.settleFailed(executionCallId, {
+          stopReason: 'watch_failed',
+          started: true,
+        });
+      } else if (delivered.stopRequested) {
+        await this.monitors.settleStopRequested(executionCallId);
+      } else {
+        await this.monitors.settleQuiet(
+          executionCallId,
+          delivered.monitorStopReason ?? 'exited',
+        );
+      }
+    } else if (delivered.evidence === null) {
+      await this.childRuns?.settleFailed(executionCallId, {
+        stopReason: 'process_failed',
+        started: true,
+      });
+    } else if (delivered.stopRequested) {
+      await this.childRuns?.requestStop(executionCallId);
+      await this.childRuns?.settleStopRequested(executionCallId);
+    } else {
+      await this.childRuns?.settleExited(executionCallId, delivered.evidence);
+    }
+    const manifestRef = delivered.manifestRef ?? background.lastManifest;
+    return {
+      executionCallId,
+      manifest: manifestRef,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef:
+        manifestRef ??
+        (await this.session.resources.publish(
+          'managed-tool-outcome',
+          Buffer.from(
+            JSON.stringify({
+              schemaVersion: 1,
+              decision: 'blocked',
+              envelope: delivered.envelope,
+              manifestRef: null,
+            }),
+          ),
+        )),
+    };
   }
 
   close(): Promise<void> {

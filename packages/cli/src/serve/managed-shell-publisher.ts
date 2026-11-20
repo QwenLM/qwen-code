@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, Response } from 'express';
+import { createHash } from 'node:crypto';
 import type { ShellExecutionResult } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
 import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import {
@@ -27,6 +28,10 @@ import type {
   ToolResultAcknowledgement,
 } from './managed-runtime-tool-executor.js';
 import { processGroupLiveness } from './managed-runtime-ledger.js';
+import {
+  BackgroundDeliveryRun,
+  WorkerBackgroundCaptureSink,
+} from './managed-background-delivery.js';
 
 export const HOSTED_SHELL_PUBLISHER_PATH =
   '/internal/hosted-shell-publisher/v1';
@@ -383,10 +388,27 @@ export class ManagedShellPublisherRegistry
   implements ManagedShellCapturePublisher
 {
   private readonly sessions = new Map<string, ShellPublisherDescriptor>();
+  private readonly sessionGenerations = new Map<string, number>();
   private readonly executions = new Map<
     string,
     { descriptor: ShellPublisherDescriptor; sink: RemoteShellCapture }
   >();
+  /** Phase 3b: worker-owned background runs, keyed by executionCallId. */
+  private readonly workerRuns = new Map<
+    string,
+    {
+      sessionId: string;
+      run: BackgroundDeliveryRun;
+      sink: WorkerBackgroundCaptureSink;
+    }
+  >();
+
+  constructor(
+    private readonly observation: {
+      readonly enabled: boolean;
+      readonly workspaceId?: string;
+    } = { enabled: false },
+  ) {}
 
   get hasInstalledPublication(): boolean {
     return this.sessions.size > 0 || this.executions.size > 0;
@@ -411,13 +433,23 @@ export class ManagedShellPublisherRegistry
       (req: Request, res: Response) => {
         let sessionId: string;
         let publisher: ShellPublisherDescriptor;
+        let writerGeneration: number | undefined;
         try {
-          const body = publisherFields(req.body, [
-            'protocolVersion',
-            'toolResult',
-            'sessionId',
-            'publisher',
-          ]);
+          const keys = Object.keys(req.body ?? {}).sort();
+          const withGeneration =
+            this.observation.enabled && keys.includes('writerGeneration');
+          const body = publisherFields(
+            req.body,
+            withGeneration
+              ? [
+                  'protocolVersion',
+                  'toolResult',
+                  'sessionId',
+                  'publisher',
+                  'writerGeneration',
+                ]
+              : ['protocolVersion', 'toolResult', 'sessionId', 'publisher'],
+          );
           if (
             body['protocolVersion'] !== 3 ||
             body['toolResult'] !== MANAGED_TOOL_RESULT_PROTOCOL ||
@@ -428,19 +460,49 @@ export class ManagedShellPublisherRegistry
             throw new Error('Invalid registration.');
           sessionId = body['sessionId'];
           publisher = parseShellPublisher(body['publisher']);
+          if (withGeneration) {
+            const generation = Number(body['writerGeneration']);
+            if (!Number.isSafeInteger(generation) || generation < 1) {
+              throw new Error('Invalid writer generation.');
+            }
+            writerGeneration = generation;
+          }
         } catch {
           res.status(400).json({ code: 'managed_runtime_attestation_invalid' });
           return;
         }
         const previous = this.sessions.get(sessionId);
-        if (
-          !available(sessionId) ||
-          (previous && JSON.stringify(previous) !== JSON.stringify(publisher))
-        ) {
+        const previousGeneration = this.sessionGenerations.get(sessionId) ?? 0;
+        if (!available(sessionId)) {
           res.status(409).json({ code: 'managed_runtime_identity_conflict' });
           return;
         }
-        this.sessions.set(sessionId, previous ?? publisher);
+        if (previous && writerGeneration === undefined) {
+          // Legacy registration: the original descriptor must match exactly.
+          if (JSON.stringify(previous) !== JSON.stringify(publisher)) {
+            res.status(409).json({ code: 'managed_runtime_identity_conflict' });
+            return;
+          }
+        } else if (previous && writerGeneration !== undefined) {
+          // Phase 3b: a same-or-newer writer generation replaces the publisher;
+          // an older one is refused.
+          if (writerGeneration < previousGeneration) {
+            res.status(409).json({ code: 'managed_runtime_identity_conflict' });
+            return;
+          }
+        }
+        this.sessions.set(sessionId, publisher);
+        if (writerGeneration !== undefined) {
+          this.sessionGenerations.set(sessionId, writerGeneration);
+          for (const {
+            sessionId: runSession,
+            run,
+          } of this.workerRuns.values()) {
+            if (runSession === sessionId) {
+              run.attach(publisher, writerGeneration);
+            }
+          }
+        }
         res.json({ ...PREFIX, sessionId, installed: true });
       },
       handleManagedRuntimeJsonError,
@@ -451,6 +513,15 @@ export class ManagedShellPublisherRegistry
     identity: ToolResultExpectedIdentity;
     sink: ManagedShellCaptureSink;
   }> {
+    const background =
+      (request.capture as { background?: boolean }).background === true;
+    if (
+      background &&
+      this.observation.enabled &&
+      this.observation.workspaceId !== undefined
+    ) {
+      return this.prepareWorkerOwned(request);
+    }
     const descriptor = this.sessions.get(request.reference.sessionId);
     if (!descriptor) throw new Error('Shell publisher is not registered.');
     const identity = publisherObject(
@@ -477,10 +548,73 @@ export class ManagedShellPublisherRegistry
     return { identity, sink };
   }
 
+  /** Phase 3b: the worker owns the background capture. Identity is computed
+   * locally exactly as the Harness admission computes it, so the applier's
+   * deterministic captureId check matches without a prepare round trip. */
+  private prepareWorkerOwned(request: LocalShellCaptureRequest): {
+    identity: ToolResultExpectedIdentity;
+    sink: ManagedShellCaptureSink;
+  } {
+    const { reference, capture } = request;
+    const sessionKey = {
+      tenantId: capture.tenantId,
+      workspaceId: this.observation.workspaceId!,
+      sessionId: capture.sessionId,
+    };
+    const captureId = createHash('sha256')
+      .update(
+        JSON.stringify([
+          sessionKey,
+          capture.executionCallId,
+          capture.bindingGeneration,
+        ]),
+      )
+      .digest('hex')
+      .slice(0, 32);
+    const identity: ToolResultExpectedIdentity = {
+      tenantId: capture.tenantId,
+      sessionId: capture.sessionId,
+      turnId: capture.turnId,
+      executionCallId: capture.executionCallId,
+      callId: reference.callId,
+      invocationDigest: reference.argsDigest,
+      bindingGeneration: capture.bindingGeneration,
+      captureId,
+      revision: 1,
+    };
+    const existing = this.workerRuns.get(capture.executionCallId);
+    if (existing) return { identity, sink: existing.sink };
+    const monitoring =
+      (capture as { monitoring?: boolean }).monitoring === true;
+    const run = new BackgroundDeliveryRun(
+      capture.executionCallId,
+      capture.bindingGeneration,
+      monitoring ? 'monitor_run' : 'child_run',
+    );
+    const sink = new WorkerBackgroundCaptureSink(identity, run);
+    this.workerRuns.set(capture.executionCallId, {
+      sessionId: reference.sessionId,
+      run,
+      sink,
+    });
+    const descriptor = this.sessions.get(reference.sessionId);
+    const generation = this.sessionGenerations.get(reference.sessionId) ?? 0;
+    if (descriptor && generation > 0) run.attach(descriptor, generation);
+    return { identity, sink };
+  }
+
   async accept(
     identity: ToolResultExpectedIdentity,
     envelope: ToolResultEnvelope,
   ): Promise<ToolResultAcknowledgement> {
+    const workerRun = this.workerRuns.get(identity.executionCallId);
+    if (workerRun) {
+      const receipt = await workerRun.run.terminalAcknowledgement();
+      return {
+        ...receipt,
+        manifest: receipt.manifest ?? envelope.capture?.manifest ?? null,
+      };
+    }
     const execution = this.executions.get(identity.executionCallId);
     if (!execution) throw new Error('Shell capture was not prepared.');
     const blocked = (): ToolResultAcknowledgement => ({
