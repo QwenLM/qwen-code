@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from inspect import Parameter, Signature, iscoroutinefunction, signature
@@ -96,6 +98,14 @@ class TimeoutOptions:
                 raise TypeError(f"timeout.{name} must be a positive number")
             if raw <= 0:
                 raise ValueError(f"timeout.{name} must be a positive number")
+            # `float("inf")` is the familiar "no timeout" idiom, but the
+            # initialize payload is serialized as JSON and the CLI parses it
+            # with the strict `JSON.parse`, which rejects the non-standard
+            # `Infinity` literal — the session would die at startup.
+            if not math.isfinite(raw):
+                raise ValueError(
+                    f"timeout.{name} must be a finite number of seconds"
+                )
             return float(raw)
 
         return cls(

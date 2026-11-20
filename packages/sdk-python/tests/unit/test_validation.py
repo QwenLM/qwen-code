@@ -249,6 +249,16 @@ def test_timeout_rejects_boolean_value() -> None:
         TimeoutOptions.from_mapping({"stream_close": True})
 
 
+def test_timeout_rejects_non_finite_value() -> None:
+    # ``float("inf")`` is the familiar "no timeout" idiom, but the initialize
+    # payload is serialized as JSON and the CLI parses it with the strict
+    # ``JSON.parse``, which rejects the ``Infinity`` literal — the session
+    # would die at startup with a parser error instead of a clear message.
+    pattern = r"timeout\.control_request must be a finite"
+    with pytest.raises(ValueError, match=pattern):
+        TimeoutOptions.from_mapping({"control_request": float("inf")})
+
+
 def test_rejects_invalid_max_tool_calls() -> None:
     with pytest.raises(ValidationError, match="max_tool_calls"):
         validate_query_options(QueryOptions(max_tool_calls=-2))
