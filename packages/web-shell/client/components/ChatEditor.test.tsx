@@ -5154,12 +5154,13 @@ describe('ChatEditor model picker host content', () => {
   // A real coarse-pointer device matches both queries: the sheet's own query
   // and the raw pointer check the touch sizing is gated on. The file-level
   // afterEach never resets matchMedia, so every caller must restore.
-  function mockCoarsePointerMedia() {
+  function mockCoarsePointerMedia({ coarse = true } = {}) {
     const media = vi.mocked(window.matchMedia).mockImplementation(
       (query: string) =>
         ({
           matches:
-            query === MODEL_SHEET_QUERY || query === TOUCH_COMPOSER_QUERY,
+            query === MODEL_SHEET_QUERY ||
+            (coarse && query === TOUCH_COMPOSER_QUERY),
           addEventListener: vi.fn(),
           removeEventListener: vi.fn(),
         }) as unknown as MediaQueryList,
@@ -5680,14 +5681,7 @@ describe('ChatEditor model picker host content', () => {
   it('keeps the compact field when the sheet stands in for a narrow desktop window', () => {
     // MODEL_SHEET_QUERY also matches (max-width: 639px), so a mouse-driven
     // narrow window gets the sheet without being a touch device.
-    const media = vi.mocked(window.matchMedia).mockImplementation(
-      (query: string) =>
-        ({
-          matches: query === MODEL_SHEET_QUERY,
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-        }) as unknown as MediaQueryList,
-    );
+    const restoreMedia = mockCoarsePointerMedia({ coarse: false });
     try {
       const container = renderChatEditor({
         visibleToolbarActions: ['model'],
@@ -5706,14 +5700,7 @@ describe('ChatEditor model picker host content', () => {
       expect(search.getAttribute('enterkeyhint')).toBeNull();
       expect(search.getAttribute('spellcheck')).toBeNull();
     } finally {
-      media.mockImplementation(
-        () =>
-          ({
-            matches: false,
-            addEventListener: vi.fn(),
-            removeEventListener: vi.fn(),
-          }) as unknown as MediaQueryList,
-      );
+      restoreMedia();
     }
   });
 

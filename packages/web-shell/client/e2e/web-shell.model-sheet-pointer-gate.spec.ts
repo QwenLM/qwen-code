@@ -28,11 +28,14 @@ async function installScenario(
   });
 }
 
-test('a narrow mouse-driven window gets the sheet without touch sizing', async ({
+// Tagged @smoke on purpose: the pull-request lane runs --grep @smoke, so an
+// untagged negative control would only ever run after merge.
+test('a narrow mouse-driven window gets the sheet without touch sizing @smoke', async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 600, height: 800 });
   const scenario = createWebShellDaemonScenario();
+  scenario.capabilities.features.push('workspace_model_reload');
   scenario.state.configOptions = [
     {
       id: 'reasoning_effort',
@@ -91,4 +94,26 @@ test('a narrow mouse-driven window gets the sheet without touch sizing', async (
   // Spell-check stays on for a mouse-driven field.
   expect(await search.getAttribute('spellcheck')).toBeNull();
   expect(await search.getAttribute('enterkeyhint')).toBeNull();
+
+  const thinkingRow = sheet.locator('[data-web-shell-thinking-row]');
+  await expect(thinkingRow).toBeVisible();
+  expect((await thinkingRow.boundingBox())!.height).toBeLessThan(44);
+
+  // The refresh icon and the switch's hit pad are gated by the same block;
+  // without these reads, hoisting either rule out of it stays green here.
+  const refresh = sheet.getByRole('button', {
+    name: 'Refresh models',
+    exact: true,
+  });
+  await expect(refresh).toBeVisible();
+  expect((await refresh.boundingBox())!.height).toBeLessThan(44);
+
+  const pad = await sheet
+    .locator('[data-web-shell-thinking-toggle]')
+    .evaluate((node) =>
+      parseFloat(getComputedStyle(node, '::after').insetBlockStart),
+    );
+  // The primitive's own pad, not a threshold: a threshold would also pass a
+  // mutation that zeroes it.
+  expect(Math.abs(pad)).toBe(8);
 });

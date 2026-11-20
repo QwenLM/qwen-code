@@ -1507,7 +1507,7 @@ function ModelReasoningControls({
       <div className={styles.reasoningSectionTitle}>
         {t('reasoning.options')}
       </div>
-      <div className={styles.reasoningThinkingRow}>
+      <div className={styles.reasoningThinkingRow} data-web-shell-thinking-row>
         <span>{t('reasoning.thinking')}</span>
         <Switch
           checked={reasoning.enabled}

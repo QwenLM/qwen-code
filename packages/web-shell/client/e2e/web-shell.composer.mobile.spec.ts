@@ -304,8 +304,12 @@ test('model sheet rows and search field stay touch-sized, including on a tablet 
   const pad = await thinking.evaluate((node) =>
     parseFloat(getComputedStyle(node, '::after').insetBlockStart),
   );
-  expect(Math.abs(pad)).toBeGreaterThanOrEqual(13);
   const track = (await thinking.boundingBox())!;
+  // The hit rect, not the pad constant: a smaller switch track must not
+  // shrink the target below 44px while the pad still reads 13.
+  expect(track.height + 2 * Math.abs(pad)).toBeGreaterThanOrEqual(44);
+  const thinkingRow = sheet.locator('[data-web-shell-thinking-row]');
+  expect((await thinkingRow.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   const hit = await page.evaluate(
     ([x, y]) => {
       const el = document.elementFromPoint(x as number, y as number);
