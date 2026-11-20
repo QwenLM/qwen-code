@@ -308,12 +308,15 @@ case "${step}" in
         fi
         # Block cross-version races: after the check above, a newer version
         # could still publish on the same channel while this run rebuilds.
-        # Serialize all real publishes for the same npm channel.
+        # Serialize every real publish, whichever channel it targets.
         if [[ "${IS_DRY_RUN}" == "false" ]]; then
-          echo "::group::Checking for concurrent same-channel publishes"
-          concurrent="$(gh run list --workflow release.yml --status in_progress --limit 20 --json databaseId,displayTitle,headBranch --jq ".[] | select(.headBranch | startswith(\"release/\")) | select(.headBranch != \"${release_branch_name}\") | .databaseId" 2>/dev/null || true)"
-          if [[ -n "${concurrent}" ]]; then
-            echo "::error::Another release run is in progress on a different version. Wait for it to finish before resuming."
+          echo "::group::Checking for concurrent release runs"
+          # Key on the run id, not on `headBranch`: release.yml is triggered by
+          # schedule and workflow_dispatch, so every run's headBranch is `main`
+          # and a `release/`-prefixed filter can never match a sibling run.
+          concurrent="$(gh run list --workflow release.yml --status in_progress --limit 20 --json databaseId --jq "[.[] | select((.databaseId|tostring) != \"${GITHUB_RUN_ID:-0}\")] | length" 2>/dev/null || echo 0)"
+          if [[ "${concurrent}" != "0" ]]; then
+            echo "::error::Another release run is in progress. Wait for it to finish before resuming."
             echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
