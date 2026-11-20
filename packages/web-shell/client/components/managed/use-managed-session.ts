@@ -3,12 +3,59 @@ import type {
   ManagedAgentProvider,
   ManagedAgentSessionEvent,
   ManagedAgentSessionSummary,
+  ManagedAgentRequestOptions,
+  ManagedAgentSessionTranscript,
 } from './managed-agent-provider';
 import {
   isAuthFailure,
   isNonRetryableClientError,
 } from './managed-request-error';
 import { mergeManagedEvents } from './managed-session-messages';
+
+function itemId(event: ManagedAgentSessionEvent): string | undefined {
+  if (!event.data || typeof event.data !== 'object') return undefined;
+  const id = (event.data as Record<string, unknown>)['itemId'];
+  return typeof id === 'string' ? id : undefined;
+}
+
+function itemContent(event: ManagedAgentSessionEvent): boolean {
+  return [
+    'accepted',
+    'assistant_delta',
+    'assistant_thought',
+    'tool_requested',
+    'tool_started',
+    'tool_completed',
+    'tool_result_updated',
+  ].includes(event.type);
+}
+
+function rememberItemCoverage(
+  coverage: Map<string, number>,
+  page: ManagedAgentSessionTranscript,
+): void {
+  for (const event of page.events) {
+    const id = event.assembledFromItem ? itemId(event) : undefined;
+    if (id !== undefined)
+      coverage.set(id, Math.max(coverage.get(id) ?? 0, page.lastEventId));
+  }
+}
+
+function withoutReplacedItemEvents(
+  events: ManagedAgentSessionEvent[],
+  page: ManagedAgentSessionTranscript,
+): ManagedAgentSessionEvent[] {
+  const replaced = new Set(
+    page.events.filter((event) => event.assembledFromItem).map(itemId),
+  );
+  replaced.delete(undefined);
+  return events.filter(
+    (event) =>
+      event.id > page.lastEventId ||
+      !itemContent(event) ||
+      !replaced.has(itemId(event)),
+  );
+}
 
 type SignalLeg = 'session' | 'transcript' | 'stream';
 
@@ -141,50 +188,130 @@ export function useManagedSession(
     loading: false,
   });
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const itemPagesRef = useRef(false);
+  const itemCoverageRef = useRef(new Map<string, number>());
   const lifetime = useRef<AbortController | undefined>(undefined);
   const summaryRef = useRef<ManagedAgentSessionSummary | undefined>(undefined);
-  const retainSummary = useCallback((incoming: ManagedAgentSessionSummary) => {
-    const previous = summaryRef.current;
-    const workspace = previous?.workspace;
-    let next =
-      previous?.sessionId === incoming.sessionId &&
-      workspace &&
-      incoming.workspace?.workspaceId === workspace.workspaceId &&
-      (workspace.contextRevision ?? 0) >
-        (incoming.workspace.contextRevision ?? 0)
-        ? { ...incoming, workspace }
-        : incoming;
-    if (
-      previous?.sessionId === incoming.sessionId &&
-      (previous.modelSelection?.revision ?? 0) >
-        (incoming.modelSelection?.revision ?? 0)
-    ) {
-      next = {
-        ...next,
-        modelSelection: previous.modelSelection,
-        modelContext: previous.modelContext,
-      };
-    }
-    if (
-      previous?.sessionId === incoming.sessionId &&
-      (previous.approvalRevision ?? 0) > (incoming.approvalRevision ?? 0)
-    ) {
-      next = {
-        ...next,
-        approvalMode: previous.approvalMode,
-        approvalRevision: previous.approvalRevision,
-        initialApprovalMode: previous.initialApprovalMode,
-        planMode: previous.planMode,
-      };
-    }
-    summaryRef.current = next;
-    return next;
+  const selectedSession = useRef(sessionId);
+  selectedSession.current = sessionId;
+  const confirmedTitle = useRef<
+    | {
+        sessionId: string;
+        title: string;
+        generation: number;
+      }
+    | undefined
+  >(undefined);
+  const readSummary = useCallback(
+    async (id: string, options: ManagedAgentRequestOptions) => {
+      const generation = confirmedTitle.current?.generation ?? 0;
+      const summary = await provider.getSession(id, options);
+      options.signal?.throwIfAborted();
+      return { summary, generation };
+    },
+    [provider],
+  );
+  const applyTitle = useCallback((id: string, title: string) => {
+    if (selectedSession.current !== id) return;
+    // Retain the confirmation even while a manual reload has no summary.
+    confirmedTitle.current = {
+      sessionId: id,
+      title,
+      generation: (confirmedTitle.current?.generation ?? 0) + 1,
+    };
+    const current = summaryRef.current;
+    if (current?.sessionId !== id) return;
+    const summary = { ...current, title };
+    summaryRef.current = summary;
+    setState((state) => ({ ...state, summary }));
   }, []);
+  const retainSummary = useCallback(
+    (read: { summary: ManagedAgentSessionSummary; generation: number }) => {
+      const incoming = read.summary;
+      const previous = summaryRef.current;
+      const confirmation = confirmedTitle.current;
+      const workspace = previous?.workspace;
+      let next =
+        previous?.sessionId === incoming.sessionId &&
+        workspace &&
+        incoming.workspace?.workspaceId === workspace.workspaceId &&
+        (workspace.contextRevision ?? 0) >
+          (incoming.workspace.contextRevision ?? 0)
+          ? { ...incoming, workspace }
+          : incoming;
+      if (
+        read.generation !== (confirmation?.generation ?? 0) &&
+        confirmation?.sessionId === incoming.sessionId
+      ) {
+        next = {
+          ...next,
+          title:
+            previous?.sessionId === incoming.sessionId
+              ? previous.title
+              : confirmation.title,
+        };
+      }
+      if (
+        previous?.sessionId === incoming.sessionId &&
+        (previous.modelSelection?.revision ?? 0) >
+          (incoming.modelSelection?.revision ?? 0)
+      ) {
+        next = {
+          ...next,
+          modelSelection: previous.modelSelection,
+          modelContext: previous.modelContext,
+        };
+      }
+      if (
+        previous?.sessionId === incoming.sessionId &&
+        (previous.approvalRevision ?? 0) > (incoming.approvalRevision ?? 0)
+      ) {
+        next = {
+          ...next,
+          approvalMode: previous.approvalMode,
+          approvalRevision: previous.approvalRevision,
+          initialApprovalMode: previous.initialApprovalMode,
+          planMode: previous.planMode,
+        };
+      }
+      if (
+        previous?.sessionId === incoming.sessionId &&
+        (previous.worktree?.revision ?? 0) > (incoming.worktree?.revision ?? 0)
+      ) {
+        next = {
+          ...next,
+          worktree: previous.worktree,
+          workspace: next.workspace
+            ? { ...next.workspace, state: previous.workspace?.state }
+            : previous.workspace,
+          ...(previous.worktree?.state === 'ready'
+            ? {}
+            : {
+                planModeSupported: false,
+                capabilities: {
+                  ...next.capabilities,
+                  canSend: false,
+                  canRename: false,
+                  workspaceTurns: false,
+                  childAgents: false,
+                  modelChange: false,
+                  contextCompression: false,
+                  approvalModeChange: false,
+                  inputAttachments: false,
+                },
+              }),
+        };
+      }
+      summaryRef.current = next;
+      return next;
+    },
+    [],
+  );
   const refreshSummary = useCallback(
     async (signal?: AbortSignal) => {
       const abort = lifetime.current;
       if (!sessionId || !abort || abort.signal.aborted) return undefined;
-      const read = await provider.getSession(sessionId, {
+      const read = await readSummary(sessionId, {
         clientId,
         signal: signal ? composeSignals([signal, abort.signal]) : abort.signal,
       });
@@ -193,7 +320,7 @@ export function useManagedSession(
       setState((current) => ({ ...current, summary }));
       return summary;
     },
-    [provider, clientId, sessionId, retainSummary],
+    [readSummary, clientId, sessionId, retainSummary],
   );
   const cursorRef = useRef<string | undefined>(undefined);
   // Whether any loop ended terminally on a session-leg answer; a later
@@ -223,6 +350,8 @@ export function useManagedSession(
     lifetime.current = abort;
     summaryRef.current = undefined;
     cursorRef.current = undefined;
+    itemPagesRef.current = false;
+    itemCoverageRef.current.clear();
     pagedRef.current = false;
     pagedHeadRef.current = undefined;
     exhaustedRef.current = false;
@@ -239,10 +368,7 @@ export function useManagedSession(
     const opts = { clientId, signal: abort.signal };
     const update = (change: Partial<ManagedSessionState>) => {
       if (abort.signal.aborted) return;
-      const next = change.summary
-        ? { ...change, summary: retainSummary(change.summary) }
-        : change;
-      setState((current) => ({ ...current, ...next }));
+      setState((current) => ({ ...current, ...change }));
     };
     const record = (leg: SignalLeg, error: unknown, final: boolean) => {
       if (abort.signal.aborted) return;
@@ -365,7 +491,7 @@ export function useManagedSession(
       // before the transcript leg's: whether the bootstrap terminates for a
       // gone session is decided by the answer, not by response ordering.
       const [sessionRead, transcriptRead] = await Promise.allSettled([
-        provider.getSession(sessionId, opts),
+        readSummary(sessionId, opts),
         provider.getTranscript(sessionId, { ...opts, limit: 100 }),
       ]);
       if (sessionRead.status === 'rejected') {
@@ -392,6 +518,34 @@ export function useManagedSession(
       const summary = retainSummary(sessionRead.value);
       const transcript = transcriptRead.value;
       if (abort.signal.aborted) return transcript.lastEventId;
+      itemPagesRef.current = transcript.history === 'items';
+      itemCoverageRef.current.clear();
+      if (itemPagesRef.current)
+        rememberItemCoverage(itemCoverageRef.current, transcript);
+      if (preserveLoadedPages && transcript.history === 'items') {
+        cursorRef.current = transcript.olderCursor;
+        pagedRef.current = false;
+        exhaustedRef.current = false;
+        pagedHeadRef.current = undefined;
+        setState((current) => ({
+          ...current,
+          summary,
+          events: mergeManagedEvents(
+            current.events.filter(
+              (event) =>
+                event.id > transcript.lastEventId &&
+                event.assembledFromItem !== true,
+            ),
+            transcript.events,
+            true,
+          ),
+          olderCursor: transcript.olderCursor,
+          loading: false,
+        }));
+        retire('session');
+        retire('transcript');
+        return transcript.lastEventId;
+      }
       if (preserveLoadedPages) {
         // The stream never replays events at or below the snapshot head,
         // so the snapshot is the sole authority for that range (assumed
@@ -594,11 +748,32 @@ export function useManagedSession(
             expiredVerdictMessage = undefined;
             retire('stream');
             retire('transcript');
-            setState((current) => ({
-              ...current,
-              events: mergeManagedEvents(current.events, [event]),
-            }));
-            if (event.type === 'context_changed') {
+            const projectedThrough =
+              itemCoverageRef.current.get(itemId(event) ?? '') ?? -1;
+            if (
+              !itemPagesRef.current ||
+              !itemContent(event) ||
+              event.id > projectedThrough
+            ) {
+              setState((current) => ({
+                ...current,
+                events: mergeManagedEvents(
+                  current.events,
+                  [event],
+                  itemPagesRef.current,
+                ),
+              }));
+            }
+            if (
+              event.type === 'context_changed' ||
+              (provider.recovery &&
+                [
+                  'completed',
+                  'cancelled',
+                  'failed',
+                  'runtime_released',
+                ].includes(event.type))
+            ) {
               void refreshSummary().catch((error: unknown) =>
                 failed(error, 'session'),
               );
@@ -655,9 +830,7 @@ export function useManagedSession(
             // verdicts.
             try {
               update({
-                summary: retainSummary(
-                  await provider.getSession(sessionId, opts),
-                ),
+                summary: retainSummary(await readSummary(sessionId, opts)),
               });
               retire('session');
             } catch (error) {
@@ -698,7 +871,7 @@ export function useManagedSession(
         if (abort.signal.aborted) return;
         try {
           update({
-            summary: retainSummary(await provider.getSession(sessionId, opts)),
+            summary: retainSummary(await readSummary(sessionId, opts)),
           });
           retire('session');
           failures = 0;
@@ -713,7 +886,15 @@ export function useManagedSession(
       }
     })();
     return () => abort.abort();
-  }, [provider, clientId, sessionId, revision, retainSummary, refreshSummary]);
+  }, [
+    provider,
+    clientId,
+    sessionId,
+    revision,
+    retainSummary,
+    readSummary,
+    refreshSummary,
+  ]);
 
   const loadOlder = useCallback(async () => {
     const abort = lifetime.current;
@@ -745,6 +926,8 @@ export function useManagedSession(
           return;
         }
         cursorRef.current = page.olderCursor;
+        if (page.history === 'items')
+          rememberItemCoverage(itemCoverageRef.current, page);
         pagedRef.current = true;
         exhaustedRef.current = page.olderCursor === undefined;
         if (page.events.length > 0)
@@ -756,7 +939,13 @@ export function useManagedSession(
         // may have corrected (e.g. retracted) the text since.
         setState((current) => ({
           ...current,
-          events: mergeManagedEvents(current.events, page.events),
+          events: mergeManagedEvents(
+            page.history === 'items'
+              ? withoutReplacedItemEvents(current.events, page)
+              : current.events,
+            page.events,
+            page.history === 'items',
+          ),
           olderCursor: page.olderCursor,
           ...(current.signals?.transcript
             ? {
@@ -837,5 +1026,6 @@ export function useManagedSession(
     loadOlder,
     reload,
     refreshSummary,
+    applyTitle,
   };
 }

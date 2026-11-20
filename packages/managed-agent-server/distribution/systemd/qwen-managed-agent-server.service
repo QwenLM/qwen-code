@@ -22,6 +22,9 @@ TimeoutStopSec=60s
 # default control-group kill would terminate them with the server.
 KillMode=process
 KillSignal=SIGTERM
+# The JVM exits with 128+SIGTERM after a clean shutdown; without this,
+# every stop leaves the unit failed.
+SuccessExitStatus=143
 # Creates /var/lib/qwen-managed-agent owned by the service account.
 StateDirectory=qwen-managed-agent
 StateDirectoryMode=0750

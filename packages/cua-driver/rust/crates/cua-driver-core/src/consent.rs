@@ -247,6 +247,10 @@ pub struct ResourceGrant {
 }
 
 impl ResourceGrant {
+    pub(crate) fn is_current(&self) -> bool {
+        !self.expired(Instant::now())
+    }
+
     pub fn is_live(&self) -> bool {
         self.protected.is_live()
     }

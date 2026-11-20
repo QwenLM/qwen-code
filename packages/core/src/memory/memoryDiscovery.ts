@@ -227,9 +227,10 @@ async function getMemoryFilePathsInternalForEachDir(
  */
 async function dedupeByCanonicalIdentity(
   filePaths: string[],
-): Promise<string[]> {
+): Promise<{ filePaths: string[]; topLevelFiles: Set<string> }> {
   const seenIdentities = new Set<string>();
   const dedupedPaths: string[] = [];
+  const topLevelFiles = new Set<string>();
   for (const filePath of filePaths) {
     let identity = path.resolve(filePath);
     try {
@@ -241,13 +242,16 @@ async function dedupeByCanonicalIdentity(
     if (!seenIdentities.has(identity)) {
       seenIdentities.add(identity);
       dedupedPaths.push(filePath);
+      topLevelFiles.add(path.resolve(filePath));
+      topLevelFiles.add(identity);
     }
   }
-  return dedupedPaths;
+  return { filePaths: dedupedPaths, topLevelFiles };
 }
 
 async function readMemoryFiles(
   filePaths: string[],
+  topLevelFiles: ReadonlySet<string>,
   importFormat: 'flat' | 'tree' = 'tree',
   getMemoryType: (filePath: string) => InstructionMemoryType,
   onInstructionsLoaded?: (
@@ -284,6 +288,7 @@ async function readMemoryFiles(
             path.dirname(filePath),
             {
               processedFiles: new Set([path.resolve(filePath)]),
+              topLevelFiles,
               maxDepth: 5,
               currentDepth: 0,
               currentFile: path.resolve(filePath),
@@ -577,7 +582,8 @@ export async function loadServerHierarchicalMemory(
   // (a workspace symlink aliasing an ancestor QWEN.md, an extension path
   // that duplicates a scanned path). Dedupe by canonical identity so the
   // file's content reaches the system prompt exactly once (#9597).
-  const dedupedFilePaths = await dedupeByCanonicalIdentity(filePaths);
+  const { filePaths: dedupedFilePaths, topLevelFiles } =
+    await dedupeByCanonicalIdentity(filePaths);
 
   let combinedInstructions = '';
   let fileCount = 0;
@@ -587,6 +593,7 @@ export async function loadServerHierarchicalMemory(
     const loadReason = options.loadReason ?? 'session_start';
     const contentsWithPaths = await readMemoryFiles(
       dedupedFilePaths,
+      topLevelFiles,
       importFormat,
       createMemoryTypeClassifier(
         userHomePath,

@@ -55,13 +55,6 @@ import {
   PopoverTrigger,
 } from '../ui/popover';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '../ui/select';
-import {
   ArrowDownUpIcon,
   BoltIcon,
   CheckIcon,
@@ -245,6 +238,16 @@ function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
       ),
     )
   );
+}
+
+function preventMenuTriggerDismiss(
+  event: CustomEvent<{ originalEvent: PointerEvent | FocusEvent }>,
+  trigger: HTMLButtonElement | null,
+) {
+  // A closing menu is still mounted when its trigger reopens it.
+  if (trigger && event.detail.originalEvent.composedPath().includes(trigger)) {
+    event.preventDefault();
+  }
 }
 
 function handleShadowToolbarMenuKeyDown(
@@ -1073,6 +1076,7 @@ function CustomFilterSection({
   onNumberValueToChange: (value: string) => void;
 }) {
   const { t } = useI18n();
+  const operatorRef = useRef<HTMLButtonElement | null>(null);
 
   return (
     <div className="flex flex-col gap-1.5 border-b px-2.5 py-2">
@@ -1081,41 +1085,51 @@ function CustomFilterSection({
       </div>
       {isNumeric ? (
         <>
-          <Select
-            value={numberOperator}
-            name={`markdown-table-number-operator-${columnIndex}`}
-            onValueChange={(value) =>
-              onNumberOperatorChange(value as NumberFilterOperator)
-            }
-          >
-            <SelectTrigger
-              size="sm"
-              className="w-full text-xs"
-              data-name={`markdown-table-number-operator-${columnIndex}`}
-              aria-label={t('markdownTable.filter.numberAria', {
-                column: columnName,
-              })}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                ref={operatorRef}
+                variant="outline"
+                type="button"
+                className="h-7 w-full justify-between text-xs"
+                data-name={`markdown-table-number-operator-${columnIndex}`}
+                aria-label={t('markdownTable.filter.numberAria', {
+                  column: columnName,
+                })}
+              >
+                {t(NUMBER_FILTER_LABEL_KEYS[numberOperator])}
+                <ChevronDownIcon aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
               data-markdown-table-filter-owner={overlayId}
               className="z-[calc(var(--web-shell-popover-z-index,1000)+1)]"
+              onKeyDownCapture={handleShadowToolbarMenuKeyDown}
+              onInteractOutside={(event) =>
+                preventMenuTriggerDismiss(event, operatorRef.current)
+              }
             >
-              {Object.entries(NUMBER_FILTER_LABEL_KEYS).map(
-                ([value, labelKey]) => (
-                  <SelectItem
-                    key={value}
-                    value={value}
-                    data-value={value}
-                    className="text-xs"
-                  >
-                    {t(labelKey)}
-                  </SelectItem>
-                ),
-              )}
-            </SelectContent>
-          </Select>
+              <DropdownMenuRadioGroup
+                value={numberOperator}
+                onValueChange={(value) =>
+                  onNumberOperatorChange(value as NumberFilterOperator)
+                }
+              >
+                {Object.entries(NUMBER_FILTER_LABEL_KEYS).map(
+                  ([value, labelKey]) => (
+                    <DropdownMenuRadioItem
+                      key={value}
+                      value={value}
+                      data-value={value}
+                      className="text-xs"
+                    >
+                      {t(labelKey)}
+                    </DropdownMenuRadioItem>
+                  ),
+                )}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <div className="flex gap-1.5">
             <Input
               className="h-7 text-xs"
@@ -1141,41 +1155,51 @@ function CustomFilterSection({
         </>
       ) : (
         <>
-          <Select
-            value={textOperator}
-            name={`markdown-table-text-operator-${columnIndex}`}
-            onValueChange={(value) =>
-              onTextOperatorChange(value as TextFilterOperator)
-            }
-          >
-            <SelectTrigger
-              size="sm"
-              className="w-full text-xs"
-              data-name={`markdown-table-text-operator-${columnIndex}`}
-              aria-label={t('markdownTable.filter.textAria', {
-                column: columnName,
-              })}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                ref={operatorRef}
+                variant="outline"
+                type="button"
+                className="h-7 w-full justify-between text-xs"
+                data-name={`markdown-table-text-operator-${columnIndex}`}
+                aria-label={t('markdownTable.filter.textAria', {
+                  column: columnName,
+                })}
+              >
+                {t(TEXT_FILTER_LABEL_KEYS[textOperator])}
+                <ChevronDownIcon aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
               data-markdown-table-filter-owner={overlayId}
               className="z-[calc(var(--web-shell-popover-z-index,1000)+1)]"
+              onKeyDownCapture={handleShadowToolbarMenuKeyDown}
+              onInteractOutside={(event) =>
+                preventMenuTriggerDismiss(event, operatorRef.current)
+              }
             >
-              {Object.entries(TEXT_FILTER_LABEL_KEYS).map(
-                ([value, labelKey]) => (
-                  <SelectItem
-                    key={value}
-                    value={value}
-                    data-value={value}
-                    className="text-xs"
-                  >
-                    {t(labelKey)}
-                  </SelectItem>
-                ),
-              )}
-            </SelectContent>
-          </Select>
+              <DropdownMenuRadioGroup
+                value={textOperator}
+                onValueChange={(value) =>
+                  onTextOperatorChange(value as TextFilterOperator)
+                }
+              >
+                {Object.entries(TEXT_FILTER_LABEL_KEYS).map(
+                  ([value, labelKey]) => (
+                    <DropdownMenuRadioItem
+                      key={value}
+                      value={value}
+                      data-value={value}
+                      className="text-xs"
+                    >
+                      {t(labelKey)}
+                    </DropdownMenuRadioItem>
+                  ),
+                )}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Input
             className="h-7 text-xs"
             value={textValue}
@@ -1651,13 +1675,16 @@ export function EnhancedTable({
   const [shell, setShell] = useState<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const fullscreenButtonRef = useRef<HTMLButtonElement | null>(null);
+  const copyButtonRef = useRef<HTMLButtonElement | null>(null);
+  const densityButtonRef = useRef<HTMLButtonElement | null>(null);
   const inlineHeightRef = useRef(0);
-  const scrollPositionRef = useRef({ top: 0, left: 0 });
+  const scrollPositionRef = useRef<{ top: number; left: number } | null>(null);
   const attachScroller = useCallback((node: HTMLDivElement | null) => {
     containerRef.current = node;
-    if (node) {
-      node.scrollTop = scrollPositionRef.current.top;
-      node.scrollLeft = scrollPositionRef.current.left;
+    const position = scrollPositionRef.current;
+    if (node && position) {
+      node.scrollTop = position.top;
+      node.scrollLeft = position.left;
     }
   }, []);
   const frozenHeaderCellRef = useRef<HTMLTableCellElement | null>(null);
@@ -2955,66 +2982,65 @@ export function EnhancedTable({
                   {t('markdownTable.copyTsvHint')}
                 </TooltipContent>
               </Tooltip>
-              {selectionStatistics.numericCount > 0 && (
-                <>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.sum')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.sum,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.average')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.average,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.min')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.min,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                  <span
-                    className={`${styles.selectionMetric} ${styles.selectionMetricSecondary}`}
-                  >
-                    {t('markdownTable.selection.max')}{' '}
-                    <strong className={styles.selectionMetricValue}>
-                      {formatSelectionStatistic(
-                        selectionStatistics.max,
-                        selectionStatistics,
-                        language,
-                      )}
-                    </strong>
-                  </span>
-                </>
-              )}
+            </div>
+          )}
+          {selectionStatistics && selectionStatistics.numericCount > 0 && (
+            <div
+              className={styles.selectionStatsSecondary}
+              role="group"
+              aria-label={t('markdownTable.selection.statistics')}
+              tabIndex={0}
+            >
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.sum')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.sum,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.average')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.average,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.min')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.min,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
+              <span className={styles.selectionMetric}>
+                {t('markdownTable.selection.max')}{' '}
+                <strong className={styles.selectionMetricValue}>
+                  {formatSelectionStatistic(
+                    selectionStatistics.max,
+                    selectionStatistics,
+                    language,
+                  )}
+                </strong>
+              </span>
             </div>
           )}
           <span className={styles.toolbarSpacer} />
           <DropdownMenu
+            modal={false}
             onOpenChange={(open) => focusToolbarMenu(open, 'density')}
           >
             <DropdownMenuTrigger asChild>
               <Button
+                ref={densityButtonRef}
                 variant="ghost"
                 size="sm"
                 className={`${styles.toolbarControl} ${styles.toolbarMenuTrigger} ${styles.compactToolbarControl}`}
@@ -3041,6 +3067,9 @@ export function EnhancedTable({
               data-density-menu={tableId}
               aria-label={t('markdownTable.densityLabel')}
               onKeyDownCapture={handleShadowToolbarMenuKeyDown}
+              onInteractOutside={(event) =>
+                preventMenuTriggerDismiss(event, densityButtonRef.current)
+              }
             >
               <DropdownMenuRadioGroup
                 value={density}
@@ -3098,9 +3127,13 @@ export function EnhancedTable({
               </span>
             </Button>
           )}
-          <DropdownMenu onOpenChange={(open) => focusToolbarMenu(open, 'copy')}>
+          <DropdownMenu
+            modal={false}
+            onOpenChange={(open) => focusToolbarMenu(open, 'copy')}
+          >
             <DropdownMenuTrigger asChild>
               <Button
+                ref={copyButtonRef}
                 variant="ghost"
                 size="sm"
                 className={`${styles.toolbarControl} ${styles.toolbarMenuTrigger} ${styles.compactToolbarControl}`}
@@ -3131,6 +3164,9 @@ export function EnhancedTable({
               data-copy-menu={tableId}
               aria-label={t('markdownTable.copyVisible')}
               onKeyDownCapture={handleShadowToolbarMenuKeyDown}
+              onInteractOutside={(event) =>
+                preventMenuTriggerDismiss(event, copyButtonRef.current)
+              }
             >
               <DropdownMenuItem onSelect={() => copyVisibleTable()}>
                 {t('markdownTable.copyTsv')}

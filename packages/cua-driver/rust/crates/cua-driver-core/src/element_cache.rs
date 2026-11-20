@@ -1,38 +1,8 @@
-//! Generic locked-HashMap plumbing for per-platform element caches.
+//! Generic locked target directory for per-platform element caches.
 //!
-//! Each platform crate stores a per-(pid, window) snapshot of the
-//! actionable accessibility elements it last walked, so subsequent
-//! tool calls (`click`, `type_text`, etc.) can resolve an
-//! `element_index` back to a native handle without re-walking the
-//! tree. Before this module the three crates each owned a
-//! near-identical `Mutex<HashMap<CacheKey, CachedSnapshot>>` plus
-//! the same insert / lookup / count methods — see
-//! `docs/dedup-audit.md` item #3.
-//!
-//! What lives here: the lock + HashMap, generic over the caller's
-//! key type `K` and snapshot type `S`. What stays per-platform:
-//!
-//! - the concrete `CacheKey` (different pid/window-id widths)
-//! - the concrete `CachedSnapshot` and its `Drop` impl, which on
-//!   macOS calls `CFRelease` on every cached AXUIElementRef and on
-//!   Windows calls COM `Release` on every IUIAutomationElement.
-//!   Those releases are load-bearing — dropping the wrong way leaks
-//!   the AX / UIA handles. The generic core just stores `S` by
-//!   value; when the entry is removed or replaced (via
-//!   `HashMap::insert`'s replace-return semantics) Rust runs `S`'s
-//!   destructor, so the platform `Drop` impl still fires exactly as
-//!   it did pre-refactor.
-//!
-//! Each platform's `ElementCache` is now a thin wrapper around an
-//! `ElementCacheCore<CacheKey, CachedSnapshot>`. Specialised
-//! accessors (`get_element_retained` on macOS and Windows,
-//! `get_element_center` on Windows, `get_element_key` on Linux) call
-//! `with_snapshot` and project the field they care about. The macOS and
-//! Windows `get_element_retained` accessors retain the element under the
-//! lock (CFRetain / COM AddRef) so a concurrent `insert` (snapshot replace)
-//! can't free it mid-action — see
-//! `platform-macos/src/ax/cache.rs::RetainedElement` and
-//! `platform-windows/src/uia/cache.rs::RetainedElement`.
+//! Platform caches store weak references here. Native snapshots are owned by
+//! the token registry and resolved actions, so replacing a directory entry
+//! cannot change the native object or metadata bound to an in-flight action.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -54,10 +24,7 @@ impl<K: Eq + Hash, S> ElementCacheCore<K, S> {
         }
     }
 
-    /// Replace the snapshot for `key`. If an entry already existed
-    /// its destructor runs here — for macOS that fires `CFRelease`
-    /// on every retained AXUIElementRef, for Windows it fires COM
-    /// `Release`, for Linux it's a no-op (just frees the `Vec<u64>`).
+    /// Replace the entry for `key`, dropping the previous stored value.
     pub fn insert(&self, key: K, snapshot: S) {
         let mut inner = self.inner.lock().unwrap();
         inner.insert(key, snapshot);
@@ -150,7 +117,7 @@ mod tests {
     #[test]
     fn insert_replaces_existing_and_runs_drop() {
         // Smoke test that re-inserting under the same key replaces
-        // the prior snapshot — the platform Drop fires here in real
+        // the prior stored value — its Drop fires here in this
         // code (CFRelease/COM Release). We can't exercise FFI in a
         // unit test, but we can confirm the value was replaced.
         use std::sync::atomic::{AtomicUsize, Ordering};

@@ -7,9 +7,8 @@
  */
 
 /**
- * OpenTUI footer + responding indicator — visual-parity restore of the ink
- * `Footer` status line and `LoadingIndicator`, ported back from the pre-batch
- * `feat/opentui-migrate` implementation the batched merge dropped.
+ * OpenTUI footer and responding indicator. Status output comes from the same
+ * execution hook as Ink; native text handles the final wrapping and styles.
  *
  * The mode segment is labelled by `formatApprovalModeName`, the mapping the rest
  * of the UI already uses, and carries the mode's indicator colour on the label
@@ -18,28 +17,26 @@
  */
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
-import nodePath from 'node:path';
 import wrapAnsi from 'wrap-ansi';
 import { useTerminalDimensions } from '@opentui/react';
-import {
-  ApprovalMode,
-  uiTelemetryService,
-  type Config,
-} from '@qwen-code/qwen-code-core';
+import { ApprovalMode, type Config } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
+import type {
+  StatusLineState,
+  useStatusLineState,
+} from '../hooks/useStatusLine.js';
 import { t } from '../../i18n/index.js';
+import type { VimMode } from '../contexts/VimModeContext.js';
 import {
   SPINNER_FRAMES,
   SPINNER_INTERVAL_MS,
   WAITING_SPINNER_FRAME,
 } from '../constants.js';
 import { usePhraseCycler } from '../hooks/usePhraseCycler.js';
-import { useGitBranchName } from '../hooks/useGitBranchName.js';
+import { useWorkflowMode } from '../hooks/use-workflow-mode.js';
 import { useTimer } from '../hooks/useTimer.js';
 import { useAnimationFrame } from '../hooks/useAnimationFrame.js';
-import { fmtTokens } from '../components/stats-helpers.js';
 import { formatApprovalModeName } from '../utils/approvalModeDisplay.js';
-import { formatModelWithReasoning } from '../statusLinePresets.js';
-import { getReasoningForDisplay } from '../../acp-integration/model-configuration.js';
 import {
   contextUsageLabel,
   formatDuration,
@@ -50,6 +47,7 @@ import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import { formatExecutionSandbox } from '../utils/execution-sandbox-display.js';
 import { C } from './theme.js';
+import { statusLineStyledText } from './status-line-text.js';
 
 /** One coloured run of the footer's bottom hint row. */
 interface HintPart {
@@ -122,6 +120,7 @@ export interface OpenTuiLoadingIndicatorProps {
    * what the setting removes — only its text.
    */
   showPhrase?: boolean;
+  screenReader?: boolean;
 }
 
 /** Spinner + witty phrase + elapsed time + token estimate, above the composer. */
@@ -131,21 +130,32 @@ export function OpenTuiLoadingIndicator({
   streamingCharsRef,
   isReceivingContent = false,
   showPhrase = true,
+  screenReader = false,
 }: OpenTuiLoadingIndicatorProps) {
   const { width } = useTerminalDimensions();
+  // The screen-reader branch below depends only on `waiting`, and every tick a
+  // source installs commits a frame that re-reads the whole history window.
   // The shared cycler resolves the phrase list for all nine locales and owns
   // the 15s rotation, so this renderer cannot drift from ink's.
-  const phrase = usePhraseCycler(streaming, waiting);
+  const phrase = usePhraseCycler(!screenReader && streaming, waiting);
   // Paused rather than deactivated while a call is parked: useTimer zeroes its
   // accumulated elapsed on a false-to-true edge, so dropping `waiting` out of
   // `isActive` would restart the counter when the parked call resumes.
-  const elapsedTime = useTimer(streaming, 0, waiting);
+  const elapsedTime = useTimer(!screenReader && streaming, 0, waiting);
   const fallbackRef = useRef(0);
   const animatedChars = useAnimationFrame(
     streamingCharsRef ?? fallbackRef,
-    streamingCharsRef && streaming ? 100 : null,
+    !screenReader && streamingCharsRef && streaming ? 100 : null,
   );
   if (!streaming && !waiting) return null;
+  if (screenReader)
+    return (
+      <text id="screen-reader-loading">
+        {waiting
+          ? t('Waiting for confirmation')
+          : t('Working. Escape to cancel.')}
+      </text>
+    );
 
   const isNarrow = isNarrowWidth(width);
   const outputTokens = Math.round(animatedChars / 4);
@@ -189,13 +199,18 @@ export function OpenTuiLoadingIndicator({
 }
 
 export interface OpenTuiFooterProps {
+  screenReader?: boolean;
   config: Config;
+  settings: LoadedSettings;
+  statusLine: ReturnType<typeof useStatusLineState>;
+  sessionStats: StatusLineState['sessionStats'];
+  activeWorktree: StatusLineState['activeWorktree'];
   streaming: boolean;
   queueLength?: number;
-  sessionName?: string | null;
   approvalMode?: ApprovalMode;
   /** `!` shell mode: takes the hint slot over the steer/approval segments. */
   shellModeActive?: boolean;
+  vimMode?: VimMode;
   /** Armed two-press quit warning: takes the bottom hint slot and gates the
    * status line off, as it does in ink. */
   exitHint?: string | null;
@@ -203,41 +218,35 @@ export interface OpenTuiFooterProps {
 
 /** The status line (ink `Footer` parity). */
 export function OpenTuiFooter({
+  screenReader = false,
   config,
+  settings,
+  statusLine,
+  sessionStats,
+  activeWorktree,
   streaming,
   queueLength = 0,
-  sessionName = null,
   approvalMode,
   shellModeActive = false,
+  vimMode,
   exitHint = null,
 }: OpenTuiFooterProps) {
+  const workflowMode = useWorkflowMode(config);
   const { width } = useTerminalDimensions();
-  const targetDir = config.getTargetDir();
-  const gitBranch = useGitBranchName(targetDir) ?? '';
   const generationConfig = config.getContentGeneratorConfig();
-  // ink's status line renders the `model-with-reasoning` preset item, so the
-  // segment carries the effort (or `reasoning off`), not the bare model id.
-  const footerModel = formatModelWithReasoning(
-    config.getModelDisplayName(),
-    generationConfig && getReasoningForDisplay(config, generationConfig),
-  );
-  const promptTokenCount = uiTelemetryService.getLastPromptTokenCount();
+  const promptTokenCount = sessionStats.lastPromptTokenCount;
   const contextWindowSize = generationConfig?.contextWindowSize;
   // Original status-line parity: the context indicator only appears once tokens
   // have been used, never bare.
   const contextLabel =
-    contextWindowSize && promptTokenCount > 0
-      ? ` · ${fmtTokens(contextWindowSize)} ${formatPercentageUsed(
+    contextWindowSize &&
+    promptTokenCount > 0 &&
+    !statusLine.hideContextIndicator
+      ? `${formatPercentageUsed(
           promptTokenCount / contextWindowSize,
         )}${contextUsageLabel(width)}`
       : '';
   const sandboxLabel = formatExecutionSandbox(config);
-  const footerLine1 =
-    `➜ ${nodePath.basename(targetDir)}` +
-    (sessionName ? ` · ${sessionName}` : '') +
-    (gitBranch ? ` · git:(${gitBranch})` : '') +
-    (footerModel ? ` · ${footerModel}` : '') +
-    contextLabel;
   // ink's AutoAcceptIndicator prefixes the default mode with a pause glyph,
   // colours the label with the mode's indicator colour and keeps the cycle
   // shortcut in text.secondary; formatApprovalModeName is shared with the
@@ -248,31 +257,34 @@ export function OpenTuiFooter({
       ? t('(tab to cycle)')
       : t('(shift + tab to cycle)');
   const pausePrefix = approvalMode === ApprovalMode.DEFAULT ? '⏸ ' : '';
-  const modeHint: HintPart[] = shellModeActive
-    ? [{ text: 'shell mode enabled (esc to disable)', color: C.dim }]
-    : [
-        ...(streaming
-          ? [
-              { text: t('Enter to steer · Ctrl+Q to queue'), color: C.dim },
-              // ink's leftBottomContent puts ' · ' between its own segments,
-              // but only where two of them are actually present.
-              ...(approvalMode ? [{ text: ' · ', color: C.dim }] : []),
-            ]
-          : []),
-        ...(approvalMode
-          ? [
-              {
-                text: `${pausePrefix}${formatApprovalModeName(approvalMode)}`,
-                color: approvalModeColor(approvalMode),
-              },
-              { text: ` ${cycleText}`, color: C.dim },
-            ]
-          : []),
-      ];
-  const queuedHint =
+  const modeHint: HintPart[] = vimMode
+    ? [{ text: `-- ${vimMode} --`, color: C.dim }]
+    : shellModeActive
+      ? [{ text: 'shell mode enabled (esc to disable)', color: C.dim }]
+      : [
+          ...(streaming
+            ? [
+                { text: t('Enter to steer · Ctrl+Q to queue'), color: C.dim },
+                // ink's leftBottomContent puts ' · ' between its own segments,
+                // but only where two of them are actually present.
+                ...(approvalMode ? [{ text: ' · ', color: C.dim }] : []),
+              ]
+            : []),
+          ...(approvalMode
+            ? [
+                {
+                  text: `${pausePrefix}${formatApprovalModeName(approvalMode)}`,
+                  color: approvalModeColor(approvalMode),
+                },
+                { text: ` ${cycleText}`, color: C.dim },
+              ]
+            : []),
+        ];
+  const queuedLabel =
     queueLength > 0
-      ? `⏳ ${t('{{count}} queued', { count: String(queueLength) })}`
+      ? t('{{count}} queued', { count: String(queueLength) })
       : null;
+  const queuedHint = queuedLabel ? `⏳ ${queuedLabel}` : null;
   // ink renders the badge as a sibling text node beginning with a literal
   // space, so it joins the hint with one space.
   const hintParts: HintPart[] = [
@@ -291,14 +303,21 @@ export function OpenTuiFooter({
   // it; the hint row is `wrap="truncate"`, so it cannot grow the footer
   // mid-turn (#8667/#8666).
   const rowBudget = Math.max(0, width - 4);
-  const statusLines = wrapAnsi(footerLine1, Math.max(1, rowBudget), {
+  const contextWidth =
+    isNarrowWidth(width) || !contextLabel
+      ? 0
+      : getCachedStringWidth(contextLabel) + 1;
+  const statusWidth = Math.max(1, rowBudget - contextWidth);
+  const statusLines = wrapAnsi(statusLine.lines.join('\n'), statusWidth, {
     trim: false,
     hard: true,
-  }).split('\n');
+  })
+    .split('\n')
+    .slice(0, 2);
   // One truncated line in ink; cut part by part against the remaining budget so
   // the coloured mode label survives narrowing instead of being dropped whole.
   const hintRow: HintPart[] = [];
-  let hintBudget = rowBudget;
+  let hintBudget = Math.max(0, rowBudget - contextWidth);
   for (const part of hintParts) {
     if (hintBudget <= 0) break;
     const text = truncateToWidth(part.text, hintBudget);
@@ -311,6 +330,64 @@ export function OpenTuiFooter({
   // its status line off while the warning is up, so the warning reads directly
   // under the composer with nothing above it. The queued-message segment sits
   // beside the warning rather than inside the hint it replaces, so it stays.
+  if (screenReader) {
+    const segments: Array<[string, string | null]> = exitHint
+      ? [
+          ['footer-exit', exitHint],
+          ['footer-queue', queuedLabel],
+        ]
+      : [
+          ['footer-sandbox', sandboxLabel ?? ''],
+          // The visual two-row clip keeps the footer from growing mid-turn.
+          // Speech has no such budget and the writer hard-wraps, so it takes
+          // the logical lines whole instead of the clipped display buffer.
+          // Command output is opaque and may refresh on a timer, so it rides
+          // the live lane instead of appending a scrollback line per tick.
+          ...statusLine.lines.map((line, index): [string, string] => [
+            `${statusLine.commandSourced ? 'live' : 'footer'}-status-${index}`,
+            line,
+          ]),
+          ['footer-context', contextLabel],
+          [
+            'footer-worktree',
+            activeWorktree && !settings.merged.ui?.hideBuiltinWorktreeIndicator
+              ? t('Worktree: {{value}}', {
+                  value: `${activeWorktree.branch || 'detached HEAD'} (${activeWorktree.slug})`,
+                })
+              : '',
+          ],
+          [
+            'footer-workflow',
+            workflowMode?.requested
+              ? t(
+                  workflowMode.effective
+                    ? 'Workflow mode: on'
+                    : 'Workflow mode: on (unavailable)',
+                )
+              : '',
+          ],
+          // The pause glyph is a visual marker; speech takes the mode label.
+          [
+            'footer-mode',
+            modeHint
+              .map((part) => part.text)
+              .join('')
+              .replace(pausePrefix, ''),
+          ],
+          ['footer-queue', queuedLabel],
+        ];
+    return (
+      <box flexDirection="column">
+        {segments.map(([key, text]) =>
+          text ? (
+            <text key={key} id={`screen-reader-${key}`}>
+              {text}
+            </text>
+          ) : null,
+        )}
+      </box>
+    );
+  }
   if (exitHint) {
     const warningLine = [exitHint, queuedHint]
       .filter((segment): segment is string => segment !== null)
@@ -330,20 +407,65 @@ export function OpenTuiFooter({
   return (
     <box flexDirection="column" paddingLeft={2} paddingRight={2} flexShrink={0}>
       {sandboxLabel && <text fg={C.dim}>{sandboxLabel}</text>}
-      {/* ink colours the built-in status line with text.accent (Footer.tsx);
-       * a user-supplied statusline keeps its own colours, which this port does
-       * not render at all. */}
-      <text fg={C.accent}>{statusLines[0]}</text>
-      {statusLines[1] && <text fg={C.accent}>{statusLines[1]}</text>}
-      {hintRow.length > 0 && (
-        <box flexDirection="row">
-          {hintRow.map((part, i) => (
-            <text key={`${i}`} fg={part.color}>
-              {part.text}
+      <box
+        flexDirection={isNarrowWidth(width) ? 'column' : 'row'}
+        justifyContent="space-between"
+      >
+        <box flexDirection="column" width={statusWidth}>
+          {statusLine.lines.length > 0 &&
+            statusLines.map((line, index) => (
+              <text
+                key={index}
+                content={statusLineStyledText(line, {
+                  color:
+                    !statusLine.respectUserColors && statusLine.useThemeColors
+                      ? C.accent
+                      : undefined,
+                  dim:
+                    !statusLine.respectUserColors && !statusLine.useThemeColors,
+                })}
+              />
+            ))}
+          {activeWorktree &&
+            !settings.merged.ui?.hideBuiltinWorktreeIndicator && (
+              <text attributes={2}>
+                {truncateToWidth(
+                  `⎇ ${activeWorktree.branch || 'detached HEAD'} (${activeWorktree.slug})`,
+                  statusWidth,
+                )}
+              </text>
+            )}
+          {workflowMode?.requested && (
+            <text fg={workflowMode.effective ? C.accent : C.yellow}>
+              {truncateToWidth(
+                workflowMode.effective
+                  ? 'Workflow mode: on'
+                  : 'Workflow mode: on (unavailable)',
+                statusWidth,
+              )}
             </text>
-          ))}
+          )}
+          {hintRow.length > 0 && (
+            <box flexDirection="row">
+              {hintRow.map((part, i) => (
+                <text key={`${i}`} fg={part.color}>
+                  {part.text}
+                </text>
+              ))}
+            </box>
+          )}
         </box>
-      )}
+        {contextLabel && (
+          <text
+            fg={
+              promptTokenCount > (contextWindowSize ?? Infinity) ? C.red : C.dim
+            }
+            flexShrink={0}
+          >
+            {contextLabel}
+          </text>
+        )}
+      </box>
     </box>
   );
 }

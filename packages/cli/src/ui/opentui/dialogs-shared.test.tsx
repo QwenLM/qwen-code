@@ -11,20 +11,45 @@
  */
 
 import React from 'react';
-import { act, renderHook } from '@testing-library/react';
+import { act, render, renderHook } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const handlers = vi.hoisted(
   () => [] as Array<(key: { name: string; sequence?: string }) => void>,
 );
 
-vi.mock('@opentui/react', () => ({
+vi.mock('@opentui/react', async () => ({
+  useAppContext: (
+    await import('../../test-utils/opentui-catalog.js')
+  ).catalogAppContext(handlers),
   useKeyboard: (
     handler: (key: { name: string; sequence?: string }) => void,
   ) => {
     handlers.push(handler);
   },
 }));
+
+const runtime = vi.hoisted(() => ({
+  async build() {
+    const React = await import('react');
+    const jsx = (
+      type: unknown,
+      props: Record<string, unknown> | null,
+      key?: React.Key,
+    ) => {
+      if (type === 'box' || type === 'text')
+        return React.createElement(
+          type === 'text' ? 'span' : 'div',
+          { key, 'data-id': props?.['id'] },
+          props?.['children'] as React.ReactNode,
+        );
+      return React.createElement(type as React.ElementType, { ...props, key });
+    };
+    return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
+  },
+}));
+vi.mock('@opentui/react/jsx-runtime', () => runtime.build());
+vi.mock('@opentui/react/jsx-dev-runtime', () => runtime.build());
 
 // theme.ts builds a SyntaxStyle at module scope; the native FFI is
 // unavailable in the test runtime.
@@ -34,6 +59,7 @@ vi.mock('@opentui/core', () => ({
 }));
 
 import {
+  DialogSelect,
   dialogAreaWidth,
   dialogContentWidth,
   useDialogSelect,
@@ -300,6 +326,45 @@ describe('useDialogSelect cursor within one key batch', () => {
 describe('useDialogSelect setActiveIndex (ink SET_ACTIVE_INDEX parity)', () => {
   beforeEach(() => {
     handlers.length = 0;
+  });
+
+  it('labels a real disabled row and keeps Enter a no-op on it', () => {
+    const mixed = [
+      { key: 'heading', value: 'Marketplaces', disabled: true },
+      { key: 'live', value: 'Add new' },
+    ];
+    const onSelect = vi.fn();
+    let focusDisabled = () => {};
+    function List() {
+      const selection = useDialogSelect({ items: mixed, onSelect });
+      focusDisabled = () => selection.setActiveIndex(0);
+      return React.createElement(DialogSelect, {
+        items: mixed,
+        activeIndex: selection.activeIndex,
+        scrollOffset: selection.scrollOffset,
+        onSelectIndex: selection.selectIndex,
+      });
+    }
+    const { container } = render(React.createElement(List));
+    expect(container.textContent).toContain('Marketplaces');
+    expect(container.textContent).toContain('Add new');
+    const disabled = container.querySelector(
+      '[data-id="screen-reader-unselected-option-disabled"]',
+    );
+    expect(disabled?.textContent).toContain('Marketplaces');
+    expect(
+      container.querySelector('[data-id="screen-reader-selected-option"]')
+        ?.textContent,
+    ).toContain('Add new');
+    act(() => focusDisabled());
+    expect(disabled?.getAttribute('data-id')).toBe(
+      'screen-reader-selected-option-disabled',
+    );
+    press({ name: 'return', sequence: '\r' });
+    expect(onSelect).not.toHaveBeenCalled();
+    press({ name: 'down' });
+    press({ name: 'return', sequence: '\r' });
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith('Add new');
   });
 
   it('setActiveIndex can land on a disabled row (R2-2)', () => {

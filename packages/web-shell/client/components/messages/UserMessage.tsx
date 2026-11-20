@@ -24,7 +24,11 @@ import {
   parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from '../../utils/composerTag';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonInputAnnotation,
+  DaemonInputSourceAnnotation,
+  SessionMessageTarget,
+} from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
 import { LinkifiedText } from './LinkifiedText';
 import { useWebShellCustomization } from '../../customization';
@@ -43,6 +47,7 @@ import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
+import { workspaceBasename } from '../../utils/workspace';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
 
@@ -80,6 +85,10 @@ interface UserMessageProps {
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   /** Set when a workspace agent, not the user, posted this message. */
   author?: DaemonMessageAuthor;
+  /** Set when another session sent this message here. */
+  sentFrom?: DaemonInputSourceAnnotation;
+  /** Set when the user sent this message to another session with `/send`. */
+  sentTo?: SessionMessageTarget;
 }
 
 interface ScheduledTaskRunContent {
@@ -264,6 +273,8 @@ export const UserMessage = memo(function UserMessage({
   onImagePreview,
   onAttachmentPreview,
   author,
+  sentFrom,
+  sentTo,
 }: UserMessageProps) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
@@ -435,6 +446,30 @@ export const UserMessage = memo(function UserMessage({
             : ''
         }`}
       >
+        {sentFrom && (
+          <div
+            className={styles.sentFrom}
+            data-web-shell-user-sent-from=""
+            title={sentFrom.workspaceCwd}
+          >
+            {t('user.sentFrom', {
+              session: sentFrom.title?.trim() || t('sidebar.untitledSession'),
+              workspace: workspaceBasename(sentFrom.workspaceCwd),
+            })}
+          </div>
+        )}
+        {sentTo && (
+          <div
+            className={styles.sentFrom}
+            data-web-shell-user-sent-to=""
+            title={sentTo.workspaceCwd}
+          >
+            {t('user.sentTo', {
+              session: sentTo.title?.trim() || t('sidebar.untitledSession'),
+              workspace: workspaceBasename(sentTo.workspaceCwd),
+            })}
+          </div>
+        )}
         {author && (
           <div className={styles.author}>
             <AuthorAvatar name={author.name} color={author.color} />

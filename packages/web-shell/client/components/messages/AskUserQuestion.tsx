@@ -33,6 +33,12 @@ interface AskUserQuestionProps {
   variant?: 'inline' | 'floating';
   customInputLabel?: string;
   /**
+   * Opens a side task that explains the pending question before the user
+   * answers. Omitted when the host has no side-task surface, which hides the
+   * action entirely.
+   */
+  onAskDetails?: () => void;
+  /**
    * Whether this question should pull keyboard focus to its first option when it
    * becomes the topmost one. Defaults to true. Split-view panes pass false so an
    * question in one pane doesn't steal focus from the pane the user is in; like
@@ -53,6 +59,7 @@ export function AskUserQuestion({
   variant = 'inline',
   keyboardActive = true,
   customInputLabel,
+  onAskDetails,
 }: AskUserQuestionProps) {
   const submitShortcutLabel =
     typeof navigator !== 'undefined' &&
@@ -929,6 +936,17 @@ export function AskUserQuestion({
             <p className={styles.shortcuts} title={shortcutHint}>
               {shortcutHint}
             </p>
+            {onAskDetails && (
+              <button
+                type="button"
+                className={styles.detailsButton}
+                disabled={submitting}
+                title={t('askUser.askDetailsHint')}
+                onClick={onAskDetails}
+              >
+                {t('askUser.askDetails')}
+              </button>
+            )}
             <button
               type="button"
               className={styles.ignoreButton}

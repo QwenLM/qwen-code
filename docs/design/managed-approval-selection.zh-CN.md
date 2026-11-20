@@ -2,6 +2,8 @@
 
 [English](managed-approval-selection.md) | [简体中文](managed-approval-selection.zh-CN.md)
 
+支持 `live-approval-selection/1` 时，[执行中审批扩展](2026-10-20-managed-live-approval.zh-CN.md) 取代本文仅空闲时修改、下一轮生效的限制。准入快照保持不可变；当前权限检查读取持久化 Session 选择。旧提供方保留本文的基线行为。
+
 ## 状态与范围
 
 本次改动已实现，基于托管 WebShell 审批选择器与模型切换改动；Linux 部署验收仍待完成。内置、公开、绑定 Workspace 的 `qwen-code` 会话可在创建时选择 `default`、`auto-edit` 或 `yolo`，并在空闲时修改下一轮使用的策略。已保存 AgentDefinition 保持编译后的创建策略；当 Harness 同时支持 `agent-definition-approval-selection/1` 时，[符合条件的已有会话现可覆盖后续用户回合策略](2026-10-17-managed-definition-approval-selection.zh-CN.md)。部署默认值、Shell 准入、工具种类、Runtime 权限与恢复拒绝语义保持原状。

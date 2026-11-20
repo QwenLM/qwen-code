@@ -8,6 +8,48 @@ import * as yaml from 'yaml';
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('YAML_PARSER');
+const MAX_CACHE_ENTRIES = 256;
+const MAX_CACHE_INPUT_LENGTH = 16 * 1024;
+const rawCache = new Map<string, Record<string, unknown>>();
+const PARSE_OPTIONS: yaml.ParseOptions &
+  yaml.DocumentOptions &
+  yaml.SchemaOptions = {
+  schema: 'core',
+  // Belt-and-suspenders: filter timestamp/binary from schema tags.
+  // The core schema doesn't include them, so this is a no-op in
+  // practice — the real defense is in sanitizeValue() which catches
+  // Date/Uint8Array from explicit !!tags that bypass schema filtering.
+  customTags: (tags) =>
+    tags.filter((tag) => {
+      const uri = typeof tag === 'string' ? tag : tag.tag;
+      return (
+        uri !== 'tag:yaml.org,2002:timestamp' &&
+        uri !== 'tag:yaml.org,2002:binary' &&
+        uri !== 'timestamp' &&
+        uri !== 'binary'
+      );
+    }),
+};
+
+function hasQuietMapKeys(document: yaml.Document): boolean {
+  let quiet = true;
+  yaml.visit(document, {
+    Pair(_key, pair) {
+      const key = pair.key;
+      // Collection-valued keys warn during toJS(), outside document.warnings.
+      if (
+        key !== null &&
+        (!yaml.isScalar(key) ||
+          (key.value !== null && typeof key.value === 'object'))
+      ) {
+        quiet = false;
+        return yaml.visit.BREAK;
+      }
+      return undefined;
+    },
+  });
+  return quiet;
+}
 
 /**
  * Parses a YAML string with full spec support (block scalars, nested
@@ -19,25 +61,37 @@ const debugLogger = createDebugLogger('YAML_PARSER');
  */
 export function parse(yamlString: string): Record<string, unknown> {
   try {
-    const result = yaml.parse(yamlString, {
-      schema: 'core',
-      // Belt-and-suspenders: filter timestamp/binary from schema tags.
-      // The core schema doesn't include them, so this is a no-op in
-      // practice — the real defense is in sanitizeValue() which catches
-      // Date/Uint8Array from explicit !!tags that bypass schema filtering.
-      customTags: (tags) =>
-        tags.filter((tag) => {
-          const uri = typeof tag === 'string' ? tag : tag.tag;
-          return (
-            uri !== 'tag:yaml.org,2002:timestamp' &&
-            uri !== 'tag:yaml.org,2002:binary' &&
-            uri !== 'timestamp' &&
-            uri !== 'binary'
-          );
-        }),
-    });
+    const useCache =
+      typeof yamlString === 'string' &&
+      yamlString.length <= MAX_CACHE_INPUT_LENGTH &&
+      !process.env['LOG_TOKENS'] &&
+      !process.env['LOG_STREAM'];
+    const cached = useCache ? rawCache.get(yamlString) : undefined;
+    if (cached) return stripNullValues(cached);
+
+    let result: unknown;
+    let cacheable = false;
+    if (useCache) {
+      const document = yaml.parseDocument(yamlString, PARSE_OPTIONS);
+      if (
+        document.errors.length === 0 &&
+        document.warnings.length === 0 &&
+        hasQuietMapKeys(document)
+      ) {
+        result = document.toJS({ reviver: undefined, ...PARSE_OPTIONS });
+        cacheable = true;
+      }
+    }
+    if (!cacheable) result = yaml.parse(yamlString, PARSE_OPTIONS);
     if (result && typeof result === 'object' && !Array.isArray(result)) {
-      return stripNullValues(result as Record<string, unknown>);
+      const fresh = stripNullValues(result as Record<string, unknown>);
+      if (cacheable) {
+        if (rawCache.size >= MAX_CACHE_ENTRIES) {
+          rawCache.delete(rawCache.keys().next().value!);
+        }
+        rawCache.set(yamlString, result as Record<string, unknown>);
+      }
+      return fresh;
     }
     debugLogger.warn(
       `Full YAML parser returned non-object (${typeof result}), falling back to simple parser`,

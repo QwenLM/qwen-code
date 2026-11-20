@@ -21,7 +21,7 @@ use core_graphics::{
         CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
         ScrollEventUnit,
     },
-    event_source::{CGEventSource, CGEventSourceStateID},
+    event_source::CGEventSource,
     geometry::CGPoint,
 };
 use foreign_types::ForeignType;
@@ -319,7 +319,7 @@ fn run_worker(
     receiver: Receiver<WorkItem>,
     ready: mpsc::Sender<Result<()>>,
 ) {
-    let source = match CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
+    let source = match crate::input::new_event_source() {
         Ok(source) => source,
         Err(_) => {
             let _ = ready.send(Err(InteractiveInputError::Native(

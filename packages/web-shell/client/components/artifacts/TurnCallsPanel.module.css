@@ -158,20 +158,6 @@
   cursor: pointer;
 }
 
-.detailBody {
-  max-height: 240px;
-  margin: 0 0 4px;
-  padding: 8px 10px;
-  overflow: auto;
-  border-radius: 5px;
-  background: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 .empty {
   display: flex;
   flex-direction: column;

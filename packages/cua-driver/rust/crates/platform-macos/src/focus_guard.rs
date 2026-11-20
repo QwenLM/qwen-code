@@ -41,14 +41,10 @@
 //!
 //! 1. A "is target already frontmost?" check so we don't arm a useless
 //!    self→self suppressor (matches Swift's `isTargetFrontmost` guard).
-//! 2. A 50ms post-action sleep that gives any in-flight focus-grab
-//!    reflex time to fire and be observed by the suppressor before the
-//!    lease is dropped. Matches Swift's `Task.sleep(nanoseconds: 50ms)`.
+//! 2. A key-focus guard sharing the target's synthetic-focus observer.
 //! 3. A static `origin` label for tracing — call sites pass a short
 //!    string like `"click.AXPress"` so leaked leases / late-firing
 //!    observers can be traced back to the caller.
-
-use std::time::Duration;
 
 use crate::apps;
 use crate::focus_steal;
@@ -65,9 +61,8 @@ use crate::focus_steal;
 /// - `origin` — short static label for tracing, e.g. `"click.AXPress"`.
 /// - `f` — the action to run with suppression armed.
 ///
-/// Returns whatever `f` returns. Drops the lease ~50ms after `f`
-/// resolves so any in-flight reflex activation is observed before
-/// suppression ends.
+/// Returns as soon as `f` completes; key-focus protection keeps its bounded
+/// observer tail without delaying the action result.
 ///
 /// If `target_pid` is already the frontmost app (no point fighting
 /// ourselves) or `prior_frontmost` is `None` (no app to restore to),
@@ -107,14 +102,10 @@ where
         None
     };
 
+    let _key_focus = target_pid
+        .filter(|_| should_arm)
+        .and_then(crate::key_focus_guard::protect);
     let result = f().await;
-
-    // Post-action settle — give the reactive observer time to fire on
-    // any side-effect activation before we drop the lease. Matches
-    // Swift's 50ms sleep in `FocusGuard.withFocusSuppressed`.
-    if _lease.is_some() {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 
     // _lease drops here (RAII end_suppression).
     result
@@ -180,7 +171,7 @@ mod tests {
     /// observe the dispatcher state through the public API here —
     /// the focus_steal module's own tests cover the lease lifecycle —
     /// but we exercise the codepath to make sure it compiles and the
-    /// 50ms sleep doesn't deadlock.
+    /// guard lifetime does not deadlock.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn arms_lease_when_target_differs_from_prior() {
         let n = with_focus_suppressed(Some(123), Some(456), "test.armed", || async { 99 }).await;

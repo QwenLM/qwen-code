@@ -247,11 +247,8 @@ export async function downloadMediaUrl(params: {
     );
   }
 
-  // Credentials in the URL are refused explicitly. `resolveNetworkTarget`
-  // would also reject them, but its message says "extension network requests"
-  // (that helper's original caller), which misattributes the reason here. The
-  // check is deliberately silent about the values themselves: OmniDownloadError
-  // messages reach the UI and the debug log.
+  // Refuse credentials here with download-domain wording; never echo their
+  // values in the UI or debug log.
   if (parsed.username || parsed.password) {
     throw new OmniDownloadError(
       `URL media must not embed credentials (refused for safety): ` +
@@ -363,11 +360,8 @@ export async function downloadMediaUrl(params: {
         // Fail closed: unlike the general web-fetch path, these bytes are
         // uploaded to a third party, so "could not verify" must mean "do not
         // fetch" rather than "connect and hope". The resolver's own text is
-        // translated rather than echoed: resolveNetworkTarget phrases its
-        // errors as "Extension network host …" (that helper's original
-        // caller), the same misattribution the credentials check above
-        // avoids — and nothing server-controlled beyond the hostname may
-        // enter the message anyway.
+        // translated into download-domain phrasing rather than echoed, and
+        // nothing server-controlled beyond the hostname may enter the message.
         const text = err instanceof Error ? err.message : String(err);
         const reason = /blocked address/i.test(text)
           ? 'resolved to a non-public address'

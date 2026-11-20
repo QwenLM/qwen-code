@@ -51,8 +51,11 @@ const CRON_CREATE_CONFIRMATION_TIMEOUT = 240_000;
 
   afterEach(async () => {
     if (session) {
-      await session.close();
-      session = null;
+      try {
+        await session.close();
+      } finally {
+        session = null;
+      }
     }
   });
 

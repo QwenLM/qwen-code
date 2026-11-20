@@ -422,7 +422,7 @@ impl Tool for PasteTool {
             Ok(content) => content,
             Err(error) => return ToolResult::error(format!("paste: {error}")),
         };
-        let foreground = input.app_context == Some(true);
+        let foreground = false;
         let mutation = if foreground {
             super::acquire_background_mutation(pid).await
         } else {

@@ -11,6 +11,7 @@ import {
 } from '../customization';
 import type { ACPToolCall, Message } from '../adapters/types';
 import { summaryRunId } from './summaryRunId';
+import messageStyles from './messages/AssistantMessage.module.css';
 import timestampStyles from './MessageTimestamp.module.css';
 import { TranscriptRenderModeProvider } from '../transcriptRenderMode';
 
@@ -68,10 +69,12 @@ vi.mock('./messages/AssistantMessage', async () => {
       content,
       customFooterInfo,
       onBranchSession,
+      footerAlwaysVisible,
     }: {
       content: string;
       customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       onBranchSession?: () => void | Promise<void>;
+      footerAlwaysVisible?: boolean;
     }) => {
       if (content.includes('__BOOM__')) throw new Error('assistant boom');
       const { renderAssistantTurnFooter } = useWebShellCustomization();
@@ -83,6 +86,12 @@ vi.mock('./messages/AssistantMessage', async () => {
         { 'data-testid': 'assistant-ok' },
         content,
         customFooter,
+        React.createElement('div', {
+          'data-testid': 'assistant-footer-visibility',
+          className: footerAlwaysVisible
+            ? messageStyles.messageFooterVisible
+            : undefined,
+        }),
         onBranchSession
           ? React.createElement(
               'button',
@@ -480,6 +489,36 @@ describe('MessageItem assistant turn footer', () => {
     expect(
       container.querySelector('[data-testid="assistant-footer"]')?.textContent,
     ).toBe('u2');
+  });
+
+  it('updates assistant footer visibility when only that flag changes', () => {
+    const message = assistantMsg('1', 'hello');
+    const tree = (assistantFooterAlwaysVisible: boolean) => (
+      <I18nProvider language="en">
+        <MessageItem
+          message={message}
+          showAssistantActions
+          assistantFooterAlwaysVisible={assistantFooterAlwaysVisible}
+        />
+      </I18nProvider>
+    );
+    const { root, container } = renderWithRoot(tree(true));
+    const footer = container.querySelector(
+      '[data-testid="assistant-footer-visibility"]',
+    )!;
+    expect(footer.classList.contains(messageStyles.messageFooterVisible)).toBe(
+      true,
+    );
+
+    act(() => root.render(tree(false)));
+
+    const released = container.querySelector(
+      '[data-testid="assistant-footer-visibility"]',
+    )!;
+    expect(released).not.toBeNull();
+    expect(
+      released.classList.contains(messageStyles.messageFooterVisible),
+    ).toBe(false);
   });
 
   it('degrades a crashing custom footer renderer to an inline notice', () => {

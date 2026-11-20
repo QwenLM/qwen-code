@@ -102,6 +102,7 @@ const broker = vi.hoisted(() => ({
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
+    resolveCapabilities = async () => {};
     readonly runtimeSessionId = 'prompt';
     warm = broker.warm;
     acquire = broker.acquire;
@@ -1215,7 +1216,7 @@ it('answers an interrupted turn by what each journal-only call committed', async
         'managed-action-options',
         Buffer.from(
           JSON.stringify({
-            v: 1,
+            v: 3,
             requestId,
             turnId: 'prompt',
             functionCallId: 'call-task',

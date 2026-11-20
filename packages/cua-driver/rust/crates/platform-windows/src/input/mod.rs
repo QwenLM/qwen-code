@@ -13,6 +13,7 @@ pub mod delivery;
 pub mod inject;
 pub mod keyboard;
 pub mod mouse;
+mod user_input;
 
 pub(crate) use inject::{force_foreground_assisted, force_foreground_attached};
 pub use inject::{
@@ -33,7 +34,7 @@ pub use mouse::{
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
-    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    TokenUIAccess, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -160,6 +161,35 @@ pub fn post_message_blocked_by_uipi(hwnd: u64) -> Option<String> {
         Some(uipi_blocked_message(hwnd, pid, target, own))
     } else {
         None
+    }
+}
+
+pub(crate) fn send_input_blocked_by_uipi(hwnd: u64) -> Option<String> {
+    // UIAccess permits foreground SendInput across integrity levels. Keep the
+    // stricter guard for posted messages and synthetic pointer injection.
+    let ui_access = unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            false
+        } else {
+            let mut value = 0u32;
+            let mut needed = 0;
+            let size = std::mem::size_of_val(&value) as u32;
+            let read = GetTokenInformation(
+                token,
+                TokenUIAccess,
+                Some((&mut value as *mut u32).cast()),
+                size,
+                &mut needed,
+            );
+            let _ = CloseHandle(token);
+            read.is_ok() && needed == size && value != 0
+        }
+    };
+    if ui_access {
+        None
+    } else {
+        post_message_blocked_by_uipi(hwnd)
     }
 }
 

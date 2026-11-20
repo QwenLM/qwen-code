@@ -111,6 +111,7 @@ import type {
   FlashFallbackEvent,
   NextSpeakerCheckEvent,
   LoopDetectedEvent,
+  LoopProtectionEvent,
   RepeatedToolFailureGuardEvent,
   LoopDetectionDisabledEvent,
   SlashCommandEvent,
@@ -675,8 +676,12 @@ export function logApiResponse(
   sessionId?: string,
   uiSubagentIdentity?: UiSubagentIdentity,
 ): void {
+  const { first_visible_offset_ms, ...apiEvent } = event;
   const uiEvent = {
-    ...event,
+    ...apiEvent,
+    ...(first_visible_offset_ms === undefined
+      ? {}
+      : { first_visible_offset_ms }),
     ...(uiSubagentIdentity
       ? {
           subagent_id: uiSubagentIdentity.id,
@@ -698,7 +703,7 @@ export function logApiResponse(
   if (!isTelemetrySdkInitialized()) return;
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
-    ...event,
+    ...apiEvent,
     ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),
@@ -761,6 +766,20 @@ export function logLoopDetected(
     attributes,
   };
   logger.emit(logRecord);
+}
+
+export function logLoopProtection(
+  config: Config,
+  event: LoopProtectionEvent,
+): void {
+  QwenLogger.getInstance(config)?.logLoopProtectionEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Loop protection ${event.decision}. Type: ${event.loop_type}.`,
+    attributes: { ...getCommonAttributes(config), ...event },
+  });
 }
 
 export function logRepeatedToolFailureGuard(

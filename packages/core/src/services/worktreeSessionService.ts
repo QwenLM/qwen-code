@@ -14,12 +14,20 @@ import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
-import { isZombie } from '../utils/process-liveness.js';
+import {
+  isZombie,
+  readPidNamespaceId,
+  readProcStartToken,
+} from '../utils/process-liveness.js';
 import {
   readWorktreeSessionMarker,
   writeWorktreeSessionMarker,
+  type CarriedEntry,
 } from './gitWorktreeService.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('WORKTREE_SESSION_SERVICE');
 
 const RUNTIME_STATUS_SCAN_MAX_DIRS = 5000;
 const WORKTREE_SESSION_SIDECAR_MAX_BYTES = 64 * 1024;
@@ -66,6 +74,17 @@ export interface WorktreeSession {
    */
   originalHeadCommit: string;
   /**
+   * The commit the worktree itself was created at (its detached base or
+   * branch tip). Distinct from `originalHeadCommit`, which is the HEAD of
+   * the checkout named by `originalCwd`: when a branch worktree is created
+   * from a session living in a sibling managed worktree, the two differ.
+   * The beyond-base promotion test, exit_worktree and the orphan reaper
+   * read this (falling back to `originalHeadCommit` when absent, for
+   * sidecars written before the field existed). The handoff's
+   * `local_head_moved` gate keeps reading `originalHeadCommit`.
+   */
+  worktreeBase?: string;
+  /**
    * Set on the superseded session's sidecar by a worktree reset: the
    * replacement session this session's worktree ownership moved to. Readers
    * redirect to it (and self-heal their registry) instead of restoring the
@@ -78,6 +97,30 @@ export interface WorktreeSession {
    * session's `supersededBy` to classify an interrupted transfer.
    */
   supersedes?: string;
+  /**
+   * The dirty overlay carried into this worktree at creation
+   * (`createUserWorktree` with `carryDirtyState`), each path with its
+   * carry-time content identity. The orphan reaper's has-work gate waives a
+   * carried path only while its current state still matches that identity,
+   * so a checkout whose only content is the pristine carried copy is
+   * collected rather than preserved forever, while a session that stages,
+   * deletes, or further edits a carried file is snapshotted (R9-6). Absent
+   * for sidecars written before the field existed and for worktrees created
+   * without carry — readers treat absent as "no recorded overlay" and the
+   * gate behaves as if no exemption were passed.
+   */
+  carriedEntries?: CarriedEntry[];
+  /**
+   * The checkout the dirty overlay was carried FROM, when it differs from
+   * `originalCwd` (a session /cd'd into a sibling checkout: the creation
+   * routes pass `dirtyStateSource` while `originalCwd` stays the workspace
+   * root for the ownership-checked routes). The reaper's source-side check
+   * for the no-archive collection reads this, falling back to `originalCwd`
+   * when absent — verifying the wrong checkout could authorize deleting the
+   * overlay's last copy (R5-14). Absent when the carry source IS
+   * `originalCwd` and on sidecars written before the field existed.
+   */
+  carriedFrom?: string;
 }
 
 export type StrictWorktreeSession =
@@ -104,10 +147,51 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
       typeof v['workspaceCwd'] === 'string') &&
     typeof v['originalBranch'] === 'string' &&
     typeof v['originalHeadCommit'] === 'string' &&
+    (v['worktreeBase'] === undefined ||
+      typeof v['worktreeBase'] === 'string') &&
     (v['supersededBy'] === undefined ||
       typeof v['supersededBy'] === 'string') &&
-    (v['supersedes'] === undefined || typeof v['supersedes'] === 'string')
+    (v['supersedes'] === undefined || typeof v['supersedes'] === 'string') &&
+    (v['carriedEntries'] === undefined ||
+      (Array.isArray(v['carriedEntries']) &&
+        v['carriedEntries'].every(isValidCarriedEntry))) &&
+    (v['carriedFrom'] === undefined || typeof v['carriedFrom'] === 'string')
   );
+}
+
+function isValidCarriedEntry(value: unknown): value is CarriedEntry {
+  if (value === null || typeof value !== 'object') return false;
+  const e = value as Record<string, unknown>;
+  return (
+    typeof e['path'] === 'string' &&
+    (e['hash'] === null || typeof e['hash'] === 'string') &&
+    typeof e['executable'] === 'boolean'
+  );
+}
+
+/**
+ * Keep a sidecar within the read cap. A large carried overlay (paths plus
+ * content identities) can serialize past {@link WORKTREE_SESSION_SIDECAR_MAX_BYTES};
+ * the reader would then refuse the whole record, orphaning the worktree
+ * binding (the reaper could never scan it again). Drop the exemption metadata
+ * in that case — the reaper then treats the overlay as work and snapshots it,
+ * the safe direction — rather than write a record no reader can parse. The
+ * carry itself (the files in the worktree) is untouched.
+ */
+function fitSidecarToReadCap(session: WorktreeSession): WorktreeSession {
+  if (session.carriedEntries === undefined) return session;
+  const bytes = Buffer.byteLength(
+    `${JSON.stringify(session, null, 2)}\n`,
+    'utf8',
+  );
+  if (bytes <= WORKTREE_SESSION_SIDECAR_MAX_BYTES) return session;
+  debugLogger.warn(
+    `worktree sidecar carriedEntries too large (${bytes} bytes > ` +
+      `${WORKTREE_SESSION_SIDECAR_MAX_BYTES}); dropping the overlay exemption ` +
+      `(the reaper will snapshot the work)`,
+  );
+  const { carriedEntries: _drop, ...rest } = session;
+  return rest;
 }
 
 /**
@@ -348,7 +432,7 @@ export async function writeWorktreeSession(
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   // atomicWriteJSON pretty-prints with 2-space indent by default.
-  await atomicWriteJSON(filePath, session);
+  await atomicWriteJSON(filePath, fitSidecarToReadCap(session));
 }
 
 async function fsyncParentDirectory(filePath: string): Promise<void> {
@@ -394,7 +478,10 @@ export async function createWorktreeSession(
     ) {
       throw new Error('Worktree session sidecar must be a regular file');
     }
-    await handle.writeFile(`${JSON.stringify(session, null, 2)}\n`, 'utf8');
+    await handle.writeFile(
+      `${JSON.stringify(fitSidecarToReadCap(session), null, 2)}\n`,
+      'utf8',
+    );
     await handle.sync();
     const pathStat = await fs.lstat(stagedPath);
     if (
@@ -656,8 +743,35 @@ async function getRuntimeStatusPathState(
     return 'unknown';
   }
 
+  // A PID number and its proc_start token only identify a process within the
+  // namespace that assigned them. A record written in a different PID
+  // namespace (host + devcontainer with a mounted home, sibling CI containers)
+  // names a PID that resolves to nothing — or to a different process — here,
+  // so comparing proc_start would judge a live foreign session 'dead' and let
+  // its worktree be taken over or deleted. 'unknown' is the safe direction:
+  // isSessionRuntimeActive treats it as active. Records without pid_ns (older
+  // writers, non-Linux) fall through to the proc_start comparison below.
+  if (status.pidNs !== null && status.pidNs !== readPidNamespaceId()) {
+    return 'unknown';
+  }
+
+  const procStartMatches = (): boolean => {
+    if (status.procStart === null) return true;
+    const current = readProcStartToken(status.pid);
+    // An unreadable token degrades to plain liveness rather than declaring a
+    // live session dead; within the same PID namespace (guaranteed by the
+    // pid_ns guard above), only a readable mismatch proves the PID was reused.
+    return current === null || current === status.procStart;
+  };
+
   try {
     process.kill(status.pid, 0);
+    if (!procStartMatches()) {
+      // The PID was recycled by an unrelated process after this record was
+      // written. Liveness alone cannot distinguish that from the original
+      // session (#14288).
+      return 'dead';
+    }
     // A zombie answers `kill(pid, 0)` — the pid still occupies a process-table
     // slot — but the process has exited and will never act again. Reporting
     // it as 'active' keeps a dead session listed as live for as long as its
@@ -672,7 +786,7 @@ async function getRuntimeStatusPathState(
       // Owned by another user. The kernel permission-checks signal 0
       // regardless of the target's state, so a cross-user zombie lands here
       // too and needs the same exclusion.
-      return isZombie(status.pid) ? 'dead' : 'active';
+      return !procStartMatches() || isZombie(status.pid) ? 'dead' : 'active';
     }
     // Any other errno establishes nothing about the pid, and folding it into
     // 'dead' would be the destructive direction: it feeds
@@ -875,10 +989,14 @@ export async function restoreWorktreeContext(
     }
   }
 
+  // '' is the detached managed-worktree convention: no branch to name.
+  const branchFragment = session.worktreeBranch
+    ? `(branch: ${session.worktreeBranch})`
+    : '(detached HEAD)';
   return {
     session,
     contextMessage:
       `[Resumed] Active worktree: "${session.slug}" at ${session.worktreePath} ` +
-      `(branch: ${session.worktreeBranch}). Continue using this path for all file operations.`,
+      `${branchFragment}. Continue using this path for all file operations.`,
   };
 }

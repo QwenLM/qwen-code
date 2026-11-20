@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { getJsInterpreterCommand } from '../utils/runtime-info.js';
 
 /**
  * The recorded-refusal cause discriminator. The recorded refusal is the
@@ -270,7 +271,7 @@ export class HookCommandCgroup {
     options?: { reapOnParentExit?: boolean },
   ) {
     return {
-      executable: process.execPath,
+      executable: getJsInterpreterCommand(import.meta.url).command,
       args: [
         '--input-type=commonjs',
         '--eval',

@@ -65,6 +65,7 @@ import {
   logUserPrompt,
   logToolCall,
   logLoopDetected,
+  logLoopProtection,
   logRepeatedToolFailureGuard,
   logFlashFallback,
   logGoalState,
@@ -126,6 +127,8 @@ import {
   MemoryMigrationEvent,
   MemoryRecallModeTransitionEvent,
   LoopDetectedEvent,
+  LoopProtectionEvent,
+  LoopReason,
   LoopType,
   RepeatedToolFailureGuardEvent,
   WorkflowRunEvent,
@@ -823,6 +826,38 @@ describe('loggers', () => {
       }));
   });
 
+  describe('logLoopProtection', () => {
+    it('records the decision in QwenLogger and OTEL', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const logLoopProtectionEvent = vi.fn();
+      const getInstanceSpy = vi
+        .spyOn(QwenLogger, 'getInstance')
+        .mockReturnValue({ logLoopProtectionEvent } as unknown as QwenLogger);
+      const event = new LoopProtectionEvent({
+        prompt_id: 'prompt-id',
+        loop_type: LoopType.TURN_TOOL_CALL_CAP,
+        decision: 'reminded',
+        mode: 'stop',
+        loop_reason: LoopReason.STUCK_REPETITION,
+      });
+      try {
+        logLoopProtection(config, event);
+      } finally {
+        getInstanceSpy.mockRestore();
+      }
+
+      expect(logLoopProtectionEvent).toHaveBeenCalledWith(event);
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: `Loop protection reminded. Type: ${LoopType.TURN_TOOL_CALL_CAP}.`,
+        attributes: {
+          'session.id': 'test-session-id',
+          ...event,
+          loop_reason: 'stuck_repetition',
+        },
+      });
+    });
+  });
+
   describe('logUserPrompt', () => {
     const mockConfig = cfg({
       getTelemetryEnabled: () => true,
@@ -993,7 +1028,7 @@ describe('loggers', () => {
       expectRequestSessionId();
     });
 
-    it('keeps task identity local to UI telemetry', () => {
+    it('keeps task identity and the first visible offset local to UI telemetry', () => {
       const event = new ApiResponseEvent(
         'test-response-id',
         'test-model',
@@ -1004,6 +1039,7 @@ describe('loggers', () => {
         undefined,
         'general-purpose',
       );
+      event.first_visible_offset_ms = 80;
 
       logApiResponse(mockConfig, event, undefined, {
         id: 'general-purpose-12345678',
@@ -1016,6 +1052,7 @@ describe('loggers', () => {
           subagent_name: 'general-purpose',
           subagent_id: 'general-purpose-12345678',
           subagent_task_name: 'inspect customer records',
+          first_visible_offset_ms: 80,
         }),
         'test-session-id',
       );
@@ -1023,6 +1060,7 @@ describe('loggers', () => {
       expect(attributes.subagent_name).toBe('general-purpose');
       expect(attributes).not.toHaveProperty('subagent_id');
       expect(attributes).not.toHaveProperty('subagent_task_name');
+      expect(attributes).not.toHaveProperty('first_visible_offset_ms');
     });
 
     const responseWithUsage = (promptId: string) =>

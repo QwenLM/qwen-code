@@ -103,8 +103,8 @@ describe('scripts/dev.js launcher', () => {
     expect(options).toEqual(expect.objectContaining({ shell: false }));
   });
 
-  it.each(['--version', '--help'])(
-    'launches %s without building or staging Browser Use',
+  it.each(['--version', '--help', '-p'])(
+    'launches %s without building or staging retired skill assets',
     async (flag) => {
       process.argv = ['node', 'scripts/dev.js', flag];
 

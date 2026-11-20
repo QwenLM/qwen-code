@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { DaemonStatusResponse } from '../serve/daemon-status.js';
+import { commandMetadata } from './command-metadata.js';
 import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
@@ -13,8 +15,12 @@ import {
   currentPidNamespace,
   isProcessAlive,
   readDaemonDiscoveries,
+  readDaemonToken,
   removeDaemonDiscovery,
+  removeDaemonToken,
+  removeStaleDaemonTokens,
   resolveDaemonDiscoveryDir,
+  writeDaemonToken,
   type DaemonDiscoveryEntry,
   type DaemonDiscoveryRecord,
 } from '../serve/daemon-discovery.js';
@@ -52,7 +58,15 @@ interface StatusArgs {
   detail?: boolean;
 }
 
-interface DaemonDetailSummary {
+type PartialMemory<T> = T extends object
+  ? { [K in keyof T]?: PartialMemory<T[K]> }
+  : T;
+type DaemonMemoryDetail = PartialMemory<{
+  runtime: Pick<DaemonStatusResponse['runtime'], 'process' | 'memory'>;
+  limits: Pick<DaemonStatusResponse['limits'], 'memory'>;
+}>;
+
+interface DaemonDetailSummary extends DaemonMemoryDetail {
   status: string;
   version?: string;
   uptimeMs?: number;
@@ -73,15 +87,31 @@ interface StopArgs {
   force?: boolean;
 }
 
+interface RestartArgs {
+  port?: number;
+  token?: string;
+  web?: boolean;
+  'require-auth'?: boolean;
+  force?: boolean;
+}
+
 interface StartArgs {
   port?: number;
   hostname: string;
   workspace?: string | string[];
+  'conversations-dir'?: string | string[];
   web: boolean;
   'require-auth': boolean;
   token?: string;
+  'save-token'?: boolean;
   wait?: boolean;
   json?: boolean;
+}
+
+interface TokenArgs {
+  port?: number;
+  json?: boolean;
+  remove?: boolean;
 }
 
 function age(iso: string, now = Date.now()): number {
@@ -175,6 +205,57 @@ export function processCommand(pid: number): string | undefined {
 }
 
 /**
+ * Every process's parent from one snapshot: `ps` on POSIX, CIM on Windows.
+ * undefined means the table could not be read.
+ */
+export function processParentTable(): Map<number, number> | undefined {
+  const result =
+    process.platform === 'win32'
+      ? spawnSync(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }',
+          ],
+          { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 },
+        )
+      : spawnSync('ps', ['-A', '-o', 'pid=,ppid='], {
+          encoding: 'utf8',
+          maxBuffer: 8 * 1024 * 1024,
+          env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+        });
+  if (result.status !== 0 || typeof result.stdout !== 'string') {
+    return undefined;
+  }
+  const parents = new Map<number, number>();
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const [pid, parent] = line.trim().split(/\s+/).map(Number);
+    if (Number.isInteger(pid) && Number.isInteger(parent)) {
+      parents.set(pid!, parent!);
+    }
+  }
+  return parents;
+}
+
+/** Whether `ancestor` is on `pid`'s parent chain. */
+export function isProcessAncestor(
+  ancestor: number,
+  pid: number,
+  parents: ReadonlyMap<number, number>,
+): boolean {
+  const seen = new Set<number>();
+  let current = parents.get(pid);
+  while (current !== undefined && current > 0 && !seen.has(current)) {
+    if (current === ancestor) return true;
+    seen.add(current);
+    current = parents.get(current);
+  }
+  return false;
+}
+
+/**
  * Windows has no graceful signal: `process.kill` there is TerminateProcess,
  * which runs no handler and leaves the daemon's children orphaned. The tree is
  * therefore killed as one unit, through the trusted OS-root `taskkill`.
@@ -261,6 +342,17 @@ export async function probeHealth(
   }
 }
 
+function nonemptyStatusObject(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  return value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).length > 0
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 export function summarizeDaemonStatus(
   value: unknown,
 ): DaemonDetailSummary | undefined {
@@ -294,11 +386,32 @@ export function summarizeDaemonStatus(
   const starting = issueRecords.some(
     (issue) => issue['code'] === 'daemon_runtime_starting',
   );
+  // Preserve only the endpoint's established memory subtrees, not the rest
+  // of the runtime/limits diagnostics. Older daemons may omit any of them.
+  const process = nonemptyStatusObject(runtime?.['process']);
+  const memory = nonemptyStatusObject(runtime?.['memory']);
+  const limits = nonemptyStatusObject(response['limits']);
+  const memoryLimits =
+    limits?.['memory'] === null
+      ? null
+      : nonemptyStatusObject(limits?.['memory']);
+  const memoryDetail = {
+    ...(process || memory
+      ? {
+          runtime: {
+            ...(process ? { process } : {}),
+            ...(memory ? { memory } : {}),
+          },
+        }
+      : {}),
+    ...(memoryLimits !== undefined ? { limits: { memory: memoryLimits } } : {}),
+  } as DaemonMemoryDetail;
   const version = daemon?.['qwenCodeVersion'];
   const uptimeMs = daemon?.['uptimeMs'];
   const active = sessions?.['active'];
   const admissionInFlight = sessions?.['admissionInFlight'];
   return {
+    ...memoryDetail,
     status: response['status'],
     ...(typeof version === 'string' ? { version } : {}),
     ...(typeof uptimeMs === 'number' ? { uptimeMs } : {}),
@@ -496,6 +609,7 @@ export function buildDaemonStartArgs(options: {
   port: number;
   hostname: string;
   workspaces: readonly string[];
+  conversationsDir?: string;
   web: boolean;
   requireAuth: boolean;
 }): { command: string; args: string[] } {
@@ -509,6 +623,9 @@ export function buildDaemonStartArgs(options: {
   ];
   if (!options.web) childArgs.push('--no-web');
   if (options.requireAuth) childArgs.push('--require-auth');
+  if (options.conversationsDir !== undefined) {
+    childArgs.push('--conversations-dir', options.conversationsDir);
+  }
   for (const workspace of options.workspaces) {
     childArgs.push('--workspace', workspace);
   }
@@ -647,6 +764,12 @@ async function printStartLogTail(file: string): Promise<void> {
 
 async function handleStart(argv: StartArgs): Promise<void> {
   ignoreBrokenPipe();
+  const conversationsDir = argv['conversations-dir'];
+  if (Array.isArray(conversationsDir)) {
+    writeStderrLine('qwen daemon: pass --conversations-dir once.');
+    process.exitCode = 1;
+    return;
+  }
   const entry = resolveCliEntry();
   if (!entry) {
     writeStderrLine(
@@ -679,6 +802,13 @@ async function handleStart(argv: StartArgs): Promise<void> {
   if (argv['require-auth'] && !token) {
     writeStderrLine(
       'qwen daemon: --require-auth requires --token or QWEN_SERVER_TOKEN.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (argv['save-token'] && !token) {
+    writeStderrLine(
+      'qwen daemon: --save-token requires --token or QWEN_SERVER_TOKEN.',
     );
     process.exitCode = 1;
     return;
@@ -725,6 +855,7 @@ async function handleStart(argv: StartArgs): Promise<void> {
     port,
     hostname,
     workspaces,
+    conversationsDir,
     web: argv.web,
     requireAuth: argv['require-auth'],
   });
@@ -777,6 +908,20 @@ async function handleStart(argv: StartArgs): Promise<void> {
   }
 
   if (record) {
+    removeStaleDaemonTokens(record.port, record.pid);
+    if (argv['save-token']) {
+      try {
+        writeDaemonToken(record.port, record.pid, token!);
+      } catch (error) {
+        writeStderrLine(
+          `qwen daemon: could not persist the token: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+    }
     const ready =
       argv.wait === true ? await waitForDaemonReady(record, token) : undefined;
     const readyFailed = ready !== undefined && !isDaemonReady(ready);
@@ -854,6 +999,8 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
         })
       ) {
         kept.push(row);
+      } else {
+        removeDaemonToken(row.entry.record.port, row.entry.record.pid);
       }
     }
     rows = kept;
@@ -1083,7 +1230,9 @@ async function handleStop(argv: StopArgs): Promise<void> {
     const { record } = entry;
     const health = await probeHealth(record);
     if (health === 'stale') {
-      removeDaemonDiscovery(record.port, { expectedPid: record.pid });
+      if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
+        removeDaemonToken(record.port, record.pid);
+      }
       writeStdoutLine(
         `qwen daemon: removed stale record for port ${record.port} (pid ${record.pid} is gone).`,
       );
@@ -1148,7 +1297,9 @@ async function handleStop(argv: StopArgs): Promise<void> {
     }
     const exited = await waitForExit(record.pid, STOP_TIMEOUT_MS);
     if (exited) {
-      removeDaemonDiscovery(record.port, { expectedPid: record.pid });
+      if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
+        removeDaemonToken(record.port, record.pid);
+      }
       writeStdoutLine(
         `qwen daemon: ${
           process.platform === 'win32' ? 'hard-killed' : 'stopped'
@@ -1164,7 +1315,9 @@ async function handleStop(argv: StopArgs): Promise<void> {
       }
       const forced = await waitForExit(record.pid, STOP_TIMEOUT_MS);
       if (forced) {
-        removeDaemonDiscovery(record.port, { expectedPid: record.pid });
+        if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
+          removeDaemonToken(record.port, record.pid);
+        }
         writeStdoutLine(
           `qwen daemon: force-stopped port ${record.port} (pid ${record.pid}).`,
         );
@@ -1178,6 +1331,419 @@ async function handleStop(argv: StopArgs): Promise<void> {
     failed = true;
   }
   if (failed) process.exitCode = 1;
+}
+
+async function handleToken(argv: TokenArgs): Promise<void> {
+  ignoreBrokenPipe();
+  const { entries } = readDaemonDiscoveries();
+  const error = selectionError(entries, { port: argv.port });
+  if (error) {
+    writeStderrLine(`qwen daemon: ${error}`);
+    process.exitCode = 1;
+    return;
+  }
+  const selected = selectDaemonEntries(entries, { port: argv.port });
+  if (selected.length !== 1) {
+    writeStderrLine(
+      'qwen daemon: token needs exactly one registered daemon; pass --port.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const record = selected[0]!.record;
+  if (argv.remove === true) {
+    const removed = removeDaemonToken(record.port, record.pid);
+    if (!removed) {
+      writeStderrLine(
+        `qwen daemon: no persisted token for port ${record.port}.`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    writeStdoutLine(
+      argv.json === true
+        ? JSON.stringify({ port: record.port, removed: true })
+        : `qwen daemon: removed persisted token for port ${record.port}.`,
+    );
+    return;
+  }
+
+  const token = readDaemonToken(record.port, record.pid);
+  if (!token) {
+    writeStderrLine(
+      `qwen daemon: no persisted token for port ${record.port}; start with --save-token or use QWEN_SERVER_TOKEN.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  writeStdoutLine(
+    argv.json === true
+      ? JSON.stringify({ port: record.port, token })
+      : `qwen daemon: token for port ${record.port}: ${token}`,
+  );
+}
+
+export interface DaemonRestartPlan {
+  error?: string;
+  /** Lines printed before the stop leg. */
+  notices?: string[];
+  command?: string;
+  stopArgs?: string[];
+  startArgs?: string[];
+  workspaces?: string[];
+  env?: NodeJS.ProcessEnv;
+}
+
+export function buildDaemonRestartPlan(
+  record: DaemonDiscoveryRecord,
+  options: {
+    token?: string;
+    web?: boolean;
+    requireAuth?: boolean;
+    force?: boolean;
+  },
+  entry: string,
+  execArgv: readonly string[] = process.execArgv,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): DaemonRestartPlan {
+  let protocol = '';
+  try {
+    protocol = new URL(record.url).protocol;
+  } catch {
+    // An unparseable record was already rejected by the discovery reader.
+  }
+  if (protocol === 'https:') {
+    return {
+      error:
+        'restarting an HTTPS daemon is not supported; restart it with qwen serve and the original TLS settings.',
+    };
+  }
+
+  // `workspaces` also holds the registrations restored at boot. Replaying
+  // those as `--workspace` would turn a forgettable registration into a
+  // startup workspace, so an older record is replayable only when it cannot
+  // contain one.
+  const workspaces = record.startupWorkspaces?.length
+    ? record.startupWorkspaces
+    : record.workspaces.length <= 1
+      ? [record.primaryWorkspace]
+      : undefined;
+  if (!workspaces) {
+    return {
+      error:
+        `the daemon on port ${record.port} was started by an older qwen that did not record its startup workspaces; ` +
+        `stop it and start it again with \`qwen daemon start --port ${record.port} --workspace <path>\`.`,
+    };
+  }
+
+  const notices: string[] = [];
+  const web = options.web ?? record.web;
+  if (web === undefined) {
+    notices.push(
+      'the record does not say whether the Web Shell was enabled; restarting with it (pass --no-web for API-only).',
+    );
+  }
+  const requireAuth =
+    options.requireAuth ?? record.requireAuth ?? record.auth === 'bearer';
+  if (
+    options.requireAuth === undefined &&
+    record.requireAuth === undefined &&
+    record.auth === 'bearer'
+  ) {
+    notices.push(
+      'the record does not say whether --require-auth was set; restarting with it (pass --no-require-auth to keep /health open on loopback).',
+    );
+  }
+
+  const explicitToken = options.token?.trim() || undefined;
+  const token =
+    explicitToken ?? (baseEnv['QWEN_SERVER_TOKEN']?.trim() || undefined);
+  // An explicit --token configures bearer auth, as it does for `daemon start`;
+  // an inherited QWEN_SERVER_TOKEN must not add auth to an auth-none daemon.
+  const bearer =
+    record.auth === 'bearer' || requireAuth || explicitToken !== undefined;
+  if (bearer && !token) {
+    return {
+      error:
+        record.auth !== 'bearer'
+          ? '--require-auth requires --token or QWEN_SERVER_TOKEN.'
+          : record.tokenGenerated === true
+            ? `the daemon on port ${record.port} uses a token generated at startup, which is not recorded; ` +
+              'pass that token with --token or QWEN_SERVER_TOKEN, or stop the daemon and run `qwen serve` again.'
+            : 'restarting a bearer daemon requires --token or QWEN_SERVER_TOKEN; ' +
+              'a token in a workspace .env or settings file is not read here.',
+    };
+  }
+  if (options.token) {
+    notices.push(
+      '--token is visible in this shell process list; prefer QWEN_SERVER_TOKEN.',
+    );
+  }
+
+  const javaScriptEntry = isJavaScriptEntry(entry);
+  const command = javaScriptEntry ? process.execPath : entry;
+  const prefix = javaScriptEntry ? [...execArgv, entry] : [];
+  const env = { ...baseEnv };
+  if (bearer) {
+    env['QWEN_SERVER_TOKEN'] = token!;
+  } else {
+    delete env['QWEN_SERVER_TOKEN'];
+  }
+
+  const stopArgs = [...prefix, 'daemon', 'stop', '--port', String(record.port)];
+  if (options.force) stopArgs.push('--force');
+
+  const startArgs = [
+    ...prefix,
+    'daemon',
+    'start',
+    '--port',
+    String(record.port),
+    '--hostname',
+    record.hostname,
+    '--wait',
+  ];
+  if (record.conversationsDir !== undefined) {
+    startArgs.push('--conversations-dir', record.conversationsDir);
+  }
+  for (const workspace of workspaces) {
+    startArgs.push('--workspace', workspace);
+  }
+  if (web === false) startArgs.push('--no-web');
+  if (requireAuth) startArgs.push('--require-auth');
+
+  return { notices, command, stopArgs, startArgs, workspaces, env };
+}
+
+/**
+ * Restart addresses one daemon, so it does not borrow `stop`'s `--all`
+ * advice.
+ */
+export function selectRestartTarget(
+  entries: readonly DaemonDiscoveryEntry[],
+  port: number | undefined,
+): { entry?: DaemonDiscoveryEntry; error?: string } {
+  if (port !== undefined) {
+    const entry = entries.find((candidate) => candidate.record.port === port);
+    return entry
+      ? { entry }
+      : { error: `No daemon is registered on port ${port}.` };
+  }
+  if (entries.length === 0) {
+    return { error: 'no daemon is registered. Start one with `qwen serve`.' };
+  }
+  if (entries.length > 1) {
+    return {
+      error: `${entries.length} daemons are registered; pass --port <port> to choose one.`,
+    };
+  }
+  return { entry: entries[0]! };
+}
+
+/**
+ * Whether a running bearer daemon rejects `token`. Only a verified listener
+ * is sent the credential, and only a 401 proves a mismatch.
+ */
+export async function daemonRejectsToken(
+  record: DaemonDiscoveryRecord,
+  token: string,
+  allowToken: boolean = listenerIdentityVerified(record),
+): Promise<boolean> {
+  if (!allowToken) return false;
+  try {
+    const response = await fetch(
+      new URL('/daemon/status?detail=summary', record.url),
+      {
+        signal: AbortSignal.timeout(DETAIL_TIMEOUT_MS),
+        redirect: 'manual',
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    );
+    return response.status === 401;
+  } catch {
+    return false;
+  }
+}
+
+export interface DaemonRestartDeps {
+  run(
+    command: string,
+    args: readonly string[],
+    env: NodeJS.ProcessEnv,
+  ): { status: number | null; error?: Error };
+  entries(): readonly DaemonDiscoveryEntry[];
+  hostedBy(pid: number): boolean;
+  validateWorkspaces(workspaces: readonly string[]): Promise<unknown>;
+  rejectsToken(record: DaemonDiscoveryRecord, token: string): Promise<boolean>;
+}
+
+const defaultRestartDeps: DaemonRestartDeps = {
+  run: (command, args, env) =>
+    spawnSync(command, [...args], { stdio: 'inherit', env }),
+  entries: () => readDaemonDiscoveries().entries,
+  hostedBy: (pid) => {
+    const parents = processParentTable();
+    return (
+      parents !== undefined && isProcessAncestor(pid, process.pid, parents)
+    );
+  },
+  validateWorkspaces: canonicalizeStartWorkspaces,
+  rejectsToken: (record, token) => daemonRejectsToken(record, token),
+};
+
+/**
+ * Run the stop and start legs of a restart and return the exit code. Every
+ * refusal that can be decided while the daemon still runs is decided before
+ * the stop leg.
+ */
+export async function runDaemonRestart(
+  record: DaemonDiscoveryRecord,
+  plan: DaemonRestartPlan,
+  deps: DaemonRestartDeps = defaultRestartDeps,
+): Promise<number> {
+  if (plan.error) {
+    writeStderrLine(`qwen daemon: ${plan.error}`);
+    return 1;
+  }
+  for (const notice of plan.notices ?? []) {
+    writeStderrLine(`qwen daemon: ${notice}`);
+  }
+  // Stopping the daemon tears down the shells it hosts (Web Shell terminals
+  // and agent shell tools), and this command with them, before the start leg.
+  if (
+    pidResolvableHere(record, currentPidNamespace()) &&
+    deps.hostedBy(record.pid)
+  ) {
+    writeStderrLine(
+      `qwen daemon: refusing to restart port ${record.port} from a process that daemon hosts, such as its Web Shell terminal; ` +
+        'stopping it would end this command before the new daemon starts. Run restart from a shell outside the daemon.',
+    );
+    return 1;
+  }
+  try {
+    await deps.validateWorkspaces(plan.workspaces!);
+  } catch (error) {
+    writeStderrLine(
+      `qwen daemon: cannot restart: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return 1;
+  }
+  const token = plan.env?.['QWEN_SERVER_TOKEN'];
+  if (
+    record.auth === 'bearer' &&
+    token &&
+    (await deps.rejectsToken(record, token))
+  ) {
+    writeStderrLine(
+      `qwen daemon: the daemon on port ${record.port} rejected the supplied token. ` +
+        'Restart keeps the daemon credential; pass its current token, or stop it and start it with the new one.',
+    );
+    return 1;
+  }
+
+  // Preserve an opted-in persisted token across the instance change. The
+  // sidecar belongs to the old pid and is removed by the stop leg; capture it
+  // before stopping, then recreate it for the pid that actually started.
+  const persistedToken = readDaemonToken(record.port, record.pid);
+
+  const stopped = deps.run(plan.command!, plan.stopArgs!, plan.env!);
+  if (stopped.error) {
+    writeStderrLine(
+      `qwen daemon: could not run daemon stop: ${stopped.error.message}`,
+    );
+    return 1;
+  }
+  if (stopped.status !== 0) {
+    // Every stop refusal leaves the record in place. A missing record means
+    // the daemon exited on its own while the stop leg started.
+    if (deps.entries().some((entry) => entry.record.port === record.port)) {
+      return 1;
+    }
+    writeStdoutLine(
+      `qwen daemon: the daemon on port ${record.port} already exited; starting it again.`,
+    );
+  }
+
+  const started = deps.run(plan.command!, plan.startArgs!, plan.env!);
+  if (started.error) {
+    writeStderrLine(
+      `qwen daemon: could not run daemon start: ${started.error.message}`,
+    );
+    writeStderrLine(
+      `qwen daemon: the daemon on port ${record.port} is stopped.`,
+    );
+    return 1;
+  }
+  if (started.status !== 0) return 1;
+
+  // serve moves to the next free port when the recorded one is taken, and
+  // the start leg succeeds wherever it landed.
+  const restarted = deps
+    .entries()
+    .find(
+      (entry) =>
+        entry.record.port === record.port &&
+        (entry.record.pid !== record.pid ||
+          entry.record.startedAt !== record.startedAt),
+    );
+  if (!restarted) {
+    writeStderrLine(
+      `qwen daemon: the restarted daemon is not on port ${record.port}; the port may be in use. Run \`qwen daemon status\` to find it.`,
+    );
+    return 1;
+  }
+  if (persistedToken !== undefined) {
+    const tokenToPersist = plan.env?.['QWEN_SERVER_TOKEN'] ?? persistedToken;
+    try {
+      writeDaemonToken(record.port, restarted.record.pid, tokenToPersist);
+    } catch (error) {
+      writeStderrLine(
+        `qwen daemon: could not persist the token for the restarted daemon: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return 1;
+    }
+  }
+  return 0;
+}
+
+async function handleRestart(argv: RestartArgs): Promise<void> {
+  ignoreBrokenPipe();
+  const target = selectRestartTarget(
+    readDaemonDiscoveries().entries,
+    argv.port,
+  );
+  if (!target.entry) {
+    writeStderrLine(`qwen daemon: ${target.error}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const entry = resolveCliEntry();
+  if (!entry) {
+    writeStderrLine(
+      'qwen daemon: cannot determine the CLI entry; restart requires the qwen CLI.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const { record } = target.entry;
+  const plan = buildDaemonRestartPlan(
+    record,
+    {
+      token: argv.token,
+      web: argv.web,
+      requireAuth: argv['require-auth'],
+      force: argv.force,
+    },
+    entry,
+  );
+  if ((await runDaemonRestart(record, plan)) !== 0) process.exitCode = 1;
 }
 
 const startCommand: CommandModule<unknown, StartArgs> = {
@@ -1201,6 +1767,12 @@ const startCommand: CommandModule<unknown, StartArgs> = {
         describe:
           'Workspace path; repeat for multiple; defaults to the current directory',
       })
+      .option('conversations-dir', {
+        type: 'string',
+        requiresArg: true,
+        describe:
+          'Absolute Conversations working-directory root (overrides QWEN_CONVERSATIONS_DIR)',
+      })
       .option('web', {
         type: 'boolean',
         default: true,
@@ -1214,6 +1786,11 @@ const startCommand: CommandModule<unknown, StartArgs> = {
       .option('token', {
         type: 'string',
         describe: 'Bearer token for the child; prefer QWEN_SERVER_TOKEN',
+      })
+      .option('save-token', {
+        type: 'boolean',
+        default: false,
+        describe: 'Persist the bearer token in a 0600 sidecar for daemon token',
       })
       .option('wait', {
         type: 'boolean',
@@ -1306,15 +1883,76 @@ const stopCommand: CommandModule<unknown, StopArgs> = {
   },
 };
 
+const restartCommand: CommandModule<unknown, RestartArgs> = {
+  command: 'restart',
+  describe:
+    'Restart a local qwen serve daemon on its recorded port and workspaces',
+  builder: (yargs: Argv) =>
+    yargs
+      .option('port', {
+        type: 'number',
+        describe: 'Daemon port; required when more than one is registered',
+      })
+      .option('token', {
+        type: 'string',
+        describe:
+          'Bearer token for the restarted daemon; a running bearer daemon must accept it. Prefer QWEN_SERVER_TOKEN',
+      })
+      .option('web', {
+        type: 'boolean',
+        describe:
+          'Serve the Web Shell; defaults to the recorded mode, use --no-web for API-only',
+      })
+      .option('require-auth', {
+        type: 'boolean',
+        describe:
+          'Require the bearer token even on loopback; defaults to the recorded setting',
+      })
+      .option('force', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Pass --force to daemon stop: confirm the Windows hard kill, or SIGKILL a POSIX daemon that does not exit after SIGTERM',
+      }),
+  handler: async (argv) => {
+    await handleRestart(argv);
+  },
+};
+
+const tokenCommand: CommandModule<unknown, TokenArgs> = {
+  command: 'token',
+  describe: 'Show or remove a persisted daemon bearer token',
+  builder: (yargs: Argv) =>
+    yargs
+      .option('port', {
+        type: 'number',
+        describe: 'Daemon port; required when more than one is registered',
+      })
+      .option('json', {
+        type: 'boolean',
+        default: false,
+        describe: 'Output a JSON object',
+      })
+      .option('remove', {
+        type: 'boolean',
+        default: false,
+        describe: 'Remove the persisted token',
+      }),
+  handler: async (argv) => {
+    await handleToken(argv);
+  },
+};
+
 export const daemonCommand: CommandModule = {
-  command: 'daemon',
-  describe: 'Inspect and control local qwen serve daemons',
+  ...commandMetadata.daemon,
   builder: (yargs: Argv) =>
     yargs
       .command(startCommand)
       .command(statusCommand)
       .command(logsCommand)
       .command(stopCommand)
+      .command(restartCommand)
+      .command(tokenCommand)
       .demandCommand(1, 'You need at least one command before continuing.')
       .version(false),
   handler: () => {},

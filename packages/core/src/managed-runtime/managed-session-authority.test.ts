@@ -111,7 +111,10 @@ async function openAuthority(
   });
   try {
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -749,7 +752,10 @@ describe('managed session authority activation fences', () => {
           sessionKey: sessionKeyFor(fixture),
         });
         const authority = await LocalManagedSessionAuthority.open({
-          lease,
+          journal: LocalJsonlManagedSessionJournalStore.fromLease(
+            lease,
+            sessionKeyFor(fixture),
+          ),
           sessionKey: sessionKeyFor(fixture),
           cwd: '/workspace',
           version: 'test',
@@ -1617,7 +1623,10 @@ describe('managed session authority log integrity', () => {
       transcriptPath: fixture.transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -1822,7 +1831,10 @@ describe('managed session uncommitted tail recovery', () => {
     });
     await expect(
       LocalManagedSessionAuthority.open({
-        lease,
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKeyFor(fixture),
+        ),
         sessionKey: sessionKeyFor(fixture),
         cwd: '/workspace',
         version: 'test',
@@ -1835,7 +1847,10 @@ describe('managed session uncommitted tail recovery', () => {
     expect(recovered.discardedBytes).toBeGreaterThan(0);
 
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -2054,7 +2069,10 @@ describe('managed session first transaction recovery', () => {
     ]);
 
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -2114,18 +2132,38 @@ describe('managed session write barrier at rest', () => {
       sessionId: fixture.sessionId,
       transcriptPath: fixture.transcriptPath,
     });
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: fixture.runtimeBaseDir,
+      sessionKey: sessionKeyFor(fixture),
+    });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
       create: {
-        definitionRef: ref('managed-definition'),
-        rootSnapshotRef: ref('managed-root'),
+        definitionRef: await resources.publish(
+          'managed-session-definition',
+          Buffer.from('{}'),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-session-root-snapshot',
+          Buffer.from('{}'),
+        ),
         createdBy: 'daemon',
       },
     });
-    await authority.submitInput(inputCommand(fixture), inputRequest);
+    await authority.submitInput(inputCommand(fixture), {
+      ...inputRequest,
+      contentRef: await resources.publish('managed-test', Buffer.from('input')),
+      admissionRef: await resources.publish(
+        'managed-test',
+        Buffer.from('admission'),
+      ),
+    });
     await authority.close();
   }
 
@@ -2157,15 +2195,33 @@ describe('managed session write barrier at rest', () => {
       transcriptPath: fixture.transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
     });
     expect(authority.committedSequence).toBe(2);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: fixture.runtimeBaseDir,
+      sessionKey: sessionKeyFor(fixture),
+    });
     const receipt = await authority.submitInput(
       inputCommand(fixture, { commandId: 'cmd-after-seal' }),
-      { ...inputRequest, inputId: 'in-after-seal' },
+      {
+        ...inputRequest,
+        inputId: 'in-after-seal',
+        contentRef: await resources.publish(
+          'managed-test',
+          Buffer.from('after-seal input'),
+        ),
+        admissionRef: await resources.publish(
+          'managed-test',
+          Buffer.from('after-seal admission'),
+        ),
+      },
     );
     expect(receipt.firstSequence).toBe(3);
     await authority.close();
@@ -2176,7 +2232,10 @@ describe('managed session write barrier at rest', () => {
       transcriptPath: fixture.transcriptPath,
     });
     const reopened = await LocalManagedSessionAuthority.open({
-      lease: reopenLease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        reopenLease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -2238,7 +2297,10 @@ describe('managed session checkpoints', () => {
       transcriptPath: fixture.transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKeyFor(fixture),
+      ),
       sessionKey: sessionKeyFor(fixture),
       cwd: '/workspace',
       version: 'test',
@@ -2247,8 +2309,14 @@ describe('managed session checkpoints', () => {
         ? {}
         : {
             create: {
-              definitionRef: ref('managed-definition'),
-              rootSnapshotRef: ref('managed-root'),
+              definitionRef: await store.publish(
+                'managed-session-definition',
+                Buffer.from('{}'),
+              ),
+              rootSnapshotRef: await store.publish(
+                'managed-session-root-snapshot',
+                Buffer.from('{}'),
+              ),
               createdBy: 'daemon',
             },
           }),
@@ -2291,7 +2359,10 @@ describe('managed session checkpoints', () => {
             phase: 'active',
             leaseDurationMs: 60_000,
             expiresAt: 2,
-            installRef: ref(),
+            installRef: await harness.store.publish(
+              'managed-test',
+              Buffer.from('install'),
+            ),
             boundaryRef: null,
           },
         },
@@ -2399,7 +2470,17 @@ describe('managed session checkpoints', () => {
   it('chains each checkpoint and recovers the newest after a cold reopen', async () => {
     const fixture = await createFixture();
     const first = await openWithResources(fixture);
-    await first.authority.submitInput(inputCommand(fixture), inputRequest);
+    await first.authority.submitInput(inputCommand(fixture), {
+      ...inputRequest,
+      contentRef: await first.store.publish(
+        'managed-test',
+        Buffer.from('input'),
+      ),
+      admissionRef: await first.store.publish(
+        'managed-test',
+        Buffer.from('admission'),
+      ),
+    });
     await activate(first, 3);
     const one = await first.authority.commitCheckpoint(
       inputCommand(fixture, {

@@ -114,6 +114,39 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     );
   });
 
+  it('holds the overlay width at rest on rows that show a PR badge', () => {
+    // The badge sits right before the slot; growing the slot on hover slid it
+    // left and put Pin under the pointer. Touch keeps the buttons in the
+    // flow, so the reservation is hover-only.
+    expect(hoverMedia).toMatch(
+      /\.sessionMetaSlotReserved\s*\{[^}]*min-width:\s*var\(--session-actions-width/,
+    );
+    expect(nonHoverCss).not.toMatch(/\.sessionMetaSlotReserved/);
+  });
+
+  it('hides the busy marker when a background-only row reveals its actions', () => {
+    // A background-only row is not .runningSession, so hovering anywhere on
+    // the row reveals the overlay — not just hovering the meta slot. Without
+    // this the amber busy marker sits under the revealed action buttons.
+    expect(hoverMedia).toMatch(
+      /\.sessionRow:hover:not\(\.runningSession\)\s*\.sessionLoading,[^{]*\{[^}]*opacity:\s*0;/,
+    );
+  });
+
+  it('keeps the background busy marker on the warning token', () => {
+    // The amber is what makes a background-only row read as busy rather than
+    // merely spinning, and the component test can only see the class name.
+    // Swapping the token for the muted one would keep every suite green, so
+    // pin the declaration itself. Prettier wraps the color-mix across lines,
+    // so the body must not be assumed to sit on one line.
+    expect(sidebarCss).toMatch(
+      /\.sessionLoadingBackground\s*\{[^}]*border-top-color:\s*var\(--warning-color/,
+    );
+    expect(sidebarCss).toMatch(
+      /\.sessionLoadingBackground\s*\{[^}]*border-color:\s*color-mix\([^)]*var\(--warning-color/,
+    );
+  });
+
   it('hides the trailing markers whenever the overlay is revealed', () => {
     for (const marker of [
       'sessionGitIcon',
@@ -127,5 +160,23 @@ describe('WebShellSidebar session row actions stylesheet', () => {
         ),
       );
     }
+  });
+});
+
+describe('WebShellSidebar more-menu stylesheet', () => {
+  it('sizes the popup to its longest label instead of a fixed English width', () => {
+    expect(sidebarCss).toMatch(
+      /\.moreMenu\s*\{[^}]*width:\s*max-content;[^}]*min-width:\s*240px;[^}]*max-width:\s*min\(22rem,\s*calc\(100vw - 24px\)\);/,
+    );
+    expect(sidebarCss).not.toMatch(/\.moreMenu\s*\{[^}]*[^-\w]width:\s*240px;/);
+  });
+
+  it('keeps more-menu rows a uniform height with left-aligned, unwrapped labels', () => {
+    expect(sidebarCss).toMatch(
+      /\.moreMenu \.footerButton,\s*\.moreMenu \.collapseButton,[\s\S]*?height:\s*36px;[\s\S]*?text-align:\s*start;/,
+    );
+    expect(sidebarCss).toMatch(
+      /\.moreMenu \.footerButtonLabel,\s*\.moreMenu \.collapseButton > span\s*\{[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;[^}]*text-align:\s*start;/,
+    );
   });
 });

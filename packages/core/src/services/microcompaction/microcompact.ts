@@ -157,7 +157,7 @@ export function collectResidentMemoryBodies(
  * fast-path (issue #4239) instead of wiping the whole cache. All three
  * take the target as a `file_path` arg.
  */
-const FILE_PATH_TOOLS = new Set<string>([
+export const FILE_PATH_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
@@ -191,7 +191,7 @@ function resolveTrackedToolName(name: string): string {
   return match;
 }
 
-function getFunctionCallIdentity(
+export function getFunctionCallIdentity(
   call: NonNullable<Part['functionCall']>,
 ): ToolCallIdentity | undefined {
   if (!call.name) return undefined;

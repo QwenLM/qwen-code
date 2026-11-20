@@ -17,6 +17,7 @@ import type {
   PermissionDecision,
 } from '../permissions/types.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
@@ -473,9 +474,13 @@ export async function runSkillReviewByAgent(params: {
   });
 
   if (result.status !== 'completed') {
+    // No cancelled arm: this planner passes no abortSignal, so
+    // runForkedAgent cannot resolve 'cancelled' here.
     throw new Error(
-      result.terminateReason ||
+      terminateReasonMessage(
+        result.terminateReason,
         'Skill review agent did not complete successfully',
+      ),
     );
   }
 

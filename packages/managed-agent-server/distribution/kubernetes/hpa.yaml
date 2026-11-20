@@ -1,0 +1,32 @@
+# Apply only after the external metrics adapter and capacity threshold are verified.
+apiVersion: 'autoscaling/v2'
+kind: 'HorizontalPodAutoscaler'
+metadata:
+  name: 'qwen-harness'
+spec:
+  scaleTargetRef:
+    apiVersion: 'apps/v1'
+    kind: 'Deployment'
+    name: 'qwen-harness'
+  minReplicas: 2
+  maxReplicas: 10
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: 'Pods'
+          value: 1
+          periodSeconds: 60
+    scaleDown:
+      selectPolicy: 'Disabled'
+  metrics:
+    - type: 'External'
+      external:
+        metric:
+          name: 'qwen_harness_runnable_backlog'
+          selector:
+            matchLabels:
+              pool: 'qwen-harness'
+        target:
+          type: 'AverageValue'
+          averageValue: '4'

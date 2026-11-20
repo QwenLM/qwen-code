@@ -1,5 +1,9 @@
 // @vitest-environment jsdom
-import { McpAppHostContext, McpAppToolsContext } from '../mcpAppHostContext';
+import {
+  McpAppHostContext,
+  McpAppToolsContext,
+  McpAppGeneratedUiContext,
+} from '../mcpAppHostContext';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -123,6 +127,7 @@ const callTool = vi.fn(async () => ({
 async function setup(
   sourceSessionId: string | null = 'session',
   toolsSessionId = 'session',
+  generatedUi = false,
 ) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('requestAnimationFrame', () => 1);
@@ -195,7 +200,18 @@ async function setup(
   document.body.appendChild(container);
   root = createRoot(container);
   const props: MessageListProps = {
-    messages: live,
+    messages: generatedUi
+      ? live.map((message) => ({
+          ...message,
+          tools: message.tools?.map((tool) => ({
+            ...tool,
+            rawOutput: {
+              ...display,
+              resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+            },
+          })),
+        }))
+      : live,
     pendingApproval: null,
     isResponding: true,
     sourceSessionId: sourceSessionId ?? undefined,
@@ -206,7 +222,18 @@ async function setup(
         <McpAppToolsContext.Provider
           value={{ sessionId: toolsSessionId, callTool }}
         >
-          <TranscriptViewport {...props} />
+          <McpAppGeneratedUiContext.Provider
+            value={
+              generatedUi
+                ? {
+                    sessionId: 'different-owner',
+                    status: { version: 1, enabled: true },
+                  }
+                : undefined
+            }
+          >
+            <TranscriptViewport {...props} />
+          </McpAppGeneratedUiContext.Provider>
         </McpAppToolsContext.Provider>
       </McpAppHostContext.Provider>,
     ),
@@ -222,6 +249,13 @@ async function setup(
 }
 
 describe('historical App real wiring', () => {
+  it('does not mount a built-in App using another session capability, even when expanded', async () => {
+    await setup('session', 'session', true);
+    expect(container!.textContent).toContain('App fallback');
+    expect(container!.querySelector('iframe')).toBeNull();
+    expect(appBridgeMocks.constructed).toBe(0);
+  });
+
   it('preserves serverTools for bound historical session', async () => {
     const { openHistory } = await setup();
     await act(async () => {

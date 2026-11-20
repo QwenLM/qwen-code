@@ -5,6 +5,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import { dp } from './dialogStyles';
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
+import { DaemonUnavailableError } from '../../daemon/availability.js';
+import { offlineDaemon } from '../../daemon/availability.test-fixtures.js';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -39,10 +42,14 @@ let sessions: DaemonSessionSummary[] = [
 const deleteSessionMock = vi.fn();
 const deleteSessionsMock = vi.fn();
 let scopedSessionsOptions: unknown;
+let scopedSessionsError: Error | undefined;
+let scopedSessionsLoading = false;
 const initialSessions = sessions.slice();
 
+let attachedSessionId = 'me';
+
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useConnection: () => ({ sessionId: 'me' }),
+  useConnection: () => ({ sessionId: attachedSessionId }),
 }));
 
 vi.mock('../../hooks/useScopedSessions', () => ({
@@ -50,8 +57,8 @@ vi.mock('../../hooks/useScopedSessions', () => ({
     scopedSessionsOptions = options;
     return {
       sessions,
-      loading: false,
-      error: undefined,
+      loading: scopedSessionsLoading,
+      error: scopedSessionsError,
       deleteSession: deleteSessionMock,
       deleteSessions: deleteSessionsMock,
     };
@@ -66,19 +73,28 @@ let onDeleted: ReturnType<typeof vi.fn>;
 let onError: ReturnType<typeof vi.fn>;
 let onClose: ReturnType<typeof vi.fn>;
 
-function renderDialog() {
+function renderDialog(availability?: ReturnType<typeof offlineDaemon>) {
+  const dialog = (
+    <DeleteSessionDialog
+      onDeleted={onDeleted}
+      onError={onError}
+      onClose={onClose}
+    />
+  );
   root!.render(
     <I18nProvider language="en">
-      <DeleteSessionDialog
-        onDeleted={onDeleted}
-        onError={onError}
-        onClose={onClose}
-      />
+      {availability ? (
+        <DaemonAvailabilityContext.Provider value={availability.availability}>
+          {dialog}
+        </DaemonAvailabilityContext.Provider>
+      ) : (
+        dialog
+      )}
     </I18nProvider>,
   );
 }
 
-function mount() {
+function mount(availability?: ReturnType<typeof offlineDaemon>) {
   onDeleted = vi.fn();
   onError = vi.fn();
   onClose = vi.fn();
@@ -86,7 +102,7 @@ function mount() {
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
-    renderDialog();
+    renderDialog(availability);
   });
 }
 
@@ -98,6 +114,13 @@ function rerender() {
 
 function rows(): HTMLElement[] {
   return Array.from(container!.querySelectorAll('[role="option"]'));
+}
+
+function hint(): string {
+  return (
+    container!.querySelector<HTMLElement>(`.${dp('picker-search-hint')}`)
+      ?.textContent ?? ''
+  );
 }
 
 function dangerButton(): HTMLButtonElement {
@@ -139,6 +162,9 @@ const isChecked = (el: HTMLElement) => el.textContent?.includes('[x]') === true;
 beforeEach(() => {
   deleteSessionMock.mockReset();
   deleteSessionsMock.mockReset();
+  scopedSessionsError = undefined;
+  scopedSessionsLoading = false;
+  attachedSessionId = 'me';
 });
 
 afterEach(() => {
@@ -264,6 +290,253 @@ describe('DeleteSessionDialog selection', () => {
     expect(dangerButton().disabled).toBe(true);
   });
 
+  it('keeps the current session row unselectable while only background work runs', () => {
+    // The sidebar refuses to delete this row; the dialog must agree, or the
+    // two entry points disagree about what "still working" means.
+    sessions = [
+      initialSessions[0],
+      initialSessions[1],
+      {
+        ...initialSessions[2],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+    ];
+    mount();
+
+    clickRow(2);
+    expect(isChecked(rows()[2])).toBe(false);
+    expect(dangerButton().disabled).toBe(true);
+  });
+
+  it('refuses to confirm a row that turned busy after it was ticked', async () => {
+    // The guard has to sit on the request, not only on the click: a blocked
+    // row can no longer be unchecked, so a stale checked set would otherwise
+    // still reach the multi-select delete.
+    deleteSessionsMock.mockResolvedValue({
+      removed: [initialSessions[0].sessionId],
+      notFound: [],
+      errors: [],
+    });
+    const idle = [
+      initialSessions[0],
+      initialSessions[1],
+      { ...initialSessions[2], activeWorkState: 'idle' },
+    ];
+    const busy = [
+      initialSessions[0],
+      initialSessions[1],
+      {
+        ...initialSessions[2],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+    ];
+    sessions = idle;
+    mount();
+    clickRow(2);
+    expect(isChecked(rows()[2])).toBe(true);
+    expect(dangerButton().disabled).toBe(false);
+
+    // Alone, the stale selection must disarm the button and uncheck the row:
+    // a blocked row cannot be unchecked by hand, so leaving it ticked would
+    // count a session the request omits.
+    sessions = busy;
+    rerender();
+    expect(dangerButton().disabled).toBe(true);
+    expect(isChecked(rows()[2])).toBe(false);
+    expect(deleteSessionsMock).not.toHaveBeenCalled();
+
+    // Alongside another row the button stays armed, so the request itself has
+    // to drop the row that turned busy — and the count the user reads must
+    // agree with what is actually sent.
+    sessions = idle;
+    rerender();
+    clickRow(2);
+    clickRow(0);
+    expect(hint()).toContain('2');
+    sessions = busy;
+    rerender();
+    expect(dangerButton().disabled).toBe(false);
+    expect(isChecked(rows()[2])).toBe(false);
+    expect(hint()).toContain('1');
+    expect(hint()).not.toContain('2');
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(deleteSessionsMock).toHaveBeenCalledWith([
+      initialSessions[0].sessionId,
+    ]);
+  });
+
+  it('refuses a non-attached row whose only activity is background work', async () => {
+    // The sidebar row already refuses this session and the delete route has no
+    // idle guard, so the dialog must not be the way around it.
+    deleteSessionsMock.mockResolvedValue({
+      removed: ['s1'],
+      notFound: [],
+      errors: [],
+    });
+    const busyFirst = {
+      ...initialSessions[0],
+      hasRunningBackgroundTasks: true,
+      activeWorkState: 'idle' as const,
+    };
+    sessions = initialSessions.slice();
+    mount();
+    clickRow(0);
+    clickRow(1);
+    expect(dangerButton().disabled).toBe(false);
+
+    sessions = [busyFirst, initialSessions[1], initialSessions[2]];
+    rerender();
+    expect(rows()[0]!.getAttribute('aria-disabled')).toBe('true');
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(hint()).toContain('1');
+    expect(hint()).not.toContain('2');
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(deleteSessionsMock).toHaveBeenCalledWith(['s1']);
+  });
+
+  it('keeps a non-attached row with a running turn selectable', () => {
+    // Only background work blocks other rows. Widening the guard to every
+    // kind of live work would make this row untickable here while the sidebar
+    // still offers Delete for it.
+    sessions = [
+      { ...initialSessions[0], hasActivePrompt: true },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(true);
+    expect(dangerButton().disabled).toBe(false);
+  });
+
+  it('names the reason when a refused row is clicked', () => {
+    // The danger button is disabled in this state, so the click on the row is
+    // the only place the refusal can reach the user.
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      { ...initialSessions[2], hasActivePrompt: true },
+    ];
+    mount();
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(hint()).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
+    clickRow(2);
+    expect(isChecked(rows()[2]!)).toBe(false);
+    expect(hint()).toBe(
+      'Cannot delete the current session while it is running.',
+    );
+    // A successful tick clears the refusal so the count is readable again.
+    clickRow(1);
+    expect(isChecked(rows()[1]!)).toBe(true);
+    expect(hint()).toContain('1');
+  });
+
+  it('drops the refusal once the row stops being blocked', () => {
+    // The refusal describes live state, not a durable error: when the
+    // background command finishes, the hint must stop asserting it even
+    // though no further click happened.
+    const firstRowBusy = (busy: boolean) => {
+      sessions = [
+        {
+          ...initialSessions[0],
+          hasRunningBackgroundTasks: busy,
+          activeWorkState: 'idle',
+        },
+        initialSessions[1],
+        initialSessions[2],
+      ];
+    };
+    firstRowBusy(true);
+    mount();
+    clickRow(1);
+    clickRow(0);
+    expect(hint()).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
+    firstRowBusy(false);
+    rerender();
+    expect(hint()).toContain('1');
+    expect(hint()).not.toContain('background work');
+    // And it must not come back on its own: a later busy tick is not a click.
+    firstRowBusy(true);
+    rerender();
+    expect(hint()).toContain('1');
+    expect(hint()).not.toContain('background work');
+    // The guard must not latch either: once idle, the row ticks again.
+    firstRowBusy(false);
+    rerender();
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(true);
+  });
+
+  it('re-reads the refusal reason from the row instead of the click', () => {
+    // The row stays refused across an attachment change, but which rule
+    // refuses it does not stay the same.
+    sessions = [
+      initialSessions[0],
+      initialSessions[1],
+      {
+        ...initialSessions[2],
+        hasActivePrompt: true,
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+    ];
+    mount();
+    clickRow(2);
+    expect(hint()).toBe(
+      'Cannot delete the current session while it is running.',
+    );
+    attachedSessionId = 's1';
+    rerender();
+    expect(hint()).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
+  });
+
+  it('lets an error keep the hint over a refusal', () => {
+    // Deliberate: the hint has one slot and an error is the durable statement,
+    // so a refused row stays untickable without taking that slot.
+    scopedSessionsError = new Error('load boom');
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(hint()).toContain('load boom');
+  });
+
+  it('keeps a load error in the hint when a row is ticked', () => {
+    // Clearing the refusal must not clobber an unrelated error sharing the hint.
+    scopedSessionsError = new Error('load boom');
+    sessions = initialSessions.slice();
+    mount();
+    expect(hint()).toContain('load boom');
+    clickRow(1);
+    expect(isChecked(rows()[1]!)).toBe(true);
+    expect(hint()).toContain('load boom');
+  });
+
   it('clears checked rows and disarms delete when the filter changes', () => {
     mount();
 
@@ -328,6 +601,336 @@ describe('DeleteSessionDialog selection', () => {
     expect(rows()).toHaveLength(1);
     expect(isChecked(rows()[0])).toBe(false);
     expect(dangerButton().disabled).toBe(true);
+  });
+
+  it('shows a delete outcome ahead of a stale load error', async () => {
+    scopedSessionsError = new Error('boom');
+    deleteSessionsMock.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's0', error: 'locked' }],
+    });
+    mount();
+
+    clickRow(0);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+    expect(hint()).not.toContain('boom');
+  });
+
+  it('shows a delete outcome ahead of an outstanding refusal', async () => {
+    let settle: (v: unknown) => void = () => {};
+    deleteSessionsMock.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(1);
+    clickRow(0);
+    expect(hint()).toContain('background work');
+
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    // Confirming supersedes the refusal for the whole request, not just for
+    // the outcome at the end of it.
+    expect(hint()).toBe('Deleting...');
+
+    await act(async () => {
+      settle({
+        removed: [],
+        notFound: [],
+        errors: [{ sessionId: 's1', error: 'locked' }],
+      });
+    });
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+    expect(hint()).not.toContain('background work');
+  });
+
+  it('does not arm a refusal while an error holds the hint', () => {
+    // Arming is refused, not just out-ranked: once the error clears, a click
+    // from that earlier state must not resurface as a refusal.
+    scopedSessionsError = new Error('load boom');
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(0);
+    expect(hint()).toContain('load boom');
+
+    scopedSessionsError = undefined;
+    rerender();
+    expect(hint()).toBe('');
+  });
+
+  it('keeps a refusal armed mid-delete from hiding that delete outcome', async () => {
+    let settle: (v: unknown) => void = () => {};
+    deleteSessionsMock.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(1);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toBe('Deleting...');
+
+    // A blocked row clicked while the request is in flight must not take the
+    // hint over: the failure below is about a different row entirely.
+    clickRow(0);
+    expect(hint()).toBe('Deleting...');
+
+    await act(async () => {
+      settle({
+        removed: [],
+        notFound: [],
+        errors: [{ sessionId: 's1', error: 'locked' }],
+      });
+    });
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+    expect(hint()).not.toContain('background work');
+  });
+
+  it('lets a second delete report progress instead of the first outcome', async () => {
+    deleteSessionsMock.mockResolvedValueOnce({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's1', error: 'locked' }],
+    });
+    let settle: (v: unknown) => void = () => {};
+    deleteSessionsMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+    sessions = initialSessions.slice();
+    mount();
+    clickRow(1);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+
+    clickRow(2);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toBe('Deleting...');
+    await act(async () => {
+      settle({ removed: ['me'], notFound: [], errors: [] });
+    });
+  });
+
+  it('keeps a delete outcome when a load error present at confirm time clears', async () => {
+    // The outcome and the load error used to share one slot, so the mirror
+    // wiped the failure on the next successful poll.
+    scopedSessionsError = new Error('load boom');
+    deleteSessionsMock.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's1', error: 'locked' }],
+    });
+    sessions = initialSessions.slice();
+    mount();
+    clickRow(1);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+
+    scopedSessionsError = undefined;
+    rerender();
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+    expect(rows().length).toBe(3);
+  });
+
+  it('keeps a delete outcome across a refresh that carries no load error', async () => {
+    // Mirroring the load error must not reach outcomes: the effect only runs
+    // when the error itself changes.
+    deleteSessionsMock.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's1', error: 'locked' }],
+    });
+    sessions = initialSessions.slice();
+    mount();
+    clickRow(1);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+    rerender();
+    rerender();
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+  });
+
+  it('lets the refusal speak again once a load error clears', () => {
+    // The list refetches every second, so one failed poll must not mute the
+    // refusal for the rest of the dialog's life.
+    scopedSessionsError = new Error('load boom');
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    expect(hint()).toContain('load boom');
+
+    scopedSessionsError = undefined;
+    rerender();
+    expect(hint()).toBe('');
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(hint()).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
+  });
+
+  it('keeps a settled delete failure in the hint when a blocked row is clicked', async () => {
+    // The failure text has no second rendering site in this dialog, so a later
+    // refusal must not be able to take the slot away from it.
+    deleteSessionsMock.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's1', error: 'locked' }],
+    });
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(1);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+  });
+
+  it('drops the refusal when the refused row filters away and back', () => {
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(0);
+    expect(hint()).toContain('background work');
+
+    typeFilter('S1');
+    expect(hint()).toBe('1 matches');
+    // Coming back must not re-assert a refusal nobody triggered in this state.
+    typeFilter('');
+    expect(hint()).toBe('');
+  });
+
+  it('keeps the loading placeholder above a stale load error', () => {
+    scopedSessionsLoading = true;
+    scopedSessionsError = new Error('boom');
+    mount();
+
+    const list = container!.querySelector('[role="listbox"]')!;
+    expect(list.textContent).toContain('Loading...');
+    expect(list.textContent).not.toContain('boom');
+  });
+
+  it('keeps the outage copy visible while the catalog reports loading', async () => {
+    scopedSessionsLoading = true;
+    const { availability } = offlineDaemon();
+    mount({ availability });
+    await act(async () => {
+      await availability.check(true);
+    });
+
+    const list = container!.querySelector('[role="listbox"]')!;
+    expect(list.textContent).toContain('Cannot reach the service.');
+    availability.dispose();
+  });
+
+  it('reports an outage during delete as the localized service message', async () => {
+    const { availability } = offlineDaemon();
+    deleteSessionsMock.mockRejectedValue(new DaemonUnavailableError());
+    mount({ availability });
+    await act(async () => {
+      await availability.check(true);
+    });
+    clickRow(0);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0][0] as Error).message).toBe(
+      'Cannot reach the service.',
+    );
+    availability.dispose();
+  });
+
+  it('keeps the outage copy ahead of a delete outcome', async () => {
+    const { availability } = offlineDaemon();
+    deleteSessionsMock.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's0', error: 'locked' }],
+    });
+    mount({ availability });
+    await act(async () => {
+      await availability.check(true);
+    });
+    clickRow(0);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(hint()).toContain('Cannot reach the service.');
+    expect(hint()).not.toContain('Failed to delete 1 session(s): locked');
+    availability.dispose();
   });
 
   it('deletes the checked sessions via the batch API and closes', async () => {

@@ -1,11 +1,40 @@
+import {
+  isManagedSessionSkills,
+  type ManagedCreationSkillsSource,
+} from './managed-creation-skills';
 import { useManagedFileReferences } from './use-managed-file-references';
+import { useManagedSkills } from './use-managed-skills';
 import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
-import { useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import shellStyles from '../../App.module.css';
 import { useI18n } from '../../i18n';
+import { useManagedRecoveryText } from './managed-recovery-messages';
+import {
+  useManagedWorktreeReason,
+  useManagedWorktreeText,
+} from './managed-worktree-messages';
+import { ManagedSessionWorktrees } from './ManagedSessionWorktrees';
+import { ManagedWorktreePopover } from './ManagedWorktreePopover';
 import { ChatEditor } from '../ChatEditor';
-import { WelcomeHeader } from '../WelcomeHeader';
+import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
+import { HostLabel } from '../workspaces/HostLabel';
+import { WelcomeHeader, type WelcomeHeaderProps } from '../WelcomeHeader';
+import {
+  getComposerPlaceholderKey,
+  getComposerPlaceholderState,
+} from '../../utils/composerInputState';
+import {
+  useWebShellCustomization,
+  type ComposerFooterRenderer,
+} from '../../customization';
 import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
+import { WorkspaceExecutionSelect } from '../workspaces/WorkspaceExecutionSelect';
 import type {
   ComposerSubmitCommit,
   EditorHandle,
@@ -30,6 +59,7 @@ import {
   DialogTitle,
 } from '../ui/dialog';
 import { Input } from '../ui/input';
+import { DropdownMenuItem, DropdownMenuSeparator } from '../ui/dropdown-menu';
 import {
   Select,
   SelectContent,
@@ -43,7 +73,10 @@ import type {
   ManagedAgentWorkspace,
   ManagedApprovalMode,
   ManagedSessionOptions,
+  ManagedModelPreset,
   ManagedInputBlock,
+  ManagedSessionSkill,
+  ManagedSessionWorktreeOptions,
 } from './managed-agent-provider';
 import type { PromptImage, PromptFile } from '../../adapters/promptTypes';
 import {
@@ -56,12 +89,18 @@ import {
   readManagedPending,
   saveManagedPending,
 } from './managed-pending-storage';
-import { isManagedApprovalMode } from './managed-agent-provider';
+import { isManagedInitialApprovalMode } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
 import { RemoteWorkspaceRegistration } from './RemoteWorkspaceRegistration';
+import {
+  isManagedExtensionPins,
+  type ManagedExtensionPin,
+  type ManagedExtensionCatalog,
+} from './managed-extension-types';
 
 interface PendingCreation {
   agentId: string;
+  modelId?: string;
   workspaceId: string;
   cwdRelative: string;
   input: ManagedInputBlock[];
@@ -70,6 +109,9 @@ interface PendingCreation {
   sessionId?: string;
   approvalMode?: ManagedApprovalMode;
   planMode?: boolean;
+  skills?: ManagedSessionSkill[];
+  extensionPins?: ManagedExtensionPin[];
+  worktree?: { baseRef?: string };
 }
 
 interface PendingWorkspace {
@@ -77,6 +119,7 @@ interface PendingWorkspace {
   idempotencyKey: string;
   sourceWorkspaceId?: string;
   cwdRelative?: string;
+  localPath?: string;
 }
 
 function validWorkspaceName(value: string): boolean {
@@ -99,6 +142,11 @@ function readPendingWorkspace(key: string): PendingWorkspace | undefined {
         item['cwdRelative'] === undefined) ||
         (typeof item['sourceWorkspaceId'] === 'string' &&
           typeof item['cwdRelative'] === 'string')) &&
+      (item['localPath'] === undefined ||
+        (typeof item['localPath'] === 'string' &&
+          item['localPath'].startsWith('/') &&
+          item['sourceWorkspaceId'] === undefined &&
+          item['cwdRelative'] === undefined)) &&
       !('nodeId' in item) &&
       !('path' in item) &&
       !('operationId' in item)
@@ -108,6 +156,7 @@ function readPendingWorkspace(key: string): PendingWorkspace | undefined {
         idempotencyKey: item['idempotencyKey'],
         sourceWorkspaceId: item['sourceWorkspaceId'] as string | undefined,
         cwdRelative: item['cwdRelative'] as string | undefined,
+        localPath: item['localPath'] as string | undefined,
       };
     }
   } catch {
@@ -126,16 +175,31 @@ function readPending(
     if (typeof value !== 'object' || !value) return undefined;
     const item = value as Record<string, unknown>;
     const input = item['input'];
+    const worktree = item['worktree'];
     if (
       typeof item['agentId'] !== 'string' ||
+      (item['modelId'] !== undefined &&
+        (typeof item['modelId'] !== 'string' || !item['modelId'].trim())) ||
       typeof item['workspaceId'] !== 'string' ||
       typeof item['cwdRelative'] !== 'string' ||
       typeof item['clientId'] !== 'string' ||
       typeof item['idempotencyKey'] !== 'string' ||
       (item['approvalMode'] !== undefined &&
-        !isManagedApprovalMode(item['approvalMode'])) ||
+        !isManagedInitialApprovalMode(item['approvalMode'])) ||
       (item['planMode'] !== undefined &&
         typeof item['planMode'] !== 'boolean') ||
+      (item['skills'] !== undefined &&
+        !isManagedSessionSkills(item['skills'])) ||
+      (item['extensionPins'] !== undefined &&
+        !isManagedExtensionPins(item['extensionPins'])) ||
+      (worktree !== undefined &&
+        (typeof worktree !== 'object' ||
+          worktree === null ||
+          Array.isArray(worktree) ||
+          Object.keys(worktree).some((key) => key !== 'baseRef') ||
+          ('baseRef' in worktree &&
+            (typeof worktree.baseRef !== 'string' ||
+              !worktree.baseRef.trim())))) ||
       !isManagedInput(input) ||
       (item['sessionId'] !== undefined && typeof item['sessionId'] !== 'string')
     )
@@ -159,18 +223,85 @@ function message(error: unknown): string {
 
 export function WorkspaceBindingCreator({
   provider,
+  workspaceCreationOpen,
+  onWorkspaceCreationOpenChange,
+  onOpenLocalWorkspace,
+  daemonWorkspaces,
+  onSelectDaemonWorkspace,
+  creationOnly = false,
   clientId,
   onCreated,
   onAbandoned,
+  workspaceId: explicitWorkspaceId,
+  onSelectWorkspace,
+  onWorkspaceCreated,
   interactive = true,
+  creationSkills,
+  handoff,
+  onOpenHandoffSource,
+  unconfirmed,
+  onUnconfirmedRetry,
+  onUnconfirmedDiscard,
+  renderWelcomeHeader,
+  renderWelcomeFooter,
+  renderComposerFooter,
+  alignManagedChatWithHost = false,
 }: {
   provider: ManagedAgentProvider;
+  workspaceCreationOpen?: boolean;
+  onWorkspaceCreationOpenChange?: (open: boolean) => void;
+  onOpenLocalWorkspace?: () => void;
+  daemonWorkspaces?: WorkspaceSelectorOption[];
+  onSelectDaemonWorkspace?: (workspace: WorkspaceSelectorOption) => void;
+  creationOnly?: boolean;
   clientId: string;
-  onCreated: (sessionId: string) => void;
+  onCreated: (sessionId: string, workspaceId: string) => void;
   onAbandoned?: () => void;
+  workspaceId?: string;
+  onSelectWorkspace?: (workspaceId: string) => void;
+  onWorkspaceCreated?: (workspaceId: string) => void;
   interactive?: boolean;
+  creationSkills?: ManagedCreationSkillsSource;
+  handoff?: import('./managed-recovery-handoff').ManagedRecoveryHandoff;
+  onOpenHandoffSource?: () => void;
+  /**
+   * The page's unconfirmed new-task prompt. This surface replaces the
+   * transcript, so the notice and both actions have to live here — and its
+   * editor is the only place the draft can be handed back to.
+   */
+  unconfirmed?: { text: string; input?: readonly ManagedInputBlock[] };
+  onUnconfirmedRetry?: () => void;
+  /** Resolves false when the durable record could not be cleared. */
+  onUnconfirmedDiscard?: () => Promise<boolean>;
+  /**
+   * Host welcome renderer for the creation surface, passed through from the
+   * managed page so the first screen a user reaches does not keep the built-in
+   * brand header while the session view shows the host's.
+   */
+  renderWelcomeHeader?: (props: WelcomeHeaderProps) => ReactNode;
+  /**
+   * Pairs with `renderWelcomeHeader` on this surface, like the managed session
+   * empty state and App both keep: a host that supplies both slots gets both.
+   */
+  renderWelcomeFooter?: (props: WelcomeHeaderProps) => ReactNode;
+  /**
+   * Host composer footer for the creation surface, passed through from the
+   * managed page like the welcome slots so the first screen does not drop the
+   * footer the session view shows.
+   */
+  renderComposerFooter?: ComposerFooterRenderer;
+  /**
+   * Mirrors the managed composer: aligned hosts get the ordinary placeholder,
+   * not the managed-only prompt copy.
+   */
+  alignManagedChatWithHost?: boolean;
 }) {
   const { t } = useI18n();
+  const { composerPlaceholders } = useWebShellCustomization();
+  const recoveryText = useManagedRecoveryText();
+  const worktreeText = useManagedWorktreeText();
+  const worktreeReason = useManagedWorktreeReason();
+  const workspaceId = explicitWorkspaceId ?? handoff?.workspaceId;
   const binding = provider.workspaceBinding!;
   const pendingKey = `qwen-managed-workspace-create:${provider.storageKey}`;
   const [pending, setPending] = useState(() => readPending(pendingKey));
@@ -191,9 +322,10 @@ export function WorkspaceBindingCreator({
   const [workspaceError, setWorkspaceError] = useState<string>();
   const [canCreateWorkspace, setCanCreateWorkspace] = useState(false);
   const [canSelectDirectory, setCanSelectDirectory] = useState(false);
+  const [canImportLocalDirectory, setCanImportLocalDirectory] = useState(false);
   const [directorySource, setDirectorySource] = useState('');
   const [directoryPicker, setDirectoryPicker] = useState<{
-    workspaceId: string;
+    workspaceId?: string;
     root: string;
   }>();
   const [supportsApprovalModeSelection, setSupportsApprovalModeSelection] =
@@ -205,32 +337,110 @@ export function WorkspaceBindingCreator({
   const [optionsError, setOptionsError] = useState<string>();
   const [optionsRevision, setOptionsRevision] = useState(0);
   const [planMode, setPlanMode] = useState(false);
+  const skillsSourceRef = useRef(creationSkills);
+  skillsSourceRef.current = creationSkills;
   const encoding = useRef(false);
   const [items, setItems] = useState<ManagedAgentWorkspace[]>([]);
   const selectionKey = `qwen-managed-workspace-selection:${provider.storageKey}`;
   const [selected, setSelected] = useState(() => {
+    if (workspaceId) return workspaceId;
     try {
       return sessionStorage.getItem(selectionKey) ?? '';
     } catch {
       return '';
     }
   });
+  const [extensionCatalog, setExtensionCatalog] =
+    useState<ManagedExtensionCatalog>();
+  const [extensionPins, setExtensionPins] = useState<ManagedExtensionPin[]>([]);
+  useEffect(() => {
+    const abort = new AbortController();
+    setExtensionCatalog(undefined);
+    setExtensionPins([]);
+    if (selected && provider.extensions) {
+      void provider.extensions
+        .list(selected, { clientId, signal: abort.signal })
+        .then((catalog) => {
+          if (
+            !abort.signal.aborted &&
+            catalog.extensions.length <= 256 &&
+            catalog.extensions.every((item) =>
+              isManagedExtensionPins([item.pin]),
+            ) &&
+            new Set(catalog.extensions.map((item) => item.pin.extensionId))
+              .size === catalog.extensions.length
+          )
+            setExtensionCatalog(catalog);
+        })
+        .catch(() => undefined);
+    }
+    return () => abort.abort();
+  }, [selected, provider.extensions, clientId]);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
-  const [cwdRelative, setCwdRelative] = useState('.');
-  const cwdEdited = useRef(false);
-  const [agentId, setAgentId] = useState(binding.agentId);
+  const requestedWorkspaceRef = useRef(workspaceId);
+  requestedWorkspaceRef.current = workspaceId;
+  const handledWorkspaceRequest = useRef(workspaceId);
+  const [selectingWorkspace, setSelectingWorkspace] = useState(false);
+  const workspaceSelectionBlocked =
+    selectingWorkspace ||
+    Boolean(workspaceId && handledWorkspaceRequest.current !== workspaceId);
+  const [cwdRelative, setCwdRelative] = useState(handoff?.cwdRelative ?? '.');
+  const [worktreeMode, setWorktreeMode] = useState(Boolean(pending?.worktree));
+  const [worktreesOpen, setWorktreesOpen] = useState(false);
+  const [worktreePopoverOpen, setWorktreePopoverOpen] = useState(false);
+  const [worktreeOptions, setWorktreeOptions] = useState<{
+    source: string;
+    value?: ManagedSessionWorktreeOptions;
+    error?: string;
+  }>();
+  const [worktreeOptionsRevision, setWorktreeOptionsRevision] = useState(0);
+  const branchScope = JSON.stringify([selected, cwdRelative]);
+  const [branchObservation, setBranchObservation] = useState<{
+    scope: string;
+    branch: string | null;
+  }>();
+  const currentBranch =
+    branchObservation?.scope === branchScope ? branchObservation.branch : null;
+  const worktreeSource = JSON.stringify([selected, cwdRelative, worktreeMode]);
+  const worktreeRequested = pending ? Boolean(pending.worktree) : worktreeMode;
+  const worktreeReady =
+    !worktreeRequested ||
+    Boolean(
+      worktreeOptions?.source === worktreeSource &&
+        worktreeOptions.value?.supported,
+    );
+  const [cwdDraft, setCwdDraft] = useState<string>();
+  const cwdEdited = useRef(Boolean(handoff?.cwdRelative));
   const modelPresets = binding.modelPresets ?? [];
-  const availableModels = [
-    ...(!modelPresets.some((item) => item.agentId === binding.agentId)
-      ? [{ agentId: binding.agentId, label: t('managed.modelDefault') }]
-      : []),
-    ...modelPresets,
-  ];
+  const availableModels: readonly ManagedModelPreset[] =
+    modelPresets.length > 0
+      ? modelPresets
+      : [{ agentId: binding.agentId, label: t('managed.modelDefault') }];
+  const [selectedModel, setSelectedModel] = useState(() => {
+    const preferred: ManagedModelPreset =
+      availableModels.find((item) => item.agentId === handoff?.agentId) ??
+      (handoff?.agentId === binding.agentId
+        ? { agentId: binding.agentId, label: t('managed.modelDefault') }
+        : undefined) ??
+      availableModels.find((item) => item.agentId === binding.agentId) ??
+      availableModels[0]!;
+    return preferred.modelId ?? preferred.agentId;
+  });
+  const selectedPreset = availableModels.find(
+    (item) => (item.modelId ?? item.agentId) === selectedModel,
+  );
+  const agentId = selectedPreset?.agentId ?? binding.agentId;
+  const modelId = selectedPreset?.modelId;
+
   const [nextCursor, setNextCursor] = useState<string>();
   const [supported, setSupported] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(true);
+  // True only while a creation request is in flight. Neither `busy` (also set
+  // by the pending-restore window) nor `workspaceCreating` (the add-workspace
+  // flow) describes this, and the screen has no queue to report through.
+  const [creatingSession, setCreatingSession] = useState(false);
   const [pendingRestoreFailed, setPendingRestoreFailed] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState<string>();
@@ -243,6 +453,23 @@ export function WorkspaceBindingCreator({
   const lifetime = useRef<AbortController | undefined>(undefined);
   // Commands must survive list reloads during same-identity credential refreshes.
   const commandLifetime = useRef<AbortController | undefined>(undefined);
+  const creationInteractive =
+    Boolean(workspaceCreationOpen) || (interactive && !creationOnly);
+
+  useEffect(() => {
+    if (workspaceCreationOpen) {
+      setWorkspaceDialogOpen(true);
+    }
+  }, [workspaceCreationOpen]);
+
+  function openLocalWorkspace() {
+    if (busy || workspaceCreatingRef.current || pendingWorkspaceRef.current)
+      return;
+    setDirectoryPicker(undefined);
+    setWorkspaceDialogOpen(false);
+    onWorkspaceCreationOpenChange?.(false);
+    onOpenLocalWorkspace?.();
+  }
 
   useEffect(() => {
     const abort = new AbortController();
@@ -255,6 +482,9 @@ export function WorkspaceBindingCreator({
         const saved = readPending(pendingKey, value);
         pendingRef.current = saved;
         setPending(saved);
+        if (saved?.worktree) {
+          setWorktreeMode(true);
+        }
         setBusy(false);
       },
       () => {
@@ -263,6 +493,56 @@ export function WorkspaceBindingCreator({
     );
     return () => abort.abort();
   }, [pendingKey]);
+
+  useEffect(() => {
+    if (!selected || pending || !provider.sessionWorktrees) return;
+    const abort = new AbortController();
+    setWorktreeOptions(undefined);
+    const timer = setTimeout(() => {
+      void provider
+        .sessionWorktrees!.options(
+          {
+            workspaceId: selected,
+            cwdRelative,
+          },
+          { clientId, signal: abort.signal },
+        )
+        .then(
+          (value) => {
+            if (!abort.signal.aborted) {
+              setWorktreeOptions({ source: worktreeSource, value });
+              setBranchObservation({
+                scope: branchScope,
+                branch: value.currentBranch ?? null,
+              });
+            }
+          },
+          (failure: unknown) => {
+            if (!abort.signal.aborted) {
+              setWorktreeOptions({
+                source: worktreeSource,
+                error: message(failure),
+              });
+              setBranchObservation({ scope: branchScope, branch: null });
+            }
+          },
+        );
+    }, 200);
+    return () => {
+      abort.abort();
+      clearTimeout(timer);
+    };
+  }, [
+    provider.sessionWorktrees,
+    clientId,
+    selected,
+    cwdRelative,
+    branchScope,
+    worktreeSource,
+    worktreeMode,
+    pending,
+    worktreeOptionsRevision,
+  ]);
 
   useEffect(() => {
     try {
@@ -296,6 +576,7 @@ export function WorkspaceBindingCreator({
         setSupported(page.supported);
         setCanCreateWorkspace(page.canCreateWorkspace === true);
         setCanSelectDirectory(page.canSelectDirectory === true);
+        setCanImportLocalDirectory(page.canImportLocalDirectory === true);
         setSupportsApprovalModeSelection(
           page.supportsApprovalModeSelection === true,
         );
@@ -309,6 +590,7 @@ export function WorkspaceBindingCreator({
         ]);
         setNextCursor(page.nextCursor);
         const previous = selectedRef.current;
+        const explicit = previous === requestedWorkspaceRef.current;
         if (previous) {
           try {
             const retained = await binding.get(previous, {
@@ -316,6 +598,8 @@ export function WorkspaceBindingCreator({
               signal: abort.signal,
             });
             if (abort.signal.aborted) return;
+            if (retained.workspaceId !== previous)
+              throw new Error(t('managed.workspaceLoadFailed'));
             if (!cwdEdited.current)
               setCwdRelative(retained.defaultCwdRelative ?? '.');
             setItems((current) => [
@@ -324,6 +608,10 @@ export function WorkspaceBindingCreator({
               ).values(),
             ]);
             if (!retained.canCreateSession) {
+              if (explicit) {
+                setError(t('managed.workspacePermission'));
+                return;
+              }
               setSelected(
                 page.defaultWorkspace?.workspaceId !== previous
                   ? (page.defaultWorkspace?.workspaceId ?? '')
@@ -333,6 +621,15 @@ export function WorkspaceBindingCreator({
             }
           } catch (failure) {
             if (abort.signal.aborted) return;
+            if (explicit) {
+              setItems((current) =>
+                current.filter((item) => item.workspaceId !== previous),
+              );
+              setError(
+                `${t('managed.workspaceLoadFailed')} ${message(failure)}`,
+              );
+              return;
+            }
             if (
               failure instanceof JavaManagedAgentHttpError &&
               failure.status === 404
@@ -361,6 +658,7 @@ export function WorkspaceBindingCreator({
         setSupported(false);
         setCanCreateWorkspace(false);
         setCanSelectDirectory(false);
+        setCanImportLocalDirectory(false);
         setSupportsApprovalModeSelection(false);
         setError(
           failure instanceof JavaManagedAgentHttpError && failure.status === 404
@@ -397,9 +695,9 @@ export function WorkspaceBindingCreator({
         });
         if (abort.signal.aborted) return;
         if (
-          !isManagedApprovalMode(options.approvalMode) ||
+          !isManagedInitialApprovalMode(options.approvalMode) ||
           !Array.isArray(options.availableApprovalModes) ||
-          !options.availableApprovalModes.every(isManagedApprovalMode) ||
+          !options.availableApprovalModes.every(isManagedInitialApprovalMode) ||
           !options.availableApprovalModes.includes(options.approvalMode)
         ) {
           throw new Error(t('managed.approvalOptionsInvalid'));
@@ -435,21 +733,51 @@ export function WorkspaceBindingCreator({
 
   const currentOptions =
     sessionOptions?.agentId === agentId ? sessionOptions : undefined;
+  const supportedSkillsSource = currentOptions?.skillsSupported
+    ? creationSkills
+    : undefined;
+  const skills = useManagedSkills(
+    provider,
+    clientId,
+    undefined,
+    supportedSkillsSource,
+  );
   const fileReferences = useManagedFileReferences(
     provider,
     clientId,
-    currentOptions?.inputAttachments
+    currentOptions?.inputAttachments && !worktreeRequested
       ? { workspaceId: selected, cwdRelative }
       : undefined,
   );
   const approvalReady =
-    !supportsApprovalModeSelection ||
-    (!optionsLoading && Boolean(currentOptions));
+    (!supportsApprovalModeSelection ||
+      (!optionsLoading && Boolean(currentOptions))) &&
+    (modelId === undefined || currentOptions?.modelSelectionSupported === true);
   const displayedApprovalMode = pending
     ? pending.approvalMode
     : supportsApprovalModeSelection
       ? currentOptions?.approvalMode
       : undefined;
+  const composerFooterModel =
+    pending?.modelId ?? pending?.agentId ?? selectedModel;
+  // Background list/options/@-file fetches stay soft: hard-disabling the
+  // editor during them would drop keystrokes (createOrRead does not gate on
+  // these flags). Only the creation request itself is "processing" work for
+  // the host override map — this screen has no turn and no queue.
+  const composerPreparing =
+    busy || loading || optionsLoading || fileReferences.busy;
+  const composerBlocked =
+    !interactive ||
+    // The prepare window and the creation request itself both set `busy`, and
+    // `createOrRead` early-returns on it: without this the composer accepts a
+    // prompt it will silently drop (and clear once the session is created).
+    busy ||
+    workspaceSelectionBlocked ||
+    workspaceCreating ||
+    Boolean(pending) ||
+    !approvalReady ||
+    !worktreeReady ||
+    worktreePopoverOpen;
 
   async function loadMore() {
     const abort = lifetime.current;
@@ -490,6 +818,7 @@ export function WorkspaceBindingCreator({
   ) {
     const abort = commandLifetime.current;
     if (
+      creationOnly ||
       !abort ||
       abort.signal.aborted ||
       busy ||
@@ -504,8 +833,24 @@ export function WorkspaceBindingCreator({
       !supportsApprovalModeSelection
     )
       return;
+    if (
+      attempt?.modelId !== undefined &&
+      !attempt.sessionId &&
+      currentOptions?.modelSelectionSupported !== true
+    )
+      return;
+    if (attempt?.worktree && !attempt.sessionId && !provider.sessionWorktrees)
+      return;
     const firstSubmission = !attempt;
     if (!attempt) {
+      if (
+        loading ||
+        workspaceSelectionBlocked ||
+        switchTo ||
+        (requestedWorkspaceRef.current &&
+          handledWorkspaceRequest.current !== requestedWorkspaceRef.current)
+      )
+        return;
       if (
         text !== undefined &&
         !text.trim() &&
@@ -513,10 +858,10 @@ export function WorkspaceBindingCreator({
         !files?.length
       )
         return;
-      if (!approvalReady) return;
+      if (!approvalReady || !worktreeReady) return;
       if (
         !supported ||
-        !availableModels.some((item) => item.agentId === agentId) ||
+        !selectedPreset ||
         !items.find(
           (item) => item.workspaceId === selected && item.canCreateSession,
         )
@@ -525,9 +870,18 @@ export function WorkspaceBindingCreator({
         return;
       }
       let input: ManagedInputBlock[] = [];
+      let skills: ManagedSessionSkill[] = [];
+      const source = supportedSkillsSource;
       encoding.current = true;
       setBusy(true);
       try {
+        if (source) {
+          skills = await source.load(abort.signal);
+          if (source !== skillsSourceRef.current)
+            throw new Error(t('managed.creationSkillsSourceChanged'));
+          if (!isManagedSessionSkills(skills))
+            throw new Error(t('managed.creationSkillsUnavailable'));
+        }
         if (text !== undefined) {
           const prepared = await fileReferences.prepareInput(
             text,
@@ -549,13 +903,23 @@ export function WorkspaceBindingCreator({
         setBusy(false);
       }
       if (abort.signal.aborted) return;
+      if (source && source !== skillsSourceRef.current) {
+        setError(t('managed.creationSkillsSourceChanged'));
+        return;
+      }
       attempt = {
         agentId,
+        ...(modelId === undefined ? {} : { modelId }),
         workspaceId: selected,
         cwdRelative,
+        ...(worktreeRequested ? { worktree: {} } : {}),
         input,
         clientId,
         idempotencyKey: managedRequestId(),
+        ...(skills.length ? { skills: structuredClone(skills) } : {}),
+        ...(extensionPins.length
+          ? { extensionPins: structuredClone(extensionPins) }
+          : {}),
         ...(supportsApprovalModeSelection && currentOptions
           ? { approvalMode: currentOptions.approvalMode }
           : {}),
@@ -580,12 +944,26 @@ export function WorkspaceBindingCreator({
     setBusy(true);
     setError(undefined);
     setPathError(undefined);
+    // Both the creation request and a read-back-only retry (a pending attempt
+    // that already carries a sessionId) are "processing" for this screen: the
+    // latch has to wrap the whole block, not just the createSession branch.
+    let creating = false;
     try {
+      creating = true;
+      setCreatingSession(true);
       if (!attempt.sessionId) {
         const request = {
           agentId: attempt.agentId,
+          ...(attempt.modelId === undefined
+            ? {}
+            : { modelId: attempt.modelId }),
           workspaceId: attempt.workspaceId,
           cwdRelative: attempt.cwdRelative,
+          ...(attempt.worktree ? { worktree: attempt.worktree } : {}),
+          ...(attempt.skills?.length ? { skills: attempt.skills } : {}),
+          ...(attempt.extensionPins === undefined
+            ? {}
+            : { extensionPins: attempt.extensionPins }),
           ...(attempt.approvalMode === undefined
             ? {}
             : { approvalMode: attempt.approvalMode }),
@@ -633,15 +1011,21 @@ export function WorkspaceBindingCreator({
       if (abort.signal.aborted) return;
       if (
         session.sessionId !== createdSessionId ||
+        (attempt.modelId !== undefined &&
+          session.modelSelection?.modelId !== attempt.modelId) ||
         (attempt.approvalMode !== undefined &&
-          (session.initialApprovalMode ?? session.approvalMode) !==
-            attempt.approvalMode) ||
+          session.initialApprovalMode !== attempt.approvalMode) ||
         ((modelPresets.length > 0 || session.agentId !== undefined) &&
           session.agentId !== attempt.agentId) ||
         !session.workspace ||
         session.workspace.workspaceId !== attempt.workspaceId ||
         typeof session.workspace.cwdRelative !== 'string' ||
-        !session.workspace.cwdRelative
+        !session.workspace.cwdRelative ||
+        (attempt.worktree &&
+          (!session.worktree ||
+            session.worktree.sessionId !== createdSessionId ||
+            session.worktree.workspaceId !== attempt.workspaceId ||
+            session.worktree.cwdRelative !== session.workspace.cwdRelative))
       ) {
         throw new Error(
           t('managed.workspaceProtocolError', {
@@ -656,7 +1040,7 @@ export function WorkspaceBindingCreator({
       acceptedCommit.current = undefined;
       await updatePending(undefined);
       if (abort.signal.aborted) return;
-      onCreated(createdSessionId);
+      onCreated(createdSessionId, session.workspace.workspaceId);
     } catch (failure) {
       if (abort.signal.aborted) return;
       if (
@@ -680,45 +1064,103 @@ export function WorkspaceBindingCreator({
         setError(message(failure));
       }
     } finally {
+      if (creating) setCreatingSession(false);
       if (!abort.signal.aborted) setBusy(false);
     }
   }
 
-  function choose(workspaceId: string) {
-    if (!workspaceId) return;
-    if (workspaceId === selected) return;
-    setError(undefined);
-    if (
-      cwdRelative !==
-      (items.find((item) => item.workspaceId === selected)
-        ?.defaultCwdRelative ?? '.')
-    )
-      setSwitchTo(workspaceId);
-    else selectWorkspace(workspaceId);
-  }
+  const selectWorkspace = useCallback(
+    (workspaceId: string, target?: ManagedAgentWorkspace) => {
+      selectedRef.current = workspaceId;
+      setSelected(workspaceId);
+      setCwdRelative(
+        (target ?? items.find((item) => item.workspaceId === workspaceId))
+          ?.defaultCwdRelative ?? '.',
+      );
+      cwdEdited.current = false;
+      onSelectWorkspace?.(workspaceId);
+    },
+    [items, onSelectWorkspace],
+  );
 
-  function selectWorkspace(workspaceId: string) {
-    setSelected(workspaceId);
-    setCwdRelative(
-      items.find((item) => item.workspaceId === workspaceId)
-        ?.defaultCwdRelative ?? '.',
-    );
-    cwdEdited.current = false;
-  }
+  const choose = useCallback(
+    (workspaceId: string, target?: ManagedAgentWorkspace) => {
+      if (!workspaceId) return;
+      if (workspaceId === selected) return;
+      setError(undefined);
+      if (
+        cwdRelative !==
+        (items.find((item) => item.workspaceId === selected)
+          ?.defaultCwdRelative ?? '.')
+      )
+        setSwitchTo(workspaceId);
+      else selectWorkspace(workspaceId, target);
+    },
+    [selected, cwdRelative, items, selectWorkspace],
+  );
+
+  useEffect(() => {
+    if (!workspaceId) handledWorkspaceRequest.current = undefined;
+    if (!workspaceId || workspaceId === handledWorkspaceRequest.current) {
+      setSelectingWorkspace(false);
+      return;
+    }
+    if (!interactive || loading || busy || pending || workspaceCreating) return;
+    const abort = new AbortController();
+    setSelectingWorkspace(true);
+    void binding
+      .get(workspaceId, { clientId, signal: abort.signal })
+      .then((target) => {
+        if (abort.signal.aborted) return;
+        if (target.workspaceId !== workspaceId || !target.canCreateSession)
+          throw new Error(t('managed.workspacePermission'));
+        handledWorkspaceRequest.current = workspaceId;
+        setItems((current) => [
+          ...current.filter((item) => item.workspaceId !== workspaceId),
+          target,
+        ]);
+        choose(workspaceId, target);
+      })
+      .catch((failure: unknown) => {
+        if (abort.signal.aborted) return;
+        handledWorkspaceRequest.current = workspaceId;
+        setSelected(workspaceId);
+        setItems((current) =>
+          current.filter((item) => item.workspaceId !== workspaceId),
+        );
+        setError(`${t('managed.workspaceLoadFailed')} ${message(failure)}`);
+      })
+      .finally(() => {
+        if (!abort.signal.aborted) setSelectingWorkspace(false);
+      });
+    return () => abort.abort();
+  }, [
+    workspaceId,
+    interactive,
+    loading,
+    busy,
+    pending,
+    workspaceCreating,
+    binding,
+    clientId,
+    choose,
+    t,
+  ]);
 
   async function createWorkspace(
     directory?: Omit<PendingWorkspace, 'idempotencyKey'>,
   ) {
     const abort = commandLifetime.current;
     if (
-      !interactive ||
+      !creationInteractive ||
       !abort ||
       abort.signal.aborted ||
       !binding.createWorkspace ||
-      !(directory?.sourceWorkspaceId ||
-      pendingWorkspaceRef.current?.sourceWorkspaceId
-        ? canSelectDirectory
-        : canCreateWorkspace) ||
+      !((directory ?? pendingWorkspaceRef.current)?.localPath
+        ? canImportLocalDirectory
+        : (directory ?? pendingWorkspaceRef.current)?.sourceWorkspaceId
+          ? canSelectDirectory
+          : canCreateWorkspace) ||
       busy ||
       pendingRef.current ||
       workspaceCreatingRef.current
@@ -757,6 +1199,7 @@ export function WorkspaceBindingCreator({
       const created = await binding.createWorkspace(
         {
           displayName: attempt.displayName,
+          ...(attempt.localPath ? { localPath: attempt.localPath } : {}),
           ...(attempt.sourceWorkspaceId
             ? {
                 sourceWorkspaceId: attempt.sourceWorkspaceId,
@@ -788,6 +1231,9 @@ export function WorkspaceBindingCreator({
       }
       setWorkspaceName('');
       setWorkspaceDialogOpen(false);
+      onSelectWorkspace?.(created.workspaceId);
+      onWorkspaceCreated?.(created.workspaceId);
+      onWorkspaceCreationOpenChange?.(false);
     } catch (failure) {
       if (abort.signal.aborted) return;
       if (
@@ -795,6 +1241,7 @@ export function WorkspaceBindingCreator({
         failure instanceof JavaManagedAgentHttpError &&
         [
           'invalid_workspace_name',
+          'invalid_local_directory',
           'invalid_cwd',
           'invalid_request',
           'invalid_idempotency_key',
@@ -818,33 +1265,169 @@ export function WorkspaceBindingCreator({
   }
 
   const directInput = Boolean(binding.createSession);
+  const handoffApplied = useRef(false);
+  useEffect(() => {
+    if (
+      !handoff ||
+      handoffApplied.current ||
+      !directInput ||
+      busy ||
+      pending ||
+      !editor.current
+    )
+      return;
+    if (!editor.current.getText().trim()) editor.current.setText(handoff.text);
+    handoffApplied.current = true;
+  }, [handoff, directInput, busy, pending]);
   const workspaceCreationSupported = Boolean(
-    (canCreateWorkspace || canSelectDirectory) && binding.createWorkspace,
+    (canCreateWorkspace || canSelectDirectory || canImportLocalDirectory) &&
+      binding.createWorkspace,
   );
 
   async function browseDirectories() {
+    if (pendingWorkspaceRef.current) {
+      setWorkspaceDialogOpen(true);
+      return;
+    }
     const workspaceId =
       directorySource ||
       items.find((item) => item.canSelectDirectory)?.workspaceId;
-    if (!workspaceId || !binding.directories) return;
+    if ((!workspaceId && !canImportLocalDirectory) || !binding.directories)
+      return;
     setWorkspaceError(undefined);
     try {
       const result = await binding.directories(
-        { workspaceId, cwdRelative: '.' },
+        canImportLocalDirectory
+          ? { localPath: '' }
+          : { workspaceId: workspaceId!, cwdRelative: '.' },
         { clientId, signal: commandLifetime.current?.signal },
       );
       if (commandLifetime.current?.signal.aborted) return;
-      setDirectoryPicker({ workspaceId, root: result.root });
+      setDirectoryPicker({
+        workspaceId: canImportLocalDirectory ? undefined : workspaceId,
+        root: result.root,
+      });
       setWorkspaceDialogOpen(false);
     } catch (failure) {
+      if (commandLifetime.current?.signal.aborted) return;
       setWorkspaceError(message(failure));
+      setWorkspaceDialogOpen(true);
     }
   }
 
-  return (
+  const suggestDirectories = useCallback(
+    async (prefix: string) => {
+      const { root, workspaceId } = directoryPicker!;
+      const clean = prefix.replace(/\/+$/, '') || '/';
+      if (workspaceId && clean !== root && !clean.startsWith(`${root}/`))
+        throw new Error(t('managed.workspaceDirectoryScope'));
+      const result = await binding.directories!(
+        workspaceId
+          ? {
+              workspaceId,
+              cwdRelative: clean.slice(root.length + 1) || '.',
+            }
+          : { localPath: clean },
+        { clientId, signal: commandLifetime.current?.signal },
+      );
+      return {
+        dir: workspaceId ? clean : result.root,
+        sep: '/',
+        truncated: result.truncated,
+        suggestions: result.directories.map((item) => ({
+          name: item.name,
+          path: `${workspaceId ? root : result.root.replace(/\/$/, '')}/${item.cwdRelative}`,
+        })),
+      };
+    },
+    [binding, clientId, directoryPicker, t],
+  );
+
+  const worktreeControl = provider.sessionWorktrees &&
+    selected &&
+    interactive && (
+      <ManagedWorktreePopover
+        worktree={worktreeRequested}
+        currentBranch={currentBranch}
+        open={worktreePopoverOpen}
+        onOpenChange={(open) => {
+          setWorktreePopoverOpen(open);
+          if (open) setWorktreeOptionsRevision((value) => value + 1);
+        }}
+        disabled={busy || workspaceCreating || Boolean(pending) || loading}
+        onWorktreeChange={setWorktreeMode}
+        onManage={() => setWorktreesOpen(true)}
+      />
+    );
+  const worktreeStatus =
+    worktreeRequested &&
+    !pending &&
+    (worktreeOptions?.source !== worktreeSource ? (
+      <p role="status" className="text-sm text-muted-foreground">
+        {worktreeText('checking')}
+      </p>
+    ) : worktreeOptions.error || !worktreeOptions.value?.supported ? (
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <p role="alert">
+          {worktreeOptions.error ??
+            worktreeReason(worktreeOptions.value?.reason)}
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={busy || workspaceCreating || loading}
+          onClick={() => setWorktreeOptionsRevision((value) => value + 1)}
+        >
+          {t('managed.refresh')}
+        </Button>
+      </div>
+    ) : null);
+  const sessionCreator = (
     <div
       className={`${directInput ? shellStyles.appChatEmpty : ''} flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-2`}
     >
+      {unconfirmed && (
+        <div className="space-y-2 text-sm" data-managed-unconfirmed>
+          <p role="alert" className="text-destructive">
+            {t('managed.uncertain')}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {onUnconfirmedRetry && (
+              <Button disabled={busy} onClick={onUnconfirmedRetry}>
+                {t('managed.retry')}
+              </Button>
+            )}
+            {onUnconfirmedDiscard && (
+              <Button
+                variant="ghost"
+                disabled={busy}
+                onClick={async () => {
+                  if (!(await onUnconfirmedDiscard())) return;
+                  // This surface owns the only editor that can take the draft
+                  // back; the page's composer is not mounted here.
+                  editor.current?.setText(unconfirmed.text);
+                  restoreManagedAttachments(editor.current, unconfirmed.input);
+                }}
+              >
+                {t('managed.discard')}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+      {handoff && (
+        <div className="space-y-2 rounded-md border p-3 text-sm" role="status">
+          <p>{recoveryText('managed.recovery.handoffNotice')}</p>
+          {handoff.truncated && (
+            <p>{recoveryText('managed.recovery.handoff.truncated')}</p>
+          )}
+          {onOpenHandoffSource && (
+            <Button variant="outline" onClick={onOpenHandoffSource}>
+              {recoveryText('managed.recovery.source')}
+            </Button>
+          )}
+        </div>
+      )}
       {!directInput && (
         <h2 className="text-base font-medium">
           {t('managed.workspaceCreateTitle')}
@@ -920,6 +1503,91 @@ export function WorkspaceBindingCreator({
           {t('managed.newWorkspaceResume')}
         </Button>
       )}
+      {!directInput && worktreeControl}
+      {!directInput && worktreeStatus}
+      {extensionCatalog?.supported &&
+        extensionCatalog.extensions.length > 0 && (
+          <fieldset
+            className="my-2 grid gap-2 text-sm"
+            disabled={busy || !!pending}
+          >
+            <legend>{t('managed.extensions.title')}</legend>
+            {extensionCatalog.extensions.map((entry) => (
+              <div key={entry.pin.extensionId} className="grid gap-1">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    disabled={
+                      extensionPins.length >= 32 &&
+                      !extensionPins.some(
+                        (pin) => pin.extensionId === entry.pin.extensionId,
+                      )
+                    }
+                    checked={extensionPins.some(
+                      (pin) => pin.extensionId === entry.pin.extensionId,
+                    )}
+                    onChange={(event) =>
+                      setExtensionPins((old) =>
+                        event.target.checked
+                          ? old.length < 32 &&
+                            !old.some(
+                              (pin) =>
+                                pin.extensionId === entry.pin.extensionId,
+                            )
+                            ? [...old, entry.pin]
+                            : old
+                          : old.filter(
+                              (pin) =>
+                                pin.extensionId !== entry.pin.extensionId,
+                            ),
+                      )
+                    }
+                  />
+                  {entry.manifest.name} {entry.manifest.version}
+                </label>
+                {extensionPins.some(
+                  (pin) => pin.extensionId === entry.pin.extensionId,
+                ) && (
+                  <label className="flex items-center gap-2">
+                    {t('managed.extensions.settingsRevision')}
+                    <Input
+                      type="number"
+                      min={1}
+                      max={Number.MAX_SAFE_INTEGER}
+                      aria-label={`${t('managed.extensions.settingsRevision')}: ${entry.manifest.name}`}
+                      value={
+                        extensionPins.find(
+                          (pin) => pin.extensionId === entry.pin.extensionId,
+                        )?.settingsRevision ?? ''
+                      }
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        if (
+                          value &&
+                          (!/^[1-9][0-9]*$/.test(value) ||
+                            !Number.isSafeInteger(Number(value)))
+                        )
+                          return;
+                        setExtensionPins((old) =>
+                          old.map((pin) =>
+                            pin.extensionId === entry.pin.extensionId
+                              ? {
+                                  ...pin,
+                                  settingsRevision: value
+                                    ? Number(value)
+                                    : undefined,
+                                }
+                              : pin,
+                          ),
+                        );
+                      }}
+                    />
+                  </label>
+                )}
+              </div>
+            ))}
+          </fieldset>
+        )}
       {pending && !busy ? (
         <div className="space-y-2 text-sm">
           <p>{t('managed.workspaceUncertain')}</p>
@@ -939,6 +1607,7 @@ export function WorkspaceBindingCreator({
                 (!pending.sessionId &&
                   (loading ||
                     !supported ||
+                    (Boolean(pending.worktree) && !provider.sessionWorktrees) ||
                     (pending.approvalMode !== undefined &&
                       !supportsApprovalModeSelection)))
               }
@@ -997,7 +1666,7 @@ export function WorkspaceBindingCreator({
                 }
                 onValueChange={(value) => {
                   if (
-                    isManagedApprovalMode(value) &&
+                    isManagedInitialApprovalMode(value) &&
                     currentOptions?.availableApprovalModes.includes(value)
                   )
                     setSessionOptions({
@@ -1025,8 +1694,8 @@ export function WorkspaceBindingCreator({
                 {t('managed.modelPreset')}
               </label>
               <Select
-                value={agentId}
-                onValueChange={setAgentId}
+                value={selectedModel}
+                onValueChange={setSelectedModel}
                 disabled={busy}
               >
                 <SelectTrigger id="managed-model-select" className="w-full">
@@ -1034,7 +1703,10 @@ export function WorkspaceBindingCreator({
                 </SelectTrigger>
                 <SelectContent>
                   {availableModels.map((item) => (
-                    <SelectItem key={item.agentId} value={item.agentId}>
+                    <SelectItem
+                      key={item.modelId ?? item.agentId}
+                      value={item.modelId ?? item.agentId}
+                    >
                       {item.label}
                     </SelectItem>
                   ))}
@@ -1050,8 +1722,10 @@ export function WorkspaceBindingCreator({
           </label>
           <Select
             value={selected}
-            onValueChange={choose}
-            disabled={!supported || loading || busy}
+            onValueChange={(id) => choose(id)}
+            disabled={
+              !supported || loading || busy || workspaceSelectionBlocked
+            }
           >
             <SelectTrigger id="managed-workspace-select" className="w-full">
               <SelectValue placeholder={t('managed.workspaceChoose')} />
@@ -1139,9 +1813,12 @@ export function WorkspaceBindingCreator({
             disabled={
               !supported ||
               loading ||
+              workspaceSelectionBlocked ||
+              Boolean(switchTo) ||
               !approvalReady ||
+              !worktreeReady ||
               busy ||
-              !availableModels.some((item) => item.agentId === agentId) ||
+              !selectedPreset ||
               !items.some(
                 (item) =>
                   item.workspaceId === selected && item.canCreateSession,
@@ -1155,23 +1832,47 @@ export function WorkspaceBindingCreator({
       {directInput && (
         <div className={shellStyles.chatPane} data-managed-standard-chat>
           <div className={shellStyles.content}>
-            <WelcomeHeader
-              version=""
-              cwd=""
-              currentModel={agentId}
-              currentMode=""
-            />
+            {(() => {
+              const welcomeProps = {
+                version: '',
+                cwd: cwdRelative,
+                currentModel: composerFooterModel,
+                currentMode: displayedApprovalMode ?? '',
+              };
+              return (
+                <>
+                  {renderWelcomeHeader ? (
+                    renderWelcomeHeader(welcomeProps)
+                  ) : (
+                    <WelcomeHeader {...welcomeProps} />
+                  )}
+                  {renderWelcomeFooter?.(welcomeProps)}
+                </>
+              );
+            })()}
           </div>
           <div className={shellStyles.footer}>
             {fileReferences.error && <p role="alert">{fileReferences.error}</p>}
             <ChatEditor
               ref={editor}
-              commands={[]}
-              composerScopeKey={`managed:${provider.storageKey}:new`}
+              commands={skills.commands}
+              composerScopeKey={
+                handoff
+                  ? `managed:${provider.storageKey}:new:handoff:${handoff.sourceSessionId}`
+                  : `managed:${provider.storageKey}:new`
+              }
               disableLegacyHistoryFallback
               shellModeEnabled={false}
               workspaceFeaturesEnabled={false}
+              skills={skills.skills}
+              onSkillsOpenChange={
+                skills.supported ? skills.onOpenChange : undefined
+              }
+              skillsLoading={skills.loading}
+              skillsLoadError={skills.error}
+              skillsLoaded={skills.loaded}
               fileReferenceActions={fileReferences.actions}
+              fileUploadTarget={fileReferences.uploadTarget}
               persistFileReferences
               existingFolderWorkspaceSupported={
                 registrationAvailable && Boolean(binding.registration)
@@ -1186,6 +1887,7 @@ export function WorkspaceBindingCreator({
                   ? [
                       ...(currentOptions?.inputAttachments ||
                       fileReferences.actions ||
+                      skills.supported ||
                       currentOptions?.planModeSupported
                         ? ['addMenu' as const]
                         : []),
@@ -1202,7 +1904,8 @@ export function WorkspaceBindingCreator({
               }
               showChatWidthToggle={false}
               contextChipPlacement="below"
-              currentModel={pending?.agentId ?? agentId}
+              gitContextControl={worktreeControl}
+              currentModel={composerFooterModel}
               modelControlsDisabled={
                 busy || workspaceCreating || Boolean(pending)
               }
@@ -1246,29 +1949,102 @@ export function WorkspaceBindingCreator({
                   !workspaceCreating &&
                   !pendingRef.current &&
                   !optionsLoading &&
-                  isManagedApprovalMode(value) &&
+                  isManagedInitialApprovalMode(value) &&
                   currentOptions?.availableApprovalModes.includes(value)
                 ) {
-                  setSessionOptions({ ...currentOptions, approvalMode: value });
+                  setSessionOptions({
+                    ...currentOptions,
+                    approvalMode: value,
+                  });
                 }
               }}
               availableModels={availableModels.map((item) => ({
-                id: item.agentId,
+                id: item.modelId ?? item.agentId,
                 label: item.label,
               }))}
               onSelectModel={(id) => {
                 if (!busy && !encoding.current && !pendingRef.current)
-                  setAgentId(id);
+                  setSelectedModel(id);
               }}
               workspaces={items.map((item) => ({
                 id: item.workspaceId,
                 cwd: item.workspaceId,
-                label: item.displayName,
+                label: `${item.displayName} · ${t('managed.managedMode')}`,
                 primary: false,
-                trusted: item.canCreateSession,
+                trusted: supported && item.canCreateSession,
               }))}
               selectedWorkspaceCwd={pending?.workspaceId ?? selected}
               workspaceSelectorAlwaysVisible
+              workspaceMenuItems={
+                <>
+                  {onSelectDaemonWorkspace &&
+                    daemonWorkspaces?.map((item) => (
+                      <DropdownMenuItem
+                        key={item.id}
+                        disabled={!item.trusted || Boolean(pendingWorkspace)}
+                        title={item.cwd}
+                        onSelect={() => {
+                          if (
+                            interactive &&
+                            !creationOnly &&
+                            !loading &&
+                            !workspaceSelectionBlocked &&
+                            !busy &&
+                            !workspaceCreatingRef.current &&
+                            !pendingRef.current &&
+                            !pendingWorkspaceRef.current &&
+                            !encoding.current &&
+                            item.trusted
+                          )
+                            onSelectDaemonWorkspace(item);
+                        }}
+                      >
+                        {item.label}
+                        {item.hostOrigin &&
+                          item.hostOrigin !== window.location.origin && (
+                            <span className="ml-auto flex items-center gap-1.5 text-muted-foreground">
+                              <HostLabel origin={item.hostOrigin} />
+                            </span>
+                          )}
+                      </DropdownMenuItem>
+                    ))}
+                  {onSelectDaemonWorkspace &&
+                    Boolean(daemonWorkspaces?.length) && (
+                      <DropdownMenuSeparator />
+                    )}
+                  <DropdownMenuItem
+                    disabled={
+                      !supported ||
+                      !items.some(
+                        (item) =>
+                          item.workspaceId === selected &&
+                          item.canCreateSession,
+                      )
+                    }
+                    onSelect={() => setCwdDraft(cwdRelative)}
+                  >
+                    {t('managed.workspaceWorkingDirectory')}
+                  </DropdownMenuItem>
+                  {canImportLocalDirectory && binding.directories && (
+                    <DropdownMenuItem
+                      disabled={Boolean(pendingWorkspace)}
+                      onSelect={() => void browseDirectories()}
+                    >
+                      {t('managed.workspaceChooseDirectory')}
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem
+                    onSelect={() => setRevision((value) => value + 1)}
+                  >
+                    {t('managed.refresh')}
+                  </DropdownMenuItem>
+                  {nextCursor && (
+                    <DropdownMenuItem onSelect={() => void loadMore()}>
+                      {t('managed.more')}
+                    </DropdownMenuItem>
+                  )}
+                </>
+              }
               scratchWorkspaceSupported={
                 interactive && workspaceCreationSupported
               }
@@ -1280,14 +2056,22 @@ export function WorkspaceBindingCreator({
               }
               workspaceSelectionDisabled={
                 !interactive ||
-                !supported ||
+                creationOnly ||
                 loading ||
+                workspaceSelectionBlocked ||
                 busy ||
                 workspaceCreating ||
                 Boolean(pending)
               }
               onSelectWorkspace={(id) => {
-                if (id && !busy && !encoding.current && !pendingRef.current)
+                if (
+                  id &&
+                  supported &&
+                  !loading &&
+                  !busy &&
+                  !encoding.current &&
+                  !pendingRef.current
+                )
                   choose(id);
               }}
               composerInput={
@@ -1296,105 +2080,155 @@ export function WorkspaceBindingCreator({
                   : undefined
               }
               composerInputVersion={0}
-              disabled={
-                !interactive ||
-                busy ||
-                workspaceCreating ||
-                Boolean(pending) ||
-                !approvalReady
-              }
+              disabled={composerBlocked}
               dialogOpen={
                 !interactive ||
                 workspaceDialogOpen ||
+                cwdDraft !== undefined ||
                 Boolean(directoryPicker) ||
-                registrationOpen
+                registrationOpen ||
+                worktreesOpen ||
+                worktreePopoverOpen
               }
-              isPreparing={
-                busy || fileReferences.busy || loading || optionsLoading
+              isPreparing={composerPreparing}
+              placeholderText={
+                alignManagedChatWithHost
+                  ? // The host override map wins per state, otherwise the
+                    // ordinary composer's localized default — both halves
+                    // read the same classifier App applies.
+                    composerPlaceholders?.[
+                      getComposerPlaceholderState({
+                        isPreparingPrompt: creatingSession,
+                        isStreaming: false,
+                      })
+                    ]?.trim() ||
+                    t(
+                      getComposerPlaceholderKey({
+                        isPreparingPrompt: creatingSession,
+                        isStreaming: false,
+                      }),
+                    )
+                  : t('managed.prompt')
               }
-              placeholderText={t('managed.prompt')}
               onSubmit={(text, images, files, commit, metadata) => {
                 void createOrRead(text, commit, images, files, metadata);
                 return false;
               }}
             />
-            <details className="mt-2 text-sm">
-              <summary>
-                {t('managed.workspaceDirectory')}:{' '}
-                {pending?.cwdRelative ?? cwdRelative}
-              </summary>
-              <label htmlFor="managed-workspace-cwd">
-                {t('managed.workspaceDirectory')}
-              </label>
-              <Input
-                id="managed-workspace-cwd"
-                value={pending?.cwdRelative ?? cwdRelative}
-                disabled={busy || Boolean(pending)}
-                aria-invalid={Boolean(pathError)}
-                onChange={(event) => {
-                  cwdEdited.current = true;
-                  setCwdRelative(event.target.value);
-                  setPathError(undefined);
-                }}
-              />
-              <p className="text-xs text-muted-foreground">
-                {t('managed.workspaceSharedFiles')}
-              </p>
-              <Button
-                variant="ghost"
-                disabled={busy}
-                onClick={() => setRevision((n) => n + 1)}
-              >
-                {t('managed.refresh')}
-              </Button>
-              {nextCursor && (
-                <Button
-                  variant="ghost"
-                  disabled={loading}
-                  onClick={() => void loadMore()}
-                >
-                  {t('managed.more')}
-                </Button>
-              )}
-            </details>
+            {(() => {
+              const Footer = renderComposerFooter;
+              return Footer ? (
+                <Footer
+                  disabled={composerBlocked}
+                  // The creation screen never runs a turn: only the creation
+                  // request itself is running work, not the restore window
+                  // (`busy`) and not the add-workspace flow.
+                  isRunning={creatingSession}
+                  currentMode={displayedApprovalMode ?? ''}
+                  currentModel={composerFooterModel}
+                />
+              ) : null;
+            })()}
+            {worktreeStatus}
           </div>
         </div>
       )}
-      {interactive && directoryPicker && binding.directories && (
+    </div>
+  );
+  return (
+    <>
+      {!creationOnly && sessionCreator}
+      {provider.sessionWorktrees && selected && worktreesOpen && (
+        <ManagedSessionWorktrees
+          provider={provider}
+          clientId={clientId}
+          workspaceId={selected}
+          open
+          onOpenChange={setWorktreesOpen}
+        />
+      )}
+      {interactive && !creationOnly && cwdDraft !== undefined && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setCwdDraft(undefined);
+          }}
+        >
+          <DialogContent>
+            <form
+              className="space-y-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                setCwdRelative(cwdDraft);
+                cwdEdited.current = true;
+                setPathError(undefined);
+                setCwdDraft(undefined);
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>
+                  {t('managed.workspaceWorkingDirectory')}
+                </DialogTitle>
+                <DialogDescription>
+                  {t('managed.workspaceWorkingDirectoryDescription')}
+                </DialogDescription>
+              </DialogHeader>
+              <label htmlFor="managed-workspace-cwd">
+                {t('managed.cwd.path')}
+              </label>
+              <Input
+                id="managed-workspace-cwd"
+                value={cwdDraft}
+                onChange={(event) => setCwdDraft(event.target.value)}
+                required
+              />
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setCwdDraft(undefined)}
+                >
+                  {t('common.cancel')}
+                </Button>
+                <Button type="submit">{t('common.save')}</Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+      )}
+      {creationInteractive && directoryPicker && binding.directories && (
         <AddWorkspaceDialog
+          executionMode={onOpenLocalWorkspace ? 'managed' : undefined}
+          onExecutionModeChange={(mode) => {
+            if (mode === 'daemon') openLocalWorkspace();
+          }}
+          executionModeLocked={
+            busy || workspaceCreating || Boolean(pendingWorkspace)
+          }
           browseDirectories
           initialPath={`${directoryPicker.root}/`}
-          pathHint={t('managed.workspaceDirectoryHint')}
+          pathHint={t(
+            directoryPicker.workspaceId
+              ? 'managed.workspaceDirectoryHint'
+              : 'managed.localDirectoryHint',
+          )}
           pathPlaceholder="/absolute/project/path"
           displayNameEnabled
           persistenceSupported={false}
-          onClose={() => setDirectoryPicker(undefined)}
-          onSuggest={async (prefix) => {
-            const root = directoryPicker.root;
-            const clean = prefix.replace(/\/+$/, '');
-            if (clean !== root && !clean.startsWith(`${root}/`))
-              throw new Error(t('managed.workspaceDirectoryScope'));
-            const result = await binding.directories!(
-              {
-                workspaceId: directoryPicker.workspaceId,
-                cwdRelative: clean.slice(root.length + 1) || '.',
-              },
-              { clientId, signal: commandLifetime.current?.signal },
-            );
-            return {
-              dir: clean,
-              sep: '/',
-              truncated: result.truncated,
-              suggestions: result.directories.map((item) => ({
-                name: item.name,
-                path: `${root}/${item.cwdRelative}`,
-              })),
-            };
+          onClose={() => {
+            setDirectoryPicker(undefined);
+            if (pendingWorkspaceRef.current) setWorkspaceDialogOpen(true);
+            else onWorkspaceCreationOpenChange?.(false);
           }}
+          onSuggest={suggestDirectories}
           onAdd={async (path, _persist, displayName) => {
             const root = directoryPicker.root;
-            const clean = path.replace(/\/+$/, '');
-            if (clean !== root && !clean.startsWith(`${root}/`))
+            const clean = path.replace(/\/+$/, '') || '/';
+            if (
+              directoryPicker.workspaceId &&
+              clean !== root &&
+              !clean.startsWith(`${root}/`)
+            )
               throw new Error(t('managed.workspaceDirectoryScope'));
             await createWorkspace({
               displayName:
@@ -1402,8 +2236,12 @@ export function WorkspaceBindingCreator({
                 workspaceName ||
                 clean.split('/').pop() ||
                 'Workspace',
-              sourceWorkspaceId: directoryPicker.workspaceId,
-              cwdRelative: clean.slice(root.length + 1) || '.',
+              ...(directoryPicker.workspaceId
+                ? {
+                    sourceWorkspaceId: directoryPicker.workspaceId,
+                    cwdRelative: clean.slice(root.length + 1) || '.',
+                  }
+                : { localPath: clean }),
             });
           }}
         />
@@ -1428,12 +2266,17 @@ export function WorkspaceBindingCreator({
             cwdEdited.current = false;
             setError(undefined);
             setPathError(undefined);
+            onSelectWorkspace?.(workspace.workspaceId);
+            onWorkspaceCreated?.(workspace.workspaceId);
           }}
         />
       )}
       <Dialog
-        open={interactive && workspaceDialogOpen}
-        onOpenChange={setWorkspaceDialogOpen}
+        open={creationInteractive && workspaceDialogOpen}
+        onOpenChange={(open) => {
+          setWorkspaceDialogOpen(open);
+          if (!open) onWorkspaceCreationOpenChange?.(false);
+        }}
       >
         <DialogContent
           onCloseAutoFocus={(event) => {
@@ -1453,53 +2296,72 @@ export function WorkspaceBindingCreator({
                 {t('managed.newWorkspaceDescription')}
               </DialogDescription>
             </DialogHeader>
-            {canSelectDirectory && binding.directories && !pendingWorkspace && (
-              <div className="space-y-2">
-                <label id="managed-directory-root-label">
-                  {t('managed.workspaceDirectoryRoot')}
-                </label>
-                <Select
-                  value={
-                    directorySource ||
-                    items.find((item) => item.canSelectDirectory)
-                      ?.workspaceId ||
-                    ''
-                  }
-                  onValueChange={setDirectorySource}
-                >
-                  <SelectTrigger aria-labelledby="managed-directory-root-label">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {items
-                      .filter((item) => item.canSelectDirectory)
-                      .map((item) => (
-                        <SelectItem
-                          key={item.workspaceId}
-                          value={item.workspaceId}
-                        >
-                          {item.displayName}
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={
-                    workspaceCreating ||
-                    !items.some((item) => item.canSelectDirectory)
-                  }
-                  onClick={() => void browseDirectories()}
-                >
-                  {t('managed.workspaceChooseDirectory')}
-                </Button>
-              </div>
+            {onOpenLocalWorkspace && (
+              <WorkspaceExecutionSelect
+                value="managed"
+                onValueChange={(mode) => {
+                  if (mode === 'daemon') openLocalWorkspace();
+                }}
+                disabled={
+                  busy || workspaceCreating || Boolean(pendingWorkspace)
+                }
+              />
             )}
-            {pendingWorkspace?.sourceWorkspaceId && (
+            {(canSelectDirectory || canImportLocalDirectory) &&
+              binding.directories &&
+              !pendingWorkspace && (
+                <div className="space-y-2">
+                  {!canImportLocalDirectory && (
+                    <>
+                      <label id="managed-directory-root-label">
+                        {t('managed.workspaceDirectoryRoot')}
+                      </label>
+                      <Select
+                        value={
+                          directorySource ||
+                          items.find((item) => item.canSelectDirectory)
+                            ?.workspaceId ||
+                          ''
+                        }
+                        onValueChange={setDirectorySource}
+                      >
+                        <SelectTrigger aria-labelledby="managed-directory-root-label">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {items
+                            .filter((item) => item.canSelectDirectory)
+                            .map((item) => (
+                              <SelectItem
+                                key={item.workspaceId}
+                                value={item.workspaceId}
+                              >
+                                {item.displayName}
+                              </SelectItem>
+                            ))}
+                        </SelectContent>
+                      </Select>
+                    </>
+                  )}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={
+                      workspaceCreating ||
+                      (!canImportLocalDirectory &&
+                        !items.some((item) => item.canSelectDirectory))
+                    }
+                    onClick={() => void browseDirectories()}
+                  >
+                    {t('managed.workspaceChooseDirectory')}
+                  </Button>
+                </div>
+              )}
+            {(pendingWorkspace?.sourceWorkspaceId ||
+              pendingWorkspace?.localPath) && (
               <p className="text-sm">
                 {t('managed.workspaceDirectory')}:{' '}
-                {pendingWorkspace.cwdRelative}
+                {pendingWorkspace.localPath ?? pendingWorkspace.cwdRelative}
               </p>
             )}
             <div className="space-y-2">
@@ -1535,7 +2397,10 @@ export function WorkspaceBindingCreator({
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setWorkspaceDialogOpen(false)}
+                onClick={() => {
+                  setWorkspaceDialogOpen(false);
+                  onWorkspaceCreationOpenChange?.(false);
+                }}
               >
                 {t('managed.newWorkspaceClose')}
               </Button>
@@ -1583,7 +2448,10 @@ export function WorkspaceBindingCreator({
       <AlertDialog
         open={interactive && Boolean(switchTo)}
         onOpenChange={(open) => {
-          if (!open) setSwitchTo(undefined);
+          if (!open) {
+            setSwitchTo(undefined);
+            onSelectWorkspace?.(selectedRef.current);
+          }
         }}
       >
         <AlertDialogContent>
@@ -1608,6 +2476,6 @@ export function WorkspaceBindingCreator({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </>
   );
 }

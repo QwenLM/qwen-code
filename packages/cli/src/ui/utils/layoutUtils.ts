@@ -77,3 +77,22 @@ export const getDialogMaxHeight = (
     1,
     terminalHeight - staticExtraHeight - MAIN_CONTENT_HEIGHT_RESERVATION,
   );
+
+/** Minimum rows the `/btw` answer viewport keeps even on a tiny terminal. */
+export const MIN_BTW_ANSWER_ROWS = 3;
+
+/**
+ * The `/btw` side answer shares the bottom controls region with the composer
+ * and the live-agent panel, so unlike a dialog it cannot take the whole
+ * screen. It is capped at half the terminal, and never so tall that the
+ * composer would be pushed off a short one.
+ */
+export const getBtwAnswerMaxRows = (terminalHeight: number): number => {
+  if (!Number.isFinite(terminalHeight) || terminalHeight <= 0) {
+    return MIN_BTW_ANSWER_ROWS;
+  }
+  return Math.max(
+    MIN_BTW_ANSWER_ROWS,
+    Math.min(Math.floor(terminalHeight / 2), terminalHeight - 8),
+  );
+};

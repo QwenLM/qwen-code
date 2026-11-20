@@ -8,7 +8,9 @@ import { describe, expect, it } from 'vitest';
 import {
   calculatePromptWidths,
   clampDialogHeight,
+  getBtwAnswerMaxRows,
   getDialogMaxHeight,
+  MIN_BTW_ANSWER_ROWS,
   STATIC_EXTRA_HEIGHT,
 } from './layoutUtils.js';
 
@@ -45,5 +47,18 @@ describe('layoutUtils', () => {
     expect(clampDialogHeight(12.8)).toBe(12);
     expect(clampDialogHeight(0)).toBe(1);
     expect(clampDialogHeight(-4)).toBe(1);
+  });
+
+  it('caps the /btw answer viewport at half the terminal', () => {
+    expect(getBtwAnswerMaxRows(24)).toBe(12);
+    expect(getBtwAnswerMaxRows(40)).toBe(20);
+  });
+
+  it('keeps the /btw answer viewport small on short terminals', () => {
+    // Half of 12 is 6, but the composer needs the other rows.
+    expect(getBtwAnswerMaxRows(12)).toBe(4);
+    expect(getBtwAnswerMaxRows(9)).toBe(MIN_BTW_ANSWER_ROWS);
+    expect(getBtwAnswerMaxRows(0)).toBe(MIN_BTW_ANSWER_ROWS);
+    expect(getBtwAnswerMaxRows(Number.NaN)).toBe(MIN_BTW_ANSWER_ROWS);
   });
 });

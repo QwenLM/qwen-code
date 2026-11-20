@@ -30,6 +30,7 @@ import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
 import type { AgentTool } from '../tools/agent/agent.js';
 import type { ToolErrorType } from '../tools/tool-error.js';
+import type { LoopProtectionMode } from '../services/loop-protection.js';
 import type {
   GoalLimitKind,
   GoalStateCause,
@@ -435,6 +436,8 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
    * all of it arrived in one chunk.
    */
   generation_ms?: number;
+  /** Time from request start to first user-visible content, for local replay. */
+  first_visible_offset_ms?: number;
   /**
    * Name of the subagent that issued this request, or undefined when the
    * request originates from the main conversation.
@@ -453,6 +456,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     ttft_ms?: number,
     execution_id?: string,
     generation_ms?: number,
+    first_visible_offset_ms?: number,
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
@@ -472,6 +476,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.subagent_name = subagent_name;
     this.ttft_ms = ttft_ms;
     this.generation_ms = generation_ms;
+    this.first_visible_offset_ms = first_visible_offset_ms;
   }
 }
 
@@ -610,6 +615,37 @@ export class LoopDetectedEvent implements BaseTelemetryEvent {
     if (detail?.toolCallLimit !== undefined) {
       this.tool_call_limit = detail.toolCallLimit;
     }
+  }
+}
+
+/**
+ * One loop-protection decision of a governed detector (#14828): a reminder
+ * queued, the turn stopped, or (under `off`) the detection only recorded.
+ * Budget stops and the provider-id breaker are not governed and emit none.
+ */
+export class LoopProtectionEvent implements BaseTelemetryEvent {
+  'event.name': 'loop_protection';
+  'event.timestamp': string;
+  prompt_id: string;
+  loop_type: LoopType;
+  decision: 'reminded' | 'stopped' | 'observed';
+  mode: LoopProtectionMode;
+  declare loop_reason?: LoopReason;
+
+  constructor(params: {
+    prompt_id: string;
+    loop_type: LoopType;
+    decision: 'reminded' | 'stopped' | 'observed';
+    mode: LoopProtectionMode;
+    loop_reason?: LoopReason;
+  }) {
+    this['event.name'] = 'loop_protection';
+    this['event.timestamp'] = new Date().toISOString();
+    this.prompt_id = params.prompt_id;
+    this.loop_type = params.loop_type;
+    this.decision = params.decision;
+    this.mode = params.mode;
+    if (params.loop_reason !== undefined) this.loop_reason = params.loop_reason;
   }
 }
 
@@ -1775,7 +1811,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
     | 'queued'
     | 'memory_tool'
     | 'memory_pressure'
-    | 'session_mismatch';
+    | 'session_mismatch'
+    | 'cadence';
   patches_count: number;
   touched_topics: string;
   duration_ms: number;
@@ -1788,7 +1825,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
       | 'queued'
       | 'memory_tool'
       | 'memory_pressure'
-      | 'session_mismatch';
+      | 'session_mismatch'
+      | 'cadence';
     patches_count: number;
     touched_topics: string[];
     duration_ms: number;

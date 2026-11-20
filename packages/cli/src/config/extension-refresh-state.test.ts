@@ -247,4 +247,24 @@ describe('extension refresh state', () => {
     endSecond();
     expect(onSettle).toHaveBeenCalledOnce();
   });
+
+  it.each(['success', 'failure'] as const)(
+    'keeps a successor reload active after an earlier %s',
+    (outcome) => {
+      const needed = vi.fn();
+      refreshState.on(AppEvent.ExtensionRefreshNeeded, needed);
+      const old = refreshState.notifyExtensionsReloadStarted();
+      const current = refreshState.notifyExtensionsReloadStarted();
+      if (outcome === 'success') refreshState.clearExtensionsChanged(old);
+      else refreshState.markExtensionsReloadFailed('old failure', old);
+      expect(refreshState.isReloadInProgress()).toBe(true);
+      expect(needed).not.toHaveBeenCalled();
+      refreshState.clearExtensionsChanged(current);
+      expect(refreshState.isReloadInProgress()).toBe(false);
+      expect(refreshState.markExtensionsChanged('new change')).toBe(true);
+      refreshState.clearExtensionsChanged(old);
+      expect(refreshState.needsExtensionRefresh()).toBe(true);
+      expect(needed).toHaveBeenCalledExactlyOnceWith('new change');
+    },
+  );
 });

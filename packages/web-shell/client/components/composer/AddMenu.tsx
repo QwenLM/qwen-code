@@ -1,10 +1,29 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import type { ChangeEvent, ReactNode } from 'react';
 import {
   ArrowLeftIcon,
+  AudioLinesIcon,
+  BlocksIcon,
+  CameraIcon,
+  FileTextIcon,
+  GitBranchIcon,
+  HistoryIcon,
+  ImageIcon,
   MessageCircleQuestionIcon,
+  PaperclipIcon,
+  PlugIcon,
   PlusIcon,
   SlashIcon,
+  SparklesIcon,
+  TerminalIcon,
+  UploadIcon,
   XIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
@@ -27,7 +46,6 @@ import {
   escapeAtReferenceText,
   EXTENSIONS_PROVIDER_ID,
   FILE_PROVIDER_ID,
-  MCP_RESOURCES_PROVIDER_ID,
   sanitizeInsertText,
 } from '../../hooks/useAtMentionSources';
 import type {
@@ -35,8 +53,11 @@ import type {
   AtMentionWorkspaceActions,
   BuiltinProviderCache,
 } from '../../hooks/useAtMentionSources';
-import { LiveVoiceMenuItem } from '../../live/LiveVoiceMenuItem';
 import { ModeIcon } from '../ModeIcon';
+import {
+  getWorkflowModeControlState,
+  type WorkflowModeControlOptions,
+} from '../workflow-mode-control-state';
 import { Button } from '../ui/button';
 import {
   Drawer,
@@ -57,6 +78,7 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import styles from '../ChatEditor.module.css';
+import menuStyles from './AddMenu.module.css';
 
 export interface AddMenuProps {
   disabled?: boolean;
@@ -78,6 +100,7 @@ export interface AddMenuProps {
    * Omitted when the host has not enabled Plan.
    */
   plan?: AddMenuPlanControl;
+  workflow?: WorkflowModeControlOptions;
   btw?: { onSelect: () => void; disabledReason?: string };
   mobileActions?: {
     commands: readonly CommandInfo[];
@@ -88,6 +111,7 @@ export interface AddMenuProps {
     onLiveVoice?: () => void;
   };
   commandsOnly?: boolean;
+  simpleMode?: boolean;
 }
 
 export interface AddMenuPlanControl {
@@ -106,6 +130,49 @@ type MobilePage =
   | 'commands';
 
 const ADD_MENU_SEARCH_DEBOUNCE_MS = 150;
+const ACTION_ROW_CLASS =
+  'min-h-[52px] gap-[10px] rounded-[10px] p-[6px] font-normal';
+
+function ActionContent({
+  icon,
+  label,
+  description,
+  descriptionId,
+}: {
+  icon: ReactNode;
+  label: string;
+  description?: string;
+  descriptionId?: string;
+}) {
+  return (
+    <>
+      <span className={menuStyles.iconTile} aria-hidden="true">
+        {icon}
+      </span>
+      <span className={menuStyles.actionText}>
+        <span className={menuStyles.actionLabel}>{label}</span>
+        {description && (
+          <span id={descriptionId} className={menuStyles.description}>
+            {description}
+          </span>
+        )}
+      </span>
+    </>
+  );
+}
+
+function PlanIndicator({ checked }: { checked: boolean }) {
+  // Keep the menu row as the only interactive control.
+  return (
+    <span
+      className={menuStyles.toggleTrack}
+      data-checked={checked}
+      aria-hidden="true"
+    >
+      <span className={menuStyles.toggleThumb} />
+    </span>
+  );
+}
 
 function SearchableProviderSubmenu({
   provider,
@@ -257,12 +324,12 @@ function SearchableProviderSubmenu({
                   ? item.detail
                   : item.description) && provider.id !== FILE_PROVIDER_ID ? (
                   <span
-                    className={
-                      mobile || provider.id === MCP_RESOURCES_PROVIDER_ID
-                        ? '[overflow-wrap:anywhere] text-xs text-muted-foreground'
-                        : 'hidden truncate text-xs text-muted-foreground sm:block'
+                    className="truncate text-xs text-muted-foreground"
+                    title={
+                      provider.id === EXTENSIONS_PROVIDER_ID
+                        ? item.detail
+                        : item.description
                     }
-                    title={item.description}
                   >
                     {provider.id === EXTENSIONS_PROVIDER_ID
                       ? item.detail
@@ -316,11 +383,18 @@ export function AddMenu({
   skillsLoadError,
   skillsLoaded = false,
   plan,
+  workflow,
   btw,
   mobileActions,
   commandsOnly = false,
+  simpleMode = false,
 }: AddMenuProps) {
   const { t, language } = useI18n();
+  const workflowDescriptionId = useId();
+  const actionDescriptionId = useId();
+  const workflowControl = workflow
+    ? getWorkflowModeControlState(workflow, language)
+    : null;
   const [open, setOpen] = useState(false);
   const [page, setPage] = useState<MobilePage>('root');
   const [commandQuery, setCommandQuery] = useState('');
@@ -528,6 +602,12 @@ export function AddMenu({
     skills: t('composerAdd.skills.label'),
     commands: t('composerMobile.commands'),
   };
+  const pageDescriptions = {
+    files: t('composerAdd.referenceFile.description'),
+    extensions: t('composerAdd.extensions.description'),
+    mcp: t('composerAdd.mcp.description'),
+    skills: t('composerAdd.skills.description'),
+  };
   const mobileRowClass =
     'h-auto min-h-11 w-full justify-start whitespace-normal text-left';
 
@@ -543,7 +623,7 @@ export function AddMenu({
             <button
               type="button"
               className={`${styles.toolBtn} ${styles.addMenuBtn}`}
-              disabled={disabled}
+              disabled={disabled && !workflowControl}
               aria-label={
                 commandsOnly
                   ? t('composerMobile.commands')
@@ -597,113 +677,171 @@ export function AddMenu({
             <div className="min-h-0 overflow-y-auto px-3" data-vaul-no-drag>
               {page === 'root' && (
                 <div className="flex flex-col gap-1">
-                  {addFileAvailable && (
+                  {!disabled &&
+                    simpleMode &&
+                    !anyAvailable &&
+                    !workflowControl && (
+                      <div
+                        className="p-3 text-muted-foreground"
+                        data-testid="composer-add-menu-empty"
+                      >
+                        {t('composerAdd.emptyState')}
+                      </div>
+                    )}
+                  {!disabled && addFileAvailable && (
                     <>
                       <Button
                         variant="ghost"
-                        className={mobileRowClass}
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                         onClick={() => pickMobileFiles('photos')}
                       >
-                        {t('composerMobile.photos')}
+                        <ActionContent
+                          icon={<ImageIcon />}
+                          label={t('composerMobile.photos')}
+                        />
                       </Button>
                       <Button
                         variant="ghost"
-                        className={mobileRowClass}
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                         onClick={() => pickMobileFiles('camera')}
                       >
-                        {t('composerMobile.camera')}
+                        <ActionContent
+                          icon={<CameraIcon />}
+                          label={t('composerMobile.camera')}
+                        />
                       </Button>
                       <Button
                         variant="ghost"
-                        className={mobileRowClass}
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                         onClick={() => pickMobileFiles('attach')}
                       >
-                        {t('composerMobile.files')}
+                        <ActionContent
+                          icon={<PaperclipIcon />}
+                          label={t('composerMobile.files')}
+                        />
                       </Button>
                     </>
                   )}
-                  {uploadAvailable && (
+                  {!disabled && uploadAvailable && (
                     <Button
                       variant="ghost"
-                      className={mobileRowClass}
+                      className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                       onClick={() => pickMobileFiles('upload')}
                     >
-                      {t('composer.dropChoice.upload')}
+                      <ActionContent
+                        icon={<UploadIcon />}
+                        label={t('composer.dropChoice.upload')}
+                      />
                     </Button>
                   )}
                   {(
                     [
-                      ['files', availability.referenceFile],
-                      ['extensions', availability.extensions],
-                      ['mcp', availability.mcp],
+                      ['files', availability.referenceFile, FileTextIcon],
+                      ['extensions', availability.extensions, BlocksIcon],
+                      ['mcp', availability.mcp, PlugIcon],
                       [
                         'skills',
                         availability.skills && !mobileActions.shellMode,
+                        SparklesIcon,
                       ],
                     ] as const
                   )
-                    .filter(([, available]) => available)
-                    .map(([id]) => (
+                    .filter(([, available]) => !disabled && available)
+                    .map(([id, , Icon]) => (
                       <Button
                         key={id}
                         data-testid={`composer-add-menu-${id === 'files' ? 'reference-file' : id}`}
                         variant="ghost"
-                        className={mobileRowClass}
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
+                        aria-label={pageLabels[id]}
+                        aria-describedby={`${actionDescriptionId}-${id}`}
                         onClick={() => {
                           setPage(id);
                           if (id === 'skills') onSkillsOpenChange?.(true);
                         }}
                       >
-                        {pageLabels[id]}
+                        <ActionContent
+                          icon={<Icon />}
+                          label={pageLabels[id]}
+                          description={pageDescriptions[id]}
+                          descriptionId={`${actionDescriptionId}-${id}`}
+                        />
                       </Button>
                     ))}
-                  <div className="my-1 border-t" />
-                  {!mobileActions.shellMode &&
-                    mobileActions.commands.length > 0 && (
+                  {!disabled && !simpleMode && (
+                    <>
+                      <div
+                        className={`my-1 border-t ${menuStyles.mobileSeparator}`}
+                      />
+                      {!mobileActions.shellMode &&
+                        mobileActions.commands.length > 0 && (
+                          <Button
+                            variant="ghost"
+                            className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
+                            onClick={() => setPage('commands')}
+                          >
+                            <ActionContent
+                              icon={<SlashIcon />}
+                              label={t('composerMobile.commands')}
+                            />
+                          </Button>
+                        )}
                       <Button
                         variant="ghost"
-                        className={mobileRowClass}
-                        onClick={() => setPage('commands')}
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
+                        onClick={() => closeAndRun(mobileActions.onHistory)}
                       >
-                        {t('composerMobile.commands')}
+                        <ActionContent
+                          icon={<HistoryIcon />}
+                          label={t('composerMobile.history')}
+                        />
                       </Button>
-                    )}
-                  <Button
-                    variant="ghost"
-                    className={mobileRowClass}
-                    onClick={() => closeAndRun(mobileActions.onHistory)}
-                  >
-                    {t('composerMobile.history')}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    className={mobileRowClass}
-                    onClick={() => closeAndRun(mobileActions.onToggleShell)}
-                  >
-                    {t(
-                      mobileActions.shellMode
-                        ? 'quickActions.exitShellMode'
-                        : 'quickActions.shellMode',
-                    )}
-                  </Button>
-                  {mobileActions.onLiveVoice && (
-                    <LiveVoiceMenuItem
-                      className={mobileRowClass}
-                      onClick={() => closeAndRun(mobileActions.onLiveVoice!)}
-                    />
+                      <Button
+                        variant="ghost"
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
+                        onClick={() => closeAndRun(mobileActions.onToggleShell)}
+                      >
+                        <ActionContent
+                          icon={<TerminalIcon />}
+                          label={t(
+                            mobileActions.shellMode
+                              ? 'quickActions.exitShellMode'
+                              : 'quickActions.shellMode',
+                          )}
+                        />
+                      </Button>
+                      {mobileActions.onLiveVoice && (
+                        <Button
+                          variant="ghost"
+                          className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
+                          onClick={() =>
+                            closeAndRun(mobileActions.onLiveVoice!)
+                          }
+                        >
+                          <ActionContent
+                            icon={<AudioLinesIcon />}
+                            label={t('live.open')}
+                          />
+                        </Button>
+                      )}
+                    </>
                   )}
-                  {btw && (
+                  {!disabled && btw && !simpleMode && (
                     <Button
                       variant="ghost"
-                      className={`${mobileRowClass} py-2`}
+                      className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                       disabled={Boolean(btw.disabledReason)}
                       data-testid="composer-add-menu-btw"
                       onClick={() => closeAndRun(btw.onSelect)}
                     >
-                      <MessageCircleQuestionIcon />
-                      <span className="flex min-w-0 flex-1 flex-col">
-                        <span>{t('composerAdd.btw.label')}</span>
-                        <span className="truncate text-xs text-muted-foreground">
+                      <span className={menuStyles.iconTile} aria-hidden="true">
+                        <MessageCircleQuestionIcon />
+                      </span>
+                      <span className={menuStyles.actionText}>
+                        <span className={menuStyles.actionLabel}>
+                          {t('composerAdd.btw.label')}
+                        </span>
+                        <span className={menuStyles.description}>
                           {btw.disabledReason ??
                             t('composerAdd.btw.description')}
                         </span>
@@ -713,23 +851,65 @@ export function AddMenu({
                       </span>
                     </Button>
                   )}
-                  {plan && (
+                  {!disabled && plan && !simpleMode && (
                     <Button
                       variant="ghost"
-                      className={mobileRowClass}
+                      className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
+                      aria-label={t('composerAdd.plan.label')}
+                      aria-describedby={`${actionDescriptionId}-plan${plan.disabled ? '-busy' : ''}`}
                       aria-pressed={plan.checked}
                       disabled={plan.disabled}
                       data-testid="composer-add-menu-plan"
                       onClick={() => closeAndRun(plan.onToggle)}
                     >
-                      <ModeIcon mode="plan" />
-                      {t('composerAdd.plan.label')}
-                      {plan.checked ? ' ✓' : ''}
+                      <ActionContent
+                        icon={<ModeIcon mode="plan" />}
+                        label={t('composerAdd.plan.label')}
+                        description={t('composerAdd.plan.description')}
+                        descriptionId={`${actionDescriptionId}-plan`}
+                      />
                       {plan.disabled && (
-                        <span className="text-xs text-muted-foreground">
+                        <span
+                          id={`${actionDescriptionId}-plan-busy`}
+                          className="text-xs text-muted-foreground"
+                        >
                           {t('composerAdd.plan.busy')}
                         </span>
                       )}
+                      <PlanIndicator checked={plan.checked} />
+                    </Button>
+                  )}
+                  {workflowControl && (
+                    <Button
+                      variant="ghost"
+                      className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
+                      aria-label={workflowControl.messages.label}
+                      aria-describedby={workflowDescriptionId}
+                      title={workflowControl.description}
+                      aria-pressed={Boolean(workflowControl.mode?.requested)}
+                      aria-busy={workflowControl.pending || undefined}
+                      disabled={workflowControl.disabled}
+                      data-testid="composer-add-menu-workflow"
+                      data-workflow-state={workflowControl.status}
+                      onClick={() =>
+                        closeAndRun(() =>
+                          workflow?.onWorkflowModeChange?.(
+                            !workflowControl.mode?.requested,
+                          ),
+                        )
+                      }
+                    >
+                      <span className={menuStyles.iconTile} aria-hidden="true">
+                        <GitBranchIcon />
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-left">
+                        <span className={menuStyles.actionLabel}>
+                          Workflow{workflowControl.mode?.requested ? ' ✓' : ''}
+                        </span>
+                        <span id={workflowDescriptionId} className="sr-only">
+                          {workflowControl.description}
+                        </span>
+                      </span>
                     </Button>
                   )}
                 </div>
@@ -851,7 +1031,7 @@ export function AddMenu({
             <button
               type="button"
               className={`${styles.toolBtn} ${styles.addMenuBtn}`}
-              disabled={disabled}
+              disabled={disabled && !workflowControl}
               aria-label={t('composerAdd.trigger')}
               data-testid="composer-add-menu-trigger"
               onClick={(event) => event.stopPropagation()}
@@ -865,7 +1045,7 @@ export function AddMenu({
             align="start"
             side="top"
             sideOffset={6}
-            className="min-w-56 max-w-[calc(100vw-1rem)] sm:min-w-64"
+            className="w-[320px] max-w-[calc(100vw-1rem)] p-[6px]"
             onClick={(event) => event.stopPropagation()}
             onCloseAutoFocus={(event) => {
               const pendingCloseAction = pendingCloseActionRef.current;
@@ -876,8 +1056,9 @@ export function AddMenu({
               }
             }}
           >
-            {!anyAvailable ? (
-              !btw && (
+            {disabled ? null : !anyAvailable ? (
+              (simpleMode || !btw) &&
+              !workflowControl && (
                 <DropdownMenuLabel data-testid="composer-add-menu-empty">
                   {t('composerAdd.emptyState')}
                 </DropdownMenuLabel>
@@ -886,8 +1067,18 @@ export function AddMenu({
               <>
                 {addFileAvailable || uploadAvailable ? (
                   <DropdownMenuSub>
-                    <DropdownMenuSubTrigger data-testid="composer-add-menu-file">
-                      {t('composerAdd.file.label')}
+                    <DropdownMenuSubTrigger
+                      className={ACTION_ROW_CLASS}
+                      data-testid="composer-add-menu-file"
+                      aria-label={t('composerAdd.file.label')}
+                      aria-describedby={`${actionDescriptionId}-file`}
+                    >
+                      <ActionContent
+                        icon={<PaperclipIcon />}
+                        label={t('composerAdd.file.label')}
+                        description={t('composerAdd.file.description')}
+                        descriptionId={`${actionDescriptionId}-file`}
+                      />
                     </DropdownMenuSubTrigger>
                     <DropdownMenuSubContent
                       collisionPadding={8}
@@ -916,14 +1107,20 @@ export function AddMenu({
                 ) : null}
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger
+                    className={ACTION_ROW_CLASS}
+                    aria-label={pageLabels.files}
+                    aria-describedby={`${actionDescriptionId}-files`}
                     disabled={!availability.referenceFile}
                     data-testid="composer-add-menu-reference-file"
                     onPointerMove={() => setReferenceSearchAutoFocus(false)}
                     onClick={() => setReferenceSearchAutoFocus(true)}
                   >
-                    <span className="min-w-0 flex-1">
-                      {t('composerAdd.referenceFile.label')}
-                    </span>
+                    <ActionContent
+                      icon={<FileTextIcon />}
+                      label={pageLabels.files}
+                      description={pageDescriptions.files}
+                      descriptionId={`${actionDescriptionId}-files`}
+                    />
                     {!availability.referenceFile ? (
                       <span className="text-xs text-muted-foreground">
                         {t('composerAdd.unavailable')}
@@ -948,12 +1145,18 @@ export function AddMenu({
                 </DropdownMenuSub>
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger
+                    className={ACTION_ROW_CLASS}
+                    aria-label={pageLabels.extensions}
+                    aria-describedby={`${actionDescriptionId}-extensions`}
                     disabled={!availability.extensions}
                     data-testid="composer-add-menu-extensions"
                   >
-                    <span className="min-w-0 flex-1">
-                      {t('composerAdd.extensions.label')}
-                    </span>
+                    <ActionContent
+                      icon={<BlocksIcon />}
+                      label={pageLabels.extensions}
+                      description={pageDescriptions.extensions}
+                      descriptionId={`${actionDescriptionId}-extensions`}
+                    />
                     {!availability.extensions ? (
                       <span className="text-xs text-muted-foreground">
                         {t('composerAdd.unavailable')}
@@ -974,12 +1177,18 @@ export function AddMenu({
                 </DropdownMenuSub>
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger
+                    className={ACTION_ROW_CLASS}
+                    aria-label={pageLabels.mcp}
+                    aria-describedby={`${actionDescriptionId}-mcp`}
                     disabled={!availability.mcp}
                     data-testid="composer-add-menu-mcp"
                   >
-                    <span className="min-w-0 flex-1">
-                      {t('composerAdd.mcp.label')}
-                    </span>
+                    <ActionContent
+                      icon={<PlugIcon />}
+                      label={pageLabels.mcp}
+                      description={pageDescriptions.mcp}
+                      descriptionId={`${actionDescriptionId}-mcp`}
+                    />
                     {!availability.mcp ? (
                       <span className="text-xs text-muted-foreground">
                         {t('composerAdd.unavailable')}
@@ -998,15 +1207,20 @@ export function AddMenu({
                     />
                   </DropdownMenuSubContent>
                 </DropdownMenuSub>
-                <DropdownMenuSeparator />
                 <DropdownMenuSub onOpenChange={onSkillsOpenChange}>
                   <DropdownMenuSubTrigger
+                    className={ACTION_ROW_CLASS}
+                    aria-label={pageLabels.skills}
+                    aria-describedby={`${actionDescriptionId}-skills`}
                     disabled={!availability.skills}
                     data-testid="composer-add-menu-skills"
                   >
-                    <span className="min-w-0 flex-1">
-                      {t('composerAdd.skills.label')}
-                    </span>
+                    <ActionContent
+                      icon={<SparklesIcon />}
+                      label={pageLabels.skills}
+                      description={pageDescriptions.skills}
+                      descriptionId={`${actionDescriptionId}-skills`}
+                    />
                     {!availability.skills ? (
                       <span className="text-xs text-muted-foreground">
                         {t('composerAdd.unavailable')}
@@ -1056,18 +1270,23 @@ export function AddMenu({
                 </DropdownMenuSub>
               </>
             )}
-            {btw ? (
+            {!disabled && btw && !simpleMode ? (
               <>
-                <DropdownMenuSeparator />
+                <DropdownMenuSeparator className={menuStyles.separator} />
                 <DropdownMenuItem
+                  className={ACTION_ROW_CLASS}
                   disabled={Boolean(btw.disabledReason)}
                   data-testid="composer-add-menu-btw"
                   onSelect={() => closeAndRun(btw.onSelect)}
                 >
-                  <MessageCircleQuestionIcon />
-                  <span className="flex min-w-0 flex-1 flex-col">
-                    <span>{t('composerAdd.btw.label')}</span>
-                    <span className="truncate text-xs text-muted-foreground">
+                  <span className={menuStyles.iconTile} aria-hidden="true">
+                    <MessageCircleQuestionIcon />
+                  </span>
+                  <span className={menuStyles.actionText}>
+                    <span className={menuStyles.actionLabel}>
+                      {t('composerAdd.btw.label')}
+                    </span>
+                    <span className={menuStyles.description}>
                       {btw.disabledReason ?? t('composerAdd.btw.description')}
                     </span>
                   </span>
@@ -1075,34 +1294,72 @@ export function AddMenu({
                 </DropdownMenuItem>
               </>
             ) : null}
-            {plan ? (
+            {!disabled && plan && !simpleMode ? (
               <>
-                <DropdownMenuSeparator />
+                <DropdownMenuSeparator className={menuStyles.separator} />
                 <DropdownMenuCheckboxItem
+                  className={`${ACTION_ROW_CLASS} ${menuStyles.planRow}`}
                   checked={plan.checked}
                   disabled={plan.disabled}
                   data-testid="composer-add-menu-plan"
                   onSelect={() => closeAndRun(plan.onToggle)}
                 >
-                  <span className={styles.addMenuPlanIcon}>
-                    <ModeIcon mode="plan" />
-                  </span>
-                  <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate">
-                      {t('composerAdd.plan.label')}
-                    </span>
-                    <span className="hidden truncate text-xs text-muted-foreground sm:block">
-                      {t('composerAdd.plan.description')}
-                    </span>
-                  </span>
+                  <ActionContent
+                    icon={<ModeIcon mode="plan" />}
+                    label={t('composerAdd.plan.label')}
+                    description={t('composerAdd.plan.description')}
+                  />
                   {plan.disabled ? (
                     <span className="text-xs text-muted-foreground">
                       {t('composerAdd.plan.busy')}
                     </span>
                   ) : null}
+                  <PlanIndicator checked={plan.checked} />
                 </DropdownMenuCheckboxItem>
               </>
             ) : null}
+            {workflowControl && (
+              <>
+                {!disabled && (
+                  <DropdownMenuSeparator className={menuStyles.separator} />
+                )}
+                <DropdownMenuCheckboxItem
+                  className={ACTION_ROW_CLASS}
+                  checked={Boolean(workflowControl.mode?.requested)}
+                  disabled={workflowControl.disabled}
+                  aria-label={workflowControl.messages.label}
+                  aria-describedby={workflowDescriptionId}
+                  title={workflowControl.description}
+                  aria-busy={workflowControl.pending || undefined}
+                  data-testid="composer-add-menu-workflow"
+                  data-workflow-state={workflowControl.status}
+                  onSelect={() =>
+                    closeAndRun(() =>
+                      workflow?.onWorkflowModeChange?.(
+                        !workflowControl.mode?.requested,
+                      ),
+                    )
+                  }
+                >
+                  <span className={menuStyles.iconTile} aria-hidden="true">
+                    <GitBranchIcon />
+                  </span>
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate">Workflow</span>
+                    <span
+                      className="hidden truncate text-xs text-muted-foreground sm:block"
+                      aria-hidden="true"
+                      data-workflow-summary
+                    >
+                      {workflowControl.summary}
+                    </span>
+                    <span id={workflowDescriptionId} className="sr-only">
+                      {workflowControl.description}
+                    </span>
+                  </span>
+                </DropdownMenuCheckboxItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       )}

@@ -7,6 +7,57 @@
 // Japanese translations for Qwen Code CLI
 
 export default {
+  user: 'ユーザー',
+  assistant: 'アシスタント',
+  thinking: '思考',
+  task: 'タスク',
+  compaction: '圧縮',
+  info: '情報',
+  warning: '警告',
+  retry: '再試行',
+  'stop-hook': '停止フック',
+  'away-recap': '離席の要約',
+  'user-shell': 'ユーザーコマンド',
+  advisor: 'アドバイザー',
+  'arena-agent': 'アリーナエージェント',
+  'arena-session': 'アリーナセッション',
+  goal: '目標',
+  'Protected input': '保護された入力',
+  'Focused input. Cursor: {{position}}':
+    '入力にフォーカス。カーソル：{{position}}',
+  'Unfocused input.': '入力にフォーカスなし。',
+  'Focused Prompt: {{value}}': 'フォーカス中のプロンプト：{{value}}',
+  'Prompt: {{value}}': 'プロンプト：{{value}}',
+  'Focused Input: {{value}}': 'フォーカス中の入力：{{value}}',
+  'Input: {{value}}': '入力：{{value}}',
+  'Placeholder: {{value}}': 'プレースホルダー：{{value}}',
+  'Cursor: {{position}}': 'カーソル：{{position}}',
+  'Selected {{value}}': '選択済み {{value}}',
+  'Disabled {{value}}': '無効 {{value}}',
+  'Focused Toggle on: {{value}}': 'フォーカス中、オン：{{value}}',
+  'Focused Toggle off: {{value}}': 'フォーカス中、オフ：{{value}}',
+  'Toggle on: {{value}}': 'オン：{{value}}',
+  'Toggle off: {{value}}': 'オフ：{{value}}',
+  'Conversation cleared.': '会話を消去しました。',
+  '{{role}}: {{value}}': '{{role}}：{{value}}',
+  'Revision {{value}}': '修正 {{value}}',
+  Dialog: 'ダイアログ',
+  'Dialog closed. Focus: prompt.':
+    'ダイアログを閉じました。フォーカス：プロンプト。',
+  'Dialog closed.': 'ダイアログを閉じました。',
+  'Waiting for confirmation': '確認待ち',
+  'Working. Escape to cancel.': '処理中。Escape でキャンセル。',
+  'History items {{start}}-{{end}} of {{total}}':
+    '履歴 {{start}}-{{end}} / {{total}} 件。',
+  'Worktree: {{value}}': 'ワークツリー: {{value}}',
+  'Workflow mode: on': 'ワークフローモード: オン',
+  'Workflow mode: on (unavailable)': 'ワークフローモード: オン（利用不可）',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+上下または PageUp/PageDown で履歴を読み、Ctrl+Home/End で最初/最新へ移動。',
+  'Generated UI': 'Generated UI（生成 UI）',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '対応するローカルセッションで内蔵 Generated UI を有効にします。変更を適用するには対象のセッションを再起動してください。',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -63,6 +114,7 @@ export default {
   'submit a bug report': 'バグレポートを送信',
   Model: 'モデル',
   'Fast Model': '高速モデル',
+  'Agent Loop': 'エージェントループ',
   Sandbox: 'サンドボックス',
   'Session ID': 'セッションID',
   'Base URL': 'Base URL',
@@ -747,6 +799,27 @@ export default {
     '使い方: /forget <削除するメモリテキスト>',
   'No managed auto-memory entries matched: {{query}}':
     '一致するマネージド自動メモリエントリなし: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'GitHub プルリクエストをこのセッションにバインド',
+  'Usage: /pr <number | url>': '使用法: /pr <番号 | url>',
+  'No PRs bound to this session.':
+    'このセッションにバインドされた PR はありません。',
+  'Bound PRs: {{list}}': 'バインド済み PR: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    '無効な PR 参照です。使用法: /pr <番号 | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'gh で PR #{{number}} を解決できませんでした。完全な PR URL を指定してください。',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} をこのセッションにバインドしました：{{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} はすでにこのセッションにバインドされています：{{url}}',
+  'Failed to bind PR #{{number}}.': 'PR #{{number}} のバインドに失敗しました。',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'PR #{{number}} のバインドに失敗しました: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'このセッションの PR バインドを読み取れませんでした。',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) が利用できないかタイムアウトしました。完全な PR URL を指定してバインドしてください。',
   'Consolidate managed auto-memory topic files.':
     'マネージド自動メモリトピックファイルを統合する。',
   'No MCP servers configured.': 'MCP servers が設定されていません',
@@ -830,6 +903,8 @@ export default {
     '圧縮サマリーが切り詰められたため、チャット履歴を圧縮できませんでした',
   'Could not compress chat history due to an API error.':
     'API エラーのため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because it is too large for the context window.':
+    'チャット履歴がコンテキストウィンドウに収まらないため、圧縮できませんでした',
   // Directory
   'Configuration is not available.': '設定が利用できません',
   'Please provide at least one path to add.':
@@ -888,6 +963,8 @@ export default {
   'disabled (bare mode)': '無効（ベアモード）',
   'disabled (safe mode)': '無効（セーフモード）',
   'disabled (disableAllHooks)': '無効（disableAllHooks）',
+  'disabled (not approved)': '無効（未承認）',
+  'disabled (rejected)': '無効（拒否済み）',
   'disabled (folder not trusted)': '無効（フォルダーが信頼されていません）',
   'disabled (turned off for this session)': '無効（このセッションでオフ）',
   'Server:': 'サーバー:',
@@ -1254,6 +1331,7 @@ export default {
   Reqs: 'リクエスト',
   'Input Tokens': '入力トークン',
   'Output Tokens': '出力トークン',
+  'Output (incl. Reasoning)': '出力（推論を含む）',
   'Savings Highlight:': '節約ハイライト:',
   'of input tokens were served from the cache, reducing costs.':
     '入力トークンがキャッシュから提供され、コストを削減しました',
@@ -1403,6 +1481,8 @@ export default {
   'System prompt': 'システムプロンプト',
   'Built-in tools': '組み込みツール',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指示ファイル',
+  'Auto memory': '自動メモリ',
   'Memory files': 'メモリファイル',
   Skills: 'スキル',
   Messages: 'メッセージ',
@@ -1619,6 +1699,8 @@ export default {
     'アドバイザーレビューに失敗しました：{{error}}',
   'No conversation context available for /advisor':
     '/advisor に使用できる会話コンテキストがありません',
+  'No conversation context available for /btw':
+    '/btw に使用できる会話コンテキストがありません',
   'Focus too long (max {{max}} chars)':
     'フォーカスが長すぎます（最大 {{max}} 文字）',
   'Another operation is in progress, wait for it to complete before running /advisor':
@@ -1979,6 +2061,8 @@ export default {
   out: '出力',
   'In/Out': '入力/出力',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    '指定バージョンへの更新にはスタンドアロン版が必要です。現在のインストール方法でバージョン {{version}} を手動インストールしてください。',
   'Check for Qwen Code updates and install if available':
     'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
   'Qwen Code update available! {{current}} → {{latest}}':

@@ -26,6 +26,10 @@ import {
   EXTERNAL_TOOL_GUARD_READY_META_KEY,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
 } from './externalToolGuard.js';
+import {
+  MOD_ROWS_CLIENT_CAPABILITY,
+  WEB_SHELL_MOD_ROW_SITES,
+} from './status.js';
 
 interface NegotiatedChannelCapabilities {
   activeWork?: {
@@ -60,7 +64,11 @@ export function createChannelInitializeRequest(
       [PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
     },
     clientCapabilities: {
-      _meta: { 'qwen.goalProposals': true },
+      _meta: {
+        'qwen.goalProposals': true,
+        'qwen.mcpAppHost': true,
+        [MOD_ROWS_CLIENT_CAPABILITY]: WEB_SHELL_MOD_ROW_SITES,
+      },
       fs: {
         readTextFile: delegateReadTextFileToClient,
         writeTextFile: true,

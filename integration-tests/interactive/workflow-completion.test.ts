@@ -47,18 +47,22 @@ const WORKFLOW_CASE_OPTIONS = { timeout: 600_000, retry: 0 };
 describe.skipIf(pickE2eRenderer() === 'opentui')(
   'saved workflow slash-command completion',
   () => {
+    const usedCaseDirs = new Set<string>();
     let rig: TestRig;
     let server: FakeOpenAIServer | undefined;
     let session: InteractiveSession | undefined;
     let restoreNoProxy: (() => void) | undefined;
 
     afterEach(async () => {
-      await session?.close();
-      session = undefined;
-      await server?.close();
-      server = undefined;
-      restoreNoProxy?.();
-      await rig?.cleanup();
+      try {
+        await session?.close();
+      } finally {
+        session = undefined;
+        await server?.close();
+        server = undefined;
+        restoreNoProxy?.();
+        await rig?.cleanup();
+      }
     });
 
     it.each([
@@ -120,9 +124,22 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       const isSlash = testCase.source === 'slash';
       rig = new TestRig();
       restoreNoProxy = applyContainerSandboxNoProxy();
-      await rig.setup(`workflow-completion-${testCase.status}`, {
-        settings: { telemetry: { enabled: false } },
-      });
+      // The marker keeps same-status cases from sharing a directory: the
+      // post-merge E2E legs set KEEP_OUTPUT (the no-AK PR gate that runs
+      // this file does not), so setup() there would remove the previous
+      // case's directory while its CLI is still writing, failing with
+      // ENOTEMPTY before the body runs.
+      await rig.setup(
+        `workflow-completion-${testCase.status}-${testCase.marker}`,
+        {
+          settings: { telemetry: { enabled: false } },
+        },
+      );
+      // sanitizeTestName is lossy, so distinct markers are not by themselves
+      // proof of distinct directories; nothing else catches a duplicate or
+      // dropped marker before a KEEP_OUTPUT leg hits ENOTEMPTY.
+      expect(usedCaseDirs.has(rig.testDir!)).toBe(false);
+      usedCaseDirs.add(rig.testDir!);
       const qwenHome = join(rig.testDir!, '.qwen-home');
       mkdirSync(qwenHome, { recursive: true });
       writeFileSync(

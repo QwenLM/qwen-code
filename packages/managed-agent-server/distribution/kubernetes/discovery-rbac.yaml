@@ -1,0 +1,21 @@
+# Apply in the Harness namespace; bind the existing Java service account.
+apiVersion: 'rbac.authorization.k8s.io/v1'
+kind: 'Role'
+metadata:
+  name: 'qwen-harness-discovery'
+rules:
+  - apiGroups:
+      - ''
+    resources:
+      - 'services'
+    resourceNames:
+      - 'qwen-harness'
+    verbs:
+      - 'get'
+  - apiGroups:
+      - 'discovery.k8s.io'
+    resources:
+      - 'endpointslices'
+    verbs:
+      - 'list'
+      - 'watch'

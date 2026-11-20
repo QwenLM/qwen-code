@@ -133,7 +133,15 @@ async function readHostedModelRequest(
     saved.sourceActivation.epoch < 1 ||
     !saved.prepared ||
     Object.keys(saved.prepared).length !==
-      6 + (Object.hasOwn(saved.prepared, 'allowPersistentRetry') ? 1 : 0) ||
+      6 +
+        (Object.hasOwn(saved.prepared, 'allowPersistentRetry') ? 1 : 0) +
+        (Object.hasOwn(saved.prepared, 'contextPrefixLength') ? 1 : 0) ||
+    (Object.hasOwn(saved.prepared, 'contextPrefixLength') &&
+      (!Number.isSafeInteger(saved.prepared.contextPrefixLength) ||
+        saved.prepared.contextPrefixLength! < 0 ||
+        saved.prepared.contextPrefixLength! > 5 ||
+        saved.prepared.contextPrefixLength! >
+          saved.prepared.history?.length)) ||
     (Object.hasOwn(saved.prepared, 'allowPersistentRetry') &&
       typeof saved.prepared.allowPersistentRetry !== 'boolean') ||
     !Array.isArray(saved.prepared.history) ||

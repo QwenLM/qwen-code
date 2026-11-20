@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import type { CallableTool, Content } from '@google/genai';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import {
@@ -673,5 +674,21 @@ describe('historical action budget', () => {
       makeRegistry({ read_file: new StubTool('read_file', { path: 'a.ts' }) }),
     );
     expectText(prior, ['Prior action: read_file('], ['omitted']);
+  });
+});
+
+describe('retained memory catalogs', () => {
+  it('excludes catalog data before projecting user intent, without text matching', () => {
+    const snapshot = getAutoMemorySnapshot([], 'CATALOG_ONLY_SENTINEL')!;
+    const messages = [
+      content('user', { text: 'inspect the package' }, snapshot),
+    ];
+    const output = JSON.stringify(build(messages));
+    expect(output).toContain('inspect the package');
+    expect(output).not.toContain('CATALOG_ONLY_SENTINEL');
+    expect(JSON.stringify(build([userText(snapshot.text!)]))).toContain(
+      'CATALOG_ONLY_SENTINEL',
+    );
+    expect(messages[0].parts?.[1]).toBe(snapshot);
   });
 });

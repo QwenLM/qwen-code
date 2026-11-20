@@ -11,6 +11,7 @@ import {
   isRecord,
   isRecoverableAcpCapacityError,
   isAcpChildCapacityError,
+  isSessionLimitExceededError,
 } from './httpErrors';
 
 describe('child capacity classification', () => {
@@ -36,6 +37,30 @@ describe('child capacity classification', () => {
     expect(isAcpChildCapacityError(new DaemonHttpError(503, body, code))).toBe(
       false,
     );
+  });
+});
+
+describe('session limit classification', () => {
+  it.each([
+    { code: 'session_limit_exceeded' },
+    { data: { errorKind: 'session_limit_exceeded' } },
+    { data: { code: 'session_limit_exceeded' } },
+  ])('recognizes a session limit in %j', (body) => {
+    expect(
+      isSessionLimitExceededError(new DaemonHttpError(503, body, 'limit')),
+    ).toBe(true);
+  });
+
+  it.each([
+    { code: 'acp_child_capacity_exhausted' },
+    { code: 'daemon_draining' },
+    undefined,
+    null,
+    [],
+  ])('does not classify unrelated 503s (%j)', (body) => {
+    expect(
+      isSessionLimitExceededError(new DaemonHttpError(503, body, 'x')),
+    ).toBe(false);
   });
 });
 

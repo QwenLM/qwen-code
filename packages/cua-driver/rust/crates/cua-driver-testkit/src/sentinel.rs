@@ -106,13 +106,7 @@ impl ForegroundSentinel {
         reaper.track_pid(target.pid);
 
         let focus_deadline = Instant::now() + Duration::from_secs(10);
-        if is_wayland_session() {
-            wait_for_journal(&journal_path, focus_deadline, r#""kind":"ready""#, "ready");
-            try_activate_native_foreground(driver, target)?;
-            // Electron may already be focused before its preload listener is ready.
-            // The compositor observation is the authoritative Wayland focus gate.
-            wait_for_native_focus_stable(target);
-        } else {
+        {
             wait_for_journal(&journal_path, focus_deadline, r#""kind":"ready""#, "ready");
             try_activate_native_foreground(driver, target)?;
             wait_for_native_focus_stable(target);
@@ -161,7 +155,7 @@ impl ForegroundSentinel {
         {
             violations.push("foreground sentinel heartbeat stopped".to_owned());
         }
-        if !is_wayland_session() {
+        {
             if events.iter().any(|event| {
                 event_kind(event) == Some("blur")
                     || (event_kind(event) == Some("visibility")
@@ -211,22 +205,12 @@ impl ForegroundSentinel {
         wait_for_event(&self.journal_path, "heartbeat", Duration::from_secs(2))?;
         reset_journal(&self.journal_path)?;
 
-        let canary_key = if std::env::var("CUA_E2E_WAYLAND_SESSION")
-            .is_ok_and(|session| session == "cua-compositor")
-        {
-            // The intentionally small injection protocol exposes navigation
-            // and control keys, not printable letters. Space still exercises
-            // the renderer keydown leak detector without broadening it.
-            "space"
-        } else {
-            "a"
-        };
         let leaked_key = driver.call(
             "press_key",
             serde_json::json!({
                 "pid": self.target.pid,
                 "window_id": self.target.native_id,
-                "key": canary_key,
+                "key": "a",
                 "delivery_mode": "foreground",
             }),
         );
@@ -248,8 +232,6 @@ impl ForegroundSentinel {
         }
         reset_journal(&self.journal_path)?;
 
-        #[cfg(target_os = "linux")]
-        set_sway_fullscreen(driver, self.target, false)?;
         let raised = driver.call(
             "bring_to_front",
             serde_json::json!({
@@ -263,11 +245,7 @@ impl ForegroundSentinel {
                 raised.text()
             ));
         }
-        #[cfg(target_os = "linux")]
-        focus_sway_target(driver, background_target)?;
-        if is_wayland_session() {
-            wait_for_native_focus_lost(self.target)?;
-        } else {
+        {
             wait_for_event(&self.journal_path, "blur", Duration::from_secs(3))?;
             let (_, focus_violations) = self.observe();
             if !focus_violations
@@ -281,8 +259,6 @@ impl ForegroundSentinel {
         }
 
         activate_native_foreground(driver, self.target);
-        #[cfg(target_os = "linux")]
-        set_sway_fullscreen(driver, self.target, true)?;
         wait_for_native_focus_stable(self.target);
         std::thread::sleep(Duration::from_millis(150));
         reset_journal(&self.journal_path)?;
@@ -377,13 +353,7 @@ impl ForegroundSentinel {
                 before.target_z
             ));
         }
-        let mut native_oracles = vec![OracleKind::Focus, OracleKind::ZOrder];
-        if std::env::var("XDG_SESSION_TYPE")
-            .map(|session| !session.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(true)
-        {
-            native_oracles.push(OracleKind::Cursor);
-        }
+        let native_oracles = [OracleKind::Focus, OracleKind::ZOrder, OracleKind::Cursor];
         let (result, delta) = observer
             .observe(&native_oracles, action)
             .map_err(|error| error.to_string())?;
@@ -465,12 +435,6 @@ fn wait_for_event(path: &std::path::Path, kind: &str, timeout: Duration) -> Resu
     }
 }
 
-fn is_wayland_session() -> bool {
-    cfg!(target_os = "linux")
-        && std::env::var("XDG_SESSION_TYPE")
-            .is_ok_and(|session| session.eq_ignore_ascii_case("wayland"))
-}
-
 fn activate_native_foreground(driver: &mut impl Driver, target: TargetWindow) {
     try_activate_native_foreground(driver, target)
         .unwrap_or_else(|error| panic!("could not activate foreground sentinel: {error}"));
@@ -490,10 +454,6 @@ fn try_activate_native_foreground(
     if response.is_error() {
         return Err(response.text().to_owned());
     }
-    #[cfg(target_os = "linux")]
-    focus_sway_target(driver, target).map_err(|error| {
-        format!("could not focus foreground sentinel through Sway IPC: {error}")
-    })?;
     #[cfg(target_os = "windows")]
     physically_focus_windows_sentinel(target);
     #[cfg(target_os = "macos")]
@@ -527,385 +487,6 @@ fn focus_macos_sentinel_contents(
         ));
     }
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn focus_sway_target(driver: &mut impl Driver, target: TargetWindow) -> Result<(), String> {
-    let is_sway = is_wayland_session()
-        && std::env::var("CUA_E2E_WAYLAND_SESSION").is_ok_and(|session| session == "sway");
-    if !is_sway {
-        return Ok(());
-    }
-
-    let (_, con_id) = sway_tree_and_container_for_target(driver, target)?;
-    run_sway_container_command(con_id, &["focus"], "focus canary")
-}
-
-#[cfg(target_os = "linux")]
-fn set_sway_fullscreen(
-    driver: &mut impl Driver,
-    target: TargetWindow,
-    enabled: bool,
-) -> Result<(), String> {
-    let is_sway = is_wayland_session()
-        && std::env::var("CUA_E2E_WAYLAND_SESSION").is_ok_and(|session| session == "sway");
-    if !is_sway {
-        return Ok(());
-    }
-
-    let (tree, view_id) = sway_tree_and_container_for_target(driver, target)?;
-    let con_id = if enabled {
-        view_id
-    } else {
-        sway_fullscreen_holder_id(&tree, view_id).unwrap_or(view_id)
-    };
-    let state = if enabled { "enable" } else { "disable" };
-    run_sway_container_command(con_id, &["fullscreen", state], "fullscreen canary")?;
-    if !enabled {
-        wait_for_sway_fullscreen_cleared(view_id)?;
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn sway_tree_and_container_for_target(
-    driver: &mut impl Driver,
-    target: TargetWindow,
-) -> Result<(serde_json::Value, i64), String> {
-    let tree = read_sway_tree()?;
-
-    let windows = driver.call("list_windows", serde_json::json!({}));
-    if windows.is_error() {
-        return Err(format!(
-            "list windows before Sway focus canary: {}",
-            windows.text()
-        ));
-    }
-    let title = sway_target_title(windows.structured(), target);
-    let con_id = title
-        .and_then(|title| sway_container_id(&tree, title))
-        .or_else(|| sway_container_id_by_unique_pid(&tree, target.pid))
-        .ok_or_else(|| {
-            format!(
-                "Sway focus canary could not resolve container for pid {} window {}",
-                target.pid, target.native_id
-            )
-        })?;
-    Ok((tree, con_id))
-}
-
-#[cfg(target_os = "linux")]
-fn read_sway_tree() -> Result<serde_json::Value, String> {
-    let tree_output = Command::new("swaymsg")
-        .args(["-r", "-t", "get_tree"])
-        .output()
-        .map_err(|error| format!("read Sway tree for focus canary: {error}"))?;
-    if !tree_output.status.success() {
-        return Err(format!(
-            "read Sway tree for focus canary: {}",
-            String::from_utf8_lossy(&tree_output.stderr).trim()
-        ));
-    }
-    serde_json::from_slice(&tree_output.stdout)
-        .map_err(|error| format!("parse Sway tree for focus canary: {error}"))
-}
-
-#[cfg(target_os = "linux")]
-fn sway_path_to_container<'a>(
-    node: &'a serde_json::Value,
-    con_id: i64,
-    path: &mut Vec<&'a serde_json::Value>,
-) -> bool {
-    path.push(node);
-    if node["id"].as_i64() == Some(con_id) {
-        return true;
-    }
-    for key in ["nodes", "floating_nodes"] {
-        if let Some(children) = node[key].as_array() {
-            for child in children {
-                if sway_path_to_container(child, con_id, path) {
-                    return true;
-                }
-            }
-        }
-    }
-    path.pop();
-    false
-}
-
-#[cfg(target_os = "linux")]
-fn sway_fullscreen_holder_id(tree: &serde_json::Value, view_id: i64) -> Option<i64> {
-    let mut path = Vec::new();
-    sway_path_to_container(tree, view_id, &mut path).then_some(())?;
-    path.into_iter()
-        .rev()
-        .find(|node| node["fullscreen_mode"].as_i64().unwrap_or(0) != 0)
-        .and_then(|node| node["id"].as_i64())
-}
-
-#[cfg(target_os = "linux")]
-fn sway_container_fullscreen_mode(tree: &serde_json::Value, con_id: i64) -> Option<i64> {
-    if tree["id"].as_i64() == Some(con_id) {
-        return Some(tree["fullscreen_mode"].as_i64().unwrap_or(0));
-    }
-    ["nodes", "floating_nodes"].into_iter().find_map(|key| {
-        tree[key].as_array().and_then(|children| {
-            children
-                .iter()
-                .find_map(|child| sway_container_fullscreen_mode(child, con_id))
-        })
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn wait_for_sway_fullscreen_cleared(view_id: i64) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(1);
-    loop {
-        let tree = read_sway_tree()?;
-        let fullscreen_mode = sway_container_fullscreen_mode(&tree, view_id)
-            .ok_or_else(|| format!("Sway fullscreen canary lost view {view_id}"))?;
-        if fullscreen_mode == 0 {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "Sway fullscreen canary did not clear fullscreen mode {fullscreen_mode} for view {view_id}"
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn run_sway_container_command(con_id: i64, command: &[&str], purpose: &str) -> Result<(), String> {
-    let criterion = format!("[con_id={con_id}]");
-    let output = Command::new("swaymsg")
-        .arg("-r")
-        .arg(criterion.as_str())
-        .args(command)
-        .output()
-        .map_err(|error| format!("run Sway {purpose} for con_id {con_id}: {error}"))?;
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("parse Sway {purpose} result for con_id {con_id}: {error}"))?;
-    let succeeded = output.status.success()
-        && result.as_array().is_some_and(|results| {
-            !results.is_empty() && results.iter().all(|item| item["success"] == true)
-        });
-    if !succeeded {
-        Err(format!(
-            "Sway {purpose} for con_id {con_id} failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim(),
-        ))
-    } else {
-        if std::env::var_os("CUA_E2E_DEBUG_SWAY").is_some() {
-            let tree = read_sway_tree()?;
-            let mut rows = Vec::new();
-            collect_sway_debug_rows(&tree, &mut rows);
-            eprintln!(
-                "[testkit] Sway {purpose}: con_id={con_id} command={command:?} tree={rows:?}"
-            );
-        }
-        Ok(())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn collect_sway_debug_rows(node: &serde_json::Value, rows: &mut Vec<String>) {
-    let focused = node["focused"].as_bool().unwrap_or(false);
-    let fullscreen = node["fullscreen_mode"].as_i64().unwrap_or(0);
-    if focused || fullscreen != 0 || node["pid"].as_u64().is_some() {
-        rows.push(format!(
-            "id={} pid={} name={:?} focused={focused} fullscreen={fullscreen}",
-            node["id"].as_i64().unwrap_or_default(),
-            node["pid"].as_u64().unwrap_or_default(),
-            node["name"].as_str().unwrap_or("")
-        ));
-    }
-    for key in ["nodes", "floating_nodes"] {
-        if let Some(children) = node[key].as_array() {
-            for child in children {
-                collect_sway_debug_rows(child, rows);
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn sway_target_title(windows: &serde_json::Value, target: TargetWindow) -> Option<&str> {
-    let windows = windows["windows"].as_array()?;
-    windows
-        .iter()
-        .find(|window| {
-            window["pid"].as_u64() == Some(target.pid as u64)
-                && window["window_id"].as_u64() == Some(target.native_id)
-        })
-        .and_then(|window| window["title"].as_str())
-        .or_else(|| {
-            let mut titles = windows
-                .iter()
-                .filter(|window| window["pid"].as_u64() == Some(target.pid as u64))
-                .filter_map(|window| window["title"].as_str())
-                .filter(|title| !title.is_empty());
-            let title = titles.next()?;
-            titles.next().is_none().then_some(title)
-        })
-}
-
-#[cfg(target_os = "linux")]
-fn collect_sway_container_ids_by_pid(node: &serde_json::Value, pid: u32, ids: &mut Vec<i64>) {
-    if node["pid"].as_u64() == Some(pid as u64) {
-        if let Some(id) = node["id"].as_i64() {
-            ids.push(id);
-        }
-    }
-    for key in ["nodes", "floating_nodes"] {
-        if let Some(children) = node[key].as_array() {
-            for child in children {
-                collect_sway_container_ids_by_pid(child, pid, ids);
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn sway_container_id_by_unique_pid(node: &serde_json::Value, pid: u32) -> Option<i64> {
-    let mut ids = Vec::new();
-    collect_sway_container_ids_by_pid(node, pid, &mut ids);
-    (ids.len() == 1).then(|| ids[0])
-}
-
-#[cfg(target_os = "linux")]
-fn sway_container_id(node: &serde_json::Value, title: &str) -> Option<i64> {
-    let raw_title = title
-        .rsplit_once(" [")
-        .map(|(candidate, _)| candidate)
-        .unwrap_or(title);
-    if node["name"]
-        .as_str()
-        .is_some_and(|name| name == title || name == raw_title)
-    {
-        return node["id"].as_i64();
-    }
-    ["nodes", "floating_nodes"].into_iter().find_map(|key| {
-        node[key].as_array().and_then(|children| {
-            children
-                .iter()
-                .find_map(|child| sway_container_id(child, title))
-        })
-    })
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod sway_tests {
-    use super::*;
-
-    #[test]
-    fn fullscreen_command_targets_the_holder_ancestor() {
-        let tree = serde_json::json!({
-            "id": 1,
-            "nodes": [{
-                "id": 30,
-                "fullscreen_mode": 1,
-                "nodes": [{
-                    "id": 31,
-                    "pid": 1234,
-                    "name": "CuaTestHarness Sentinel",
-                    "focused": true,
-                    "fullscreen_mode": 0
-                }]
-            }]
-        });
-        assert_eq!(sway_fullscreen_holder_id(&tree, 31), Some(30));
-    }
-
-    #[test]
-    fn fullscreen_command_prefers_the_actionable_view() {
-        let tree = serde_json::json!({
-            "id": 1,
-            "fullscreen_mode": 1,
-            "nodes": [{
-                "id": 30,
-                "fullscreen_mode": 1,
-                "nodes": [{
-                    "id": 31,
-                    "pid": 1234,
-                    "name": "CuaTestHarness Sentinel",
-                    "focused": true,
-                    "fullscreen_mode": 1
-                }]
-            }]
-        });
-        assert_eq!(sway_fullscreen_holder_id(&tree, 31), Some(31));
-    }
-
-    #[test]
-    fn fullscreen_clear_checks_the_view_not_inherited_workspace_state() {
-        let tree = serde_json::json!({
-            "id": 1,
-            "fullscreen_mode": 1,
-            "nodes": [{
-                "id": 30,
-                "fullscreen_mode": 1,
-                "nodes": [{
-                    "id": 31,
-                    "pid": 1234,
-                    "name": "CuaTestHarness Sentinel",
-                    "focused": true,
-                    "fullscreen_mode": 0
-                }]
-            }]
-        });
-        assert_eq!(sway_container_fullscreen_mode(&tree, 31), Some(0));
-    }
-
-    #[test]
-    fn focus_target_uses_unique_sway_pid_when_title_is_unavailable() {
-        let tree = serde_json::json!({
-            "id": 1,
-            "nodes": [{
-                "id": 9,
-                "nodes": [{
-                    "id": 42,
-                    "pid": 1234,
-                    "name": "CuaTestHarness Electron"
-                }]
-            }]
-        });
-        assert_eq!(sway_container_id_by_unique_pid(&tree, 1234), Some(42));
-    }
-
-    #[test]
-    fn focus_target_does_not_guess_when_pid_owns_multiple_windows() {
-        let tree = serde_json::json!({
-            "id": 1,
-            "nodes": [
-                {"id": 41, "pid": 1234, "name": "First"},
-                {"id": 42, "pid": 1234, "name": "Second"}
-            ]
-        });
-        assert_eq!(sway_container_id_by_unique_pid(&tree, 1234), None);
-        assert_eq!(sway_container_id(&tree, "Second"), Some(42));
-    }
-
-    #[test]
-    fn focus_target_uses_unique_same_process_title_when_window_id_changes() {
-        let windows = serde_json::json!({
-            "windows": [{
-                "pid": 1234,
-                "window_id": 88,
-                "title": "CuaTestHarness Electron [cdp=9223]"
-            }]
-        });
-        let target = TargetWindow {
-            pid: 1234,
-            native_id: 99,
-        };
-        assert_eq!(
-            sway_target_title(&windows, target),
-            Some("CuaTestHarness Electron [cdp=9223]")
-        );
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -986,34 +567,6 @@ fn wait_for_native_focus_stable(target: TargetWindow) {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-}
-
-#[cfg(target_os = "linux")]
-fn wait_for_native_focus_lost(target: TargetWindow) -> Result<(), String> {
-    use crate::observer::{ObserverBackend, TargetZ};
-
-    let backend = NativeObserver::new();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let snapshot = backend.snapshot(target).ok();
-        let lost = snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.target_z != TargetZ::Foreground);
-        if lost {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "native Wayland focus-loss canary was not detected; last snapshot: {snapshot:?}"
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn wait_for_native_focus_lost(_target: TargetWindow) -> Result<(), String> {
-    Err("native Wayland focus observation is only available on Linux".to_owned())
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]

@@ -7,6 +7,7 @@
 import { truncateToolOutput } from './truncation.js';
 import { measureToolOutput, type ToolOutputSize } from './tool-output-size.js';
 import { LRUCache } from 'mnemonist';
+import { rm } from 'node:fs/promises';
 import type { Config } from '../config/config.js';
 import {
   fetchWithPolicy,
@@ -65,6 +66,7 @@ export function sideQueryTimeoutMs(): number {
 // Truncation applies to converted/decoded text, never to raw HTML — cutting
 // markup before conversion silently destroys content deep in large pages.
 const MAX_CONTENT_CHARS = 100_000;
+const MANAGED_MAX_CONTENT_BYTES = 16 * 1024;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const MAX_REDIRECTS = 10;
 
@@ -227,6 +229,26 @@ export interface WebFetchToolParams {
   format?: 'auto' | 'markdown' | 'html' | 'text';
 }
 
+function managedContentPreview(content: string): string {
+  if (Buffer.byteLength(JSON.stringify(content)) <= MANAGED_MAX_CONTENT_BYTES)
+    return content;
+  const notice =
+    '\n\n[Content truncated to fit the Managed Session result limit.]';
+  let low = 0;
+  let high = content.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (
+      Buffer.byteLength(JSON.stringify(content.slice(0, mid) + notice)) <=
+      MANAGED_MAX_CONTENT_BYTES
+    )
+      low = mid;
+    else high = mid - 1;
+  }
+  if (low > 0 && /[\uD800-\uDBFF]/u.test(content[low - 1])) low--;
+  return content.slice(0, low) + notice;
+}
+
 /**
  * Implementation of the WebFetch tool invocation logic
  */
@@ -239,6 +261,7 @@ class WebFetchToolInvocation extends BaseToolInvocation<
   constructor(
     private readonly config: Config,
     params: WebFetchToolParams,
+    private readonly mode: 'local' | 'managed',
   ) {
     super(params);
     this.debugLogger = createDebugLogger('WEB_FETCH');
@@ -306,7 +329,10 @@ class WebFetchToolInvocation extends BaseToolInvocation<
 
   private buildRedirectResult(redirect: FetchPolicyRedirect): ToolResult {
     const redirectHost = hostnameOf(redirect.redirectUrl);
-    const message = `REDIRECT DETECTED: The URL redirects to a different host (or scheme/port), which was not followed automatically.
+    const message =
+      this.mode === 'managed'
+        ? `Redirect (${redirect.status}) was not followed. Make a new web_fetch call for this destination, subject to the same network policy and approval:\n${redirect.redirectUrl}`
+        : `REDIRECT DETECTED: The URL redirects to a different host (or scheme/port), which was not followed automatically.
 
 Original URL: ${redirect.originalUrl}
 Redirect URL: ${redirect.redirectUrl}
@@ -335,7 +361,8 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
   ): Promise<CacheEntry | FetchPolicyRedirect> {
     const fetchUrl = this.getFetchUrl();
     const acceptHeader = this.getAcceptHeader();
-    const urlCache = getUrlCacheFor(this.config.storage);
+    const urlCache =
+      this.mode === 'managed' ? undefined : getUrlCacheFor(this.config.storage);
 
     // The format param changes the Accept header, which can change what the
     // server returns — a URL-only key would serve format:'html' content to a
@@ -343,7 +370,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     // that share one Config/Storage (/clear and /new call startNewSession
     // with a fresh ID); old-session entries age out of the LRU.
     const cacheKey = `${this.config.getSessionId?.() ?? ''}|${acceptHeader} ${fetchUrl}`;
-    const cached = urlCache.get(cacheKey);
+    const cached = urlCache?.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
       this.debugLogger.debug(`[WebFetchTool] Cache hit for ${fetchUrl}`);
       return cached;
@@ -353,6 +380,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     );
 
     const policyOptions = {
+      ...(this.mode === 'managed' ? { networkPolicy: 'public' as const } : {}),
       timeoutMs: FETCH_TIMEOUT_MS,
       maxBytes: MAX_RESPONSE_BYTES,
       maxRedirects: MAX_REDIRECTS,
@@ -375,7 +403,11 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       // caller actually asked for — the user approved the http URL they
       // supplied, and fallback responses are never cached (see below).
       const { upgradedFrom } = this.getFetchPlan();
-      if (upgradedFrom && isConnectionLevelError(error)) {
+      if (
+        this.mode !== 'managed' &&
+        upgradedFrom &&
+        isConnectionLevelError(error)
+      ) {
         this.debugLogger.debug(
           `[WebFetchTool] https upgrade failed (${(error as Error).message}); retrying original ${upgradedFrom}`,
         );
@@ -441,6 +473,10 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     let content: string;
 
     if (isBinary) {
+      if (this.mode === 'managed')
+        throw new Error(
+          'Managed web_fetch supports text content only; binary downloads are unavailable.',
+        );
       // Keep the raw bytes on disk so the model (or shell tools) can inspect
       // them. Binary bytes are never UTF-8 decoded for the side-query —
       // mojibake wastes tokens and misleads the model. PDFs get real text
@@ -481,13 +517,27 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
 
       content = '';
       if (sniff.extension === 'pdf' && persistedPath) {
-        const pdfText = await extractPDFText(persistedPath, { signal });
-        if (pdfText.success && pdfText.text.trim()) {
-          content = pdfText.text;
-        } else if (!pdfText.success) {
-          this.debugLogger.debug(
-            `[WebFetchTool] PDF text extraction failed: ${pdfText.error}`,
-          );
+        try {
+          const pdfText = await extractPDFText(persistedPath, { signal });
+          signal.throwIfAborted();
+          if (pdfText.success && pdfText.text.trim()) {
+            content = pdfText.text;
+          } else if (!pdfText.success) {
+            this.debugLogger.debug(
+              `[WebFetchTool] PDF text extraction failed: ${pdfText.error}`,
+            );
+          }
+        } catch (error) {
+          try {
+            await rm(persistedPath, { force: true });
+            this.config.trackToolResultBytes(-response.body.length);
+          } catch (cleanupError) {
+            this.debugLogger.error(
+              '[WebFetchTool] Failed to remove unused PDF',
+              cleanupError,
+            );
+          }
+          throw error;
         }
       }
     } else if (contentType.includes('text/html')) {
@@ -514,7 +564,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     let persistedTextPath: string | undefined;
     let rawOutputSize: ToolOutputSize | undefined;
     let reduced = false;
-    if (content.length > MAX_CONTENT_CHARS) {
+    if (this.mode !== 'managed' && content.length > MAX_CONTENT_CHARS) {
       rawOutputSize = measureToolOutput(content);
       const shortened = await truncateToolOutput(
         this.config,
@@ -555,7 +605,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     // endpoint — a silent downgrade of exactly the no-downgrade guarantee the
     // fallback is scoped to preserve.
     if (!usedHttpFallback && content.length <= MAX_CACHEABLE_CHARS) {
-      urlCache.set(cacheKey, entry);
+      urlCache?.set(cacheKey, entry);
     }
     return entry;
   }
@@ -585,6 +635,14 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
         : '';
 
       const displaySummary = `Received ${formatByteSize(entry.byteLength)} (${entry.status} ${entry.statusText || 'OK'}) from ${hostnameOf(this.params.url)}${entry.persistedPath ? ` — binary saved to ${entry.persistedPath}` : ''}`;
+
+      if (this.mode === 'managed') {
+        signal.throwIfAborted();
+        return {
+          llmContent: `${header}\n\n${entry.content}`,
+          returnDisplay: `${displaySummary}${elapsedSuffix()}`,
+        };
+      }
 
       // Binary with no extractable text: nothing useful to summarize —
       // return the metadata and file location without a side-query call.
@@ -627,6 +685,11 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
         };
       }
 
+      const persistedOutputFiles = entry.persistedTextPath
+        ? [entry.persistedTextPath]
+        : entry.reduced
+          ? []
+          : undefined;
       const fallbackPrompt = `The user requested the following: "${this.params.prompt}".
 
 I have fetched the content from ${this.params.url}. Fetch metadata:
@@ -686,6 +749,7 @@ ${entry.content}
           llmContent: `${header}\n\n[Content processing failed (${getErrorMessage(error)}). The raw fetched content follows.]\n\n${entry.content}${binaryNote}`,
           returnDisplay: `${displaySummary}${elapsedSuffix()} — processing failed, raw content returned`,
           rawOutputSize: entry.rawOutputSize,
+          persistedOutputFiles,
           ...(entry.persistedPath
             ? { resultFilePaths: [entry.persistedPath] }
             : {}),
@@ -705,6 +769,7 @@ ${entry.content}
           : {}),
       };
     } catch (e) {
+      if (signal.aborted) throw e;
       // e may be a non-Error abort reason (throwIfAborted rethrows whatever
       // the aborting caller passed — e.g. a plain string, or null).
       const errorMessage = `Error during fetch for ${this.params.url}: ${getErrorMessage(e)}`;
@@ -770,7 +835,27 @@ ${entry.content}
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
-    return this.executeDirectFetch(signal);
+    const result = await this.executeDirectFetch(signal);
+    if (this.mode !== 'managed') return result;
+    return {
+      ...result,
+      llmContent:
+        typeof result.llmContent === 'string'
+          ? managedContentPreview(result.llmContent)
+          : result.llmContent,
+      returnDisplay:
+        typeof result.returnDisplay === 'string'
+          ? managedContentPreview(result.returnDisplay)
+          : result.returnDisplay,
+      ...(result.error
+        ? {
+            error: {
+              ...result.error,
+              message: managedContentPreview(result.error.message),
+            },
+          }
+        : {}),
+    };
   }
 }
 
@@ -783,7 +868,10 @@ export class WebFetchTool extends BaseDeclarativeTool<
 > {
   static readonly Name: string = ToolNames.WEB_FETCH;
 
-  constructor(private readonly config: Config) {
+  constructor(
+    private readonly config: Config,
+    private readonly mode: 'local' | 'managed' = 'local',
+  ) {
     super(
       WebFetchTool.Name,
       ToolDisplayNames.WEB_FETCH,
@@ -832,6 +920,8 @@ export class WebFetchTool extends BaseDeclarativeTool<
       if (parsedUrl.username || parsedUrl.password) {
         return "The 'url' must not include credentials.";
       }
+      if (this.mode === 'managed' && parsedUrl.protocol !== 'https:')
+        return 'Managed web_fetch requires an HTTPS URL.';
     } catch {
       return "The 'url' is malformed and could not be parsed.";
     }
@@ -847,10 +937,14 @@ export class WebFetchTool extends BaseDeclarativeTool<
     // Normalize before the invocation exists: the scheduler feeds
     // invocation.params into evaluatePermissionFlow, so this is what makes
     // domain rules match the host actually contacted.
-    return new WebFetchToolInvocation(this.config, {
-      ...params,
-      url: rewriteGitHubBlobUrl(params.url),
-    });
+    return new WebFetchToolInvocation(
+      this.config,
+      {
+        ...params,
+        url: rewriteGitHubBlobUrl(params.url),
+      },
+      this.mode,
+    );
   }
 
   override toAutoClassifierInput(

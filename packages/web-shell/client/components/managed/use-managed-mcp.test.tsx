@@ -14,6 +14,7 @@ let provider: ManagedAgentProvider;
 let sessionId: string | undefined;
 let clientId: string;
 let language: WebShellLanguage;
+let catalogScope: string;
 let current: ReturnType<typeof useManagedMcp>;
 const catalog = (id = 'session-a'): ManagedSessionMcp => ({
   object: 'agent.mcp_catalog',
@@ -32,7 +33,7 @@ const catalog = (id = 'session-a'): ManagedSessionMcp => ({
 });
 
 function Probe() {
-  current = useManagedMcp(provider, clientId, sessionId);
+  current = useManagedMcp(provider, clientId, sessionId, catalogScope);
   return null;
 }
 const render = () =>
@@ -51,6 +52,7 @@ beforeEach(() => {
   sessionId = 'session-a';
   clientId = 'client';
   language = 'en';
+  catalogScope = '';
   provider = {
     storageKey: 'tenant:actor',
     mcp: { list: vi.fn().mockResolvedValue(catalog()) },
@@ -98,7 +100,7 @@ it('keeps failures distinct from empty catalogs and permits another query', asyn
   await expect(current!.loadMcpStatus!()).resolves.toEqual({ servers: [] });
 });
 
-it.each(['session', 'provider', 'client', 'unmount'] as const)(
+it.each(['session', 'provider', 'client', 'catalog', 'unmount'] as const)(
   'aborts requests and rejects late results on %s changes',
   async (change) => {
     let release!: (value: ManagedSessionMcp) => void;
@@ -115,6 +117,7 @@ it.each(['session', 'provider', 'client', 'unmount'] as const)(
     if (change === 'session') sessionId = 'session-b';
     if (change === 'provider') provider = { ...provider };
     if (change === 'client') clientId = 'new-client';
+    if (change === 'catalog') catalogScope = 'after-management';
     if (change === 'unmount') await act(async () => root.render(null));
     else await render();
     expect(signal.aborted).toBe(true);

@@ -73,6 +73,7 @@ Thumbs.db
 
 # Ignore built ts files
 dist
+packages/web-shell/dist-managed-host/
 packages/audio-capture/build/
 packages/audio-capture/prebuilds/
 

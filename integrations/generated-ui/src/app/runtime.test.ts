@@ -50,13 +50,16 @@ describe('UiRuntime', () => {
         ui.on('servers', 'input', calculate);
         calculate();`,
         { servers: { value: '2', checked: false } },
-      ),
+      ).patches,
     ).toEqual([{ kind: 'text', id: 'capacity', value: '250' }]);
     expect(
       runtime.dispatch(event('servers', '5', 'input'), {
         servers: { value: '5', checked: false },
       }),
-    ).toEqual([{ kind: 'text', id: 'capacity', value: '625' }]);
+    ).toEqual({
+      patches: [{ kind: 'text', id: 'capacity', value: '625' }],
+      handled: true,
+    });
   });
 
   it('supports a different comparison interaction with HTML and value patches', () => {
@@ -75,11 +78,14 @@ describe('UiRuntime', () => {
       runtime.dispatch(event('compare'), {
         weight: { value: '0.75', checked: false },
       }),
-    ).toEqual([
-      { kind: 'html', id: 'ranking', value: '<strong>A</strong>' },
-      { kind: 'value', id: 'winner', value: 'A' },
-      { kind: 'text', id: 'trigger', value: 'compare:click' },
-    ]);
+    ).toEqual({
+      patches: [
+        { kind: 'html', id: 'ranking', value: '<strong>A</strong>' },
+        { kind: 'value', id: 'winner', value: 'A' },
+        { kind: 'text', id: 'trigger', value: 'compare:click' },
+      ],
+      handled: true,
+    });
   });
 
   it('lets a reset handler read its new control value in the same event', () => {
@@ -97,11 +103,14 @@ describe('UiRuntime', () => {
       runtime.dispatch(event('reset'), {
         rate: { value: '25', checked: true },
       }),
-    ).toEqual([
-      { kind: 'value', id: 'rate', value: '10' },
-      { kind: 'text', id: 'result', value: '20' },
-      { kind: 'text', id: 'checked', value: 'true' },
-    ]);
+    ).toEqual({
+      patches: [
+        { kind: 'value', id: 'rate', value: '10' },
+        { kind: 'text', id: 'result', value: '20' },
+        { kind: 'text', id: 'checked', value: 'true' },
+      ],
+      handled: true,
+    });
   });
 
   it('isolates activations and replaces a handler without multiplying callbacks', () => {
@@ -117,16 +126,90 @@ describe('UiRuntime', () => {
       `ui.on('run', 'click', () => ui.text('count', 'other'));`,
       {},
     );
-    expect(first.dispatch(event(), {})).toEqual([
-      { kind: 'text', id: 'count', value: '1' },
-    ]);
-    expect(second.dispatch(event(), {})).toEqual([
-      { kind: 'text', id: 'count', value: 'other' },
-    ]);
-    expect(first.dispatch(event('unknown'), {})).toEqual([]);
-    expect(first.dispatch(event(), {})).toEqual([
-      { kind: 'text', id: 'count', value: '2' },
-    ]);
+    expect(first.dispatch(event(), {})).toEqual({
+      patches: [{ kind: 'text', id: 'count', value: '1' }],
+      handled: true,
+    });
+    expect(second.dispatch(event(), {})).toEqual({
+      patches: [{ kind: 'text', id: 'count', value: 'other' }],
+      handled: true,
+    });
+    expect(first.dispatch(event('unknown'), {})).toEqual({
+      patches: [],
+      handled: false,
+    });
+    expect(first.dispatch(event(), {})).toEqual({
+      patches: [{ kind: 'text', id: 'count', value: '2' }],
+      handled: true,
+    });
+  });
+
+  it('distinguishes an invoked empty handler from an unmatched event', () => {
+    const runtime = createRuntime();
+    runtime.initialize(
+      `let calls = 0;
+       ui.on('run', 'click', () => { calls++; });
+       ui.on('inspect', 'click', () => ui.text('calls', String(calls)));`,
+      {},
+    );
+
+    expect(runtime.dispatch(event('run', '', 'input'), {})).toEqual({
+      patches: [],
+      handled: false,
+    });
+    expect(runtime.dispatch(event(), {})).toEqual({
+      patches: [],
+      handled: true,
+    });
+    expect(runtime.dispatch(event('run', '', 'change'), {})).toEqual({
+      patches: [],
+      handled: false,
+    });
+    expect(runtime.dispatch(event(), {})).toEqual({
+      patches: [],
+      handled: true,
+    });
+    expect(runtime.dispatch(event('inspect'), {})).toEqual({
+      patches: [{ kind: 'text', id: 'calls', value: '2' }],
+      handled: true,
+    });
+  });
+
+  it('does not accept guest objects or globals as execution metadata', () => {
+    const runtime = createRuntime();
+    runtime.initialize(
+      `Object.prototype.handled = true;
+       Object.prototype.execution = 'handled';
+       Object.prototype.toJSON = () => ({handled: true, patches: []});
+       Boolean.prototype.valueOf = () => { while (true) {} };
+       Boolean.prototype.toJSON = () => false;
+       JSON.parse = () => ({handled: true});
+       JSON.stringify = () => 'forged';
+       globalThis.handled = true;
+       globalThis.execution = 'handled';
+       globalThis.handlers = {'unknown:click': () => {}};
+       ui.on('run', 'click', () => ({
+         handled: false,
+         execution: 'unhandled',
+         patches: [{kind: 'text', id: 'forged', value: 'attack'}],
+         toJSON() { while (true) {} },
+         valueOf() { while (true) {} }
+       }));`,
+      {},
+    );
+
+    expect(runtime.dispatch(event('unknown'), {})).toEqual({
+      patches: [],
+      handled: false,
+    });
+    expect(runtime.dispatch(event(), {})).toEqual({
+      patches: [],
+      handled: true,
+    });
+    expect(runtime.dispatch(event('unknown'), {})).toEqual({
+      patches: [],
+      handled: false,
+    });
   });
 
   it('has no browser, network, timer, process, filesystem or host messaging globals', () => {
@@ -138,7 +221,7 @@ describe('UiRuntime', () => {
           typeof require, typeof tools, typeof postMessage, typeof WebAssembly
         ]));`,
         {},
-      ),
+      ).patches,
     ).toEqual([
       {
         kind: 'text',
@@ -158,11 +241,12 @@ describe('UiRuntime', () => {
            ui.text('status', 'done');
          });`,
         {},
-      ),
+      ).patches,
     ).toEqual([{ kind: 'text', id: 'status', value: 'ready' }]);
-    expect(runtime.dispatch(event(), {})).toEqual([
-      { kind: 'text', id: 'status', value: 'done' },
-    ]);
+    expect(runtime.dispatch(event(), {})).toEqual({
+      patches: [{ kind: 'text', id: 'status', value: 'done' }],
+      handled: true,
+    });
   });
 
   it.each([
@@ -205,7 +289,7 @@ describe('UiRuntime', () => {
       }
       Promise.resolve().then(next);
     `;
-    expect(createRuntime().initialize(script(256), {})).toEqual([
+    expect(createRuntime().initialize(script(256), {}).patches).toEqual([
       { kind: 'text', id: 'out', value: '256' },
     ]);
     const exceeded = createRuntime();
@@ -248,10 +332,13 @@ describe('UiRuntime', () => {
     );
     expect(
       runtime.dispatch(event(), { input: { value: 'safe', checked: false } }),
-    ).toEqual([
-      { kind: 'text', id: 'out', value: 'safe' },
-      { kind: 'text', id: 'missing', value: '' },
-    ]);
+    ).toEqual({
+      patches: [
+        { kind: 'text', id: 'out', value: 'safe' },
+        { kind: 'text', id: 'missing', value: '' },
+      ],
+      handled: true,
+    });
     const attack = createRuntime();
     expect(() =>
       attack.initialize(
@@ -288,7 +375,7 @@ describe('UiRuntime', () => {
       const runtime = createRuntime();
       runtime.initialize(`ui.on('run', 'click', ${handler});`, {});
       expect(() => runtime.dispatch(event(), {})).toThrow(
-        'Generated JavaScript failed or exceeded a runtime limit.',
+        /^Script error: Invalid UI operation or output limit exceeded/,
       );
       expect(() => runtime.dispatch(event(), {})).toThrow(/stopped/);
     },
@@ -303,11 +390,12 @@ describe('UiRuntime', () => {
          ui.on('run', 'click', () => Promise.reject(new Error('failure'))
            .catch(() => ui.text('out', 'handled')));`,
         {},
-      ),
+      ).patches,
     ).toEqual([{ kind: 'text', id: 'out', value: 'recovered' }]);
-    expect(runtime.dispatch(event(), {})).toEqual([
-      { kind: 'text', id: 'out', value: 'handled' },
-    ]);
+    expect(runtime.dispatch(event(), {})).toEqual({
+      patches: [{ kind: 'text', id: 'out', value: 'handled' }],
+      handled: true,
+    });
   });
 
   it('cannot hide a UI limit violation with a promise rejection handler', () => {
@@ -318,7 +406,7 @@ describe('UiRuntime', () => {
            .catch(() => {});`,
         {},
       ),
-    ).toThrow('Generated JavaScript failed or exceeded a runtime limit.');
+    ).toThrow(/^Script error: Invalid UI operation or output limit exceeded/);
     expect(() => runtime.dispatch(event(), {})).toThrow(/stopped/);
   });
 
@@ -341,12 +429,13 @@ describe('UiRuntime', () => {
            ui.text('out', 'interactive');
          });`,
           {},
-        ),
+        ).patches,
       ).toEqual([{ kind: 'text', id: 'out', value: 'initial' }]);
       for (let i = 0; i < 2; i++) {
-        expect(runtime.dispatch(event(), {})).toEqual([
-          { kind: 'text', id: 'out', value: 'interactive' },
-        ]);
+        expect(runtime.dispatch(event(), {})).toEqual({
+          patches: [{ kind: 'text', id: 'out', value: 'interactive' }],
+          handled: true,
+        });
       }
     },
   );
@@ -382,5 +471,119 @@ describe('UiRuntime', () => {
     expect(() => createRuntime().dispatch(event(), {})).toThrow(
       /not initialized/,
     );
+  });
+
+  describe('view state', () => {
+    it('starts from the saved state and reports only rounds that set it', () => {
+      const runtime = createRuntime();
+      expect(
+        runtime.initialize(
+          `ui.text('out', JSON.stringify(ui.state.get()));
+           ui.on('add', 'click', () => {
+             const state = ui.state.get();
+             state.items.push(state.items.length + 1);
+             ui.state.set(state);
+             ui.state.set({ items: state.items, last: true });
+             ui.text('out', JSON.stringify(ui.state.get()));
+           });
+           ui.on('look', 'click', () => ui.text('out', 'looked'));`,
+          {},
+          '{"items":[1]}',
+        ),
+      ).toEqual({
+        patches: [{ kind: 'text', id: 'out', value: '{"items":[1]}' }],
+      });
+      const saved = '{"items":[1,2],"last":true}';
+      expect(runtime.dispatch(event('add'), {})).toEqual({
+        patches: [{ kind: 'text', id: 'out', value: saved }],
+        state: saved,
+        handled: true,
+      });
+      expect(runtime.dispatch(event('look'), {})).toEqual({
+        patches: [{ kind: 'text', id: 'out', value: 'looked' }],
+        handled: true,
+      });
+    });
+
+    it('returns a fresh copy and keeps the state API fixed', () => {
+      const runtime = createRuntime();
+      expect(
+        runtime.initialize(
+          `const copy = ui.state.get();
+           copy.value = 'changed';
+           ui.state.get = () => 'forged';
+           ui.text('out', [ui.state.get().value, Object.isFrozen(ui.state)].join());`,
+          {},
+          '{"value":"saved"}',
+        ).patches,
+      ).toEqual([{ kind: 'text', id: 'out', value: 'saved,true' }]);
+      expect(
+        createRuntime().initialize(
+          "ui.text('out', String(ui.state.get()));",
+          {},
+        ).patches,
+      ).toEqual([{ kind: 'text', id: 'out', value: 'null' }]);
+    });
+
+    it.each([
+      ['undefined', 'undefined', /JSON value/],
+      ['a function', '() => 1', /JSON value/],
+      ['a non-finite number', 'NaN', /JSON value/],
+      ['a nested undefined', '{ x: undefined }', /JSON value/],
+      ['a sparse array', '[, 1]', /JSON value/],
+      ['a map', 'new Map()', /JSON value/],
+      ['a date', 'new Date(0)', /JSON value/],
+      ['an object with toJSON', '{ toJSON: () => 1 }', /JSON value/],
+      [
+        'a getter that replaces its own field',
+        `({ get x() {
+          Object.defineProperty(this, 'x', { value: 1 });
+          return 1;
+        } })`,
+        /JSON value/,
+      ],
+      [
+        'a cycle',
+        '(() => { const a = {}; a.a = a; return a; })()',
+        /circular|cyclic/i,
+      ],
+      ['a value over 16 KiB', "'x'.repeat(16 * 1024)", /16 KiB/],
+    ])('lets the card catch a state set to %s', (_name, value, error) => {
+      const runtime = createRuntime();
+      const { patches, state } = runtime.initialize(
+        `try { ui.state.set(${value}); ui.text('out', 'set'); }
+         catch (error) { ui.text('out', error.message); }
+         ui.text('saved', String(ui.state.get()));`,
+        {},
+        '42',
+      );
+      expect(state).toBeUndefined();
+      expect(patches[0]?.value).toMatch(error);
+      expect(patches[1]?.value).toBe('42');
+    });
+
+    it('saves plain data without invoking inherited serialization hooks', () => {
+      const { state } = createRuntime().initialize(
+        `Object.prototype.toJSON = Array.prototype.toJSON = () => 1;
+         ui.state.set({ items: [2, { enabled: true }], label: '✓' });`,
+        {},
+      );
+      expect(state).toBe('{"items":[2,{"enabled":true}],"label":"✓"}');
+    });
+
+    it('fails the round for an uncaught state error', () => {
+      expect(() =>
+        createRuntime().initialize('ui.state.set(undefined);', {}),
+      ).toThrow(/Script error: TypeError: ui.state.set needs a JSON value/);
+    });
+
+    it.each([
+      ['malformed JSON', '{'],
+      ['more than 16 KiB', JSON.stringify('x'.repeat(16 * 1024))],
+    ])('refuses saved state that is %s', (_name, state) => {
+      expect(() => createRuntime().initialize('', {}, state)).toThrow(
+        /saved view state|JSON/i,
+      );
+    });
   });
 });

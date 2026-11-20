@@ -98,6 +98,16 @@ pub(crate) fn all_windows_any_layer() -> Vec<WindowInfo> {
     enumerate_windows(kCGWindowListExcludeDesktopElements, LayerFilter::AnyLayer).windows
 }
 
+/// Visible stacking order must come from the on-screen query: the all-window
+/// query can report a different order even for rows marked on-screen.
+pub(crate) fn visible_windows_any_layer() -> Vec<WindowInfo> {
+    enumerate_windows(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        LayerFilter::AnyLayer,
+    )
+    .windows
+}
+
 pub(crate) fn match_ax_window(
     pid: i32,
     title: Option<&str>,
@@ -127,7 +137,7 @@ pub(crate) fn match_ax_window(
         .into_iter()
         .filter(|window| window.title.trim() == title)
         .collect();
-    (titled.len() == 1).then_some(titled[0].window_id)
+    (titled.len() == 1).then(|| titled[0].window_id)
 }
 
 /// Supplement an explicitly requested application's visible AX dialogs only.
@@ -399,6 +409,7 @@ fn get_bounds_num(
                 None
             }
         })
+        .filter(|value| value.is_finite())
         .unwrap_or(0.0)
 }
 
@@ -410,6 +421,12 @@ pub fn window_info_by_id(window_id: u32) -> Option<WindowInfo> {
     all_windows_any_layer()
         .into_iter()
         .find(|w| w.window_id == window_id)
+}
+
+pub(crate) fn window_on_current_space_by_id(window_id: u32) -> Option<bool> {
+    let query = crate::input::skylight::SpaceQuery::new()?;
+    let spaces = query.window_space_ids(window_id)?;
+    window_on_current_space(Some(&spaces), query.current_space_for_window(window_id))
 }
 
 /// Look up a window's bounds by its CGWindowID.
@@ -482,6 +499,33 @@ pub fn resolve_main_window_id(pid: i32) -> anyhow::Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_bounds_keep_finite_values_when_core_foundation_reports_invalid_numbers() {
+        use core_foundation::{
+            base::TCFType, dictionary::CFDictionary, number::CFNumber, string::CFString,
+        };
+
+        for value in [12.5, -50.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let dictionary = CFDictionary::from_CFType_pairs(&[(
+                CFString::new("X").as_CFType(),
+                CFNumber::from(value).as_CFType(),
+            )]);
+            let bounds =
+                unsafe { CFDictionary::wrap_under_get_rule(dictionary.as_concrete_TypeRef()) };
+            let parsed = get_bounds_num(&bounds, "X");
+            assert_eq!(parsed, if value.is_finite() { value } else { 0.0 });
+            assert_eq!(get_bounds_num(&bounds, "Missing"), 0.0);
+            assert!(serde_json::to_value(WindowBounds {
+                x: parsed,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            })
+            .unwrap()["x"]
+                .is_number());
+        }
+    }
 
     #[test]
     fn cg_front_to_back_order_normalizes_to_higher_is_frontmost() {
@@ -564,6 +608,25 @@ mod tests {
         );
         assert_eq!(
             match_ax_window(800, None, [0.0, 580.0, 500.0, 500.0], &windows),
+            None
+        );
+    }
+
+    #[test]
+    fn ax_window_matching_refuses_a_title_without_a_matching_candidate() {
+        let mut target = window(42, 800, "TextEdit");
+        target.title = "First".into();
+        let mut duplicate = target.clone();
+        duplicate.window_id = 43;
+        duplicate.title = "Second".into();
+        let windows = vec![target, duplicate];
+
+        assert_eq!(
+            match_ax_window(800, Some("Missing"), [9.0, 580.0, 500.0, 500.0], &windows),
+            None
+        );
+        assert_eq!(
+            match_ax_window(800, Some("Missing"), [0.0, 580.0, 500.0, 500.0], &windows),
             None
         );
     }

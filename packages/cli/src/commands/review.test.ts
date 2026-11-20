@@ -82,6 +82,7 @@ describe('reviewCommand', () => {
       'save-artifact',
       'submit',
       'cleanup',
+      'watch-repo',
     ]);
   });
 

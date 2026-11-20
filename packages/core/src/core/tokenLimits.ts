@@ -2,6 +2,7 @@ import {
   lookupModelCatalog,
   versionSpellingAlias,
 } from '../models/model-catalog.js';
+import { KIMI_K3_GENERATION } from '../models/constants.js';
 
 type Model = string;
 type TokenCount = number;
@@ -162,7 +163,7 @@ export function normalize(model: string): string {
   // model name. `modelId.ts` documents the same collision from the other side
   // ("Model IDs can legitimately contain colons").
   s = s.replace(
-    /:(?:free|beta|extended|thinking|online|nitro|floor|latest|\d+(?:\.\d+)?(?:x\d+)?b(?:-[\w.]+)*)$/,
+    /:(?:free|beta|extended|thinking|online|nitro|floor|exacto|latest|\d+(?:\.\d+)?(?:x\d+)?b(?:-[\w.]+)*)$/,
     '',
   );
 
@@ -235,6 +236,23 @@ export function normalize(model: string): string {
  */
 const CLAUDE_OPUS_EXTENDED = /^claude-opus-(?:4-(?:6|7|8)|5)/;
 
+/**
+ * qwen4-max: `max_tokens` caps thinking + answer together (262,144 in thinking
+ * mode), so the flat 64K auto ceiling would be consumed by thinking alone.
+ * Exempt it from OUTPUT_TOKEN_CEILING like CLAUDE_OPUS_EXTENDED;
+ * clampOutputTokensToWindow still bounds every request by window room. Scoped
+ * to qwen4-max (not the whole qwen4 prefix): the combined cap is a qwen4-max
+ * contract, and other qwen4* routes keep their shipped output limit.
+ */
+const QWEN4_OUTPUT_EXTENDED = /^qwen4-max/;
+
+/**
+ * qwen4-max non-thinking output cap: with thinking disabled the gateway rejects
+ * max_tokens above 131,072 (400 range error), while thinking mode allows the
+ * full 262,144. The pipeline clamps the final disable shape to this value.
+ */
+export const QWEN4_NON_THINKING_OUTPUT_CAP: TokenCount = 131_072;
+
 /** Ordered regex patterns: most specific -> most general (first match wins). */
 const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
@@ -263,8 +281,17 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3-coder-plus/, LIMITS['1m']],
   [/^qwen3-coder-flash/, LIMITS['1m']],
   [/^qwen3\.\d/, LIMITS['1m']],
+  // 1M is the forward default for the qwen4 generation, so qwen4.x releases
+  // need no further code change. The catalog still wins once models.dev
+  // publishes a qwen4 entry with a different window.
+  [/^qwen4/, LIMITS['1m']],
   [/^qwen-plus-latest$/, LIMITS['1m']],
   [/^qwen-flash-latest$/, LIMITS['1m']],
+  // Invite-only series aliases (`qwen-latest-series-invite-202610-m4`) name no
+  // model generation the rows above key on and are absent from models.dev, so
+  // they fell through to the 256K family row. The whole series is 1M; the
+  // trailing hyphen keeps the prefix off ids that merely share its letters.
+  [/^qwen-latest-series-/, LIMITS['1m']],
   [/^coder-model$/, LIMITS['1m']],
   // Commercial API models (256K context)
   [/^qwen3-max/, LIMITS['256k']],
@@ -302,7 +329,11 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
-  [/^kimi-k3/, LIMITS['1m']], // Kimi K3: 1M
+  // Kimi K3's 256K variant shares the generation prefix but not its window,
+  // so it is named before the 1M row (Kimi Code reports 262,144 for it).
+  [/^(?:kimi-)?k3-256k$/, LIMITS['256k']],
+  // Kimi K3 generation: 1M, including Kimi Code's bare `k3.1-pro` aliases.
+  [KIMI_K3_GENERATION, LIMITS['1m']],
   [/^kimi-/, LIMITS['256k']], // Kimi fallback: 256K
 
   // -------------------
@@ -332,6 +363,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
   // Alibaba / Qwen
+  [QWEN4_OUTPUT_EXTENDED, LIMITS['256k']], // qwen4-max: max_tokens caps CoT + answer (262,144 thinking)
   [/^qwen3\.\d/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
   [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 32K
@@ -381,7 +413,17 @@ function findTokenLimit(
   type: TokenLimitType = 'input',
 ): TokenCount | undefined {
   const norm = normalize(model);
-  const catalog = lookupModelCatalog(norm);
+  let catalog = lookupModelCatalog(norm);
+  if (!catalog) {
+    // A terminal dotted version may be stripped as a suffix (deepseek-v3.1 ->
+    // deepseek). Retry its original spelling's alias before normalizing so the
+    // catalog's dashed entry remains reachable without changing normalization.
+    const alias = versionSpellingAlias(model);
+    const rawNorm = model.toLowerCase().replace(/^.*\//, '');
+    if (alias && norm !== rawNorm) {
+      catalog = lookupModelCatalog(normalize(alias));
+    }
+  }
   const fromCatalog = type === 'output' ? catalog?.output : catalog?.context;
   const usableCatalogContext =
     type === 'input' &&
@@ -452,7 +494,11 @@ export function tokenLimit(
  */
 export function defaultOutputCeiling(model: Model): TokenCount {
   const outputLimit = tokenLimit(model, 'output');
-  if (CLAUDE_OPUS_EXTENDED.test(normalize(model))) {
+  const normalized = normalize(model);
+  if (
+    CLAUDE_OPUS_EXTENDED.test(normalized) ||
+    QWEN4_OUTPUT_EXTENDED.test(normalized)
+  ) {
     return outputLimit;
   }
   return Math.min(outputLimit, OUTPUT_TOKEN_CEILING);

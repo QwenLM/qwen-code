@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDaemonRestRequest } from '../daemon/rest-request.js';
 import { persistDaemonToken } from './daemon';
 
 export async function exchangePairingCode(
@@ -20,7 +21,12 @@ export async function exchangePairingCode(
   window.history.replaceState(window.history.state, '', url);
   if (baseUrl !== window.location.origin) return { failed: true };
   try {
-    const response = await fetch(`${baseUrl}/web-shell/pairing/exchange`, {
+    const response = await createDaemonRestRequest(
+      baseUrl,
+      code,
+      undefined,
+      true,
+    )('/web-shell/pairing/exchange', {
       method: 'POST',
       headers: { Authorization: `Bearer ${code}` },
       cache: 'no-store',
