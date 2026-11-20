@@ -2,7 +2,7 @@
 
 [English](2026-11-04-github-channel-bound-session-action-templates.md) | [简体中文](2026-11-04-github-channel-bound-session-action-templates.zh-CN.md)
 
-Status: implemented on `feat/github-bound-session-action-templates` (2026-11-04, pending review; direction confirmed by the maintainer: role-aware fan-out). Builds on the implemented [GitHub Channel Events to PR-Bound Sessions](2026-11-02-github-channel-bound-session-events.md) design (PR #16117). This proposal explicitly generalizes that design's Key decision 4 ("one candidate, no broadcast") to **one winner per role, fan-out across roles**, and only when the new field is configured; with the field absent, every behavior of the base design is unchanged.
+Status: implemented as #16258 (2026-11-04; direction confirmed by the maintainer: role-aware fan-out). The body below describes the increment as designed. Builds on the implemented [GitHub Channel Events to PR-Bound Sessions](2026-11-02-github-channel-bound-session-events.md) design (PR #16117). This proposal explicitly generalizes that design's Key decision 4 ("one candidate, no broadcast") to **one winner per role, fan-out across roles**, and only when the new field is configured; with the field absent, every behavior of the base design is unchanged.
 
 ## Problem
 

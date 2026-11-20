@@ -65,6 +65,7 @@ import { classifyRetryError } from '../../utils/retryErrorClassification.js';
 import { retryContext } from '../../utils/retryContext.js';
 import { getErrorStatus } from '../../utils/errors.js';
 import { buildSessionAwareFetch } from '../outbound-session-id.js';
+import { markRequestDispatched } from '../loggingContentGenerator/request-dispatch.js';
 import {
   isRetryableStatuslessUpstreamError,
   isRetryableStreamTransportError,
@@ -392,6 +393,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
     let stream: AsyncIterable<RawMessageStreamEvent>;
     try {
+      markRequestDispatched();
       stream = (await this.client.messages.create(
         streamingRequest as MessageCreateParamsStreaming,
         {

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
@@ -96,7 +97,7 @@ public final class ManagedMcpSettings {
                         + " FROM ma_session_record r LEFT JOIN ma_resource u ON u.session_scope_key=r.session_scope_key"
                         + " AND u.resource_id=r.record_resource_id AND u.tenant_id=r.tenant_id AND u.session_id=r.session_id"
                         + " AND u.workspace_id=r.workspace_id WHERE r.session_scope_key=? AND r.tenant_id=? AND r.session_id=?"
-                        + " AND r.record_kind='DOMAIN' AND r.domain=? AND r.record_id=?",
+                        + " AND r.record_kind='DOMAIN' AND r.domain=? AND r.record_id=? AND r.record_key=?",
                 (row, index) -> {
                     byte[] bytes = row.getBytes("inline_bytes");
                     check(bytes != null && bytes.length == row.getLong("byte_length")
@@ -111,7 +112,8 @@ public final class ManagedMcpSettings {
                     require(body);
                     check(body.get("revision").longValue() == row.getLong("revision"), "MCP settings projection conflicts");
                     return body;
-                }, scope, tenantId, sessionId, DOMAIN, RECORD_ID).stream().findFirst().orElse(null);
+                }, scope, tenantId, sessionId, DOMAIN, RECORD_ID,
+                ManagedExtensionProjection.recordKey(sessionId, DOMAIN, RECORD_ID)).stream().findFirst().orElse(null);
     }
 
     private static void check(boolean valid, String message) {

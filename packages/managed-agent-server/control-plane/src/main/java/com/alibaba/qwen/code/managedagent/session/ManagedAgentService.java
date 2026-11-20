@@ -59,7 +59,6 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -120,6 +119,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         this.extensionPackages = value;
     }
     private org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices;
+    private boolean externalFilesConfiguration;
+
     private BooleanSupplier sideQueriesEnabled = () -> false;
     private BooleanSupplier terminalEnabled = () -> false;
     private java.util.function.Predicate<SessionRecord> terminalPlacementCapable = session -> false;
@@ -168,6 +169,12 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 && harness.supportsClientFiles(session);
     }
 
+    @Autowired
+    void configureExternalFiles(ManagedAgentSettings properties) {
+        externalFilesConfiguration = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
+                .equals(properties.getRuntimeBroker().getProvisioner());
+    }
+
     @Autowired(required = false)
     void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
         this.runtimeWarmer = runtimeWarmer;
@@ -184,11 +191,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     private boolean supportsClose(SessionRecord session) {
-        if (CsiFilesRetirementProfile.isProfile(session.toolProfile())) {
-            return false;
-        }
         return session.workspace() == null || RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
-                && harness.supportsLifecycle(session.toolProfile());
+                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
     }
 
     private boolean hasActions(SessionRecord session) {
@@ -327,6 +332,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             String tenantId, String actorId, String agentId) {
         requireModelActor(actorId);
         var options = store.workspaceSessionOptions(tenantId, agentId);
+        if (externalFilesConfiguration) {
+            return new WebShellSessionOptions(options.approvalMode(), options.availableApprovalModes(),
+                    false, false, false, "qwen-code".equals(agentId) && workspaces.externalFilesAvailable()
+                            && !store.modelOptions().isEmpty() && harness.supportsModelSelection());
+        }
         if ("qwen-code".equals(agentId) && store.workspaceShellEnabled() && harness.supportsApprovalSelection()) {
             return new WebShellSessionOptions(options.approvalMode(), List.of("default", "auto-edit", "yolo"),
                     harness.supportsPlanMode(), harness.supportsInputAttachments(), harness.supportsSessionSkills(),
@@ -584,6 +594,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         requireMemoryConfiguration(memoryStoreId);
         requireModelConfiguration(modelConfig);
+        if (externalFilesConfiguration && !workspaces.externalFilesAvailable()) {
+            throw new ManagedAgentException(409, "workspace_unavailable", "External Workspace creation is unavailable.");
+        }
         if (modelId != null && (!"qwen-code".equals(agentId) || !harness.supportsModelSelection())) {
             throw new ManagedAgentException(409, "unsupported_feature",
                     "Initial model selection is unavailable for this Agent.");
@@ -591,6 +604,42 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         if (!additions.isEmpty() && !harness.supportsSessionSkills()) {
             throw new ManagedAgentException(409, "unsupported_feature",
                     "The Hosted Harness does not support Session Skills.");
+        }
+        // Defaults are a bonus for extension-capable creations only: when the
+        // resolved profile, lifecycle negotiation or import readiness cannot
+        // admit pins, skip discovery and keep the legacy creation behavior
+        // instead of importing packages a later gate would refuse.
+        if (extensionPins == null && additions.isEmpty() && extensionPackages != null && extensionPackages.hasSkillCatalog()
+                && harness.supportsSessionExtensions()
+                && (input.isEmpty() || harness.isWorkspaceFilesAvailable())
+                && (worktree == null || sessionWorktrees != null)) {
+            var workspace = selection == null ? workspaces.readableDefault(tenantId, actorId)
+                    : workspaces.findReadable(tenantId, actorId, selection.workspaceId());
+            if (workspace == null) {
+                if (selection == null) {
+                    throw new ManagedAgentException(400, "workspace_required", "Select a Workspace.");
+                }
+                throw new ManagedAgentException(404, "workspace_not_found", "Workspace was not found.");
+            }
+            if (!workspace.canCreateSession()) {
+                throw new ManagedAgentException(403, "workspace_forbidden", "Workspace cannot be used.");
+            }
+            String profile = store.creationToolProfile(tenantId, actorId, agentId, agentRevision, workspace.workspaceId());
+            if (profile != null
+                    && (WorkspaceToolProfiles.isPublicShell(profile) || WorkspaceToolProfiles.MCP.equals(profile))
+                    && harness.supportsLifecycle(profile)
+                    && extensionPackages.defaultImportsSupported(tenantId, actorId, workspace.workspaceId())) {
+                var pins = extensionPackages.defaultSkillPins(tenantId, actorId, workspace.workspaceId(), idempotencyKey);
+                if (!pins.isEmpty()) {
+                    extensionPins = pins;
+                    // Admitted defaults bind the resolved Workspace explicitly;
+                    // an empty catalog keeps the omitted selection and its
+                    // default tenant-scan lock order (see the lock inventory).
+                    if (selection == null) {
+                        selection = new WorkspaceSelection(workspace.workspaceId(), ".");
+                    }
+                }
+            }
         }
         if (extensionPins != null && !harness.supportsSessionExtensions()) {
             throw new ManagedAgentException(409, "unsupported_feature", "The Hosted Harness does not support extension packages.");
@@ -602,7 +651,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         Admission admission;
         Set<String> extensionLifecycleProfiles = extensionPins == null ? Set.of()
-                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3, WorkspaceToolProfiles.MCP)
+                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3, WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP)
                         .filter(harness::supportsLifecycle).collect(java.util.stream.Collectors.toSet());
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
@@ -641,6 +690,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                     .planModeSupported(harness.supportsPlanMode())
                     .skills(additions)
                     .publicChildrenSupported(harness.supportsPublicChildAgents())
+                    .sessionSkillsSupported(harness.supportsSessionSkills())
                     .modelId(modelId)
                     .extensionPins(extensionPins)
                     .extensionSelection(extensionSelection)
@@ -747,8 +797,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             com.fasterxml.jackson.databind.JsonNode snapshot) {
         List<Map<String, Object>> normalizedInput = normalizeInput(input);
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
-        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
-                || CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
             throw new ManagedAgentException(409,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
@@ -1582,7 +1631,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         false, foregroundShell(session, worktree),
                         visible && session.modelConfigDigest() == null && modelSelectionSupported && mayChangeContext,
                         visible && approvalSupported && mayChangeContext && !Boolean.FALSE.equals(foregroundShell(session, worktree)),
-                        visible && maySubmit && harness.supportsInputAttachments(),
+                        // Unbound Turns skip the Workspace admission conjuncts
+                        // (requireSubmitterFacts only enforces them when bound),
+                        // so an ACTIVE unbound Session advertises attachments
+                        // on the same harness capability instead of hiding them.
+                        visible && (maySubmit || (session.workspace() == null && !publicChild
+                                && "ACTIVE".equals(session.status())))
+                                && !WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && harness.supportsInputAttachments(),
                         visible && "ACTIVE".equals(session.status()) && renameSupported
                                 && (session.workspace() == null || maySubmit),
                         visible && approvalExecutable && compressionSupported && compression.available(),
@@ -1612,12 +1667,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
-        if (CsiFilesRetirementProfile.isProfile(session.toolProfile())) {
-            return false;
-        }
         return retention || session.workspace() != null
                 && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
-                && harness.supportsLifecycle(session.toolProfile());
+                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
     }
 
     private Boolean childAgentsCapability(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
@@ -1919,7 +1972,28 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         return session.workspace() != null && "ACTIVE".equals(session.status())
                 && session.deletedAt() == null && store.workspaceFilesEnabled()
                 && ready(worktree)
-                && (runtimeWarmer == null || runtimeWarmer.supportsWorkspaceContextChange(session.workspace()));
+                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? externalContextShapeAllowed(session)
+                        : runtimeWarmer == null || runtimeWarmer.supportsWorkspaceContextChange(session.workspace()));
+    }
+
+    /**
+     * Shape-only answer for the external profile, whose eligibility reads the
+     * durable registration. That read refuses an unreadable, ambiguous or
+     * undecodable record by throwing, while this predicate renders a capability
+     * flag for every row of a Session page — letting it propagate would turn one
+     * bad registration into a failed listing for unrelated Sessions.
+     *
+     * A refusal means eligibility is unproven, so the flag is false. Admission
+     * still calls the throwing check on the mutating path, so nothing is
+     * admitted on this weaker answer.
+     */
+    private boolean externalContextShapeAllowed(SessionRecord session) {
+        try {
+            return workspaces.externalFilesAllowed(session.workspace());
+        } catch (RuntimeException unproven) {
+            return false;
+        }
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,

@@ -59,7 +59,7 @@ defaults:
 # scripts/tests/qwen-autofix-fork-bridge-workflow.test.js.
 concurrency:
   group: >-
-    ${{ (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-fork-signal-pr-{0}', github.event.pull_request.number) || format('qwen-autofix-fork-signal-{0}', github.run_id) }}
+    ${{ (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-review-bot') && format('qwen-autofix-fork-signal-pr-{0}', github.event.pull_request.number) || format('qwen-autofix-fork-signal-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -107,7 +107,7 @@ jobs:
       || contains(toJSON(github.event.pull_request.labels.*.name), '"autofix/takeover"'))
       && !contains(toJSON(github.event.pull_request.labels.*.name), '"autofix/skip"')
       && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)
-      || github.event.review.user.login == 'qwen-code-ci-bot') }}
+      || github.event.review.user.login == 'qwen-code-review-bot') }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     steps:

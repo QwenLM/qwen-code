@@ -65,6 +65,7 @@ type DialogContentProps = React.ComponentProps<
   typeof DialogPrimitive.Content
 > & {
   showCloseButton?: boolean;
+  closeLabel?: string;
   overlayProps?: React.ComponentProps<typeof DialogPrimitive.Overlay>;
 };
 
@@ -72,7 +73,14 @@ const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   DialogContentProps
 >(function DialogContent(
-  { className, children, showCloseButton = true, overlayProps, ...props },
+  {
+    className,
+    children,
+    showCloseButton = true,
+    closeLabel = 'Close',
+    overlayProps,
+    ...props
+  },
   ref,
 ) {
   return (
@@ -96,7 +104,7 @@ const DialogContent = React.forwardRef<
               size="icon-sm"
             >
               <XIcon />
-              <span className="sr-only">Close</span>
+              <span className="sr-only">{closeLabel}</span>
             </Button>
           </DialogPrimitive.Close>
         )}

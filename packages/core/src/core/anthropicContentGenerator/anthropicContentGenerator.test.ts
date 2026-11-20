@@ -1111,6 +1111,24 @@ describe('AnthropicContentGenerator', () => {
       expect(reqHeaders['anthropic-beta']).toContain(EFFORT_BETA);
     });
 
+    it('reports the request dispatch before the SDK call', async () => {
+      createImpl.mockResolvedValue(streamOf(messageDelta('end_turn', 1)));
+      const onDispatch = vi.fn();
+      // Same module instance as the generator's, afresh after resetModules().
+      const { observeRequestDispatch } = await import(
+        '../loggingContentGenerator/request-dispatch.js'
+      );
+
+      await observeRequestDispatch(onDispatch, async () => {
+        await drain(await openStream());
+      });
+
+      expect(onDispatch).toHaveBeenCalledTimes(1);
+      expect(onDispatch.mock.invocationCallOrder[0]).toBeLessThan(
+        createImpl.mock.invocationCallOrder[0],
+      );
+    });
+
     it('also sends the computed beta header on streaming requests', async () => {
       // A separate code path from generateContent(). message_delta, not a
       // bare message_stop, which signals an empty stream and a fallback retry.

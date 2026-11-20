@@ -1,9 +1,5 @@
 package com.alibaba.qwen.code.managedagent.settings;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity;
-import com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact;
-
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -11,6 +7,7 @@ import java.util.Map;
 public interface ManagedAgentSettings {
     public Harness getHarness();
     public boolean admitsPublicChildAgents();
+    public boolean isExternalWorkspaceFilesConfigured();
     public Automation getAutomation();
     public Channels getChannels();
     public EventTransport getEventTransport();
@@ -62,13 +59,6 @@ public interface ManagedAgentSettings {
         public String getKeyStorePasswordFile();
         public String getTrustStoreFile();
         public String getTrustStorePasswordFile();
-        public String getKubernetesApiUrl();
-        public String getKubernetesTokenFile();
-        public String getKubernetesCaFile();
-        public String getNamespace();
-        public String getServiceName();
-        public String getServiceUid();
-        public String getPortName();
     }
     public interface HarnessInstance {
         public String getInstanceId();
@@ -162,6 +152,13 @@ public interface ManagedAgentSettings {
     public interface RuntimeBroker {
         public SshSettings getSsh();
         public Retention getRetention();
+        public McpParking getMcpParking();
+        public interface McpParking {
+            public boolean isEnabled();
+            public Duration getIdleDuration();
+            public int getBatchSize();
+            public Duration getScanDelay();
+        }
         public interface Retention {
             public boolean isEnabled();
             public Duration getMaxAge();
@@ -199,19 +196,6 @@ public interface ManagedAgentSettings {
             public String storageId();
             public String root();
         }
-        public interface ResidentWorkspace {
-            public String workspaceId();
-            public long workspaceGeneration();
-            public WorkspaceCsiRegistration registration();
-            public ProtectionIdentity protection();
-            public String image();
-            public List<String> command();
-            public List<WorkerArtifact> artifacts();
-        }
-        public List<? extends ResidentWorkspace> getResidentWorkspaces();
-        public String getResidentKubernetesApiUrl();
-        public String getResidentKubernetesTokenFile();
-        public String getResidentKubernetesCaFile();
         public boolean isDurableLocalProcess();
         public boolean isTrustedLocalRebootRecovery();
         public boolean isOperatorRecoveryEnabled();

@@ -11,6 +11,7 @@
  * node test against a scripted control-plane peer.
  */
 
+import { randomUUID } from '../utils/random-uuid.js';
 import type { JsonRpcRequest } from './mcp-server.js';
 // Single source of truth for the RPC contract: the sibling daemon bridge
 // already exports this structural type; re-export it rather than re-declaring.
@@ -103,7 +104,7 @@ export class ManagedClientFilesBridge {
     // A unique identity for this registration: the downlink is correlated to
     // it (not merely to "a generation newer than baseline"), so a concurrent
     // tab's registration can never be adopted and drained onto this directory.
-    const connectionId = crypto.randomUUID();
+    const connectionId = randomUUID();
     this.connectionId = connectionId;
     let registerFailed = false;
     let registerIssued = false;

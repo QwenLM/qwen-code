@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import { promises as fs } from 'node:fs';
 import { createServer, type Server } from 'node:http';
+import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -70,8 +71,13 @@ import {
   WorkspaceSettingsPartialPersistError,
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
-import { type AcpHttpHandle, mountAcpHttp } from './index.js';
+import {
+  type AcpHttpHandle,
+  type MountAcpHttpOptions,
+  mountAcpHttp,
+} from './index.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
+import { isManagedTerminalUpgradePath } from '../managed-local-web.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
@@ -4415,6 +4421,62 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('session/list carries the artifact count and the pending-restore marker', async () => {
+    bridge.workspaceSessions = [
+      {
+        sessionId: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
+        workspaceCwd: TEST_WORKSPACE,
+        createdAt: '2026-06-30T00:00:00.000Z',
+        updatedAt: '2026-06-30T00:01:00.000Z',
+        displayName: 'Counted Session',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isArchived: false,
+        artifactCount: 3,
+      },
+      {
+        sessionId: '22222222-bbbb-cccc-dddd-eeeeeeeeeeee',
+        workspaceCwd: TEST_WORKSPACE,
+        createdAt: '2026-06-30T00:00:00.000Z',
+        updatedAt: '2026-06-30T00:02:00.000Z',
+        displayName: 'Restoring Session',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isArchived: false,
+        artifactCountPending: true,
+      },
+    ];
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 13,
+      method: 'session/list',
+      params: { workspaceCwd: TEST_WORKSPACE },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { sessions: Array<Record<string, unknown>> };
+    }>;
+    expect(frame.id).toBe(13);
+    const counted = frame.result.sessions.find(
+      (session) =>
+        session['sessionId'] === '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
+    );
+    expect(counted).toMatchObject({ artifactCount: 3 });
+    expect(counted).not.toHaveProperty('artifactCountPending');
+    const restoring = frame.result.sessions.find(
+      (session) =>
+        session['sessionId'] === '22222222-bbbb-cccc-dddd-eeeeeeeeeeee',
+    );
+    expect(restoring).toMatchObject({ artifactCountPending: true });
+    expect(restoring).not.toHaveProperty('artifactCount');
+  });
+
   it('cancels session/list without buffering an error when the connection is destroyed', async () => {
     let loadSignal: AbortSignal | undefined;
     const listSessionsSpy = vi
@@ -6590,7 +6652,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ) as
         | {
             result?: {
-              prs?: Array<{ number: number; url: string; state?: string }>;
+              prs?: Array<{
+                number: number;
+                url: string;
+                state?: string;
+                source?: string;
+              }>;
             };
           }
         | undefined;
@@ -6602,6 +6669,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           number: 9101,
           url: 'https://github.com/o/r/pull/9101',
           state: 'merged',
+          source: 'create',
         },
       ]);
       // The entry must be re-hydrated from the sidecar BEFORE the mutation
@@ -12798,6 +12866,8 @@ describe('ACP WebSocket transport security', () => {
       webShellToken?: string;
       hostname?: string;
       reportedLocalPort?: number;
+      reportedRemoteAddress?: string;
+      managedTerminalUpgrade?: MountAcpHttpOptions['managedTerminalUpgrade'];
       desktopRelaySessionId?: string;
     } = {},
   ) {
@@ -12853,6 +12923,7 @@ describe('ACP WebSocket transport security', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
         clientMcpOverWs: opts.desktopRelaySessionId !== undefined,
+        managedTerminalUpgrade: opts.managedTerminalUpgrade,
         ...(opts.cdpTunnelOverWs
           ? {
               cdpTunnelOverWs: true,
@@ -12867,6 +12938,14 @@ describe('ACP WebSocket transport security', () => {
             Object.defineProperty(socket, 'localPort', {
               configurable: true,
               value: opts.reportedLocalPort,
+            });
+          });
+        }
+        if (opts.reportedRemoteAddress !== undefined) {
+          listeningServer.prependListener('upgrade', (_request, socket) => {
+            Object.defineProperty(socket, 'remoteAddress', {
+              configurable: true,
+              value: opts.reportedRemoteAddress,
             });
           });
         }
@@ -12927,11 +13006,12 @@ describe('ACP WebSocket transport security', () => {
     host: string,
     origin?: string,
     extraHeaders: Record<string, string> = {},
+    requestPath = '/acp',
   ): Promise<{ code: number }> {
     return new Promise((resolve) => {
       const headers: Record<string, string> = { ...extraHeaders };
       if (origin) headers['Origin'] = origin;
-      const ws = new WebSocket(`ws://${host}:${port}/acp`, {
+      const ws = new WebSocket(`ws://${host}:${port}${requestPath}`, {
         headers,
         handshakeTimeout: 2000,
       });
@@ -12946,13 +13026,57 @@ describe('ACP WebSocket transport security', () => {
     });
   }
 
+  // Raw bytes keep dot-only selectors intact instead of normalizing them away
+  // during URL parsing. This is a fixture, not an HTTP client URL factory.
+  async function rawTerminalUpgrade(
+    requestPath: string,
+    authority = `127.0.0.1:${port}`,
+  ): Promise<{ statusLine: string; clientError?: string }> {
+    return await new Promise((resolve, reject) => {
+      let data = '';
+      let clientError: string | undefined;
+      const socket = connect({ port, host: '127.0.0.1' }, () => {
+        socket.write(
+          [
+            `GET ${requestPath} HTTP/1.1`,
+            `Host: ${authority}`,
+            'Connection: Upgrade',
+            'Upgrade: websocket',
+            'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version: 13',
+            'Sec-WebSocket-Protocol: qwen-ws',
+            `Origin: http://127.0.0.1:${port}`,
+            '',
+            '',
+          ].join('\r\n'),
+        );
+      });
+      const timeout = setTimeout(() => {
+        socket.destroy();
+        reject(new Error('Raw terminal upgrade timed out'));
+      }, 3000);
+      socket.setEncoding('latin1');
+      socket.on('data', (chunk: string) => {
+        data += chunk;
+      });
+      socket.once('error', (error) => {
+        clientError = error.message;
+      });
+      socket.once('close', () => {
+        clearTimeout(timeout);
+        resolve({ statusLine: data.split('\r\n')[0] ?? '', clientError });
+      });
+    });
+  }
+
   function wsConnectLocalControl(
     token: string,
     headers: Record<string, string> = {},
+    requestPath = '/acp',
   ): Promise<{ code: number; socket?: WebSocket }> {
     return new Promise((resolve) => {
       const ws = new WebSocket(
-        `ws://127.0.0.1:${lanPort}/acp`,
+        `ws://127.0.0.1:${lanPort}${requestPath}`,
         ['qwen-ws', bearerProto(token)],
         {
           headers: {
@@ -13250,6 +13374,131 @@ describe('ACP WebSocket transport security', () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'https://evil.com');
     expect(result.code).toBe(403);
+  });
+
+  it('refuses Managed terminal upgrades on a non-primary listener', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    const forward = vi.fn();
+    await startServer({
+      localControlToken: 'pairing',
+      managedTerminalUpgrade: { matches: () => true, forward },
+    });
+    const result = await wsConnectLocalControl(
+      'pairing',
+      {},
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    );
+    expect(result.code).toBe(403);
+    expect(forward).not.toHaveBeenCalled();
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('managed-terminal-primary-loopback-required'),
+    );
+  });
+
+  it('refuses Managed terminal upgrades on a non-loopback primary socket', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    const forward = vi.fn();
+    await startServer({
+      hostname: '0.0.0.0',
+      token: 'runtime-token',
+      webShellToken: 'device-token',
+      reportedRemoteAddress: '203.0.113.10',
+      managedTerminalUpgrade: { matches: () => true, forward },
+    });
+    const result = await wsConnectRaw(
+      '127.0.0.1',
+      'http://qwen.test:4170',
+      {
+        Host: 'qwen.test:4170',
+        Authorization: 'Bearer device-token',
+      },
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    );
+    expect(result.code).toBe(403);
+    expect(forward).not.toHaveBeenCalled();
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('managed-terminal-primary-loopback-required'),
+    );
+  });
+
+  it('leaves ordinary ACP and near-miss terminal paths outside the Managed relay', async () => {
+    const forward = vi.fn();
+    await startServer({
+      managedTerminalUpgrade: {
+        matches: isManagedTerminalUpgradePath,
+        forward,
+      },
+    });
+    const acp = await wsConnectRaw('127.0.0.1', undefined);
+    expect(acp.code).toBe(101);
+    expect(forward).not.toHaveBeenCalled();
+    const nearMiss = await wsConnectRaw(
+      '127.0.0.1',
+      undefined,
+      {},
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal/',
+    );
+    expect(nearMiss.code).not.toBe(101);
+    expect(forward).not.toHaveBeenCalled();
+  });
+
+  it('keeps the Managed terminal Host allowlist on an authenticated non-loopback bind', async () => {
+    const forwarded: string[] = [];
+    await startServer({
+      hostname: '0.0.0.0',
+      token: 'runtime-token',
+      webShellToken: 'device-token',
+      managedTerminalUpgrade: {
+        matches: isManagedTerminalUpgradePath,
+        forward: (request, socket) => {
+          forwarded.push(request.url ?? '');
+          socket.end('HTTP/1.1 101 Switching Protocols\r\n\r\n');
+        },
+      },
+    });
+    const rejected = await rawTerminalUpgrade(
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+      'attacker.invalid',
+    );
+    expect(rejected.statusLine).toBe('HTTP/1.1 403 Forbidden');
+    expect(forwarded).toEqual([]);
+    const accepted = await rawTerminalUpgrade(
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    );
+    expect(accepted.statusLine).toBe('HTTP/1.1 101 Switching Protocols');
+    expect(forwarded).toEqual([
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    ]);
+  });
+
+  it('rejects dot-only Managed terminal selectors while preserving ordinary dotted selectors', async () => {
+    const forwarded: string[] = [];
+    await startServer({
+      managedTerminalUpgrade: {
+        matches: isManagedTerminalUpgradePath,
+        forward: (request, socket) => {
+          forwarded.push(request.url ?? '');
+          socket.end('HTTP/1.1 101 Switching Protocols\r\n\r\n');
+        },
+      },
+    });
+    for (const session of ['sess-1', 'tenant.v1']) {
+      const result = await rawTerminalUpgrade(
+        `/api/agent/web-shell/v1/sessions/${session}/terminal?terminalId=t1&replay=1`,
+      );
+      expect(result.statusLine).toBe('HTTP/1.1 101 Switching Protocols');
+      expect(result.clientError).toBeUndefined();
+    }
+    for (const selector of ['.', '..']) {
+      const result = await rawTerminalUpgrade(
+        `/api/agent/web-shell/v1/sessions/${selector}/terminal?terminalId=t1&replay=1`,
+      );
+      expect(result.statusLine).not.toContain('101');
+    }
+    expect(forwarded).toEqual([
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+      '/api/agent/web-shell/v1/sessions/tenant.v1/terminal?terminalId=t1&replay=1',
+    ]);
   });
 
   it("rejects cross-origin WS upgrade even when allow-origin '*' is configured", async () => {

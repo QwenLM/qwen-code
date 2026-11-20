@@ -309,6 +309,37 @@ describe('ManagedClientFilesBridge', () => {
     );
   });
 
+  it('registers a connection id without crypto.randomUUID (non-secure context)', async () => {
+    const cryptoObject = globalThis.crypto;
+    const descriptor = Object.getOwnPropertyDescriptor(
+      cryptoObject,
+      'randomUUID',
+    );
+    Object.defineProperty(cryptoObject, 'randomUUID', {
+      value: undefined,
+      configurable: true,
+    });
+    try {
+      const p = await peer();
+      const b = bridge(p, {
+        async handle() {
+          return undefined;
+        },
+      });
+      void b.connect();
+      await vi.waitFor(() => expect(p.registered.length).toBe(1));
+      expect(p.registered[0]!.connectionId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(cryptoObject, 'randomUUID', descriptor);
+      } else {
+        delete (cryptoObject as { randomUUID?: unknown }).randomUUID;
+      }
+    }
+  });
+
   it('reports a notification as offline without a response payload', async () => {
     const p = await peer();
     const b = bridge(p, {

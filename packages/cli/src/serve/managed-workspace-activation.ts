@@ -36,10 +36,15 @@ export const MEASURED_WORKSPACE_CAPABILITY_DIGEST =
 export const MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST = `sha256:${createHash('sha256').update('managed-workspace-execution/2;web-terminal/1').digest('hex')}`;
 export const MEASURED_WORKSPACE_EXECUTION_PROFILE =
   'managed-workspace-execution/2';
+// Registered external storage plus foreground Shell (#15512 slice C). Its own
+// capability, derived from the canonical string exactly as the terminal digest
+// above; the Java control plane pins the same hex in WorkspaceExecutionProfile.
+export const EXTERNAL_SHELL_CAPABILITY_DIGEST = `sha256:${createHash('sha256').update('managed-workspace-execution/1;external-shell/1').digest('hex')}`;
 
 export function isWorkspaceToolCapability(digest: string): boolean {
   return (
     digest === WORKSPACE_CAPABILITY_DIGEST ||
+    digest === EXTERNAL_SHELL_CAPABILITY_DIGEST ||
     isMeasuredWorkspaceCapability(digest)
   );
 }
@@ -159,6 +164,7 @@ export class WorkspaceActivations {
               request['profile'] !== RESIDENT_WORKSPACE_PROFILE
             : ![
                 WORKSPACE_CAPABILITY_DIGEST,
+                EXTERNAL_SHELL_CAPABILITY_DIGEST,
                 MEASURED_WORKSPACE_CAPABILITY_DIGEST,
                 MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
                 ...(boot.managedExtensions

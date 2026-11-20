@@ -44,6 +44,7 @@ import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 import { FootnoteSection, FootnoteSup } from './FootnoteCard';
 import { rehypeFootnoteCards } from './rehype-footnote-cards';
+import { openSessionLink } from './session-link';
 import {
   DEFAULT_WEB_SHELL_MARKDOWN_CHART,
   WebShellMarkdownChartProvider,
@@ -944,7 +945,7 @@ function MarkdownLink({
     if (renderMode !== 'interactive') {
       return <span className={styles.link}>{children}</span>;
     }
-    const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
+    const target = href.trim().replace(QWEN_SESSION_SCHEME, '');
     return (
       <a
         href="#"
@@ -953,9 +954,7 @@ function MarkdownLink({
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          window.dispatchEvent(
-            new CustomEvent('qwen:open-session', { detail: sessionId }),
-          );
+          openSessionLink(target);
         }}
       >
         {children}
@@ -976,12 +975,79 @@ function MarkdownLink({
   );
 }
 
+// Display-layer heuristic only: isSafeImageSrc is a shared security gate
+// whose same-origin consumers (e.g. /images/logo.png) must keep passing, so
+// local-path detection lives here and onError covers whatever it misses.
+const LOCAL_FILE_PATH =
+  /^(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\/(?:Users|home|tmp|var|opt|private|Volumes|mnt|media|srv)\/)/;
+
+export function isLocalFilePath(src: string | undefined): boolean {
+  return !!src && LOCAL_FILE_PATH.test(src.trim());
+}
+
+// micromark percent-encodes markdown destinations, so spaces and non-ASCII
+// arrive encoded; the chip must show a path the reader can actually use.
+function safeDecodePath(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const renderMode = useTranscriptRenderMode();
-  const safeSrc = isSafeImageSrc(src, renderMode === 'document')
-    ? src
-    : undefined;
-  return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+  const { t } = useI18n();
+  const [failedSrc, setFailedSrc] = useState<string>();
+  const documentMode = renderMode === 'document';
+  const localPath = isLocalFilePath(src);
+  const safeSrc =
+    !localPath && isSafeImageSrc(src, documentMode) ? src : undefined;
+  if (localPath || !safeSrc || failedSrc === src) {
+    // The export builder rewrites remote images upstream, but urlTransform
+    // passes https through and hidden copy sources render raw markdown in
+    // document mode, so the chip itself must never echo src there. data:
+    // URIs would dump a base64 blob into the chat in any mode. Only local
+    // paths are decoded: percent-escapes in a URL are part of the resource
+    // identity, so decoding them would display a different resource.
+    const displaySrc =
+      !documentMode && src && !/^data:/i.test(src)
+        ? localPath
+          ? safeDecodePath(src)
+          : src
+        : '';
+    const text =
+      (localPath ? displaySrc || alt : alt || displaySrc) ||
+      t('common.failedToLoad');
+    // plainText reads the alt attribute the way it reads img.alt, so reply
+    // copy extraction keeps its pre-fallback semantics (empty alt stays empty
+    // and the raw-markdown fallback still fires); the turndown rule reads the
+    // src attribute to rebuild the image reference for selection markdown
+    // copy. The src attribute is document-mode-gated like displaySrc. The
+    // accessible name keeps the alt description the replaced img exposed.
+    return (
+      <span
+        className={styles.imageFallback}
+        role="img"
+        aria-label={alt || text}
+        data-markdown-image-alt={alt || ''}
+        data-markdown-image-src={documentMode ? undefined : src}
+      >
+        {text}
+      </span>
+    );
+  }
+  // Document mode keeps the img even when the payload is undecodable: the
+  // transcript-document browser gate pins src preservation for approved
+  // data URIs, so the onError degradation only applies to live chat.
+  return (
+    <img
+      src={safeSrc}
+      alt={alt || ''}
+      className={styles.image}
+      onError={documentMode ? undefined : () => setFailedSrc(src)}
+    />
+  );
 }
 
 /**
