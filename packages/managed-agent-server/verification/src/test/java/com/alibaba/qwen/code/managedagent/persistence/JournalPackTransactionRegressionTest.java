@@ -89,9 +89,13 @@ class JournalPackTransactionRegressionTest {
     }
 
     private byte[] bytes(int size) {
+        return bytes(size, 0);
+    }
+
+    private byte[] bytes(int size, int seed) {
         byte[] value = new byte[size];
         for (int index = 0; index < size; index++) {
-            value[index] = (byte) (index % 251);
+            value[index] = (byte) ((index + seed) % 251);
         }
         return value;
     }
@@ -348,7 +352,7 @@ class JournalPackTransactionRegressionTest {
             for (int index = 0; index < 32; index++) {
                 String session = SESSION + "-sealed-" + index;
                 insertHead(session, 1);
-                insertTransaction(session, 1, bytes(4096));
+                insertTransaction(session, 1, bytes(4096, index + 1));
                 assertThat(packs.compactOnce(TENANT, WORKSPACE, session)).isTrue();
                 jdbc.update("UPDATE ma_session_head SET state = 'SEALED' WHERE tenant_id = ?"
                         + " AND session_id = ?", TENANT, session);
@@ -372,9 +376,12 @@ class JournalPackTransactionRegressionTest {
                     + " record_bytes IS NULL", Long.class)).isEqualTo(33L);
             // A third pass selects nothing: the sweep progresses and terminates.
             assertThat(packs.deleteCoveredBlobs()).isZero();
-            // Evicted bytes stay resolvable for sealed and active sessions alike.
+            // Evicted bytes stay resolvable for sealed and active sessions alike, each
+            // from its own pack: the payloads differ per session, so resolving the wrong
+            // session's pack would fail the digest/length match.
+            byte[] sealedFirst = bytes(4096, 1);
             assertThat(packs.resolveBytes(TENANT, SESSION + "-sealed-0", 1,
-                    JournalStoreRows.sha256(active), active.length)).isEqualTo(active);
+                    JournalStoreRows.sha256(sealedFirst), sealedFirst.length)).isEqualTo(sealedFirst);
             assertThat(packs.resolveBytes(TENANT, SESSION, 1,
                     JournalStoreRows.sha256(active), active.length)).isEqualTo(active);
         }
