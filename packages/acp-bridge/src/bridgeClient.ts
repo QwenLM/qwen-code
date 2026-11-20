@@ -2381,6 +2381,7 @@ export class BridgeClient implements Client {
     const callerSessionId = this.requireSubSessionCaller(params);
     const workspace = params['workspace'];
     const workspaceGeneration = params['workspaceGeneration'];
+    const requiresYolo = params['requiresYolo'];
     if (
       workspace !== undefined &&
       (!isSubSessionWorkspaceSelector(workspace) ||
@@ -2400,6 +2401,15 @@ export class BridgeClient implements Client {
       throw RequestError.invalidParams(
         undefined,
         'Named sub-sessions require a workspace generation from approval',
+      );
+    }
+    if (
+      requiresYolo !== undefined &&
+      (requiresYolo !== true || workspace === undefined)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`requiresYolo` is only supported for named workspaces and must be true',
       );
     }
     const sessionId = params['sessionId'];
@@ -2440,7 +2450,11 @@ export class BridgeClient implements Client {
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
       ...(typeof workspace === 'string' &&
       typeof workspaceGeneration === 'string'
-        ? { workspace, workspaceGeneration }
+        ? {
+            workspace,
+            workspaceGeneration,
+            ...(requiresYolo === true ? { requiresYolo } : {}),
+          }
         : {}),
       ...(typeof sessionId === 'string' ? { sessionId } : {}),
       ...source,
@@ -3077,6 +3091,24 @@ export class BridgeClient implements Client {
           const code = character.charCodeAt(0);
           return code <= 31 || code === 127;
         })
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      this.onSessionCatalogChanged?.();
+      return;
+    }
+    if (method === 'qwen/notify/session/goal-changed') {
+      // The child persists the goal sidecar itself; this notification is a
+      // pure catalog-clock mark so version-watching clients refetch the
+      // marker — the same propagation pr-binding uses. No projection values
+      // travel here: the sidecar on disk is the catalog's single source.
+      const sessionId = params['sessionId'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0
       ) {
         return;
       }

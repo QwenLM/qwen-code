@@ -161,6 +161,8 @@ import { sessionMatchesSource as matchesSessionSource } from './sessionSearch';
 import { SessionSearchDialog } from './SessionSearchDialog';
 import { useLivePresence } from '../../live/live-presence';
 import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
+import { hasVisibleGoal } from '../GoalStatusStrip';
+import { SessionGoalMarker } from '../SessionGoalMarker';
 import {
   hasWorkspaceExpansionPreference,
   migrateWorkspaceExpansionPreference,
@@ -198,6 +200,10 @@ import {
   useWebShellSessions,
 } from '../../session-catalog/session-catalog-hooks';
 import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
+import {
+  hasLiveWork,
+  sessionBlocksDelete,
+} from '../../session-catalog/session-live-work';
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
 import { RecentSessions } from './RecentSessions';
@@ -261,15 +267,35 @@ function SelectableSessionRow({
     identity: string,
     state: Pick<
       DaemonSessionSummary,
-      'isPinned' | 'hasActivePrompt' | 'activeWorkState'
+      | 'isPinned'
+      | 'hasActivePrompt'
+      | 'activeWorkState'
+      | 'hasRunningBackgroundTasks'
     >,
   ) => void;
 }) {
   const { t } = useI18n();
-  const { isPinned, hasActivePrompt, activeWorkState } = session;
+  const {
+    isPinned,
+    hasActivePrompt,
+    activeWorkState,
+    hasRunningBackgroundTasks,
+  } = session;
   useEffect(() => {
-    onRefresh(identity, { isPinned, hasActivePrompt, activeWorkState });
-  }, [identity, isPinned, hasActivePrompt, activeWorkState, onRefresh]);
+    onRefresh(identity, {
+      isPinned,
+      hasActivePrompt,
+      activeWorkState,
+      hasRunningBackgroundTasks,
+    });
+  }, [
+    identity,
+    isPinned,
+    hasActivePrompt,
+    activeWorkState,
+    hasRunningBackgroundTasks,
+    onRefresh,
+  ]);
   const label = getSessionLabel(session);
   return (
     <button
@@ -1877,7 +1903,10 @@ export function WebShellSidebar({
       identity: string,
       state: Pick<
         DaemonSessionSummary,
-        'isPinned' | 'hasActivePrompt' | 'activeWorkState'
+        | 'isPinned'
+        | 'hasActivePrompt'
+        | 'activeWorkState'
+        | 'hasRunningBackgroundTasks'
       >,
     ) => {
       setSelectedSessions((previous) => {
@@ -1886,7 +1915,9 @@ export function WebShellSidebar({
           !selected ||
           (selected.isPinned === state.isPinned &&
             selected.hasActivePrompt === state.hasActivePrompt &&
-            selected.activeWorkState === state.activeWorkState)
+            selected.activeWorkState === state.activeWorkState &&
+            selected.hasRunningBackgroundTasks ===
+              state.hasRunningBackgroundTasks)
         )
           return previous;
         return new Map(previous).set(identity, { ...selected, ...state });
@@ -2959,10 +2990,11 @@ export function WebShellSidebar({
   const canDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
       // The current session is deletable too (issue #12619), but deleting the
-      // session the client is attached to tears its runtime down — match the
-      // Session Overview's idle-only policy for that case.
-      (!isCurrentSession(session) ||
-        (!session.hasActivePrompt && session.activeWorkState !== 'active')) &&
+      // session the client is attached to tears its runtime down, so it is
+      // only offered once nothing is running. Background work blocks any row:
+      // the delete route has no idle guard, so it would kill work the row
+      // advertises, and the Session Overview card already refuses it.
+      !sessionBlocksDelete(session, isCurrentSession(session)) &&
       canShowDeleteSession(session),
     [canShowDeleteSession, isCurrentSession],
   );
@@ -3056,8 +3088,7 @@ export function WebShellSidebar({
       session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('archive') &&
       !isCurrentSession(session) &&
-      !session.hasActivePrompt &&
-      session.activeWorkState !== 'active' &&
+      !hasLiveWork(session) &&
       canMutateSessionArchive(session),
     [canMutateSessionArchive, isCurrentSession, sessionActionItems],
   );
@@ -5525,11 +5556,19 @@ export function WebShellSidebar({
         </span>
       ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
+      // Completed goals render no marker, matching the Goals listings' filter.
+      const hasGoalMarker = hasVisibleGoal(session.goal);
+      // Archived rows do not open on click, so their marker is a pure
+      // indicator; the active row below renders the button variant.
+      const goalMarker =
+        hasGoalMarker && session.goal ? (
+          <SessionGoalMarker goal={session.goal} />
+        ) : null;
       // The badge is a click target of its own right before the meta slot, so
       // its row keeps the slot at the hover actions' width instead of growing
       // it on hover — growing slid `#N` left and put Pin where it had been.
       const reserveActionsWidth =
-        openableSessionPrs(session.prs ?? []).length > 0;
+        openableSessionPrs(session.prs ?? []).length > 0 || hasGoalMarker;
       const withDetails = (row: ReactElement) => (
         <Fragment key={sessionIdentity}>
           {sessionActionItems.has('details') ? (
@@ -5604,6 +5643,7 @@ export function WebShellSidebar({
               </span>
             )}
             {prBadge}
+            {goalMarker}
             <div
               className={cx(
                 styles.sessionMetaSlot,
@@ -5785,9 +5825,18 @@ export function WebShellSidebar({
         !session.hasActivePrompt && session.activeWorkState === 'active';
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
-      const running = Boolean(session.hasActivePrompt || sessionWorkActive);
+      const running = hasLiveWork(session);
       const backgroundRunning =
         !session.hasActivePrompt && session.hasRunningBackgroundTasks;
+      // The status dot is prompt-gated, so a turn in flight hides the background
+      // dot. The busy marker must not be: it is the only place left that can
+      // still say this row is running background work.
+      const backgroundTasks = session.hasRunningBackgroundTasks === true;
+      const busyLabel = backgroundRunning
+        ? t('background.running')
+        : sessionWorkActive
+          ? t('sidebar.activeWork')
+          : t('sidebar.running');
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attention = session.isWaitingForPermission
@@ -5834,13 +5883,19 @@ export function WebShellSidebar({
       // a button that can never succeed. Keep it disabled until the user opens
       // another chat (leaving first, then deleting, is tracked separately).
       const currentStandalone = Boolean(standalone?.active);
-      const deleteDisabled =
-        busy || currentStandalone || (isCurrent && running);
+      // The attached session is only deletable once nothing runs (#12619).
+      // Background work additionally blocks any row: the delete route has no
+      // idle guard, so confirming would kill work the row says is running,
+      // and the Session Overview card already refuses the same session.
+      const deleteBlocked = sessionBlocksDelete(session, isCurrent);
+      const deleteDisabled = busy || currentStandalone || deleteBlocked;
       const deleteDisabledTitle = currentStandalone
         ? t('sidebar.currentStandaloneDeleteDisabled')
         : isCurrent && running
           ? t('sidebar.currentDeleteDisabled')
-          : undefined;
+          : deleteBlocked
+            ? t('sidebar.deleteRunningDisabled')
+            : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
       // Archived sessions cannot load into a split pane (they leave an empty
       // pane), so the sidebar withholds the split action for them.
@@ -6024,6 +6079,9 @@ export function WebShellSidebar({
                 )}
               </span>
               {prBadge}
+              {hasGoalMarker && session.goal && (
+                <SessionGoalMarker goal={session.goal} onOpen={openRow} />
+              )}
               <div
                 className={cx(
                   styles.sessionMetaSlot,
@@ -6049,13 +6107,23 @@ export function WebShellSidebar({
                     {attention.short}
                   </span>
                 )}
-                {running && !backgroundRunning ? (
+                {running ? (
                   <span
-                    className={styles.sessionLoading}
+                    className={cx(
+                      styles.sessionLoading,
+                      backgroundTasks && styles.sessionLoadingBackground,
+                    )}
+                    // Stay unnamed only while the status dot is actually
+                    // rendered to carry the name: repeating it would make the
+                    // row announce it twice, and a live-starting row swaps the
+                    // dot for its own spinner, leaving this as the carrier.
                     aria-label={
-                      sessionWorkActive
-                        ? t('sidebar.activeWork')
-                        : t('sidebar.running')
+                      backgroundRunning && !liveStarting ? undefined : busyLabel
+                    }
+                    title={
+                      backgroundTasks && !backgroundRunning
+                        ? `${busyLabel} · ${t('background.running')}`
+                        : undefined
                     }
                   />
                 ) : !attention && gitIcon ? (
@@ -6648,8 +6716,7 @@ export function WebShellSidebar({
       if (
         !sessionActionItems.has('archive') ||
         session.sessionId === connection.sessionId ||
-        session.hasActivePrompt ||
-        session.activeWorkState === 'active' ||
+        hasLiveWork(session) ||
         busySessionIdsRef.current.has(getIdentityForSession(session))
       )
         return;
@@ -9143,10 +9210,7 @@ export function WebShellSidebar({
                       const busy = busySessionIds.has(
                         getIdentityForSession(session),
                       );
-                      const running = Boolean(
-                        session.hasActivePrompt ||
-                          session.activeWorkState === 'active',
-                      );
+                      const running = hasLiveWork(session);
                       const pinLabel = session.isPinned
                         ? t('sidebar.unpin')
                         : t('sidebar.pin');

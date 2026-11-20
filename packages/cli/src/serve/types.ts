@@ -140,17 +140,23 @@ export interface ServeOptions {
    */
   maxConnections?: number;
   /**
-   * Admission cap on concurrent REST SSE streams (`GET /session/:id/events`).
-   * Long-lived SSE connections share the listener's `maxConnections` quota
-   * with short requests; without a separate SSE ceiling a fleet of idle or
-   * stalled streams can occupy every listener slot, after which Node closes
-   * new sockets at accept time WITHOUT an HTTP response — taking `/health`
-   * and the Web Shell down with them. When unset, the cap derives from the
-   * effective listener cap (80%, leaving ≥20% headroom for short requests);
-   * when the listener cap is disabled the SSE cap is disabled too. Streams
-   * at the cap are rejected with `503` + `Retry-After` instead of a silent
-   * socket close. `0` (or `Infinity`) disables the cap explicitly.
-   * NaN / negative values throw at boot.
+   * Admission cap on concurrent long-lived streams (issue #17554): every
+   * SSE surface — REST session events, agent session-events, session and
+   * workspace generation, artifact-library and side-question streams, the
+   * hosted-harness event handler — plus the ACP SSE and WebSocket
+   * transports. Long-lived streams share the listener's `maxConnections`
+   * quota with short requests; without a separate ceiling a fleet of idle
+   * or stalled streams can occupy every listener slot, after which Node
+   * closes new sockets at accept time WITHOUT an HTTP response — taking
+   * `/health` and the Web Shell down with them. When unset, the cap derives
+   * from the effective listener cap (80%, leaving ≥20% headroom for short
+   * requests); when the listener cap is disabled the derived cap is
+   * disabled too. While the cap is enabled, the pairing listeners
+   * (local-control / remote-access) are additionally clamped at 80% of
+   * their own 64-socket budget. Streams at the cap are rejected with
+   * `503` + `Retry-After` instead of a silent socket close (ACP WebSocket
+   * upgrades get a body-less 503 before the upgrade). `0` (or `Infinity`)
+   * disables the cap explicitly. NaN / negative values throw at boot.
    */
   maxSseConnections?: number;
   /**

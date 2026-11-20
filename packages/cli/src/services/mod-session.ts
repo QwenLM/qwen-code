@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
@@ -115,13 +115,16 @@ export interface ModTerminalHost {
 }
 
 /**
- * An ACP session: it has no surface of its own, reports each log line itself
- * and raises neither prompts nor tool middleware. Its stdout carries the
- * protocol, so nothing is printed.
+ * An ACP session: it reports each log line itself and raises neither prompts
+ * nor tool middleware. Its stdout carries the protocol, so nothing is printed.
+ * Its surface is `desktop` where its client draws the rows `sites` names, and
+ * none otherwise.
  */
 export interface ModAcpHost {
-  surface: null;
+  surface: 'desktop' | null;
   log(entry: ModLog, plugin: string, sessionId: string): void;
+  /** The row sites the client draws, read once at load. */
+  sites?(): readonly ModRenderSite[];
 }
 
 type ModOutput =
@@ -143,6 +146,12 @@ export interface ModTurn {
    */
   complete(ending?: 'aborted' | 'error'): Promise<void>;
 }
+
+/** A remote client's row, as `askRow` answers it. */
+export type ModRowAnswer =
+  | { status: 'unhooked' }
+  | { status: 'unanswered' }
+  | { status: 'answered'; props?: Record<string, unknown> };
 
 interface RunningTurn {
   id: string;
@@ -304,7 +313,7 @@ export class ModSession implements ICommandLoader {
   }
 
   private get acp(): boolean {
-    return this.host?.surface === null;
+    return this.host !== undefined && this.host.surface !== 'terminal';
   }
 
   private chatTokens(): number {
@@ -346,7 +355,7 @@ export class ModSession implements ICommandLoader {
   }
 
   private async load(signal: AbortSignal): Promise<void> {
-    const sites = (this.sites = this.terminal?.sites?.() ?? []);
+    const sites = (this.sites = this.host?.sites?.() ?? []);
     try {
       const candidates = [];
       for (const extension of this.config
@@ -464,7 +473,7 @@ export class ModSession implements ICommandLoader {
           },
           signal,
           (name) => this.config.getToolRegistry().ensureTool(name),
-          this.terminal?.surface ?? null,
+          this.host?.surface ?? null,
           this.config.getCliVersion() || 'unknown',
           () => this.facts(),
           (turnId) => this.abortTurn(turnId),
@@ -774,6 +783,45 @@ export class ModSession implements ICommandLoader {
     return this.rows.watch(input, listener);
   }
 
+  /**
+   * Asks once for a row a remote client draws: `unhooked` where no hook hears
+   * its site, `unanswered` when the ask ended first, and otherwise the props
+   * its hooks rewrote, if they did. The same props are the same row, so a
+   * reload or a second client is answered from the first answer.
+   */
+  async askRow(
+    component: ModRenderSite,
+    props: ModRenderInput['props'],
+    signal: AbortSignal,
+  ): Promise<ModRowAnswer> {
+    const surface = this.host?.surface;
+    if (
+      surface !== 'desktop' ||
+      !this.sites.includes(component) ||
+      !this.runtime?.renderHooksFor(component).length
+    )
+      return { status: 'unhooked' };
+    if (this.closing) return { status: 'unanswered' };
+    const input = {
+      surface,
+      component,
+      requestId: createHash('sha256')
+        .update(stableJson({ component, props }))
+        .digest('hex')
+        .slice(0, 32),
+      props,
+    } as ModRenderInput;
+    // Too large to hand the hooks whole: drawn as it is.
+    if (Buffer.byteLength(JSON.stringify(input)) > MOD_MAX_BYTES / 2)
+      return { status: 'answered' };
+    const answer = await this.rows.ask(input, signal);
+    return !answer
+      ? { status: 'unanswered' }
+      : answer.props
+        ? { status: 'answered', props: { ...answer.props } }
+        : { status: 'answered' };
+  }
+
   /** The props a row draws with once its hooks answered, if they rewrote it. */
   rowProps(
     sessionId: string,
@@ -798,10 +846,9 @@ export class ModSession implements ICommandLoader {
     }
   }
 
-  // A row's answer: the props its hooks rewrote, or none to draw its own.
   private async renderRow(
     input: ModRenderInput,
-  ): Promise<ModRenderInput['props'] | undefined> {
+  ): Promise<ModRenderInput['props'] | undefined | null> {
     const runtime = this.runtime;
     const generation = this.toolGeneration.signal;
     if (
@@ -812,7 +859,7 @@ export class ModSession implements ICommandLoader {
       !this.allowed() ||
       !this.active()
     )
-      return undefined;
+      return null;
     const signal = AbortSignal.any([
       this.lifetime.signal,
       generation,

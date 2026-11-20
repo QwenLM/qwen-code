@@ -170,6 +170,59 @@ class SessionWorktreeStoreTest {
     }
 
     @Test
+    void listReusesAuthorizedRowsAndStillVerifiesBranchesAndBlocksBadIdentity() throws Exception {
+        var files = org.mockito.Mockito.mock(WorktreeFiles.class);
+        var json = new ObjectMapper();
+        for (int index = 0; index < 6; index++) {
+            String tenant = index == 5 ? "other-tenant" : "tenant";
+            String selectedWorkspace = index == 4 ? "other-workspace" : workspace;
+            String session = "listed-" + index;
+            String state = index == 1 ? "PREPARING" : index == 3 ? "REMOVED" : "READY";
+            var plan = new Plan(tenant, selectedWorkspace, 1, "storage", ".", "config", 1,
+                    temp.toString(), "root", ".", ".", ".git", "common", null, "commit",
+                    session, session, session, "planned-branch");
+            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified)"
+                    + " VALUES (?, ?, 'agent', 1, 1)", tenant, session);
+            jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id,"
+                    + " physical_key, worktree_id, owner_actor_key, state, revision, plan_json, identity_json,"
+                    + " operation_id, gmt_create, gmt_modified) VALUES (?, ?, ?, 'storage', 'physical', ?, ?, ?, 1, ?, '{}', ?, ?, 1)",
+                    tenant, session, selectedWorkspace, session, ManagedWorkspaceRegistry.actorKey(tenant, "actor"),
+                    state, json.writeValueAsString(plan), session, index);
+            new WorkspaceOperations(jdbc, tenant).create(WorkspaceOperations.Kind.SESSION_WORKTREE, session,
+                    WorkspaceOperations.values("session_id", session, "state", state, "phase", state));
+            if (index == 0) {
+                org.mockito.Mockito.when(files.verify(plan, "{}")).thenReturn("verified-identity");
+                org.mockito.Mockito.when(files.currentBranch("verified-identity")).thenReturn("current-branch");
+            } else if (index == 2) {
+                org.mockito.Mockito.when(files.verify(plan, "{}"))
+                        .thenThrow(SessionWorktreeStore.error("worktree_identity_conflict"));
+            }
+        }
+        var trace = new StoreLockTrace(jdbc.getDataSource());
+        var listing = new JdbcSessionWorktreeStore(new ManagedSchemaJdbcTemplate(trace),
+                new JdbcManagedWorkspaceRegistry(jdbc), org.mockito.Mockito.mock(WorkspaceStorageGuard.class));
+        listing.configureWorktreeFiles(files);
+        var descriptors = listing.list("tenant", "actor", workspace);
+        assertThat(descriptors).extracting(SessionWorktreeStore.Descriptor::sessionId)
+                .containsExactly("listed-2", "listed-1", "listed-0");
+        assertThat(descriptors).extracting(SessionWorktreeStore.Descriptor::state)
+                .containsExactly("blocked", "preparing", "ready");
+        assertThat(descriptors.getLast().branch()).isEqualTo("current-branch");
+        assertThat(descriptors.getFirst().errorCode()).isEqualTo("worktree_identity_conflict");
+        assertThat(descriptors.getFirst().revision()).isEqualTo(2);
+        assertThat(JdbcSessionWorktreeStore.find(jdbc, "tenant", "listed-2").state()).isEqualTo("BLOCKED");
+        assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .map(StoreLockTrace.Event::sql).filter(sql -> sql.contains(" from ma_session_worktree w ")))
+                .hasSize(1).allMatch(sql -> !sql.contains("w.session_id in"));
+        org.mockito.Mockito.verify(files, org.mockito.Mockito.times(2)).verify(
+                org.mockito.ArgumentMatchers.any(Plan.class), org.mockito.ArgumentMatchers.eq("{}"));
+        jdbc.update("UPDATE ma_session_worktree SET plan_json = 'not-json' WHERE tenant_id = ? AND session_id = ?",
+                "tenant", "listed-1");
+        assertThatThrownBy(() -> listing.list("tenant", "actor", workspace))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("Invalid Session worktree record");
+    }
+
+    @Test
     void cleanupReusesItsReceiptAndRemovesTheCheckoutUnderMaintenance() throws Exception {
         var location = store.source("tenant", "actor", new WorkspaceSelection(workspace, "."));
         Path repository = Files.createDirectory(location.root().resolve("project"));
