@@ -209,30 +209,74 @@ export class ManagedEmailStateStore {
    * parsed (counts unknown, reported as 0 but flagged) from one that parsed to
    * an empty ledger: an unreadable legacy certainly strands whatever it held,
    * so the caller must not render it as a quiescent "nothing was lost".
+   *
+   * `lastUid` and `generation` are read for the notice and the generation seed,
+   * never adopted as pending state: the fresh ledger restarts the cursor at the
+   * mailbox tip (so the offline window after the legacy cursor is skipped, even
+   * for a quiescent 0/0 legacy) and at generation 1 (so a mailbox that already
+   * re-keyed must seed the monotonic counter back, or the control plane refuses
+   * the lower generation on every start).
    */
   strandedLegacyLedger():
-    | { path: string; pending: number; outbound: number; readable: boolean }
+    | {
+        path: string;
+        pending: number;
+        outbound: number;
+        readable: boolean;
+        lastUid: number | undefined;
+        generation: number | undefined;
+      }
     | undefined {
     const legacyPath = join(this.directory, 'managed-state.json');
     if (!existsSync(legacyPath)) return undefined;
     let pending = 0;
     let outbound = 0;
     let readable = true;
+    let lastUid: number | undefined;
+    let generation: number | undefined;
     try {
       const value = JSON.parse(readFileSync(legacyPath, 'utf8')) as {
         pending?: unknown[];
         outbound?: unknown[];
+        lastUid?: unknown;
+        generation?: unknown;
       } | null;
       const pendingList = value?.pending;
       const outboundList = value?.outbound;
       pending = Array.isArray(pendingList) ? pendingList.length : 0;
-      outbound = Array.isArray(outboundList) ? outboundList.length : 0;
+      // Only segments whose delivery status is UNKNOWN count toward the
+      // outbound loss: a definitive receipt (accepted/rejected) proves the
+      // outcome, but an absent receipt — or one whose outcome is 'unknown' —
+      // does not, so both still count (mirrors the GitHub store; an
+      // {outcome:'unknown'} receipt is not a known outcome).
+      outbound = Array.isArray(outboundList)
+        ? outboundList.filter((segment) => {
+            const receipt =
+              segment && typeof segment === 'object'
+                ? (segment as { receipt?: { outcome?: unknown } }).receipt
+                : undefined;
+            return !(
+              receipt &&
+              (receipt.outcome === 'accepted' || receipt.outcome === 'rejected')
+            );
+          }).length
+        : 0;
+      lastUid = typeof value?.lastUid === 'number' ? value.lastUid : undefined;
+      generation =
+        typeof value?.generation === 'number' ? value.generation : undefined;
     } catch {
       // A corrupt or unreadable legacy still strands; flag it so the caller
       // reports unknown counts and a possible loss, never a silent "empty".
       readable = false;
     }
-    return { path: legacyPath, pending, outbound, readable };
+    return {
+      path: legacyPath,
+      pending,
+      outbound,
+      readable,
+      lastUid,
+      generation,
+    };
   }
 
   /**

@@ -238,20 +238,34 @@ export class ManagedEmailAdapter {
         // An unreadable legacy is not an empty one: its counts are unknown and
         // any claims it held are stranded. Name the inbound and outbound
         // consequences separately so an outbound-only strand does not report
-        // lost inbound mail, and a quiescent 0/0 legacy reports no loss.
+        // lost inbound mail.
         const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
         const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
+        // The "fresh window" loss claims only hold when no keyed ledger was
+        // loaded. On a roll-forward after a rollback the keyed ledger keeps its
+        // own cursor, so the poll re-fetches from it and the legacy window is
+        // NOT skipped — claiming a loss there would page the operator about a
+        // loss that does not happen (mirrors the GitHub freshWindow gate).
+        const freshWindow = !loaded;
         let consequence = '';
         if (!legacy.readable) {
           consequence =
             ' Its contents could not be read, so any staged-but-unadmitted claims it held are stranded.';
         } else {
-          if (legacy.pending > 0)
+          if (legacy.pending > 0 && freshWindow)
             consequence +=
               ' Its staged-but-unadmitted claims are stranded; the fresh ledger starts at the current mailbox tip and does not re-fetch them.';
           if (legacy.outbound > 0)
             consequence +=
-              ' Its un-receipted outbound segments were dropped, so their delivery status is unknown.';
+              ' Its outbound segments with an unknown delivery status were dropped.';
+          // Even a quiescent 0/0 legacy skips the offline backlog: the fresh
+          // ledger restarts the cursor at the mailbox tip, so mail received
+          // after the legacy cursor while the adapter was down is never listed.
+          // Name that window separately — an independent sentence, not a
+          // loosening of the pending gate (mirrors the GitHub offline-window
+          // clause). A genuinely cursor-less legacy reports no loss.
+          if (freshWindow && legacy.lastUid !== undefined)
+            consequence += ` Mail received after the legacy cursor (UID ${legacy.lastUid}) and before this start was never listed and will not be admitted.`;
         }
         this.log(
           `Managed email upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
@@ -286,6 +300,24 @@ export class ManagedEmailAdapter {
       await this.openMailbox();
       if (!this.running)
         throw new Error('Managed email adapter stopped during connection.');
+      // A fresh ledger starts at generation 1, but the control plane's account
+      // generation never moves back (it fences a lower one with
+      // channel_generation_stale). A mailbox that already re-keyed (a UIDVALIDITY
+      // change) persisted a higher generation in the legacy; seed ONLY that
+      // monotonic counter so the upgrade restart registers it instead of being
+      // refused on every start. This adopts no pending/cursor state — the fresh
+      // ledger still starts at the mailbox tip with empty pending.
+      if (
+        !loaded &&
+        legacy?.readable &&
+        typeof legacy.generation === 'number' &&
+        Number.isSafeInteger(legacy.generation) &&
+        this.state &&
+        legacy.generation > this.state.generation
+      ) {
+        this.state.generation = legacy.generation;
+        this.persist();
+      }
       await this.ensureRegistered(this.state!);
       // Segments sent before a crash took their receipt: the provider may
       // hold them, so each is reported unknown — never sent again.

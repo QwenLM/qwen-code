@@ -212,6 +212,97 @@ describe('ManagedEmailStateStore registration-identity keying', () => {
     expect(stranded.readable).toBe(false);
     expect(stranded.pending).toBe(0);
     expect(stranded.outbound).toBe(0);
+    expect(stranded.lastUid).toBeUndefined();
+    expect(stranded.generation).toBeUndefined();
+  });
+
+  it('counts only unknown-status outbound segments, not settled receipts', () => {
+    const store = new ManagedEmailStateStore(
+      'mail',
+      tempCwd(),
+      settings,
+      'cp|tenant-a|chan|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({
+        ...freshState(),
+        outbound: [
+          {
+            deliveryId: 'd-accepted',
+            ordinal: 0,
+            messageId: '<a@x>',
+            receipt: {
+              outcome: 'accepted',
+              ordinal: 0,
+              providerMessageId: '<a@x>',
+              acceptedAt: 1,
+            },
+          },
+          {
+            deliveryId: 'd-rejected',
+            ordinal: 1,
+            messageId: '<r@x>',
+            receipt: { outcome: 'rejected' },
+          },
+          {
+            deliveryId: 'd-unknown',
+            ordinal: 2,
+            messageId: '<u@x>',
+            receipt: { outcome: 'unknown' },
+          },
+          { deliveryId: 'd-none', ordinal: 3, messageId: '<n@x>' },
+        ],
+      }),
+    );
+    const stranded = store.strandedLegacyLedger()!;
+    // accepted + rejected are settled; an unknown outcome and an absent
+    // receipt both still count toward the unknown-status loss.
+    expect(stranded.outbound).toBe(2);
+    expect(stranded.readable).toBe(true);
+  });
+
+  it('reads the legacy cursor and generation for the notice and seed', () => {
+    const store = new ManagedEmailStateStore(
+      'mail',
+      tempCwd(),
+      settings,
+      'cp|tenant-a|chan|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({ ...freshState(), lastUid: 440, generation: 2 }),
+    );
+    const stranded = store.strandedLegacyLedger()!;
+    expect(stranded.lastUid).toBe(440);
+    expect(stranded.generation).toBe(2);
+  });
+
+  it('a cursor-less legacy reports undefined cursor and generation', () => {
+    const store = new ManagedEmailStateStore(
+      'mail',
+      tempCwd(),
+      settings,
+      'cp|tenant-a|chan|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        uidValidity: '1',
+        pending: [],
+        outbound: [],
+        recent: [],
+        routes: [],
+      }),
+    );
+    const stranded = store.strandedLegacyLedger()!;
+    expect(stranded.lastUid).toBeUndefined();
+    expect(stranded.generation).toBeUndefined();
+    expect(stranded.readable).toBe(true);
   });
 
   it('still reports a legacy staged after a rollback (keyed ledger exists)', () => {

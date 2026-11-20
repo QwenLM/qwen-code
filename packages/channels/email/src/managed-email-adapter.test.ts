@@ -95,13 +95,30 @@ class FakeControlPlane implements ManagedChannelControlPlane {
   failSubmits = 0;
   refuseSubmitsWithStatus = 0;
   failRegisters = 0;
+  enforceGenerationFence = false;
+  highestGeneration = 0;
+  registerGate?: Promise<void>;
+  registerEntered?: () => void;
   submitErrors: Array<{ status: number; code?: string }> = [];
   receiptErrors: Array<{ status: number; code?: string }> = [];
   submitAttempts = 0;
   disconnected = false;
 
   async register(request: { accountGeneration: number }) {
+    this.registerEntered?.();
+    if (this.registerGate) await this.registerGate;
     this.registrations.push({ accountGeneration: request.accountGeneration });
+    // Mirror the control plane's monotonic fence: a generation below the
+    // highest it has seen is refused channel_generation_stale (R1-8).
+    if (this.enforceGenerationFence) {
+      if (request.accountGeneration < this.highestGeneration) {
+        throw Object.assign(new Error('HTTP 409'), {
+          status: 409,
+          code: 'channel_generation_stale',
+        });
+      }
+      this.highestGeneration = request.accountGeneration;
+    }
     if (this.failRegisters > 0) {
       this.failRegisters -= 1;
       throw new Error('ECONNRESET');
@@ -2162,7 +2179,12 @@ describe('managed email adapter registration-identity isolation', () => {
     expect(stranded[0]).toContain('3 outbound');
     expect(stranded[0]).toContain('does not re-fetch them');
     expect(stranded[0]).toContain(
-      'un-receipted outbound segments were dropped',
+      'outbound segments with an unknown delivery status were dropped',
+    );
+    // The legacy cursor (lastUid 2) is named as a skipped offline window even
+    // though this legacy also carries pending/outbound (R1-1).
+    expect(stranded[0]).toContain(
+      'Mail received after the legacy cursor (UID 2)',
     );
     // Not adopted: the legacy pending never enters this registration's state.
     expect(state(adapter).pending).toEqual([]);
@@ -2189,15 +2211,16 @@ describe('managed email adapter registration-identity isolation', () => {
     await second.disconnect();
   });
 
-  it('a quiescent legacy ledger (0/0) is reported without a loss alarm', async () => {
+  it('a genuinely cursor-less quiescent legacy (0/0) reports no loss', async () => {
     const lines: string[] = [];
     plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
     const adapter = make({}, { log: (l: string) => lines.push(l) });
     const dir = dirname(adapter.stateFile);
     mkdirSync(dir, { recursive: true });
+    // No lastUid: a genuinely cursor-less legacy skips no offline window.
     writeFileSync(
       join(dir, 'managed-state.json'),
-      JSON.stringify(legacyState(0, 0)),
+      JSON.stringify({ ...legacyState(0, 0), lastUid: undefined }),
     );
     await adapter.connect();
     const stranded = lines.filter((l) =>
@@ -2207,7 +2230,38 @@ describe('managed email adapter registration-identity isolation', () => {
     expect(stranded[0]).toContain('0 pending');
     expect(stranded[0]).toContain('0 outbound');
     expect(stranded[0]).not.toContain('does not re-fetch them');
-    expect(stranded[0]).not.toContain('outbound segments were dropped');
+    expect(stranded[0]).not.toContain('unknown delivery status');
+    expect(stranded[0]).not.toContain('Mail received after the legacy cursor');
+    await adapter.disconnect();
+  });
+
+  it('names the skipped offline window for a quiescent cursor-bearing legacy', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // UIDs 1..5 arrived while the adapter was stopped (tip 5); the legacy
+    // cursor sits at 2, so 3..5 are below the fresh tip and never re-fetched.
+    for (let i = 0; i < 5; i++) append(raw(`offline-${i}`));
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), lastUid: 2 }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).toContain(
+      'Mail received after the legacy cursor (UID 2)',
+    );
+    expect(stranded[0]).toContain('will not be admitted');
+    // The skipped mail is never admitted: the fresh ledger starts at the tip.
+    await adapter.tick();
+    expect(plane.events).toHaveLength(0);
     await adapter.disconnect();
   });
 
@@ -2252,6 +2306,137 @@ describe('managed email adapter registration-identity isolation', () => {
     );
     expect(stranded).toHaveLength(1);
     expect(stranded[0]).toContain('1 pending');
+    // Roll-forward: the keyed ledger keeps its own cursor and re-fetches, so
+    // the fresh-window loss clauses must NOT fire (R1-2).
+    expect(stranded[0]).not.toContain('does not re-fetch them');
+    expect(stranded[0]).not.toContain('Mail received after the legacy cursor');
     await second.disconnect();
+  });
+
+  it('reports settled-receipt outbound as zero, not an unknown-status loss', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        ...legacyState(0, 0),
+        outbound: [
+          {
+            deliveryId: 'd-a',
+            ordinal: 0,
+            messageId: '<a@x>',
+            receipt: {
+              outcome: 'accepted',
+              ordinal: 0,
+              providerMessageId: '<a@x>',
+              acceptedAt: 1,
+            },
+          },
+          {
+            deliveryId: 'd-r',
+            ordinal: 1,
+            messageId: '<r@x>',
+            receipt: { outcome: 'rejected' },
+          },
+        ],
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).not.toContain('unknown delivery status');
+    await adapter.disconnect();
+  });
+
+  it('a fresh generation-1 ledger is refused when the server holds a higher generation', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 2;
+    const adapter = make();
+    await expect(adapter.connect()).rejects.toThrow();
+    expect(plane.registrations).toContainEqual({ accountGeneration: 1 });
+  });
+
+  it('seeds the legacy generation so a re-keyed mailbox still registers after upgrade', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 2;
+    const adapter = make();
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 2 }),
+    );
+    await adapter.connect();
+    expect(plane.registrations).toContainEqual({ accountGeneration: 2 });
+    expect(state(adapter).generation).toBe(2);
+    // Seeding the counter adopts no pending/cursor state.
+    expect(state(adapter).pending).toEqual([]);
+    await adapter.disconnect();
+  });
+
+  it('does not seed a non-integer legacy generation that would brick the fresh ledger', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const first = make();
+    const dir = dirname(first.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 2.5 }),
+    );
+    await first.connect();
+    // A float generation is not a safe integer: seeding it would persist a
+    // state the validator rejects on the next load, bricking the ledger.
+    expect(state(first).generation).toBe(1);
+    await first.disconnect();
+    const second = make();
+    await second.connect();
+    expect(state(second).generation).toBe(1);
+    await second.disconnect();
+  });
+
+  it('rejects when the lock is lost during connection', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    let release!: () => void;
+    plane.registerGate = new Promise<void>((r) => {
+      release = r;
+    });
+    let entered!: () => void;
+    const enteredP = new Promise<void>((r) => {
+      entered = r;
+    });
+    plane.registerEntered = entered;
+    const adapter = make();
+    const connecting = adapter.connect();
+    await enteredP;
+    lockCompromised!();
+    release();
+    await expect(connecting).rejects.toThrow(/stopped during connection/);
+  });
+
+  it('a failed first start leaves the legacy unarchived for a rollback', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make();
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify(legacyState(1, 0)),
+    );
+    plane.failRegisters = 1;
+    await expect(adapter.connect()).rejects.toThrow();
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
   });
 });
