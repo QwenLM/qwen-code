@@ -697,6 +697,17 @@ describe('release workflow', () => {
     '@qwen-code/external-context-mem0': 'PUBLISH_EXTERNAL_CONTEXT_MEM0',
   };
 
+  // audio-capture is gated on the repository, not on a bootstrap variable,
+  // so its remedy is not a switch a maintainer can set.
+  const SKIP_NOTICES = {
+    '@qwen-code/audio-capture':
+      '::notice::Skipping @qwen-code/audio-capture; it publishes only from QwenLM/qwen-code',
+    '@qwen-code/channel-msteams':
+      '::notice::Skipping @qwen-code/channel-msteams; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true',
+    '@qwen-code/external-context-mem0':
+      '::notice::Skipping @qwen-code/external-context-mem0; set NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED=true',
+  };
+
   it.each(Object.entries(BOOTSTRAP_SWITCHES))(
     'selects %s only when its own publish switch is set',
     (pkg, variable) => {
@@ -714,17 +725,15 @@ describe('release workflow', () => {
           (name) => name === pkg || !(name in BOOTSTRAP_SWITCHES),
         ),
       );
-      // A silent Teams skip is indistinguishable from a mistyped variable,
-      // so the skip names the package and its switch in the runner log —
-      // and emits no Teams notice when Teams does publish.
-      if (pkg === '@qwen-code/channel-msteams') {
-        expect(result.stderr).not.toContain(
-          '::notice::Skipping @qwen-code/channel-msteams',
-        );
-      } else {
-        expect(result.stderr).toContain(
-          '::notice::Skipping @qwen-code/channel-msteams; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true',
-        );
+      // A silent skip is indistinguishable from a mistyped variable, so every
+      // gated package names itself and its remedy in the runner log — and
+      // emits no notice for itself when it does publish.
+      for (const other of Object.keys(BOOTSTRAP_SWITCHES)) {
+        if (other === pkg) {
+          expect(result.stderr).not.toContain(`::notice::Skipping ${other}`);
+        } else {
+          expect(result.stderr).toContain(SKIP_NOTICES[other]);
+        }
       }
     },
   );
