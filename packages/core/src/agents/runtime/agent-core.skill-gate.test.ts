@@ -1327,6 +1327,49 @@ describe('AgentCore skill-gate inputs', () => {
       ).toEqual(['mcp__github__read_file', 'mcp__github__create_issue']);
     });
 
+    it('refuses a bridge target the direct-mode list names only by MCP server or mcp__*', async () => {
+      // In `direct` the configured list is an exact-name allowlist, so a
+      // server prefix or `mcp__*` names no tool. The bridge re-check in
+      // coreToolScheduler is this predicate, and the target is never
+      // declared, so it is the only gate.
+      const config = makeFakeConfig({ toolMode: ToolMode.Direct });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new ToolSearchTool(config));
+      registry.registerTool(new ToolCallTool(registry));
+      const deleteTool = new MockTool({
+        name: 'mcp__github__delete_repo',
+        shouldDefer: true,
+      });
+      Object.assign(deleteTool, {
+        serverName: 'github',
+        serverToolName: 'delete_repo',
+      });
+      registry.registerTool(deleteTool);
+
+      for (const entry of ['mcp__github', 'mcp__*']) {
+        const core = new AgentCore(
+          'mcp-prefix-bridge',
+          config,
+          { systemPrompt: '' } as never,
+          { model: 'test-model' } as never,
+          { max_turns: 1 } as never,
+          {
+            tools: [
+              ToolNames.READ_FILE,
+              ToolNames.TOOL_SEARCH,
+              ToolNames.TOOL_CALL,
+              entry,
+            ],
+          },
+        );
+        const declared = await declaredNames(core);
+        expect(declared.has('mcp__github__delete_repo')).toBe(false);
+        expect(executable(core, 'mcp__github__delete_repo')).toBe(false);
+      }
+    });
+
     it('keeps inherited CodeMode declarations executable only when directly allowed', async () => {
       const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
       const registry = new ToolRegistry(config);

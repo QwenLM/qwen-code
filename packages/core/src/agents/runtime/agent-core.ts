@@ -2731,7 +2731,10 @@ export class AgentCore {
       return (
         configuredAllowlist === undefined ||
         configuredAllowlist.includes(toolName) ||
-        (toolName.startsWith('mcp__') &&
+        // MCP patterns name tools only in a code mode; `direct` keeps the
+        // configured list an exact-name allowlist.
+        (isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
+          toolName.startsWith('mcp__') &&
           this.matchesMcpAllowlist(
             toolName,
             new Set(configuredAllowlist.filter((name) => !name.includes('*'))),
