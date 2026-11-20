@@ -1,31 +1,44 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const script = resolve('.github/scripts/run-release-step.sh');
+const directories = [];
+afterEach(() =>
+  directories
+    .splice(0)
+    .forEach((path) => rmSync(path, { recursive: true, force: true })),
+);
 
-it.skipIf(process.platform === 'win32').each([false, true])(
-  'resumes a partial release only with matching contents (changed=%s)',
-  (changed) => {
-    const directory = mkdtempSync(join(tmpdir(), 'release-branch-retry-'));
-    const checkout = join(directory, 'checkout');
-    const remote = join(directory, 'remote.git');
-    const bin = join(directory, 'bin');
-    mkdirSync(checkout);
-    mkdirSync(bin);
-    const git = (...args) => {
-      const result = spawnSync('git', args, {
-        cwd: checkout,
-        encoding: 'utf8',
-        env: { ...process.env, HUSKY: '0', GIT_CONFIG_NOSYSTEM: '1' },
-      });
-      expect(result.status, result.stderr).toBe(0);
-      return result.stdout.trim();
-    };
+describe.skipIf(process.platform === 'win32')('release branch retry', () => {
+  it.each([false, true])(
+    'resumes a partial release only with matching contents (changed=%s)',
+    (changed) => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-branch-retry-'));
+      directories.push(directory);
+      const checkout = join(directory, 'checkout');
+      const remote = join(directory, 'remote.git');
+      const bin = join(directory, 'bin');
+      mkdirSync(checkout);
+      mkdirSync(bin);
+      const git = (...args) => {
+        const result = spawnSync('git', args, {
+          cwd: checkout,
+          encoding: 'utf8',
+          env: { ...process.env, HUSKY: '0', GIT_CONFIG_NOSYSTEM: '1' },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        return result.stdout.trim();
+      };
 
-    try {
       git('init');
       git('config', 'user.name', 'Release test');
       git('config', 'user.email', 'release@example.test');
@@ -82,8 +95,6 @@ it.skipIf(process.platform === 'win32').each([false, true])(
           'published npm versions will be skipped',
         );
       }
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  },
-);
+    },
+  );
+});
