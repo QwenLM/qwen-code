@@ -5661,7 +5661,9 @@ export class Config {
 
   /**
    * Returns the names of configured (non-disabled) MCP servers whose
-   * discovery did NOT end in a CONNECTED state. Intended to be called by
+   * discovery did not settle as CONNECTED — that is, whose status is
+   * DISCONNECTED when {@link waitForMcpReady} resolves. Intended to be
+   * called by
    * non-interactive entry points AFTER {@link waitForMcpReady} resolves,
    * so they can surface a single user-visible warning summarizing which
    * servers failed.
