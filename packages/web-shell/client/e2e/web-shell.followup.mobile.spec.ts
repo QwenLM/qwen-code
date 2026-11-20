@@ -7,7 +7,7 @@
 // Touch follow-up suggestion acceptance. Runs under the `mobile-chromium`
 // (Pixel 7) and `mobile-webkit` (iPhone 13) projects, where the composer is
 // the plain-textarea backend: the suggestion renders as a tappable bar above
-// the input (every variant) and as a Tab key in the editing row (default
+// the input (every variant) and as a fill key in the editing row (default
 // variant only). Both fill the textarea without submitting, matching desktop
 // Tab; Send with an empty input keeps submitting the suggestion directly.
 
@@ -26,7 +26,7 @@ const COMPOSER_SUBMIT = '[data-web-shell-composer-submit]';
 const FOLLOWUP_BAR = '[data-web-shell-mobile-followup]';
 const FOLLOWUP_ACCEPT = '[data-web-shell-mobile-followup-accept]';
 const FOLLOWUP_DISMISS = '[data-web-shell-mobile-followup-dismiss]';
-const FOLLOWUP_TAB = '[data-web-shell-mobile-followup-tab]';
+const FOLLOWUP_FILL = '[data-web-shell-mobile-followup-fill]';
 const SUGGESTION = 'run the tests';
 
 async function installScenario(
@@ -123,7 +123,7 @@ test('mobile suggestion bar fills the textarea without submitting', async ({
   await expect(textarea).not.toHaveAttribute('placeholder', SUGGESTION);
   await expect(send).toBeEnabled();
   await page.screenshot({
-    path: testInfo.outputPath('followup-bar-simple-v2.png'),
+    path: testInfo.outputPath('followup-bar-simple-v3.png'),
   });
   await page.locator(FOLLOWUP_ACCEPT).tap();
   await expect(textarea).toHaveValue(SUGGESTION);
@@ -212,7 +212,7 @@ test('mobile prefix typing keeps the send completion without the bar', async ({
   );
 });
 
-test('mobile editing row Tab key fills the textarea without submitting', async ({
+test('mobile editing row fill key fills the textarea without submitting', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -221,20 +221,21 @@ test('mobile editing row Tab key fills the textarea without submitting', async (
   const textarea = page.locator(COMPOSER_TEXTAREA);
   const editingRow = page.locator('[data-web-shell-mobile-editing-actions]');
   await expect(editingRow).toBeVisible();
-  await expect(page.locator(FOLLOWUP_TAB)).toHaveCount(0);
+  await expect(page.locator(FOLLOWUP_FILL)).toHaveCount(0);
   const idlePlaceholder = await textarea.getAttribute('placeholder');
   await pushSuggestion(daemon, scenario.sessionId);
-  const tabKey = page.locator(FOLLOWUP_TAB);
-  await expect(tabKey).toBeVisible();
+  const fillKey = page.locator(FOLLOWUP_FILL);
+  await expect(fillKey).toBeVisible();
+  await expect(fillKey).toHaveText('Fill in');
   await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
   await expect(textarea).toHaveAttribute('placeholder', idlePlaceholder!);
   await page.screenshot({
-    path: testInfo.outputPath('followup-tab-key-v2.png'),
+    path: testInfo.outputPath('followup-fill-key-v3.png'),
   });
-  await tabKey.tap();
+  await fillKey.tap();
   await expect(textarea).toHaveValue(SUGGESTION);
   await expect(textarea).toBeFocused();
-  await expect(tabKey).toHaveCount(0);
+  await expect(fillKey).toHaveCount(0);
   await expect(page.locator(FOLLOWUP_BAR)).toHaveCount(0);
   expect(daemon.promptRequests()).toHaveLength(0);
 });

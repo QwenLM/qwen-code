@@ -4819,11 +4819,11 @@ export const ChatEditor = memo(
                     disabled={disabled}
                     aria-label={t('composerMobile.acceptFollowup')}
                     title={t('composerMobile.acceptFollowup')}
-                    data-web-shell-mobile-followup-tab
+                    data-web-shell-mobile-followup-fill
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => core.onAcceptFollowup('tab')}
                   >
-                    Tab
+                    {t('composerMobile.fillFollowup')}
                   </button>
                 )}
                 {!showAddMenuAction && (

@@ -15,7 +15,7 @@ Two earlier decisions shape this change. The mobile-composer-actions redesign re
 Two touch points, one accept path:
 
 - **Suggestion bar** above the input row, in every composer variant: the suggestion text as a tappable button plus a dismiss button.
-- **Editing-row Tab key**, default variant only (the editing row does not render in the simple variant or during voice capture): a `Tab`-labelled button that appears only while a suggestion is visible.
+- **Editing-row fill key**, default variant only (the editing row does not render in the simple variant or during voice capture): a button labelled with the localized action word (`Fill in` / 填入 / Вставить) that appears only while a suggestion is visible. It names the action rather than a desktop key: touch users have no Tab key and no Tab-accept muscle memory, so a `Tab` label would reference hardware they do not have.
 
 Visibility for both: touch backend mounted, suggestion visible, draft empty, composer enabled. Both hide as soon as the user types, matching the desktop ghost's prefix rule in spirit while keeping the touch surface draft-free. While the bar is visible the touch textarea keeps its ordinary placeholder, so the suggestion text appears on exactly one surface; an earlier revision also left it in the placeholder, which duplicated the text on screen. Desktop keeps rendering the suggestion as placeholder (empty input) and ghost completion (typed prefix).
 
@@ -28,11 +28,11 @@ Preserved fast paths: Send with an empty input still submits the visible suggest
 - 44px touch targets; the bar occupies one 44px row only while a suggestion is visible, so idle layout is unchanged.
 - The textarea keeps its 16px font (iOS focus auto-zoom rule); the bar is a button and uses 14px dimmed text with ellipsis.
 - The accept button prevents mousedown default like the other editing-row controls, so focus is not lost before the gesture-driven insert.
-- The old "no simulated keyboard keys" acceptance stays true when no suggestion is visible; the Tab key is contextual, not a revived dead key.
+- The old "no simulated keyboard keys" acceptance stays true when no suggestion is visible; the fill key is contextual, not a revived dead key, and its label never names a keyboard key.
 
 ## Validation
 
-- `client/e2e/web-shell.followup.mobile.spec.ts`, mobile-chromium (Pixel 7 touch emulation): 6/6 passed — bar fill without submit, dismiss, empty-send direct submit, typing hides the bar, prefix completion, editing-row Tab key fill, and the placeholder staying ordinary while the bar shows (single surface). The spec captures evidence screenshots into its
+- `client/e2e/web-shell.followup.mobile.spec.ts`, mobile-chromium (Pixel 7 touch emulation): 6/6 passed — bar fill without submit, dismiss, empty-send direct submit, typing hides the bar, prefix completion, editing-row fill key accept (labelled `Fill in`), and the placeholder staying ordinary while the bar shows (single surface). The spec captures evidence screenshots into its
   test-results output.
 - `ChatEditor.test.tsx` mobile composer actions: 8 new unit tests pin visibility (draft, hidden suggestion, desktop backend, disabled, simple variant) and the accept/dismiss wiring; 383/383 passed with `i18n.test.ts` at the merged head.
 - web-shell `tsc --noEmit` and ESLint on the changed files: clean.

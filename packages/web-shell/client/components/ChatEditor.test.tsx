@@ -6694,7 +6694,7 @@ describe('ChatEditor mobile composer actions', () => {
     };
   }
 
-  it('shows the follow-up bar and editing-row Tab key for an empty touch draft', () => {
+  it('shows the follow-up bar and editing-row fill key for an empty touch draft', () => {
     mobileComposer();
     visibleFollowup();
     const container = renderChatEditor({ visibleToolbarActions: [] });
@@ -6706,8 +6706,9 @@ describe('ChatEditor mobile composer actions', () => {
         ?.textContent,
     ).toBe('run the tests');
     expect(
-      container.querySelector('[data-web-shell-mobile-followup-tab]'),
-    ).not.toBeNull();
+      container.querySelector('[data-web-shell-mobile-followup-fill]')
+        ?.textContent,
+    ).toBe('Fill in');
     const accept = container.querySelector<HTMLButtonElement>(
       '[data-web-shell-mobile-followup-accept]',
     )!;
@@ -6727,7 +6728,7 @@ describe('ChatEditor mobile composer actions', () => {
     expect(composerCoreState.onAcceptFollowup).toHaveBeenCalledWith('tab');
     expect(composerCoreState.submitText).not.toHaveBeenCalled();
     composerCoreState.onAcceptFollowup.mockClear();
-    await clickButton('Tab');
+    await clickButton('Fill in');
     expect(composerCoreState.onAcceptFollowup).toHaveBeenCalledWith('tab');
     expect(composerCoreState.submitText).not.toHaveBeenCalled();
   });
@@ -6749,7 +6750,7 @@ describe('ChatEditor mobile composer actions', () => {
       container.querySelector('[data-web-shell-mobile-followup]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-mobile-followup-tab]'),
+      container.querySelector('[data-web-shell-mobile-followup-fill]'),
     ).toBeNull();
   });
 
@@ -6760,7 +6761,7 @@ describe('ChatEditor mobile composer actions', () => {
       container.querySelector('[data-web-shell-mobile-followup]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-mobile-followup-tab]'),
+      container.querySelector('[data-web-shell-mobile-followup-fill]'),
     ).toBeNull();
   });
 
@@ -6771,7 +6772,7 @@ describe('ChatEditor mobile composer actions', () => {
       container.querySelector('[data-web-shell-mobile-followup]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-mobile-followup-tab]'),
+      container.querySelector('[data-web-shell-mobile-followup-fill]'),
     ).toBeNull();
   });
 
@@ -6786,11 +6787,11 @@ describe('ChatEditor mobile composer actions', () => {
       container.querySelector('[data-web-shell-mobile-followup]'),
     ).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-mobile-followup-tab]'),
+      container.querySelector('[data-web-shell-mobile-followup-fill]'),
     ).toBeNull();
   });
 
-  it('keeps the bar but not the Tab key in the simple variant', () => {
+  it('keeps the bar but not the fill key in the simple variant', () => {
     mobileComposer();
     visibleFollowup();
     const container = renderChatEditor({
@@ -6800,7 +6801,7 @@ describe('ChatEditor mobile composer actions', () => {
       container.querySelector('[data-web-shell-mobile-followup]'),
     ).not.toBeNull();
     expect(
-      container.querySelector('[data-web-shell-mobile-followup-tab]'),
+      container.querySelector('[data-web-shell-mobile-followup-fill]'),
     ).toBeNull();
     expect(
       container.querySelector('[data-web-shell-mobile-editing-actions]'),

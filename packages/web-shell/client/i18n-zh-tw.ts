@@ -1158,6 +1158,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'composerMobile.searchCommands': '搜尋命令',
   'composerMobile.history': '輸入歷史',
   'composerMobile.acceptFollowup': '接受建議',
+  'composerMobile.fillFollowup': '填入',
   'composerMobile.dismissFollowup': '忽略建議',
   'composerMobile.stop': '停止',
   'composerMobile.attachments': (v) => `已新增附件/圖片：${v?.count ?? 0}`,
