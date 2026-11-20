@@ -193,7 +193,7 @@ final class ManagedSessionRetirementStore {
                     "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'RUNTIME_STAGE'"
                             + " AND owner_key = ? AND owner_revision = ?",
                     scope,
-                    ManagedSchemaKeys.identity((String) row.get("execution_call_id_hash")),
+                    (String) row.get("execution_call_id_hash"),
                     row.get("delivery_seq"));
             jdbc.update("DELETE FROM ma_runtime_stage WHERE id = ?", row.get("id"));
         }

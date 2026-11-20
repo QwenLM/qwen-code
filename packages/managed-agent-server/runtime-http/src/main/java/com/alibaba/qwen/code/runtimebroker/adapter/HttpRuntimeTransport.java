@@ -955,9 +955,89 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                     Map<String, Object> parsed =
                             new java.util.LinkedHashMap<>(ManagedContextProtocol.parse(bytes));
                     Object observation = parsed.remove("observation");
+                    Object observedRuns = parsed.remove("observedRuns");
                     ManagedContextProtocol.verify(parsed, expected);
-                    return observation == null ? Map.<String, Object>of()
-                            : Map.<String, Object>of("observation", observation);
+                    Map<String, Object> extra = new LinkedHashMap<>();
+                    if (observation != null) {
+                        extra.put("observation", observation);
+                    }
+                    if (observedRuns instanceof Map<?, ?> runsMap) {
+                        extra.put("observedRuns", runsMap);
+                    }
+                    return extra.isEmpty() ? Map.<String, Object>of() : Map.copyOf(extra);
+                });
+    }
+
+    @Override
+    public CompletionStage<Void> detachPublisher(
+            RuntimeLease lease, RuntimeSession session, Long writerGeneration) {
+        return detachPublisherV3(lease, session, writerGeneration);
+    }
+
+    @Override
+    public CompletionStage<Void> detachPublisherV3(
+            RuntimeLease lease, RuntimeSession session, Long writerGeneration) {
+        requireV3Context(lease, session);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 3);
+        body.put("toolResult", "managed-tool-result/1");
+        body.put("sessionId", session.getRuntimeSessionId());
+        if (writerGeneration != null) {
+            if (writerGeneration < 1) {
+                throw new IllegalArgumentException("writerGeneration must be positive");
+            }
+            body.put("writerGeneration", writerGeneration);
+        }
+        Map<String, Object> expected = Map.of(
+                "protocolVersion", 3,
+                "toolResult", "managed-tool-result/1",
+                "sessionId", session.getRuntimeSessionId(),
+                "detached", true);
+        return post(lease, ManagedContextProtocol.PUBLISHER_DETACH_PATH,
+                encodeToolRequest(body, BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenAccept(bytes -> ManagedContextProtocol.verify(
+                        ManagedContextProtocol.parse(bytes), expected));
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> pullObservations(
+            RuntimeLease lease, String executionCallId, long afterSeq,
+            long ackThrough, int waitMs, int maxEntries) {
+        return pullObservationsV3(lease, executionCallId, afterSeq, ackThrough, waitMs, maxEntries);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> pullObservationsV3(
+            RuntimeLease lease, String executionCallId, long afterSeq,
+            long ackThrough, int waitMs, int maxEntries) {
+        if (lease == null || executionCallId == null || executionCallId.isEmpty()
+                || afterSeq < 0 || ackThrough < 0 || waitMs < 0 || maxEntries < 1) {
+            throw new IllegalArgumentException("observation pull arguments are invalid");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 3);
+        body.put("toolResult", "managed-tool-result/1");
+        body.put("executionCallId", executionCallId);
+        body.put("afterSeq", afterSeq);
+        body.put("ackThrough", ackThrough);
+        body.put("waitMs", waitMs);
+        body.put("maxEntries", maxEntries);
+        Duration timeout = requestTimeout.plusMillis(Math.max(0, waitMs));
+        return post(lease, ManagedContextProtocol.OBSERVATION_PULL_PATH,
+                encodeToolRequest(body, BODY_LIMIT_BYTES),
+                16 * 1024 * 1024,
+                null,
+                timeout)
+                .thenApply(bytes -> {
+                    Map<String, Object> parsed = JsonCodec.parseObject(bytes, "observation pull response");
+                    if (!Integer.valueOf(3).equals(parsed.get("protocolVersion"))
+                            || !"managed-tool-result/1".equals(parsed.get("toolResult"))
+                            || !executionCallId.equals(parsed.get("executionCallId"))
+                            || !(parsed.get("status") instanceof String status)
+                            || !Set.of("held", "attached", "missing", "superseded").contains(status)) {
+                        throw protocol("Runtime observation pull response is invalid.");
+                    }
+                    return parsed;
                 });
     }
 

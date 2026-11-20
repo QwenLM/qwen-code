@@ -268,6 +268,15 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                 long deliverySeq = requiredLong(entry, "deliverySeq");
                 boolean isTerminal = "terminal".equals(kind);
 
+                if (stageRowExists(callHash, deliverySeq)) {
+                    if (isTerminal) {
+                        settleProcessInTx(request.executionCallId(), entry);
+                        terminalSettled = true;
+                    }
+                    stagedThrough = deliverySeq;
+                    continue;
+                }
+
                 if (!isTerminal && sessionBytes >= stagedBytesHardCap) {
                     hardCapReached = true;
                     break;
@@ -434,7 +443,7 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                 "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'RUNTIME_STAGE'"
                         + " AND owner_key = ? AND owner_revision <= ?",
                 scopeKey,
-                bytes(callHash),
+                callHash,
                 throughSeq);
         jdbc.update(
                 "DELETE FROM ma_runtime_stage WHERE runtime_session_key = ?"
@@ -542,6 +551,15 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
         return sum == null ? 0L : sum.longValue();
     }
 
+    private boolean stageRowExists(String callHash, long deliverySeq) {
+        List<Integer> found = jdbc.query(
+                "SELECT 1 FROM ma_runtime_stage WHERE execution_call_id_hash = ? AND delivery_seq = ? LIMIT 1",
+                (rs, idx) -> 1,
+                callHash,
+                deliverySeq);
+        return !found.isEmpty();
+    }
+
     private int countRunObservations(String callHash) {
         Integer count = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM ma_runtime_stage WHERE execution_call_id_hash = ? AND entry_kind = 'observation'",
@@ -625,7 +643,7 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                                     + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
                                     + " resource_id, gmt_create) VALUES (?, 'RUNTIME_STAGE', ?, ?, ?, ?, ?, ?, ?, ?)",
                             scopeKey,
-                            bytes(callHash),
+                            callHash,
                             deliverySeq,
                             resourceKey,
                             bytes(tenantId),

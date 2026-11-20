@@ -401,6 +401,24 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Void> detachPublisher(
+            RuntimeLease lease, RuntimeSession session, Long writerGeneration) {
+        if (!managed(session)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        requireLocalCapture(context(lease, session, false));
+        return delegate.detachPublisherV3(lease, session, writerGeneration);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> pullObservations(
+            RuntimeLease lease, String executionCallId, long afterSeq,
+            long ackThrough, int waitMs, int maxEntries) {
+        return delegate.pullObservationsV3(
+                lease, executionCallId, afterSeq, ackThrough, waitMs, maxEntries);
+    }
+
+    @Override
     public CompletionStage<Map<String, Object>> acknowledge(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> reference, Map<String, Object> receipt) {
         if (!managed(session) || !v3(reference)) {
