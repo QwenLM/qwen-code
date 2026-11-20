@@ -688,6 +688,42 @@ describe('release workflow', () => {
     }
   });
 
+  // The publish-set matrix drives all three switches from one value, so a
+  // gate cloned onto a sibling variable stays green there. Enable one gate
+  // at a time and expect the set from the package identity, not the flag.
+  const BOOTSTRAP_SWITCHES = {
+    '@qwen-code/audio-capture': 'PUBLISH_AUDIO_CAPTURE',
+    '@qwen-code/channel-msteams': 'PUBLISH_CHANNEL_MSTEAMS',
+    '@qwen-code/external-context-mem0': 'PUBLISH_EXTERNAL_CONTEXT_MEM0',
+  };
+
+  it.each(Object.entries(BOOTSTRAP_SWITCHES))(
+    'selects %s only when its own publish switch is set',
+    (pkg, variable) => {
+      const env = { ...process.env };
+      for (const key of Object.values(BOOTSTRAP_SWITCHES)) env[key] = 'false';
+      env[variable] = 'true';
+      const result = spawnSync(
+        process.execPath,
+        [join(process.cwd(), 'scripts/release-packages.mjs')],
+        { encoding: 'utf8', env },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim().split('\n')).toEqual(
+        RELEASE_WORKSPACES.filter(
+          (name) => name === pkg || !(name in BOOTSTRAP_SWITCHES),
+        ),
+      );
+      // A silent Teams skip is indistinguishable from a mistyped variable,
+      // so the skip names the package and its switch in the runner log.
+      if (pkg !== '@qwen-code/channel-msteams') {
+        expect(result.stderr).toContain(
+          '::notice::Skipping @qwen-code/channel-msteams; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true',
+        );
+      }
+    },
+  );
+
   it('keeps the workflow focused on orchestration', () => {
     // 920, raised from 880 for reconcile_failure: the success-gated sibling of
     // notify_failure, one job carrying a single script step, because the close
@@ -4043,14 +4079,10 @@ esac`,
     );
     // npm cannot bind trusted publishing to a package that has never been
     // published, so the first Teams release failed the nightly's publish job
-    // (#17898). Both clauses are load-bearing: the repository guard stops a
-    // fork publishing into @qwen-code, the variable stops upstream
-    // authenticating against a package that does not exist yet.
-    expect(publishStep.env.PUBLISH_CHANNEL_MSTEAMS).toContain(
-      "vars.NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED == 'true'",
-    );
-    expect(publishStep.env.PUBLISH_CHANNEL_MSTEAMS).toContain(
-      "github.repository == 'QwenLM/qwen-code'",
+    // (#17898). Pin the whole expression, conjunction included: with `||`
+    // the repository guard alone would publish Teams before its bootstrap.
+    expect(publishStep.env.PUBLISH_CHANNEL_MSTEAMS).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED == 'true' }}",
     );
     // The audio-capture switch replaced a deleted step-level
     // `if: github.repository == 'QwenLM/qwen-code'` gate. Unpinned, a fork

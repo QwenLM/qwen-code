@@ -42,8 +42,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (
       name === '@qwen-code/channel-msteams' &&
       process.env.PUBLISH_CHANNEL_MSTEAMS !== 'true'
-    )
+    ) {
+      // stderr, never stdout: stdout is the publish step's --filter payload.
+      console.error(
+        `::notice::Skipping ${name}; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true after its bootstrap publish`,
+      );
       continue;
+    }
     if (
       name === '@qwen-code/external-context-mem0' &&
       process.env.PUBLISH_EXTERNAL_CONTEXT_MEM0 !== 'true'
