@@ -294,7 +294,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
                 var reference = resolved.reference();
                 String id = "ext_" + UUID.nameUUIDFromBytes(ManagedSchemaKeys.key("source", tenant, workspace,
                         reference.providerId(), reference.kind(), reference.resourceId()).getBytes(StandardCharsets.UTF_8));
-                var previous = repository.list(tenant, workspace).stream().filter(entry -> id.equals(entry.pin().extensionId())).findFirst();
+                var previous = repository.findLatestCatalogPackage(tenant, workspace, id);
                 if (previous.isPresent() && !previous.get().manifest().name().equals(manifest.name())) {
                     throw new ManagedAgentException(409, "extension_namespace_conflict", "An update must retain the package namespace.");
                 }
@@ -416,7 +416,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
         var input = decodeImportMetadata(encodedMetadata);
         if (extensionId != null) {
             requireId(extensionId);
-            if (repository.list(tenant, workspace).stream().noneMatch(entry -> extensionId.equals(entry.pin().extensionId()))) {
+            if (repository.findLatestCatalogPackage(tenant, workspace, extensionId).isEmpty()) {
                 throw missing();
             }
         }
@@ -594,8 +594,8 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
         requireDigest(digest);
         if (extensionId != null) {
             requireExecutionAccess(tenant, actor, workspace);
-            Package previous = repository.list(tenant, workspace).stream()
-                    .filter(entry -> extensionId.equals(entry.pin().extensionId())).findFirst().orElseThrow(ManagedExtensionPackageService::missing);
+            Package previous = repository.findLatestCatalogPackage(tenant, workspace, extensionId)
+                    .orElseThrow(ManagedExtensionPackageService::missing);
             if (previous.source() != null) {
                 throw new ManagedAgentException(409, "extension_source_conflict", "Source-bound extensions require a source import.");
             }
@@ -675,8 +675,8 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
 
     private void authorizeExtension(String tenant, String actor, String workspace, String extensionId) {
         requireAccess(tenant, actor, workspace, false);
-        Package saved = repository.list(tenant, workspace).stream().filter(entry -> extensionId.equals(entry.pin().extensionId()))
-                .findFirst().orElseThrow(ManagedExtensionPackageService::missing);
+        Package saved = repository.findLatestCatalogPackage(tenant, workspace, extensionId)
+                .orElseThrow(ManagedExtensionPackageService::missing);
         authorizeSource(tenant, actor, workspace, saved);
     }
 

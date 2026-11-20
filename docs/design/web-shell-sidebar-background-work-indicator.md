@@ -48,7 +48,8 @@ Out of scope (recorded as follow-ups, not silently dropped):
   restart) while a detached background shell keeps running. The shell registry
   is in-memory, so no `hasRunningBackgroundTasks` reaches the client at all.
   Evidence: a remote session whose shell pid had been alive ~26h was absent
-  from live-state and carried no background field in the catalog.
+  from live-state and carried no background field in the catalog. Tracked in
+  #17819.
 - Re-grading the Session Overview panel's cards. A background-only session
   still reads `idle` there, which keeps the panel's sort order and displayed
   status unchanged; its two destructive card actions are gated separately (see

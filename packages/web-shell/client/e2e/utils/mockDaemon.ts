@@ -2365,7 +2365,10 @@ async function handleDaemonRoute(
       return;
     }
     const summary = scenario.sessions[index];
-    const displayName = readStringField(body, 'displayName');
+    const initialDisplayName = readStringField(body, 'initialDisplayName');
+    const displayName =
+      readStringField(body, 'displayName') ??
+      (summary.displayName?.trim() ? undefined : initialDisplayName);
     const prInput = getRecordValue(body, 'pr');
     let prs = summary.prs ?? [];
     if (prInput !== undefined) {
@@ -2446,7 +2449,11 @@ async function handleDaemonRoute(
     };
     await json(route, {
       sessionId,
-      ...(displayName !== undefined ? { displayName } : {}),
+      ...(displayName !== undefined
+        ? { displayName }
+        : initialDisplayName !== undefined
+          ? { displayName: summary.displayName }
+          : {}),
       prs,
     });
     return;
