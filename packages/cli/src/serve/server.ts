@@ -217,6 +217,10 @@ import {
 import { registerBrandRoutes } from './routes/brand.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
+  bindDefaultSessionEngine,
+  readTrustedWorkflowSettings,
+} from './workspace-workflow-capabilities.js';
+import {
   createHostedHarnessContract,
   installHostedHarnessContractMiddleware,
 } from './hosted-harness-contract.js';
@@ -1357,14 +1361,14 @@ export function createServeApp(
     );
   let reclaimIdleAcp: IdleAcpReclaimer | undefined;
   let defaultBridgeForAdmission: AcpSessionBridge | undefined;
-  const totalSessionAdmission =
-    !deps.bridge && !injectedWorkspaceRegistry
-      ? createTotalSessionAdmissionController({
-          maxTotalSessions: opts.maxTotalSessions,
-          getBridges: () =>
-            defaultBridgeForAdmission ? [defaultBridgeForAdmission] : [],
-        })
-      : undefined;
+  const ownsDefaultBridge = !deps.bridge && !injectedWorkspaceRegistry;
+  const totalSessionAdmission = ownsDefaultBridge
+    ? createTotalSessionAdmissionController({
+        maxTotalSessions: opts.maxTotalSessions,
+        getBridges: () =>
+          defaultBridgeForAdmission ? [defaultBridgeForAdmission] : [],
+      })
+    : undefined;
   const defaultSessionOwnerIndex = !injectedWorkspaceRegistry
     ? createWorkspaceSessionOwnerIndex()
     : undefined;
@@ -1373,7 +1377,7 @@ export function createServeApp(
     boundWorkspace,
     Storage.getRuntimeBaseDir(),
   );
-  const defaultBridgeChannels = () => {
+  const createDefaultBridgeChannels = () => {
     const channelFactory =
       acpChildArgs || deps.managedChildProcesses
         ? createSpawnChannelFactory({
@@ -1403,6 +1407,9 @@ export function createServeApp(
       }),
     };
   };
+  const defaultBridgeChannels = ownsDefaultBridge
+    ? createDefaultBridgeChannels()
+    : undefined;
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
@@ -1446,7 +1453,7 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...defaultBridgeChannels(),
+      ...defaultBridgeChannels,
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -1463,7 +1470,7 @@ export function createServeApp(
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
     });
-  if (!injectedWorkspaceRegistry && !deps.bridge) {
+  if (ownsDefaultBridge) {
     defaultBridgeForAdmission = bridge;
   }
   const archiveCoordinator = new SessionArchiveCoordinator();
@@ -1614,7 +1621,20 @@ export function createServeApp(
           mode: 'parent-process',
           overlayKeys: [],
         },
-        ...(deps.bridge ? {} : { sessionBareMode: false }),
+        readWorkflowSettings: () =>
+          readTrustedWorkflowSettings(
+            boundWorkspace,
+            primaryEffectiveEnv ?? daemonEnvAtBoot,
+          ),
+        ...(ownsDefaultBridge
+          ? {
+              sessionBareMode: false,
+              selectDefaultSessionEngine: bindDefaultSessionEngine(
+                defaultBridgeChannels?.executionEngines,
+                boundWorkspace,
+              ),
+            }
+          : {}),
         bridge,
         workspaceService: workspace,
         routeFileSystemFactory: fsFactory,

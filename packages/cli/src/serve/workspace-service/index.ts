@@ -71,6 +71,7 @@ import {
 } from '../../config/trustedFolders.js';
 import {
   buildPermissionSettings,
+  type PermissionSettingsScope,
   type QwenPermissionSettings,
 } from '../../config/permission-settings.js';
 import {
@@ -297,6 +298,11 @@ export function createDaemonWorkspaceService(
     });
   };
   const assertActiveGeneration = () => assertGenerationOpen?.();
+  let permissionWriteSequence = 0;
+  const lastPermissionSync = new Map<
+    PermissionSettingsScope,
+    { sequence: number; incomplete: boolean }
+  >();
   const loggedPreheatFailures = new WeakSet<object>();
   const logPreheatFailure = (err: unknown) => {
     if (typeof err === 'object' && err !== null) {
@@ -887,8 +893,20 @@ export function createDaemonWorkspaceService(
       );
     },
 
-    async getWorkspacePermissionsStatus(_ctx: WorkspaceRequestContext) {
-      return buildPermissionSettings(loadBoundSettings());
+    async getWorkspacePermissionsStatus(
+      _ctx: WorkspaceRequestContext,
+      opts?: { skipLoadEnvironment?: boolean },
+    ) {
+      assertActiveGeneration();
+      const pendingLiveSync = [...lastPermissionSync]
+        .filter(([, sync]) => sync.incomplete)
+        .map(([scope]) => scope);
+      return {
+        ...buildPermissionSettings(
+          loadBoundSettings(opts?.skipLoadEnvironment),
+        ),
+        ...(pendingLiveSync.length > 0 && { pendingLiveSync }),
+      };
     },
 
     async getWorkspaceVoiceStatus(_ctx: WorkspaceRequestContext) {
@@ -957,6 +975,7 @@ export function createDaemonWorkspaceService(
     ) {
       assertActiveGeneration();
       const key = `permissions.${request.ruleType}`;
+      const sequence = ++permissionWriteSequence;
       type ChildPermissionResult = QwenPermissionSettings & {
         liveSyncIncomplete?: boolean;
       };
@@ -986,12 +1005,19 @@ export function createDaemonWorkspaceService(
         }
       }
       assertActiveGeneration();
+      const liveSyncIncomplete = result?.liveSyncIncomplete === true;
+      if (sequence > (lastPermissionSync.get(request.scope)?.sequence ?? 0)) {
+        lastPermissionSync.set(request.scope, {
+          sequence,
+          incomplete: liveSyncIncomplete || bridgePartial !== undefined,
+        });
+      }
       publishWorkspaceEvent({
         type: 'settings_changed',
         data: { key, value: request.rules, scope: request.scope },
         originatorClientId: ctx.originatorClientId,
       });
-      if (result?.liveSyncIncomplete === true) {
+      if (liveSyncIncomplete) {
         throw new WorkspacePermissionSyncIncompleteError(bridgePartial);
       }
       if (bridgePartial) throw bridgePartial;

@@ -31,6 +31,8 @@ export interface QwenPermissionSettings {
   workspace: PermissionSettingsScopeState;
   merged: PermissionRuleSet;
   isTrusted: boolean;
+  /** Scopes with settings saved but still awaiting live synchronization. */
+  pendingLiveSync?: PermissionSettingsScope[];
 }
 
 export class PermissionRulesValidationError extends Error {

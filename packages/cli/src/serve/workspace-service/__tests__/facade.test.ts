@@ -554,6 +554,52 @@ describe('createDaemonWorkspaceService', () => {
       expect(result).toBe(acpResult);
     });
 
+    it.each([true, false])(
+      'keeps the latest permission sync result when an older write finishes last (latest incomplete=%s)',
+      async (latestIncomplete) => {
+        await withIsolatedWorkspace(async ({ workspace }) => {
+          const earlier = deferred<{ liveSyncIncomplete: boolean }>();
+          const svc = createDaemonWorkspaceService(
+            makeDeps({
+              boundWorkspace: workspace,
+              invokeWorkspaceCommand: vi
+                .fn()
+                .mockImplementationOnce(() => earlier.promise)
+                .mockResolvedValueOnce({
+                  liveSyncIncomplete: latestIncomplete,
+                }),
+            }),
+          );
+          const write = () =>
+            svc.setWorkspacePermissionRules(makeCtx(), {
+              scope: 'workspace',
+              ruleType: 'deny',
+              rules: [],
+            });
+
+          const older = write();
+          const latest = write();
+          await expect(
+            latest.then(
+              () => true,
+              () => false,
+            ),
+          ).resolves.toBe(!latestIncomplete);
+          earlier.resolve({ liveSyncIncomplete: !latestIncomplete });
+          await expect(
+            older.then(
+              () => true,
+              () => false,
+            ),
+          ).resolves.toBe(latestIncomplete);
+          const status = await svc.getWorkspacePermissionsStatus(makeCtx());
+          expect(status.pendingLiveSync).toEqual(
+            latestIncomplete ? ['workspace'] : undefined,
+          );
+        });
+      },
+    );
+
     it('rejects permission updates when ACP has no live session', async () => {
       await withIsolatedQwenHome(async () => {
         const invokeWorkspaceCommand = vi

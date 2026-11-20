@@ -6,7 +6,6 @@
 
 import type { Application, Request, Response } from 'express';
 import {
-  buildPermissionSettings,
   isPermissionRuleType,
   normalizePermissionRules,
   PermissionRulesValidationError,
@@ -54,21 +53,17 @@ export function registerWorkspacePermissionsRoutes(
     parseAndValidateClientId,
   } = deps;
 
-  app.get('/workspace/permissions', (_req: Request, res: Response) => {
+  app.get('/workspace/permissions', async (_req: Request, res: Response) => {
     try {
       const assertGenerationOpen =
         deps.captureGenerationAssertion?.() ?? (() => {});
       assertGenerationOpen();
-      const workspaceTrusted = deps.isWorkspaceTrusted?.();
-      res.status(200).json(
-        buildPermissionSettings(
-          loadSettings(boundWorkspace, {
-            skipLoadEnvironment: true,
-            skipWorkspaceSettings: workspaceTrusted === false,
-            workspaceTrusted,
-          }),
-        ),
+      const status = await workspace.getWorkspacePermissionsStatus(
+        { route: 'GET /workspace/permissions', workspaceCwd: boundWorkspace },
+        { skipLoadEnvironment: true },
       );
+      assertGenerationOpen();
+      res.status(200).json(status);
     } catch (err) {
       if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
@@ -203,7 +198,7 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
     workspaceRegistry: WorkspaceRegistry;
   },
 ): void {
-  app.get('/workspaces/:workspace/permissions', (req, res) => {
+  app.get('/workspaces/:workspace/permissions', async (req, res) => {
     const runtime = resolveWorkspaceRuntimeFromParam(
       deps.workspaceRegistry,
       req,
@@ -211,14 +206,15 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
     );
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
-      res
-        .status(200)
-        .json(
-          buildPermissionSettings(
-            loadSettings(runtime.workspaceCwd, { workspaceTrusted: true }),
-          ),
-        );
+      const status =
+        await runtime.workspaceService.getWorkspacePermissionsStatus({
+          route: 'GET /workspaces/:workspace/permissions',
+          workspaceCwd: runtime.workspaceCwd,
+        });
+      runtime.generationGuard?.assertOpen();
+      res.status(200).json(status);
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspaces/:workspace/permissions error: ${
           err instanceof Error ? err.message : String(err)

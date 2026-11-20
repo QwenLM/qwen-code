@@ -36,7 +36,6 @@ import {
 } from './hosted-harness-profile.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
-import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
   acquireInheritedLoaderEnvScrub,
@@ -5429,8 +5428,7 @@ async function runQwenServeImpl(
       resolvedCliVersion,
       trustPolicy,
       workflowTrust,
-      { matchesRule, parseRule },
-      { ToolNames },
+      { readTrustedWorkflowSettings, bindDefaultSessionEngine },
     ] = await Promise.all([
       loadServeRuntimeModules(),
       loadCoreRuntime(),
@@ -5438,8 +5436,7 @@ async function runQwenServeImpl(
       cliVersionPromise,
       import('../config/daemon-trust-policy.js'),
       import('./workflow-ancestor-trust.js'),
-      import('@qwen-code/qwen-code-core/permissions/rule-parser.js'),
-      import('@qwen-code/qwen-code-core/tools/tool-names.js'),
+      import('./workspace-workflow-capabilities.js'),
     ]);
     getWorkspaceRuntimeCoordinatorIfSupported =
       runtime.getWorkspaceRuntimeCoordinatorIfSupported;
@@ -6035,47 +6032,6 @@ async function runQwenServeImpl(
         workspaceTrusted: trusted,
       });
     };
-    const readWorkflowSettings = (
-      workspace: string,
-      environment: Readonly<NodeJS.ProcessEnv>,
-    ) => {
-      try {
-        const { tools, permissions } =
-          settingsRuntime.settings.readSettingsSnapshot(workspace, {
-            environment,
-            workspaceTrusted: true,
-          }).merged;
-        return {
-          enabled:
-            typeof tools?.workflowsEnabled === 'boolean'
-              ? tools.workflowsEnabled
-              : undefined,
-          toolDenied:
-            normalizeDisabledToolList(tools?.disabled).includes(
-              ToolNames.WORKFLOW,
-            ) ||
-            [
-              ...normalizeDisabledToolList(permissions?.deny),
-              ...normalizeDisabledToolList(tools?.exclude),
-            ].some((rule) => matchesRule(parseRule(rule), ToolNames.WORKFLOW)),
-        };
-      } catch {
-        return null;
-      }
-    };
-    const bindDefaultSessionEngine = (
-      executionEngines:
-        | ReturnType<typeof runtime.createPairedExecutionEngines>
-        | undefined,
-      workspaceCwd: string,
-    ) =>
-      executionEngines &&
-      (() =>
-        executionEngines.select({
-          operation: 'spawn',
-          request: { workspaceCwd },
-          daemonOwnedStandalone: false,
-        }));
     const resolveSkillToggleIdentities = async (
       workspace: string,
       skillNames: readonly string[],
@@ -6854,7 +6810,7 @@ async function runQwenServeImpl(
         env: primaryRuntimeEnv,
         ...(deps.bridge ? {} : { sessionBareMode: false }),
         readWorkflowSettings: () =>
-          readWorkflowSettings(boundWorkspace, runtimeEffectiveEnv),
+          readTrustedWorkflowSettings(boundWorkspace, runtimeEffectiveEnv),
         selectDefaultSessionEngine: bindDefaultSessionEngine(
           primaryExecutionEngines,
           boundWorkspace,
@@ -7500,7 +7456,10 @@ async function runQwenServeImpl(
         env: secondaryEnv.metadata,
         sessionBareMode: false,
         readWorkflowSettings: () =>
-          readWorkflowSettings(workspaceInput.cwd, secondaryEnv.effectiveEnv),
+          readTrustedWorkflowSettings(
+            workspaceInput.cwd,
+            secondaryEnv.effectiveEnv,
+          ),
         selectDefaultSessionEngine: bindDefaultSessionEngine(
           secondaryExecutionEngines,
           workspaceInput.cwd,
@@ -8607,7 +8566,7 @@ async function runQwenServeImpl(
         env: wsEnv.metadata,
         sessionBareMode: false,
         readWorkflowSettings: () =>
-          readWorkflowSettings(cwd, wsEnv.effectiveEnv),
+          readTrustedWorkflowSettings(cwd, wsEnv.effectiveEnv),
         selectDefaultSessionEngine: bindDefaultSessionEngine(
           wsExecutionEngines,
           cwd,

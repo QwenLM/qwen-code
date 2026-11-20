@@ -197,6 +197,7 @@ export interface DaemonWorkspaceService {
   /** Permission settings for the bound workspace. */
   getWorkspacePermissionsStatus(
     ctx: WorkspaceRequestContext,
+    opts?: { skipLoadEnvironment?: boolean },
   ): Promise<QwenPermissionSettings>;
 
   /** Start the ACP child/channel without creating a user-visible session. */

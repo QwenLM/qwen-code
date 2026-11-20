@@ -41,7 +41,7 @@ class EngineAgent {
   constructor(
     private readonly engine: BridgeExecutionEngine,
     private readonly acknowledge: () => boolean,
-    private readonly localSyncIncomplete = false,
+    public localSyncIncomplete = false,
   ) {}
 
   async initialize(): Promise<InitializeResponse> {
@@ -181,7 +181,12 @@ describe('paired Bridge workspace changes through the workspace routes', () => {
       post(`/session/${sessionId}/prompt`, {
         prompt: [{ type: 'text', text: 'hello' }],
       });
-    return { paired, legacy, managed, managedSession, post, prompt };
+    const get = (route: string) =>
+      request(app)
+        .get(route)
+        .set('Host', '127.0.0.1:4170')
+        .set('Authorization', `Bearer ${TOKEN}`);
+    return { paired, legacy, managed, managedSession, get, post, prompt };
   }
 
   it.each([true, false])(
@@ -213,6 +218,25 @@ describe('paired Bridge workspace changes through the workspace routes', () => {
       });
     },
   );
+
+  it('reports the pending scope to readers until that scope syncs', async () => {
+    const { legacy, get, post } = await harness(true, true);
+    const route = '/workspace/permissions';
+    const request = { scope: 'user', ruleType: 'deny', rules: [] };
+
+    expect((await get(route)).body).not.toHaveProperty('pendingLiveSync');
+    expect((await post(route, request)).status).toBe(409);
+    expect((await get(route)).body.pendingLiveSync).toEqual(['user']);
+
+    legacy.localSyncIncomplete = false;
+    expect((await post(route, { ...request, scope: 'workspace' })).status).toBe(
+      200,
+    );
+    expect((await get(route)).body.pendingLiveSync).toEqual(['user']);
+
+    expect((await post(route, request)).status).toBe(200);
+    expect((await get(route)).body).not.toHaveProperty('pendingLiveSync');
+  });
 
   it('delivers a new deny rule to live Managed sessions', async () => {
     const { managed, managedSession, post, prompt } = await harness(true);

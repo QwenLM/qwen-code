@@ -11185,6 +11185,68 @@ describe('DaemonClient', () => {
       expect(calls[0]?.method).toBe('GET');
     });
 
+    it.each(['add', 'remove'] as const)(
+      'retries a saved but unsynchronized %s through a fresh client',
+      async (operation) => {
+        const rule = 'ShellTool(npm test)';
+        const saved = {
+          ...permissionsStatus,
+          workspace: {
+            ...permissionsStatus.workspace,
+            rules: {
+              ...permissionsStatus.workspace.rules,
+              allow: operation === 'add' ? [rule] : [],
+            },
+          },
+        };
+        const before = {
+          ...saved,
+          workspace: {
+            ...saved.workspace,
+            rules: {
+              ...saved.workspace.rules,
+              allow: operation === 'add' ? [] : [rule],
+            },
+          },
+        };
+        let attempts = 0;
+        const { fetch, calls } = recordingFetch(({ method }) => {
+          if (method === 'GET') {
+            return jsonResponse(
+              200,
+              attempts === 0
+                ? before
+                : { ...saved, pendingLiveSync: ['workspace'] },
+            );
+          }
+          attempts += 1;
+          return attempts === 1
+            ? jsonResponse(409, { code: 'permission_sync_incomplete' })
+            : jsonResponse(200, saved);
+        });
+        const run = () => {
+          const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+          return operation === 'add'
+            ? client.addWorkspacePermissionRule('workspace', 'allow', rule)
+            : client.removeWorkspacePermissionRule('workspace', 'allow', rule);
+        };
+
+        await expect(run()).rejects.toMatchObject({ status: 409 });
+        await expect(run()).resolves.toEqual(saved);
+        expect(calls.map(({ method }) => method)).toEqual([
+          'GET',
+          'POST',
+          'GET',
+          'POST',
+        ]);
+        expect(JSON.parse(calls[3]!.body!)).toEqual({
+          scope: 'workspace',
+          ruleType: 'allow',
+          rules: saved.workspace.rules.allow,
+        });
+      },
+    );
+
     it('removeWorkspacePermissionRule propagates GET failures without POSTing', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(500, { error: 'failed to load permissions' }),

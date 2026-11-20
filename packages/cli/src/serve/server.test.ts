@@ -6167,6 +6167,80 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it.each([false, true])(
+      'reads the trusted embedded workspace’s effective user Workflow setting (injected bridge: %s)',
+      async (injectBridge) => {
+        const home = path.join(
+          serverTestEnvironmentRoot,
+          `workflow-user-home-${injectBridge}`,
+        );
+        await fsp.mkdir(home, { recursive: true });
+        const settingsPath = path.join(home, 'settings.json');
+        const writeWorkflowSetting = (workflowsEnabled: boolean) =>
+          fsp.writeFile(
+            settingsPath,
+            JSON.stringify({ tools: { workflowsEnabled } }),
+          );
+        await writeWorkflowSetting(false);
+        const app = createServeApp(baseOpts, undefined, {
+          ...(injectBridge ? { bridge: fakeBridge() } : {}),
+          primaryWorkspaceTrusted: true,
+          daemonEnv: {
+            QWEN_HOME: path.join(serverTestEnvironmentRoot, 'home'),
+          },
+          primaryRuntimeEnv: {
+            mode: 'runtime-overlay',
+            overlayKeys: ['QWEN_HOME'],
+            effectiveEnv: { QWEN_HOME: home },
+          },
+        });
+        const capabilities = () =>
+          request(app)
+            .get('/capabilities')
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .expect(200);
+
+        expect((await capabilities()).body.workspaces).toEqual([
+          expect.objectContaining({ trusted: true, workflowsEnabled: false }),
+        ]);
+
+        await writeWorkflowSetting(true);
+        expect((await capabilities()).body.workspaces).toEqual([
+          expect.objectContaining({ trusted: true, workflowsEnabled: true }),
+        ]);
+      },
+    );
+
+    it('uses the owned paired bridge’s default engine for Workflow availability', async () => {
+      const factory = vi.fn();
+      const evaluate = vi.fn(() => ({ status: 'compatible' as const }));
+      const app = createServeApp(
+        { ...baseOpts, experimentalPairedEngines: true },
+        undefined,
+        {
+          primaryWorkspaceTrusted: true,
+          daemonEnv: {
+            QWEN_HOME: path.join(serverTestEnvironmentRoot, 'home'),
+          },
+          managedExecutionEngine: { factory, evaluate },
+        },
+      );
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .expect(200);
+
+      expect(response.body.workspaces).toEqual([
+        expect.objectContaining({ trusted: true, workflowsEnabled: false }),
+      ]);
+      expect(evaluate).toHaveBeenCalledWith({
+        operation: 'spawn',
+        request: { workspaceCwd: response.body.workspaceCwd },
+        daemonOwnedStandalone: false,
+      });
+      expect(factory).not.toHaveBeenCalled();
+    });
+
     it('advertises the scoped workspace-memory tags on the wire', async () => {
       // The three tags this PR adds are pinned against a real `/capabilities`
       // body only in integration-tests/cli/qwen-serve-routes.test.ts, which no

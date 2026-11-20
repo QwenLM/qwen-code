@@ -5003,6 +5003,8 @@ export interface DaemonWorkspacePermissionsStatus {
   workspace: DaemonWorkspacePermissionScopeState;
   merged: DaemonPermissionRuleSet;
   isTrusted: boolean;
+  /** Scopes with settings saved but still awaiting live synchronization. */
+  pendingLiveSync?: DaemonPermissionScope[];
 }
 
 /**

@@ -6475,11 +6475,12 @@ export class DaemonClient {
     const normalized = normalizePermissionRuleInput(rule);
     const current = await this.workspacePermissions(opts);
     const rules = current[scope].rules[ruleType];
-    if (rules.includes(normalized)) return current;
+    const exists = rules.includes(normalized);
+    if (exists && !current.pendingLiveSync?.includes(scope)) return current;
     return await this.setWorkspacePermissionRules(
       scope,
       ruleType,
-      [...rules, normalized],
+      exists ? rules : [...rules, normalized],
       opts,
     );
   }
@@ -6501,7 +6502,12 @@ export class DaemonClient {
     const normalized = normalizePermissionRuleInput(rule);
     const current = await this.workspacePermissions(opts);
     const rules = current[scope].rules[ruleType];
-    if (!rules.includes(normalized)) return current;
+    if (
+      !rules.includes(normalized) &&
+      !current.pendingLiveSync?.includes(scope)
+    ) {
+      return current;
+    }
     return await this.setWorkspacePermissionRules(
       scope,
       ruleType,
