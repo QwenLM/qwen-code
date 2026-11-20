@@ -2495,6 +2495,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): SessionMetadataUpdate;
 
+  initializeSessionTitle?(
+    sessionId: string,
+    displayName: string,
+    context?: BridgeClientRequestContext,
+  ): SessionMetadataUpdate;
+
   /** Persist a Hosted Managed title before acknowledging the control plane. */
   commitSessionTitle?(
     sessionId: string,

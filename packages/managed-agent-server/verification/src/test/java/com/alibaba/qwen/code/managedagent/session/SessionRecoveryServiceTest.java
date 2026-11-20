@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.RecoveryStatus;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -66,6 +67,8 @@ class SessionRecoveryServiceTest {
         jdbc.execute("CREATE TABLE ma_resource_ref (resource_key VARCHAR,"
                 + " session_scope_key VARCHAR, owner_kind VARCHAR)");
         jdbc.execute("CREATE TABLE ma_resource (resource_key VARCHAR, state VARCHAR)");
+        jdbc.execute("CREATE TABLE ma_public_event (tenant_id VARCHAR, session_id VARCHAR,"
+                + " turn_id VARCHAR, stream_kind VARCHAR, is_terminal INT, source_key VARCHAR)");
         when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(session);
         when(store.findLatestTurns("tenant", List.of("session"))).thenReturn(Map.of());
         service = new SessionRecoveryService(sessions, store, coordinator, harness, new com.alibaba.qwen.code.managedagent.persistence.JdbcSessionRecoveryRepository(jdbc), mock(JdbcManagedSessionStore.class));
@@ -172,6 +175,162 @@ class SessionRecoveryServiceTest {
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("ready");
         assertThat(recovery.nextTurnAllowed()).isTrue();
+    }
+
+    // #17538: only the replica holding the attachment reads live evidence.
+    // Every other replica reads null, which must not turn a Turn the Harness
+    // already settled in its journal into an operator failure.
+    private void terminalEvent(String sourceKey) {
+        jdbc.update("INSERT INTO ma_public_event VALUES ('tenant', 'session', 'turn', 'SESSION', 1, ?)",
+                sourceKey);
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {"COMPLETED,", "CANCELLED,", "FAILED,model_rate_limited"})
+    void aReplicaWithoutTheAttachmentReadsANativeTerminalAsReady(String status, String code) {
+        turn(status, code);
+        terminalEvent("boot:epoch:7");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        assertThat(recovery.nextTurnAllowed()).isTrue();
+        assertThat(recovery.actions().recheck()).isFalse();
+        assertThat(service.projection(session, "actor")).isEqualTo(recovery);
+        verify(harness, never()).recheckRecoveryCleanup(anyString(), anyString(), anyString());
+        verifyNoInteractions(coordinator);
+    }
+
+    @Test
+    void aControlPlaneTerminalIsNotNativeSettlement() {
+        turn("FAILED", "managed_runtime_recovery_blocked");
+        terminalEvent(null);
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("operator_required");
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @Test
+    void aNonTerminalSourceKeyEventIsNotNativeSettlement() {
+        turn("COMPLETED", null);
+        jdbc.update("INSERT INTO ma_public_event VALUES ('tenant', 'session', 'turn', 'SESSION', 0, 'boot:epoch:7')");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("operator_required");
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @Test
+    void anotherTurnsNativeTerminalDoesNotSettleTheLatestTurn() {
+        turn("COMPLETED", null);
+        jdbc.update("INSERT INTO ma_public_event VALUES ('tenant', 'session', 'other-turn', 'SESSION', 1, 'boot:epoch:7')");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("operator_required");
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"throw", "foreign"})
+    void anUnreadableOwnerStatusWithANativeTerminalIsNotReadiness(String mode) {
+        turn("COMPLETED", null);
+        terminalEvent("boot:epoch:7");
+        when(harness.cachedRecoveryAttachment("tenant", "session"))
+                .thenReturn(new HarnessConnector.Attachment("boot"));
+        if ("throw".equals(mode)) {
+            when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                    .thenThrow(new IllegalStateException("unavailable"));
+        } else {
+            when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                    .thenReturn(new RecoveryStatus("ready", null, "another-prompt", true, true, true));
+        }
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("operator_required");
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"turn", "runtime", "cleanup"})
+    void aNativeTerminalThatStillOwesDurableWorkIsNotReady(String obligation) {
+        turn("COMPLETED", null);
+        terminalEvent("boot:epoch:7");
+        var scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        switch (obligation) {
+            case "turn" -> jdbc.update("INSERT INTO ma_turn VALUES ('tenant', 'session', 'RUNNING')");
+            case "runtime" -> jdbc.update("INSERT INTO ma_session_record VALUES (?, 'DOMAIN', 'ready')", scope);
+            default -> {
+                jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
+                jdbc.update("INSERT INTO ma_resource_ref VALUES ('debt', ?, 'HOSTED_CLEANUP')", scope);
+            }
+        }
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+    }
+
+    @Test
+    void theOwningReplicaKeepsItsLiveEvidenceOverANativeTerminal() {
+        turn("COMPLETED", null);
+        terminalEvent("boot:epoch:7");
+        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                .thenReturn(new RecoveryStatus("cleanup_pending", "file_history_pending",
+                        "private-prompt", true, true, false));
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("cleanup_pending");
+        assertThat(recovery.reasonCode()).isEqualTo("file_history_pending");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @Test
+    void aSealedHeadStillNeedsItsOwnProofWithANativeTerminal() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = 1");
+        turn("COMPLETED", null);
+        terminalEvent("boot:epoch:7");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("operator_required");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @Test
+    void recheckAnswersANativeTerminalWithoutOpeningTheSession() {
+        turn("FAILED", "model_rate_limited");
+        terminalEvent("boot:epoch:7");
+        var recovery = service.recheck("tenant", "actor", "session", "turn");
+        assertThat(recovery.state()).isEqualTo("ready");
+        assertThat(recovery.nextTurnAllowed()).isTrue();
+        verify(harness, never()).recheckRecoveryCleanup(anyString(), anyString(), anyString());
+        verifyNoInteractions(coordinator);
+    }
+
+    @Test
+    void aColdRecheckNoHarnessCanServeSaysSo() {
+        turn("FAILED", "failure");
+        when(harness.recheckRecoveryCleanup("tenant", "session", "private-prompt"))
+                .thenThrow(new IllegalStateException("Hosted Harness connector is closed"));
+        assertThatThrownBy(() -> service.recheck("tenant", "actor", "session", "turn"))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(503);
+                    assertThat(error.getCode()).isEqualTo("recovery_runtime_unavailable");
+                });
+        var pool = new ManagedAgentException(503, "harness_pool_unavailable", "No owner");
+        doThrow(pool).when(harness).recheckRecoveryCleanup("tenant", "session", "private-prompt");
+        assertThatThrownBy(() -> service.recheck("tenant", "actor", "session", "turn")).isSameAs(pool);
+    }
+
+    @Test
+    void aTerminalCleanupDeclineIsNotARetriableUnavailable() {
+        turn("FAILED", "failure");
+        when(harness.recheckRecoveryCleanup("tenant", "session", "private-prompt"))
+                .thenThrow(new HostedHarnessRecoveryDeclinedException(
+                        HostedHarnessRecoveryDeclinedException.REASON_PUBLIC_CHILD_UNSUPPORTED));
+        assertThatThrownBy(() -> service.recheck("tenant", "actor", "session", "turn"))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("hosted_turn_recovery_declined");
+                    assertThat(error.getCause())
+                            .isInstanceOf(HostedHarnessRecoveryDeclinedException.class);
+                });
     }
 
     @Test

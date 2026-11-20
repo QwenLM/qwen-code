@@ -787,7 +787,11 @@ describe('createAndAttachSessionForPrompt', () => {
       expect(actions.attachSession).not.toHaveBeenCalled();
       expect(actions.setModel).not.toHaveBeenCalled();
       expect(client.setModel).toHaveBeenCalledWith('qwen3');
-      expect(onSessionCreated).toHaveBeenCalledWith('session-1', client);
+      expect(onSessionCreated).toHaveBeenCalledWith(
+        'session-1',
+        client,
+        client,
+      );
       expect(actions.releaseSession).not.toHaveBeenCalled();
       expect(actions.clearSession).not.toHaveBeenCalled();
     });

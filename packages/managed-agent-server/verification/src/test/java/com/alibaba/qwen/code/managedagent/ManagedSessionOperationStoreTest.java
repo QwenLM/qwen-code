@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
@@ -229,6 +230,10 @@ class ManagedSessionOperationStoreTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: these witness v1 termination mechanics, so the Session rides
+        // external-files (ordinary files is v2 now).
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, TENANT, sessionId);
         String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
                 OperationKind.CLOSE, "owner", "a".repeat(64), "close",
                 "digest", true, 1).operation().operationId();
@@ -284,6 +289,10 @@ class ManagedSessionOperationStoreTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: these witness v1 termination mechanics, so the Session rides
+        // external-files (ordinary files is v2 now).
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, TENANT, sessionId);
         String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
                 OperationKind.CLOSE, "owner", "a".repeat(64), "close",
                 "digest", true, 1).operation().operationId();

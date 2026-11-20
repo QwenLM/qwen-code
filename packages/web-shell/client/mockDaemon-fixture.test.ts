@@ -29,6 +29,9 @@ describe('createWebShellDaemonScenario fixture ownership', () => {
     const scenario = createWebShellDaemonScenario({ sessions: fixture });
     expect(scenario.sessions).not.toBe(fixture);
     expect(scenario.sessions[0]).not.toBe(fixture[0]);
+    // Identity alone survives a clone that drops rows: the sibling cases below
+    // would throw on the missing element, but this one would stay green.
+    expect(scenario.sessions).toEqual(fixture);
   });
 
   it('keeps an in-place mutation out of the caller fixture', () => {
@@ -38,6 +41,20 @@ describe('createWebShellDaemonScenario fixture ownership', () => {
     scenario.sessions[0]!.goal = undefined;
 
     expect(scenario.sessions[0]!.goal).toBeUndefined();
+    expect(fixture[0]!.goal).toMatchObject({ status: 'active' });
+  });
+
+  it('keeps a nested element mutation out of the caller fixture', () => {
+    // Reassigning a top-level field cannot tell a deep clone from a per-element
+    // shallow one: both give the scenario its own element object. Writing into
+    // a nested object is what separates them, and `goal` is the field the e2e
+    // goal path writes.
+    const fixture = [goalSession()];
+    const scenario = createWebShellDaemonScenario({ sessions: fixture });
+
+    scenario.sessions[0]!.goal!.status = 'paused';
+
+    expect(scenario.sessions[0]!.goal).toMatchObject({ status: 'paused' });
     expect(fixture[0]!.goal).toMatchObject({ status: 'active' });
   });
 
@@ -69,26 +86,75 @@ describe('createWebShellDaemonScenario fixture ownership', () => {
   });
 
   it('does not hand back the caller standaloneSessions array', () => {
-    // The standalone create and patch routes unshift and replace whole
-    // elements, so array identity is the property that decides whether a
-    // case's writes reach the caller's fixture.
-    const fixture: DaemonStandaloneSessionSummary[] = [];
+    // Array and element identity both decide whether a case's writes reach the
+    // caller. The standalone create and patch routes only unshift and replace
+    // whole elements, so array identity covers them; the element assertion is
+    // for web-shell.standalone.spec.ts, which writes displayName into a found
+    // summary in place. A shallow copy satisfies not.toBe(fixture) and
+    // toEqual(fixture) alike, so only the element assertion catches it. A
+    // populated fixture is what lets any of this be exercised — an empty one
+    // would pass for any fresh empty array.
+    const fixture: DaemonStandaloneSessionSummary[] = [
+      {
+        ...makeSidebarSession('standalone-fixture'),
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+      },
+    ];
     const scenario = createWebShellDaemonScenario({
       standaloneSessions: fixture,
     });
 
     expect(scenario.standaloneSessions).not.toBe(fixture);
+    expect(scenario.standaloneSessions[0]).not.toBe(fixture[0]);
+    expect(scenario.standaloneSessions).toEqual(fixture);
   });
 
   it('does not hand back the caller gitRemotes array', () => {
     // materializeRemotes returns the array itself, and the add/remove routes
     // splice and push it, so identity decides whether those writes reach the
-    // caller. An empty fixture still exercises the clone: ??= only fills in
-    // the default when the field is nullish.
+    // caller. The value assertion is what keeps an empty fixture meaning "no
+    // remotes": identity alone is also satisfied by undefined, which would let
+    // ??= seed the default origin row for a caller that asked for none.
     const fixture: DaemonGitRemoteInfo[] = [];
     const scenario = createWebShellDaemonScenario({ gitRemotes: fixture });
 
     expect(scenario.gitRemotes).not.toBe(fixture);
+    expect(scenario.gitRemotes).toEqual([]);
+  });
+
+  it('keeps a goal-control write out of the caller goalsByWorkspace', () => {
+    // The goal-control route takes an entry out of this map and assigns
+    // wsEntry.snapshot, so the write lands inside the caller's object unless
+    // the map is cloned. web-shell.goals-multi-workspace.spec.ts builds every
+    // case from one module-level const, which is where that would leak.
+    const fixture = {
+      'ws-secondary': {
+        sessionId: 'sess-secondary',
+        snapshot: {
+          v: 2 as const,
+          activity: 'idle' as const,
+          goal: null,
+        },
+      },
+    };
+    const scenario = createWebShellDaemonScenario({
+      goalsByWorkspace: fixture,
+    });
+
+    expect(scenario.goalsByWorkspace).not.toBe(fixture);
+    expect(scenario.goalsByWorkspace!['ws-secondary']).not.toBe(
+      fixture['ws-secondary'],
+    );
+    expect(scenario.goalsByWorkspace).toEqual(fixture);
+
+    scenario.goalsByWorkspace!['ws-secondary']!.snapshot = {
+      v: 2,
+      activity: 'running',
+      goal: null,
+    };
+
+    expect(fixture['ws-secondary'].snapshot.activity).toBe('idle');
   });
 
   it('keeps a mid-turn message push out of the caller fixture', () => {

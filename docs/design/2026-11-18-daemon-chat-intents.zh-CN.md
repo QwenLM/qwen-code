@@ -59,6 +59,11 @@ cancel、被取代的 approval），以及一条见证关联测试，使每份�
   为 `failed`。approval 一旦结算为 `established`，引擎即释放其请求身份——在唯一的
   证据应用路径中执行，故在飞证据路径同样释放——使存活集合不随每个被应答的请求增长。
   `failed` 决定不构成取代：其请求保持存活，重试仍可建立。
+- `settleDecisionRequest(requestId, witness)`——把决策证据作用于该请求的存活
+  （非终态）approval/question 尝试，复用与 `settle` 相同的结算核心。它存在是因为
+  daemon 决策事件只点名请求、且可能在该尝试的 POST 仍在飞（操作 id 尚未绑定）时到达：
+  它在证据到达时冻结 approval 时效，并暂存已收窄见证待 dispatch 应用。关联是请求级；
+  无匹配的存活尝试即空操作，故已结束尝试的迟到事件不被保留。slice 2c 新增。
 - `abandon(operationId)`——给 admission 永远无法被确认的尝试（抛错的 transport 留
   下 `unknown`，任何 witness 都无法使其终态化）一条出路：把该行终态化为 `failed`、
   绝不 `established`，使失败的 transport 不会把 phase 钉死。未知 id、已终态尝试、
@@ -85,9 +90,10 @@ cancel、被取代的 approval），以及一条见证关联测试，使每份�
 ### 为什么单独设 `settle` 入口
 
 若 `dispatch` 从 transport promise 的 resolve 导出 witness，那么一个快速或被 mock
-的 transport 就会伪装成已建立的效果。把 `settle` 作为唯一能提升 witness 的路径，
-使该不变量成为结构性的：transport 路径在字面上就无法产生 `established`。下面的
-负向测试在这一边界被折叠时转红。
+的 transport 就会伪装成已建立的效果。把结算入口（按操作 id 的 `settle`、以及为在飞
+决策证据按请求的 `settleDecisionRequest`）作为唯一能提升 witness 的路径，使该不变量
+成为结构性的：transport 路径在字面上就无法产生 `established`。下面的负向测试在这一
+边界被折叠时转红。
 
 ### 为什么结算要点名具体尝试
 
@@ -100,6 +106,12 @@ session/turn 上的重试会复用该 target，于是已结束尝试的迟到 wi
 引擎事后自行发明的 id 本身不认证任何东西：slice 2c 必须在发起请求时把操作 id
 记在请求的后端身份旁，使到来的事件能点名它所属的尝试。适配器无法绑定的证据保持
 未验证，而不是宣告新尝试已完成。
+
+该尝试-id 不变量对 prompt 证据成立——daemon 逐 turn 点名唯一 `promptId`。决策证据
+是文档化的例外：daemon 决策事件只点名 `requestId`（跨尝试稳定），故
+`settleDecisionRequest` 按请求级关联——到该请求唯一的存活尝试——而非按尝试 id。
+重放安全的尝试级决策关联需要 daemon 目前不发出的后端尝试判别符；见 slice-2c
+控制器设计说明。
 
 尝试在 transport 执行**之前**就被记录，原因有二。其一，各行按派发顺序排列，而
 保留逻辑按位置取每个 kind+target 的最新终态行——当同一 target 上两次发送重叠时，

@@ -23,7 +23,7 @@ class ManagedSnapshotRestoreResponseTest {
     void snapshotIsAnOptionalSiblingOfTheOriginalHeadFields() throws Exception {
         var manifest = new ManagedNativeJournalSnapshots.Manifest("qwen-managed-native-session-snapshot/1",
                 "committed-prefix-v1", "tenant", "workspace", "session", "snapshot", 1, 0, null,
-                0, null, 1, 1, 0, "a".repeat(64));
+                0, null, 1, 0, "a".repeat(64));
         var descriptor = new ManagedNativeJournalSnapshots.Descriptor(manifest,
                 new ToolResultResourceRef("manifest", "managed-native-journal-snapshot", 1, 100, "b".repeat(64)), false);
         var response = json.readTree(json.writeValueAsBytes(new ManagedSessionStoreController.RestoreResponse(head(), descriptor)));
@@ -34,6 +34,6 @@ class ManagedSnapshotRestoreResponseTest {
     }
 
     private RestoreHead head() {
-        return new RestoreHead("ACTIVE", 1, 1, 1, 0, null, 0, null, 0, "READY", null);
+        return new RestoreHead("ACTIVE", false, 1, 1, 0, null, 0, null, 0, "READY", null);
     }
 }
