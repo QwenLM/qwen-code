@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -19,6 +21,7 @@ import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -58,11 +61,7 @@ class JournalPackDeletionRegressionTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         objects = new PublicationProbeWiring.InMemoryObjectStore();
-        ManagedAgentSettings settings = (ManagedAgentSettings) Proxy.newProxyInstance(
-                getClass().getClassLoader(), new Class<?>[] {ManagedAgentSettings.class},
-                (proxy, method, args) -> method.getName().equals("getSessionResources")
-                        ? sessionResources() : null);
-        packs = new JdbcJournalPacks(jdbc, objects, settings);
+        packs = new JdbcJournalPacks(jdbc, objects, settings());
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create,"
                 + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT, SESSION);
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id,"
@@ -73,6 +72,13 @@ class JournalPackDeletionRegressionTest {
                         + " 'ACTIVE', 0, 0, 0, 0, 1, 0, 1, 1, 1)",
                 ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(SESSION), TENANT, WORKSPACE,
                 SESSION, SESSION);
+    }
+
+    private ManagedAgentSettings settings() {
+        return (ManagedAgentSettings) Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] {ManagedAgentSettings.class},
+                (proxy, method, args) -> method.getName().equals("getSessionResources")
+                        ? sessionResources() : null);
     }
 
     private ManagedAgentSettings.SessionResources sessionResources() {
@@ -236,6 +242,46 @@ class JournalPackDeletionRegressionTest {
         JournalStoreRows rows = new JournalStoreRows(jdbc, null);
         assertThatThrownBy(() -> rows.activationLeaseRow(activationHead()))
                 .isInstanceOf(ManagedAgentException.class);
+    }
+
+    @Test
+    void sealedHeadEvictedGenesisStillClosesThroughThePackFallback() throws Exception {
+        var fixture = new WorkspaceLifecycleStoreTest.Fixture();
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc);
+        var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
+                "w".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
+        // A real genesis header with a durable definitionRef and no hookCatalog: the
+        // receipt synthesizes from the header alone, with no hook effects to settle.
+        byte[] definition = "{\"toolProfile\":\"hosted-workspace-files/1\"}".getBytes(StandardCharsets.UTF_8);
+        String digest = DigestUtils.sha256Hex(definition);
+        var header = fixture.json.createObjectNode().put("subtype", "managed_session_header_v1");
+        header.putObject("managedSession").putObject("definitionRef").put("resourceId", "definition")
+                .put("kind", "managed-session-definition").put("schemaVersion", 1).put("byteLength", definition.length).put("digest", digest);
+        byte[] bytes = ("{\"subtype\":\"session_execution_engine\"}\n" + header + "\n").getBytes(StandardCharsets.UTF_8);
+        var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "original", writer.writerGeneration(),
+                0, 0, "transaction", "session.create", "command", "a".repeat(64), 0, 0, 0, null, null, null, 0, null, 2,
+                Base64.getEncoder().encodeToString(bytes), DigestUtils.sha256Hex(bytes),
+                List.of(new ManagedSessionStoreModels.CommitResource("definition", "managed-session-definition", 1,
+                        definition.length, digest, Base64.getEncoder().encodeToString(definition))));
+        fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32), commit));
+        var operation = fixture.admit(OperationKind.CLOSE);
+        var fixtureObjects = new PublicationProbeWiring.InMemoryObjectStore();
+        JdbcJournalPacks fixturePacks = new JdbcJournalPacks(fixture.jdbc, fixtureObjects, settings());
+        fixture.lifecycle.setJournalPacks(fixturePacks);
+        assertThat(fixturePacks.compactOnce("tenant", "workspace", fixture.session)).isTrue();
+        fixture.jdbc.update("UPDATE ma_session_head SET state = 'SEALED'");
+        // The first pack covers the genesis; eviction nulls its SQL bytes while the
+        // head rests SEALED between writer leases.
+        assertThat(fixturePacks.deleteCoveredBlobs()).isGreaterThan(0);
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
+                + " WHERE record_bytes IS NULL", Long.class)).isEqualTo(1L);
+        // CLOSE recovery must synthesize the receipt from the pack-resolved header;
+        // before the fallback this threw NPE on the null genesis bytes.
+        var receipt = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(operation));
+        assertThat(receipt).isNotNull();
+        assertThat(receipt.path("storeSynthesized").asBoolean()).isTrue();
+        assertThat(receipt.path("definitionRef").path("resourceId").asText()).isEqualTo("definition");
+        fixture.transactions.executeWithoutResult(ignored -> fixture.lifecycle.verifyCompletion(operation));
     }
 
     // A single renewActivation record whose first line is the activation.changed event the lease
