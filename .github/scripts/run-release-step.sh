@@ -334,8 +334,8 @@ case "${step}" in
         # commit (the version-bump commit created by prepare-release-branch).
         # This prevents a rogue commit with matching tree but wrong ancestry
         # from being adopted as the release.
-        if ! git merge-base --is-ancestor "${RELEASE_SHA}" "${release_commit}" 2>/dev/null; then
-          echo "::error::${release_branch_name} tip ${release_commit} is not a descendant of release source ${RELEASE_SHA}. Refusing to resume."
+        if [[ "$(git rev-parse --verify -q "${release_commit}^" 2>/dev/null)" != "${RELEASE_SHA}" ]]; then
+          echo "::error::${release_branch_name} tip ${release_commit} is not a direct child of release source ${RELEASE_SHA}. Refusing to resume."
           exit 1
         fi
         if [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "${release_commit}^{tree}")" ]]; then

@@ -68,7 +68,14 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
       } else {
         git('commit', '--allow-empty', '-m', `Retry\n\n${trailer}`);
       }
-      writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      // Real `gh release view` on a missing release prints the message to
+      // stderr and exits 1; the resume arm keys on that text, so the stub has
+      // to reproduce it rather than exit silently.
+      writeFileSync(
+        join(bin, 'gh'),
+        '#!/bin/sh\necho "release not found" >&2\nexit 1\n',
+        { mode: 0o755 },
+      );
       // Stub npm so the dist-tag guard does not hit the real registry.
       // Report the previous version (behind the release) — safe to resume.
       writeFileSync(join(bin, 'npm'), '#!/bin/sh\necho "1.2.2"\n', {
