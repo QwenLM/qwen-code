@@ -204,7 +204,9 @@ case "${step}" in
         done
         if [[ "${probe_ok}" == "false" ]]; then
           echo "::error::Cannot confirm npm dist-tag ${NPM_TAG} state after 3 attempts; refusing to resume."
-          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+          # Do NOT set version_refusal — this is an infrastructure failure
+          # (registry unreachable), not a version refusal. notify_failure
+          # should still fire so a human investigates.
           exit 1
         fi
         if [[ -n "${current_tag}" ]]; then
@@ -215,8 +217,18 @@ case "${step}" in
           # 2 = comparison failed (refuse with distinct message).
           compare_result=0
           CURRENT_TAG="${current_tag}" RELEASE_VERSION_VAR="${RELEASE_VERSION}" node -e "
-            const parse = v => v.replace(/^v/,'').split(/[.-]/).map(s => parseInt(s, 10) || 0);
+            const parse = v => {
+              const parts = v.replace(/^v/,'').split(/[.-]/);
+              // Refuse non-numeric segments (e.g. nightly hashes) — they
+              // cannot be compared numerically and must not be treated as 0.
+              return parts.map(s => {
+                const n = parseInt(s, 10);
+                if (Number.isNaN(n)) return NaN;
+                return n;
+              });
+            };
             const [a, b] = [process.env.CURRENT_TAG, process.env.RELEASE_VERSION_VAR].map(parse);
+            if (a.some(Number.isNaN) || b.some(Number.isNaN)) process.exit(2);
             for (let i = 0; i < Math.max(a.length, b.length); i++) {
               const d = (a[i]||0) - (b[i]||0);
               if (d > 0) process.exit(1);
@@ -229,8 +241,16 @@ case "${step}" in
           # the comparison ran and the channel is ahead; otherwise it failed.
           if [[ "${compare_result}" -eq 1 ]]; then
             node_stderr="$(CURRENT_TAG="${current_tag}" RELEASE_VERSION_VAR="${RELEASE_VERSION}" node -e "
-              const parse = v => v.replace(/^v/,'').split(/[.-]/).map(s => parseInt(s, 10) || 0);
+              const parse = v => {
+                const parts = v.replace(/^v/,'').split(/[.-]/);
+                return parts.map(s => {
+                  const n = parseInt(s, 10);
+                  if (Number.isNaN(n)) return NaN;
+                  return n;
+                });
+              };
               const [a, b] = [process.env.CURRENT_TAG, process.env.RELEASE_VERSION_VAR].map(parse);
+              if (a.some(Number.isNaN) || b.some(Number.isNaN)) process.exit(2);
               for (let i = 0; i < Math.max(a.length, b.length); i++) {
                 const d = (a[i]||0) - (b[i]||0);
                 if (d > 0) process.exit(1);
@@ -254,19 +274,42 @@ case "${step}" in
           fi
           # compare_result == 0: channel is at or behind — safe to resume.
         fi
+        # Block cross-version races: after the check above, a newer version
+        # could still publish on the same channel while this run rebuilds.
+        # Serialize all real publishes for the same npm channel.
+        if [[ "${IS_DRY_RUN}" == "false" ]]; then
+          echo "::group::Checking for concurrent same-channel publishes"
+          concurrent="$(gh run list --workflow release.yml --status in_progress --limit 20 --json databaseId,displayTitle,headBranch --jq ".[] | select(.headBranch | startswith(\"release/\")) | select(.headBranch != \"${release_branch_name}\") | .databaseId" 2>/dev/null || true)"
+          if [[ -n "${concurrent}" ]]; then
+            echo "::error::Another release run is in progress on a different version. Wait for it to finish before resuming."
+            echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+          echo "::endgroup::"
+        fi
         # Skip tree comparison when the release is already complete (tag +
         # GitHub Release exist): the finalize workflow may have pushed a
         # CHANGELOG commit that makes the tree differ, but the version is
         # done and should not be reported as a failure.
         release_check_ok=false
+        release_exists=false
+        release_published=false
         for attempt in 1 2 3; do
-          if gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx 'false'; then
+          gh_output="$(gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>&1)" || true
+          if echo "${gh_output}" | grep -qx 'false'; then
             release_check_ok=true
+            release_exists=true
             release_published=true
             break
-          elif gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx 'true'; then
+          elif echo "${gh_output}" | grep -qx 'true'; then
             release_check_ok=true
+            release_exists=true
             release_published=false
+            break
+          elif echo "${gh_output}" | grep -qi 'not found\|release not found'; then
+            # Release does not exist yet — normal for a first resume.
+            release_check_ok=true
+            release_exists=false
             break
           fi
           if [[ "${attempt}" -lt 3 ]]; then
@@ -275,7 +318,9 @@ case "${step}" in
         done
         if [[ "${release_check_ok}" == "false" ]]; then
           echo "::error::Cannot confirm GitHub Release ${RELEASE_TAG} state after 3 attempts; refusing to resume."
-          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+          # Do NOT set version_refusal here — this is an infrastructure
+          # failure (network/permission), not a version refusal. The
+          # notify_failure job should still fire.
           exit 1
         fi
         if [[ "${release_published}" == "true" ]]; then
@@ -285,8 +330,17 @@ case "${step}" in
         fi
         git fetch --no-tags origin "refs/heads/${release_branch_name}"
         release_commit="$(git rev-parse FETCH_HEAD)"
+        # Verify the reused commit is a direct child of the release source
+        # commit (the version-bump commit created by prepare-release-branch).
+        # This prevents a rogue commit with matching tree but wrong ancestry
+        # from being adopted as the release.
+        if ! git merge-base --is-ancestor "${RELEASE_SHA}" "${release_commit}" 2>/dev/null; then
+          echo "::error::${release_branch_name} tip ${release_commit} is not a descendant of release source ${RELEASE_SHA}. Refusing to resume."
+          exit 1
+        fi
         if [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "${release_commit}^{tree}")" ]]; then
           echo "::error::${release_branch_name} already exists with different contents. Resume from that release commit instead."
+          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
           exit 1
         fi
         git switch --detach "${release_commit}"
