@@ -278,19 +278,24 @@ const durableFailover =
   bigOutput;
 const runtimeTakeover = inflightFailover || continuationFailover;
 const workspaceTurns = runtimeTakeover || bigOutput;
+const durableLocalProcess =
+  workspaceTurns && process.platform === 'linux' ? 'true' : 'false';
 const registerStorage = process.env['QWEN_E2E_REGISTER_STORAGE'] === '1';
 if (registerStorage && process.platform !== 'linux') {
   throw new Error(
     'QWEN_E2E_REGISTER_STORAGE=1 requires Linux native storage identity',
   );
 }
-// The tool-driven modes take over a dead Runtime binding, which needs the
-// durable local-Worker reclaim from the W0e line — Linux-only today. With
-// --harness-only the Spring and its Broker stay alive, the worker is never
-// orphaned, and no reclaim is needed.
-if (runtimeTakeover && !harnessOnly && process.platform !== 'linux') {
+// After Spring restarts, preparing a Workspace Turn requires reclaiming the
+// original local Worker binding. With --harness-only, its Broker stays alive.
+if (workspaceTurns && !harnessOnly && process.platform !== 'linux') {
+  const mode = bigOutput
+    ? '--big-output'
+    : inflightFailover
+      ? '--inflight-failover'
+      : '--continuation-failover';
   throw new Error(
-    `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted failover E2E CI job or a Linux container.`,
+    `${mode} requires Linux: the replacement Broker must reclaim the dead worker's Runtime binding. Run the mode in the Hosted failover E2E CI job or a Linux container.`,
   );
 }
 // The frozen-arm teardown wakes the former writer by this registry key, so
@@ -3340,10 +3345,6 @@ try {
         QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
         QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
         QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
-        // Trusted reboot recovery stays pinned off in every runner mode;
-        // durable local process follows runtimeTakeover. Both pins keep each
-        // mode's previously verified behavior and keep the runner starting
-        // off Linux.
         QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
         ...(registerStorage
           ? {
@@ -3370,14 +3371,7 @@ try {
               commandRewriteExtensionCache,
             )
           : {}),
-        ...(runtimeTakeover
-          ? {
-              QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:
-                process.platform === 'linux' ? 'true' : 'false',
-            }
-          : {
-              QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
-            }),
+        QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: durableLocalProcess,
         ...(durableFailover
           ? {
               QWEN_MANAGED_AGENT_DISPATCH_LEASE_DURATION: '2s',
@@ -4732,14 +4726,8 @@ try {
               : {}),
             QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
             QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
-            ...(runtimeTakeover
-              ? {
-                  QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:
-                    process.platform === 'linux' ? 'true' : 'false',
-                }
-              : {
-                  QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
-                }),
+            QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:
+              durableLocalProcess,
             QWEN_MANAGED_AGENT_DISPATCH_LEASE_DURATION: '2s',
             QWEN_MANAGED_AGENT_DISPATCH_LEASE_RENEW_INTERVAL: '500ms',
             QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',

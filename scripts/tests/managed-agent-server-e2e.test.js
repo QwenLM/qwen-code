@@ -2600,21 +2600,18 @@ describe('managed-agent-server e2e runner', () => {
     }
   });
 
-  // With the server defaults flipped on, dropping these pins would make the
-  // runner start the durable path off Linux and fail at server startup while
-  // `npm run test:scripts` stayed green: trusted recovery is pinned off at
-  // both Spring launch sites, and durable local process only ever follows the
-  // runtimeTakeover modes.
+  // The Workspace failover modes need the original and replacement Brokers
+  // to use the same durable provider. Other modes can still run off Linux.
   it('pins the runtime recovery flags for every runner mode', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
-    expect(source).toContain(
-      'const runtimeTakeover = inflightFailover || continuationFailover;',
+    expect(source).toMatch(
+      /const durableLocalProcess\s*=\s*workspaceTurns && process\.platform === 'linux' \? 'true' : 'false'/,
     );
     expect(
       source.match(
-        /if \(runtimeTakeover && !harnessOnly && process\.platform !== 'linux'\)/,
+        /if \(workspaceTurns && !harnessOnly && process\.platform !== 'linux'\)/,
       ),
-      'only orphaned Runtime takeover modes must require Linux',
+      'Workspace failover across Broker restart must require Linux',
     ).not.toBeNull();
     expect(
       source.match(
@@ -2624,15 +2621,9 @@ describe('managed-agent-server e2e runner', () => {
     ).toHaveLength(2);
     expect(
       source.match(
-        /QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:\s*'false'/g,
+        /QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:\s*durableLocalProcess/g,
       ),
-      'both non-runtimeTakeover branches must pin durable local process off',
-    ).toHaveLength(2);
-    expect(
-      source.match(
-        /\.\.\.\(runtimeTakeover\s*\?\s*\{\s*QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:\s*process\.platform === 'linux' \? 'true' : 'false'/g,
-      ),
-      'both durable local process branches must follow runtimeTakeover, Linux-gated',
+      'both Spring launch sites must use the same durable provider setting',
     ).toHaveLength(2);
   });
 
