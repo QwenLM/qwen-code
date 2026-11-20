@@ -20,6 +20,7 @@ import express from 'express';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
+  AgentHostReplacementProgramError,
   authenticateAgentHost,
   enrollAgentHost,
   heartbeatAgentHost,
@@ -695,6 +696,17 @@ export function registerAgentHostTransportRoutes(
       });
       res.status(201).json(enrolled);
     } catch (error) {
+      if (error instanceof AgentHostReplacementProgramError) {
+        if (error.enrollmentRefused) {
+          res.status(401).json({
+            error: AGENT_HOST_ENROLLMENT_REFUSED,
+            detail: error.message,
+          });
+        } else {
+          res.status(409).json({ error: error.message });
+        }
+        return;
+      }
       // The Host makes a new secret and sends its Replace again.
       if (
         (error as Error | undefined)?.message === AGENT_HOST_ALREADY_ENROLLED

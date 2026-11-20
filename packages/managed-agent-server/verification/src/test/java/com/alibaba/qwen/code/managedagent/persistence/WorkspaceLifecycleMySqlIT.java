@@ -315,7 +315,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
             assertThatThrownBy(() -> {
                 if (throughAdmission) {
                     fixture.store.beginWorkspaceLifecycle("tenant", fixture.session, OperationKind.DELETE, "owner",
-                            "a".repeat(64), "operation", "digest", true, 1);
+                            "a".repeat(64), "operation", "digest", true, 2);
                 } else {
                     JdbcWorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json,
                             "tenant", fixture.session);

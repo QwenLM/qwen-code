@@ -77,6 +77,7 @@ export const TEST_READ_MARKDOWN = new Set([
   '.qwen/skills/triage/references/pr-workflow.md',
   '.qwen/skills/verify-pr/SKILL.md',
   '.qwen/skills/verify-pr/references/android.md',
+  '.qwen/skills/verify-pr/references/web-shell.md',
   'AGENTS.md',
   'CLAUDE.md',
   'integrations/generated-ui/README.md',

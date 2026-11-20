@@ -4298,6 +4298,27 @@ it('requires an explicit resume for a stopped pane', async () => {
   });
 });
 
+it('keeps the pane editor available while deferring sends until history loads', async () => {
+  connectionState.loadingTranscript = true;
+  render();
+
+  expect(latestChatEditorProps?.disabled).toBe(false);
+  expect(latestChatEditorProps?.submitDisabled).toBe(true);
+  expect(latestOnSubmit!('pane draft')).toBe(false);
+  expect(sendPrompt).not.toHaveBeenCalled();
+
+  connectionState.loadingTranscript = false;
+  rerender();
+  expect(latestChatEditorProps?.submitDisabled).toBe(false);
+  await act(async () => {
+    latestOnSubmit!('pane draft');
+  });
+  expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(
+    'pane draft',
+    expect.objectContaining({ submittedPrompt: 'pane draft' }),
+  );
+});
+
 it('fences pane submits while the runtime is stopped and says why', async () => {
   connectionState.runtimeStopped = true;
   connectionState.status = 'disconnected';

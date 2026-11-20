@@ -86,6 +86,18 @@ export interface DaemonChatIntents {
     witness: OutcomeWitness,
   ): IntentResult | undefined;
   /**
+   * Apply decision evidence to the request's active (non-terminal) approval or
+   * question attempt, freezing currency when the evidence arrives even though
+   * the attempt's operation id is not yet bound (its POST is still in flight).
+   * The daemon decision event names only the request, so the correlation is
+   * request-level. No active matching attempt is a no-op, so a late event for a
+   * finished attempt is not retained.
+   */
+  settleDecisionRequest(
+    requestId: string,
+    witness: OutcomeWitness,
+  ): IntentResult | undefined;
+  /**
    * Give an attempt whose admission can never be confirmed (a thrown transport
    * leaves it `unknown`) an exit: terminalize it as `failed`, never
    * `established`, so it stops holding the phase open. Unknown ids,
@@ -193,6 +205,50 @@ export function createDaemonChatIntents(): DaemonChatIntents {
     return result;
   };
 
+  // The shared settlement core: freeze currency now, retain the narrowed
+  // witness while the POST is in flight, and apply it once admission resolves.
+  // Both the operation-id entry point and the request-id entry point use it so
+  // an in-flight decision is judged when its evidence arrives, not later.
+  const settleIntent = (
+    intent: TrackedIntent,
+    witness: OutcomeWitness,
+  ): IntentResult | undefined => {
+    if (isTerminal(intent.operation.state)) return undefined;
+    const narrowed = narrowWitness(intent, witness);
+    // Monotonic freeze: a row already validly settled (settled witness, not
+    // superseded) must not be weakened by a later duplicate delivery that
+    // judges the request superseded. Upgrades (superseded -> live) still apply
+    // below, so a re-delivery that judges the request live again recovers it.
+    if (
+      intent.witness === 'settled' &&
+      !intent.superseded &&
+      narrowed === 'none'
+    ) {
+      return resolveIntent(
+        intent.admission,
+        intent.witness,
+        intent.operation.target,
+      );
+    }
+    intent.witness = narrowed;
+    // Recompute on every settle that applies: a re-delivered decision may
+    // judge the request live again, and a stale flag would publish a state
+    // that disagrees with the returned outcome and skip the identity release.
+    intent.superseded =
+      intent.operation.kind === 'approval' &&
+      witness === 'settled' &&
+      narrowed === 'none';
+    // While the POST is in flight the row stays pending: the evidence is
+    // retained and applied by dispatch once admission resolves, so a submit
+    // does not leave 'submitting' before it was admitted.
+    if (intent.operation.state === 'pending') {
+      return resolveIntent(intent.admission, narrowed, intent.operation.target);
+    }
+    const result = applyEvidence(intent, narrowed);
+    rebuild();
+    return result;
+  };
+
   return {
     get operations() {
       return snapshot;
@@ -270,47 +326,27 @@ export function createDaemonChatIntents(): DaemonChatIntents {
     settle(operationId, witness) {
       const intent = find(operationId);
       if (!intent) return undefined;
-      if (isTerminal(intent.operation.state)) return undefined;
-      // Freeze the currency judgment now and retain the narrowed witness, so a
-      // settlement delivered in flight is applied once admission resolves
-      // without re-judging currency or being discarded.
-      const narrowed = narrowWitness(intent, witness);
-      // Monotonic freeze: a row already validly settled (settled witness, not
-      // superseded) must not be weakened by a later duplicate delivery that
-      // judges the request superseded. Upgrades (superseded -> live) still apply
-      // below, so a re-delivery that judges the request live again recovers it.
-      if (
-        intent.witness === 'settled' &&
-        !intent.superseded &&
-        narrowed === 'none'
-      ) {
-        return resolveIntent(
-          intent.admission,
-          intent.witness,
-          intent.operation.target,
-        );
+      return settleIntent(intent, witness);
+    },
+    settleDecisionRequest(requestId, witness) {
+      // Route decision evidence to the request's active (non-terminal) attempt
+      // rather than a stale bound id, so an in-flight retry's evidence is not
+      // applied to the previous terminal attempt. The daemon decision event
+      // names only the request, so the correlation is request-level.
+      let active: TrackedIntent | undefined;
+      for (const intent of tracked) {
+        if (
+          intent.operation.kind !== 'approval' &&
+          intent.operation.kind !== 'question'
+        ) {
+          continue;
+        }
+        if (intent.operation.target.requestId !== requestId) continue;
+        if (isTerminal(intent.operation.state)) continue;
+        active = intent;
       }
-      intent.witness = narrowed;
-      // Recompute on every settle that applies: a re-delivered decision may
-      // judge the request live again, and a stale flag would publish a state
-      // that disagrees with the returned outcome and skip the identity release.
-      intent.superseded =
-        intent.operation.kind === 'approval' &&
-        witness === 'settled' &&
-        narrowed === 'none';
-      // While the POST is in flight the row stays pending: the evidence is
-      // retained and applied by dispatch once admission resolves, so a submit
-      // does not leave 'submitting' before it was admitted.
-      if (intent.operation.state === 'pending') {
-        return resolveIntent(
-          intent.admission,
-          narrowed,
-          intent.operation.target,
-        );
-      }
-      const result = applyEvidence(intent, narrowed);
-      rebuild();
-      return result;
+      if (!active) return undefined;
+      return settleIntent(active, witness);
     },
     abandon(operationId) {
       const intent = find(operationId);

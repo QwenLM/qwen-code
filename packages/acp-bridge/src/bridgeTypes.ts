@@ -1521,12 +1521,28 @@ export interface BridgeClientRequestContext {
   onPromptAdmitted?: () => void;
   /** Internal cancellation while a guarded prompt waits for its ACP write. */
   dispatchSignal?: AbortSignal;
+  /**
+   * For continuation requests, resolve accepted only after the first dispatch
+   * fence succeeds and the ACP write begins. Do not wait for the turn to finish.
+   */
+  requireDispatchAck?: boolean;
   /** Internal signal when the prompt write begins and may reach the ACP child. */
   onPromptWriteStarted?: () => void;
   /** Internal signal after the bridge writes the queued prompt to ACP. */
   onPromptDispatched?: () => void;
   /** Internal authorization check when dequeuing a prompt and before its ACP write. */
   assertCanDispatch?: () => void;
+  /**
+   * Internal authorization check after the agent classifies a continuation
+   * and before the bridge admits its turn. HTTP routes never receive it as
+   * request input; an old workspace generation may throw to refuse the turn.
+   */
+  assertCanContinue?: () => void;
+  /**
+   * If supplied, admit only this actual interruption classification, not a
+   * stale classification previously read by a recovery-listing caller.
+   */
+  expectedInterruption?: 'interrupted_prompt' | 'interrupted_turn';
   /** Approval mode required for the delegated turn. */
   expectedApprovalMode?: ApprovalMode;
   /** The live mode before the switch. Older children still enforce expectedApprovalMode. */
@@ -1711,6 +1727,9 @@ export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
  * tool boundary.
  */
 export const MID_TURN_SEND_NOW_METHOD = 'craft/midTurnSendNow';
+
+/** Child-to-host wait for the prompt FIFO to settle after a Send now handoff. */
+export const MID_TURN_GOAL_HANDOFF_METHOD = 'craft/waitForGoalHandoff';
 
 /**
  * Cap on each per-session mid-turn reconciliation ring.
@@ -2495,6 +2514,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): SessionMetadataUpdate;
 
+  initializeSessionTitle?(
+    sessionId: string,
+    displayName: string,
+    context?: BridgeClientRequestContext,
+  ): SessionMetadataUpdate;
+
   /** Persist a Hosted Managed title before acknowledging the control plane. */
   commitSessionTitle?(
     sessionId: string,
@@ -2913,6 +2938,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    /** Present only when admission refused the actual interruption type. */
+    reason?: 'interruption_mismatch';
     /**
      * Replay cursor + correlation id for an accepted continuation, mirroring
      * the `POST /session/:id/prompt` 202 body. Present only when `accepted` —
@@ -3217,11 +3244,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   /**
    * Ask the agent to deliver the session's queued mid-turn messages now: a
    * model response that a foreground turn is streaming is cut short so they
-   * reach the model in this round trip, unless it has started a tool call;
-   * running tools still finish first. Otherwise, as in a channel, cron or
-   * background turn, the messages are delivered as without the request, at a
-   * tool boundary or by promotion when the turn ends; the protocol reference
-   * lists the narrow windows where neither happens. `requested` is true
+   * reach the model in this round trip. During tool calls, the agent ends the
+   * foreground turn and the messages follow the prompt FIFO. When another
+   * prompt is already queued, it can drain the messages at a tool boundary or
+   * promote them on settlement. Channel, cron and background turns keep
+   * tool-boundary delivery. `requested` is true
    * when user messages were waiting and the agent was asked, not that a
    * response was cut; it is false when none were waiting. Authorized like
    * the sibling mid-turn methods.
