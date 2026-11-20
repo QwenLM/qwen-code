@@ -1130,6 +1130,12 @@ function ToolbarPopover({
       )}
     </div>
   );
+  // iOS zooms the page when a focused field is under 16px. The sheet also
+  // opens on landscape tablets, which still match the Input's md: shrink to
+  // text-sm, so the touch field holds text-base at every breakpoint. The
+  // sheet doubles as the popover in narrow desktop windows, where a mouse
+  // wants the compact field and its spell-check, so gate on the pointer too.
+  const touchSearchField = mobileSheet && isCoarsePointerDevice();
   const searchInput = searchable ? (
     <Input
       ref={searchInputRef}
@@ -1138,6 +1144,11 @@ function ToolbarPopover({
       aria-label={searchLabel}
       placeholder={searchLabel}
       autoComplete="off"
+      className={touchSearchField ? 'h-11 text-base md:text-base' : undefined}
+      autoCapitalize={touchSearchField ? 'off' : undefined}
+      autoCorrect={touchSearchField ? 'off' : undefined}
+      spellCheck={touchSearchField ? false : undefined}
+      enterKeyHint={touchSearchField ? 'search' : undefined}
       onChange={(event) => setSearchQuery(event.target.value)}
       onKeyDown={(event) => {
         if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
@@ -1496,7 +1507,7 @@ function ModelReasoningControls({
       <div className={styles.reasoningSectionTitle}>
         {t('reasoning.options')}
       </div>
-      <div className={styles.reasoningThinkingRow}>
+      <div className={styles.reasoningThinkingRow} data-web-shell-thinking-row>
         <span>{t('reasoning.thinking')}</span>
         <Switch
           checked={reasoning.enabled}

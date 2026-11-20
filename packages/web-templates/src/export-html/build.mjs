@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_976;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -179,9 +179,17 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_976;
 // The merged catalog-loading tree measures 2,149,263 JS bytes, down 419,
 // with 2,425,802 bytes of separate CSS and the same third-party input mix.
 // The warning and ceiling keep 713 and 1,713 bytes above that measurement.
+//
+// A frozen-install build of a clean detached worktree at main 82a0f3031f71
+// measures 2,151,147 bytes of renderer JS on Node 22.22.2, 171 above the
+// previous ceiling. CI's Build unit-test tree (Linux, Node 22.x) measures
+// 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
+// 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
+// above the local measurement.
+//
 // The tool-summary parsing for permission-omitted search results (#15144)
 // adds about 463 bytes on top of main, under this ceiling.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_150_976;
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_151_577;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
