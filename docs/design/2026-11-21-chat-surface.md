@@ -35,20 +35,42 @@ next increment (2f), so this slice is additive and renders nothing on its own.
   on every streaming delta; the cheap block-level classifier still builds the
   signature each render.
 - **Admission is not establishment, in the composer too.** `ChatEditor.onSubmit`
-  dispatches `controller.submit` and clears the draft (`commitAccepted`) only on an
-  `accepted` admission, never on establishment. `onCancel` dispatches
-  `controller.cancel`. `isRunning` derives from `phase` (`submitting`/`running`).
+  dispatches `controller.submit`, returns the literal `false` to defer
+  `useComposerCore`'s synchronous commit, and clears the draft (`commitAccepted`)
+  only on an `accepted` admission — never on establishment, and never before the
+  transport resolves (any other return wipes the draft immediately). `onCancel`
+  dispatches `controller.cancel`. `isRunning` derives from `phase`
+  (`submitting`/`running`/`cancelling`), so a cancel in flight keeps the stop
+  affordance and the streaming indicator until settlement evidence arrives.
 - **Approvals/questions.** The surface renders the first `pending` approval
   (superseded items are skipped) and the first pending question. `ToolApproval`
-  confirmation routes to `respondApproval(id, optionId)`; `AskUserQuestion`
-  confirmation normalizes its index-keyed answers record into `QuestionAnswer[]`
-  and routes to `respondQuestion`, returning `admission === 'accepted'` as the
-  component's success boolean.
+  confirmation routes to `respondApproval(id, optionId)` and **rejects** on a
+  non-accepted admission (reporting through `onError`), because `ToolApproval`
+  re-arms only through rejection — resolving would latch the card inert.
+  `AskUserQuestion` confirmation routes by the chosen option: the submit
+  (`allow_once`) option normalizes its index-keyed answers record into
+  `QuestionAnswer[]` and goes to `respondQuestion`; the reject option is a decision
+  vote and goes to `respondApproval` (`respondQuestion` always votes the submit
+  option and cannot express a rejection). Both return `admission === 'accepted'`
+  as the component's success boolean.
+- **In-flow decision sheets.** A pending card renders in flow before the composer
+  and replaces it (the composer is hidden and gets `dialogOpen`), so the transcript
+  shrinks above the card instead of being covered by a floating overlay and the
+  composer does not keep the keyboard. Approval and question keep distinct
+  containers (`approval-overlay` / `question-overlay`) so both stay operable when
+  pending together; `approvalOverlayActive` is passed for either.
 - **Slots keep the kernel backend-neutral.** Header, backend-specific panels, the
   composer status stack, and the localized transcript-unavailable UI arrive as
   slots (`header`, `panels`, `composerStatus`, `transcriptError`). The status stack
   and usage stats need richer facts than the current conservative `statusFacts`
   (`queueLength`/`goalActive`), so the owning page supplies them until parity lands.
+- **Page-supplied facts and gating.** History pagination forwards
+  `hasOlderHistory` and `onLoadOlderHistory` (defaulting to `controller.loadOlder`).
+  Plan facts and focus/notification gating arrive as props (`planTodos`,
+  `planExecutionMode`, `approvalDisabled`, `approvalKeyboardActive`,
+  `showBrowserNotifications`) because the owning page computes them; split-view
+  panes pass `approvalKeyboardActive={false}` to avoid stealing focus. The default
+  `onError` is an observable `console.error` sink, not a silent no-op.
 
 ## Deferred to later increments
 

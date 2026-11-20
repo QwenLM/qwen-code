@@ -13,12 +13,10 @@
   flex-direction: column;
 }
 
-.approvalOverlay {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 10;
+/* In-flow bottom sheet: the decision card takes the composer's place so the
+   transcript shrinks above it rather than being covered by a floating layer. */
+.decisionCard {
+  flex: 0 0 auto;
   display: flex;
   justify-content: center;
   padding: 0 16px;
@@ -26,4 +24,8 @@
 
 .composer {
   flex: 0 0 auto;
+}
+
+.composerHidden {
+  display: none;
 }

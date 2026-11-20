@@ -30,16 +30,31 @@
 - **拆分保留每增量优化。** 渲染就绪的 request 仅在内容签名变化时抽取（slice 2d 的
   ref 缓存），而非每个流式增量；轻量块级分类器仍每次渲染构建签名。
 - **准入不等于建立，输入框亦然。** `ChatEditor.onSubmit` 派发 `controller.submit`，
-  仅在 `accepted` 准入时清空草稿（`commitAccepted`），绝不在建立时。`onCancel` 派发
-  `controller.cancel`。`isRunning` 由 `phase`（`submitting`/`running`）派生。
+  返回字面量 `false` 以推迟 `useComposerCore` 的同步提交，仅在 `accepted` 准入时清空
+  草稿（`commitAccepted`）——绝不在建立时、也绝不在 transport 落定前（其他任何返回值
+  都会立即清空草稿）。`onCancel` 派发 `controller.cancel`。`isRunning` 由 `phase`
+  （`submitting`/`running`/`cancelling`）派生，故取消在途时停止入口与流式指示器保持到
+  落定证据到达。
 - **审批/提问。** 表面渲染第一个 `pending` 审批（跳过被取代项）与第一个待处理提问。
-  `ToolApproval` 确认路由到 `respondApproval(id, optionId)`；`AskUserQuestion` 确认把
-  其按索引键控的答案记录规范化为 `QuestionAnswer[]` 并路由到 `respondQuestion`，以
+  `ToolApproval` 确认路由到 `respondApproval(id, optionId)`，并在非 accepted 准入时
+  **reject**（经 `onError` 上报），因为 `ToolApproval` 仅经 rejection 重新解锁——resolve
+  会把卡片闩死失效。`AskUserQuestion` 确认按所选选项路由：提交（`allow_once`）选项把
+  按索引键控的答案记录规范化为 `QuestionAnswer[]` 走 `respondQuestion`；拒绝选项是决策
+  投票，走 `respondApproval`（`respondQuestion` 总是投提交选项、无法表达拒绝）。两者均以
   `admission === 'accepted'` 作为组件的成功布尔返回。
+- **在流决策卡片。** 待处理卡片在输入框之前以在流方式渲染并替换它（输入框被隐藏并收到
+  `dialogOpen`），故转录在卡片上方收缩、而非被浮动层覆盖，输入框也不保留键盘。审批与
+  提问各有独立容器（`approval-overlay` / `question-overlay`），同时待处理时两者都可操作；
+  任一存在即传 `approvalOverlayActive`。
 - **槽位保持 kernel 后端中立。** 头部、后端特定面板、composer 状态栈、本地化的
   转录不可用 UI 均以槽位传入（`header`、`panels`、`composerStatus`、`transcriptError`）。
   状态栈与用量统计需要比当前保守 `statusFacts`（`queueLength`/`goalActive`）更丰富的
   事实，故由宿主页提供，直至 parity 落地。
+- **页面提供的事实与门控。** 历史分页转发 `hasOlderHistory` 与 `onLoadOlderHistory`
+  （默认取 `controller.loadOlder`）。计划事实与焦点/通知门控以 props 传入（`planTodos`、
+  `planExecutionMode`、`approvalDisabled`、`approvalKeyboardActive`、
+  `showBrowserNotifications`），因由宿主页计算；分屏面板传 `approvalKeyboardActive={false}`
+  以免抢焦点。默认 `onError` 是可观测的 `console.error` 落点，而非静默空函数。
 
 ## 延后到后续增量
 
