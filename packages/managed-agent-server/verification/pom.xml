@@ -181,6 +181,7 @@
                     <excludedGroups>fault-gate</excludedGroups>
                     <!-- H2 fixtures retain named databases for the JVM's lifetime.
                          Keep those catalogs scoped to a test class, not the whole suite. -->
+                    <forkCount>1</forkCount>
                     <reuseForks>false</reuseForks>
                     <systemPropertyVariables>
                         <managed.module.root>${managed.module.root}</managed.module.root>
