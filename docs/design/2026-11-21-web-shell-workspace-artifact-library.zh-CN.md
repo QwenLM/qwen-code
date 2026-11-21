@@ -16,7 +16,7 @@ Web Shell 的本地 daemon 模式只在会话内展示产物：按轮芯片、�
 对话——加载会额外创建 agent、仅为浏览输出就改变运行状态，这正是持久化产物库
 路由要避免的问题（[会话产物库](session-artifact-library.zh-CN.md)）。
 
-## 现状（在 main `930a1b30e0` 上核实）
+## 现状（在 main `232496db23` 上核实）
 
 会话级界面（本地 daemon）：
 
@@ -101,8 +101,18 @@ Managed 先例：
   `sessionId` 累积 envelope；展平产物并按最新优先排序（`updatedAt` 降序、
   `createdAt` 回退、`(sessionId, artifactId)` 稳定 tiebreak）；跟踪扫描进度
   （`total` 来自 `start`；仅 `complete` 表示终止）；未收到 `complete` 的断连
-  或终止 `error` 将结果标记为部分并给出重试；卸载或工作区变化时中止；手动
-  刷新重跑扫描。不轮询。
+  或终止 `error` 将结果标记为部分并给出重试。不轮询。
+- 扫描 generation 所有权：每次扫描——首次加载、手动刷新或工作区切换——都
+  中止上一次扫描，并递增一个绑定工作区键的单调 generation
+  （`ScanOwner = { workspaceKey, generation }`）。每个事件与终态提交
+  （`start` / `session` / `session_error` / `complete` / `error`）都经过
+  所有权检查：signal 未中止、工作区键匹配、generation 与当前扫描一致。
+  abort 本身不是所有权证明——传输层可能在 abort 之后仍投递排队事件；迟到的
+  `complete(A)` 不得终止更新的刷新 B，迟到的 `session(A)` 不得覆盖 B 的更新
+  结果。A→B→A 的工作区切换不得复活旧的 A 扫描：需要 generation 身份，不能
+  只凭工作区键字符串再次相等。
+- envelope 与错误按 generation 保存，新扫描开始时整体替换；进度、部分横幅与
+  终态永远描述当前 generation，绝不描述已结算但被取代的那一次。
 - 会话元数据来自 envelope（不像 managed 页面那样在客户端解析摘要）；
   `displayName` 缺失时回退为缩短的会话 id。
 - 无产物的会话不出现在列表里，但仍计入扫描进度。
@@ -126,7 +136,10 @@ Managed 先例：
 - 状态：扫描进度（已收到/总会话数）、空工作区、持久化不可用
   （`409 artifact_library_unavailable`）、runtime 不可用
   （`503 workspace_runtime_unavailable`）、请求级错误带重试、逐会话错误摘要
-  （`session_error` 行）、流未收到 `complete` 即结束时的部分结果横幅。
+  （`session_error` 行）、流未收到 `complete` 即结束时的部分结果横幅。终态
+  措辞区分两种判断：带 `session_error` 行的 `complete` 读作「扫描结束，但有
+  逐会话失败」，不是「工作区全部产物已核验」；无错误的 `complete` 读作
+  「枚举完成」，不是「T 时刻的原子快照」——扫描期间源是可变的。
 - 文案沿用 managed 产物库先例：专用文案模块（EN/ZH/RU）注册进 `i18n.tsx`，
   transcript stub 注册进 `vite.lib.config.ts`，使仅交互态文案不进导出
   transcript 预算，zh-TW 目录条目由 i18n 测试钉住。
@@ -141,6 +154,9 @@ Managed 先例：
 - SSE 优先、JSON 回退：全量扫描是 O(会话数) 且冷会话要重放转录；渐进渲染让
   大工作区下页面可用。保留有限查询语义：仅 `complete` 终止扫描；断连是部分
   结果，绝不静默当作完成。
+- 传输完成不等于视图确立：`complete` 事件只终止拥有当前 generation 的那次
+  扫描。每次状态提交的 generation 守卫是纯客户端契约——不新增 daemon
+  语义——并由下文的交错测试钉住，使更晚结算的旧请求永远无法确立当前视图。
 - 旧 daemon 隐藏入口而非做降级视图：满足「不能静默只返回 live 产物」，又不必
   为一个不存在的功能做升级状态屏。
 - 冷 managed 预览走跳转而非新增工作区内容路由：保持切片只读，避免新增内容/
@@ -172,11 +188,15 @@ Managed 先例：
   渲染只能缓解，不能消除。
 - 扫描结果到达时行会重排（SSE 完成序不是展示序）；列表是扫描快照，不是稳定
   分页窗口。
+- 全量扫描是枚举完成，不是工作区的原子 as-of 快照：四个 worker 运行期间，
+  运行中、冷、归档源都可能变化，各会话 envelope 的读取时刻互不相同。UI 不得
+  把结果呈现为一致的 as-of 视图；也不要求后端提供事务语义。
 - 产物库投影携带 metadata-only 的 workspace 恢复状态；列表不保证文件新鲜度。
   预览按需读取真实文件，缺失/变化显式报错。
 - 快照在刷新前会过期；产物身份是 `(sessionId, artifactId)`，绝不能只用
   `artifactId`。
-- 在飞扫描必须在工作区变化时中止；状态所有权沿用既有按会话缓存守卫模式。
+- 在飞扫描必须在刷新、卸载或工作区变化时中止；状态所有权由上文的
+  generation 契约保证，缓存键沿用既有按会话守卫模式。
 - 旧 daemon 隐藏入口；客户端不得用 live-only 读取伪造产物库。Managed 模式
   不受影响（其产物库对话框与 parity 立场保持原样）。
 
@@ -185,6 +205,14 @@ Managed 先例：
 - 单元：SDK 封装请求形状、Accept 头与错误映射；hook SSE 累积、JSON 回退、
   断连判部分、中止、刷新、排序稳定性；页面行/过滤器/状态/操作分派（workspace
   预览 vs live 内容 vs 冷跳转）；导航门控。
+- 扫描 generation 所有权的交错见证：（负向）同工作区重叠刷新——扫描 A 先发出
+  会话 S 的较旧 envelope，用户刷新，扫描 B 返回更新的 S 与 `complete(B)`，
+  随后迟到的 `session(A)` 与 `complete(A)` 从一个 abort 后仍投递排队事件的
+  传输层到达；最终行、进度与终态必须只反映 B，与哪个请求更晚结算无关。
+  （负向）A→B→A 工作区切换——旧 A 请求不得仅因工作区键再次相等而复活；
+  还要求 generation 身份。（正向）单次完成的扫描展示全部成功 envelope、保留
+  逐会话错误报告，冷/归档跳转与 workspace 文件预览路径仍可用；当前流断连
+  判部分。
 - E2E（headless 对真实 daemon；计划在 `.qwen/e2e-tests/`）：含运行中、冷、
   归档会话且带产物的工作区——渐进显示且不加载会话（无 attach/spawn）、归档
   产物可见、workspace 文件免加载预览、冷 managed 跳转后加载再预览、会话标签
@@ -201,6 +229,9 @@ Managed 先例：
   标签打开会话（归档经既有解归档流程）。
 - 旧 daemon 隐藏入口；无 live-only 回退。流未收到 `complete` 即结束时显示为
   部分结果并可重试。
+- 重叠刷新与 A→B→A 工作区往返绝不让被取代的扫描确立行、进度或终态；终态
+  措辞区分「枚举完成」与「扫描结束，但有逐会话失败」，绝不声称原子 as-of
+  快照。
 - build、typecheck、聚焦单测通过；会话级界面与 managed 产物库不变。
 
 ## 开放问题

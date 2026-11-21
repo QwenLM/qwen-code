@@ -22,7 +22,7 @@ allocates agents and changes runtime state merely to browse outputs, the
 exact problem the persisted library routes were built to avoid
 ([session artifact library](session-artifact-library.md)).
 
-## Current state (verified on main `930a1b30e0`)
+## Current state (verified on main `232496db23`)
 
 Session-scoped surfaces (local daemon):
 
@@ -119,8 +119,21 @@ Content paths:
   sort newest-first (`updatedAt` descending, `createdAt` fallback, stable
   `(sessionId, artifactId)` tiebreak); track scan progress (`total` from
   `start`; only `complete` terminates); a disconnect or terminal `error`
-  without `complete` marks the result partial and offers retry; abort on
-  unmount or workspace change; manual refresh re-runs the scan. No polling.
+  without `complete` marks the result partial and offers retry. No polling.
+- Scan-generation ownership: every scan — initial load, manual refresh, or
+  workspace switch — aborts the previous scan and bumps a monotonic generation
+  bound to the workspace key (`ScanOwner = { workspaceKey, generation }`).
+  Every event and terminal-state commit (`start` / `session` / `session_error`
+  / `complete` / `error`) is guarded by an ownership check: the signal is not
+  aborted, the workspace key matches, and the generation matches the current
+  scan. Abort alone is not ownership proof — a transport can deliver a queued
+  event after abort; a delayed `complete(A)` must not terminate a newer
+  refresh B, and a delayed `session(A)` must not overwrite a newer result from
+  B. An A→B→A workspace switch must not revive the old A scan: generation
+  identity is required, not the workspace key string alone.
+- Envelopes and errors are kept per generation and replaced when a new scan
+  begins; progress, partial banners, and terminal states always describe the
+  current generation, never a settled-but-superseded one.
 - Session metadata comes from the envelope (no client-side summary resolution,
   unlike the managed page); a missing `displayName` falls back to a shortened
   session id.
@@ -153,7 +166,11 @@ Content paths:
   persistence unavailable (`409 artifact_library_unavailable`), runtime
   unavailable (`503 workspace_runtime_unavailable`), request-level error with
   retry, per-session error summary (`session_error` rows), partial-result
-  banner when the stream ends without `complete`.
+  banner when the stream ends without `complete`. Terminal wording distinguishes
+  two judgments: `complete` with `session_error` rows reads as "scan finished
+  with per-session failures", not "all workspace artifacts verified";
+  `complete` without errors reads as "enumeration finished", not "atomic
+  snapshot at time T" — the sources are mutable while the scan runs.
 - Copy follows the managed library precedent: a dedicated message module
   (EN/ZH/RU) registered in `i18n.tsx`, a transcript stub registered in
   `vite.lib.config.ts` so interaction-only copy stays out of the exported
@@ -173,6 +190,11 @@ Content paths:
   transcript replay; progressive rendering keeps the page usable on large
   workspaces. Finite-query semantics are preserved: only `complete` terminates
   a scan; a disconnect is partial, never silently complete.
+- Transport completion is not view establishment: a `complete` event only
+  terminates the scan that owns the current generation. The generation guard
+  on every state commit is a client-only contract — no new daemon semantics —
+  and the interleaving tests below pin it, so an older request settling last
+  can never establish the current view.
 - Hide the entry on old daemons rather than build a degraded view: satisfies
   "must not silently return live-only artifacts" without an upgrade-state
   screen for a feature that does not exist there.
@@ -212,13 +234,19 @@ Content paths:
   partial rendering mitigate, not eliminate.
 - Rows re-sort as scan results arrive (SSE completion order is not display
   order); the list is a scan snapshot, not a stable pagination window.
+- A full scan is enumeration-complete, not an atomic as-of workspace snapshot:
+  live, cold, and archived sources may change while the four workers run, and
+  per-session envelopes are read at different moments. The UI must not present
+  the result as a coherent as-of view; the backend is not asked for
+  transactional semantics.
 - Library projections carry metadata-only workspace restore state; the list
   does not guarantee file freshness. Preview reads the actual file on demand
   and surfaces missing/changed files.
 - Snapshots go stale until refresh; artifact identity is
   `(sessionId, artifactId)`, never `artifactId` alone.
-- In-flight scans must abort on workspace change; state ownership follows the
-  existing per-session cache-guard pattern.
+- In-flight scans must abort on refresh, unmount, or workspace change; state
+  ownership is guaranteed by the generation contract above, and cache keys
+  follow the existing per-session guard pattern.
 - Old daemons hide the entry; clients must not fabricate a library from
   live-only reads. Managed mode is untouched (its library dialog and parity
   standing stay as they are).
@@ -229,6 +257,18 @@ Content paths:
   accumulation, JSON fallback, partial-on-disconnect, abort, refresh, sort
   stability; page rows/filter/states/action dispatch (workspace preview vs
   live content vs cold jump); nav gating.
+- Interleaving witnesses for scan-generation ownership: (negative)
+  same-workspace overlapping refresh — scan A emits an older envelope for
+  session S, the user refreshes, scan B returns a newer S and `complete(B)`,
+  then a delayed `session(A)` and `complete(A)` arrive from a transport that
+  delivers queued events even after abort; final rows, progress, and terminal
+  state must reflect only B, regardless of which request settles last.
+  (negative) A→B→A workspace switch — the old A request must not be revived
+  merely because the workspace key matches again; generation identity is also
+  required. (positive) a single completed scan displays all successful
+  envelopes, preserves session-error reporting, and keeps the cold/archived
+  jump and workspace-file preview paths working; a disconnected current stream
+  is partial.
 - E2E (headless against a real daemon; plan under `.qwen/e2e-tests/`): a
   workspace with live, cold, and archived sessions carrying artifacts —
   progressive display without session load (no attach/spawn), archived
@@ -251,6 +291,10 @@ Content paths:
   session (archived via the existing unarchive flow).
 - Old daemons hide the entry; no live-only fallback. A stream ending without
   `complete` is shown as partial with retry.
+- Overlapping refreshes and A→B→A workspace round-trips never let a superseded
+  scan establish rows, progress, or terminal state; terminal wording
+  distinguishes "enumeration finished" from "scan finished with per-session
+  failures", and never claims an atomic as-of snapshot.
 - Build, typecheck, and focused unit tests pass; session-scoped surfaces and
   the managed library are unchanged.
 
