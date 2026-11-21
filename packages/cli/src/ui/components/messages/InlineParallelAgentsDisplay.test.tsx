@@ -125,6 +125,47 @@ describe('<InlineParallelAgentsDisplay />', () => {
     expect(frame).toContain('0/3 done');
   });
 
+  /** Line count of a render with the given tool calls, for row-invariant comparisons. */
+  function lastFrameLines(
+    toolCalls: Array<ReturnType<typeof agentToolCall>>,
+  ): number {
+    const { lastFrame } = renderInline({ toolCalls });
+    return (lastFrame() ?? '').split('\n').length;
+  }
+
+  it('flattens a model-supplied newline in the agent name to one row (R3-1)', () => {
+    // The name cell is one line per row; the multiline sanitizer preserves
+    // \n by design, so the name must flatten it — otherwise a model-authored
+    // taskDescription paints a second terminal row and breaks the table.
+    const clean = agentToolCall({
+      callId: 'c1',
+      subagentName: 'general-purpose',
+      taskDescription: 'Agent 1: single line',
+    });
+    const hostile = agentToolCall({
+      callId: 'c2',
+      subagentName: 'general-purpose',
+      taskDescription: 'Agent 2: line\nHIJACKED ROW',
+    });
+    const { lastFrame } = renderInline({ toolCalls: [clean, hostile] });
+    const frame = lastFrame() ?? '';
+    // The injected text never owns a line of its own...
+    expect(frame.split('\n')).not.toContain('HIJACKED ROW');
+    // ...and the row count matches the clean two-agent render.
+    expect(frame.split('\n').length).toBe(
+      lastFrameLines([
+        clean,
+        agentToolCall({
+          callId: 'c2',
+          subagentName: 'general-purpose',
+          taskDescription: 'Agent 2: line HIJACKED ROW',
+        }),
+      ]),
+    );
+    // The flattened name is still readable on the original row.
+    expect(frame).toContain('line HIJACKED ROW');
+  });
+
   it('renders nothing for an empty toolCalls list', () => {
     const { lastFrame } = renderInline({ toolCalls: [] });
     expect(lastFrame() ?? '').toBe('');
