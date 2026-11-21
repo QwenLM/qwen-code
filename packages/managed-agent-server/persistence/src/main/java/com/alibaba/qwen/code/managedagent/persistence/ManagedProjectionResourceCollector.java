@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -22,16 +21,19 @@ final class ManagedProjectionResourceCollector {
         transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
     }
 
-    static void release(JdbcTemplate jdbc, String scope, String kind, String owner) {
+    static void release(JdbcTemplate jdbc, String tenant, String session, String kind, String owner) {
         // Readers can still hold this body's old read view; collection waits for their leases.
         jdbc.update(
-                "UPDATE ma_resource SET retention_until = " + ManagedSchemaTime.SQL_NOW + " WHERE session_scope_key = ? AND kind IN ("
+                "UPDATE ma_resource SET retention_until = " + ManagedSchemaTime.SQL_NOW + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND kind IN ("
                         + KINDS
                         + ") AND state = 'REFERENCED' AND publication_id IS NULL AND resource_key"
                         + " IN (SELECT f.resource_key FROM ma_resource_ref f WHERE"
-                        + " f.session_scope_key = ? AND f.owner_kind = ? AND f.owner_key = ?)",
-                scope,
-                scope,
+                        + " f.tenant_id = ? AND f.session_id = ? AND f.owner_kind = ? AND f.owner_key = ?)",
+                tenant,
+                session,
+                tenant,
+                session,
                 kind,
                 owner);
     }
@@ -54,16 +56,14 @@ final class ManagedProjectionResourceCollector {
         JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
                 jdbc, tenant, JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         ToolPublicationRetentionStore.lockSessionHead(jdbc, tenant, session);
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         var rows =
                 jdbc.queryForList(
                         "SELECT resource_key FROM ma_resource WHERE resource_key = ? AND"
-                            + " session_scope_key = ? AND tenant_id = ? AND session_id = ? AND kind"
+                            + " tenant_id = ? AND session_id = ? AND kind"
                             + " IN ("
                                 + KINDS
                                 + ") AND retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE' AND publication_id IS NULL AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL AND deletion_operation_key IS NULL FOR UPDATE",
                         key,
-                        scope,
                         tenant,
                         session);
         if (rows.isEmpty()) {
@@ -81,11 +81,11 @@ final class ManagedProjectionResourceCollector {
         }
         long now = ToolPublicationRetentionStore.now(jdbc);
         boolean protectedBody = !jdbc.queryForList(
-                                "SELECT tenant_id FROM ma_session_head WHERE tenant_key = ? AND"
-                                    + " harness_key = ? AND tenant_id = ? AND session_id = ? AND"
+                                "SELECT tenant_id FROM ma_session_head WHERE tenant_id = ? AND"
+                                    + " harness_session_id = ? AND session_id = ? AND"
                                     + " head_kind = 'MANAGED_SESSION' AND recovery_status <>"
                                     + " 'READY'",
-                ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session), tenant, session).isEmpty();
+                tenant, session, session).isEmpty();
         protectedBody |= !jdbc.queryForList(
                                 "SELECT session_id FROM ma_session WHERE tenant_id = ? AND"
                                         + " session_id = ? AND is_recovery_protected = TRUE",

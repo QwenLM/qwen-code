@@ -6,6 +6,13 @@
 
 - Status: **proposal**. No code or schema is changed by this document. Implementation
   requires its own change, baseline reproduction, and MySQL evidence.
+- Revision (2026-11-20): a follow-up survey of the hash keys that duplicate another unique
+  key in their own table corrected the `workspace_id` budget and added constraints for
+  receipts, operations, Session hash columns and read leases, then decided the three
+  questions it raised (see [Duplicate business keys](#duplicate-business-keys)).
+- Revision (2026-11-21): increment 2 removes the hash keys that only restate raw
+  columns of their own row, ahead of the VARCHAR conversion (see
+  [Increment 2](#increment-2-redundant-same-row-hash-keys)).
 - Date: 2026-11-20. Source baseline: `origin/main` at `7ef9d6decb`. Analysis was
   executed at `f10299764e`; the three intervening commits touch no
   `packages/managed-agent-server` file, and the shared V1 schema and
@@ -44,7 +51,9 @@ does not hold for them, and the layer can be removed in favour of raw columns.
 Goals:
 
 - Store identities as `VARCHAR` with per-class budgets sized to real values plus
-  buffer, with byte-exact (NO PAD) equality.
+  buffer, with byte-exact (NO PAD) equality. Identity classes with an ASCII-only
+  contract may instead keep a byte type sized to the contract (decision 2 under
+  [Duplicate business keys](#duplicate-business-keys)).
 - Remove the identity-hash key layer; key coordination, uniqueness, and cross-table
   references on raw identity columns.
 - Preserve every isolation, fencing, idempotency, lock-order, and replay invariant.
@@ -61,19 +70,37 @@ Non-goals:
 
 ## Identity evidence and budgets
 
-| Identity                                                           | Actual form / length                         | Evidence                                                                                                                                                      | Budget           | Index bytes |
-| ------------------------------------------------------------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ----------- |
-| `tenant_id`, `actor_id`                                            | numeric, ≤20 digits                          | upstream table defines `tenant_id bigint(20) unsigned`, `act_id` likewise (maintainer-supplied, 2026-11-20); arrives as decimal string via `X-Qwen-Tenant-Id` | `VARCHAR(36)`    | 144         |
-| `session_id`                                                       | UUID, 36                                     | transcript file is `<uuid>.jsonl` (`packages/core/src/services/sessionService.ts:1841`)                                                                       | `VARCHAR(64)`    | 256         |
-| `workspace_id`                                                     | `workspace-` + UUID-derived receipt key, ≈46 | `WorkspaceCreationStore.java:278,309`                                                                                                                         | `VARCHAR(64)`    | 256         |
-| `resource_id`, `operation_id`, `activation_id`, other minted ids   | `randomUUID()`, 36                           | `http-managed-session-store.ts`, `managed-session-assembly.ts`, Java `UUID.randomUUID()`                                                                      | `VARCHAR(64)`    | 256         |
-| external channel `account_id`, `sender_id`, `chat_id`, `thread_id` | platform-opaque, variable                    | schema comments "External platform … identity"                                                                                                                | `VARCHAR(512)`   | 2048        |
-| `object_key`, `capture_object_key`                                 | OSS key, long, not indexed                   | `ma_resource`, `ma_journal_pack`                                                                                                                              | keep `VARBINARY` | n/a         |
+| Identity                                                           | Actual form / length                                                                                                      | Evidence                                                                                                                                                      | Budget                            | Index bytes |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ----------- |
+| `tenant_id`, `actor_id`                                            | numeric, ≤20 digits                                                                                                       | upstream table defines `tenant_id bigint(20) unsigned`, `act_id` likewise (maintainer-supplied, 2026-11-20); arrives as decimal string via `X-Qwen-Tenant-Id` | `VARCHAR(36)`                     | 144         |
+| `session_id`                                                       | UUID, 36                                                                                                                  | transcript file is `<uuid>.jsonl` (`packages/core/src/services/sessionService.ts:1841`)                                                                       | `VARCHAR(64)`                     | 256         |
+| `workspace_id`                                                     | `workspace-` + 64-hex receipt key, 74; `ws_` + UUID (SSH), 39; 32-hex child id, 32; registration-chosen, up to 128        | `WorkspaceCreationStore`, `JdbcSshWorkspaceStore`, `ChildWorkspaceStore`, `WorkspaceValues.requireIdentifier` (`[A-Za-z0-9._:-]{1,128}`)                      | `VARBINARY(128)` (ASCII contract) | 128         |
+| `storage_id`                                                       | `created-` / `imported-` + the same receipt key, 72 / 73; `ssh_` + UUID, 40; registration-chosen or configured, up to 256 | `WorkspaceCreationStore`, `JdbcSshWorkspaceStore`, `WorkspaceRecord.MAXIMUM_STORAGE_ID_LENGTH` (printable ASCII)                                              | `VARBINARY(256)` (ASCII contract) | 256         |
+| `resource_id`, `operation_id`, `activation_id`, other minted ids   | `randomUUID()`, 36                                                                                                        | `http-managed-session-store.ts`, `managed-session-assembly.ts`, Java `UUID.randomUUID()`                                                                      | `VARCHAR(64)`                     | 256         |
+| external channel `account_id`, `sender_id`, `chat_id`, `thread_id` | platform-opaque, variable                                                                                                 | schema comments "External platform … identity"                                                                                                                | `VARCHAR(512)`                    | 2048        |
+| `object_key`, `capture_object_key`                                 | OSS key, long, not indexed                                                                                                | `ma_resource`, `ma_journal_pack`                                                                                                                              | keep `VARBINARY`                  | n/a         |
 
 `VARCHAR(N)` under utf8mb4 counts as `4×N` bytes for index-key arithmetic; on-disk
 storage is the actual bytes. The class table gives defaults; implementation must
 enumerate every identity column's mint format and finalize per-column budgets,
 listing exceptions (e.g. composite turn/event ids) explicitly.
+
+Correction (follow-up survey): an earlier revision listed `workspace_id` as a
+UUID-derived receipt key of about 46 characters with a `VARCHAR(64)` budget. The
+receipt key is the 64-hex SHA-256 of the creation receipt tuple, so the receipt-minted
+`workspace_id` is 74 characters and the matching `storage_id` is 72 or 73. `VARCHAR(64)`
+would fail closed on production workspace creation under strict mode, the same class
+of error as the 83-character guard sentinel. The binding limit, however, is the public
+contract rather than the receipt-minted form: external storage registrations accept a
+`tenantWorkspaceId` of up to 128 characters (`[A-Za-z0-9._-]{1,128}`), which becomes
+both `workspace_id` and `storage_id`, and workspace selection accepts workspace ids of
+up to 128 characters. Storage ids are wider still: the contract types accept up to 256
+printable ASCII characters. Decision 2 below keeps both contracts and sizes the columns
+to them. Dropping
+the `workspace-` / `created-` / `imported-` prefixes would not help: the registry
+relies on `workspace-` plus 64 hex characters to tell receipt-minted ids from
+registration-chosen ones, the storage prefixes record whether a workspace was created
+or imported, and registration-chosen ids can still reach 128 characters.
 
 Contract caveat: the code treats tenant/actor as opaque header strings and does not
 enforce length. Development defaults to `local-java-demo`
@@ -103,6 +130,12 @@ Result with the budgets above: **246/246 keys < 3072 bytes; widest 2800 bytes.**
 The previously marginal `uk_ma_operation_request` (≈3184 bytes when actor was
 budgeted at `VARCHAR(256)`) drops to ≈2304 once actor is numeric `VARCHAR(36)`
 (`actor_key` expands to tenant+actor = 288 bytes). No key needs a retained hash.
+
+These estimates used `workspace_id` at `VARCHAR(64)`, 256 index bytes. Under decision 2
+a workspace identity costs 128 bytes (`VARBINARY(128)`) and a storage identity 256 bytes
+(`VARBINARY(256)`), so a key narrows by 128 bytes for each workspace identity it
+contains, directly or through an expanded scope tuple (the receipt worst case below
+becomes ≈1120 bytes). The exact recompute still decides the final widths.
 
 ## Proposed schema change
 
@@ -144,6 +177,12 @@ budgeted at `VARCHAR(256)`) drops to ≈2304 once actor is numeric `VARCHAR(36)`
   becomes `(tenant_id, harness_session_id)` (144+256=400 bytes); the `FOR UPDATE`
   lock point moves to that raw unique. `idx_ma_head_workspace`, `idx_ma_head_wake`,
   `idx_ma_head_session` rebuild on raw columns. `head_kind` semantics unchanged.
+  `ma_session.tenant_key`, `session_key` and `session_scope_key` are written only by
+  the publication-retention CONTROL upsert, which also fills them on an existing row,
+  so every join on these columns also restricts the match to Sessions that path has
+  registered. Joins rewritten onto raw columns must carry that restriction explicitly.
+  `ma_read_lease` stores only `(tenant_key, session_key)` and needs raw `tenant_id` and
+  `session_id` columns before its join to `ma_session` can move.
 - **Session scope prefix.** Child tables replace `session_scope_key` with the raw
   `(tenant_id, session_id)` prefix and rebuild every index that led with it
   (`idx_ma_record_identity`, `ma_journal_pack` unique, resource/ref/operation/side
@@ -160,7 +199,22 @@ budgeted at `VARCHAR(256)`) drops to ≈2304 once actor is numeric `VARCHAR(36)`
   Polymorphic single-column scopes are expanded to typed columns rather than kept
   as an encoded string; if a cross-table reference proves too wide, a canonical
   **readable** scope string (explicitly not a hash) is the fallback, re-checked for
-  width.
+  width. `receipt_key` is also a minted identifier, not only an index key: for
+  `WORKSPACE_CREATE` it is embedded in `workspace_id` (`workspace-<receipt_key>`), in
+  the created or imported `storage_id`, and in the on-disk workspace root
+  `<base>/<key(tenant)>/<receipt_key>`, and the workspace registry strips the prefix
+  from a workspace id to look the receipt up by `receipt_key`. That lookup cannot be
+  turned back into the raw receipt tuple; decision 1 below keeps `receipt_key` as a
+  minted identifier.
+- **Operation identity.** `operation_key` derivations are not uniform. Most writers
+  use `operationKey(kind, scope_key, target_key, operation_id)`, but three families
+  address operations by tenant, kind and id: SSH workspace creation uses
+  `key(OPERATION, tenant, id)`, and the `WorkspaceOperations` kinds and workspace
+  uploads use `key(kind, tenant, id)`. For them `operation_key` is stricter than
+  `uk_ma_operation_identity` because it omits the target: the same tenant and
+  operation id under two targets is rejected today and would be accepted by the
+  identity key alone. Decision 3 below keeps that constraint with an explicit unique
+  key.
 
 ### External channel identities and OSS keys
 
@@ -177,6 +231,9 @@ budgeted at `VARCHAR(256)`) drops to ≈2304 once actor is numeric `VARCHAR(36)`
   move in one change).
 - `ManagedSchemaKeys.key()` identity derivations are deleted (410 call sites);
   digest helpers remain. Cross-table references carry raw identity columns.
+  Derivations that mint public identifiers or filesystem paths (`receiptKey` for
+  workspace and storage ids, `key(tenant)` for the workspace root directory) are
+  identifiers, not index keys, and stay.
 - Admission validates identity length/format fail-closed at the boundary
   (tenant/actor ≤36, UUID/prefixed forms, external ≤512); over-long or malformed
   identities are rejected, never truncated.
@@ -227,6 +284,141 @@ Acceptance adds per-store cursor/lock-order equivalence tests (same rows, same
 order, no deadlock under concurrency) and generated-column/CHECK rewrite tests on
 both engines.
 
+## Duplicate business keys
+
+A follow-up survey checked whether the hash keys that only duplicate another unique key
+in their own table could be removed ahead of the VARCHAR conversion, as
+`ma_memory_store.store_key` and the extension `package_key` / `settings_key` were. #17958
+proposes removing two more that qualify, `ma_storage (tenant_key, storage_key)` and
+`ma_storage_owner.physical_key`. None of the remaining ones can go on its own:
+
+| Key                                       | Equivalent unique in its table                       | Why it cannot be removed alone                                                                                                                                                                                                                                                                                               |
+| ----------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ma_storage.alias_key`                    | `(tenant_id, storage_id)`                            | The raw pair is 2048+2048 = 4096 bytes at current widths; `ma_runtime_binding.storage_alias_key` references it; aliases are locked in `alias_key` order.                                                                                                                                                                     |
+| `ma_session` `tenant_key` / `session_key` | Primary key `(tenant_id, session_id)`                | Join bridge to `ma_session_head (tenant_key, harness_key)`, whose raw key `(tenant_id, harness_session_id)` is 4096 bytes; also the registered-Session restriction above.                                                                                                                                                    |
+| `ma_operation.operation_key`              | `uk_ma_operation_identity`                           | `ma_operation_work` has no operation identity columns, and rebuilding `idx_ma_work_pending` on them is ≈3200 bytes; also the non-uniform derivations above.                                                                                                                                                                  |
+| `ma_resource.resource_key`                | `uk_ma_resource_id (session_scope_key, resource_id)` | The raw triple is 4608 bytes. `(session_scope_key, resource_id)` fits, but six referencing tables (seven columns) would need resource identity columns (only `ma_resource_ref` already has a nullable `resource_id`) and two `FOR UPDATE` cursors would change, all to be rewritten again when `session_scope_key` converts. |
+| `ma_request_receipt.receipt_key`          | `uk_ma_request` (verified for all six writers)       | Minted into workspace and storage ids and the workspace root (above); kept as a minted identifier (decision 1).                                                                                                                                                                                                              |
+| `ma_delivery.delivery_key`                | `uk_ma_delivery_identity`                            | Possible through `(source_scope_key, delivery_id)` on `ma_channel_segment` (2624 bytes), but it trades one hash column for a hash plus a raw column; do it with the conversion.                                                                                                                                              |
+
+Database row `id` is not an alternative reference: business identities, tenant scoping,
+idempotency and fencing keep business keys
+([schema conventions](2026-11-02-managed-schema-conventions.md)). The survey therefore
+confirms that the remaining work is one atomic cluster
+([implementation plan](../plans/2026-11-20-managed-identity-dehash-cluster-impl.md)).
+
+### Decisions
+
+1. **Receipt-minted ids: `receipt_key` stays as a minted identifier.** It is the
+   identity root of a created or imported workspace: the workspace id, the storage id
+   and the on-disk root are derived from it while the receipt is still pending, which lets
+   a retried creation find the same directory again. Two lookups resolve by it: a
+   `created-` / `imported-` storage id resolves its local root through the receipt, and
+   the workspace list reads a receipt-minted workspace's default working directory from
+   it; both re-derive `receiptKey` from the receipt's raw columns to verify the row.
+   Recording the receipt tuple or the creation details on the workspace and storage rows
+   instead would add columns and change the creation protocol only to drop one
+   64-character column, and the derivation would still be needed to mint the ids. The
+   de-hash therefore keeps `ma_request_receipt.receipt_key` and its unique key as an
+   identifier, not an index key, and keeps the `receiptKey` and `key(tenant)`
+   derivations; idempotency stays enforced by `uk_ma_request`.
+2. **Workspace and storage id budgets: keep the contracts and size byte columns to
+   them.** The contract types accept workspace ids matching `[A-Za-z0-9._:-]{1,128}`
+   and storage ids of up to 256 printable ASCII characters, and external registrations
+   already accept the full 128-character workspace range. No producer needs a tighter
+   contract: the minted forms are 74 (receipt), 39 (SSH) and 32 (child) characters for
+   workspace ids, and 72/73 and 40 for storage ids. Tightening would be a public
+   contract change with no benefit. Because both contracts are ASCII-only,
+   `workspace_id` and `storage_id` keep a byte type sized to the contract,
+   `VARBINARY(128)` and `VARBINARY(256)`, instead of utf8mb4 `VARCHAR`: equality is
+   byte-exact by construction, an index costs 128 and 256 bytes instead of 512 and
+   1024, and these columns need no bind change. The exact width recompute decides
+   whether other ASCII-contract identity classes should follow the same rule.
+3. **Tenant-addressed operations keep their uniqueness through an explicit unique
+   key.** Three writer families read and update operations by recomputing
+   `key(kind, tenant, id)`: SSH workspace creation (`WORKSPACE_CREATE`), the six
+   `WorkspaceOperations` kinds (`WORKSPACE_RECOVERY`, `WORKSPACE_OPERATOR_RECOVERY`,
+   `STORAGE_MIGRATION`, `WORKSPACE_RETIREMENT`, `CHILD_WORKSPACE`, `SESSION_WORKTREE`)
+   and `WORKSPACE_UPLOAD`. For SSH creation the unique key is the database backstop
+   for idempotency: the operation id is derived from tenant, actor and idempotency key,
+   while each attempt mints a new random workspace as its target, so
+   `uk_ma_operation_identity` alone would not reject a duplicate. Every other writer
+   uses `operationKey(kind, scope_key, target_key, operation_id)`, which is exactly
+   `uk_ma_operation_identity`. The de-hash adds a generated column
+   `tenant_operation_id` that equals `operation_id` for these kinds and is NULL
+   otherwise, with `UNIQUE (tenant_id, operation_kind, tenant_operation_id)`, the
+   pattern the schema already uses for `publication_command_id`; their lookups move to
+   `tenant_id = ? AND operation_kind = ? AND operation_id = ?`. This preserves today's
+   constraint exactly, without unifying derivations or relying on unproven id
+   uniqueness. The kind list lives in the DDL, so a new tenant-addressed kind must be
+   added there.
+
+## Increment 2: redundant same-row hash keys
+
+A hash column is redundant when it is derived only from raw columns of its own row,
+no other table joins on it, and it mints no identifier. Increment 2 drops those
+columns, rebuilds their uniques and indexes on the raw columns with the same column
+order, and rewrites every query to filter the raw columns. The VARBINARY types are
+unchanged; the VARCHAR conversion, the cross-table references and the decisions above
+remain the cluster described in the
+[implementation plan](../plans/2026-11-20-managed-identity-dehash-cluster-impl.md).
+
+| Table                                                        | Removed                            | Replaced by                                                      |
+| ------------------------------------------------------------ | ---------------------------------- | ---------------------------------------------------------------- |
+| `ma_session_head`                                            | `tenant_key`, `harness_key`        | `UNIQUE (tenant_id, harness_session_id)`                         |
+| `ma_session_record`, `ma_resource`, `ma_resource_ref`        | `session_scope_key`                | `(tenant_id, session_id)` prefix                                 |
+| `ma_operation`, `ma_journal_pack`, `ma_client_files_binding` | `session_scope_key`                | `(tenant_id, session_id)` prefix                                 |
+| `ma_client_files_request`                                    | `session_scope_key`, `request_key` | `UNIQUE (tenant_id, session_id, binding_generation, request_id)` |
+| `ma_side_query`                                              | `session_scope_key`, `query_key`   | `UNIQUE (tenant_id, query_id)`; session index on raw columns     |
+| `ma_memory_entry`                                            | `entry_key`                        | `UNIQUE (tenant_id, memory_store_id, memory_id)`                 |
+| `ma_extension_package`, `_settings`, `_operation`            | `scope_key`                        | `(tenant_id, workspace_id, extension_id, …)`                     |
+| `ma_output_capture`                                          | `tenant_key`                       | `idx_ma_capture_tenant (tenant_id, state)`                       |
+
+Width. Several raw replacements fit only because the child identity column is
+narrowed to its parent's width, 512 bytes: `ma_session_head.tenant_id` and
+`workspace_id`, `session_id` in `ma_session_record`, `ma_resource` and
+`ma_resource_ref`, and `ma_operation.tenant_id`. Their tenant and Session ids are those
+of `ma_session` and `ma_workspace` (512 bytes), and the journal writer, the only head
+writer that sets a workspace, already rejects tenant ids over 128 bytes and workspace
+and Session ids over 512 bytes, so no accepted value is lost. This supersedes the Session-head part of the `ma_session` row
+above: with the head tenant at 512 bytes the raw head key is 2560 bytes. Three
+non-unique indexes use a key prefix, `idx_ma_record_identity`, `idx_ma_ref_journal`
+and `idx_ma_delivery_source` (`record_id`, `resource_id` and `delivery_id` limited
+to 1024 bytes, MySQL only); every unique uses full columns. The widest rebuilt keys, `uk_ma_resource_id` and `idx_ma_head_workspace`,
+are exactly 3072 bytes, which InnoDB accepts.
+
+Kept, because they are not redundant:
+
+- `ma_session.tenant_key`, `session_key` and `session_scope_key` are the registration
+  marker written by the publication-retention CONTROL upsert. Every join moved off them
+  joins the raw columns and keeps `s.session_scope_key IS NOT NULL`, so a Session that
+  path never registered still does not match.
+- `ma_output_capture.scope_key` anchors the publication scope that `ma_operation`,
+  `ma_resource` and `ma_artifact` reference.
+- `resource_key`, `record_key`, `operation_key`, `target_key`, the delivery keys, actor
+  keys, storage keys and runtime request and scope keys are cross-table references,
+  minted identifiers or non-uniform derivations (see above).
+- `ma_request_receipt.tenant_key`: its raw replacement in the ingress keyset index
+  would be 3208 bytes. `ma_read_lease` stores no raw identity.
+
+Query rules:
+
+- Every Session head writer sets `session_id` to `harness_session_id`, so the former
+  `tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?` lookups
+  become `tenant_id = ? AND harness_session_id = ?`: the same unique row and the same
+  `FOR UPDATE` lock.
+- A cross-table join that compared hash columns either binds the derived value
+  (`l.source_scope_key = ?`) or joins the raw columns through an index path. The
+  Session-message handover join needed one new index,
+  `idx_ma_delivery_source (delivery_kind, tenant_id, source_session_id, delivery_id)`.
+- Session retirement locks side queries and client-files requests in the order of
+  their rebuilt unique keys (`query_id`; `binding_generation, request_id`) instead of
+  hash order. It is the only multi-row locker that orders those rows, and the other
+  multi-row lock (live side queries by state) keeps its index order, so the change
+  adds no lock cycle.
+- Collision re-checks against the removed hashes are deleted with them; capacity logs
+  still print the tenant hash, never the raw tenant id.
+
 ## Invariants preserved
 
 - Tenant/actor/workspace authorization precedes LIMIT and pagination; no
@@ -263,6 +455,17 @@ both engines.
 - Cross-engine identity equality tests: case, trailing space, multi-byte; NO PAD on
   MySQL and aligned H2 behavior.
 - Admission rejection tests for over-long/malformed tenant/actor/external ids.
+- Workspace creation and admission tests bind a real receipt-minted `workspace_id`
+  (74 characters) and `storage_id` (73 characters), a 128-character
+  registration-chosen workspace id and a 256-character storage id, as the guard
+  regression binds a real 64-hex host sentinel.
+- Retrying SSH workspace creation with the same idempotency key yields one operation,
+  and a concurrent duplicate insert is rejected by the tenant-addressed unique key even
+  though its target workspace differs.
+- `created-` / `imported-` storage roots and receipt-minted workspace defaults still
+  resolve through `receipt_key`.
+- Joins moved off the `ma_session` hash columns keep the registered-Session
+  restriction: a Session the retention path never registered is not matched.
 - MySQL race suites: guard acquisition (tenant + sentinel domains), head claim/drain/
   renew, rename settlement, retirement/GC ordering, receipt idempotency.
 - sql-hot-paths benchmark: result fingerprints equal and examined-row counts not
