@@ -1259,7 +1259,7 @@ describe('createAcpSessionBridge', () => {
       ).toEqual({
         'qwen.goalProposals': true,
         'qwen.mcpAppHost': true,
-        'qwen.modRows': ['AssistantMessage'],
+        'qwen.modRows': ['AssistantMessage', 'Thinking'],
       });
 
       // No snapshot has arrived yet, so the session is "unknown": busy rather
@@ -23446,6 +23446,96 @@ describe('createAcpSessionBridge', () => {
       expect(() => bridge.getPendingPrompts('unknown')).toThrow(
         SessionNotFoundError,
       );
+    });
+  });
+
+  describe('rateSessionTurn', () => {
+    it('forwards the mark to the owning child and returns its answer', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionFeedback) {
+            return { recorded: true };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const result = await bridge.rateSessionTurn(session.sessionId, {
+        promptId: 'prompt-feedback',
+        rating: 'up',
+      });
+
+      expect(result).toEqual({ recorded: true });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionFeedback,
+        params: {
+          sessionId: session.sessionId,
+          promptId: 'prompt-feedback',
+          rating: 'up',
+        },
+      });
+      await bridge.shutdown();
+    });
+
+    it('passes a suppressed collection answer through unchanged', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionFeedback
+            ? { recorded: false }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.rateSessionTurn(session.sessionId, {
+          promptId: 'prompt-feedback',
+          rating: 'down',
+        }),
+      ).resolves.toEqual({ recorded: false });
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown sessions', async () => {
+      const bridge = makeBridge();
+      await expect(
+        bridge.rateSessionTurn('unknown', {
+          promptId: 'prompt-feedback',
+          rating: 'up',
+        }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+    });
+
+    it('propagates child failures', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionFeedback) {
+            throw new Error('child refused');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // The JSON-RPC layer sanitizes a plain child Error to the standard
+      // internal-error message; the point is that the failure propagates
+      // instead of fabricating a recorded answer.
+      await expect(
+        bridge.rateSessionTurn(session.sessionId, {
+          promptId: 'prompt-feedback',
+          rating: 'up',
+        }),
+      ).rejects.toThrow('Internal error');
+      await bridge.shutdown();
     });
   });
 

@@ -716,6 +716,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_sub_session_send',
   'session_prompt',
   'session_turn_status',
+  'session_turn_feedback',
   'session_attachments',
   'session_attachment_chunk_upload',
   'session_attachment_list',
@@ -1615,6 +1616,11 @@ interface FakeBridge extends AcpSessionBridge {
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
   }>;
+  feedbackCalls: Array<{
+    sessionId: string;
+    req: Parameters<AcpSessionBridge['rateSessionTurn']>[1];
+    context?: BridgeClientRequestContext;
+  }>;
   setConfigOptionCalls: Array<{
     sessionId: string;
     req: Parameters<AcpSessionBridge['setSessionConfigOption']>[1];
@@ -1832,6 +1838,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const feedbackCalls: FakeBridge['feedbackCalls'] = [];
   const setConfigOptionCalls: FakeBridge['setConfigOptionCalls'] = [];
   const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
     [];
@@ -2534,6 +2541,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     continueSessionContexts,
     sessionHooksCalls,
     setModelCalls,
+    feedbackCalls,
     setConfigOptionCalls,
     setLanguageCalls,
     setApprovalModeCalls,
@@ -2948,6 +2956,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    async rateSessionTurn(sessionId, req, context) {
+      feedbackCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return { recorded: true };
     },
     async setSessionConfigOption(sessionId, req, context) {
       setConfigOptionCalls.push({
