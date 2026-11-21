@@ -1586,6 +1586,48 @@ describe('runNonInteractive', () => {
     expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
   });
 
+  // The refusal envelope is an error, so the exit status must agree with it
+  // instead of reporting success for a turn that produced no answer.
+  it('exits non-zero for a turn the client refused', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.UserPromptSubmitBlocked,
+          value: { reason: 'policy', originalPrompt: 'run it' },
+        },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'run it',
+      'refused-turn',
+    );
+
+    expect(exitCode).toBe(1);
+    const stdout = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('');
+    const result = stdout
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+      .find((frame: { type?: string }) => frame.type === 'result');
+    expect(result.is_error).toBe(true);
+    expect(result.error.message).toBe(
+      'Blocked by a UserPromptSubmit hook: policy',
+    );
+  });
+
   it('runs resume with the exact permit scheduled by Core', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
@@ -13285,6 +13327,100 @@ describe('runNonInteractive', () => {
         (m: unknown) => extractToolResultId(m) === 'tool-trailing',
       );
       expect(trailingToolResult).toBeDefined();
+    });
+
+    it('exits non-zero when a refusal turned the structured success into an error', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+        required: ['summary'],
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      setupMetricsMock();
+
+      const writes: string[] = [];
+      processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+        writes.push(
+          typeof chunk === 'string'
+            ? chunk
+            : Buffer.from(chunk).toString('utf8'),
+        );
+        return true;
+      });
+
+      // A drain item arms the second turn.
+      mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+        if (!cb) return;
+        cb(
+          'Monitor "logs" event #1: ready',
+          '<task-notification></task-notification>',
+          {
+            monitorId: 'mon_refused',
+            toolUseId: 'tool_mon_refused',
+            status: 'running',
+            eventCount: 1,
+          },
+        );
+      });
+
+      // Turn one is refused before its send, so the latch samples
+      // `producedText: false`. The refusal outlives the turn, and the drain
+      // turn then submits structured_output — the other success terminal, which
+      // has to apply the same "the envelope decides the exit status" rule.
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.UserPromptSubmitBlocked,
+              value: { reason: 'policy', originalPrompt: 'watch the logs' },
+            },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-drain-structured-refused',
+                name: 'structured_output',
+                args: { summary: 'drain-captured' },
+                isClientInitiated: false,
+                prompt_id: 'prompt-drain-struct-refused',
+              },
+            },
+          ]),
+        );
+
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'ok' }],
+      });
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Watch the logs',
+        'prompt-drain-struct-refused',
+      );
+
+      const events = writes
+        .join('')
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line))
+        .flat() as Array<{ type?: string } & Row>;
+      const result = events.find((frame) => frame.type === 'result');
+      expect(result).toBeDefined();
+      // A frame that reports a failure can never be paired with exit code 0.
+      expect(exitCode).toBe(result?.is_error === true ? 1 : 0);
     });
 
     it('skips side-effecting tool calls that precede structured_output in the same turn', async () => {
