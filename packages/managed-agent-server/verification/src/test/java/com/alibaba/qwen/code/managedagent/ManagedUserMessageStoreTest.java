@@ -511,7 +511,7 @@ class ManagedUserMessageStoreTest {
         store.beginOperation(TENANT, session, OperationKind.ARCHIVE, ACTOR, "archive", "digest");
         jdbc.update("UPDATE ma_user_message SET state = 'queued' WHERE tenant_id = ? AND session_id = ?", TENANT, session);
         long beforeUnarchive = queueRevision(session);
-        store.beginSessionMutation(TENANT, "UNARCHIVE_SESSION", "unarchive", "digest", session, SessionMutationKind.UNARCHIVE);
+        store.beginSessionMutation(TENANT, "UNARCHIVE_SESSION", "unarchive", "digest", session, SessionMutationKind.UNARCHIVE, ACTOR);
         store.completeSessionMutation(TENANT, "UNARCHIVE_SESSION", "unarchive", session, SessionMutationKind.UNARCHIVE, null, null);
         assertThat(store.requireSession(TENANT, session).status()).isEqualTo("CLOSED");
         assertThat(state(queued)).isEqualTo("withdrawn");
