@@ -6,7 +6,9 @@ import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -45,28 +47,26 @@ class LocalRuntimeProviderFactoryTest {
     }
 
     @Test
-    void preflightTreatsABlankWorkspaceCwdAsUnconfigured() {
-        var settings = settings();
-        settings.getRuntimeBroker().setWorkspaceCwd("");
-        // `Path.of("")` is this process's working directory, so an absent state
-        // directory under it used to read as "inside a Workspace root" and made
-        // the verdict depend on where `--check` ran.
-        settings.getRuntimeBroker()
-                .setStateDirectory(Path.of("").toAbsolutePath()
-                        .resolve("qwen-preflight-absent-state").toString());
-        assertThat(new LocalRuntimeProviderFactory().preflight(settings))
-                .filteredOn(check -> check.name().equals("broker-state"))
-                .singleElement()
-                .satisfies(check -> {
-                    // Absent but creatable: the verdict is the WARN naming the
-                    // store, never "inside a Workspace root".
-                    assertThat(check.status())
-                            .isEqualTo(RuntimeProviderFactory.Status.WARN);
-                    assertThat(String.valueOf(check.remediation()))
-                            .doesNotContain("outside every configured Workspace");
-                    assertThat(String.valueOf(check.detail()))
-                            .doesNotContain("Workspace root");
-                });
+    void preflightTreatsABlankWorkspaceCwdAsUnconfigured() throws IOException {
+        Path stateUnderCwd = Path.of("").toRealPath().resolve("qwen-preflight-absent-state");
+        for (String blank : List.of("", "   ")) {
+            var settings = settings();
+            settings.getRuntimeBroker().setWorkspaceCwd(blank);
+            // `Path.of("")` is this process's working directory and whitespace
+            // is not a configured path; neither may read as a Workspace root.
+            settings.getRuntimeBroker().setStateDirectory(stateUnderCwd.toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status())
+                                .isEqualTo(RuntimeProviderFactory.Status.WARN);
+                        assertThat(String.valueOf(check.remediation()))
+                                .doesNotContain("outside every configured Workspace");
+                        assertThat(String.valueOf(check.detail()))
+                                .doesNotContain("Workspace root");
+                    });
+        }
     }
 
     private ManagedAgentProperties settings() {
