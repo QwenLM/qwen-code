@@ -388,4 +388,127 @@ describe('ChatSurface', () => {
       container.querySelector('[data-testid="status-slot"]'),
     ).not.toBeNull();
   });
+
+  it('reports an unknown submit admission and keeps the draft', async () => {
+    const onError = vi.fn();
+    const controller = fakeController({
+      submit: vi.fn(async () => ({
+        admission: 'unknown',
+        target: { sessionId: 's1' },
+      })),
+    });
+    mountReact(<ChatSurface controller={controller} onError={onError} />);
+    const onSubmit = captured.editor?.onSubmit as SubmitHandler;
+    const commitAccepted = vi.fn();
+    onSubmit('hello', undefined, undefined, commitAccepted, undefined);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+    expect(commitAccepted).not.toHaveBeenCalled();
+  });
+
+  it('reports a submit transport rejection', async () => {
+    const onError = vi.fn();
+    const controller = fakeController({
+      submit: vi.fn(async () => {
+        throw new Error('network');
+      }),
+    });
+    mountReact(<ChatSurface controller={controller} onError={onError} />);
+    const onSubmit = captured.editor?.onSubmit as SubmitHandler;
+    onSubmit('hello', undefined, undefined, vi.fn(), undefined);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+  });
+
+  it('blocks a repeat send while a submit is in flight', () => {
+    const submitting = fakeController({ phase: 'submitting' });
+    mountReact(<ChatSurface controller={submitting} />);
+    expect(captured.editor?.submitDisabled).toBe(true);
+    cleanupReact();
+    const idle = fakeController({ phase: 'idle' });
+    mountReact(<ChatSurface controller={idle} />);
+    expect(captured.editor?.submitDisabled).toBe(false);
+  });
+
+  it('leaves the composer visible and ungated when nothing is pending', () => {
+    const controller = fakeController();
+    const container = mountReact(<ChatSurface controller={controller} />);
+    expect(captured.editor?.dialogOpen).toBe(false);
+    expect(captured.transcript?.approvalOverlayActive).toBe(false);
+    const composerWrap = container.querySelector(
+      '[data-testid="chat-editor"]',
+    )?.parentElement;
+    expect(composerWrap?.className).not.toContain('composerHidden');
+  });
+
+  it('prefers an explicit onLoadOlderHistory override over the controller capability', async () => {
+    const loadOlder = vi.fn(async () => {});
+    const override = vi.fn(async () => {});
+    const controller = fakeController({ loadOlder });
+    mountReact(
+      <ChatSurface controller={controller} onLoadOlderHistory={override} />,
+    );
+    const onLoadOlderHistory = captured.transcript
+      ?.onLoadOlderHistory as (options?: { force?: boolean }) => Promise<void>;
+    await onLoadOlderHistory();
+    expect(override).toHaveBeenCalled();
+    expect(loadOlder).not.toHaveBeenCalled();
+  });
+
+  it('returns false when the question reject vote is not accepted', async () => {
+    const request = permissionRequest('q1');
+    const controller = fakeController({
+      pendingQuestions: [{ id: 'q1', request }],
+      respondApproval: vi.fn(async () => ({
+        admission: 'rejected',
+        target: { sessionId: 's1' },
+      })),
+    });
+    mountReact(<ChatSurface controller={controller} />);
+    const onConfirm = captured.question?.onConfirm as QuestionConfirm;
+    expect(await onConfirm('q1', 'cancel', undefined)).toBe(false);
+  });
+
+  it('threads keyboard focus gating to the question card', () => {
+    const controller = fakeController({
+      pendingQuestions: [{ id: 'q1', request: permissionRequest('q1') }],
+    });
+    mountReact(
+      <ChatSurface controller={controller} approvalKeyboardActive={false} />,
+    );
+    expect(captured.question?.keyboardActive).toBe(false);
+  });
+
+  it('forwards the question free-text label and details escape hatch', () => {
+    const askUserDetails = vi.fn();
+    const controller = fakeController({
+      pendingQuestions: [{ id: 'q1', request: permissionRequest('q1') }],
+    });
+    mountReact(
+      <ChatSurface
+        controller={controller}
+        askUserFreeTextLabel="Custom other"
+        askUserDetails={askUserDetails}
+      />,
+    );
+    expect(captured.question?.customInputLabel).toBe('Custom other');
+    expect(captured.question?.onAskDetails).toBe(askUserDetails);
+  });
+
+  it('forwards the history pagination error flag', () => {
+    const controller = fakeController();
+    mountReact(<ChatSurface controller={controller} historyPaginationError />);
+    expect(captured.transcript?.historyPaginationError).toBe(true);
+  });
+
+  it('forwards the composer draft scope for a new chat', () => {
+    const controller = fakeController({ sessionId: '' });
+    mountReact(
+      <ChatSurface
+        controller={controller}
+        atWorkspaceCwd="/w"
+        composerScopeKey="standalone"
+      />,
+    );
+    expect(captured.editor?.atWorkspaceCwd).toBe('/w');
+    expect(captured.editor?.composerScopeKey).toBe('standalone');
+  });
 });

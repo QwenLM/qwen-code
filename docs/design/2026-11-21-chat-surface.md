@@ -38,10 +38,15 @@ next increment (2f), so this slice is additive and renders nothing on its own.
   dispatches `controller.submit`, returns the literal `false` to defer
   `useComposerCore`'s synchronous commit, and clears the draft (`commitAccepted`)
   only on an `accepted` admission — never on establishment, and never before the
-  transport resolves (any other return wipes the draft immediately). `onCancel`
-  dispatches `controller.cancel`. `isRunning` derives from `phase`
-  (`submitting`/`running`/`cancelling`), so a cancel in flight keeps the stop
-  affordance and the streaming indicator until settlement evidence arrives.
+  transport resolves (any other return wipes the draft immediately). Because the
+  deferred commit keeps the draft, the surface passes
+  `submitDisabled={phase === 'submitting'}` so a second Enter/click during the POST
+  round-trip cannot dispatch a duplicate send (the editor stays editable), and it
+  reports an `unknown` admission or a transport rejection through `onError` rather
+  than failing silently. `onCancel` dispatches `controller.cancel`. `isRunning`
+  derives from `phase` (`submitting`/`running`/`cancelling`), so a cancel in flight
+  keeps the stop affordance and the streaming indicator until settlement evidence
+  arrives.
 - **Approvals/questions.** The surface renders the first `pending` approval
   (superseded items are skipped) and the first pending question. `ToolApproval`
   confirmation routes to `respondApproval(id, optionId)` and **rejects** on a
@@ -65,12 +70,20 @@ next increment (2f), so this slice is additive and renders nothing on its own.
   and usage stats need richer facts than the current conservative `statusFacts`
   (`queueLength`/`goalActive`), so the owning page supplies them until parity lands.
 - **Page-supplied facts and gating.** History pagination forwards
-  `hasOlderHistory` and `onLoadOlderHistory` (defaulting to `controller.loadOlder`).
-  Plan facts and focus/notification gating arrive as props (`planTodos`,
-  `planExecutionMode`, `approvalDisabled`, `approvalKeyboardActive`,
-  `showBrowserNotifications`) because the owning page computes them; split-view
-  panes pass `approvalKeyboardActive={false}` to avoid stealing focus. The default
-  `onError` is an observable `console.error` sink, not a silent no-op.
+  `hasOlderHistory`, `onLoadOlderHistory` (defaulting to `controller.loadOlder`), and
+  the paired `historyPaginationError` (without it a failed older page is invisible
+  and every top-scroll re-issues it). Plan facts and focus/notification gating
+  arrive as props (`planTodos`, `planExecutionMode`, `approvalDisabled`,
+  `approvalKeyboardActive`, `showBrowserNotifications`) because the owning page
+  computes them; split-view panes pass `approvalKeyboardActive={false}` to avoid
+  stealing focus (it reaches both the approval and the question card). The question
+  card also receives the host's `askUserFreeTextLabel` / `askUserDetails` (the
+  details escape hatch matters because the composer is hidden while a card is
+  active). The composer receives `atWorkspaceCwd` / `composerScopeKey` so a new chat
+  (no session id yet) still persists its draft — the draft key is scoped by the
+  workspace/new-chat fact, not by `sessionId` alone and not by forwarding
+  `controller.storageKey` (which `getComposerDraftStorageKey` would re-prefix). The
+  default `onError` is an observable `console.error` sink, not a silent no-op.
 
 ## Deferred to later increments
 
@@ -88,6 +101,9 @@ next increment (2f), so this slice is additive and renders nothing on its own.
   the shared components `ChatSurface` composes carry only type-only SDK imports
   (erased at build), verified across all eight.
 - No daemon/Java route or OpenAPI change; session id namespaces and storage keys are
-  untouched (the composer reuses the existing draft-key convention via `sessionId`).
+  untouched. The composer reuses the existing draft-key convention: the session
+  branch keys by `sessionId`, and the new-chat branch keys by the workspace/scope
+  fact (`atWorkspaceCwd` / `composerScopeKey`), so a draft persists before a session
+  id exists.
 - The contract extension is additive and backend-neutral; the daemon binding is the
   only populated adapter today.

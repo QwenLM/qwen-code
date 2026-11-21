@@ -32,7 +32,10 @@
 - **准入不等于建立，输入框亦然。** `ChatEditor.onSubmit` 派发 `controller.submit`，
   返回字面量 `false` 以推迟 `useComposerCore` 的同步提交，仅在 `accepted` 准入时清空
   草稿（`commitAccepted`）——绝不在建立时、也绝不在 transport 落定前（其他任何返回值
-  都会立即清空草稿）。`onCancel` 派发 `controller.cancel`。`isRunning` 由 `phase`
+  都会立即清空草稿）。由于延迟提交保留了草稿，表面传
+  `submitDisabled={phase === 'submitting'}`，使 POST 往返期间再按 Enter/点击不会派发
+  重复发送（输入框仍可编辑）；并对 `unknown` 准入或 transport 拒绝经 `onError` 上报，
+  而非静默失败。`onCancel` 派发 `controller.cancel`。`isRunning` 由 `phase`
   （`submitting`/`running`/`cancelling`）派生，故取消在途时停止入口与流式指示器保持到
   落定证据到达。
 - **审批/提问。** 表面渲染第一个 `pending` 审批（跳过被取代项）与第一个待处理提问。
@@ -50,11 +53,17 @@
   转录不可用 UI 均以槽位传入（`header`、`panels`、`composerStatus`、`transcriptError`）。
   状态栈与用量统计需要比当前保守 `statusFacts`（`queueLength`/`goalActive`）更丰富的
   事实，故由宿主页提供，直至 parity 落地。
-- **页面提供的事实与门控。** 历史分页转发 `hasOlderHistory` 与 `onLoadOlderHistory`
-  （默认取 `controller.loadOlder`）。计划事实与焦点/通知门控以 props 传入（`planTodos`、
-  `planExecutionMode`、`approvalDisabled`、`approvalKeyboardActive`、
+- **页面提供的事实与门控。** 历史分页转发 `hasOlderHistory`、`onLoadOlderHistory`
+  （默认取 `controller.loadOlder`）与成对的 `historyPaginationError`（缺它则更早历史页
+  加载失败不可见、且每次顶部滚动都重发）。计划事实与焦点/通知门控以 props 传入
+  （`planTodos`、`planExecutionMode`、`approvalDisabled`、`approvalKeyboardActive`、
   `showBrowserNotifications`），因由宿主页计算；分屏面板传 `approvalKeyboardActive={false}`
-  以免抢焦点。默认 `onError` 是可观测的 `console.error` 落点，而非静默空函数。
+  以免抢焦点（审批卡与提问卡都收到）。提问卡还接收宿主的 `askUserFreeTextLabel` /
+  `askUserDetails`（卡片激活时输入框被隐藏，详情逃生入口因此重要）。composer 接收
+  `atWorkspaceCwd` / `composerScopeKey`，使新会话（尚无 session id）仍能落盘草稿——草稿键
+  按工作区/新会话作用域事实定位，而非仅靠 `sessionId`、也不是转发 `controller.storageKey`
+  （`getComposerDraftStorageKey` 会对其再加前缀）。默认 `onError` 是可观测的
+  `console.error` 落点，而非静默空函数。
 
 ## 延后到后续增量
 
@@ -68,6 +77,7 @@
 
 - `chat-core` 自身模块不 import `daemon/**` 或 `@qwen-code/sdk/daemon` 值；
   `ChatSurface` 组合的共享组件仅带 type-only SDK 导入（构建期擦除），已对全部八个核实。
-- 不改 daemon/Java 路由或 OpenAPI；会话 id 命名空间与存储键不变（composer 经
-  `sessionId` 复用既有草稿键约定）。
+- 不改 daemon/Java 路由或 OpenAPI；会话 id 命名空间与存储键不变。composer 复用既有
+  草稿键约定：会话分支按 `sessionId` 定位，新会话分支按工作区/作用域事实
+  （`atWorkspaceCwd` / `composerScopeKey`）定位，故尚无 session id 时草稿也能落盘。
 - 契约扩展是增量且后端中立的；daemon 绑定是当前唯一填充的适配器。

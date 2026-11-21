@@ -32,6 +32,9 @@ export interface ChatSurfaceProps {
   readonly onLoadOlderHistory?: (options?: {
     force?: boolean;
   }) => Promise<void>;
+  // Paired with the pagination props: without it a failed older-history page is
+  // invisible and every top-scroll re-issues the failing request.
+  readonly historyPaginationError?: boolean;
   // Approval facts and focus/notification gating are computed by the owning
   // page (plan state, pane focus, background-tab policy), not derivable here.
   readonly planTodos?: readonly TodoItem[];
@@ -39,6 +42,14 @@ export interface ChatSurfaceProps {
   readonly approvalDisabled?: boolean;
   readonly approvalKeyboardActive?: boolean;
   readonly showBrowserNotifications?: boolean;
+  // Question-card host customisation: the free-text label and the details escape
+  // hatch (the composer is hidden while a card is active).
+  readonly askUserFreeTextLabel?: string;
+  readonly askUserDetails?: () => void;
+  // Composer draft scope for a new chat (no session id yet): the workspace cwd
+  // and/or an explicit scope key, so the draft persists before a session exists.
+  readonly atWorkspaceCwd?: string;
+  readonly composerScopeKey?: string;
 }
 
 /**
@@ -59,11 +70,16 @@ export function ChatSurface({
   onError,
   hasOlderHistory,
   onLoadOlderHistory,
+  historyPaginationError,
   planTodos,
   planExecutionMode,
   approvalDisabled,
   approvalKeyboardActive,
   showBrowserNotifications,
+  askUserFreeTextLabel,
+  askUserDetails,
+  atWorkspaceCwd,
+  composerScopeKey,
 }: ChatSurfaceProps) {
   const activeApproval = controller.pendingApprovals.find(
     (approval) => approval.status === 'pending',
@@ -98,6 +114,7 @@ export function ChatSurface({
             sessionKey={controller.sessionId}
             hasOlderHistory={hasOlderHistory}
             onLoadOlderHistory={loadOlder}
+            historyPaginationError={historyPaginationError}
           />
         )}
       </div>
@@ -134,6 +151,8 @@ export function ChatSurface({
             request={activeQuestion.request}
             variant="floating"
             keyboardActive={approvalKeyboardActive}
+            customInputLabel={askUserFreeTextLabel}
+            onAskDetails={askUserDetails}
             onError={reportError}
             onConfirm={async (id, optionId, answers) => {
               const option = activeQuestion.request.options.find(
@@ -167,8 +186,14 @@ export function ChatSurface({
         <ChatEditor
           commands={[...commands]}
           sessionId={controller.sessionId}
+          atWorkspaceCwd={atWorkspaceCwd}
+          composerScopeKey={composerScopeKey}
           isRunning={isRunning}
           dialogOpen={cardActive}
+          // The deferred commit keeps the draft, so the send button would stay
+          // enabled over it; reject every submit path while a submit is in
+          // flight to prevent a double send (the editor stays editable).
+          submitDisabled={controller.phase === 'submitting'}
           onCancel={() => {
             void controller.cancel();
           }}
@@ -177,7 +202,17 @@ export function ChatSurface({
               .submit({ text, images, files, metadata })
               .then((result) => {
                 // Clear the draft on admission, not on establishment.
-                if (result.admission === 'accepted') commitAccepted?.();
+                if (result.admission === 'accepted') {
+                  commitAccepted?.();
+                } else if (result.admission === 'unknown') {
+                  reportError(
+                    new Error('Prompt admission unknown'),
+                    'Prompt not confirmed',
+                  );
+                }
+              })
+              .catch((error: unknown) => {
+                reportError(error, 'Failed to send message');
               });
             // Defer the composer's synchronous commit to admission; only the
             // literal false does that (useComposerCore commits on any other
