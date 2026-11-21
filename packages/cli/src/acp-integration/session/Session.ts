@@ -639,6 +639,8 @@ const GOAL_HELD_RECOVERY_COMMANDS =
   'Run:\n/goal pause\nThen, when ready:\n/goal resume';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+/** Carries an output-limit truncation from the turn to the ACP boundary. */
+const OUTPUT_TRUNCATED_META_KEY = 'qwen.outputTruncated';
 const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
 function readDaemonAttachmentReferences(
   value: unknown,
@@ -1090,6 +1092,8 @@ type SharedRoundResult =
       streamStartTime: number;
       requestRouteKey: string;
       channelDeliveryResponseBlock: ChannelDeliveryResponseBlock | undefined;
+      /** The round's last response ended truncated at the output limit. */
+      maxTokensTruncated: boolean;
       /** The round's last response stopped on its own. */
       stoppedOnItsOwn: boolean;
     };
@@ -6289,7 +6293,15 @@ export class Session implements SessionContext {
         turnRecording,
         result,
       );
-      return result;
+      // The ACP boundary. Inside this package a truncated answer keeps its
+      // `end_turn` outcome so the completion gates that decide Goal pauses,
+      // channel delivery and rewind points still see a finished turn; only
+      // the client is told, via the closed `StopReason` union, that the
+      // answer is incomplete.
+      return result.stopReason === 'end_turn' &&
+        result._meta?.[OUTPUT_TRUNCATED_META_KEY] === true
+        ? { ...result, stopReason: 'max_tokens' }
+        : result;
     } catch (caught) {
       const error =
         caught instanceof ManagedRuntimeOutcomeUnknownError
@@ -8434,8 +8446,13 @@ export class Session implements SessionContext {
             // Whether the client ran the turn's memory tasks, which it does
             // when a round's response stops on its own.
             let memoryTasksRanInClient = false;
+            // Whether the turn's last model response ended truncated at the
+            // output limit. A bounded MAX_TOKENS recovery that ran out its
+            // attempts leaves the response truncated; carrying it on the
+            // response lets the ACP boundary tell the client the answer is
+            // incomplete without changing the internal `end_turn` outcome.
+            let truncatedAtOutputLimit = false;
             let restorePostAnswerNoticesAttached = false;
-
             // conversation_finished must fire on every terminal path of the
             // turn — restore of ask_user_question, the loop below's
             // cancel/abort/no-stream early-returns, and API-error throws —
@@ -8784,6 +8801,7 @@ export class Session implements SessionContext {
                     requestRouteKey,
                     channelDeliveryResponseBlock,
                   } = roundResult);
+                  truncatedAtOutputLimit = roundResult.maxTokensTruncated;
                   memoryTasksRanInClient =
                     roundResult.stoppedOnItsOwn &&
                     !stopHookCapped &&
@@ -8922,6 +8940,11 @@ export class Session implements SessionContext {
                           responseCapture.agentOutput.observeFinishReason(
                             candidate.finishReason,
                           );
+                          if (candidate.finishReason) {
+                            truncatedAtOutputLimit =
+                              candidate.finishReason ===
+                              FinishReason.MAX_TOKENS;
+                          }
                         }
 
                         if (
@@ -8956,6 +8979,11 @@ export class Session implements SessionContext {
                               channelDeliveryResponseBlock,
                               channelDeliveryCheckpoint,
                             );
+                            // The attempt the flag described is abandoned
+                            // here; a later response must decide the flag
+                            // afresh, or a completed turn still reports
+                            // max_tokens.
+                            truncatedAtOutputLimit = false;
                           }
                           await finalizeToolCallPreparations(
                             preparationTracker,
@@ -9147,6 +9175,7 @@ export class Session implements SessionContext {
 
               // The shared round's stop point ran in the client, so its turn
               // ends here; otherwise fire the session's Stop hook loop.
+              let continuationFinishReason: string | undefined;
               const result = sharedModelRound
                 ? {
                     stopReason: getAbortAwareEndTurnStopReason(
@@ -9164,14 +9193,37 @@ export class Session implements SessionContext {
                     rejectOnLoopDetected,
                     goalTurn,
                     channelTurn,
+                    true,
+                    (reason) => {
+                      continuationFinishReason = reason;
+                    },
                   );
+              // Recovery is bounded: exhausting its attempts leaves the answer
+              // cut off. The internal outcome stays `end_turn` — every
+              // completion gate inside this package reads it, and a Goal turn
+              // would otherwise pause on a session-token limit that was never
+              // hit — so the truncation rides as its own field and is
+              // rewritten to `max_tokens` only where it crosses the ACP
+              // boundary in `prompt()`.
               this.#recordPromptCompletionEffects(
                 result,
                 responseCapture,
                 isFreshUserTurn,
                 { channelTurn, sharedModelRound, memoryTasksRanInClient },
               );
-              return { stopReason: result.stopReason };
+              if (!sharedModelRound && continuationFinishReason !== undefined) {
+                // The Stop-hook continuation's own finish reason decides the
+                // flag: a continuation that completed the answer must not
+                // inherit the superseded round's MAX_TOKENS.
+                truncatedAtOutputLimit =
+                  continuationFinishReason === FinishReason.MAX_TOKENS;
+              }
+              return truncatedAtOutputLimit && result.stopReason === 'end_turn'
+                ? {
+                    stopReason: result.stopReason,
+                    _meta: { [OUTPUT_TRUNCATED_META_KEY]: true },
+                  }
+                : { stopReason: result.stopReason };
             } catch (error) {
               modTurn?.fail();
               throw error;
@@ -9269,6 +9321,10 @@ export class Session implements SessionContext {
     let roundStop: AgentLoopStopReason | undefined;
     let streamFailed = false;
     let responseOpened = false;
+    // The finish reason the round's last response ended on. A bounded
+    // MAX_TOKENS recovery that ran out resolves the round here with no other
+    // trace of the truncation, so the turn's stop reason needs it.
+    let lastFinishReason: string | undefined;
     // A response cut short for queued input is given up, as
     // `responseInterrupt.watch` gives it up on the current path.
     const cutForInput = () =>
@@ -9433,6 +9489,7 @@ export class Session implements SessionContext {
                 responseCapture.agentOutput.observeFinishReason(
                   event.value.reason,
                 );
+                if (event.value.reason) lastFinishReason = event.value.reason;
                 if (event.value.reason === FinishReason.MAX_TOKENS) {
                   attempt.outputTruncated = true;
                 }
@@ -9457,6 +9514,10 @@ export class Session implements SessionContext {
                 functionCalls.length = 0;
                 toolRequests.length = 0;
                 attempt = newModelResponseFacts();
+                // The retried round owns the finish reason from here on;
+                // keeping the abandoned attempt's MAX_TOKENS would report a
+                // completed retry as truncated.
+                lastFinishReason = undefined;
                 break;
               }
               case LlmEventType.ChatCompressed:
@@ -9634,8 +9695,13 @@ export class Session implements SessionContext {
       streamStartTime,
       requestRouteKey,
       channelDeliveryResponseBlock,
-      // The client runs the turn's memory tasks when a response stops on
-      // its own.
+      // A bounded output recovery that exhausted its attempts ends
+      // here with the response still truncated. Carrying that out of
+      // the round is what lets the ACP boundary tell an unresolved
+      // output limit from a completed answer.
+      maxTokensTruncated: lastFinishReason === FinishReason.MAX_TOKENS,
+      // The client runs the turn's memory tasks when a response
+      // stops on its own.
       stoppedOnItsOwn:
         roundType !== SendMessageType.Steer &&
         functionCalls.length === 0 &&
@@ -9924,6 +9990,7 @@ export class Session implements SessionContext {
     goalTurn?: AcpGoalTurn,
     channelTurn = false,
     isSessionTurn = true,
+    onFinishReason?: (reason: string | undefined) => void,
   ): Promise<{
     stopReason: PromptResponse['stopReason'];
     loopProtectionStopped?: boolean;
@@ -10009,6 +10076,7 @@ export class Session implements SessionContext {
             getModelOverride: () => modelOverride,
             responseCapture,
             rejectOnLoopDetected,
+            ...(onFinishReason ? { onFinishReason } : {}),
             isSessionTurn,
             ...(goalTurn ? { goalTurn } : {}),
             ...(channelTurn ? { channelTurn: true } : {}),
@@ -10066,6 +10134,7 @@ export class Session implements SessionContext {
               getModelOverride: () => modelOverride,
               responseCapture,
               rejectOnLoopDetected,
+              ...(onFinishReason ? { onFinishReason } : {}),
               isSessionTurn,
               ...(goalTurn ? { goalTurn } : {}),
               ...(channelTurn ? { channelTurn: true } : {}),
@@ -10186,6 +10255,7 @@ export class Session implements SessionContext {
                 getModelOverride: () => modelOverride,
                 responseCapture,
                 rejectOnLoopDetected,
+                ...(onFinishReason ? { onFinishReason } : {}),
                 isSessionTurn,
                 ...(goalTurn ? { goalTurn } : {}),
                 ...(channelTurn ? { channelTurn: true } : {}),
@@ -10330,6 +10400,7 @@ export class Session implements SessionContext {
           getModelOverride: () => modelOverride,
           responseCapture,
           rejectOnLoopDetected,
+          ...(onFinishReason ? { onFinishReason } : {}),
           isSessionTurn,
           ...(goalTurn ? { goalTurn } : {}),
           ...(channelTurn ? { channelTurn: true } : {}),
@@ -10377,6 +10448,8 @@ export class Session implements SessionContext {
       interruptible?: boolean;
       /** Called when the continuation answers user input it cut in for. */
       onUserInputAnswered?: () => void;
+      /** Observes the continuation's own last model finish reason. */
+      onFinishReason?: (reason: string | undefined) => void;
       /**
        * Ledger membership for the continuation sends. Defaults to true; a
        * background notification's stop-hook/todo-guard continuation passes
@@ -10841,6 +10914,9 @@ export class Session implements SessionContext {
             options.responseCapture?.agentOutput.observeFinishReason(
               candidate.finishReason,
             );
+            if (candidate.finishReason) {
+              options.onFinishReason?.(candidate.finishReason);
+            }
           }
 
           if (

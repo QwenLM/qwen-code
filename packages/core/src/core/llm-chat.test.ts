@@ -15493,7 +15493,7 @@ describe('LlmChat', async () => {
       expectStreamCalls(5);
     });
 
-    it('should pop dangling recovery message and emit STOP chunk when recovery throws', async () => {
+    it('should pop dangling recovery message and emit MAX_TOKENS chunk when recovery throws', async () => {
       serveStreams(
         truncated('partial'),
         truncated('still partial'),
@@ -15504,12 +15504,15 @@ describe('LlmChat', async () => {
         await sendPro('recovery fails', 'prompt-recovery-fail'),
       );
 
-      // The last chunk is the catch's synthetic STOP chunk.
+      // The last chunk is the catch's synthetic chunk. It carries MAX_TOKENS:
+      // the partial text from the earlier iterations is already in the
+      // transcript, so ending the turn as a clean STOP would hide the
+      // truncation from the clients deciding what the user sees.
       const lastChunk = eventsOfType(events, StreamEventType.CHUNK).at(-1)!;
       expect(
         (lastChunk as { value: GenerateContentResponse }).value.candidates?.[0]
           ?.finishReason,
-      ).toBe('STOP');
+      ).toBe('MAX_TOKENS');
       // No dangling recovery user message: roles alternate, so providers don't
       // reject the next turn as consecutive same-role content.
       const history = chat.getHistory();
