@@ -74,8 +74,6 @@ public class TransportWakeActivator implements Closeable {
     public enum LoadOutcome {
         /** This node loaded the Session. */
         ACTIVATED,
-        /** This node already holds an attachment for the Session. */
-        ALREADY_ATTACHED,
         /** The load failed and SQL now shows another live writer. */
         FENCED,
         /** The load failed otherwise; SQL scan or source-ledger recovery applies. */
@@ -168,12 +166,10 @@ public class TransportWakeActivator implements Closeable {
         String tenantId = envelope.tenantId();
         String sessionId = envelope.sessionId();
         try {
-            if (!harness.activateForWake(tenantId, sessionId)) {
-                LOG.debug("transport wake found the Session already attached"
-                        + " tenant={} session={} sequence={}", tenantId,
-                        sessionId, envelope.sequence());
-                return LoadOutcome.ALREADY_ATTACHED;
-            }
+            // Passive, as the backstop scan loads: a wake never drives a
+            // crashed Session's Runtime recovery or its foreground Turn
+            // (docs/design/2026-11-19-managed-control-plane-wake.md §4.2).
+            harness.recoverForWake(tenantId, sessionId);
             activated.accept(sessionId);
             return LoadOutcome.ACTIVATED;
         } catch (RuntimeException failure) {
