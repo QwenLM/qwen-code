@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Set;
 
 public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory {
+    private static final String CGROUP_ROOT = "cgroup-root";
     @Override
     public Set<String> kinds() {
         return Set.of(LocalProcessRuntimeProvisioner.KIND);
@@ -30,6 +31,13 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
         require(broker.getWorkerEntry(), "Runtime worker entry");
         if (!broker.getEnvironment().isEmpty()) {
             throw new IllegalStateException("Merged local Runtime provisioner does not accept extra environment");
+        }
+        String cgroupRoot = broker.getProviderOptions().get(CGROUP_ROOT);
+        if (StringUtils.isNotBlank(cgroupRoot)
+                && (!broker.isDurableLocalProcess() || !"Linux".equals(System.getProperty("os.name"))
+                    || !Path.of(cgroupRoot).isAbsolute() || settings.getManagedExtensions().isEnabled())) {
+            throw new IllegalStateException("Local provider-options.cgroup-root requires durable Linux local-process"
+                    + " and no Managed extension profile.");
         }
         if (settings.getManagedExtensions().isEnabled()) {
             String directory = settings.getManagedExtensions().getCacheDirectory();
@@ -56,9 +64,10 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
             // could not start a single Runtime.
             ensureStateDirectory(stateDirectory);
         }
+        String cgroupRoot = broker.getProviderOptions().get(CGROUP_ROOT);
         LocalProcessRuntimeProvisioner provider = broker.isDurableLocalProcess()
                 ? LocalProcessRuntimeProvisioner.durable(command, stateDirectory, http(transport),
-                        broker.isTrustedLocalRebootRecovery())
+                        broker.isTrustedLocalRebootRecovery(), StringUtils.isBlank(cgroupRoot) ? null : Path.of(cgroupRoot))
                 : new LocalProcessRuntimeProvisioner(command, stateDirectory, http(transport));
         try {
             if (settings.getManagedExtensions().isEnabled()) {

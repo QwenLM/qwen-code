@@ -1,5 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning.local;
 
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeProvisioner;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -24,33 +27,45 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 
 public class RuntimeHarnessDrainTest {
@@ -512,6 +527,216 @@ public class RuntimeHarnessDrainTest {
             assertEquals(RuntimeSessionRecord.State.RELEASED, sessions.findById(scope, "original").getState());
             assertEquals(0, transport.releases);
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @EnabledOnOs(OS.LINUX)
+    @EnabledIfSystemProperty(named = "qwen.test.cgroup.root", matches = ".+")
+    void cgroupRetirementProvesTheOriginalUnitBeforeClearingTheMember(boolean killWorkerFirst,
+            @TempDir Path directory) throws Exception {
+        Path delegated = newTestDelegation();
+        try {
+            Path workerPid = directory.resolve("worker");
+            Path childPid = directory.resolve("child");
+            var command = List.of("/bin/sh", "-c", """
+                    printf '%s\\n' "$$" > "$1"
+                    setsid /bin/sleep 120 </dev/null >/dev/null 2>&1 &
+                    printf '%s\\n' "$!" > "$2"
+                    exec node "$3"
+                    """, "fixture", workerPid.toString(), childPid.toString(),
+                    Path.of("src/test/resources/fake-attestation-worker.mjs").toAbsolutePath().toString());
+            var host = LocalRuntimeStore.HostIdentity.linux();
+            var http = new HttpRuntimeTransport();
+            RuntimeBindingRecord original;
+            try (var local = new LocalProcessRuntimeProvisioner(command, directory, http, ignored -> "storage",
+                    new LocalRuntimeStore(directory, host, delegated));
+                    var initial = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(scope),
+                            local, http, bindings, sessions, executions, "cgroup-initial",
+                            Duration.ofSeconds(10), Duration.ofSeconds(10))) {
+                original = initial.warm("harness").toCompletableFuture().get(10, TimeUnit.SECONDS);
+            }
+            assertTrue(RuntimeProviderKinds.isLocalProcessCgroup(original.getResourceHandle()));
+            assertTrue(bindings.findRecoveryCandidates("local-process", null, 10).stream()
+                    .anyMatch(candidate -> original.getBindingId().equals(candidate.getBindingId())));
+            var unit = LinuxRuntimeCgroup.saved(original.getResourceHandle());
+            Path leaf = delegated.resolve("qwen-runtime-" + unit.resourceId());
+            ProcessHandle worker = ProcessHandle.of(Long.parseLong(Files.readString(workerPid).strip())).orElseThrow();
+            ProcessHandle child = ProcessHandle.of(Long.parseLong(Files.readString(childPid).strip())).orElseThrow();
+            String childStart = LocalRuntimeStore.startIdentity(child);
+            assertNotNull(childStart);
+            Path childStat = Path.of("/proc", Long.toString(child.pid()), "stat");
+            await().atMost(Duration.ofSeconds(5)).until(() -> {
+                String stat = Files.readString(childStat);
+                return Long.toString(child.pid()).equals(stat.substring(stat.lastIndexOf(')') + 1).strip().split("\\s+")[3]);
+            });
+            assertTrue(unit.contains(worker.pid()));
+            assertTrue(unit.contains(child.pid()));
+
+            var jdbc = new JdbcTemplate(source);
+            var ownership = new JdbcWorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(source));
+            String physical = "a".repeat(64);
+            jdbc.update("INSERT INTO ma_storage (alias_key,tenant_id,storage_id,physical_key,"
+                            + "storage_kind,registration_state,registration_revision,registration_json)"
+                            + " VALUES (?,?,?,?,'LOCAL','REGISTERED',1,'{}')",
+                    RuntimeAdmissionFences.storageAliasKey("tenant", "storage"), "tenant", "storage", physical);
+            jdbc.update("INSERT INTO ma_storage_owner (storage_key,storage_kind,mount_state) VALUES (?,'LOCAL','READY')", physical);
+            var context = new ContextBinding("tenant", "workspace", 1, "storage", ".", "fixture", 1);
+            bindings.admitSession(sessions, candidate(original, "original"));
+            var member = sessions.findById(scope, "original");
+            ownership.claim(context, member);
+            assertTrue(ownership.hasHolder(original));
+            assertEquals(1L, memberCount(jdbc, physical));
+            String storageKeyQuery = "SELECT execution_storage_key FROM ma_runtime_session"
+                    + " WHERE binding_id = ? AND runtime_generation = ?";
+            assertEquals(physical, jdbc.queryForObject(storageKeyQuery, String.class,
+                    original.getBindingId(), original.getGeneration()));
+
+            if (killWorkerFirst) {
+                assertTrue(worker.destroyForcibly());
+                await().atMost(Duration.ofSeconds(5)).until(() -> !worker.isAlive());
+            }
+            assertFalse(unit.empty());
+            assertFalse(LocalRuntimeStore.linuxProcessAbsent(childStat, childStart));
+
+            Path sibling = Files.createDirectory(delegated.resolve("sibling"));
+            var canary = new ProcessBuilder("/bin/sh", "-c",
+                    "printf '%s\\n' \"$$\" > \"$1\"; exec /bin/sleep 120", "canary",
+                    sibling.resolve("cgroup.procs").toString()).start();
+            await().atMost(Duration.ofSeconds(5)).until(() ->
+                    Files.readAllLines(sibling.resolve("cgroup.procs")).contains(Long.toString(canary.pid())));
+
+            try (var restored = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, http, null,
+                    new LocalRuntimeStore(directory, host));
+                    var broker = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(scope),
+                            new WorkspaceRuntimeProvisioner(restored, null, ownership, bindings),
+                            new WorkspaceRuntimeTransport(http, ownership, bindings, sessions, ignored -> context),
+                            bindings, sessions, executions, "cgroup-restored", Duration.ofSeconds(10), Duration.ofSeconds(10))) {
+                if (killWorkerFirst) {
+                    var observed = restored.reconcile(request, original.getProvisionSeed(), original.getResourceHandle(),
+                            original.getLease()).toCompletableFuture().get(5, TimeUnit.SECONDS);
+                    assertEquals(RuntimeObservation.Outcome.NOT_FOUND, observed.getOutcome());
+                    assertTrue(observed.getLossEvidence().matches(
+                            original.getProvisionSeed(), original.getResourceHandle(), original.getLease()));
+                    assertNull(observed.getStopEvidence());
+                }
+                RuntimeLifecycleAuthority authority = killWorkerFirst ? null : resourceClaim();
+                if (authority == null) {
+                    broker.requestHarnessDrain("tenant", "harness");
+                }
+                Supplier<CompletionStage<Void>> drain = () -> authority == null
+                        ? broker.drainHarnessSession("tenant", "harness")
+                        : broker.drainHarnessResources("tenant", "harness", authority, false);
+                mountCommand("mount", "--bind", sibling.toString(), leaf.toString());
+                try {
+                    var rejected = assertThrows(ExecutionException.class,
+                            () -> drain.get().toCompletableFuture().get(10, TimeUnit.SECONDS));
+                    assertEquals("workspace_close_stop_unconfirmed",
+                            assertInstanceOf(RuntimeBrokerException.class, rejected.getCause()).getCode());
+                    assertNull(bindings.findById(original.getBindingId()).getDrainReceipt());
+                    assertTrue(ownership.hasHolder(original));
+                    assertEquals(1L, memberCount(jdbc, physical));
+                    assertFalse(LocalRuntimeStore.linuxProcessAbsent(childStat, childStart));
+                    assertTrue(canary.isAlive());
+                } finally {
+                    mountCommand("umount", leaf.toString());
+                }
+                drain.get().toCompletableFuture().get(10, TimeUnit.SECONDS);
+                var retired = bindings.findById(original.getBindingId());
+                assertEquals(RuntimeBindingRecord.State.RELEASED, retired.getState());
+                assertTrue(retired.getDrainReceipt().matches(retired));
+                assertEquals(original.getResourceHandle(), retired.getDrainReceipt().resourceHandle());
+                assertEquals(RuntimeSessionRecord.State.RELEASED, sessions.findById(scope, "original").getState());
+                assertFalse(ownership.hasHolder(original));
+                assertEquals(0L, memberCount(jdbc, physical));
+                assertNull(jdbc.queryForObject(storageKeyQuery, String.class,
+                        original.getBindingId(), original.getGeneration()));
+                assertFalse(Files.exists(leaf));
+                assertTrue(LocalRuntimeStore.linuxProcessAbsent(childStat, childStart));
+                assertTrue(canary.isAlive());
+
+                Files.createDirectory(leaf);
+                mountCommand("mount", "--bind", sibling.toString(), leaf.toString());
+                try {
+                    var replayed = restored.stopDrained(retired).toCompletableFuture().get(5, TimeUnit.SECONDS);
+                    assertTrue(replayed.matches(retired));
+                    assertTrue(canary.isAlive());
+                } finally {
+                    mountCommand("umount", leaf.toString());
+                }
+            }
+        } finally {
+            cleanupDelegation(delegated);
+        }
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    @EnabledIfSystemProperty(named = "qwen.test.cgroup.root", matches = ".+")
+    void cgroupWorkerRequiresBothRealMembershipAndTheLaunchGate(@TempDir Path directory) throws Exception {
+        Path delegated = newTestDelegation();
+        try {
+            Path marker = directory.resolve("exec-marker");
+            var command = List.of("/bin/sh", "-c", "printf reached > \"$1\"", "fixture", marker.toString());
+            var store = new LocalRuntimeStore(directory, LocalRuntimeStore.HostIdentity.linux(), delegated);
+            try (var local = new LocalProcessRuntimeProvisioner(command, directory, new HttpRuntimeTransport(), null, store)) {
+                var seed = bindings.findOrCreate(request).getProvisionSeed();
+                var handle = local.ensureResource(request, seed, null).toCompletableFuture().get(5, TimeUnit.SECONDS);
+                var unit = LinuxRuntimeCgroup.saved(handle);
+                var trampoline = unit.prepare(new ProcessBuilder(command)).start();
+                try {
+                    unit.awaitMember(trampoline, Duration.ofSeconds(5));
+                    assertFalse(Files.exists(marker));
+                    trampoline.getOutputStream().close();
+                    assertTrue(trampoline.waitFor(5, TimeUnit.SECONDS));
+                    assertEquals(125, trampoline.exitValue());
+                    assertFalse(Files.exists(marker));
+                } finally {
+                    trampoline.destroyForcibly();
+                }
+
+                Path procs = delegated.resolve("qwen-runtime-" + unit.resourceId()).resolve("cgroup.procs");
+                mountCommand("mount", "--bind", procs.toString(), procs.toString());
+                try {
+                    mountCommand("mount", "-o", "remount,bind,ro", procs.toString());
+                    var refused = assertThrows(ExecutionException.class,
+                            () -> local.provision(request, seed).toCompletableFuture().get(8, TimeUnit.SECONDS));
+                    assertEquals("The Runtime did not join its original cgroup.", refused.getCause().getCause().getMessage());
+                    assertFalse(Files.exists(marker));
+                    assertTrue(unit.empty());
+                } finally {
+                    mountCommand("umount", procs.toString());
+                }
+            }
+        } finally {
+            cleanupDelegation(delegated);
+        }
+    }
+
+    private static long memberCount(JdbcTemplate template, String physical) {
+        return template.queryForObject("SELECT member_count FROM ma_storage_owner WHERE storage_key = ?", Long.class, physical);
+    }
+
+    private static Path newTestDelegation() throws Exception {
+        return Files.createTempDirectory(Path.of(System.getProperty("qwen.test.cgroup.root")).toRealPath(), "broker-");
+    }
+
+    private static void mountCommand(String... args) throws Exception {
+        var process = new ProcessBuilder(args).inheritIO().start();
+        assertTrue(process.waitFor(5, TimeUnit.SECONDS));
+        assertEquals(0, process.exitValue());
+    }
+
+    private static void cleanupDelegation(Path delegated) throws Exception {
+        try (var children = Files.list(delegated)) {
+            for (var group : children.filter(Files::isDirectory).toList()) {
+                Files.writeString(group.resolve("cgroup.kill"), "1", StandardOpenOption.WRITE);
+                await().atMost(Duration.ofSeconds(5)).until(() ->
+                        Files.readAllLines(group.resolve("cgroup.events")).contains("populated 0"));
+                Files.delete(group);
+            }
+        }
+        Files.delete(delegated);
     }
 
     @ParameterizedTest

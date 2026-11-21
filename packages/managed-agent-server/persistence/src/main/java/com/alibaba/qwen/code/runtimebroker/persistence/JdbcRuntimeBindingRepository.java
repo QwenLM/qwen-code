@@ -1198,7 +1198,7 @@ public final class JdbcRuntimeBindingRepository
                                             + BINDING_COLUMNS
                                             + " FROM ma_runtime_binding WHERE is_recovery_candidate = 1"
                                             + " AND provisioner_kind = ?"
-                                            + " AND binding_id > ? AND resource_handle_version = 2"
+                                            + " AND binding_id > ?"
                                             + " AND binding_state IN ('PROVISIONING', 'READY',"
                                             + " 'DRAINING', 'RECOVERY_BLOCKED', 'LOST') AND NOT"
                                             + " EXISTS (SELECT 1 FROM ma_operation recovery WHERE"

@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -97,7 +98,7 @@ public final class WorkspaceOperatorRecoveryStore {
                     + " FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE", (row, index) ->
                             saved.getVersion() == row.getLong("record_version")
                             && saved.getState().name().equals(row.getString("binding_state"))
-                            && row.getInt("resource_handle_version") == 2
+                            && row.getInt("resource_handle_version") == saved.getResourceHandle().getVersion()
                             && saved.getProvisionSeed().getProvisionRequestId().equals(
                                     row.getString("provision_request_id"))
                             && saved.getLease().getLeaseId().equals(row.getString("runtime_lease_id"))
@@ -273,8 +274,9 @@ public final class WorkspaceOperatorRecoveryStore {
         if (binding == null || binding.getGeneration() != generation
                 || !binding.getRequest().isManagedContext()
                 || binding.getResourceHandle() == null
-                || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(binding.getResourceHandle().getKind())
+                || !RuntimeProviderKinds.LOCAL_PROCESS.equals(binding.getResourceHandle().getKind())
                 || binding.getResourceHandle().getVersion() != 2
+                        && !RuntimeProviderKinds.isLocalProcessCgroup(binding.getResourceHandle())
                 || binding.getProvisionSeed() == null || binding.getLease() == null) {
             throw blocked();
         }

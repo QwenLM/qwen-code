@@ -1404,6 +1404,23 @@ for it. Physical cleanup needs an evidence-preserving lifecycle;
 do not delete records to reclaim capacity.
 See the [adoption design](../../docs/design/2026-09-27-local-runtime-adoption.md).
 
+To opt in to cgroup stop verification for new durable Linux local-process
+Workspace bindings, set
+`qwen.managed-agent.runtime-broker.provider-options.cgroup-root` to a dedicated,
+writable cgroup v2 directory delegated to the Broker. The Broker and its worker
+must be able to move the worker into a child of that directory, and the Broker
+needs access to `cgroup.kill` and `cgroup.events`. Preserve the directory and its
+mount namespace across Broker restarts. This setting supports Session-exclusive
+Workspace bindings. It requires trusted tools and a Broker-controlled hierarchy.
+Use a separate deployment for Managed executable extensions. Command Hooks,
+background Shell and Monitor operations that need a separate cgroup supervisor
+are unavailable in this profile. The original unit remains bound to its saved
+Runtime identity when configuration changes. A LOST binding whose original
+unit is still populated requires an operator to stop that unit before the
+existing offline recovery command can attest it. See the [English stop-proof
+design](../../docs/design/managed-agents/2026-11-21-managed-local-cgroup-stop-proof.md)
+and the [Chinese design](../../docs/design/managed-agents/2026-11-21-managed-local-cgroup-stop-proof.zh-CN.md).
+
 Trusted same-host reboot recovery is also on by default on Linux and macOS. It requires
 durable local mode with the `local-process` provisioner, so a deployment that
 opts out of durable local workers or uses another provisioner must set

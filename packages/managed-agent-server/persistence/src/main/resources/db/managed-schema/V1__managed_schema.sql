@@ -1025,7 +1025,7 @@ CREATE TABLE ma_runtime_binding (
         COMMENT 'Generated flag indicating durable provisioning seed evidence.',
     credential_key_id VARBINARY(2048) COMMENT 'Encryption key identifier for the provisioning seed.',
     resource_handle_version INT UNSIGNED COMMENT 'Version of the provisioner resource-handle format.',
-    is_recovery_candidate TINYINT UNSIGNED GENERATED ALWAYS AS (CASE WHEN resource_handle_version = 2 THEN CASE binding_state WHEN 'PROVISIONING' THEN 1 WHEN 'READY' THEN 1 WHEN 'DRAINING' THEN 1 WHEN 'RECOVERY_BLOCKED' THEN 1 WHEN 'LOST' THEN 1 ELSE 0 END ELSE 0 END)
+    is_recovery_candidate TINYINT UNSIGNED GENERATED ALWAYS AS (CASE WHEN resource_handle_version = 2 OR (provisioner_kind = 'local-process' AND resource_handle_version = 3) THEN CASE binding_state WHEN 'PROVISIONING' THEN 1 WHEN 'READY' THEN 1 WHEN 'DRAINING' THEN 1 WHEN 'RECOVERY_BLOCKED' THEN 1 WHEN 'LOST' THEN 1 ELSE 0 END ELSE 0 END)
         COMMENT 'Generated eligibility for ordered Runtime recovery discovery.',
     resource_handle_json LONGTEXT COMMENT 'Durable provisioner resource handle for lookup, stop, and recovery.',
     loss_evidence_json LONGTEXT COMMENT 'Evidence that the original Runtime was lost.',

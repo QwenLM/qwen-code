@@ -610,6 +610,14 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             detachOwed.remove(detachKey(context));
             return CompletableFuture.completedFuture(true);
         }
+        if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.isLocalProcessCgroup(context.runtime().getResourceHandle())) {
+            boolean released = binding != null && binding.getDrainReceipt() != null
+                    && binding.getDrainReceipt().matches(binding) && !ownership.hasHolder(binding);
+            if (released) {
+                detachOwed.remove(detachKey(context));
+            }
+            return CompletableFuture.completedFuture(released);
+        }
         if (binding != null && binding.getState() == RuntimeBindingRecord.State.LOST) {
             // The LOST family owns this holder; its evidence gate is stricter.
             return CompletableFuture.completedFuture(true);
