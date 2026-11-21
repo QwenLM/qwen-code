@@ -16,6 +16,7 @@ import {
   useRef,
 } from 'react';
 import {
+  collapsePastes,
   expandPendingPastePlaceholders,
   framePasteExpansion,
   restorePasteDraft,
@@ -636,8 +637,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           ? recalledItem.pasteExpansions
           : undefined;
       if (recalledPastes) {
+        const collapsed = collapsePastes(restored, recalledPastes);
         const draft = restorePasteDraft(
-          restored,
+          collapsed.text,
           recalledPastes,
           pendingPastes,
         );

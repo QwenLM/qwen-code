@@ -578,6 +578,7 @@ describe('InputPrompt', () => {
           id: 1,
           type: 'user',
           text: placeholder,
+          recallText: body,
           pasteExpansions,
         },
       ],
@@ -587,7 +588,7 @@ describe('InputPrompt', () => {
     const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
     if (!historyArgs) throw new Error('useInputHistory was not called');
 
-    act(() => historyArgs.onChange(placeholder));
+    act(() => historyArgs.onChange(body));
 
     expect(onPendingPastesChange).toHaveBeenCalledWith(pasteExpansions);
     expect(props.buffer.setText).toHaveBeenCalledWith(placeholder);
