@@ -171,6 +171,9 @@ hardcoding them in source.
 ## Multi-Turn Sessions
 
 For multi-turn use cases, pass an async iterable of `SDKUserMessage` objects.
+When the iterable ends, the SDK keeps the CLI input open until every submitted
+turn has returned a result, subject to the `stream_close` timeout. This lets later
+turns complete permission exchanges even after an earlier turn has finished.
 Use a stable UUID for `session_id` when you want to correlate messages:
 
 ```python
