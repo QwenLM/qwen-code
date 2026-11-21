@@ -14,6 +14,10 @@ import wrapAnsi from 'wrap-ansi';
 import { DiffRenderer } from './DiffRenderer.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import {
+  sanitizeTerminalText,
+  sanitizeTerminalLine,
+} from '../../utils/textUtils.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
   ToolCallConfirmationDetails,
@@ -408,7 +412,7 @@ export const ToolConfirmationMessage: React.FC<
       confirmationDetails as ToolExecuteConfirmationDetails;
 
     question = t("Allow execution of: '{{command}}'?", {
-      command: executionProps.rootCommand,
+      command: sanitizeTerminalLine(executionProps.rootCommand),
     });
     options.push({
       label: t('Yes, allow once'),
@@ -417,7 +421,7 @@ export const ToolConfirmationMessage: React.FC<
     });
     if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
       const friendlyLabel = executionProps.permissionRules?.length
-        ? ` ${buildHumanReadableRuleLabel(executionProps.permissionRules)}`
+        ? ` ${sanitizeTerminalLine(buildHumanReadableRuleLabel(executionProps.permissionRules))}`
         : '';
       options.push({
         label: friendlyLabel
@@ -456,7 +460,15 @@ export const ToolConfirmationMessage: React.FC<
     // and use the same wrapping semantics as Ink's Text renderer.
     const warnings = executionProps.warnings ?? [];
     const warningsCount = warnings.length;
-    const reservedWarningsHeight = warningsHeight(warnings);
+    // Reserve height from the SANITIZED strings, not the raw ones: the box
+    // below paints sanitizeTerminalText(warning), and an ESC-prefixed
+    // sequence that wrap-ansi counts as zero columns in the raw string
+    // expands to several visible characters once sanitized, so reserving
+    // against the raw array can under-budget the painted height.
+    const sanitizedWarnings = warnings.map((warning) =>
+      sanitizeTerminalText(warning),
+    );
+    const reservedWarningsHeight = warningsHeight(sanitizedWarnings);
 
     let bodyContentHeight = availableBodyContentHeight();
     if (bodyContentHeight !== undefined) {
@@ -486,13 +498,15 @@ export const ToolConfirmationMessage: React.FC<
             overflowDirection="bottom"
           >
             <Box>
-              <Text color={theme.text.link}>{executionProps.command}</Text>
+              <Text color={theme.text.link}>
+                {sanitizeTerminalText(executionProps.command)}
+              </Text>
             </Box>
           </MaxSizedBox>
         </Box>
         {warningsCount > 0 ? (
           <Box flexDirection="column" paddingX={1} marginLeft={1} marginTop={1}>
-            {warnings.map((warning, idx) => (
+            {sanitizedWarnings.map((warning, idx) => (
               <Text key={idx} color={theme.status.warning}>
                 ⚠ {warning}
               </Text>
