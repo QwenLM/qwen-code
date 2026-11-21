@@ -8,6 +8,7 @@ import {
   isSummaryReplayEvent,
   summarizeReplayEvent,
 } from './replay-summary.js';
+import { parseBackgroundNotificationTurn } from './bridgeTypes.js';
 import {
   EVENT_SCHEMA_VERSION,
   logEventSizingFailed,
@@ -100,6 +101,7 @@ interface LiveJournalTextSegment {
   chunks: string[];
   sourceRecordIds?: readonly string[];
   parentToolCallId?: string;
+  backgroundTurnIdentity?: string;
   promptId?: string;
   originatorClientId?: string;
   sessionId?: string;
@@ -512,6 +514,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       journal.entryBytes[currentIndex]! + bytes <= this.maxJournalBytes &&
       current.sessionUpdate === textChunk.sessionUpdate &&
       current.parentToolCallId === textChunk.parentToolCallId &&
+      current.backgroundTurnIdentity === textChunk.backgroundTurnIdentity &&
       stringArraysEqual(current.sourceRecordIds, textChunk.sourceRecordIds) &&
       current.promptId === event.promptId &&
       current.originatorClientId === event.originatorClientId &&
@@ -533,6 +536,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           chunks: [textChunk.text],
           sourceRecordIds: textChunk.sourceRecordIds,
           parentToolCallId: textChunk.parentToolCallId,
+          backgroundTurnIdentity: textChunk.backgroundTurnIdentity,
           promptId: event.promptId,
           originatorClientId: event.originatorClientId,
           sessionId: captureSessionId(event),
@@ -1110,6 +1114,7 @@ function liveJournalTextChunk(event: BridgeEvent):
       text: string;
       sourceRecordIds?: readonly string[];
       parentToolCallId?: string;
+      backgroundTurnIdentity?: string;
     }
   | undefined {
   if (event.type !== 'session_update') return undefined;
@@ -1139,6 +1144,9 @@ function liveJournalTextChunk(event: BridgeEvent):
     text: content.text,
     sourceRecordIds: extractSourceRecordIdsFromMeta(data?.update?._meta),
     parentToolCallId: extractParentToolCallIdFromMeta(data?.update?._meta),
+    backgroundTurnIdentity: extractBackgroundTurnIdentityFromMeta(
+      data?.update?._meta,
+    ),
   };
 }
 
@@ -1269,6 +1277,16 @@ function extractParentToolCallIdFromMeta(meta: unknown): string | undefined {
   return undefined;
 }
 
+function extractBackgroundTurnIdentityFromMeta(
+  meta: unknown,
+): string | undefined {
+  if (typeof meta !== 'object' || meta === null) return undefined;
+  const backgroundTurn = parseBackgroundNotificationTurn(
+    (meta as Record<string, unknown>)['backgroundTurn'],
+  );
+  return backgroundTurn ? JSON.stringify(backgroundTurn) : undefined;
+}
+
 function extractSourceRecordIdsFromMeta(
   meta: unknown,
 ): readonly string[] | undefined {
@@ -1343,6 +1361,17 @@ function hasUnmodeledTextMeta(meta: unknown): boolean {
       // never reads it, so an unenrolled key would split every streamed
       // subagent delta in the live view only.
       if (typeof value !== 'object' || value === null) return true;
+      continue;
+    }
+    if (key === 'backgroundTurn') {
+      const backgroundTurn = parseBackgroundNotificationTurn(value);
+      if (
+        backgroundTurn === undefined ||
+        Object.keys(value as Record<string, unknown>).some(
+          (key) => !Object.hasOwn(backgroundTurn, key),
+        )
+      )
+        return true;
       continue;
     }
     if (key === 'qwenTranscript') {

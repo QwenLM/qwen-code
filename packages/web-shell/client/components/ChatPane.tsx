@@ -1024,6 +1024,7 @@ export function ChatPane({
         return false;
       if (admissionPayloadLocked || planPreparationRef.current?.isCurrent())
         return false;
+      if (connectionRef.current.loadingTranscript) return false;
       // Same fence as App's composer: a stopped runtime keeps the draft in
       // the composer (the pane banner offers Resume); a submit here would
       // only race the dead runtime. The parked state retains sessionId, so
@@ -2180,6 +2181,7 @@ export function ChatPane({
               onSelectReasoningEffort={handleSelectReasoningEffort}
               dialogOpen={approvalActive}
               disabled={approvalActive || admissionPayloadLocked}
+              submitDisabled={connection.loadingTranscript}
               voiceTarget={hidden ? undefined : voiceTarget}
               voiceStatusRevision={voiceStatusRevision}
               followupState={followupState}

@@ -195,20 +195,7 @@ final class AgentStoreRows {
                         "The Session was not found."));
     }
 
-    void requireLegacyMutation(String tenantId, String sessionId) {
-    }
-
-    SessionRecord requireLegacySessionForUpdate(String tenantId, String sessionId) {
-        return requireSessionForUpdate(tenantId, sessionId);
-    }
-
-    SessionRecord requireSessionForUpdate(String tenantId,
-            String sessionId) {
-        return requireSessionForUpdate(tenantId, sessionId, false);
-    }
-
-    SessionRecord requireSessionForUpdate(
-            String tenantId, String sessionId, boolean legacyMutation) {
+    SessionRecord requireSessionForUpdate(String tenantId, String sessionId) {
         try {
             return jdbc.queryForObject(
                     "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session")
@@ -243,11 +230,6 @@ final class AgentStoreRows {
 
     LockedSessionTurn requireSessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
         return new LockedSessionTurn(requireSessionForUpdate(tenantId, sessionId),
-                requireTurnForUpdate(tenantId, sessionId, turnId));
-    }
-
-    LockedSessionTurn requireLegacySessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
-        return new LockedSessionTurn(requireLegacySessionForUpdate(tenantId, sessionId),
                 requireTurnForUpdate(tenantId, sessionId, turnId));
     }
 

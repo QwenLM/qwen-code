@@ -51,6 +51,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/sessions/recovery',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/recovery',
+  },
+  {
+    method: 'POST',
+    path: '/sessions/recovery/continue',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/recovery/continue',
+  },
+  {
+    method: 'POST',
     path: '/sessions/catalog',
     attribution: 'handler_resolved',
     route: 'POST /sessions/catalog',
@@ -854,6 +866,7 @@ export function resolveDaemonTelemetryRoute(
     if (req.method === 'POST') {
       if (
         suffix === '/workspace/settings' ||
+        suffix === '/workspace/settings/vision-bridge' ||
         suffix === '/workspace/voice' ||
         suffix === '/workspace/voice/transcribe' ||
         suffix === '/workspace/permissions' ||

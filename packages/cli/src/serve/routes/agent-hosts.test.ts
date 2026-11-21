@@ -13,6 +13,7 @@ import type {
 } from '../workspace-registry.js';
 import { getSessionAgentEventHub } from '../session-agents/events.js';
 import { createRateLimiter, type RateLimiterInstance } from '../rate-limit.js';
+import { AgentHostReplacementProgramError } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import {
   readAwaitedPermissions,
   readHostAck,
@@ -240,6 +241,30 @@ describe('enrollment', () => {
     expect(response.body).toEqual({ error: 'Invalid Agent Host enrollment.' });
     expect(enroll).not.toHaveBeenCalled();
   });
+
+  it.each([true, false])(
+    'reports incompatible replacement safely (unenrolled secret=%s)',
+    async (unenrolled) => {
+      const failure = new AgentHostReplacementProgramError(
+        ['ag_pinned'],
+        unenrolled,
+      );
+      enroll.mockRejectedValue(failure);
+
+      const response = await request(setup().app)
+        .post('/agent-hosts/enroll')
+        .send({ ...ENROLLMENT, secret: 'p'.repeat(43) });
+
+      expect(enroll).toHaveBeenCalledWith('/work/selected', expect.any(Object));
+      expect(response.status).toBe(unenrolled ? 401 : 409);
+      expect(response.body).toEqual(
+        unenrolled
+          ? { error: 'Agent Host enrollment refused.', detail: failure.message }
+          : { error: failure.message },
+      );
+      expect(failure.message).toContain('ag_pinned');
+    },
+  );
 });
 
 it('stores the probe, renews the listed leases and returns decisions on heartbeat', async () => {

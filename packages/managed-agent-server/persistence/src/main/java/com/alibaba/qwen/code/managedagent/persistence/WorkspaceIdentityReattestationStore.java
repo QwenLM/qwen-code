@@ -62,8 +62,8 @@ public final class WorkspaceIdentityReattestationStore {
         String physical = text(input, "physicalKey");
         var owners = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, storage_id, mount_root, mount_host_id,"
                 + " mount_device, mount_inode, mount_birth_time, mount_registration_id, mount_revision"
-                + " FROM ma_storage_owner WHERE storage_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'"
-                + " AND mount_state = 'READY' AND mount_operation_id IS NULL", physical, physical);
+                + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+                + " AND mount_state = 'READY' AND mount_operation_id IS NULL", physical);
         check(owners.size() == 1, "owner_unavailable");
         JsonNode owner = JSON.valueToTree(owners.getFirst());
         check(owner.path("mount_device").asText().matches("[0-9]{1,20}"), "legacy_owner_required");
@@ -235,9 +235,9 @@ public final class WorkspaceIdentityReattestationStore {
             requireFences(request);
             String previous = text(request, "physicalKey");
             String next = inventory.path("newPhysicalKey").asText();
-            jdbc.update("UPDATE ma_storage_owner SET storage_key = ?, physical_key = ?, mount_device = ?,"
+            jdbc.update("UPDATE ma_storage_owner SET storage_key = ?, mount_device = ?,"
                     + " mount_revision = mount_revision + 1, mount_state = 'READY', mount_operation_id = NULL,"
-                    + " mount_completed_operation_id = ? WHERE storage_key = ?", next, next,
+                    + " mount_completed_operation_id = ? WHERE storage_key = ?", next,
                     inventory.path("identity").path("device").asText(), id, previous);
             jdbc.update("UPDATE ma_storage SET physical_key = ?, registration_revision = registration_revision + 1,"
                     + " fence_operation_id = NULL WHERE physical_key = ? AND fence_operation_id = ?", next, previous, id);
@@ -263,9 +263,9 @@ public final class WorkspaceIdentityReattestationStore {
         var inventory = request.path("inventory");
         String next = inventory.path("newPhysicalKey").asText();
         String previous = text(request, "physicalKey");
-        check(jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE storage_key = ? AND physical_key = ?"
+        check(jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE storage_key = ?"
                 + " AND mount_state = 'READY' AND mount_operation_id IS NULL AND mount_completed_operation_id = ?"
-                + " AND mount_device = ? AND mount_revision = ?", Integer.class, next, next, text(request, "operationId"),
+                + " AND mount_device = ? AND mount_revision = ?", Integer.class, next, text(request, "operationId"),
                 inventory.path("identity").path("device").asText(), inventory.path("owner").path("mount_revision").asLong() + 1).size() == 1,
                 "committed_owner_changed");
         check(jdbc.queryForList("SELECT 1 FROM ma_storage WHERE physical_key = ?", Integer.class, previous).isEmpty(), "committed_alias_changed");
@@ -291,7 +291,7 @@ public final class WorkspaceIdentityReattestationStore {
         String physical = text(request, "physicalKey");
         var owners = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, storage_id, mount_root, mount_host_id,"
                 + " mount_device, mount_inode, mount_birth_time, mount_registration_id, mount_revision"
-                + " FROM ma_storage_owner WHERE storage_key = ? AND physical_key = ? AND storage_kind = 'LOCAL' FOR UPDATE", physical, physical);
+                + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE", physical);
         check(owners.size() == 1 && inventory.path("owner").equals(JSON.valueToTree(owners.getFirst())), "owner_changed");
         requireOnlyOwner(inventory.path("owner"), physical);
         check(inventory.path("aliases").equals(aliases(physical)), "aliases_changed");
