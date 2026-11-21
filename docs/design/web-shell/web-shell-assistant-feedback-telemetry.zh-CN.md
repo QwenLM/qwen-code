@@ -218,25 +218,29 @@ false` 时跳过发射（`recorded: false`）。TUI 读同一个键来抑制弹�
 
 ## 涉及文件
 
-| 文件                                                                     | 改动                                                                      |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `packages/cli/src/serve/routes/session.ts`                               | 新增 `POST /session/:id/feedback` 路由（live-session-owner）。            |
-| `packages/sdk-typescript/src/daemon/capabilities.ts`                     | `session_turn_feedback` 注册表 tag（注册表在 SDK 里，serve 模块再导出）。 |
-| `packages/cli/src/serve/capability-parity.ts`                            | parity 行：无 Managed 等价物。                                            |
-| `packages/cli/src/serve/server.test.ts`                                  | 预期广告 features 清单。                                                  |
-| `integration-tests/cli/qwen-serve-routes.test.ts`                        | 预期广告 features 清单。                                                  |
-| `packages/acp-bridge/src/status.ts`                                      | `SERVE_CONTROL_EXT_METHODS.sessionFeedback`。                             |
-| `packages/acp-bridge/src/bridgeTypes.ts`                                 | `AcpSessionBridge.rateSessionTurn` + 请求/结果类型。                      |
-| `packages/acp-bridge/src/session-control-plane.ts`                       | 基于会话 extMethod 助手的 bridge 实现。                                   |
-| `packages/cli/src/acp-integration/acpAgent.ts`                           | `extMethodInternal` 分支：门控、映射、`logUserFeedback`。                 |
-| `packages/sdk-typescript/src/daemon/types.ts`                            | `RateSessionTurnResult`。                                                 |
-| `packages/sdk-typescript/src/daemon/DaemonClient.ts`                     | `rateSessionTurn` POST 方法。                                             |
-| `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts`              | 会话句柄包装。                                                            |
-| `packages/web-shell/client/daemon/session/actions.ts`                    | `rateAssistantTurn` action。                                              |
-| `packages/web-shell/client/daemon/chat-capabilities.ts`                  | 穷举的 feature→region 映射条目：该 tag 不翻转任何 chat region。           |
-| `packages/web-shell/client/App.tsx`                                      | 独立版、capability 门控的 `assistantFeedback` 接线，宿主优先。            |
-| `docs/developers/qwen-serve-protocol.md`                                 | 路由 + capability 文档，紧邻轮次状态一节。                                |
-| `docs/design/web-shell/web-shell-assistant-feedback.md`（+ `.zh-CN.md`） | 更新独立版开启与遥测状态，链接到本文。                                    |
+| 文件                                                                     | 改动                                                                             |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `packages/cli/src/serve/routes/session.ts`                               | 新增 `POST /session/:id/feedback` 路由（live-session-owner）。                   |
+| `packages/sdk-typescript/src/daemon/capabilities.ts`                     | `session_turn_feedback` 注册表 tag（注册表在 SDK 里，serve 模块再导出）。        |
+| `packages/cli/src/serve/capability-parity.ts`                            | parity 行：无 Managed 等价物。                                                   |
+| `packages/cli/src/serve/server.test.ts`                                  | 预期广告 features 清单。                                                         |
+| `integration-tests/cli/qwen-serve-routes.test.ts`                        | 预期广告 features 清单。                                                         |
+| `packages/acp-bridge/src/status.ts`                                      | `SERVE_CONTROL_EXT_METHODS.sessionFeedback`。                                    |
+| `packages/acp-bridge/src/bridgeTypes.ts`                                 | `AcpSessionBridge.rateSessionTurn` + 请求/结果类型。                             |
+| `packages/acp-bridge/src/session-control-plane.ts`                       | 基于会话 extMethod 助手的 bridge 实现。                                          |
+| `packages/cli/src/acp-integration/acpAgent.ts`                           | `extMethodInternal` 分支：门控、映射、`logUserFeedback`。                        |
+| `packages/cli/src/serve/server/telemetry.ts`（+ `.test.ts`）             | 反馈路由的目录条目（`handler_resolved`）与审计路由计数。                         |
+| `package.json` + `scripts/tests/no-ak-integration-ci.test.js`            | 集成套件的 no-AK CI 登记（列表与钉死的 argv 同提交）。                           |
+| `integration-tests/cli/_daemon-harness.ts`                               | `envDrop` 选项，供隔离 rig 剔除宿主会话环境泄漏。                                |
+| `packages/sdk-typescript/src/daemon/index.ts`                            | 桶文件再导出 `RateSessionTurnResult`。                                           |
+| `packages/sdk-typescript/src/daemon/types.ts`                            | `RateSessionTurnResult`。                                                        |
+| `packages/sdk-typescript/src/daemon/DaemonClient.ts`                     | `rateSessionTurn` POST 方法。                                                    |
+| `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts`              | 会话句柄包装。                                                                   |
+| `packages/web-shell/client/daemon/session/actions.ts`                    | `rateAssistantTurn` action。                                                     |
+| `packages/web-shell/client/daemon/chat-capabilities.ts`                  | 穷举的 feature→region 映射条目：该 tag 不翻转任何 chat region。                  |
+| `packages/web-shell/client/App.tsx`                                      | 独立版、capability 门控的 `assistantFeedback` 接线，宿主优先，含跨会话派发守卫。 |
+| `docs/developers/qwen-serve-protocol.md`                                 | 路由 + capability 文档，紧邻轮次状态一节。                                       |
+| `docs/design/web-shell/web-shell-assistant-feedback.md`（+ `.zh-CN.md`） | 更新独立版开启与遥测状态，链接到本文。                                           |
 
 测试按仓库约定与每个改动的源文件同目录放置。
 

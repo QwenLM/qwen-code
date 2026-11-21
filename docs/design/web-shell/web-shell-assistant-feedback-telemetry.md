@@ -261,25 +261,29 @@ Three independent gates, each with a distinct owner:
 
 ## Files affected
 
-| File                                                                    | Change                                                                                                |
-| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `packages/cli/src/serve/routes/session.ts`                              | New `POST /session/:id/feedback` route (live-session-owner).                                          |
-| `packages/sdk-typescript/src/daemon/capabilities.ts`                    | `session_turn_feedback` registry tag (the registry lives in the SDK; the serve module re-exports it). |
-| `packages/cli/src/serve/capability-parity.ts`                           | Parity row: no Managed equivalent.                                                                    |
-| `packages/cli/src/serve/server.test.ts`                                 | Expected advertised-features list.                                                                    |
-| `integration-tests/cli/qwen-serve-routes.test.ts`                       | Expected advertised-features list.                                                                    |
-| `packages/acp-bridge/src/status.ts`                                     | `SERVE_CONTROL_EXT_METHODS.sessionFeedback`.                                                          |
-| `packages/acp-bridge/src/bridgeTypes.ts`                                | `AcpSessionBridge.rateSessionTurn` + request/result types.                                            |
-| `packages/acp-bridge/src/session-control-plane.ts`                      | Bridge implementation over the session extMethod helper.                                              |
-| `packages/cli/src/acp-integration/acpAgent.ts`                          | `extMethodInternal` case: gates, mapping, `logUserFeedback`.                                          |
-| `packages/sdk-typescript/src/daemon/types.ts`                           | `RateSessionTurnResult`.                                                                              |
-| `packages/sdk-typescript/src/daemon/DaemonClient.ts`                    | `rateSessionTurn` POST method.                                                                        |
-| `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts`             | Session-handle wrapper.                                                                               |
-| `packages/web-shell/client/daemon/session/actions.ts`                   | `rateAssistantTurn` action.                                                                           |
-| `packages/web-shell/client/daemon/chat-capabilities.ts`                 | Exhaustive feature→region map entry: no chat region flips with the tag.                               |
-| `packages/web-shell/client/App.tsx`                                     | Standalone, capability-gated `assistantFeedback` wiring with host precedence.                         |
-| `docs/developers/qwen-serve-protocol.md`                                | Route + capability documentation, next to the turn-status section.                                    |
-| `docs/design/web-shell/web-shell-assistant-feedback.md` (+ `.zh-CN.md`) | Standalone opt-in and telemetry status updated, linked here.                                          |
+| File                                                                    | Change                                                                                                           |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/serve/routes/session.ts`                              | New `POST /session/:id/feedback` route (live-session-owner).                                                     |
+| `packages/sdk-typescript/src/daemon/capabilities.ts`                    | `session_turn_feedback` registry tag (the registry lives in the SDK; the serve module re-exports it).            |
+| `packages/cli/src/serve/capability-parity.ts`                           | Parity row: no Managed equivalent.                                                                               |
+| `packages/cli/src/serve/server.test.ts`                                 | Expected advertised-features list.                                                                               |
+| `integration-tests/cli/qwen-serve-routes.test.ts`                       | Expected advertised-features list.                                                                               |
+| `packages/acp-bridge/src/status.ts`                                     | `SERVE_CONTROL_EXT_METHODS.sessionFeedback`.                                                                     |
+| `packages/acp-bridge/src/bridgeTypes.ts`                                | `AcpSessionBridge.rateSessionTurn` + request/result types.                                                       |
+| `packages/acp-bridge/src/session-control-plane.ts`                      | Bridge implementation over the session extMethod helper.                                                         |
+| `packages/cli/src/acp-integration/acpAgent.ts`                          | `extMethodInternal` case: gates, mapping, `logUserFeedback`.                                                     |
+| `packages/cli/src/serve/server/telemetry.ts` (+ `.test.ts`)             | Feedback route catalog entry (`handler_resolved`) and the audited route counts.                                  |
+| `package.json` + `scripts/tests/no-ak-integration-ci.test.js`           | No-AK CI enrollment of the integration suite (list and pinned argv together).                                    |
+| `integration-tests/cli/_daemon-harness.ts`                              | `envDrop` option so hermetic rigs can strip host-session env leakage.                                            |
+| `packages/sdk-typescript/src/daemon/index.ts`                           | Barrel re-export of `RateSessionTurnResult`.                                                                     |
+| `packages/sdk-typescript/src/daemon/types.ts`                           | `RateSessionTurnResult`.                                                                                         |
+| `packages/sdk-typescript/src/daemon/DaemonClient.ts`                    | `rateSessionTurn` POST method.                                                                                   |
+| `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts`             | Session-handle wrapper.                                                                                          |
+| `packages/web-shell/client/daemon/session/actions.ts`                   | `rateAssistantTurn` action.                                                                                      |
+| `packages/web-shell/client/daemon/chat-capabilities.ts`                 | Exhaustive feature→region map entry: no chat region flips with the tag.                                          |
+| `packages/web-shell/client/App.tsx`                                     | Standalone, capability-gated `assistantFeedback` wiring with host precedence and a cross-session dispatch guard. |
+| `docs/developers/qwen-serve-protocol.md`                                | Route + capability documentation, next to the turn-status section.                                               |
+| `docs/design/web-shell/web-shell-assistant-feedback.md` (+ `.zh-CN.md`) | Standalone opt-in and telemetry status updated, linked here.                                                     |
 
 Tests are collocated with each changed source file per repository convention.
 
