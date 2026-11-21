@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import { fileUriToLocalPath, isFileUri, isUncPath } from './file-uri.js';
 
 const PASTED_IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
@@ -19,7 +20,9 @@ const PASTED_IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
  * split on newlines and on spaces that precede an absolute path (spaces inside
  * a path are shell-escaped), then normalize each token.
  *
- * @returns `imagePaths` (normalized tokens with an image extension) and
+ * @returns `imagePaths` (normalized absolute tokens with an image extension;
+ *   helpers inject absolute paths, so a bare `test.jpg` copied from a file
+ *   manager stays text) and
  *   `allImages` (true only when every token is such a path), so the caller can
  *   promote a pure image-path paste without swallowing mixed text.
  */
@@ -53,7 +56,11 @@ export function classifyPastedImagePaths(pasted: string): {
       allImages = false;
       continue;
     }
-    if (PASTED_IMAGE_EXTENSIONS.test(normalized)) {
+    if (
+      (path.win32.isAbsolute(normalized) ||
+        path.posix.isAbsolute(normalized)) &&
+      PASTED_IMAGE_EXTENSIONS.test(normalized)
+    ) {
       imagePaths.push(normalized);
     } else {
       allImages = false;
