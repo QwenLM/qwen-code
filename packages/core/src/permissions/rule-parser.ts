@@ -1039,7 +1039,8 @@ export interface CompoundCommandSegment {
  * the operator that terminated each one.
  *
  * See {@link splitCompoundCommand} for the string-only form and for examples;
- * this is the same split, and that function is a projection of this one.
+ * the default split is also used by command-rule matching. `includeGroups`
+ * retains group delimiters and empty structural segments for cwd ownership.
  *
  * Scanned twice and split wherever either scan finds an operator: comments,
  * backtick bodies and heredocs are not modelled, and quotes inside them can
@@ -1047,14 +1048,15 @@ export interface CompoundCommandSegment {
  */
 export function splitCompoundCommandSegments(
   command: string,
+  includeGroups = false,
 ): CompoundCommandSegment[] {
   // The two readings differ only at a backslash, so one scan is enough without.
   const boundaries = command.includes('\\')
     ? [
-        ...findOperatorBoundaries(command, 'bash'),
-        ...findOperatorBoundaries(command, 'escape-everywhere'),
+        ...findOperatorBoundaries(command, 'bash', includeGroups),
+        ...findOperatorBoundaries(command, 'escape-everywhere', includeGroups),
       ].sort((a, b) => a.start - b.start)
-    : findOperatorBoundaries(command, 'bash');
+    : findOperatorBoundaries(command, 'bash', includeGroups);
 
   const segments: CompoundCommandSegment[] = [];
   let lastSplit = 0;
@@ -1071,7 +1073,7 @@ export function splitCompoundCommandSegments(
     const segment = trimBashWordSeparators(
       dropsLineEndingCR ? raw.replace(/\r$/, '') : raw,
     );
-    if (segment) {
+    if (segment || includeGroups) {
       segments.push({ command: segment, terminator: operator });
     }
     lastSplit = end;
@@ -1094,19 +1096,147 @@ interface OperatorBoundary {
 
 type BackslashReading = 'bash' | 'escape-everywhere';
 
+type CommandParen = 'command' | 'subshell' | 'arithmetic';
+
+/** Return the closing parenthesis of a command/process substitution, or -1. */
+export function commandSubstitutionEnd(
+  command: string,
+  openParen: number,
+): number {
+  const parens: CommandParen[] = ['command'];
+  const caseDepths = [0];
+  let commandStart = true;
+  let inSingle = false;
+  let inDouble = false;
+  let inAnsiC = false;
+  let inBacktick = false;
+  let escaped = false;
+  let dollarPending = false;
+  const keywordBoundary = (end: number) =>
+    end >= command.length || /[\s;|&()]/.test(command[end]!);
+
+  for (let i = openParen + 1; i < command.length; i++) {
+    const ch = command[i]!;
+    const ansiCIntroducer: boolean = dollarPending;
+    dollarPending = false;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inBacktick) {
+      if (ch === '\\') i++;
+      else if (ch === '`') inBacktick = false;
+      continue;
+    }
+    if (ch === '\\' && (!inSingle || inAnsiC)) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inAnsiC = inSingle ? false : ansiCIntroducer;
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle) continue;
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '$') dollarPending = !ansiCIntroducer;
+
+    const top = parens[parens.length - 1];
+    if (top === 'arithmetic') {
+      if (ch === ')' && command[i + 1] === ')') {
+        parens.pop();
+        caseDepths.pop();
+        commandStart = false;
+        i++;
+      }
+      continue;
+    }
+    if (commandStart && !inDouble && !/\s/.test(ch)) {
+      if (ch === '!') continue;
+      if (command.startsWith('time', i) && keywordBoundary(i + 4)) {
+        i += 3;
+        continue;
+      }
+      if (command.startsWith('case', i) && keywordBoundary(i + 4)) {
+        caseDepths[caseDepths.length - 1]++;
+        commandStart = false;
+        i += 3;
+        continue;
+      }
+      if (
+        caseDepths[caseDepths.length - 1] > 0 &&
+        command.startsWith('esac', i) &&
+        keywordBoundary(i + 4)
+      ) {
+        caseDepths[caseDepths.length - 1]--;
+        commandStart = false;
+        i += 3;
+        continue;
+      }
+      if (ch !== '$' && ch !== '\\') commandStart = false;
+    }
+    if (ch === '$' && command[i + 1] === '(') {
+      if (command[i + 2] === '(') {
+        parens.push('arithmetic');
+        caseDepths.push(0);
+        commandStart = true;
+        i += 2;
+      } else {
+        parens.push('command');
+        caseDepths.push(0);
+        commandStart = true;
+        i++;
+      }
+      continue;
+    }
+    if (ch === '(' && !inDouble) {
+      parens.push('subshell');
+      caseDepths.push(0);
+      commandStart = true;
+      continue;
+    }
+    if (ch === ')' && !inDouble) {
+      if (caseDepths[caseDepths.length - 1] > 0) {
+        commandStart = true;
+        continue;
+      }
+      parens.pop();
+      caseDepths.pop();
+      commandStart = false;
+      if (parens.length === 0) return i;
+    }
+    if ((ch === ';' || ch === '|' || ch === '&') && !inDouble) {
+      commandStart = true;
+    }
+  }
+  return -1;
+}
+
 function findOperatorBoundaries(
   command: string,
   reading: BackslashReading,
+  includeGroups: boolean,
 ): OperatorBoundary[] {
   const boundaries: OperatorBoundary[] = [];
   let inSingle = false;
   let inDouble = false;
   let inAnsiC = false;
+  let inBacktick = false;
   let dollarPending = false;
   let escaped = false;
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
+  let wordParenDepth = 0;
+  let parameterDepth = 0;
+  let lastWordParenClose = -1;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -1132,6 +1262,10 @@ function findOperatorBoundaries(
       escaped = true;
       continue;
     }
+    if (inBacktick) {
+      if (ch === '`') inBacktick = false;
+      continue;
+    }
     if (ch === "'" && !inDouble) {
       inAnsiC = inSingle ? false : ansiCIntroducer;
       inSingle = !inSingle;
@@ -1141,12 +1275,81 @@ function findOperatorBoundaries(
       inDouble = !inDouble;
       continue;
     }
-    if (inSingle || inDouble) {
+    if (inSingle) {
+      continue;
+    }
+    if (includeGroups && ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (
+      includeGroups &&
+      arithmeticDepth === 0 &&
+      ((ch === '$' && command[i + 1] === '(') ||
+        (!inDouble && (ch === '<' || ch === '>') && command[i + 1] === '('))
+    ) {
+      const end = commandSubstitutionEnd(command, i + 1);
+      if (end >= 0) {
+        lastWordParenClose = end;
+        i = end;
+        continue;
+      }
+    }
+    if (inDouble) {
       continue;
     }
     if (ch === '$') {
       // The second `$` of `$$` (the PID) cannot open `$'…'`.
       dollarPending = !ansiCIntroducer;
+      continue;
+    }
+
+    if (
+      includeGroups &&
+      (parameterDepth > 0 ||
+        (ch === '{' &&
+          command[i - 1] === '$' &&
+          precedingBackslashCount(command, i - 1) % 2 === 0))
+    ) {
+      if (
+        ch === '{' &&
+        command[i - 1] === '$' &&
+        precedingBackslashCount(command, i - 1) % 2 === 0
+      )
+        parameterDepth++;
+      else if (ch === '}') parameterDepth--;
+      continue;
+    }
+
+    if (
+      includeGroups &&
+      wordParenDepth === 0 &&
+      ch === '#' &&
+      i - 1 !== lastWordParenClose &&
+      (i === 0 || /[ \t\n;&|()]/.test(command[i - 1]!))
+    ) {
+      const newline = command.indexOf('\n', i);
+      if (newline === -1) break;
+      i = newline - 1;
+      continue;
+    }
+
+    if (includeGroups && wordParenDepth > 0) {
+      if (
+        ch === '#' &&
+        i - 1 !== lastWordParenClose &&
+        (i === 0 || /[ \t\n;&|()]/.test(command[i - 1]!))
+      ) {
+        const newline = command.indexOf('\n', i);
+        if (newline === -1) break;
+        i = newline - 1;
+        continue;
+      }
+      if (ch === '(') wordParenDepth++;
+      else if (ch === ')') {
+        wordParenDepth--;
+        if (wordParenDepth === 0) lastWordParenClose = i;
+      }
       continue;
     }
 
@@ -1158,6 +1361,31 @@ function findOperatorBoundaries(
     if (arithmeticDepth > 0 && ch === ')' && command[i + 1] === ')') {
       arithmeticDepth--;
       i++;
+      continue;
+    }
+
+    if (includeGroups && arithmeticDepth === 0 && ch === '(') {
+      if (/[?*+@!$<>=]/.test(command[i - 1] ?? '')) {
+        wordParenDepth = 1;
+        continue;
+      }
+      const emptyParameters = /^\([ \t]*\)/.exec(command.slice(i));
+      if (emptyParameters) {
+        i += emptyParameters[0].length - 1;
+        continue;
+      }
+    }
+
+    if (
+      includeGroups &&
+      arithmeticDepth === 0 &&
+      (ch === '(' ||
+        ch === ')' ||
+        ((ch === '{' || ch === '}') &&
+          (i === 0 || /[ \t\n;&|()]/.test(command[i - 1]!)) &&
+          (i + 1 === command.length || /[ \t\n;&|()<>]/.test(command[i + 1]!))))
+    ) {
+      boundaries.push({ start: i, end: i + 1, operator: ch });
       continue;
     }
 

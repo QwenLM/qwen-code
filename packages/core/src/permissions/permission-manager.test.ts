@@ -2072,6 +2072,16 @@ describe('PermissionManager', () => {
     // R7-9: an unresolvable -c payload may be the option terminator, so a
     // wrapper wildcard must not auto-allow the unreadable spelling while
     // the readable twin asks.
+    it('does not promote a quoted wrapper positional argument to a command', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['Bash(rm -rf *)'],
+      });
+      expect(await pm.evaluate(mon('bash -c "echo $X" "rm -rf /tmp/x"'))).toBe(
+        'allow',
+      );
+    });
+
     it('does not auto-allow an unresolvable wrapper payload via a wildcard', async () => {
       pm = makeShellPm('bash', { permissionsAllow: ['Bash(bash -c *)'] });
       expect(await pm.evaluate(mon('bash -c $CMD'))).toBe('ask');
@@ -3536,10 +3546,173 @@ describe('PermissionManager — compound shell write attribution', () => {
     { virtualTool: 'write_file', filePath },
   ];
 
+  it.each([
+    'tee >(cat) .qwen/settings.json',
+    'tee $(printf source) .qwen/settings.json',
+    'cp -S.tmp a .qwen/settings.json',
+    'cp -St a .qwen/settings.json',
+    'f() { cd .qwen; }; printf x > .qwen/settings.json',
+    "(cd .qwen; case a in a) :;; esac; printf '{}' > settings.json)",
+    'if false; then { cd /tmp; }; fi; printf x > .qwen/settings.json',
+    "echo ${x:- #}; cd .qwen; printf '{}' > settings.json",
+    'function f { cd .qwen; }; printf x > .qwen/settings.json',
+    "A[0'']=1 cd .qwen; printf x > settings.json",
+    'A["0"]=1 cd .qwen; printf x > settings.json',
+    'A[$I]=1 cd .qwen; printf x > settings.json',
+  ])(
+    'keeps protected writes visible through shell syntax: %s',
+    async (command) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
+  it('keeps backtick command boundaries visible to Bash deny rules', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)'],
+      permissionsDeny: ['Bash(rm -rf *)'],
+    });
+    expect(
+      await pm.evaluate(sh('echo `cd /tmp && rm -rf victim`', '/repo')),
+    ).toBe('deny');
+  });
+
+  it.each([
+    "echo ${x:-{} ; cd .qwen; printf '{}' > settings.json",
+    "echo $(date # (x\n); cd .qwen; printf '{}' > settings.json",
+  ])(
+    'keeps a protected write visible after lexer comments and braces: %s',
+    async (command) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
+  it('asks instead of dropping an unresolved move destination', async () => {
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    expect(await pm.evaluate(sh('mv .qwen/settings.json $OUT', '/repo'))).toBe(
+      'ask',
+    );
+  });
+
+  it.each([
+    "sh -c 'echo $(pwd)#1; rm .qwen/settings.json'",
+    'echo $(true; rm .qwen/settings.json)',
+  ])(
+    'keeps protected removals visible through shell syntax: %s',
+    async (command) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['Edit(.qwen/settings.json)'],
+      });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
+  it.each(["'-p'", String.raw`\-p`, "-''p", "'--'"])(
+    'denies the unchanged-cwd write after time %s',
+    async (option) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['Write(//repo/settings.json)'],
+      });
+      expect(
+        await pm.evaluate(
+          sh(`time ${option} cd .qwen; printf x > settings.json`, '/repo'),
+        ),
+      ).toBe('deny');
+    },
+  );
+
+  it('asks for a quote-spliced outer expansion despite broad allow rules', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'Write(*)'],
+      ...denySettings,
+    });
+    expect(
+      await pm.evaluate(
+        sh(String.raw`bash -c "printf x > '$D'settings.json"`, '/repo'),
+      ),
+    ).toBe('ask');
+  });
+
   it('deny rule matches a write after `cd` into a subdir', async () => {
     const ctx = sh("cd .qwen && echo '{}' > settings.json", '/repo');
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
+
+  it.each(['A=1', 'A+=1', 'A[0]=1', 'command', 'builtin', 'time', 'time -p'])(
+    'keeps a protected write denied after %s cd',
+    async (prefix) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      const command = `${prefix} cd .qwen && printf '{}' > settings.json`;
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
+  it.each(["'A=1' cd /elsewhere", 'HOME=. cd', 'CDPATH=/elsewhere cd .qwen'])(
+    'does not lose a protected deny through %s',
+    async (prefix) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(//repo/.qwen/settings.json)'],
+      });
+      const command = `${prefix}; printf '{}' > .qwen/settings.json`;
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
+  it.each(['./$D', '$D', '"$D"', 'src $D', '-L "$D"'])(
+    'asks for an uncertain find starting point despite broad allow rules: %s',
+    async (target) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)', 'ListFilesTool(*)'],
+      });
+      expect(await pm.evaluate(sh(`find ${target} -name x`, '/repo'))).toBe(
+        'ask',
+      );
+    },
+  );
+
+  it.each([
+    "'time' cd .qwen",
+    '"time" cd .qwen',
+    '(command cd .qwen)',
+    'A=1 cd .qwen | cat',
+    '{ cd .qwen; printf x > log; } | cat',
+    '{ cd .qwen; } & wait',
+  ])('keeps a later parent cd after %s', async (prefix) => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'WriteFileTool(*)'],
+      permissionsDeny: ['WriteFileTool(//repo/child/private.txt)'],
+    });
+    expect(
+      await pm.evaluate(
+        sh(`${prefix}; cd child; printf x > private.txt`, '/repo'),
+      ),
+    ).toBe('deny');
+  });
+
+  it.each([
+    "printf '{}' > .qwen/setting{s..s}.json",
+    "printf '{}' > .qwen/settings.j@(son)",
+    'touch .qwen/setting{s..s}.json',
+    'sort -o $OUT in.txt',
+    'cp -t $D settings.json',
+    'cp -t out/x? file',
+    'mv --target-directory=out/{a,b} f',
+    'cp -t out/$D/.. file',
+    'cp -t .qwe? settings.json',
+  ])(
+    'does not certify an expanded write despite a broad allow: %s',
+    async (command) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+        ...denySettings,
+      });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('ask');
+    },
+  );
 
   // B1: a `|` inside the redirect operator is a filename character. Before the
   // syntax mask included `|`, `>"|/../".qwen/settings.json` was read as the `>|`
@@ -3591,6 +3764,132 @@ describe('PermissionManager — compound shell write attribution', () => {
     const ctx = sh("cd .qwen && bash -lc 'echo {} > settings.json'", '/repo');
     expect(await pm.evaluate(ctx)).toBe('deny');
   });
+
+  it.each([
+    [
+      String.raw`D=sub; sh -c "printf {} > \"$D\"/../.qwen/settings.json"`,
+      'deny',
+    ],
+    [String.raw`sh -c 'printf {} > "$OUTPUT"'`, 'ask'],
+  ])(
+    'does not allow an unresolved wrapper redirect: %s',
+    async (command, restrictiveDecision) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(restrictiveDecision);
+      const broadPm = repoPm({
+        permissionsAllow: ['Bash(*)', 'WriteFileTool(*)'],
+      });
+      expect(await broadPm.evaluate(sh(command, '/repo'))).toBe('ask');
+    },
+  );
+
+  it.each([ToolNames.SHELL, ToolNames.MONITOR])(
+    'does not certify an outer expansion as a literal path for %s',
+    async (toolName) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+        permissionsDeny: ['WriteFileTool(~/.bashrc)'],
+      });
+      const ctx = sh(
+        String.raw`bash -c "printf x > '$HOME/.bashrc'"' '`,
+        '/repo',
+      );
+      expect(await pm.evaluate({ ...ctx, toolName })).toBe('ask');
+    },
+  );
+
+  it.each([ToolNames.SHELL, ToolNames.MONITOR])(
+    'keeps a protected write visible after a backslash expansion for %s',
+    async (toolName) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+        permissionsDeny: ['WriteFileTool(~/.bashrc)'],
+      });
+      const ctx = sh(String.raw`bash -c "cat \\$HOME"'; > ~/.bashrc'`, '/repo');
+      expect(await pm.evaluate({ ...ctx, toolName })).toBe('deny');
+    },
+  );
+
+  it('retains outer expansion marks in an alternative monitor payload', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+      permissionsDeny: ['WriteFileTool(~/.bashrc)'],
+    });
+    const ctx = sh(
+      String.raw`sh -c $TERM "printf x > '$HOME/.bashrc'"' '`,
+      '/repo',
+    );
+    expect(await pm.evaluate({ ...ctx, toolName: ToolNames.MONITOR })).toBe(
+      'ask',
+    );
+  });
+
+  it('keeps a known deny beside an unresolved redirect', async () => {
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    const command = 'printf ok > "$OUT"; printf {} > .qwen/settings.json';
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+  });
+
+  it('matches a known literal redirect after quote removal', async () => {
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    const command = String.raw`printf ok > '$OUT'/../.qwen/settings.json`;
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+  });
+
+  it('keeps a protected write visible beside an undecodable wrapper argument', async () => {
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    const ctx = sh(
+      String.raw`sh -c $'echo {} > .qwen/settings.json; cat \xff'`,
+      '/repo',
+    );
+    expect(await pm.evaluate(ctx)).toBe('deny');
+  });
+
+  it('does not certify paths after a cd whose uncertainty normalization erased', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+      permissionsDeny: [
+        'ReadFileTool(victim.txt)',
+        'WriteFileTool(.qwen/settings.json)',
+      ],
+    });
+    for (const [command, expected] of [
+      [String.raw`cd $'\xff'/../dir; cat > settings.json`, 'ask'],
+      [String.raw`cd $'\xff'/..; cat victim.txt`, 'deny'],
+    ] as const) {
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+    }
+  });
+
+  it.each([
+    [String.raw`cat $'\xff'`, 'ask'],
+    [String.raw`cat $'\xff'/../victim.txt`, 'ask'],
+    [String.raw`printf x > $'\uD800'`, 'ask'],
+    [String.raw`cat $'\U00110000'`, 'ask'],
+    ["sh -c 'cat \uD800'" + String.raw`$'\xff'`, 'ask'],
+    [String.raw`bash -c "printf ok > $'\\xff'"`, 'ask'],
+    [String.raw`bash -c "printf $VALUE > $'\\xff'"`, 'ask'],
+    ['cat ' + String.fromCharCode(0xd800, 0x5c, 0xdcff), 'ask'],
+    [String.raw`sh -c $'printf ok > $\x27\xff\x27'`, 'ask'],
+    [String.raw`sh -c $'printf ok > $\047\xff\047'`, 'ask'],
+    ["cat '\uD800'\uDCFF", 'ask'],
+    ["printf ok > '\uD800'\uDCFF", 'ask'],
+    [String.raw`cat $'\xc3\xa9'`, 'allow'],
+    [String.raw`sh -c 'cat 😀'$'\x41'`, 'allow'],
+  ] as const)(
+    'undecodable paths ask instead of matching an allow rule: %s → %s',
+    async (command, expected) => {
+      const pm = repoPm({
+        permissionsAllow: [
+          'Bash(*)',
+          'ReadFileTool(*)',
+          'WriteFileTool(*)',
+          'Edit',
+        ],
+      });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+    },
+  );
 
   // #15600: `>&file` writes `file`, so it must hit that file's deny rule, while
   // fd duplication (`2>&1`, `>&2`) writes nothing and must not be denied.
@@ -3729,6 +4028,47 @@ describe('PermissionManager — compound shell write attribution', () => {
       expect(await pm.evaluate(sh(command, '/project'))).toBe('deny');
     },
   );
+
+  it.each(['time -- cd .qwen', 'time -p -- cd .qwen'])(
+    'asks instead of certifying a version-dependent time cwd: %s',
+    async (command) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+      });
+      const ctx = sh(`${command} && printf '{}' > settings.json`, '/repo');
+      expect(await pm.evaluate(ctx)).toBe('ask');
+    },
+  );
+
+  it('allows an ordinary read-only glob under broad allow rules', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+    });
+    expect(await pm.evaluate(sh('grep -rn foo src/*.ts', '/repo'))).toBe(
+      'allow',
+    );
+  });
+
+  it('does not waive a deny-protected brace read as an ordinary glob', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'ReadFileTool(*)'],
+      permissionsDeny: ['ReadFileTool(.qwen/settings.json)'],
+    });
+    expect(
+      await pm.evaluate(sh('cat .qwen/setting{s..s}.json', '/repo')),
+    ).not.toBe('allow');
+  });
+
+  it('does not make path uncertainty relevant without permission rules', () => {
+    const pm = repoPm({});
+    expect(pm.hasRelevantRules(sh('cat ./src/*', '/repo'))).toBe(false);
+  });
+
+  it('keeps path uncertainty relevant to a restrictive file rule', () => {
+    const pm = repoPm({ permissionsDeny: ['Read(*)'] });
+    expect(pm.hasRelevantRules(sh('cat ./src/*', '/repo'))).toBe(true);
+  });
 
   it('ordinary writes after `cd` into project subdirs stay unmatched by self-mod rules', () => {
     const ctx = sh("cd src && bash -lc 'echo ok > generated.txt'", '/repo');
