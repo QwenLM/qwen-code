@@ -1201,23 +1201,31 @@ describe('ci flaky rerun patrol', () => {
     // the JSON object — the failure identifier the excerpt exists to show. A
     // quoted value must stop at its closing quote; an already-[redacted] value
     // followed by a structural delimiter must not be re-redacted greedily.
-    for (const [line, payload] of [
+    for (const [line, payload, secret] of [
       [
         '{"authToken":"s3cr3t","err":"TestFailed:suiteA"}',
         '"err":"TestFailed:suiteA"',
+        's3cr3t',
       ],
       [
         '{"apiKey":"s3cr3t","msg":"AssertionError: expected 1 to be 2"}',
         '"msg":"AssertionError: expected 1 to be 2"',
+        's3cr3t',
       ],
       [
         '{"db_password":"x","msg":"AssertionError: boom"}',
         '"msg":"AssertionError: boom"',
+        '"x"',
       ],
+      // A control splits the KEY, so pass 1 misses it and the repair's
+      // quoted-value branch is load-bearing: it must bound the value at its
+      // closing quote, not run into the err payload. Deleting that branch
+      // reds this case.
+      ['{"auth\rToken":"s3cr3t","err":"boom"}', '"err":"boom"', 's3cr3t'],
     ]) {
       const evidence = skillLog(`${line}\n`);
       expect(evidence, line).toContain(payload);
-      expect(evidence, line).not.toContain('s3cr3t');
+      expect(evidence, line).not.toContain(secret);
     }
   });
 
