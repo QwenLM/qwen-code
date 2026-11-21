@@ -301,12 +301,23 @@ export function visualLineStartsAround(
   } else if (index + 1 < logicalStarts.length) {
     const nextStart = logicalStarts[index + 1];
     starts.push(nextStart);
-    // The sentinel after a logical line is the *start* of the line after
-    // next, not next-1: an empty next line is zero-length, and next-1 would
-    // collapse onto nextStart and drop the boundary entirely (down then
-    // reads to document end and skips the blank line).
+    // A wrapped next logical line must contribute its opening displayed line
+    // too, or Down skips straight into a later wrap. Otherwise the sentinel
+    // after a logical line is the *start* of the line after next, not next-1:
+    // an empty next line is zero-length, and next-1 would collapse onto
+    // nextStart and drop the boundary entirely.
+    const nextTop = topAt(cache, text, nextStart);
+    const nextLogicalEnd =
+      index + 2 < logicalStarts.length
+        ? logicalStarts[index + 2] - 1
+        : text.length;
     const nextEnd =
-      index + 2 < logicalStarts.length ? logicalStarts[index + 2] : text.length;
+      nextLogicalEnd > nextStart &&
+      nextTop < topAt(cache, text, nextLogicalEnd) - 0.5
+        ? firstAbove(cache, text, nextStart + 1, nextLogicalEnd, nextTop)
+        : index + 2 < logicalStarts.length
+          ? logicalStarts[index + 2]
+          : text.length;
     if (nextEnd > nextStart) starts.push(nextEnd);
   } else if (caret < text.length) {
     // The document-end sentinel bounds the current line, but it must not

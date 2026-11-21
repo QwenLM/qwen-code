@@ -1516,6 +1516,35 @@ describe('touch editing-row keys', () => {
     expect(textarea().selectionStart).toBe(6);
   });
 
+  it('restarts vertical navigation from the caret after moving right', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('abc\ndef\nghi\njkl');
+    textarea().setSelectionRange(3, 3);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(7);
+    act(() => latest!.pressEditingKey('right'));
+    expect(textarea().selectionStart).toBe(8);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(12);
+  });
+
+  it('restarts vertical navigation from the caret after inserting slash', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('abc\ndef\nghi\njkl');
+    textarea().setSelectionRange(3, 3);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(7);
+    act(() => latest!.pressEditingKey('slash'));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(textarea().selectionStart).toBe(8);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(12);
+  });
+
   it('resets the held column when the user jumps the selection', async () => {
     mockTouchDevice();
     await mount();

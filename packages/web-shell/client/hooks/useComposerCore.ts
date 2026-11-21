@@ -5067,6 +5067,7 @@ export function useComposerCore(
       mirrorHostsRef.current.add(el);
       if (key === 'right') {
         verticalColumnRef.current = null;
+        verticalLineStartRef.current = null;
         const followup = followupStateRef.current;
         const completion = getFollowupCompletion(
           text,
@@ -5123,6 +5124,11 @@ export function useComposerCore(
       const column =
         verticalColumnRef.current ??
         caretGraphemeColumn(text, anchor, lineStarts);
+      const currentIndex = lineIndexAt(lineStarts, anchor);
+      const targetIndex = Math.max(
+        0,
+        Math.min(lineStarts.length - 1, currentIndex + (key === 'up' ? -1 : 1)),
+      );
       const target = computeCaretTarget(
         text,
         anchor,
@@ -5132,15 +5138,9 @@ export function useComposerCore(
         column,
       );
       verticalColumnRef.current = column;
-      const landedIndex = lineIndexAt(lineStarts, target);
-      // At a wrap boundary the clamp put us at the previous line's end, not
-      // at the start of the next one: anchor to the line we actually landed
-      // on, or the next Up would resolve the same boundary offset again.
-      const landedStart =
-        key === 'up' && target > 0 && lineStarts[landedIndex] === target
-          ? lineStarts[Math.max(0, landedIndex - 1)]
-          : lineStarts[landedIndex];
-      verticalLineStartRef.current = landedStart;
+      // A soft-wrap clamp can equal the next line's start; lineIndexAt(target)
+      // would then remember that next line instead of the actual destination.
+      verticalLineStartRef.current = lineStarts[targetIndex];
       programmaticSelectionRef.current = [target, target];
       el.focus();
       el.setSelectionRange(target, target);
