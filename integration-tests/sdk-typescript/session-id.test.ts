@@ -49,7 +49,7 @@ describe('Session ID Support (E2E)', () => {
   });
 
   afterEach(async () => {
-    await fakeServer.close();
+    await fakeServer?.close();
     await helper.cleanup();
   });
 
@@ -203,16 +203,11 @@ describe('Session ID Support (E2E)', () => {
       });
 
       try {
-        for await (const _message of q) {
-          // Consume messages
-        }
-        // Should not reach here - CLI should reject this combination
-        throw new Error(
-          'Expected query to fail when using sessionId with resume',
-        );
-      } catch (error) {
-        // Expected to fail - CLI rejects --session-id with --resume
-        expect(error).toBeDefined();
+        await expect(async () => {
+          for await (const _message of q) {
+            // Consume messages
+          }
+        }).rejects.toThrow(/CLI process exited with code 1/);
       } finally {
         await q.close();
       }
