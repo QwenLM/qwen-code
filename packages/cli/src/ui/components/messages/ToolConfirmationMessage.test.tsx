@@ -668,6 +668,34 @@ describe('ToolConfirmationMessage', () => {
     };
 
     describe.each([
+      execConfirmationDetails,
+      infoConfirmationDetails,
+      mcpConfirmationDetails,
+    ])('explicit empty permission rules for $type', (details) => {
+      it.each([false, true])(
+        'omits persistent choices with compactMode=%s',
+        (compactMode) => {
+          const mockConfig = {
+            isTrustedFolder: () => true,
+            getIdeMode: () => false,
+          } as unknown as Config;
+          const { lastFrame } = renderWithProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{ ...details, permissionRules: [] }}
+              config={mockConfig}
+              availableTerminalHeight={30}
+              contentWidth={80}
+              compactMode={compactMode}
+            />,
+          );
+          expect(lastFrame()).toContain('Yes, allow once');
+          expect(lastFrame()).not.toMatch(/allow always|always allow/i);
+          expect(lastFrame()).toContain('No');
+        },
+      );
+    });
+
+    describe.each([
       {
         description: 'for edit confirmations',
         details: editConfirmationDetails,

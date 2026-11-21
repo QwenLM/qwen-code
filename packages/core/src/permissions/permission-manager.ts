@@ -8,6 +8,8 @@ import {
   parseRules,
   parseRule,
   matchesRule,
+  matchesCommandPattern,
+  hasUnsupportedShellSyntax,
   hasAmbiguousMcpGrant,
   resolveToolName,
   splitCompoundCommand,
@@ -29,6 +31,11 @@ import {
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  removeShellLineContinuations,
+  shellCommandMayChangeCwd,
+  staticShellCommand,
+} from './shell-command-syntax.js';
+import {
   findDangerousAllowRules,
   isDangerousAllowRule,
 } from './dangerousRules.js';
@@ -45,6 +52,27 @@ import type {
 } from './types.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
+
+type ShellRuleContext = PermissionCheckContext & { cwdUnknown?: boolean };
+
+// The virtual-op tracker owns cwd resolution. Bash rules only know that a
+// directory-changing segment invalidates their initial invocation cwd.
+function compoundContexts(
+  ctx: ShellRuleContext,
+  commands: string[],
+): ShellRuleContext[] {
+  let cwdUnknown = ctx.cwdUnknown ?? false;
+  return commands.map((command) => {
+    const next = { ...ctx, command, cwdUnknown };
+    if (
+      SHELL_TOOL_NAMES.has(ctx.toolName) &&
+      getShellConfiguration().shell === 'bash'
+    ) {
+      cwdUnknown ||= shellCommandMayChangeCwd(command);
+    }
+    return next;
+  });
+}
 
 /**
  * How a tool participates in the registry for this session.
@@ -98,7 +126,13 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
  * therefore keeps the conservative splitter, and stays covered by `Bash(...)`
  * rules through it.
  */
-function splitCommandForRules(command: string, toolName: string): string[] {
+export function splitCommandForRules(
+  command: string,
+  toolName: string,
+): string[] {
+  if (getShellConfiguration().shell === 'bash') {
+    command = removeShellLineContinuations(command);
+  }
   if (
     toolName !== 'run_shell_command' ||
     getShellConfiguration().shell !== 'bash' ||
@@ -469,7 +503,7 @@ export class PermissionManager {
    *      via `extractShellOperationsAcrossCommand` — allows Read/Edit/Write/WebFetch rules
    *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
    */
-  private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
+  private evaluateSingle(ctx: ShellRuleContext): PermissionDecision {
     const {
       toolName,
       toolAliases,
@@ -496,7 +530,7 @@ export class PermissionManager {
       command,
       filePath,
       domain,
-      pathCtx,
+      ctx.cwdUnknown ? undefined : pathCtx,
       specifier,
       toolParams,
       toolAliases,
@@ -523,6 +557,11 @@ export class PermissionManager {
         if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
           return 'ask';
       }
+      if (
+        this.hasUncertainShellRedirect(ctx) ||
+        this.hasUnmodeledRestrictedFileEffects(ctx)
+      )
+        return 'ask';
       // Priority 3: allow rules
       for (const rule of [
         ...this.activeSessionAllowRules(),
@@ -549,7 +588,13 @@ export class PermissionManager {
     // must never downgrade an explicit 'allow' decision from a Bash rule.
     // Example: `git status` has no file ops; an allow rule for `Bash(git *)`
     // should return 'allow', not be downgraded to 'default'.
-    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+    // After cd, the full-command pass owns virtual paths; repeating extraction
+    // with the initial cwd would invent a second, stale file operation.
+    if (
+      !ctx.cwdUnknown &&
+      SHELL_TOOL_NAMES.has(toolName) &&
+      command !== undefined
+    ) {
       const cwd = pathCtx?.cwd ?? process.cwd();
       // Use the compound-aware extractor here too so a single
       // `evaluateSingle` call on a segment like
@@ -570,6 +615,47 @@ export class PermissionManager {
     }
 
     return baseDecision;
+  }
+
+  private hasUncertainShellRedirect(ctx: ShellRuleContext): boolean {
+    const { command } = ctx;
+    if (!command) return false;
+    const actual = staticShellCommand(command);
+    return [
+      ...this.sessionRules.deny,
+      ...this.persistentRules.deny,
+      ...this.sessionRules.ask,
+      ...this.persistentRules.ask,
+    ].some((rule) => {
+      if (
+        rule.invalid ||
+        !rule.specifier ||
+        !toolMatchesRuleToolName(rule.toolName, ctx.toolName)
+      )
+        return false;
+      const expected = staticShellCommand(rule.specifier, true);
+      if (!expected?.redirects.length) return false;
+      if (!actual) return /[<>]/.test(command);
+      return (
+        matchesCommandPattern(expected.words, actual.words) &&
+        expected.redirects.some((redirect) =>
+          actual.redirects.some(
+            (candidate) =>
+              (candidate.kind === redirect.kind ||
+                candidate.kind === 'readwrite') &&
+              // A parent component cannot be collapsed lexically across a
+              // possible symlink. Keep a relevant restriction unresolved.
+              (/(?:^|%002f)%002e%002e(?:%002f|$)/.test(candidate.target) ||
+                /(?:^|%002f)%002e%002e(?:%002f|$)/.test(redirect.target) ||
+                // The static view encodes a literal leading slash as %002f.
+                (ctx.cwdUnknown &&
+                  ((!redirect.target.startsWith('%002f') &&
+                    !redirect.target.startsWith('*')) ||
+                    !candidate.target.startsWith('%002f')))),
+          ),
+        )
+      );
+    });
   }
 
   /**
@@ -633,6 +719,19 @@ export class PermissionManager {
     );
   }
 
+  private hasUnmodeledRestrictedFileEffects(ctx: ShellRuleContext): boolean {
+    // An unmodelled shell can still touch files covered by an explicit rule.
+    // Keep that restriction relevant even when no Bash allow matches; otherwise
+    // callers can skip this manager and retain their default allow decision.
+    return (
+      SHELL_TOOL_NAMES.has(ctx.toolName) &&
+      ctx.command !== undefined &&
+      (this.hasDenyOrAskRuleForTool('read_file') ||
+        this.hasDenyOrAskRuleForTool('write_file')) &&
+      hasUnsupportedShellSyntax(ctx.command, 0, true)
+    );
+  }
+
   /**
    * Evaluate a compound command by splitting it into sub-commands,
    * evaluating each independently, and returning the most restrictive result.
@@ -662,15 +761,13 @@ export class PermissionManager {
     };
 
     let mostRestrictive: ResolvedDecision = 'allow';
-    const changesDirectory = subCommands.some((command) =>
-      /^\s*(?:cd|pushd)(?:\s|$)/.test(command),
-    );
+    const contexts = compoundContexts(ctx, subCommands);
+    const changesDirectory =
+      contexts.some((context) => context.cwdUnknown) ||
+      subCommands.some((command) => /^\s*(?:cd|pushd)(?:\s|$)/.test(command));
 
-    for (const subCmd of subCommands) {
-      const subCtx: PermissionCheckContext = {
-        ...ctx,
-        command: subCmd,
-      };
+    for (const subCtx of contexts) {
+      const subCmd = subCtx.command!;
       const rawDecision = this.evaluateSingle(subCtx);
 
       // Resolve 'default' to actual permission using AST analysis
@@ -1030,7 +1127,7 @@ export class PermissionManager {
    *
    * Useful for providing user-visible feedback about which rule caused a denial.
    */
-  findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
+  findMatchingDenyRule(ctx: ShellRuleContext): string | undefined {
     ctx = this.normalizePermissionContext(ctx);
     const {
       toolName,
@@ -1059,7 +1156,11 @@ export class PermissionManager {
     // WebFetch rule matching an operation extracted from the command, even
     // though the deny rule's toolName (e.g. `read_file`) never matches the
     // shell tool name. Without this pass the citation silently drops.
-    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+    if (
+      !ctx.cwdUnknown &&
+      SHELL_TOOL_NAMES.has(toolName) &&
+      command !== undefined
+    ) {
       const cwdForOps = pathCtx?.cwd ?? process.cwd();
       const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
       for (const op of ops) {
@@ -1088,8 +1189,8 @@ export class PermissionManager {
     if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
       const subCommands = splitCommandForRules(command, toolName);
       if (subCommands.length > 1) {
-        for (const subCmd of subCommands) {
-          const rule = this.findMatchingDenyRule({ ...ctx, command: subCmd });
+        for (const subCtx of compoundContexts(ctx, subCommands)) {
+          const rule = this.findMatchingDenyRule(subCtx);
           if (rule) {
             return rule;
           }
@@ -1103,7 +1204,7 @@ export class PermissionManager {
       command,
       filePath,
       domain,
-      pathCtx,
+      ctx.cwdUnknown ? undefined : pathCtx,
       specifier,
       toolParams,
       toolAliases,
@@ -1187,7 +1288,7 @@ export class PermissionManager {
    * @param ctx - Permission check context.
    * @returns true if at least one rule matches.
    */
-  hasRelevantRules(ctx: PermissionCheckContext): boolean {
+  hasRelevantRules(ctx: ShellRuleContext): boolean {
     ctx = this.normalizePermissionContext(ctx);
     const {
       toolName,
@@ -1225,7 +1326,11 @@ export class PermissionManager {
     // wrapper unwrapping see the FULL original command. Required so
     // rules like `Write(.qwen/settings.json)` are recognised as relevant
     // for `cd .qwen && bash -lc 'echo > settings.json'`.
-    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+    if (
+      !ctx.cwdUnknown &&
+      SHELL_TOOL_NAMES.has(toolName) &&
+      command !== undefined
+    ) {
       const cwdForOps = pathCtx?.cwd ?? process.cwd();
       const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
       if (
@@ -1269,8 +1374,8 @@ export class PermissionManager {
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCommandForRules(command, toolName);
       if (subCommands.length > 1) {
-        return subCommands.some((subCmd) =>
-          this.hasRelevantRules({ ...ctx, command: subCmd }),
+        return compoundContexts(ctx, subCommands).some((subCtx) =>
+          this.hasRelevantRules(subCtx),
         );
       }
     }
@@ -1280,34 +1385,44 @@ export class PermissionManager {
       command,
       filePath,
       domain,
-      pathCtx,
+      ctx.cwdUnknown ? undefined : pathCtx,
       specifier,
       toolParams,
       toolAliases,
     ] as const;
 
     return (
+      this.hasUncertainShellRedirect(ctx) ||
+      this.hasUnmodeledRestrictedFileEffects(ctx) ||
       restrictiveRules.some((rule) =>
         matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
       ) ||
       allowRules.some(
         (rule) =>
-          matchesRule(rule, ...matchArgs, undefined, mcpIdentity) &&
-          !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity),
+          // A syntactically vetoed shell allow still requires evaluation.
+          // Otherwise callers skip this manager and inherit their L3 allow.
+          // Restrictive matching is used for relevance only, never approval.
+          matchesRule(
+            rule,
+            ...matchArgs,
+            undefined,
+            mcpIdentity,
+            SHELL_TOOL_NAMES.has(toolName),
+          ) && !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity),
       )
     );
   }
 
   /**
-   * Returns true when the invocation is matched by an explicit `ask` rule.
+   * Returns true for an explicit `ask` or an unresolved redirect restriction.
    *
    * This is intentionally narrower than `evaluate(ctx) === 'ask'`. Shell
    * commands can resolve to `ask` simply because they are non-read-only and no
    * explicit allow/deny rule matched. That fallback should still allow users to
    * create new allow rules, so callers must only hide "Always allow" when a
-   * real ask rule matched.
+   * restrictive rule prevents persistent approval.
    */
-  hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
+  hasMatchingAskRule(ctx: ShellRuleContext): boolean {
     ctx = this.normalizePermissionContext(ctx);
     const {
       toolName,
@@ -1334,7 +1449,11 @@ export class PermissionManager {
     // ── Cross-command virtual-op pass (shell tools only) ─────────────────
     // See `hasRelevantRules` for the rationale; same cd-tracking and
     // wrapper-unwrapping requirement applies to ask rules.
-    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+    if (
+      !ctx.cwdUnknown &&
+      SHELL_TOOL_NAMES.has(toolName) &&
+      command !== undefined
+    ) {
       const cwdForOps = pathCtx?.cwd ?? process.cwd();
       const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
       if (
@@ -1342,7 +1461,7 @@ export class PermissionManager {
           if (
             op.cwdUnknown &&
             op.pathMayDependOnCwd &&
-            this.hasAskRuleForTool(op.virtualTool)
+            this.hasDenyOrAskRuleForTool(op.virtualTool)
           ) {
             return true;
           }
@@ -1373,8 +1492,8 @@ export class PermissionManager {
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCommandForRules(command, toolName);
       if (subCommands.length > 1) {
-        return subCommands.some((subCmd) =>
-          this.hasMatchingAskRule({ ...ctx, command: subCmd }),
+        return compoundContexts(ctx, subCommands).some((subCtx) =>
+          this.hasMatchingAskRule(subCtx),
         );
       }
     }
@@ -1384,21 +1503,18 @@ export class PermissionManager {
       command,
       filePath,
       domain,
-      pathCtx,
+      ctx.cwdUnknown ? undefined : pathCtx,
       specifier,
       toolParams,
       toolAliases,
     ] as const;
 
-    return askRules.some((rule) =>
-      matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
-    );
-  }
-
-  private hasAskRuleForTool(toolName: string): boolean {
-    return [...this.sessionRules.ask, ...this.persistentRules.ask].some(
-      (rule) =>
-        !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
+    return (
+      this.hasUncertainShellRedirect(ctx) ||
+      this.hasUnmodeledRestrictedFileEffects(ctx) ||
+      askRules.some((rule) =>
+        matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
+      )
     );
   }
 

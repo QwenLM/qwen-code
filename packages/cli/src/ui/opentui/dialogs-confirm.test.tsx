@@ -197,6 +197,41 @@ describe('buildConfirmationPrompt', () => {
     expect(labels).toContain('Always allow for this user');
   });
 
+  it.each([
+    { ...execDetails() },
+    {
+      type: 'info' as const,
+      title: 'Confirm operation',
+      prompt: 'Continue?',
+      onConfirm: onConfirmNoop,
+    },
+    {
+      type: 'mcp' as const,
+      title: 'Confirm MCP tool',
+      serverName: 'server',
+      toolName: 'tool',
+      toolDisplayName: 'Tool',
+      onConfirm: onConfirmNoop,
+    },
+  ])(
+    'omits persistent choices for explicit empty rules in $type',
+    (details) => {
+      const values = buildConfirmationPrompt(
+        { ...details, permissionRules: [] },
+        true,
+      ).options.map((option) => option.value);
+      expect(values).toEqual([
+        ToolConfirmationOutcome.ProceedOnce,
+        ToolConfirmationOutcome.Cancel,
+      ]);
+      expect(
+        buildConfirmationPrompt(details, true).options.map(
+          (option) => option.value,
+        ),
+      ).toContain(ToolConfirmationOutcome.ProceedAlwaysProject);
+    },
+  );
+
   it('drops the always-allow rows in an untrusted folder', () => {
     // Granting a durable rule for a workspace the user has not trusted is not
     // a decision the dialog may offer — ink gates these the same way.

@@ -189,7 +189,7 @@ function allowOnceOrAlways(
   const options: OutcomeOption[] = [
     { label: t('Yes, allow once'), value: ToolConfirmationOutcome.ProceedOnce },
   ];
-  if (showAlwaysAllow) {
+  if (showAlwaysAllow && permissionRules?.length !== 0) {
     const action = permissionRules?.length
       ? buildHumanReadableRuleLabel(permissionRules)
       : '';

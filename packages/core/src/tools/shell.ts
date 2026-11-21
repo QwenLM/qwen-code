@@ -25,6 +25,7 @@ import type {
   ToolExecuteConfirmationDetails,
   ToolConfirmationPayload,
 } from './tools.js';
+import { suggestCommandRules } from '../permissions/command-rule-suggestions.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
   getSessionCommitGeneration,
@@ -100,7 +101,6 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
   isShellCommandReadOnlyASTInDirectory,
-  extractCommandRules,
   parseShellCommand,
 } from '../utils/shellAstParser.js';
 import type Parser from 'web-tree-sitter';
@@ -3443,17 +3443,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // Extract minimum-scope permission rules only for sub-commands that
     // actually need confirmation.
-    let permissionRules: string[] = [];
-    try {
-      const allRules: string[] = [];
-      for (const sub of effectiveSubCommands) {
-        const rules = await extractCommandRules(sub);
-        allRules.push(...rules);
-      }
-      permissionRules = [...new Set(allRules)].map((rule) => `Bash(${rule})`);
-    } catch (e) {
-      debugLogger.warn('Failed to extract command rules:', e);
-    }
+    const suggested = await suggestCommandRules(
+      this.params.command,
+      'Bash',
+      command === this.params.command.trim() ? effectiveSubCommands : undefined,
+    );
 
     // Flag command substitution ($(), backticks, <(), >()) so the user
     // sees a visible warning in the confirmation dialog. We surface this
@@ -3475,7 +3469,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       title: 'Confirm Shell Command',
       command: this.params.command,
       rootCommand: rootCommands.join(', '),
-      permissionRules,
+      ...suggested,
       onConfirm: async (
         _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,

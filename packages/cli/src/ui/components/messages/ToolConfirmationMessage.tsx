@@ -66,8 +66,10 @@ export const ToolConfirmationMessage: React.FC<
     autoModeFallback?.reason === 'classifier_unavailable' ||
     autoModeFallback?.reason === 'consecutive_unavailable';
   const hidesAlwaysAllow =
-    'hideAlwaysAllow' in confirmationDetails &&
-    confirmationDetails.hideAlwaysAllow === true;
+    ('hideAlwaysAllow' in confirmationDetails &&
+      confirmationDetails.hideAlwaysAllow === true) ||
+    ('permissionRules' in confirmationDetails &&
+      confirmationDetails.permissionRules?.length === 0);
 
   // An open right-click context menu owns the keyboard while it is up. The
   // dispatch in KeypressContext is a broadcast that discards return values,
@@ -288,7 +290,7 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
-    if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
+    if (isTrustedFolder && !hidesAlwaysAllow) {
       options.push({
         label: t('Yes, allow always'),
         value: ToolConfirmationOutcome.ProceedAlways,
@@ -415,7 +417,7 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
-    if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
+    if (isTrustedFolder && !hidesAlwaysAllow) {
       const friendlyLabel = executionProps.permissionRules?.length
         ? ` ${buildHumanReadableRuleLabel(executionProps.permissionRules)}`
         : '';
@@ -583,7 +585,7 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
-    if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
+    if (isTrustedFolder && !hidesAlwaysAllow) {
       const friendlyLabel =
         'permissionRules' in infoProps &&
         (infoProps as { permissionRules?: string[] }).permissionRules?.length
@@ -685,7 +687,7 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
-    if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
+    if (isTrustedFolder && !hidesAlwaysAllow) {
       const friendlyLabel = mcpProps.permissionRules?.length
         ? ` ${buildHumanReadableRuleLabel(mcpProps.permissionRules)}`
         : '';
@@ -777,7 +779,7 @@ export const ToolConfirmationMessage: React.FC<
                 },
               ]
             : []),
-          ...(isTrustedFolder && !confirmationDetails.hideAlwaysAllow
+          ...(isTrustedFolder && !hidesAlwaysAllow
             ? [
                 {
                   key: 'proceed-always',

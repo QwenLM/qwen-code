@@ -72,7 +72,9 @@ function filterAlwaysAllowOptions(
     forceHideAlwaysAllow ||
     confirmation.autoModeFallback !== undefined ||
     (supportsHideAlwaysAllow(confirmation) &&
-      confirmation.hideAlwaysAllow === true);
+      confirmation.hideAlwaysAllow === true) ||
+    ('permissionRules' in confirmation &&
+      confirmation.permissionRules?.length === 0);
   const visibleOptions = hideAlwaysAllow
     ? options.filter((option) => option.kind !== 'allow_always')
     : options;

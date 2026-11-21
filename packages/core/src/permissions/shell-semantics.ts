@@ -34,12 +34,24 @@
 import nodePath from 'node:path';
 import os from 'node:os';
 import {
-  decodeAnsiCBytes,
-  decodeAnsiCEscape,
+  stripShellCommandNegation,
+  stripShellCommandPrefixes,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
+import {
+  envSplitStringCommand,
+  getMapfileCallback,
+  getShellPrefixCommand,
+  MAX_SHELL_UNWRAP_DEPTH,
+} from '../utils/shell-command-prefixes.js';
+import { tokenizeShellWords as tokenize } from '../utils/shell-word-tokenizer.js';
+import { ShellCommentContext } from '../utils/shell-comment-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { splitCompoundCommandSegments } from './rule-parser.js';
+import {
+  removeShellLineContinuations,
+  shellCommandMayChangeCwd,
+} from './shell-command-syntax.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -86,266 +98,12 @@ export interface ShellOperation {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Tokenize a shell command string, respecting single/double quotes and
- * backslash escapes, splitting on unquoted whitespace.
- *
- * The input should be a single simple command (already split from compound
- * commands via `splitCompoundCommand`).
- *
- * Quote removal hides whether a `&` was typed bare: `>&1` duplicates a file
- * descriptor, but `>"&1"` and `>\&1` write a file named `&1`. When
- * `fdRedirects` is given, it receives the index of each token that starts
- * with `>&`, `1>&`, `2>&` or `<&` whose `>`/`<` and `&` were both unquoted.
- * Bash reads an unquoted `-` right after such an operator as "close" and the
- * rest of the word as an argument: `rm >&-notes.txt` closes stdout and
- * removes `notes.txt`. That rest becomes its own token after the redirect
- * token, and `fdCloses` receives the redirect token's index.
- */
-function tokenize(
-  command: string,
-  fdRedirects?: Set<number>,
-  fdCloses?: Set<number>,
-  /** Parallel bare marks per pushed token; '1' = typed unquoted and unescaped. */
-  bares?: string[],
-): string[] {
-  const tokens: string[] = [];
-  let current = '';
-  // One char per char of `current`: '1' if typed unquoted and unescaped.
-  let bare = '';
-  let wordStarted = false;
-  let tildeQuoted = false;
-  let ansiCBytes: number[] = [];
-  const flushAnsiC = () => {
-    if (ansiCBytes.length === 0) return;
-    const text = decodeAnsiCBytes(ansiCBytes);
-    current += text;
-    bare += '0'.repeat(text.length);
-    ansiCBytes = [];
-  };
-  let inSingle = false;
-  let inDouble = false;
-  // `$'…'` keeps its own quote state: `\'` does not close it and `\n` is a
-  // newline in the word rather than layout, so escapes decode here.
-  let inAnsiC = false;
-  // A NUL ends the word bash builds inside an ANSI-C quote: `$'a\0b'c` is
-  // the word `ac`. Once set, the scan skips to the segment's closing quote
-  // without emitting anything; a following concatenation still appends.
-  let ansiCTruncated = false;
-  let escaped = false;
-  // The second `$` of `$$` (the PID) cannot open `$'…'` or `$"…"`: the
-  // quote after it is an ordinary quote.
-  let pendingDollar = false;
-
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]!;
-    if (
-      !inSingle &&
-      !inAnsiC &&
-      !escaped &&
-      ch === '\\' &&
-      command[i + 1] === '\n'
-    ) {
-      i++;
-      continue;
-    }
-    const afterDollar = pendingDollar;
-    pendingDollar = false;
-
-    if (inAnsiC) {
-      if (ansiCTruncated) {
-        // Skip an escaped character so `\'` does not read as the close.
-        if (ch === '\\') {
-          i++;
-          continue;
-        }
-        if (ch === "'") {
-          inAnsiC = false;
-          ansiCTruncated = false;
-        }
-        continue;
-      }
-      if (ch === '\\') {
-        const escape = decodeAnsiCEscape(command, i);
-        if (!escape) {
-          ansiCBytes.push(0x5c);
-          continue;
-        }
-        if (escape.bytes.includes(0)) {
-          ansiCTruncated = true;
-          i += escape.length - 1;
-          continue;
-        }
-        for (const byte of escape.bytes) ansiCBytes.push(byte);
-        i += escape.length - 1;
-        continue;
-      }
-      if (ch === "'") {
-        inAnsiC = false;
-        continue;
-      }
-      const literal = String.fromCodePoint(command.codePointAt(i)!);
-      for (const byte of Buffer.from(literal)) ansiCBytes.push(byte);
-      i += literal.length - 1;
-      continue;
-    }
-
-    let quoteAt = i + 1;
-    while (ch === '$' && command.startsWith('\\\n', quoteAt)) quoteAt += 2;
-    if (!(ch === '$' && command[quoteAt] === "'")) flushAnsiC();
-    if (ch === "'" || ch === '"' || ch === '\\') {
-      if (!current.includes('/')) tildeQuoted = true;
-      wordStarted = true;
-    }
-    if (escaped) {
-      current += ch;
-      bare += '0';
-      escaped = false;
-      continue;
-    }
-    if (ch === '\\' && !inSingle) {
-      escaped = true;
-      continue;
-    }
-    // `$'…'` opens an ANSI-C word; `$"…"` is locale quoting, which quotes
-    // like a double-quoted word. Only the introducer is skipped; a
-    // backslash-newline between `$` and the quote is removed first.
-    if (ch === '$' && !inSingle && !inDouble && !afterDollar) {
-      let next = i + 1;
-      while (command[next] === '\\' && command[next + 1] === '\n') next += 2;
-      if (command[next] === "'") {
-        wordStarted = true;
-        if (!current.includes('/')) tildeQuoted = true;
-        inAnsiC = true;
-        i = next;
-        continue;
-      }
-      if (command[next] === '"') {
-        wordStarted = true;
-        if (!current.includes('/')) tildeQuoted = true;
-        inDouble = true;
-        i = next;
-        continue;
-      }
-      pendingDollar = true;
-    }
-    if (ch === "'" && !inDouble) {
-      inSingle = !inSingle;
-      continue;
-    }
-    if (ch === '"' && !inSingle) {
-      inDouble = !inDouble;
-      continue;
-    }
-    if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
-      if (wordStarted) {
-        if (tildeQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
-        if (current) {
-          pushToken(tokens, current, bare, fdRedirects, fdCloses, bares);
-        } else {
-          tokens.push('');
-          bares?.push('');
-        }
-        current = '';
-        bare = '';
-        wordStarted = false;
-        tildeQuoted = false;
-      }
-      continue;
-    }
-    current += ch;
-    wordStarted = true;
-    bare += inSingle || inDouble ? '0' : '1';
-  }
-  flushAnsiC();
-  if (tildeQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
-  if (current) pushToken(tokens, current, bare, fdRedirects, fdCloses, bares);
-  else if (wordStarted) {
-    tokens.push('');
-    bares?.push('');
-  }
-  return tokens;
-}
-
-/**
  * The words of one simple shell command after quote removal, ANSI-C `$'…'`
  * decoding and `\`-newline joining. The amend guard matches on these so a
  * quote-split spelling (`git com''mit --amend`) is read as the word bash runs.
  */
 export function shellWords(command: string): string[] {
   return tokenize(command);
-}
-
-function pushToken(
-  tokens: string[],
-  token: string,
-  bare: string,
-  fdRedirects: Set<number> | undefined,
-  fdCloses?: Set<number>,
-  bares?: string[],
-): void {
-  // Right after an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted `-`
-  // as "close the descriptor" and starts a new word after it:
-  // `rm >&-notes.txt` closes stdout and removes `notes.txt`. The redirect
-  // token keeps the whole word (see extractRedirects) and the rest of the
-  // word follows it as an argument. The new word can close again
-  // (`rm >&->&-notes.txt`); a loop handles that, so a long chain can't
-  // overflow the stack, and only the first redirect keeps the whole word,
-  // as on `main`: the closes after it open no file.
-  let chained = false;
-  for (;;) {
-    if (token === '{' || token === '}') return;
-    const normalized = trimShellSyntax(token, bare);
-    if (!normalized) return;
-    // trimShellSyntax only drops leading `(` and trailing `)`/`&`.
-    const start = /^\(*/.exec(token)![0].length;
-    const normBare = bare.slice(start, start + normalized.length);
-    if (!fdRedirects) {
-      tokens.push(normalized);
-      bares?.push(normBare);
-      return;
-    }
-    const op = /^[12]?>&|^<&/.exec(normalized)?.[0];
-    if (!op || normBare.slice(op.length - 2, op.length) !== '11') {
-      tokens.push(normalized);
-      bares?.push(normBare);
-      return;
-    }
-    const close = op.length;
-    const closes = normalized[close] === '-' && normBare[close] === '1';
-    if (!closes || normalized.length === close + 1) {
-      fdRedirects.add(tokens.length);
-      tokens.push(normalized);
-      bares?.push(normBare);
-      return;
-    }
-    if (!chained) {
-      fdRedirects.add(tokens.length);
-      fdCloses?.add(tokens.length);
-      tokens.push(normalized);
-      bares?.push(normBare);
-      chained = true;
-    }
-    token = normalized.slice(close + 1);
-    bare = normBare.slice(close + 1);
-  }
-}
-
-function trimShellSyntax(token: string, bare: string): string {
-  let start = 0;
-  let end = token.length;
-
-  while (start < end && token[start] === '(') {
-    start++;
-  }
-  while (end > start) {
-    const ch = token[end - 1];
-    // A quoted or escaped `)` or `&` is part of the word: `>"x&"` writes
-    // `x&`, `>"notes)"` writes `notes)`.
-    if ((ch !== ')' && ch !== '&') || bare[end - 1] !== '1') break;
-    end--;
-  }
-
-  return token.slice(start, end);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1485,18 +1243,12 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       if (looksLikePath(arg)) startingPoints.push(resolvePath(arg, cwd));
     }
     if (startingPoints.length === 0) {
-      return [
-        { virtualTool: 'list_directory', filePath: cwd },
-        ...extractFindExecOps(args, cwd),
-      ];
+      return [{ virtualTool: 'list_directory', filePath: cwd }];
     }
-    return [
-      ...startingPoints.map((p) => ({
-        virtualTool: 'list_directory' as const,
-        filePath: p,
-      })),
-      ...extractFindExecOps(args, cwd),
-    ];
+    return startingPoints.map((p) => ({
+      virtualTool: 'list_directory' as const,
+      filePath: p,
+    }));
   },
 
   tree: (args, cwd) =>
@@ -2212,66 +1964,6 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Transparent prefix commands
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Flags that consume the next argument as their value, for specific prefix
- * commands.  Used by the prefix-stripping logic to correctly skip flag values
- * (e.g. `-u root` in `sudo -u root cat /etc/shadow`).
- */
-const PREFIX_COMMAND_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
-  [
-    'sudo',
-    new Set([
-      '-u',
-      '--user',
-      '-g',
-      '--group',
-      '-C',
-      '--close-from',
-      '-c',
-      '--login-class',
-      '-D',
-      '--chdir',
-      '-p',
-      '--prompt',
-      '-r',
-      '--role',
-      '-t',
-      '--type',
-      '-T',
-      '--command-timeout',
-      '-U',
-      '--other-user',
-    ]),
-  ],
-  ['timeout', new Set(['-s', '--signal', '-k', '--kill-after'])],
-]);
-
-/**
- * Commands that act as transparent wrappers around the actual command.
- * When encountered, the prefix is stripped and the analysis recurses on
- * the remaining command string.
- *
- * Examples:
- *   `sudo cat /etc/shadow`     → analyse `cat /etc/shadow`
- *   `timeout 10 wget http://…` → analyse `wget http://…`
- */
-const PREFIX_COMMANDS = new Set([
-  'sudo',
-  'doas', // OpenBSD sudo alternative
-  'env',
-  'time',
-  'nice',
-  'ionice',
-  'nohup',
-  'timeout',
-  'unbuffer',
-  'stdbuf',
-]);
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Main entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2293,6 +1985,19 @@ const PREFIX_COMMANDS = new Set([
 export function extractShellOperations(
   simpleCommand: string,
   cwd: string,
+  depth = 0,
+): ShellOperation[] {
+  return extractShellOperationsAtCwds(
+    simpleCommand,
+    { cwds: [cwd], unknown: false },
+    depth,
+  );
+}
+
+function extractShellOperationsAtCwds(
+  simpleCommand: string,
+  state: ShellCwdState,
+  depth: number,
 ): ShellOperation[] {
   if (!simpleCommand.trim()) return [];
 
@@ -2304,82 +2009,92 @@ export function extractShellOperations(
 
   // Extract I/O redirections before dispatching to the command handler.
   // This mutates `tokens` in-place by removing redirect tokens.
-  const { readFiles: redirectReads, writeFiles: redirectWrites } =
-    extractRedirects(tokens, cwd, fdRedirects, fdCloses, bares);
+  const originalTokens = [...tokens];
+  const originalBares = [...bares];
+  const firstCwd = state.cwds[0]!;
+  const firstRedirects = extractRedirects(
+    tokens,
+    firstCwd,
+    fdRedirects,
+    fdCloses,
+    bares,
+  );
+  const redirectOps = operationsAtCwds(state, simpleCommand, (cwd) =>
+    toRedirectOperations(
+      cwd === firstCwd
+        ? firstRedirects
+        : extractRedirects([...originalTokens], cwd, fdRedirects, fdCloses, [
+            ...originalBares,
+          ]),
+    ),
+  );
 
   while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
     tokens.shift();
-  }
-
-  const cmdName = tokens[0];
-  if (!cmdName) {
-    // Only assignments and/or redirections were present.
-    return toRedirectOperations({
-      readFiles: redirectReads,
-      writeFiles: redirectWrites,
-    });
+    bares.shift();
   }
 
   const ops: ShellOperation[] = [];
-
-  // ── Transparent prefix commands ───────────────────────────────────────────
-  if (PREFIX_COMMANDS.has(cmdName)) {
-    const flagsWithVal = PREFIX_COMMAND_FLAGS_WITH_VALUE.get(cmdName);
-    // Find where the actual command starts (after flags, flag-values, and env
-    // variable assignments).  For example:
-    //   sudo -u root cat /file  →  startIdx skips '-u' AND 'root'
-    let startIdx = 1;
-    while (startIdx < tokens.length) {
-      const t = tokens[startIdx]!;
-      if (t.startsWith('-')) {
-        // Skip the flag itself
-        startIdx++;
-        // If this flag takes a separate value argument, skip that too
-        if (
-          flagsWithVal?.has(t) &&
-          startIdx < tokens.length &&
-          !tokens[startIdx]!.startsWith('-')
-        ) {
-          startIdx++;
+  let commandIndex = 0;
+  for (;;) {
+    if (tokens[commandIndex] === '!' && bares[commandIndex] === '1') {
+      commandIndex++;
+      continue;
+    }
+    const prefix = getShellPrefixCommand(tokens, commandIndex);
+    if (prefix === undefined) break;
+    if (prefix.splitString !== undefined) {
+      if (depth <= MAX_SHELL_UNWRAP_DEPTH) {
+        const payload = envSplitStringCommand(
+          prefix.splitString,
+          tokens.slice(prefix.commandIndex),
+        );
+        if (payload !== undefined) {
+          const innerState = { ...state, unknown: true };
+          ops.push(
+            ...(depth < MAX_SHELL_UNWRAP_DEPTH
+              ? walkCompoundCommand(payload, innerState, depth + 1)
+              : extractShellOperationsAtCwds(payload, innerState, depth + 1)),
+          );
         }
-      } else if (isEnvAssignmentToken(t)) {
-        // Environment variable assignment: skip
-        startIdx++;
-      } else {
-        break;
       }
+      commandIndex = tokens.length;
+      break;
     }
-    // `timeout DURATION command` — the duration is a numeric positional that
-    // precedes the actual command.  Skip it.
-    if (
-      cmdName === 'timeout' &&
-      startIdx < tokens.length &&
-      /^\d/.test(tokens[startIdx]!)
-    ) {
-      startIdx++;
-    }
-    if (startIdx < tokens.length) {
-      // Reconstruct the inner command and recurse
-      const innerCommand = tokens.slice(startIdx).join(' ');
-      ops.push(...extractShellOperations(innerCommand, cwd));
-    }
-  } else {
-    // ── Dispatch to the known-command handler ─────────────────────────────
-    const handler = COMMANDS[cmdName];
-    if (handler) {
-      const args = tokens.slice(1);
-      ops.push(...handler(args, cwd));
-    }
-    // Unknown commands: return no ops (safe — we don't guess what we don't know)
+    commandIndex = prefix.commandIndex;
+  }
+
+  const cmdName = tokens[commandIndex];
+  if (!cmdName) {
+    // Only assignments and/or redirections were present.
+    return [...ops, ...redirectOps];
+  }
+
+  // Prefixes advance through the same argv; reparsing joined words would turn
+  // quoted arguments such as `echo 'hi > file'` into executable redirections.
+  const callback = getMapfileCallback(tokens, commandIndex);
+  if (callback !== undefined && depth < MAX_SHELL_UNWRAP_DEPTH) {
+    ops.push(
+      ...walkCompoundCommand(callback, { ...state, unknown: true }, depth + 1),
+    );
+  }
+  const handler = COMMANDS[cmdName];
+  if (handler) {
+    ops.push(
+      ...operationsAtCwds(state, simpleCommand, (cwd) =>
+        handler(tokens.slice(commandIndex + 1), cwd),
+      ),
+    );
+  }
+  if (cmdName === 'find' && depth < MAX_SHELL_UNWRAP_DEPTH) {
+    // Execution clauses share the complete cwd set and nesting budget.
+    ops.push(
+      ...extractFindExecOps(tokens.slice(commandIndex + 1), state, depth),
+    );
   }
 
   // Append redirect-derived operations
-  ops.push(
-    ...toRedirectOperations({
-      readFiles: redirectReads,
-      writeFiles: redirectWrites,
-    }),
-  );
+  ops.push(...redirectOps);
 
   return ops;
 }
@@ -2387,15 +2102,6 @@ export function extractShellOperations(
 // ─────────────────────────────────────────────────────────────────────────────
 // Compound-aware extractor
 // ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Cap on recursive shell-wrapper unwrapping. A pathological command can wrap
- * itself many levels deep (`bash -lc "bash -lc \"...\""`) to obscure intent;
- * after this many unwraps we stop and analyse whatever remains as-is. Four is
- * enough for every legitimate wrapper combination observed in the wild
- * (login shells, sandbox shells, tmux send-keys).
- */
-const MAX_SHELL_UNWRAP_DEPTH = 4;
 
 /**
  * Classify a literal `cd` command and resolve its target cwd when static.
@@ -2435,7 +2141,8 @@ function resolveCdTargetCwd(
   // its marking are read from the filtered arrays.
   const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses, bares);
 
-  if (words[0] === 'popd') return { kind: 'dynamic', redirects };
+  if (['popd', 'source', '.'].includes(words[0] ?? ''))
+    return { kind: 'dynamic', redirects };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
 
   if (words[0] === 'pushd') {
@@ -2481,7 +2188,12 @@ function resolveCdTargetCwd(
   return {
     kind: 'static',
     cwd: resolvePath(target, cwd, targetBare),
-    cwdUnknown: targetIsDecoded || (cwdUnknown && !isShellAbsolutePath(target)),
+    cwdUnknown:
+      targetIsDecoded ||
+      (cwdUnknown && !isShellAbsolutePath(target)) ||
+      (!!process.env['CDPATH'] &&
+        !isShellAbsolutePath(target) &&
+        !/^(?:\.|\.\.)(?:\/|$)/.test(target)),
     redirects,
   };
 }
@@ -2541,10 +2253,14 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  return walkCompoundCommand(command, { cwds: [cwd], unknown: false }, 0);
 }
 
-function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
+function extractFindExecOps(
+  args: string[],
+  state: ShellCwdState,
+  depth: number,
+): ShellOperation[] {
   const ops: ShellOperation[] = [];
   for (let i = 0; i < args.length; i++) {
     const marker = args[i]!;
@@ -2568,38 +2284,101 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
     const innerCommand = inner
       .map((arg) => arg.replaceAll('{}', '__find_exec_path__'))
       .join(' ');
-    const innerOps = extractShellOperationsAcrossCommand(innerCommand, cwd);
     ops.push(
-      ...(marker.endsWith('dir')
-        ? markCwdUnknownOps(innerOps, innerCommand, cwd)
-        : innerOps),
+      ...walkCompoundCommand(
+        innerCommand,
+        { ...state, unknown: state.unknown || marker.endsWith('dir') },
+        depth + 1,
+      ),
     );
   }
   return ops;
 }
 
+interface HeredocDelimiter {
+  text: string;
+  quoted: boolean;
+}
+
+function hasUnclosedShellQuote(command: string): boolean {
+  let quote = '';
+  let pendingDollar = false;
+  const comments = new ShellCommentContext();
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    const afterDollar: boolean = pendingDollar;
+    pendingDollar = false;
+    const comment = comments.read(
+      command,
+      index,
+      quote === "'" || quote === "$'",
+      quote === '"',
+    );
+    if (comment) {
+      index = comment.end;
+      continue;
+    }
+    if (character === '\\' && quote !== "'") {
+      if (command[index + 1] === '\n' && quote !== "$'")
+        pendingDollar = afterDollar;
+      index++;
+      continue;
+    }
+    if (quote) {
+      if (character === quote || (quote === "$'" && character === "'"))
+        quote = '';
+    } else if (character === "'" || character === '"') {
+      quote = character === "'" && afterDollar ? "$'" : character;
+    } else if (character === '$') {
+      pendingDollar = !afterDollar;
+    }
+  }
+  return quote !== '';
+}
+
 function stripHeredocBodies(command: string): string {
   const lines = command.split('\n');
   const kept: string[] = [];
-  const pendingDelimiters: string[] = [];
+  const pendingDelimiters: HeredocDelimiter[] = [];
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index++) {
+    let line = lines[index]!;
     if (pendingDelimiters.length > 0) {
-      if (line.trim() === pendingDelimiters[0]) {
+      const delimiter = pendingDelimiters[0]!;
+      const body: string[] = [];
+      while (
+        !delimiter.quoted &&
+        index + 1 < lines.length &&
+        (line.match(/\\+$/)?.[0].length ?? 0) % 2 === 1
+      ) {
+        body.push(line.slice(0, -1));
+        line = lines[++index]!;
+      }
+      body.push(line);
+      if (body.join('').trim() === delimiter.text) {
         pendingDelimiters.shift();
       }
       continue;
     }
 
+    while (
+      index + 1 < lines.length &&
+      (!removeShellLineContinuations(line + '\n').endsWith('\n') ||
+        hasUnclosedShellQuote(line))
+    ) {
+      line += '\n' + lines[++index]!;
+    }
     kept.push(line);
-    pendingDelimiters.push(...getHeredocDelimiters(line));
+    pendingDelimiters.push(
+      ...getHeredocDelimiters(removeShellLineContinuations(line)),
+    );
   }
 
   return kept.join('\n');
 }
 
-function getHeredocDelimiters(line: string): string[] {
-  const delimiters: string[] = [];
+function getHeredocDelimiters(line: string): HeredocDelimiter[] {
+  const delimiters: HeredocDelimiter[] = [];
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
@@ -2651,79 +2430,173 @@ function getHeredocDelimiters(line: string): string[] {
     }
 
     if (wordEnd > wordStart) {
-      delimiters.push(line.slice(wordStart, wordEnd));
+      delimiters.push({ text: line.slice(wordStart, wordEnd), quoted });
     }
     i = wordEnd;
   }
   return delimiters;
 }
 
+interface ShellCwdState {
+  cwds: string[];
+  unknown: boolean;
+}
+
+const MAX_KNOWN_SHELL_CWDS = 64;
+
+// Preserve concrete deny candidates. Truncation keeps the unknown signal, so
+// relative file effects outside the bounded set cannot silently receive grants.
+function joinCwdStates(
+  first: ShellCwdState,
+  second: ShellCwdState,
+): ShellCwdState {
+  const cwds = [...new Set([...first.cwds, ...second.cwds])];
+  return {
+    cwds: cwds.slice(0, MAX_KNOWN_SHELL_CWDS),
+    unknown: first.unknown || second.unknown || cwds.length > 1,
+  };
+}
+
+function operationsAtCwds(
+  state: ShellCwdState,
+  command: string,
+  extract: (cwd: string, index: number) => ShellOperation[],
+): ShellOperation[] {
+  // Deduplicate candidate directories without collapsing repeated operations
+  // inside one command or in later commands.
+  const seen = new Set<string>();
+  return state.cwds.flatMap((cwd, index) => {
+    const extracted = extract(cwd, index);
+    const candidates = state.unknown
+      ? markCwdUnknownOps(extracted, command, cwd)
+      : extracted;
+    const fresh = candidates.filter(
+      (operation) => !seen.has(JSON.stringify(operation)),
+    );
+    for (const operation of candidates) seen.add(JSON.stringify(operation));
+    return fresh;
+  });
+}
+
 function walkCompoundCommand(
   command: string,
-  cwd: string,
+  initialState: ShellCwdState,
   depth: number,
-  initialCwdUnknown: boolean,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
+  command = removeShellLineContinuations(stripHeredocBodies(command));
+  const subCommands = splitCompoundCommandSegments(command);
 
   const ops: ShellOperation[] = [];
-  let effectiveCwd = cwd;
-  let cwdUnknown = initialCwdUnknown;
+  let succeeded = initialState;
+  let failed = succeeded;
+  let listStart = succeeded;
+  let previous = '';
 
-  for (const { command: sub, terminator } of subCommands) {
-    // `cd x & …` runs the `cd` in a background subshell, so it does not move
-    // the cwd the following segments run in. Treating it as a foreground `cd`
-    // would attribute their relative writes to the wrong directory — for
-    // `cd /tmp & echo {} > settings.json` the write lands in the *original*
-    // cwd, which is exactly where a protected settings file would be.
-    const backgrounded = terminator === '&';
+  for (let index = 0; index < subCommands.length; index++) {
+    const input =
+      previous === '&&'
+        ? succeeded
+        : previous === '||'
+          ? failed
+          : previous === '&'
+            ? listStart
+            : joinCwdStates(succeeded, failed);
+    if (previous !== '&&' && previous !== '||') listStart = input;
 
-    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
-    if (cdTarget.kind !== 'not-cd') {
-      const redirectOps = toRedirectOperations(cdTarget.redirects);
-      ops.push(
-        ...(cwdUnknown
-          ? markCwdUnknownOps(redirectOps, sub, effectiveCwd)
-          : redirectOps),
+    // A pipeline runs its commands in separate processes. Analyse their file
+    // effects from the pipeline's input cwd, without carrying a cd to a sibling
+    // or to the foreground list that follows it.
+    let pipelineEnd = index;
+    while (
+      ['|', '|&'].includes(subCommands[pipelineEnd]!.terminator) &&
+      pipelineEnd + 1 < subCommands.length
+    )
+      pipelineEnd++;
+    let nextSuccess = input;
+    let nextFailure = input;
+
+    for (let part = index; part <= pipelineEnd; part++) {
+      const rawSub = subCommands[part]!.command;
+      const sub = stripShellCommandNegation(rawSub);
+      const cdTargets = input.cwds.map((cwd) =>
+        resolveCdTargetCwd(sub, cwd, input.unknown),
       );
-      if (!backgrounded) {
-        if (cdTarget.kind === 'static') {
-          effectiveCwd = cdTarget.cwd;
-          cwdUnknown = cdTarget.cwdUnknown;
+      if (cdTargets.some((target) => target.kind !== 'not-cd')) {
+        ops.push(
+          ...operationsAtCwds(input, sub, (_cwd, index) => {
+            const target = cdTargets[index]!;
+            return target.kind === 'not-cd'
+              ? []
+              : toRedirectOperations(target.redirects);
+          }),
+        );
+        if (cdTargets.some((target) => target.kind === 'dynamic')) {
+          // source/. can change cwd even when the sourced command fails.
+          nextSuccess = nextFailure = { ...input, unknown: true };
         } else {
-          cwdUnknown = true;
+          nextSuccess = { cwds: [], unknown: false };
+          for (const target of cdTargets) {
+            if (target.kind === 'static') {
+              nextSuccess = joinCwdStates(nextSuccess, {
+                cwds: [target.cwd],
+                unknown: target.cwdUnknown,
+              });
+            }
+          }
+          nextFailure = input;
+        }
+      } else {
+        // Unwrap after the outer split so sibling segments remain visible.
+        const strictPrefix = stripShellCommandPrefixes(sub);
+        const unprefixed =
+          strictPrefix ?? stripShellCommandPrefixes(sub, true) ?? sub;
+        const subCwdUnknown = input.unknown || strictPrefix === undefined;
+        const subState = { ...input, unknown: subCwdUnknown };
+        ops.push(...extractShellOperationsAtCwds(sub, subState, depth));
+        const unwrapped = stripShellWrapper(unprefixed);
+        if (unwrapped !== unprefixed) {
+          if (depth < MAX_SHELL_UNWRAP_DEPTH) {
+            ops.push(...walkCompoundCommand(unwrapped, subState, depth + 1));
+          } else {
+            shellSemanticsDebugLogger.warn(
+              `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
+            );
+          }
+          // An explicit child shell cannot change the parent's cwd.
+          nextSuccess = nextFailure = input;
+        } else {
+          nextSuccess = nextFailure = shellCommandMayChangeCwd(sub)
+            ? { ...input, unknown: true }
+            : input;
         }
       }
-      continue;
-    }
 
-    // Unwrap per segment, after the outer split, so wrapper suffixes like
-    // `bash -lc 'safe' && echo > file` are not discarded.
-    if (depth < MAX_SHELL_UNWRAP_DEPTH) {
-      const subUnwrapped = stripShellWrapper(sub);
-      if (subUnwrapped !== sub) {
-        ops.push(
-          ...walkCompoundCommand(
-            subUnwrapped,
-            effectiveCwd,
-            depth + 1,
-            cwdUnknown,
-          ),
-        );
-        continue;
+      if (sub.startsWith('(') && sub.endsWith(')')) {
+        // A complete parenthesized segment is a subshell, not a parent cd.
+        nextSuccess = nextFailure = input;
+      } else if (
+        (rawSub.slice(0, rawSub.length - sub.length).match(/!/g)?.length ?? 0) %
+        2
+      ) {
+        [nextSuccess, nextFailure] = [nextFailure, nextSuccess];
       }
-    } else if (stripShellWrapper(sub) !== sub) {
-      shellSemanticsDebugLogger.warn(
-        `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
-      );
     }
+    if (pipelineEnd !== index) nextSuccess = nextFailure = input;
 
-    const subOps = extractShellOperations(sub, effectiveCwd);
-    if (cwdUnknown) {
-      ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
+    // && / || are left associative. Carry the branch that skipped this command
+    // into the appropriate result, rather than treating the final cd as certain.
+    if (previous === '&&') {
+      failed = joinCwdStates(nextFailure, failed);
+      succeeded = nextSuccess;
+    } else if (previous === '||') {
+      succeeded = joinCwdStates(nextSuccess, succeeded);
+      failed = nextFailure;
     } else {
-      ops.push(...subOps);
+      succeeded = nextSuccess;
+      failed = nextFailure;
     }
+    previous = subCommands[pipelineEnd]!.terminator;
+    index = pipelineEnd;
   }
 
   return ops;

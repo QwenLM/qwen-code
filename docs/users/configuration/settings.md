@@ -546,6 +546,10 @@ Some rule names automatically cover multiple tools:
 | `"WebFetch(api.example.com)"` | Fetch from `api.example.com` and all its subdomains            |
 | `"mcp__puppeteer"`            | All tools from the puppeteer MCP server                        |
 
+Suggested shell rules retain subcommands after a file redirection. For example, `git > /dev/null push origin main` keeps `Bash(git push *)` and adds the original command when needed so the saved rules cover the invocation you approved. Existing command-rule prefix and wildcard semantics stay the same; saving a rule does not teach an existing `Bash(git push *)` rule to match other redirected spellings. The same suggestions are used for Shell, Monitor and scheduled command gates.
+
+Bash commands with redirections outside the file-operation tracker's supported syntax, including arbitrary file descriptors, redirections glued to words, and unresolved variable or glob targets, require confirmation even under an existing allow rule. The same check applies inside shell wrappers. Command and process substitutions also require confirmation; constant decimal arithmetic arguments using parentheses and `+`, `-`, `*`, `/`, or `%` can retain reusable rules, while dynamic arithmetic and arithmetic redirect targets cannot. Quoted or escaped operator characters remain ordinary arguments. When no reusable rule safely represents an invocation, including a literal `*` in a required full-command fallback, its confirmation dialog omits persistent-approval options. This does not change YOLO or other automatic-approval policies. Safe parts of a mixed command retain their reusable suggestions; saving those rules does not approve an unsupported part. Scheduled gates show a permission-rule hint only when it covers every part. These checks do not resolve environment-variable values or replace the existing file-operation analysis. Existing saved rules are not rewritten; a saved `Bash(git)` retains its broad subcommand scope.
+
 **Path pattern prefixes:**
 
 | Prefix | Meaning                               | Example             |

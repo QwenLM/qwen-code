@@ -3960,6 +3960,66 @@ describe('runNonInteractive', () => {
     ]);
   });
 
+  it('keeps headless YOLO approval when no persistent rule is offered', async () => {
+    setupMetricsMock();
+    const teamEvents = new EventEmitter();
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+    let emittedApproval = false;
+    mockLlmClient.sendMessageStream.mockImplementation(
+      async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+        if (!emittedApproval) {
+          emittedApproval = true;
+          teamEvents.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, {
+            teammateName: 'worker',
+            toolName: 'run_shell_command',
+            toolInput: { command: 'git log --oneline $(date)' },
+            confirmationDetails: {
+              type: 'exec',
+              title: 'Confirm shell command',
+              command: 'git log --oneline $(date)',
+              rootCommand: 'git',
+              permissionRules: [],
+            },
+            respond,
+            timestamp: Date.now(),
+          });
+        }
+        yield {
+          type: LlmEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        };
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-no-persistent-rule',
+    );
+
+    await vi.waitFor(() =>
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.ProceedOnce),
+    );
+    expect(respond).toHaveBeenCalledTimes(1);
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining(
+        'requires an explicit interactive approval surface',
+      ),
+    );
+  });
+
   it('does not let headless YOLO bypass explicit teammate approval', async () => {
     setupMetricsMock();
     const teamEvents = new EventEmitter();

@@ -9,6 +9,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { SshExecutionEnvironment } from './ssh-execution-environment.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
+
+vi.mock('../utils/shell-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/shell-utils.js')>();
+  return {
+    ...actual,
+    getShellConfiguration: () => ({
+      executable: '/bin/bash',
+      argsPrefix: ['-c'],
+      shell: 'bash',
+    }),
+  };
+});
 
 const transport = vi.hoisted(() => ({
   request: vi.fn(),
@@ -657,6 +671,53 @@ describe('SshExecutionEnvironment', () => {
       ]),
     });
   });
+
+  it.each([
+    'git > /dev/null push origin main',
+    'git > /tmp/log push origin main # comment',
+  ])(
+    'reuses the SSH confirmation rules for %s after reloading',
+    async (command) => {
+      const { id } = await prepare(ToolNames.SHELL, { command });
+      const details = await environment.confirmation(id, signal);
+      expect(details.type).toBe('exec');
+      if (details.type !== 'exec')
+        throw new Error('Expected execution confirmation');
+      const rules = details.permissionRules ?? [];
+      expect(rules).toContain('Bash(git push *)');
+      const manager = new PermissionManager({
+        getPermissionsAllow: () => [...rules],
+        getPermissionsDeny: () => [],
+        getPermissionsAsk: () => [],
+        getProjectRoot: () => remote,
+        getCwd: () => remote,
+        getShellExecutionSandbox: () => true,
+      });
+      manager.initialize();
+      expect(
+        await manager.evaluate({ toolName: ToolNames.SHELL, command }),
+      ).toBe('allow');
+      expect(
+        await manager.evaluate({
+          toolName: ToolNames.SHELL,
+          command: 'git reset --hard',
+        }),
+      ).toBe('ask');
+      expect(transport.execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['git log --oneline $(date)', "env bash -c 'git push > $X'"])(
+    'offers no persistent SSH rule for %s',
+    async (command) => {
+      const { id } = await prepare(ToolNames.SHELL, { command });
+      expect(await environment.confirmation(id, signal)).toMatchObject({
+        type: 'exec',
+        permissionRules: [],
+      });
+      expect(transport.execute).not.toHaveBeenCalled();
+    },
+  );
 
   it('invalidates every prior read when no paths are supplied', async () => {
     await read();

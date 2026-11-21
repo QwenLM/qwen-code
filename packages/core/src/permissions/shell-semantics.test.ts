@@ -787,10 +787,20 @@ describe('extractShellOperationsAcrossCommand', () => {
       "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
       [write(REPO_SETTINGS)],
     ],
+    // A newline does not prove cd succeeded. Keep both reachable paths, with
+    // uncertainty only affecting relative file targets.
     [
       'splits literal newlines as command boundaries',
       'cd .qwen\ncp /tmp/malicious settings.json',
-      [read('/tmp/malicious'), write(REPO_SETTINGS)],
+      [
+        {
+          ...read('/tmp/malicious'),
+          cwdUnknown: true,
+          pathMayDependOnCwd: false,
+        },
+        uncertainWrite(REPO_SETTINGS),
+        uncertainWrite('/repo/settings.json'),
+      ],
     ],
     [
       'tracks cwd through brace-grouped commands',
@@ -811,12 +821,39 @@ describe('extractShellOperationsAcrossCommand', () => {
         'EOF',
         'echo > settings.json',
       ].join('\n'),
-      [write(REPO_SETTINGS)],
+      [uncertainWrite(REPO_SETTINGS), uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'retains executable commands after a quoted heredoc ending in a backslash',
+      ["cat <<'EOF'", 'C:\\', 'EOF', 'echo x > /tmp/protected'].join('\n'),
+      [uncertainWrite('/tmp/protected', false)],
+    ],
+    [
+      'joins a continued heredoc delimiter before locating its body',
+      ['cat <<EO\\', 'F', 'hello', 'EOF', 'echo x > /tmp/protected'].join('\n'),
+      [uncertainWrite('/tmp/protected', false)],
+    ],
+    [
+      'joins a double-quoted continued delimiter without joining its body',
+      ['cat <<"EO\\', 'F"', 'C:\\', 'EOF', 'echo x > /tmp/protected'].join(
+        '\n',
+      ),
+      [uncertainWrite('/tmp/protected', false)],
+    ],
+    [
+      'keeps a continued unquoted body from ending at a swallowed delimiter',
+      ['cat <<EOF', 'C:\\', 'EOF', 'echo x > /tmp/protected'].join('\n'),
+      [],
+    ],
+    [
+      'joins an unquoted delimiter split across body lines',
+      ['cat <<EOF', 'EO\\', 'F', 'echo x > /tmp/protected'].join('\n'),
+      [uncertainWrite('/tmp/protected', false)],
     ],
     [
       'does not treat quoted heredoc-looking text as a heredoc marker',
       ["echo '<<EOF'", 'cd .qwen', "echo '{}' > settings.json"].join('\n'),
-      [write(REPO_SETTINGS)],
+      [uncertainWrite(REPO_SETTINGS), uncertainWrite('/repo/settings.json')],
     ],
     [
       'handles `cd --` and other POSIX flag forms before the target',
@@ -887,7 +924,11 @@ describe('extractShellOperationsAcrossCommand', () => {
     [
       'preserves operation order across compound segments',
       'echo a > one.txt && cd sub && echo b > two.txt; cat /etc/hosts',
-      [write('/repo/one.txt'), write('/repo/sub/two.txt'), read('/etc/hosts')],
+      [
+        write('/repo/one.txt'),
+        write('/repo/sub/two.txt'),
+        { ...read('/etc/hosts'), cwdUnknown: true, pathMayDependOnCwd: false },
+      ],
     ],
     [
       'returns no ops when only `cd` segments are present',
@@ -1157,6 +1198,7 @@ describe('quoted and decoded tilde targets', () => {
     // the rest of the segment runs in a cwd the analysis cannot know.
     expect(across(String.raw`cd $'\x7e' ; cat > settings.json`)).toEqual([
       uncertainWrite('/repo/~/settings.json'),
+      uncertainWrite('/repo/settings.json'),
     ]);
   });
 
@@ -1165,6 +1207,7 @@ describe('quoted and decoded tilde targets', () => {
     (target) => {
       expect(across(`cd ${target}; cat > settings.json`)).toEqual([
         uncertainWrite('/repo/~/x/settings.json'),
+        uncertainWrite('/repo/settings.json'),
       ]);
     },
   );
@@ -1172,12 +1215,14 @@ describe('quoted and decoded tilde targets', () => {
   it('keeps an empty quote in a cd tilde prefix uncertain', () => {
     expect(across("cd ~''; cat > settings.json")).toEqual([
       uncertainWrite('/repo/~/settings.json'),
+      uncertainWrite('/repo/settings.json'),
     ]);
   });
 
   it('keeps a quoted cd target uncertain', () => {
     expect(across('cd "~/x" ; cat > y')).toEqual([
       uncertainWrite('/repo/~/x/y'),
+      uncertainWrite('/repo/y'),
     ]);
   });
 });
