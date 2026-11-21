@@ -1745,6 +1745,43 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('emits the detach reason when a detached session closes unheld', async () => {
+      // The automatic paths pass no `closeOpts`, so
+      // `reason: opts.closeReason` inside `closeIfChildUnheld` is the only
+      // source of the emitted reason there. Observe it through the lifecycle
+      // hook: subscribing to the session would pin it as a watched Session and
+      // skip the close-on-last-detach path entirely.
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: activeWorkCloseImpl,
+      });
+      const removed: Array<{ sessionId: string; reason: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+        sessionLifecycle: (event) => {
+          if (event.type === 'removed')
+            removed.push({ sessionId: event.sessionId, reason: event.reason });
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await vi.waitFor(() =>
+        expect(
+          removed.find((entry) => entry.sessionId === session.sessionId),
+        ).toBeDefined(),
+      );
+      expect(
+        removed.find((entry) => entry.sessionId === session.sessionId)?.reason,
+      ).toBe('last_client_detached');
+
+      await bridge.shutdown();
+    });
+
     it('keeps a detached session until the child reports it unheld', async () => {
       const handle = makeChannel({
         initializeImpl: () => activeWorkInitializeResponse(),
@@ -35910,13 +35947,71 @@ describe('createAcpSessionBridge', () => {
       await new Promise((r) => setImmediate(r));
 
       await bridge.closeSession(session.sessionId);
+      // `closeSession` already awaits the whole close, so the count is
+      // settled once it resolves; assert before draining so a regression
+      // that leaves the bus open fails here instead of timing out on the
+      // unbounded drain.
+      expect(bridge.sessionCount).toBe(0);
       await drain;
 
-      expect(bridge.sessionCount).toBe(0);
       const closedEvent = events.find((e) => e.type === 'session_closed');
       expect(closedEvent).toBeDefined();
       expect((closedEvent?.data as { reason: string }).reason).toBe(
         'client_close',
+      );
+
+      await bridge.shutdown();
+    });
+
+    it('closes the session when a conditional close finds no active work', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: activeWorkCloseImpl,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const abort = new AbortController();
+      const collecting = (async () => {
+        for await (const ev of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+        }))
+          events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      await bridge.closeSession(session.sessionId, undefined, {
+        closeIfUnheld: true,
+        reason: 'scheduled_task_deleted',
+      });
+      // A granted close must publish `session_closed` on the bus. Waiting for
+      // that event is what makes a bus left open observable; the
+      // `sessionCount` assertion below cannot stand in for it, because the
+      // teardown deletes from `byId` before it closes the bus.
+      await vi.waitFor(() =>
+        expect(events.some((e) => e.type === 'session_closed')).toBe(true),
+      );
+      abort.abort();
+      await collecting;
+
+      expect(bridge.sessionCount).toBe(0);
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            call.params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
+        ),
+      ).toHaveLength(1);
+      // Pins the wire-level reason on the explicit path. This case cannot
+      // witness the `reason: opts.closeReason` hand-off in
+      // `closeIfChildUnheld`: the spread of `closeOpts` already carries the
+      // same literal, so dropping the hand-off leaves this green. The
+      // automatic paths (no `closeOpts`) are where it is the only source.
+      const closedEvent = events.find((e) => e.type === 'session_closed');
+      expect(closedEvent).toBeDefined();
+      expect((closedEvent?.data as { reason: string }).reason).toBe(
+        'scheduled_task_deleted',
       );
 
       await bridge.shutdown();
@@ -36008,10 +36103,7 @@ describe('createAcpSessionBridge', () => {
       const handle = makeChannel({
         initializeImpl: () => activeWorkInitializeResponse(),
         loadSessionImpl: () => lateRestore.promise,
-        extMethodImpl: (method) =>
-          method === SERVE_CONTROL_EXT_METHODS.sessionClose
-            ? { closed: true, holds: [] }
-            : {},
+        extMethodImpl: activeWorkCloseImpl,
       });
       const bridge = makeBridge({
         sessionScope: 'thread',
@@ -36064,10 +36156,7 @@ describe('createAcpSessionBridge', () => {
     it('atomically refuses a required-idle close until active work settles', async () => {
       const handle = makeChannel({
         initializeImpl: () => activeWorkInitializeResponse(),
-        extMethodImpl: async (method) =>
-          method === SERVE_CONTROL_EXT_METHODS.sessionClose
-            ? { closed: true, holds: [] }
-            : {},
+        extMethodImpl: activeWorkCloseImpl,
       });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
