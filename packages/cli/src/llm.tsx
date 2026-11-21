@@ -391,6 +391,7 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
       return;
     }
     cleanupStarted = true;
+    prepareFileWatchersForProcessExit();
     process.on('SIGINT', swallowSignalDuringCleanup);
 
     void runExitCleanup()
