@@ -78,9 +78,6 @@ final class AgentMessageProjection {
     StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
             String cursor, int limit, boolean backward, long afterSequence) {
         storeRows.requireSession(tenantId, sessionId);
-        ManagedLegacySessionGuard.requireLegacyMutation(Boolean.TRUE.equals(jdbc.queryForObject(
-                "SELECT is_csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ?",
-                Boolean.class, tenantId, sessionId)));
         if (limit < 1 || limit > 100) {
             throw new ManagedAgentException(400, "invalid_limit",
                     "Limit must be between 1 and 100.");
@@ -292,9 +289,6 @@ final class AgentMessageProjection {
                 "SELECT s.tenant_id, s.session_id FROM ma_event_stream s"
                     + " WHERE s.stream_kind = 'SESSION' AND s.stream_id = X''"
                     + " AND s.covered_sequence > s.replay_floor_sequence"
-                    + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE"
-                    + " private_scope.tenant_id = s.tenant_id AND private_scope.session_id = s.session_id"
-                    + " AND private_scope.is_csi_guard = FALSE)"
                     + " AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN ma_public_event e ON"
                     + " e.tenant_id = t.tenant_id AND e.session_id = t.session_id AND e.turn_id = t.turn_id"
                     + " WHERE t.tenant_id = s.tenant_id AND t.session_id = s.session_id"
@@ -309,7 +303,7 @@ final class AgentMessageProjection {
     /** Advances only through readable message coverage, retaining active-Turn evidence. */
     ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
             long floorSequence) {
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        storeRows.requireSessionForUpdate(tenantId, sessionId);
         ReplayWindow window = findReplayWindow(tenantId, sessionId);
         long floor = Math.min(floorSequence, window.snapshotThroughSequence());
         Long activeStart =
@@ -340,7 +334,7 @@ final class AgentMessageProjection {
 
     List<MaterializationTarget> findMaterializationTargets(int limit) {
         return jdbc.query(
-                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.is_csi_guard = FALSE AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.is_projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
+                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.is_projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
                 (result, row) ->
                         new MaterializationTarget(
                                 result.getString("tenant_id"), result.getString("session_id")),
@@ -349,7 +343,7 @@ final class AgentMessageProjection {
 
     MaterializationResult materializeNextBatch(String tenantId,
             String sessionId, int limit) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         Long covered = jdbc.queryForObject(
                         "SELECT covered_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
                             + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"
@@ -451,7 +445,6 @@ final class AgentMessageProjection {
 
     void deferMaterializationTarget(String tenantId,
             String sessionId) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         jdbc.update("UPDATE ma_event_stream SET gmt_modified = ? WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
                 clock.millis(), tenantId, sessionId);
     }

@@ -18,13 +18,18 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /** One bounded page per tick; storage deletion never holds a database transaction. */
 public final class ToolPublicationCollector {
     private static final Logger LOG = LoggerFactory.getLogger(ToolPublicationCollector.class);
     private static final long CLAIM_MILLIS = 60_000;
+    private static final int SCAN_ROWS = 32;
+    private static final int ENQUEUE_ROWS = 32;
     private static final long PROTECTED_RECHECK_MILLIS = Duration.ofHours(24).toMillis();
     // The Session collector deletes the owner rows this blocker waits on, so the handoff clears
     // in seconds; a full claim interval there cost a retire its whole collection window (#15191).
@@ -35,6 +40,8 @@ public final class ToolPublicationCollector {
     private final ToolPublicationObjectStore objects;
     private final ManagedAgentSettings properties;
     private final String owner = UUID.randomUUID().toString();
+    private long operationScanId;
+    private long operationScanRoundEnd;
 
     public ToolPublicationCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ToolPublicationRetentionStore retention, ToolPublicationObjectStore objects,
@@ -121,50 +128,58 @@ public final class ToolPublicationCollector {
     }
 
     private void ensureOperations() {
-        // Keep each existence check on its capture identity as terminal operation history grows.
-        var candidates = jdbc.query(
-                        "SELECT c.scope_key, c.publication_id, c.tenant_id, c.workspace_id,"
-                            + " c.session_id FROM ma_output_capture c WHERE c.retention_state ="
-                            + " 'RETIRING' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE"
-                            + " s.tenant_id = c.tenant_id AND s.session_id = c.session_id AND"
-                            + " s.is_csi_guard = TRUE) AND NOT EXISTS (SELECT 1 FROM ma_operation o"
-                            + " USE INDEX (idx_ma_operation_publication) WHERE o.scope_key ="
-                            + " c.scope_key AND o.publication_id = c.publication_id AND"
-                            + " o.operation_kind = 'CAPTURE_GC' LIMIT 1) LIMIT 32",
-                (row, index) -> ManagedSchemaRows.read(row));
+        if (operationScanId == 0) {
+            Long roundEnd = jdbc.queryForObject("SELECT MAX(id) FROM ma_output_capture", Long.class);
+            operationScanRoundEnd = roundEnd == null ? 0 : roundEnd;
+        }
+        // LIMIT inside the derived table bounds source reads, even with no missing operations.
+        var page = jdbc.query(
+                "SELECT c.*, CASE WHEN c.retention_state = 'RETIRING' AND NOT EXISTS"
+                    + " (SELECT 1 FROM ma_operation o USE INDEX (idx_ma_operation_publication)"
+                    + " WHERE o.scope_key = c.scope_key AND o.publication_id = c.publication_id"
+                    + " AND o.operation_kind = 'CAPTURE_GC' LIMIT 1) THEN 1 ELSE 0 END AS needs_operation"
+                    + " FROM (SELECT id, scope_key, publication_id, tenant_id, workspace_id,"
+                    + " session_id, retention_state FROM ma_output_capture WHERE id > ? AND id <= ?"
+                    + " ORDER BY id LIMIT " + SCAN_ROWS + ") c ORDER BY c.id",
+                (row, index) -> ManagedSchemaRows.read(row), operationScanId, operationScanRoundEnd);
         long now = ToolPublicationRetentionStore.now(jdbc);
-        for (var capture : candidates) {
-            transactions.executeWithoutResult(
-                    status -> {
-                        ToolPublicationRetentionStore.lockGenericSession(
-                                jdbc,
-                                (String) capture.get("tenant_id"),
-                                (String) capture.get("session_id"));
-                        String scope = (String) capture.get("scope_key");
-                        String publication = (String) capture.get("publication_id");
-                        String request =
-                                JSON.createObjectNode()
-                                        .put("version", 1)
-                                        .put("publicationId", publication)
-                                        .toString();
-                        jdbc.update(
-                                "INSERT IGNORE INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, publication_id, tenant_id, workspace_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, 'CAPTURE_GC', ?, ?, ?, ?, ?, 'OUTPUT_CAPTURE', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)",
-                                operationKey(scope, publication),
-                                ManagedSessionStore.sessionScopeKey(
-                                        (String) capture.get("tenant_id"),
-                                        (String) capture.get("session_id")),
-                                scope,
-                                operationId(scope, publication),
-                                publication,
-                                capture.get("tenant_id"),
-                                capture.get("workspace_id"),
-                                capture.get("session_id"),
-                                ManagedSchemaKeys.key(publication),
-                                ManagedSchemaKeys.key(request),
-                                request,
-                                now,
-                                now);
-                    });
+        for (var capture : page) {
+            if (!ToolPublicationRetentionStore.flag(capture, "needs_operation")) {
+                continue;
+            }
+            transactions.executeWithoutResult(status -> {
+                ToolPublicationRetentionStore.lockGenericSession(jdbc,
+                        (String) capture.get("tenant_id"), (String) capture.get("session_id"));
+                enqueue(jdbc, List.of(capture), now);
+            });
+        }
+        long lastId = page.isEmpty() ? 0 : ToolPublicationRetentionStore.number(page.getLast(), "id");
+        operationScanId = page.size() < SCAN_ROWS || lastId >= operationScanRoundEnd ? 0 : lastId;
+    }
+
+    // Caller owns the transaction and upstream locks; never relock above its operation rows.
+    static void enqueue(JdbcTemplate jdbc, List<Map<String, Object>> captures, long now) {
+        for (int start = 0; start < captures.size(); start += ENQUEUE_ROWS) {
+            var batch = captures.subList(start, Math.min(start + ENQUEUE_ROWS, captures.size()));
+            var args = new ArrayList<Object>(batch.size() * 13);
+            for (var capture : batch) {
+                String scope = (String) capture.get("scope_key");
+                String publication = (String) capture.get("publication_id");
+                String tenant = (String) capture.get("tenant_id");
+                String session = (String) capture.get("session_id");
+                String request = JSON.createObjectNode().put("version", 1)
+                        .put("publicationId", publication).toString();
+                Collections.addAll(args, operationKey(scope, publication),
+                        ManagedSessionStore.sessionScopeKey(tenant, session), scope,
+                        operationId(scope, publication), publication, tenant,
+                        capture.get("workspace_id"), session, ManagedSchemaKeys.key(publication),
+                        ManagedSchemaKeys.key(request), request, now, now);
+            }
+            jdbc.update(
+                    "INSERT IGNORE INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, publication_id, tenant_id, workspace_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES "
+                            + String.join(", ", Collections.nCopies(batch.size(),
+                                    "(?, ?, ?, 'CAPTURE_GC', ?, ?, ?, ?, ?, 'OUTPUT_CAPTURE', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)")),
+                    args.toArray());
         }
     }
 
@@ -207,7 +222,7 @@ public final class ToolPublicationCollector {
         long time = ToolPublicationRetentionStore.now(jdbc);
         var candidates =
                 jdbc.query(
-                        "SELECT scope_key, publication_id, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND s.is_csi_guard = TRUE) AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
+                        "SELECT scope_key, publication_id, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
                         (row, index) -> ManagedSchemaRows.read(row),
                         time,
                         owner,

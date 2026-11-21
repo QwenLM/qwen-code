@@ -44,11 +44,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcRuntimeBrokerMySqlIT {
     @Test
-    void residentMountPathsDoNotBlockIndependentStorageAfterRetirement() throws Exception {
-        inIsolatedSchema("resident_placement_", ResidentWorkspacePlacementTest::verify);
-    }
-
-    @Test
     void physicalAliasesReleaseOnlyTheirMatchingHolder() throws Exception {
         inIsolatedSchema("broker_physical_", JdbcPhysicalStorageReleaseTest::verify);
     }
@@ -70,6 +65,11 @@ class JdbcRuntimeBrokerMySqlIT {
                     new AesGcmSecretProtector("maintenance", new byte[32])), new JdbcRuntimeSessionRepository(source),
                     new JdbcToolExecutionRepository(source), "mysql-maintenance-" + java.util.UUID.randomUUID());
         });
+    }
+
+    @Test
+    void recoveryCandidatesSkipHistoryAndPreserveGlobalBinaryCursors() throws Exception {
+        inIsolatedSchema("broker_candidates_", RuntimeMaintenanceRecoveryTest::verifyRecoveryCandidates);
     }
 
     @Test

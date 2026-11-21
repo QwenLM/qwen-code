@@ -7,6 +7,7 @@
 import {
   ManagedDingtalkAdapter,
   createManagedDingtalkDeps,
+  dingtalkSettings,
 } from '@qwen-code/channel-dingtalk';
 import { loadSettings } from '../../config/settings.js';
 import { resolveProxyUrl } from './proxy.js';
@@ -35,12 +36,19 @@ export const managedDingtalkCommand = createManagedChannelCommand({
       undefined,
       settings.merged.proxy as string | undefined,
     );
+    // The card API exchanges its access token from the robot app credential;
+    // pass the parsed credential so the deps supply the card send (H5e). The
+    // adapter still gates card rendering on its capability and cardTemplateId.
+    const credentials = dingtalkSettings(channel.config);
     return new ManagedDingtalkAdapter({
       name: channel.name,
       cwd: channel.config.cwd,
       config: channel.config,
       controlPlane,
-      deps: createManagedDingtalkDeps(proxy),
+      deps: createManagedDingtalkDeps(proxy, {
+        clientId: credentials.clientId,
+        clientSecret: credentials.clientSecret,
+      }),
     });
   },
 });

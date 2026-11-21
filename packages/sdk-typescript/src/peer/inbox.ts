@@ -138,9 +138,8 @@ function tokenMatches(expected: string, presented: string): boolean {
 }
 
 /**
- * Split a connection's bytes into lines. The cap is measured on what is
- * left after complete lines are taken, so it bounds one line rather than
- * how the bytes happened to arrive.
+ * Split a connection's bytes into lines, applying the cap to each complete
+ * line and to the unfinished tail rather than the size of the whole batch.
  */
 function createLineReader(
   onLine: (line: string) => void,
@@ -151,6 +150,11 @@ function createLineReader(
     buffer += chunk;
     let newline = buffer.indexOf('\n');
     while (newline !== -1) {
+      if (newline > MAX_FRAME_CHARS) {
+        buffer = '';
+        onOverflow();
+        return;
+      }
       const line = buffer.slice(0, newline);
       buffer = buffer.slice(newline + 1);
       if (line.trim().length > 0) onLine(line);

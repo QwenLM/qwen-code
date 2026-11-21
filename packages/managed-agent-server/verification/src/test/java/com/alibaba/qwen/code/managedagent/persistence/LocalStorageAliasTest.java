@@ -105,7 +105,7 @@ class LocalStorageAliasTest {
         byte[] marker = Files.readAllBytes(root.resolve(".qwen-managed-storage.json"));
         assertThat(owner.get("tenant_id")).isEqualTo("tenant");
         assertThat(owner.get("storage_id")).isEqualTo("storage");
-        assertThat(owner.get("physical_key")).isEqualTo(physical);
+        assertThat(owner.get("storage_key")).isEqualTo(physical);
         guard.verify(binding("tenant", "storage"));
         guard.verify(binding("other-tenant", "other-storage"));
         jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?", UUID.randomUUID().toString(),
@@ -189,9 +189,10 @@ class LocalStorageAliasTest {
     @Test
     void driftedPhysicalMappingAndCopiedMarkersCannotAuthorizeAnAlias() throws Exception {
         String physical = LocalStorageOwners.key(jdbc, "tenant", "storage");
-        jdbc.update("UPDATE ma_storage_owner SET physical_key = ? WHERE storage_key = ?", "f".repeat(64), physical);
+        String other = RuntimeAdmissionFences.storageAliasKey("other-tenant", "other-storage");
+        jdbc.update("UPDATE ma_storage SET physical_key = ? WHERE alias_key = ?", "f".repeat(64), other);
         assertThatThrownBy(() -> guard.verify(binding("other-tenant", "other-storage"))).isInstanceOf(RuntimeBrokerException.class);
-        jdbc.update("UPDATE ma_storage_owner SET physical_key = ? WHERE storage_key = ?", physical, physical);
+        jdbc.update("UPDATE ma_storage SET physical_key = ? WHERE alias_key = ?", physical, other);
         Path replacement = Files.createDirectory(temporary.resolve("replacement")).toRealPath();
         Files.copy(root.resolve(".qwen-managed-storage.json"), replacement.resolve(".qwen-managed-storage.json"));
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("third", "copy", replacement.toString())));

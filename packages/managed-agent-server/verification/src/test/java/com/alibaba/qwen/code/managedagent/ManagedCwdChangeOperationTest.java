@@ -137,8 +137,8 @@ class ManagedCwdChangeOperationTest {
     }
 
     private void installMigrationFence(Fixture fixture) {
-        fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
-                RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE), RuntimeAdmissionFences.storageFenceKey(TENANT), RuntimeAdmissionFences.storageFenceKey(STORAGE),
+        fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?)",
+                RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE),
                 TENANT, STORAGE, UUID.randomUUID().toString());
     }
 

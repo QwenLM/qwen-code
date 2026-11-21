@@ -27,10 +27,10 @@ import java.util.Set;
 public class JdbcWakeRecoveryStore
         implements WakeRecoveryStore {
     private static final Set<String> SOURCES = Set.of("monitor", "channel", "child_agent",
-            "workflow", "automation", "session_message", "loop");
+            "workflow", "automation", "session_message", "loop", "pr_event");
     private static final int JOURNAL_PAGE = 1;
     private static final int PROOF_PAGES = 32;
-    private static final long RETRY_MS = 30_000;
+    static final long RETRY_MS = 30_000;
     private static final String UNOWNED = " (h.state = 'SEALED' OR (h.state = 'ACTIVE'"
             + " AND (h.writer_lease_until IS NULL OR h.writer_lease_until <= " + ManagedSchemaTime.SQL_NOW + ")))";
     private final JdbcTemplate jdbc;
@@ -91,19 +91,21 @@ public class JdbcWakeRecoveryStore
     private List<Candidate> findPending(String defaultWorkspace, int limit, boolean hinted) {
         return jdbc.query("SELECT h.tenant_id, h.workspace_id, h.session_id, h.journal_revision,"
                         + " h.committed_sequence, h.compacted_through_revision, s.parent_session_id,"
-                        + " s.parent_child_run_id FROM ma_session_head h JOIN ma_session s ON"
+                        + " s.parent_child_run_id, h.wake_seal_revision FROM ma_session_head h JOIN ma_session s ON"
                         + " s.tenant_id = h.tenant_id AND s.session_id = h.session_id WHERE"
                         + " h.head_kind = 'MANAGED_SESSION' AND h.is_wake_scan_pending = TRUE"
                         + " AND h.compacted_through_revision = 0"
                         + " AND h.is_wake_pending = ? AND h.wake_retry_at <= " + ManagedSchemaTime.SQL_NOW + " AND" + UNOWNED
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
-                        + " AND s.retired_at IS NULL AND s.is_csi_guard = FALSE"
+                        + " AND s.retired_at IS NULL"
                         + " AND h.workspace_id = COALESCE(s.workspace_id, ?)"
                         + " ORDER BY h.wake_retry_at, h.tenant_key, h.harness_key LIMIT ?",
                 (row, index) -> new Candidate(row.getString("tenant_id"), row.getString("workspace_id"),
                         row.getString("session_id"), row.getLong("journal_revision"),
                         row.getLong("committed_sequence"), row.getLong("compacted_through_revision"),
-                        row.getString("parent_session_id"), row.getString("parent_child_run_id")),
+                        row.getString("parent_session_id"), row.getString("parent_child_run_id"),
+                        Long.valueOf(row.getLong("journal_revision"))
+                                .equals(row.getObject("wake_seal_revision", Long.class))),
                 hinted, defaultWorkspace, limit);
     }
 
@@ -114,7 +116,7 @@ public class JdbcWakeRecoveryStore
             // subquery would first lock the head, then wait for a shared Session lock.
             var session = jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ?"
                             + " AND session_id = ? AND session_kind = 'PUBLIC' AND status = 'ACTIVE'"
-                            + " AND retired_at IS NULL AND is_csi_guard = FALSE"
+                            + " AND retired_at IS NULL"
                             + " AND (workspace_id IS NULL OR workspace_id = ?) FOR UPDATE",
                     String.class, candidate.tenantId(), candidate.sessionId(), candidate.workspaceId());
             if (session.isEmpty() || ManagedConfigStore.blocked(jdbc, candidate.tenantId(), candidate.sessionId())) {
@@ -301,7 +303,7 @@ public class JdbcWakeRecoveryStore
                         + " AND h.journal_revision = ? AND h.committed_sequence = ?"
                         + " AND h.compacted_through_revision = 0 AND h.is_wake_scan_pending = TRUE AND" + UNOWNED
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
-                        + " AND s.retired_at IS NULL AND s.is_csi_guard = FALSE"
+                        + " AND s.retired_at IS NULL"
                         + " AND (s.workspace_id IS NULL OR s.workspace_id = ?)",
                 Long.class, ManagedSchemaKeys.key(candidate.tenantId()), ManagedSchemaKeys.key(candidate.sessionId()),
                 candidate.tenantId(), candidate.sessionId(), candidate.workspaceId(), candidate.journalRevision(),

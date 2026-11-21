@@ -85,7 +85,7 @@ final class AgentExecutionOperations {
     OperationAdmission beginContextCompression(String tenantId, String sessionId,
             String actorId, String actorDigest, String key, String digest,
             long expectedCompactionRevision, boolean supported) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         WorkspaceAccess access = AgentSessionAccess.requireContextCompressionRead(session, actorId, workspaces);
         ContextBinding binding = session.workspace();
         Optional<OperationRecord> replay = lifecycleOperations.replayOperation(tenantId, sessionId,
@@ -330,7 +330,6 @@ final class AgentExecutionOperations {
     }
 
     Optional<OperationRecord> claimContextCompression(String tenantId, String sessionId, String operationId, String owner, Duration duration) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         int changed = jdbc.update("UPDATE ma_operation SET state = 'RUNNING', delivery_state = 'LEASED',"
                 + " claim_owner = ?, claim_until = (" + ManagedSchemaTime.SQL_NOW + " + ?),"
                 + " claim_generation = claim_generation + 1, attempt_count = attempt_count + 1 WHERE"
@@ -357,7 +356,7 @@ final class AgentExecutionOperations {
     }
 
     boolean markContextCompressionSubmitted(OperationRecord operation, String owner) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(operation.tenantId(), operation.sessionId());
+        SessionRecord session = storeRows.requireSessionForUpdate(operation.tenantId(), operation.sessionId());
         if (!"ACTIVE".equals(session.status()) || session.workspace() == null
                 || !initiatorKeepsOperate(session, operation)
                 || !sessionQueries.hasExecutionRegistryFacts(session.tenantId(), session.sessionId())) {
@@ -421,7 +420,7 @@ final class AgentExecutionOperations {
     CwdChangeOutcome completeCwdChangeOperation(String tenantId,
             String sessionId, String operationId, String owner,
             long claimGeneration) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         OperationRecord operation = lifecycleOperations.findSessionOperation(tenantId, sessionId, operationId, true)
                 .orElseThrow(() -> new IllegalStateException("Session operation is unavailable"));
         if (operation.kind() != OperationKind.CWD_CHANGE) {
@@ -535,7 +534,6 @@ final class AgentExecutionOperations {
     boolean failCwdChangeOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             String failureCode) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         long now = storeRows.lifecycleDatabaseTime();
         return jdbc.update(
                         "UPDATE ma_operation SET phase = 'FAILED', state ="
@@ -568,7 +566,7 @@ final class AgentExecutionOperations {
         // a lost 202 survives capability and state changes; only a new
         // request rechecks the Session state, the task's cancel action
         // and the one-open-operation rule, atomically with its insert.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         Optional<OperationRecord> existing = lifecycleOperations.replayOperation(tenantId, sessionId,
                 OperationKind.TASK_CANCEL, actorDigest, idempotencyKey);
         if (existing.isPresent()) {
@@ -669,17 +667,14 @@ final class AgentExecutionOperations {
                                 "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE"
                                     + " operation_kind = 'TASK_CANCEL' AND state IN ('PENDING',"
                                     + " 'RUNNING') AND delivery_state = 'PENDING' AND available_at"
-                                    + " <= ? AND EXISTS (SELECT 1 FROM ma_session private_scope"
-                                    + " WHERE private_scope.tenant_id = ma_operation.tenant_id AND"
-                                    + " private_scope.session_id = ma_operation.session_id AND"
-                                    + " private_scope.is_csi_guard = FALSE) ORDER BY available_at"
+                                    + " <= ? ORDER BY available_at"
                                     + " LIMIT ?",
                                 lifecycleOperations.operationTargetMapper,
                                 now,
                                 limit));
         if (targets.size() < limit) {
             targets.addAll(jdbc.query(
-                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind = 'TASK_CANCEL' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY claim_until LIMIT ?",
+                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind = 'TASK_CANCEL' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " ORDER BY claim_until LIMIT ?",
                     lifecycleOperations.operationTargetMapper, limit - targets.size()));
         }
         return List.copyOf(targets);
@@ -692,9 +687,7 @@ final class AgentExecutionOperations {
                 "SELECT tenant_id, session_id, operation_id, operation_kind FROM ma_operation"
                     + " WHERE operation_kind IN " + ACCEPTANCE_UNKNOWN_KINDS + " AND state ="
                     + " 'RECOVERY_BLOCKED' AND available_at <= ? AND delivery_state = 'BLOCKED'"
-                    + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id ="
-                    + " ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND"
-                    + " s.is_csi_guard = FALSE) ORDER BY available_at LIMIT ?",
+                    + " ORDER BY available_at LIMIT ?",
                 (result, row) -> new ParkedOperation(result.getString("tenant_id"),
                         result.getString("session_id"), result.getString("operation_id"),
                         result.getString("operation_kind")),
@@ -702,7 +695,6 @@ final class AgentExecutionOperations {
     }
 
     boolean settleParkedOperation(ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
-        storeRows.requireLegacyMutation(parked.tenantId(), parked.sessionId());
         long now = storeRows.lifecycleDatabaseTime();
         List<Object> arguments = new ArrayList<>();
         String update = switch (verdict.acceptance()) {
@@ -817,7 +809,6 @@ final class AgentExecutionOperations {
             throw new IllegalArgumentException(
                     "A parked task cancel settles through settleParkedOperation");
         }
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         long now = storeRows.lifecycleDatabaseTime();
         // A leased claim settles only while it is still this worker's.
         String claim = " AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "";

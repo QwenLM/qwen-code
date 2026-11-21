@@ -32,6 +32,7 @@ import type {
   DaemonSessionBtwStreamEvent,
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
+  DaemonSessionArtifact,
   DaemonSessionAttachmentData,
   DaemonSessionAttachmentReference,
   DaemonSessionTranscriptPage,
@@ -53,6 +54,8 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
   DaemonSessionRecapResult,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonSessionSummary,
   DaemonShellCommandResult,
   DaemonSessionArtifactInput,
@@ -147,6 +150,8 @@ export interface DaemonSessionClientOptions {
    * Consumers should prefer the full transcript over the snapshot when set.
    */
   replayDegraded?: boolean;
+  /** Restored artifact snapshot embedded in the load/resume response. */
+  restoredArtifacts?: DaemonSessionArtifact[];
   /**
    * Local per-session prompt cap. The counter is shared with the parent
    * `DaemonClient`; other session clients using the same parent instance
@@ -215,6 +220,7 @@ function createStandaloneRestoredClient(
     replayError,
     lastEventId,
     eventEpoch,
+    artifacts,
     ...session
   } = restored;
   return new DaemonSessionClient({
@@ -224,6 +230,7 @@ function createStandaloneRestoredClient(
     state,
     lastEventId: lastEventId ?? 0,
     eventEpoch,
+    restoredArtifacts: artifacts,
     ...(includeReplay
       ? {
           replaySnapshot: {
@@ -293,6 +300,8 @@ export class DaemonSessionClient {
    * transcript (see `fullTranscriptAvailable`) when set.
    */
   readonly replayDegraded: boolean;
+  /** Restored artifact snapshot from the load/resume response, if embedded. */
+  readonly restoredArtifacts?: DaemonSessionArtifact[];
   private lastSeenEventId: number | undefined;
   /**
    * Epoch token paired with {@link lastSeenEventId}. Seeded from the
@@ -353,6 +362,7 @@ export class DaemonSessionClient {
     this.historyAnchorRecordId = opts.historyAnchorRecordId;
     this.replayProjectionWatermark = opts.replayProjectionWatermark;
     this.replayDegraded = opts.replayDegraded ?? false;
+    this.restoredArtifacts = opts.restoredArtifacts;
     this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],
@@ -468,6 +478,7 @@ export class DaemonSessionClient {
       replayError,
       lastEventId: serverLastEventId,
       eventEpoch,
+      artifacts,
       ...session
     } = restored;
     const result = new DaemonSessionClient({
@@ -477,6 +488,7 @@ export class DaemonSessionClient {
       state,
       lastEventId: serverLastEventId ?? 0,
       eventEpoch,
+      restoredArtifacts: artifacts,
       replaySnapshot: {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
@@ -514,6 +526,7 @@ export class DaemonSessionClient {
       hasActivePrompt,
       lastEventId: serverLastEventId,
       eventEpoch,
+      artifacts,
       ...session
     } = await client.resumeSession(sessionId, req, clientId);
     return new DaemonSessionClient({
@@ -523,6 +536,7 @@ export class DaemonSessionClient {
       state,
       lastEventId: serverLastEventId ?? 0,
       eventEpoch,
+      restoredArtifacts: artifacts,
     });
   }
 
@@ -1115,6 +1129,17 @@ export class DaemonSessionClient {
     });
   }
 
+  /** Ask this session's Mods for a row; see `DaemonClient.askSessionModRow`. */
+  askModRow(
+    row: DaemonModRow,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonModRowAnswer> {
+    return this.client.askSessionModRow(this.sessionId, row, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
   generateContent(
     prompt: string,
     opts?: { signal?: AbortSignal },
@@ -1335,8 +1360,10 @@ export class DaemonSessionClient {
     return this.client.sessionSupportedCommands(this.sessionId, this.clientId);
   }
 
-  tasks(): Promise<DaemonSessionTasksStatus> {
-    return this.client.sessionTasks(this.sessionId, this.clientId);
+  tasks(
+    opts: { includeSubSessions?: boolean } = {},
+  ): Promise<DaemonSessionTasksStatus> {
+    return this.client.sessionTasks(this.sessionId, this.clientId, opts);
   }
 
   taskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus> {
@@ -1470,6 +1497,8 @@ export class DaemonSessionClient {
 
   async updateMetadata(metadata: {
     displayName?: string;
+    /** Best-effort initial title for a session without a custom title. */
+    initialDisplayName?: string;
     pr?: Omit<DaemonSessionPrInfo, 'issues'>;
   }): Promise<SessionMetadataResult> {
     return await this.client.updateSessionMetadata(
