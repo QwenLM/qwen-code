@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -384,5 +385,123 @@ export function isProcessAlive(pid: number): boolean {
   } catch (error) {
     // EPERM means the process exists but belongs to another user.
     return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+const PROCESS_START_TOLERANCE_MS = 5_000;
+const PROCESS_START_LEAD_MS = 10 * 60_000;
+
+/**
+ * The recorded daemon's process start time: ps's lstart on POSIX, and
+ * Get-Process StartTime through PowerShell on Windows. undefined means the
+ * start time cannot be established, and callers refuse rather than signal.
+ */
+export function processStartTime(pid: number): number | undefined {
+  if (process.platform === 'win32') {
+    const result = spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
+      ],
+      { encoding: 'utf8' },
+    );
+    if (result.status !== 0 || typeof result.stdout !== 'string') {
+      return undefined;
+    }
+    const parsed = Date.parse(result.stdout.trim());
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+    encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+  });
+  if (result.status !== 0 || typeof result.stdout !== 'string') {
+    return undefined;
+  }
+  const parsed = Date.parse(result.stdout.trim());
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * A reused PID belongs to a process that started after the daemon wrote its
+ * record. The daemon's own process starts before that write, so the check is
+ * one-sided on purpose: a slow startup may start well before the record, while
+ * a later start cannot be the recorded daemon.
+ */
+export function processStartMatchesRecord(
+  recordStartedAt: string,
+  processStartedAt: number | undefined,
+): boolean {
+  if (processStartedAt === undefined) return true;
+  const recorded = Date.parse(recordStartedAt);
+  if (!Number.isFinite(recorded)) return true;
+  // The daemon starts shortly before it writes the record. A process that
+  // started much earlier cannot be it (a pid from another namespace or an
+  // older unrelated process), and a later start is a reused pid.
+  return (
+    processStartedAt >= recorded - PROCESS_START_LEAD_MS &&
+    processStartedAt <= recorded + PROCESS_START_TOLERANCE_MS
+  );
+}
+
+/**
+ * Whether `record.pid` names the daemon in this process's PID namespace. A
+ * record written in another container (or on another kernel) shares only the
+ * number: the pid is neither evidence of life nor of death here, and it must
+ * never be signalled. A v1 record without the field keeps the pid check.
+ */
+export function pidResolvableHere(
+  record: DaemonDiscoveryRecord,
+  currentNamespace: string | undefined,
+): boolean {
+  if (record.pidNamespace === undefined) return true;
+  if (currentNamespace === undefined) return false;
+  return record.pidNamespace === currentNamespace;
+}
+
+/**
+ * A discovery record and an answering /health prove that a listener exists,
+ * not that it is the daemon that wrote the record: a foreign namespace cannot
+ * address the pid, and a recycled pid can answer for an unrelated listener.
+ * Only call this when the recorded process is addressable here, alive, and
+ * started when the record says it did.
+ */
+export function listenerIdentityVerified(
+  record: DaemonDiscoveryRecord,
+  currentNamespace: string | undefined = currentPidNamespace(),
+  alive: (pid: number) => boolean = isProcessAlive,
+  startedAt: (pid: number) => number | undefined = processStartTime,
+): boolean {
+  if (!pidResolvableHere(record, currentNamespace)) return false;
+  if (!alive(record.pid)) return false;
+  if (!Number.isFinite(Date.parse(record.startedAt))) return false;
+  const started = startedAt(record.pid);
+  if (started === undefined) return false;
+  return processStartMatchesRecord(record.startedAt, started);
+}
+
+/**
+ * Read and validate the discovery record published for `port`, or undefined
+ * when no record exists there or the file is unreadable or invalid. A missing
+ * record proves nothing about who holds the port — discovery is environment
+ * scoped — so callers must treat undefined as "identity unknown".
+ */
+export function readDaemonDiscoveryRecord(
+  port: number,
+  dir: string = resolveDaemonDiscoveryDir(),
+): DaemonDiscoveryRecord | undefined {
+  try {
+    const filePath = daemonDiscoveryFilePath(port, dir);
+    // Mirror readDaemonDiscoveries: a FIFO would block readFileSync forever
+    // and a symlink is not trusted, even when it points at a valid record.
+    if (!fs.lstatSync(filePath).isFile()) return undefined;
+    const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!isValidRecord(parsed) || parsed.port !== port) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
   }
 }

@@ -188,8 +188,10 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/daemon-discovery.ts',
     {
       reason:
-        'Embedded callers may omit the daemon-level environment argument.',
-      accesses: { whole: 1 },
+        'Embedded callers may omit the daemon-level environment argument. ' +
+        'The ps lookup forces the C locale through a copy of the process ' +
+        'environment so its output is parseable.',
+      accesses: { whole: 2 },
     },
   ],
   [

@@ -314,6 +314,8 @@ import {
   DAEMON_DISCOVERY_VERSION,
   currentPidNamespace,
   daemonDiscoveryUrl,
+  listenerIdentityVerified,
+  readDaemonDiscoveryRecord,
   removeDaemonDiscovery,
   removeDaemonToken,
   writeDaemonDiscovery,
@@ -11978,8 +11980,54 @@ async function runQwenServeImpl(
         }
         onListening();
       };
+      // The operator names exactly one port — an explicit --port or the
+      // default. When its holder is a live qwen serve daemon, silently
+      // moving on starts a duplicate daemon (#17479). The gate also covers
+      // the one port that cannot be bumped (--port 65535), which must fail
+      // with the holder's pid rather than a raw socket error. Identity is
+      // positive-only — a missing or unverifiable record says nothing about
+      // who holds the port. Fallback candidates (attempt > 0) are ports the
+      // operator never named and keep the bump below.
+      const refuseNamedPortHolder = (): boolean => {
+        if (opts.port === 0 || attempt !== 0) return false;
+        const holder = readDaemonDiscoveryRecord(attemptPort);
+        if (!holder || !listenerIdentityVerified(holder)) return false;
+        // Identity is verified, so Date.parse is finite; normalise to ISO
+        // so record-derived text cannot carry terminal escape bytes to
+        // stderr.
+        const holderStartedAt = new Date(
+          Date.parse(holder.startedAt),
+        ).toISOString();
+        const stopCommand =
+          process.platform === 'win32'
+            ? `qwen daemon stop --port ${attemptPort} --force`
+            : `qwen daemon stop --port ${attemptPort}`;
+        // Callers print `qwen serve: ${err.message}`, so the message must
+        // not carry its own prefix or it is printed twice.
+        const holderError = new Error(
+          `port ${attemptPort} is held by a live qwen serve daemon ` +
+            `(pid ${holder.pid}, started at ${holderStartedAt}). ` +
+            `Stop it with '${stopCommand}' or choose a different --port.`,
+        );
+        removeCurrentServePidfile();
+        markServeAppStartupFailed(holderError);
+        void serveAppLifecycle.close().then(
+          () => reject(holderError),
+          (closeError: unknown) =>
+            reject(
+              closeError instanceof Error
+                ? new AggregateError(
+                    [holderError, closeError],
+                    holderError.message,
+                  )
+                : holderError,
+            ),
+        );
+        return true;
+      };
       const handleError = (err: NodeJS.ErrnoException): void => {
         server.removeListener('listening', handleListening);
+        if (refuseNamedPortHolder()) return;
         const nextPort = attemptPort + 1;
         // The control plane names the Hosted Harness by its exact port, so a
         // moved Harness would start while no Session could reach it.
