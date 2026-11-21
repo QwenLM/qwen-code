@@ -604,6 +604,10 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                 }, tenant, session);
         check(heads.size() <= 1, "source_drift");
         if (heads.isEmpty()) {
+            // A head for this Harness/Session pair under another tenant is drift,
+            // not absence: the tenant-scoped lookup above cannot see it.
+            check(count(jdbc, "SELECT COUNT(*) FROM ma_session_head WHERE harness_session_id = ? AND session_id = ?",
+                    session, session) == 0, "source_drift");
             source.putNull("head");
         } else {
             Map<String, Object> head = heads.getFirst();
