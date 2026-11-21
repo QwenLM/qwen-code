@@ -393,12 +393,31 @@ describe('acpModelUtils', () => {
       'https://api.example/v1/@scope',
     ],
     ['https://user:p ass@api.example/v1', 'https://api.example/v1'],
+    ['https://user :pass@host.io/v1', 'https://host.io/v1'],
+    ['https:// user:pass@host.io/v1', 'https://host.io/v1'],
+    ['https://user:p@ss word@host.io/v1', 'https://host.io/v1'],
+    [
+      'https://api.example:8443 — contact admin@example.com',
+      'https://api.example:8443 — contact admin@example.com',
+    ],
+    [
+      'https://host.io: contact admin@example.com',
+      'https://host.io: contact admin@example.com',
+    ],
     [`https://user:p'ass@api.example/v1`, 'https://api.example/v1'],
     ['https://user:p%2Fx@api.example/v1', 'https://api.example/v1'],
     ['https://user:p/x@api.example/v1', 'https://api.example/v1'],
     ['https://user:p?x@api.example/v1', 'https://api.example/v1'],
     ['https://user:p#x@api.example/v1', 'https://api.example/v1'],
     ['https://user:secret@api.example', 'https://api.example'],
+    [
+      'https://api.example — contact admin@example.com',
+      'https://api.example — contact admin@example.com',
+    ],
+    [
+      'https://user:pass@host.io please contact admin@corp.io',
+      'https://host.io please contact admin@corp.io',
+    ],
   ])('sanitizes provider base URL credentials for %s', (input, expected) => {
     expect(sanitizeProviderBaseUrl(input)).toBe(expected);
   });
