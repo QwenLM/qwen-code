@@ -136,6 +136,26 @@ class LocalRuntimeProviderFactoryTest {
     }
 
     @Test
+    void preflightTreatsABlankWorkspaceCwdAsUnconfigured() {
+        var settings = settings();
+        settings.getRuntimeBroker().setWorkspaceCwd("");
+        // `Path.of("")` is this process's working directory, so an absent state
+        // directory under it used to read as "inside a Workspace root" and made
+        // the verdict depend on where `--check` ran.
+        settings.getRuntimeBroker()
+                .setStateDirectory(Path.of("").toAbsolutePath()
+                        .resolve("qwen-preflight-absent-state").toString());
+        assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.remediation())
+                            .doesNotContain("outside every configured Workspace");
+                    assertThat(check.detail()).doesNotContain("Workspace root");
+                });
+    }
+
+    @Test
     void preflightRejectsADurableStateDirectoryBlockedByAFile() throws Exception {
         Path root = realTempDirectory("durable-file");
         try {
