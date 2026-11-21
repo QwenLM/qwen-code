@@ -328,6 +328,7 @@ it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`,
       await active.idle(350, 1000);
       expect(server.requests).toHaveLength(1);
       frames['recall'] = await active.viewport();
+      active.pressKey('\x05');
       await type('_RECALL_EDIT');
       active.pressKey('\r');
       await until(
