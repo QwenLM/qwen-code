@@ -704,6 +704,7 @@ export function getMainSessionBaseSystemPrompt(
         config.isTodoWriteEnabled(),
         config.getCodeModeOnly(),
         {
+          searchConfig: config,
           declaredTools: config.getPromptToolSnapshot?.(),
           agentReachable: config.getPromptAgentReachable?.(),
           executionSandboxFilesystem:
@@ -5416,6 +5417,7 @@ export class LlmClient {
             getPlanModeSystemReminder(
               shouldUsePlanOnlyReminderInSubagentContext() ||
                 this.config.getSdkMode(),
+              this.config,
             ),
           );
         }

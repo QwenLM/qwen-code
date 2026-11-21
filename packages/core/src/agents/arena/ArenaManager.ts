@@ -1119,6 +1119,7 @@ export class ArenaManager {
                 this.resolvePeerOutputStyle(),
                 this.config.isTodoWriteEnabled(),
                 this.config.getCodeModeOnly(),
+                { searchConfig: this.config },
               ),
               contextFiles: this.config.getUserMemory(),
             }),
