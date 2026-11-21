@@ -121,11 +121,13 @@ say explicitly what each one should read and whether it may edit files.
   whose root accepts an object, and it is compiled strictly. A schema that is
   not an object, fails strict compilation (for example an unknown keyword),
   uses `$async`, or carries a contradiction the pre-flight check can prove (a
-  root `type`/`const`/`enum` that excludes objects, or a required property its
-  own object forbids) makes agent() resolve to null without starting the agent.
-  A contradiction behind `$ref`, `allOf`/`anyOf`/`oneOf`, `not` or `if` is not
-  detected up front: the agent is dispatched and the failure arrives as failed
-  submissions. Each failed submission hands its error back to the agent, and
+  root `type`/`const`/`enum` that excludes objects, a required list longer than
+  `maxProperties` allows, or a required property its own object forbids) makes
+  agent() resolve to null without starting the agent. The check reads only a
+  node's own property rules and skips a node carrying reference, combinator,
+  conditional, dependency, unevaluated-property or property-name keywords: the
+  agent is dispatched and the failure arrives as failed submissions. Each
+  failed submission hands its error back to the agent, and
   the third failed submission stops it. With no valid result agent() resolves
   to null and the failure states how many submissions failed and the last
   error; check for null.

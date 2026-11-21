@@ -105,7 +105,23 @@ describe('bundled workflow-authoring skill', () => {
     for (const schema of refused) {
       expect(prepareWorkflowSchema(schema).ok).toBe(false);
     }
-    expect(prepareWorkflowSchema({ type: 'object', not: {} }).ok).toBe(true);
+    const contradictory = {
+      type: 'object',
+      required: ['a'],
+      properties: { a: false },
+    };
+    for (const schema of [
+      { ...contradictory, $ref: '#' },
+      { ...contradictory, allOf: [{}] },
+      { ...contradictory, anyOf: [{}] },
+      { ...contradictory, oneOf: [{}] },
+      { ...contradictory, not: {} },
+      { ...contradictory, if: {}, then: {}, else: {} },
+      { ...contradictory, dependencies: {} },
+      { ...contradictory, propertyNames: {} },
+    ]) {
+      expect(prepareWorkflowSchema(schema).ok).toBe(true);
+    }
 
     const prose = skillProse();
     for (const anchor of [
@@ -114,7 +130,9 @@ describe('bundled workflow-authoring skill', () => {
       'uses `$async`',
       'root `type`/`const`/`enum`',
       'required property its own object forbids',
-      'not detected up front',
+      'required list longer than `maxProperties` allows',
+      'skips a node carrying',
+      'property-name keywords',
     ]) {
       expect(prose).toContain(anchor);
     }
