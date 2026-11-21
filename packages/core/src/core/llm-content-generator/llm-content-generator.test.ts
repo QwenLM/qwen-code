@@ -161,6 +161,67 @@ describe('LlmContentGenerator', () => {
     },
   );
 
+  it.each([
+    ['uses the built-in Gemini 4 default', undefined, 'HIGH'],
+    ['honors an explicit Gemini 4 low tier', { effort: 'low' } as const, 'LOW'],
+    [
+      'honors an explicit Gemini 4 medium tier',
+      { effort: 'medium' } as const,
+      'MEDIUM',
+    ],
+    [
+      'clamps a persisted legacy Gemini 4 tier',
+      { effort: 'max' } as const,
+      'HIGH',
+    ],
+  ])('%s', async (_title, reasoning, thinkingLevel) => {
+    const config = {
+      getResolvedModelConfig: vi.fn().mockReturnValue({}),
+    } as unknown as Config;
+    const builtIn = new LlmContentGenerator(
+      { apiKey: 'dummy' },
+      { model: 'gemini-4-neon', authType: 'gemini' as AuthType, reasoning },
+      config,
+    );
+    await builtIn.generateContent(
+      { model: 'gemini-4-neon', contents: [] },
+      'prompt',
+    );
+    expectSentConfig({
+      thinkingConfig: { includeThoughts: true, thinkingLevel },
+    });
+  });
+
+  it('does not override thinking off on a built-in Gemini 4 route', async () => {
+    const config = {
+      getResolvedModelConfig: vi.fn().mockReturnValue({}),
+    } as unknown as Config;
+    const builtIn = new LlmContentGenerator(
+      { apiKey: 'dummy' },
+      {
+        model: 'gemini-4-neon',
+        authType: 'gemini' as AuthType,
+        reasoning: false,
+      },
+      config,
+    );
+    const requestOptOut = () => ({ includeThoughts: false, thinkingBudget: 0 });
+    await builtIn.generateContent(
+      { model: 'gemini-4-neon', contents: [] },
+      'prompt',
+    );
+    expectSentConfig({ thinkingConfig: { includeThoughts: false } });
+    await builtIn.generateContent(
+      {
+        model: 'gemini-4-neon',
+        contents: [],
+        config: { thinkingConfig: requestOptOut() },
+      },
+      'prompt',
+    );
+    expectSentConfig({ thinkingConfig: requestOptOut() });
+  });
+
   it('should merge customHeaders into existing httpOptions.headers', async () => {
     vi.mocked(GoogleGenAI).mockClear();
     const headers = { 'X-Base': 'base', 'X-Override': 'base' };
