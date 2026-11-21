@@ -2787,6 +2787,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.sessionIssueStateNotPlanned': 'Not planned',
   'sidebar.userInputNeeded': 'User input needed',
   'sidebar.userInputNeededShort': 'Input',
+  'sidebar.continuationNeeded': 'Continue execution needed',
+  'sidebar.continuationNeededShort': 'Continue',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
   'sidebar.selectSessions': 'Select sessions',

@@ -2694,6 +2694,8 @@ export const ZH: Messages = {
   'sidebar.sessionIssueStateNotPlanned': '未计划',
   'sidebar.userInputNeeded': '需要用户输入',
   'sidebar.userInputNeededShort': '需输入',
+  'sidebar.continuationNeeded': '需要继续执行',
+  'sidebar.continuationNeededShort': '待继续',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
   'sidebar.selectSessions': '多选对话',

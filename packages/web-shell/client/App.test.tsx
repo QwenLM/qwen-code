@@ -93,6 +93,7 @@ import type {
 } from './voice/voice-workspace-target';
 import type {
   ChatHeaderRenderInfo,
+  WebShellAssistantFeedbackOptions,
   WebShellComposerToolbarRenderInfo,
 } from './customization';
 import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
@@ -767,6 +768,7 @@ const {
       sessionId: 'session-1',
       recap: null,
     }),
+    rateAssistantTurn: vi.fn().mockResolvedValue(undefined),
     refreshCommands: vi.fn().mockResolvedValue(undefined),
     setModel: vi.fn().mockResolvedValue(undefined),
     setReasoningEffort: vi.fn().mockResolvedValue(undefined),
@@ -1005,6 +1007,9 @@ const {
         | ((turn: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn) => void)
         | undefined,
       capturedHostOwnsArtifactPreview: undefined as boolean | undefined,
+      capturedAssistantFeedback: undefined as
+        | WebShellAssistantFeedbackOptions
+        | undefined,
       latestMessageListProps: null as {
         onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
         turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
@@ -1727,6 +1732,8 @@ vi.mock('./components/TranscriptViewport', async () => {
       // the hostOwnsArtifactPreview value App derives from onRightPanelOpen.
       testState.capturedHostOwnsArtifactPreview =
         useWebShellCustomization().hostOwnsArtifactPreview;
+      testState.capturedAssistantFeedback =
+        useWebShellCustomization().assistantFeedback;
       React.useImperativeHandle(ref, () => ({
         scrollToBottom: notificationScrollToBottom,
         scrollToMessage: messageListScrollToMessage,
@@ -13761,6 +13768,7 @@ beforeEach(() => {
   testState.backgroundDetails = undefined;
   testState.openTurnCalls = undefined;
   testState.capturedHostOwnsArtifactPreview = undefined;
+  testState.capturedAssistantFeedback = undefined;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
@@ -24107,6 +24115,132 @@ describe('App session callbacks', () => {
       'recover connection',
       expect.objectContaining({ images: undefined }),
     );
+  });
+
+  describe('standalone assistant feedback telemetry wiring', () => {
+    beforeEach(() => {
+      mockConnection.capabilities.features = ['session_turn_feedback'];
+    });
+
+    // MessageList is mocked in this harness, so the wiring is asserted on
+    // the customization it receives; the rendered marks and the click →
+    // onRate leg live in the MessageList/AssistantMessage tests and the
+    // assistant-feedback Playwright spec.
+    function rate(rating: 'up' | 'down' | null): void {
+      const onRate = testState.capturedAssistantFeedback?.onRate;
+      expect(onRate).toBeDefined();
+      onRate!({
+        rating,
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        userMessage: { text: 'hello' },
+      });
+    }
+
+    it('offers the marks and reports a satisfied mark', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      expect(testState.capturedAssistantFeedback).toBeDefined();
+      rate('up');
+
+      expect(mockSessionActions.rateAssistantTurn).toHaveBeenCalledWith(
+        'prompt-1',
+        'up',
+      );
+    });
+
+    it('reports a dissatisfied mark', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      rate('down');
+
+      expect(mockSessionActions.rateAssistantTurn).toHaveBeenCalledWith(
+        'prompt-1',
+        'down',
+      );
+    });
+
+    it('does not report clearing a lit mark', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      rate(null);
+
+      expect(mockSessionActions.rateAssistantTurn).not.toHaveBeenCalled();
+    });
+
+    it('does not record a mark owned by another session (split pane)', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      const onRate = testState.capturedAssistantFeedback?.onRate;
+      expect(onRate).toBeDefined();
+      onRate!({
+        rating: 'up',
+        sessionId: 'other-session',
+        promptId: 'prompt-1',
+        userMessage: { text: 'hello' },
+      });
+
+      expect(mockSessionActions.rateAssistantTurn).not.toHaveBeenCalled();
+    });
+
+    it('still dispatches when the payload carries no session id', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      const onRate = testState.capturedAssistantFeedback?.onRate;
+      expect(onRate).toBeDefined();
+      onRate!({
+        rating: 'down',
+        promptId: 'prompt-1',
+        userMessage: { text: 'hello' },
+      });
+
+      expect(mockSessionActions.rateAssistantTurn).toHaveBeenCalledWith(
+        'prompt-1',
+        'down',
+      );
+    });
+
+    it('keeps the marks hidden without the capability', async () => {
+      mockConnection.capabilities.features = [];
+      renderApp({}, undefined, true);
+      await flush();
+
+      expect(testState.capturedAssistantFeedback).toBeUndefined();
+    });
+
+    it('does not wire telemetry for embedded hosts', async () => {
+      renderApp({}, undefined, false);
+      await flush();
+
+      expect(testState.capturedAssistantFeedback).toBeUndefined();
+    });
+
+    it('lets a host-provided option win over the standalone wiring', async () => {
+      const onRate = vi.fn();
+      renderApp({ assistantFeedback: { onRate } }, undefined, true);
+      await flush();
+
+      expect(testState.capturedAssistantFeedback?.onRate).toBe(onRate);
+      rate('up');
+
+      expect(onRate).toHaveBeenCalledWith(
+        expect.objectContaining({ promptId: 'prompt-1', rating: 'up' }),
+      );
+      expect(mockSessionActions.rateAssistantTurn).not.toHaveBeenCalled();
+    });
+
+    it('honors a host disabling the marks even standalone', async () => {
+      renderApp({ assistantFeedback: { enabled: false } }, undefined, true);
+      await flush();
+
+      expect(testState.capturedAssistantFeedback?.enabled).toBe(false);
+      expect(testState.capturedAssistantFeedback?.onRate).toBeUndefined();
+    });
   });
 
   describe('cancelling a prompt before it produced anything', () => {

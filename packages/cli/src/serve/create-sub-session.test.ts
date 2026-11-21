@@ -21,6 +21,10 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { CreateSubSessionTool } from '@qwen-code/qwen-code-core/tools/create-sub-session.js';
+import { PermissionManager } from '@qwen-code/qwen-code-core/permissions/permission-manager.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   upsertSessionPr,
   writeSessionPrs,
@@ -2667,6 +2671,7 @@ describe('sub-sessions in another workspace', () => {
     sourceCap?: number;
     targetCap?: number;
     targetRuntimeBaseDir?: string;
+    replaceOwnLauncher?: boolean;
     sentModeDispatchTimeoutMs?: number;
     closeSessionFails?: 'not-found';
   }) {
@@ -2730,7 +2735,7 @@ describe('sub-sessions in another workspace', () => {
           : selector === WS_A
             ? {
                 kind: 'found',
-                launcher: launcherA,
+                launcher: opts?.replaceOwnLauncher ? launcherB : launcherA,
                 workspaceId: 'ws-a',
                 workspaceCwd: WS_A,
                 workspaceGeneration: 'generation-a',
@@ -3450,6 +3455,14 @@ describe('sub-sessions in another workspace', () => {
 
   it('runs locally when the named workspace is the caller own', async () => {
     const { a, b, launcherA } = twoWorkspaces();
+    expect(launcherA.resolveDestination('caller', WS_A)).toMatchObject({
+      workspaceGeneration: 'generation-a',
+      sameWorkspace: true,
+    });
+    expect(launcherA.resolveDestination('caller', WS_B)).toMatchObject({
+      workspaceGeneration: 'generation-b',
+      sameWorkspace: false,
+    });
     await launcherA.launch({
       prompt: 'p',
       completion: 'sent',
@@ -3460,6 +3473,15 @@ describe('sub-sessions in another workspace', () => {
     expect(a.spawns).toHaveLength(1);
     expect(b.spawns).toEqual([]);
     expect(a.modeChanges).toEqual([]);
+  });
+
+  it('distinguishes the current launcher from a replaced launcher under the same selector', () => {
+    const { launcherA } = twoWorkspaces({ replaceOwnLauncher: true });
+    expect(launcherA.resolveDestination('caller', WS_A)).toMatchObject({
+      workspaceId: 'ws-a',
+      workspaceCwd: WS_A,
+      sameWorkspace: false,
+    });
   });
 
   it.each([
@@ -3489,6 +3511,91 @@ describe('sub-sessions in another workspace', () => {
       launcherA.stop();
     },
   );
+
+  it('rejects an automatic launch when AUTO is no longer effective', async () => {
+    const { a, b, launcherA } = twoWorkspaces();
+    const request = {
+      prompt: 'summarize',
+      completion: 'sent' as const,
+      workspace: WS_B,
+      workspaceGeneration: 'generation-b',
+      callerSessionId: 'caller',
+    };
+    await expect(
+      launcherA.launch({ ...request, requiresAutoMode: true }),
+    ).rejects.toThrow('requires one-time approval');
+    expect(b.spawns).toEqual([]);
+
+    a.changeApprovalMode('caller', 'auto');
+    await expect(
+      launcherA.launch({ ...request, requiresAutoMode: true }),
+    ).resolves.toMatchObject({ sessionId: 'sub-1' });
+    expect(b.spawns).toHaveLength(1);
+
+    a.changeApprovalMode('caller', 'default');
+    await expect(launcherA.launch(request)).resolves.toMatchObject({
+      sessionId: 'sub-2',
+    });
+    expect(b.spawns).toHaveLength(2);
+    launcherA.stop();
+  });
+
+  it('allows a human approval to survive a subsequent DEFAULT launch', async () => {
+    const { a, b, launcherA } = twoWorkspaces({ callerMode: 'yolo' });
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [`create_sub_session(workspace:ws-b)`],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => ApprovalMode.YOLO,
+    });
+    pm.initialize();
+    const config = {
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionManager: () => pm,
+      getSubSessionWorkspaceResolver: () => async () => ({
+        workspaceId: 'ws-b',
+        workspaceCwd: WS_B,
+        workspaceGeneration: 'generation-b',
+        sameWorkspace: false,
+      }),
+      getSubSessionSpawner:
+        () =>
+        async (request: {
+          prompt: string;
+          completion: 'sent';
+          workspace?: string;
+          workspaceGeneration?: string;
+        }) => {
+          a.changeApprovalMode('caller', 'default');
+          return launcherA.launch({ ...request, callerSessionId: 'caller' });
+        },
+    } as unknown as Config;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'summarize',
+      workspace: WS_B,
+    });
+    await invocation.getDefaultPermission();
+    const confirmation = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(b.spawns).toHaveLength(1);
+
+    await expect(
+      launcherA.launch({
+        prompt: 'summarize',
+        completion: 'sent',
+        workspace: WS_B,
+        workspaceGeneration: 'generation-b',
+        callerSessionId: 'caller',
+        requiresYolo: true,
+      }),
+    ).rejects.toThrow('requires one-time approval');
+    expect(b.spawns).toHaveLength(1);
+    launcherA.stop();
+  });
 
   it('rechecks the YOLO waiver at dispatch in a named local workspace', async () => {
     let markQueued!: () => void;
