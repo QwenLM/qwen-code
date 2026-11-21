@@ -312,6 +312,28 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
 
     @Test
     @EnabledOnOs(OS.LINUX)
+    void durableExistingInsideWorkspaceCwdFailsPreflightAndCreate() throws Exception {
+        Path workspace = Files.createDirectory(directory.resolve("workspace"));
+        Path state = Files.createDirectory(workspace.resolve("state"));
+        Files.setPosixFilePermissions(state,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        var settings = durableSettings(state);
+        settings.getRuntimeBroker().setWorkspaceCwd(workspace.toString());
+        var factory = new LocalRuntimeProviderFactory();
+        assertThat(factory.preflight(settings))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                    assertThat(check.detail()).contains("outside Workspace roots");
+                });
+        assertThatThrownBy(() -> factory.create(settings, new HttpRuntimeTransport(),
+                RuntimeProviderDependencies.NONE))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
     void durableRelativeExistingPrivateDirectoryPassesPreflight() throws Exception {
         // A relative configured path resolves against the process working
         // directory, exactly as create() absolutizes it; the canonical check

@@ -716,9 +716,11 @@ public final class LocalProcessRuntimeProvisioner
         // the directory can still start a Runtime.
         try {
             // Create a missing directory owner-private (rwx------), matching
-            // the durable store's convention; an existing directory is used
-            // as-is (the local worker does not inspect its cwd's mode). Fall
-            // back to default attributes where POSIX is unsupported.
+            // the durable store's convention; an existing directory is not
+            // re-moded. The attestation worker does not inspect its cwd, but
+            // the workspace-upload bootstrap requires the state directory to
+            // be canonical and owner-private. Fall back to default attributes
+            // where POSIX is unsupported.
             if (workingDirectory.getFileSystem().supportedFileAttributeViews().contains("posix")) {
                 Files.createDirectories(workingDirectory, PosixFilePermissions.asFileAttribute(
                         PosixFilePermissions.fromString("rwx------")));

@@ -24,7 +24,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * writes a marker relative to its working directory proves the directory
  * existed before {@code ProcessBuilder.start}. A missing directory is created
  * owner-private (rwx------), matching the durable store's convention; an
- * existing directory is used as-is.
+ * existing directory is not re-moded (the workspace-upload bootstrap still
+ * requires it to be canonical and owner-private).
  */
 class LocalProcessRuntimeProvisionerStateDirectoryTest {
     @TempDir
