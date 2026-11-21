@@ -16762,9 +16762,9 @@ describe('createAcpSessionBridge', () => {
 
     it('keeps numeric zero evidence and omits empty wchan in liveness telemetry', async () => {
       vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
       try {
         const event = vi.fn();
-        const stderrSpy = vi.spyOn(process.stderr, 'write');
         vi.mocked(sampleChannelProcess).mockReturnValue({
           cpuTicks: 100,
           state: 'T',
@@ -16839,9 +16839,9 @@ describe('createAcpSessionBridge', () => {
 
     it('omits absent evidence keys from liveness telemetry instead of undefined', async () => {
       vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
       try {
         const event = vi.fn();
-        const stderrSpy = vi.spyOn(process.stderr, 'write');
         vi.mocked(sampleChannelProcess).mockReturnValue(undefined);
         const handle = makeChannel({
           initializeImpl: () => channelLivenessInitializeResponse(),
@@ -16903,9 +16903,9 @@ describe('createAcpSessionBridge', () => {
 
     it('logs guarded evidence on every busy extension and on the final kill', async () => {
       vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
       try {
         const event = vi.fn();
-        const stderrSpy = vi.spyOn(process.stderr, 'write');
         let ticks = 0;
         vi.mocked(sampleChannelProcess).mockImplementation(() => ({
           cpuTicks: (ticks += 10),

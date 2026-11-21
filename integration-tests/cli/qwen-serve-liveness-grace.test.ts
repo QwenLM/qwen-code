@@ -22,6 +22,10 @@ import {
   CHANNEL_LIVENESS_VERSION,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SERVE_STATUS_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import type {
+  BridgeTelemetry,
+  BridgeTelemetryAttributes,
+} from '@qwen-code/acp-bridge/bridgeOptions';
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk';
 
 // Mirrors the busy-extension limit in packages/acp-bridge/src/channel-liveness.ts.
@@ -51,17 +55,20 @@ function capture(): LivenessCapture {
   };
 }
 
-function telemetryFor(cap: LivenessCapture) {
+function telemetryFor(cap: LivenessCapture): BridgeTelemetry {
   return {
     captureContext: () => undefined,
-    runWithContext: async (_c: unknown, fn: () => Promise<unknown>) =>
+    runWithContext: async <T>(_captured: unknown, fn: () => Promise<T>) =>
       await fn(),
-    withSpan: async (_o: unknown, _a: unknown, fn: () => Promise<unknown>) =>
-      await fn(),
-    event: (name: string, attrs: Record<string, unknown>) => {
+    withSpan: async <T>(
+      _operation: string,
+      _attributes: BridgeTelemetryAttributes,
+      fn: () => Promise<T>,
+    ) => await fn(),
+    event: (name: string, attrs: BridgeTelemetryAttributes) => {
       cap.events.push([name, attrs]);
     },
-    injectPromptContext: (r: unknown) => r,
+    injectPromptContext: <T extends object>(request: T) => request,
     metrics: {
       sessionLifecycle: () => {},
       channelLifecycle: () => {},
