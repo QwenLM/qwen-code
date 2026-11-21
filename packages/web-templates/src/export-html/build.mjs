@@ -186,6 +186,9 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
 // 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
 // 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
 // above the local measurement.
+//
+// The tool-summary parsing for permission-omitted search results (#15144)
+// adds about 463 bytes on top of main, under this ceiling.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_151_577;
 
 // Modules that must not be reachable from the document entry, checked against

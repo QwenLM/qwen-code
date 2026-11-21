@@ -1024,6 +1024,12 @@ export class PermissionManager {
     return this.eagerToolAllowList !== null;
   }
 
+  hasDenyRules(): boolean {
+    return [...this.sessionRules.deny, ...this.persistentRules.deny].some(
+      (rule) => !rule.invalid,
+    );
+  }
+
   /**
    * Find the first deny rule that matches the given context.
    * Returns the raw rule string if found, or undefined if no deny rule matches.
