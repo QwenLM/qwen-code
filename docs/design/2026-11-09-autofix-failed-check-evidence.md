@@ -198,13 +198,14 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    redacting the span — a real PEM with no marker, and a body with a non-marker
    `#`, are still fully redacted (an intact-label block containing a marker is
    redacted whole by the first pass, as in base). The strip class also does not
-   cover the wider Unicode whitespace/format families — zero-width (U+200B,
-   U+2060, U+FEFF), NBSP (U+00A0), U+2000–U+200A, U+3000. Whether a split by one
-   of these leaks depends on the rule: a character that breaks the contiguity a
-   fixed-prefix token rule needs (`npm_`, `sk-`, `ghp_`, AKIA, JWT) leaves the
-   token unredacted, and a whitespace-family character terminates the
-   whitespace-bounded value classes; but a non-whitespace format character
-   INSIDE an env / Bearer / URL value is part of that value and is redacted. A
+   cover the wider Unicode whitespace/format families. Whether a split by one
+   of these leaks depends on the rule and on whether JS counts the character as
+   whitespace: a character that breaks the contiguity a fixed-prefix token rule
+   needs (`npm_`, `sk-`, `ghp_`, AKIA, JWT) leaves the token unredacted; a
+   character JS treats as whitespace — NBSP (U+00A0), U+2000–U+200A, U+3000, and
+   U+FEFF — terminates the whitespace-bounded value classes, so the tail ships;
+   but a non-whitespace format character such as U+200B / U+2060 INSIDE an env /
+   Bearer / URL value is part of that value and is redacted. A
    tab inside a credential is preserved by the strip and terminates both
    passes' value classes, so that shape is unmatched too. These are recorded as
    gaps, not closed here; the record is illustrative of an unbounded adversarial
@@ -328,7 +329,8 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
 - A red PR's `feedback.md` carries failed step names and a redacted excerpt for
   up to three failing jobs, and the excerpt actually renders against a current
   `gh` (the flag is passed) with no raw ANSI, terminal control characters
-  (bare CR, backspace, C0/C1) or Bidi overrides reaching `feedback.md` or step
+  (bare CR, backspace, and the other C0/C1 controls — tab and newline are kept)
+  or Bidi overrides reaching `feedback.md` or step
   stdout.
 - The redaction is BEST-EFFORT over the weld shapes the suite pins, not a
   completeness guarantee: a control inside a credential, in front of its leading
