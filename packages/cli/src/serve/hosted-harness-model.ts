@@ -731,14 +731,15 @@ async function runPreparedHostedHarnessTextTurn(
       Object.assign(runtimeView!, {
         contentGenerator: resolved.contentGenerator,
         contentGeneratorConfig: resolved.contentGeneratorConfig,
-        // The stub above describes the pre-resolution state; once the child
-        // route's generator is in place its own source map is the truthful
-        // one, and leaving the stub's `computed` would attribute the routed
-        // entry's modalities to a name-based guess.
-        ...(resolved.configSources
-          ? { configSources: resolved.configSources }
-          : {}),
       });
+      // The stub above describes the pre-resolution state; once the child
+      // route's generator is in place its own source map is the truthful one,
+      // and leaving the stub's `computed` attributes the routed entry's
+      // modalities to a name-based guess. Set it unconditionally — the fast
+      // path resolves without a map, and `Config` returns any truthy view map
+      // wholesale — so an absent map lets the session map answer.
+      (runtimeView as { configSources?: unknown }).configSources =
+        resolved.configSources;
       await config.getLlmClient().initialize(undefined, input.signal);
     }
     if (
