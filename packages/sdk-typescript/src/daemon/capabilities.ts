@@ -111,6 +111,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // so the tag is purely informational.
   typed_event_schema: { since: 'v1' },
   session_set_model: { since: 'v1' },
+  // Separate from `session_set_model`: a client asking for a session-only
+  // switch sends `persistDefault: false`, which an older daemon would accept
+  // while still rewriting the user/workspace default. Preflighting this tag
+  // fails the call before any model mutation instead.
+  session_set_model_transient: { since: 'v1' },
   client_identity: { since: 'v1' },
   client_heartbeat: { since: 'v1' },
   session_permission_vote: { since: 'v1' },

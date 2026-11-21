@@ -284,6 +284,20 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('session/set_model');
   });
 
+  it('preserves model persistence options without accepting a forged session owner', () => {
+    const route = matchRoute('/session/owner%2FB/model', 'POST')!;
+    const body = {
+      modelId: 'model-b',
+      persistDefault: false,
+      _meta: { 'qwen.session.modelPersistDefault': false },
+      sessionId: 'forged-session',
+    };
+    expect(route.mapping.extractParams(route.segments, body, 'POST')).toEqual({
+      ...body,
+      sessionId: 'owner/B',
+    });
+  });
+
   it.each([
     { configId: 'workflow_mode', value: 'off' },
     { configId: 'reasoning_effort', value: 'high', persist: false },

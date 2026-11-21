@@ -160,6 +160,33 @@ function turnCompleteFrame(promptId: string): string {
 }
 
 describe('DaemonSessionClient', () => {
+  it('forwards transient model selection with its own client identity', async () => {
+    const { fetch, calls } = recordingFetch(({ url }) =>
+      jsonResponse(
+        200,
+        url.endsWith('/capabilities')
+          ? { v: 1, features: ['session_set_model_transient'] }
+          : {},
+      ),
+    );
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'session-client',
+      },
+    });
+    const options = { persistDefault: false, clientId: 'forged-client' };
+    await session.setModel('qwen3-coder', options);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.headers['x-qwen-client-id']).toBe('session-client');
+    expect(JSON.parse(calls[1]!.body!)).toEqual({
+      modelId: 'qwen3-coder',
+      persistDefault: false,
+    });
+  });
   it.each([
     ['workflow_mode', 'invalid'],
     ['workflow_mode', 'on', { persist: true }],
