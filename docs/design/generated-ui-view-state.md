@@ -291,11 +291,12 @@ Step 3:
   `ui.state`, and the persistence, save acknowledgement and isolation pins
   pass; all other pins are unchanged. A branch inherits state for the same
   card ID, then restores a different value from its source after an edit.
-- Evaluator tests with a controlled host: the save acknowledgement passes when
-  the host shows a fresh `saved` outcome for the first Add. It fails on any
-  other outcome or when items persisted without a fresh outcome. It does not
-  apply when nothing persisted and the host showed no outcome. The new tab
-  must restore the undone state, including when saving the undo was delayed.
+- Evaluator tests with a controlled host: blur the draft input before observing
+  the first Add. The save acknowledgement requires a fresh `saved` outcome and
+  a new tab restoring the added item before any further edits. It does not
+  apply when nothing persisted and the host showed no outcome. After reload,
+  Undo must clear the checkmark. A new tab must restore that state, including
+  after a delayed save, and a second Undo must restore the deleted item.
 - A live run of the checklist case with the gating model, reported in the PR.
 
 ## Acceptance criteria

@@ -396,8 +396,11 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'save-unavailable',
       'stale-acknowledgement',
       'late-acknowledgement',
+      'draft-only-first-add',
+      'false-save-first-add',
       'delayed-undo-save',
       'undo-not-saved',
+      'cold-history-loss',
       'shared-card-state',
     ] as const)(
       'checks checklist progress and undo persistence: %s',
@@ -418,7 +421,9 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               if (mode === 'save-unavailable') bar.dataset.generatedUiSave = 'unavailable';
               if (mode === 'stale-acknowledgement' && !saved) bar.dataset.generatedUiSave = 'saved';
               let items = saved?.items || [];
-              let history = saved?.history || [];
+              let history = mode === 'cold-history-loss' && !sessionStorage.getItem('checklist-mounted')
+                ? [] : saved?.history || [];
+              sessionStorage.setItem('checklist-mounted', '1');
               let pendingRenameReceipt = false;
               const byId = id => document.getElementById(id);
               const snapshot = () => JSON.parse(JSON.stringify(items));
@@ -479,9 +484,22 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                   }
                 }
               }
+              byId('new-item').onchange = event => {
+                if (mode === 'draft-only-first-add' && !items.length && event.target.value) {
+                  localStorage.setItem(key, JSON.stringify({ items, history, draft: event.target.value }));
+                  bar.dataset.generatedUiSave = 'saved';
+                }
+              };
               byId('add').onclick = () => {
                 if (${JSON.stringify(mode)} === 'inert-add') return;
-                history.push(snapshot()); items.push({ text: byId('new-item').value, done: false }); byId('new-item').value = ''; commit();
+                const first = !items.length;
+                history.push(snapshot());
+                items.push({ text: byId('new-item').value, done: false });
+                byId('new-item').value = '';
+                if (first && (mode === 'draft-only-first-add' || mode === 'false-save-first-add')) {
+                  render();
+                  if (mode === 'false-save-first-add') bar.dataset.generatedUiSave = 'saved';
+                } else commit();
               };
               byId('filter').onchange = applyFilter;
               byId('undo').onclick = () => {
@@ -516,8 +534,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             });
           });
           let starts = 0;
-          let checkedBeforeReload = false;
-          let reopenedAuthenticated = false;
+          let checkedBeforeReload: boolean | undefined;
           const newPage = context.newPage.bind(context);
           vi.spyOn(context, 'newPage').mockImplementation(async () => {
             const reopened = await newPage();
@@ -525,7 +542,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             vi.spyOn(reopened, 'goto').mockImplementation(
               async (url, options) => {
                 const response = await goto(url, options);
-                reopenedAuthenticated =
+                const reopenedAuthenticated =
                   (await reopened.evaluate(() =>
                     sessionStorage.getItem('daemon-token'),
                   )) === token;
@@ -538,10 +555,12 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           });
           const reload = page.reload.bind(page);
           vi.spyOn(page, 'reload').mockImplementation(async (options) => {
-            const card = await waitForCardOn(page, 0);
-            checkedBeforeReload = await card.view
-              .locator('#item-2-check')
-              .isChecked();
+            if (checkedBeforeReload === undefined) {
+              const card = await waitForCardOn(page, 0);
+              checkedBeforeReload =
+                (await card.view.locator('[id$="-check"]:checked').count()) ===
+                1;
+            }
             return reload(options);
           });
           const branchSession = vi.fn(async (source: string) => {
@@ -613,14 +632,13 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             mode !== 'save-unavailable';
           const persistedUndo =
             restoresAfterReload && mode !== 'undo-not-saved';
-          expect(reopenedAuthenticated).toBe(restoresAfterReload);
           expect(status('persists-after-reload')).toBe(
             restoresAfterReload ? 'pass' : 'fail',
           );
           expect(status('persists-after-reopen')).toBe(
             !restoresAfterReload
               ? 'not-applicable'
-              : mode === 'undo-not-saved'
+              : mode === 'undo-not-saved' || mode === 'cold-history-loss'
                 ? 'fail'
                 : 'pass',
           );
@@ -650,7 +668,9 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               mode === 'save-failed' ||
               mode === 'save-unavailable' ||
               mode === 'stale-acknowledgement' ||
-              mode === 'late-acknowledgement'
+              mode === 'late-acknowledgement' ||
+              mode === 'draft-only-first-add' ||
+              mode === 'false-save-first-add'
               ? 'fail'
               : 'pass',
           );

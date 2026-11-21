@@ -479,6 +479,33 @@ export async function runChecklist(
   await env.waitForIdle();
   const sessionUrl = env.page.url();
   const { view } = card;
+  const sameState = (
+    a: Awaited<ReturnType<typeof itemStates>>,
+    b: Awaited<ReturnType<typeof itemStates>>,
+  ) => JSON.stringify(a) === JSON.stringify(b);
+  const readState = (
+    target: Card,
+    expected: Awaited<ReturnType<typeof itemStates>>,
+  ) =>
+    settle(
+      () => itemStates(target.view),
+      (items) => sameState(items, expected),
+    );
+  const openChecklist = async (page: Page, url: URL) => {
+    const prefix = `${url.pathname}/generated-ui/state/`;
+    const cardIds = new Set<string>();
+    page.on('request', (request) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === 'GET' && path.startsWith(prefix)) {
+        cardIds.add(path.slice(prefix.length));
+      }
+    });
+    url.hash = new URLSearchParams({ token: env.daemon.token }).toString();
+    await page.goto(url.toString());
+    const card = await waitForCardOn(page, 0, env.cardTimeoutMs);
+    const [cardId] = cardIds;
+    return { page, card, cardId: cardIds.size === 1 ? cardId : undefined };
+  };
 
   const emptyText = await text(view, 'empty');
   const emptyVisible = await view.locator('#empty').first().isVisible();
@@ -489,20 +516,35 @@ export async function runChecklist(
     'no visible empty-state message before items exist',
   );
 
-  let firstAddOutcome: string | undefined;
-  let firstItemAdded = false;
+  const firstAdd: { outcome?: string; readbackError?: string } = {
+    readbackError: 'the first item did not appear',
+  };
   const added = await checks.guard('add', 'case 2', async () => {
     await setValue(view, 'new-item', 'Agenda');
     const add = view.locator('#add');
+    // Commit any draft change before observing the Add click.
+    await add.focus();
     await waitForStill(add);
-    // Observe the first committed edit before any other checklist action.
-    firstAddOutcome = await saveOutcome(card, () => add.click());
-    firstItemAdded = (
-      await settle(
-        () => itemTexts(view),
-        (texts) => texts.includes('Agenda'),
-      )
-    ).includes('Agenda');
+    firstAdd.outcome = await saveOutcome(card, () => add.click());
+    const expected = [{ text: 'Agenda', checked: false }];
+    if (
+      sameState(await readState(card, expected), expected) &&
+      firstAdd.outcome === 'saved'
+    ) {
+      let probe: Page | undefined;
+      try {
+        probe = await env.context.newPage();
+        const opened = await openChecklist(probe, new URL(sessionUrl));
+        const restored = await readState(opened.card, expected);
+        firstAdd.readbackError = sameState(restored, expected)
+          ? undefined
+          : `first Add showed "saved", but a new tab restored ${JSON.stringify(restored)}`;
+      } catch (error) {
+        firstAdd.readbackError = `could not verify the first Add in a new tab: ${String(error)}`;
+      } finally {
+        await probe?.close().catch(() => {});
+      }
+    }
     for (const label of ['Notes', 'Actions']) {
       await addItem(view, label);
     }
@@ -651,29 +693,45 @@ export async function runChecklist(
     );
   }
 
-  const beforeSave = await itemStates(view);
+  const { beforeDelete, deleted, deleteSlot } = await settle(
+    async () => {
+      const beforeDelete = await itemStates(view);
+      const deleted = beforeDelete.find(
+        (item) => item.text && item.text !== 'Notes',
+      );
+      const deleteSlot = deleted && (await itemSlot(view, deleted.text));
+      return { beforeDelete, deleted, deleteSlot };
+    },
+    ({ beforeDelete, deleteSlot }) =>
+      !!deleteSlot &&
+      beforeDelete.some((item) => item.text === 'Notes' && !item.checked),
+  );
+  const beforeSave = beforeDelete.filter((item) => item !== deleted);
   const saved = beforeSave.map((item) =>
     item.text === 'Notes' ? { ...item, checked: true } : item,
   );
-  const sameState = (a: typeof saved, b: typeof saved) =>
-    JSON.stringify(a) === JSON.stringify(b);
   const checkAndSave = async (target: Card, slot: string) => {
     const box = target.view.locator(`#${slot}-check`);
     await waitForStill(box);
     return saveOutcome(target, () => box.click());
   };
-  const notesSlot = await itemSlot(view, 'Notes');
-  const readState = (target: Card, expected: typeof saved) =>
-    settle(
-      () => itemStates(target.view),
-      (items) => sameState(items, expected),
-    );
   let hasPersistedItems = false;
   let undoOutcome: string | undefined;
   const reloaded = await checks.guard(
     'persists-after-reload',
     'case 2 / R4',
     async () => {
+      if (!deleteSlot)
+        throw new Error(
+          `could not find an item to delete before reload: ${JSON.stringify(beforeDelete)}`,
+        );
+      await clickWhenStill(view.locator(`#${deleteSlot}-delete`));
+      if (!sameState(await readState(card, beforeSave), beforeSave)) {
+        throw new Error(
+          'could not prepare the deletion to undo after reopening',
+        );
+      }
+      const notesSlot = await itemSlot(view, 'Notes');
       if (
         !notesSlot ||
         !beforeSave.some((item) => item.text === 'Notes' && !item.checked)
@@ -712,26 +770,13 @@ export async function runChecklist(
   );
 
   const pages: Page[] = [];
-  const openChecklist = async (url: URL) => {
+  const openForPersistence = async (url: URL) => {
     const page = await env.context.newPage();
     pages.push(page);
-    const prefix = `${url.pathname}/generated-ui/state/`;
-    const cardIds = new Set<string>();
-    page.on('request', (request) => {
-      const path = new URL(request.url()).pathname;
-      if (request.method() === 'GET' && path.startsWith(prefix)) {
-        cardIds.add(path.slice(prefix.length));
-      }
-    });
-    url.hash = new URLSearchParams({ token: env.daemon.token }).toString();
-    await page.goto(url.toString());
-    const card = await waitForCardOn(page, 0, env.cardTimeoutMs);
-    const [cardId] = cardIds;
-    return { page, card, cardId: cardIds.size === 1 ? cardId : undefined };
+    return openChecklist(page, url);
   };
-  let source: Awaited<ReturnType<typeof openChecklist>> | undefined;
   try {
-    const reopened = await checks.guard(
+    await checks.guard(
       'persists-after-reopen',
       'case 2 / R4',
       async () => {
@@ -746,18 +791,28 @@ export async function runChecklist(
         if (undoOutcome === 'saving') {
           throw new Error('the undo save did not settle before reopening');
         }
-        source = await openChecklist(new URL(sessionUrl));
+        const source = await openForPersistence(new URL(sessionUrl));
         const restored = await readState(source.card, beforeSave);
+        if (!sameState(restored, beforeSave)) {
+          throw new Error(
+            `after reopening: expected the undone state ${JSON.stringify(beforeSave)}, saw ${JSON.stringify(restored)} (undo save: ${undoOutcome ?? 'no outcome'})`,
+          );
+        }
+
+        await checkIsolation(source.cardId);
+        await clickWhenStill(source.card.view.locator('#undo'));
+        const undone = await readState(source.card, beforeDelete);
         return checks.expect(
           'persists-after-reopen',
           'case 2 / R4',
-          sameState(restored, beforeSave),
-          `after reopening: expected the undone state ${JSON.stringify(beforeSave)}, saw ${JSON.stringify(restored)} (undo save: ${undoOutcome ?? 'no outcome'})`,
+          sameState(undone, beforeDelete),
+          `undo after reopening: expected ${JSON.stringify(beforeDelete)}, saw ${JSON.stringify(undone)}`,
         );
       },
+      [['isolated-across-sessions', 'case 2 / R4']],
     );
 
-    if (firstAddOutcome === undefined && !hasPersistedItems) {
+    if (firstAdd.outcome === undefined && !hasPersistedItems) {
       checks.add(
         'save-acknowledged',
         'case 2 / R4',
@@ -768,23 +823,19 @@ export async function runChecklist(
       checks.expect(
         'save-acknowledged',
         'case 2 / R4',
-        firstItemAdded && firstAddOutcome === 'saved',
-        firstAddOutcome === undefined
-          ? 'items persisted, but the host showed no new outcome for the first Add'
-          : `first Add: item added=${firstItemAdded}, host outcome="${firstAddOutcome}"`,
+        firstAdd.outcome === 'saved' && firstAdd.readbackError === undefined,
+        firstAdd.outcome === 'saved'
+          ? (firstAdd.readbackError ?? '')
+          : `first Add: host outcome="${firstAdd.outcome ?? 'no new outcome'}"`,
       );
     }
+  } finally {
+    await Promise.all(pages.map((page) => page.close().catch(() => {})));
+  }
+  return checks.results;
 
-    if (!reopened || !source) {
-      checks.skip(
-        [['isolated-across-sessions', 'case 2 / R4']],
-        'the original session must restore the undone state before branching',
-      );
-      return checks.results;
-    }
-
-    const original = source;
-    await checks.guard('isolated-across-sessions', 'case 2 / R4', async () => {
+  async function checkIsolation(sourceCardId: string | undefined) {
+    return checks.guard('isolated-across-sessions', 'case 2 / R4', async () => {
       const url = new URL(sessionUrl);
       const id = url.pathname.match(/\/session\/([^/]+)$/)?.[1];
       if (!id) throw new Error('could not identify the source session');
@@ -797,8 +848,8 @@ export async function runChecklist(
         /[^/]+$/,
         encodeURIComponent(sessionId),
       );
-      const fork = await openChecklist(url);
-      if (!fork.cardId || fork.cardId !== original.cardId) {
+      const fork = await openForPersistence(url);
+      if (!fork.cardId || fork.cardId !== sourceCardId) {
         throw new Error(
           'the two sessions did not load state for the same card ID',
         );
@@ -818,11 +869,9 @@ export async function runChecklist(
         await waitForCardOn(fork.page, 0, env.cardTimeoutMs),
         saved,
       );
-      await original.page.reload();
-      const sourceState = await readState(
-        await waitForCardOn(original.page, 0, env.cardTimeoutMs),
-        beforeSave,
-      );
+      // Keep the first cold mount intact for its Undo check.
+      await env.page.reload();
+      const sourceState = await readState(await env.waitForCard(0), beforeSave);
       return checks.expect(
         'isolated-across-sessions',
         'case 2 / R4',
@@ -830,10 +879,7 @@ export async function runChecklist(
         `after saving in the branch: branch=${JSON.stringify(branchState)}, original=${JSON.stringify(sourceState)}`,
       );
     });
-  } finally {
-    await Promise.all(pages.map((page) => page.close().catch(() => {})));
   }
-  return checks.results;
 }
 
 /** Values of a parameters message: `"id": { "value": "...", "checked": ... }`. */
