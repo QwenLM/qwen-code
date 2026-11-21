@@ -1,4 +1,4 @@
-import type { ACPToolCall } from './types.js';
+import type { ACPToolCall, PermissionRequest } from './types.js';
 
 function getRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -15,6 +15,13 @@ export function resolveToolCallName(
   return toolName === 'tool_call' && typeof name === 'string' && name.trim()
     ? name
     : toolName;
+}
+
+export function isNamedSubSessionApproval(request: PermissionRequest): boolean {
+  return (
+    request.toolName?.toLowerCase().replaceAll('_', '') ===
+      'createsubsession' && typeof request.rawInput?.workspace === 'string'
+  );
 }
 
 export function isActiveToolStatus(

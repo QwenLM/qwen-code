@@ -130,6 +130,7 @@ const OUTSIDE = {
 const CLEAN = {
   branch: 'qwen/swift-fox',
   detached: false,
+  hasHead: true,
   hasUpstream: false,
   ahead: 0,
   behind: 0,
@@ -378,6 +379,7 @@ describe('workspace git worktree routes', () => {
       available: true,
       branch: 'qwen/swift-fox',
       detached: false,
+      hasHead: true,
       staged: 1,
       unstaged: 2,
       untracked: 3,
@@ -407,6 +409,19 @@ describe('workspace git worktree routes', () => {
       '/workspaces/primary/git/worktrees/status',
     );
     expect(missing.status).toBe(400);
+  });
+
+  it('forwards an unborn HEAD as hasHead: false', async () => {
+    // The composer keys its worktree eligibility on this field; a
+    // constant-true forward would send a no-commit repo to a create
+    // path the daemon refuses.
+    statusMock.mockResolvedValue({ ...CLEAN, branch: 'main', hasHead: false });
+    const app = mount([runtime('primary', ROOT, true)]);
+    const ok = await request(app).get(
+      `/workspaces/primary/git/worktrees/status?path=${encodeURIComponent(LINKED.path)}`,
+    );
+    expect(ok.status).toBe(200);
+    expect(ok.body.hasHead).toBe(false);
   });
 
   it('removes a clean, idle linked worktree', async () => {

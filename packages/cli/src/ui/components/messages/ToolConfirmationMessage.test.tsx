@@ -264,6 +264,57 @@ describe('ToolConfirmationMessage', () => {
   // commands were hard-denied at L4 with an opaque "denied by
   // permission rules" message; we now ask for confirmation and surface
   // the substitution clearly.
+  it.each([
+    [40, false],
+    [70, false],
+    [40, true],
+    [70, true],
+  ] as const)(
+    'preserves every exec command character at width %i (compact=%s)',
+    (width, compactMode) => {
+      const payload = Array.from(
+        { length: 20 },
+        (_, index) => `cmd${index.toString(16).padStart(2, '0')}-`,
+      ).join('');
+      const command = `printf 'BEGIN_${payload}_END'`;
+      const question = compactMode
+        ? 'Do you want to proceed?'
+        : "Allow execution of: 'printf'?";
+      const view = renderWithProviders(
+        <Box width={width}>
+          <ToolConfirmationMessage
+            confirmationDetails={{
+              type: 'exec',
+              title: 'Confirm Shell Command',
+              command,
+              rootCommand: 'printf',
+              onConfirm: vi.fn(),
+            }}
+            config={mockConfig}
+            availableTerminalHeight={40}
+            contentWidth={width}
+            compactMode={compactMode}
+          />
+        </Box>,
+      );
+      try {
+        const lines = (view.lastFrame() ?? '').split(/\r?\n/u);
+        const start = lines.findIndex((line) =>
+          line.trimStart().startsWith('printf'),
+        );
+        const end = lines.findIndex((line) => line.includes(question));
+        expect(start).toBeGreaterThanOrEqual(0);
+        expect(end).toBeGreaterThan(start);
+        const body = lines.slice(start, end).join('').replace(/\s/gu, '');
+        expect(body).toBe(command.replace(/\s/gu, ''));
+        expect(view.lastFrame()).not.toContain('lines hidden');
+        expect(view.lastFrame()).toContain('Yes, allow once');
+      } finally {
+        view.unmount();
+      }
+    },
+  );
+
   it('renders warnings on exec confirmations when provided', () => {
     const confirmationDetails: ToolCallConfirmationDetails = {
       type: 'exec',

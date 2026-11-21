@@ -10,9 +10,19 @@ Messaging channels use a separate persistent scheduler so results can be pushed 
 
 > **Tip:** Scheduled tasks are enabled by default. To disable them, set `experimental.cron: false` in your [settings](../configuration/settings.md), or set `QWEN_CODE_DISABLE_CRON=1` in your environment.
 
+## Workspace in Web Shell
+
+The **Scheduled Tasks** page shows each task's workspace on its card. When creating or editing a task, the **Workspace** field shows where it runs. With a single workspace, this field is read-only; if an embedded Web Shell has a workspace fixed by its host, it also displays **Fixed by host**. Hover over the workspace label to see its full path.
+
+With multiple workspaces, choose a workspace when creating a task. An existing task stays in its original workspace. Workspace labels require workspace information from the daemon or host; a missing label does not mean the task runs without a workspace.
+
 ## Deliver Web Shell task results to a Channel
 
-In `qwen serve`, open **Scheduled Tasks** and create or edit a task in its workspace. Choose a persistent run destination (a dedicated session, or the current session when available), then choose a **Delivery Channel**, a user or chat destination type, and a destination ID. Recent observed contacts are optional suggestions; check the Channel name, type, and raw ID before selecting one. You can also enter an ID directly. If an ID has leading or trailing whitespace, the form warns you and offers **Remove surrounding whitespace**; it never changes the ID automatically. The configured Channel must support sending to that destination.
+In `qwen serve`, open **Scheduled Tasks** and create or edit a task in its workspace. Choose a persistent run destination (a dedicated session, or the current session when available), then choose a **Delivery Channel**.
+
+For Channels with a configured destination, such as [DingTalk webhooks](./channels/dingtalk-webhook.md), selecting the Channel uses that destination without requiring a type or ID. If an existing task's saved destination differs, the form preserves it and offers **Use configured destination** to replace it explicitly.
+
+For other Channels, choose a user or chat destination type and a destination ID. Recent observed contacts are optional suggestions; check the Channel name, type, and raw ID before selecting one. You can also enter an ID directly. If an ID has leading or trailing whitespace, the form warns you and offers **Remove surrounding whitespace**; it never changes the ID automatically. The configured Channel must support sending to that destination.
 
 Delivery is off by default. Configuring a Channel alone does not enable delivery for any task. When enabled, a successfully completed scheduled run's final response is sent through the selected Channel; this does not guarantee receipt or add durable retries or failure alerts. The task card displays a delivery line only when it has a saved destination.
 

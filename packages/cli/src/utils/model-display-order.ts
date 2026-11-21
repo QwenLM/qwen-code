@@ -9,7 +9,7 @@ import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 
 type ModelEntry = {
-  model?: Pick<AvailableModel, 'authType' | 'id' | 'isRuntimeModel'>;
+  model?: Pick<AvailableModel, 'authType' | 'isRuntimeModel'>;
 };
 
 export function filterModelEntriesForDisplay<T extends ModelEntry>(
@@ -34,13 +34,9 @@ export function sortModelEntriesForDisplay<T extends ModelEntry>(
   }
 
   const priority = ({ model }: ModelEntry): number => {
-    if (!model || model.isRuntimeModel) return 3;
-    if (model.authType === AuthType.QWEN_SUBSCRIPTION) {
-      if (model.id === 'qwen3.8-max') return 0;
-      if (model.id === 'qwen3.8-flash') return 1;
-      return 2;
-    }
-    return model.authType === AuthType.QWEN_OAUTH ? 2 : 3;
+    if (!model || model.isRuntimeModel) return 2;
+    if (model.authType === AuthType.QWEN_SUBSCRIPTION) return 0;
+    return model.authType === AuthType.QWEN_OAUTH ? 1 : 2;
   };
 
   return entries.toSorted((left, right) => priority(left) - priority(right));

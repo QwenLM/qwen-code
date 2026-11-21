@@ -12,7 +12,10 @@ import {
   PencilIcon,
   Trash2Icon,
 } from 'lucide-react';
-import { SIDEBAR_SESSION_PREVIEW_LIMIT } from '../../constants/sessions';
+import {
+  SIDEBAR_SESSION_EXPAND_STEP,
+  SIDEBAR_SESSION_PREVIEW_LIMIT,
+} from '../../constants/sessions';
 import { useI18n } from '../../i18n';
 import styles from './WebShellSidebar.module.css';
 
@@ -23,7 +26,9 @@ export interface SessionGroupSectionProps {
   expanded: boolean;
   color?: DaemonSessionGroupColor;
   icon?: ReactNode;
-  children: ReactNode;
+  children?: ReactNode;
+  itemCount?: number;
+  renderChildren?: (visibleCount: number) => ReactNode;
   onToggle: () => void;
   onRename?: () => void;
   onDelete?: () => void;
@@ -40,6 +45,8 @@ export function SessionGroupSection({
   color,
   icon,
   children,
+  itemCount,
+  renderChildren,
   onToggle,
   onRename,
   onDelete,
@@ -49,11 +56,15 @@ export function SessionGroupSection({
   limitSessions = true,
 }: SessionGroupSectionProps) {
   const { t } = useI18n();
-  const [showAll, setShowAll] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(
+    SIDEBAR_SESSION_PREVIEW_LIMIT,
+  );
   const items = Children.toArray(children);
+  const total = itemCount ?? items.length;
   useEffect(() => {
-    if (!expanded) setShowAll(false);
+    if (!expanded) setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [expanded]);
+  const previewLimited = limitSessions && total > visibleCount;
   const colorClass = color?.startsWith('#')
     ? styles.groupColorCustom
     : color
@@ -121,20 +132,27 @@ export function SessionGroupSection({
       </div>
       {expanded && (
         <div className={styles.sessionGroupList}>
-          {!limitSessions || showAll
-            ? items
-            : items.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT)}
-          {limitSessions &&
-            !showAll &&
-            items.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
-              <button
-                type="button"
-                className={styles.showAllSessions}
-                onClick={() => setShowAll(true)}
-              >
-                {t('sidebar.showAllSessions')}
-              </button>
-            )}
+          {renderChildren
+            ? renderChildren(previewLimited ? visibleCount : total)
+            : previewLimited
+              ? items.slice(0, visibleCount)
+              : items}
+          {previewLimited && (
+            <button
+              type="button"
+              className={styles.showAllSessions}
+              onClick={() =>
+                setVisibleCount((count) => count + SIDEBAR_SESSION_EXPAND_STEP)
+              }
+            >
+              {t('sidebar.showMoreSessions', {
+                count: Math.min(
+                  SIDEBAR_SESSION_EXPAND_STEP,
+                  total - visibleCount,
+                ),
+              })}
+            </button>
+          )}
         </div>
       )}
     </section>

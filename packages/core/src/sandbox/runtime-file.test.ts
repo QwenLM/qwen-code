@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
+import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { WriteFileTool } from '../tools/write-file.js';
@@ -37,6 +39,9 @@ describe('runtime file mutation routing', () => {
     service = new StandardFileSystemService();
     cache = new FileReadCache();
     config = {
+      storage: new Storage(root),
+      getPlansDir: () => path.join(root, 'plans'),
+      getWorkspaceContext: () => createMockWorkspaceContext(root),
       getShellExecutionSandbox: () => ({
         workspace: root,
         installation: '/installation',

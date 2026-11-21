@@ -453,8 +453,8 @@ class HostedHookCancelFaultGatesIT {
         JsonNode ref = hookExecution(session).path("resultRef");
         assertThat(ref.isNull()).as("hook result ref").isFalse();
         String body = jdbc.queryForObject("SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
-                + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                String.class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                String.class, tenant, session,
                 ref.path("resourceId").asText(), tenant, session);
         return json.readTree(body);
     }

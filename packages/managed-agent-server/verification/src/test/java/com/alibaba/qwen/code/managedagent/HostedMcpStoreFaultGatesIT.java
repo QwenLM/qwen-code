@@ -5,11 +5,12 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationComma
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.FaultingExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.persistence.StoreFaultGate;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -784,12 +785,12 @@ class HostedMcpStoreFaultGatesIT {
     }
 
     private JsonNode published(String session, JsonNode ref) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String body = jdbc.queryForObject(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND resource_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
                         + " AND tenant_id = ? AND session_id = ?",
-                String.class, scope, ref.path("resourceId").asText(), tenant,
+                String.class, tenant, session, ref.path("resourceId").asText(), tenant,
                 session);
         assertThat(body).as("published response body").isNotBlank();
         try {
@@ -1408,9 +1409,9 @@ class HostedMcpStoreFaultGatesIT {
     static class StoreFaultConfiguration {
         @Bean
         @Primary
-        ManagedExtensionRecordStore faultingExtensionRecordStore(
+        JdbcManagedExtensionRecordStore faultingExtensionRecordStore(
                 JdbcTemplate jdbc, AgentStateStore sessions,
-                ManagedTaskEventStore taskEvents) {
+                JdbcManagedTaskEventStore taskEvents) {
             return new FaultingExtensionRecordStore(jdbc, sessions, taskEvents,
                     StoreFaultGate.INSTANCE);
         }

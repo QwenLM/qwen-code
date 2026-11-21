@@ -6,7 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -251,22 +251,19 @@ class HostedMonitorRunFaultGatesIT {
                 String physical = UUID.randomUUID().toString()
                         .replace("-", "");
                 jdbc.update("INSERT INTO ma_storage (alias_key,"
-                        + " tenant_key, storage_key, tenant_id, storage_id,"
+                        + " tenant_id, storage_id,"
                         + " physical_key, storage_kind, registration_state,"
                         + " registration_revision, registration_json) VALUES"
-                        + " (?, ?, ?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1,"
+                        + " (?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1,"
                         + " '{}')",
-                        JdbcRuntimeBindingRepository.storageAliasKey(tenant,
-                                "storage-" + index),
-                        JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                        JdbcRuntimeBindingRepository.storageFenceKey(
+                        RuntimeAdmissionFences.storageAliasKey(tenant,
                                 "storage-" + index),
                         tenant, "storage-" + index, physical);
                 jdbc.update("INSERT INTO ma_storage_owner (storage_key,"
-                        + " physical_key, storage_kind, tenant_id,"
-                        + " storage_id, mount_state) VALUES (?, ?, 'LOCAL',"
+                        + " storage_kind, tenant_id,"
+                        + " storage_id, mount_state) VALUES (?, 'LOCAL',"
                         + " ?, ?, 'READY')",
-                        physical, physical, tenant, "storage-" + index);
+                        physical, tenant, "storage-" + index);
             }
         }
         var sessions = new ArrayList<Map<String, Object>>();
@@ -1249,23 +1246,23 @@ class HostedMonitorRunFaultGatesIT {
         var byId = new HashMap<String, Map<String, Object>>();
         for (var row : jdbc.queryForList(
                 "SELECT resource_id, kind, byte_length, sha256 FROM"
-                        + " ma_resource WHERE session_scope_key = ? AND"
+                        + " ma_resource WHERE tenant_id = ? AND session_id = ? AND"
                         + " tenant_id = ? AND session_id = ? AND kind LIKE"
                         + " 'managed-tool-result-%'",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+                tenant, sessionId,
                 tenant, sessionId)) {
             byId.put(row.get("resource_id").toString(), row);
         }
         var bodies = new HashMap<String, JsonNode>();
         for (var row : jdbc.queryForList(
                 "SELECT resource_id, CONVERT(inline_bytes USING utf8mb4) AS"
-                        + " body FROM ma_resource WHERE session_scope_key = ?"
+                        + " body FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
                         + " AND tenant_id = ? AND session_id = ? AND (kind IN"
                         + " ('managed-tool-result-manifest',"
                         + " 'managed-tool-result-page') OR (kind ="
                         + " 'managed-tool-result-content' AND byte_length <"
                         + " 1024))",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+                tenant, sessionId,
                 tenant, sessionId)) {
             String body = row.get("body").toString();
             // The producers' short tail segment is raw bytes, not JSON;

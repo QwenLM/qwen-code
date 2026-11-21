@@ -206,6 +206,9 @@ const baseRegistry = () => ({
   get: vi.fn(),
   register: vi.fn(),
   unregisterForeground: vi.fn(),
+  // Foreground launches call the returned unsubscribe in their finally.
+  trackInlineApprovals: vi.fn().mockReturnValue(vi.fn()),
+  clearInlineApproval: vi.fn(),
   complete: vi.fn(),
   fail: vi.fn(),
   finalizeCancelled: vi.fn(),
@@ -2384,6 +2387,7 @@ describe('AgentTool', () => {
       const registry = config.getBackgroundTaskRegistry() as unknown as {
         get: MockFn;
         bridgeApprovalEvents: MockFn;
+        trackInlineApprovals: MockFn;
       };
       registry.get.mockImplementation((id: string) =>
         id === 'fork-entry'
@@ -2510,6 +2514,8 @@ describe('AgentTool', () => {
       expect(opts).toEqual({ nestedSource: true });
       // Unbridged in the foreground finally — no listener leak.
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      // The ancestor's entry carries the prompt; nothing waits inline.
+      expect(registry.trackInlineApprovals).not.toHaveBeenCalled();
     });
 
     it.each(['success', 'throw', 'cancel', 'no-goal', 'nested'])(
@@ -2547,6 +2553,28 @@ describe('AgentTool', () => {
           );
       },
     );
+
+    it('records inline prompts of a top-level foreground launch on its entry', async () => {
+      // The prompt is answered inline in the parent session; the entry only
+      // mirrors it so the live panel can say the agent is waiting.
+      const registry = config.getBackgroundTaskRegistry() as unknown as {
+        register: MockFn;
+        trackInlineApprovals: MockFn;
+      };
+      const cleanupSpy = vi.fn();
+      registry.trackInlineApprovals.mockReturnValue(cleanupSpy);
+
+      const invocation = agentTool.build(fg());
+      await invocation.execute(new AbortController().signal);
+
+      expect(registry.trackInlineApprovals).toHaveBeenCalledTimes(1);
+      const [agentId, emitter] = registry.trackInlineApprovals.mock.calls[0];
+      expect(agentId).toBe(registry.register.mock.calls[0][0].agentId);
+      expect(emitter).toBe(
+        (invocation as unknown as { eventEmitter: unknown }).eventEmitter,
+      );
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+    });
 
     it('does not bridge approvals for a top-level foreground launch', async () => {
       // No frame → no backgrounded ancestor → inline confirmation applies.
@@ -3528,9 +3556,21 @@ describe('AgentTool', () => {
         .mockReturnValue(
           client as unknown as ReturnType<Config['getLlmClient']>,
         );
-    const chatWith = (generationConfig: object) => ({
+    const chatWith = (
+      generationConfig: object,
+      dispatchedConfig?: object,
+      dispatchedRequest?: object,
+    ) => ({
       getChat: vi.fn().mockReturnValue({
         getGenerationConfig: vi.fn().mockReturnValue(generationConfig),
+        ...(dispatchedConfig && {
+          getDispatchedGenerationConfig: vi
+            .fn()
+            .mockReturnValue(dispatchedConfig),
+        }),
+        ...(dispatchedRequest && {
+          getDispatchedRequest: vi.fn().mockReturnValue(dispatchedRequest),
+        }),
       }),
     });
     /** Parent declarations `[name, description][]` (+ registry names). */
@@ -3934,6 +3974,37 @@ describe('AgentTool', () => {
       await runFork(forkParams('some task', { fork_turns: '1' }));
       expect(getHistory).toHaveBeenCalledWith();
       expectSeed([h.startup, h.secondUser, h.secondModel]);
+    });
+
+    it('inherits the dispatched parent prompt instead of a later canonical variant', async () => {
+      const generationConfig = {
+        systemInstruction: 'dispatched parent instruction',
+      };
+      const runtimeView = {
+        contentGenerator: {
+          generateContent: vi.fn(),
+          generateContentStream: vi.fn(),
+          embedContent: vi.fn(),
+        },
+        contentGeneratorConfig: {
+          ...config.getContentGeneratorConfig(),
+          model: 'dispatched-parent-model',
+        },
+      };
+      llmClient({
+        getHistory: vi.fn().mockReturnValue([]),
+        ...chatWith(
+          { systemInstruction: 'canonical model instruction' },
+          generationConfig,
+          { model: 'dispatched-parent-model', generationConfig, runtimeView },
+        ),
+      });
+      await runFork(forkParams('some task'));
+      expect(createArgs()?.[2]).toMatchObject({
+        renderedSystemPrompt: 'dispatched parent instruction',
+      });
+      expect(createArgs()?.[3]).toEqual({ model: 'dispatched-parent-model' });
+      expect(createArgs()?.[8]).toBe(runtimeView);
     });
 
     it('caps fork turns and uses bubble approval mode', async () => {
@@ -4878,6 +4949,54 @@ describe('AgentTool', () => {
     });
   });
 
+  describe('inline approval record on the registry entry', () => {
+    beforeEach(() => {
+      newContextState();
+      loadFirstSubagent();
+    });
+
+    it('clears the record when the prompt is answered, not when the call ends', async () => {
+      // The call's result arrives only after it has run; a long tool would
+      // keep "needs approval" on the panel row for its whole run otherwise.
+      const registry = config.getBackgroundTaskRegistry() as unknown as {
+        register: MockFn;
+        clearInlineApproval: MockFn;
+      };
+      const mockAgent = mockHeadless('Done', statsOf(1, 100, 1, [10, 5]));
+      const invocation = invoke(fg());
+      vi.mocked(mockAgent.execute).mockImplementation(async () => {
+        invocation.eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-slow-1',
+          name: 'run_shell_command',
+          description: 'wait 15s',
+          timestamp: Date.now(),
+          confirmationDetails: { type: 'exec', title: 'Shell' },
+          respond: vi.fn(),
+        } as unknown as AgentApprovalRequestEvent);
+      });
+      serveAgent(mockAgent);
+
+      let answered = false;
+      await invocation.execute(undefined, (output) => {
+        const display = output as AgentResultDisplay;
+        if (!answered && display.pendingConfirmation?.onConfirm) {
+          answered = true;
+          void display.pendingConfirmation.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          );
+        }
+      });
+
+      expect(answered).toBe(true);
+      expect(registry.clearInlineApproval).toHaveBeenCalledExactlyOnceWith(
+        registry.register.mock.calls[0][0].agentId,
+        'call-slow-1',
+      );
+    });
+  });
+
   describe('Agent-level background: true', () => {
     let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
@@ -5727,6 +5846,29 @@ describe('AgentTool', () => {
         PermissionMode.AutoEdit,
         undefined,
       );
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+    });
+
+    it('does not register a background agent after cancellation during SubagentStart', async () => {
+      const hookSystem = installHookSystem();
+      let releaseHook!: () => void;
+      vi.mocked(hookSystem.fireSubagentStartEvent).mockReturnValueOnce(
+        new Promise((resolve) => {
+          releaseHook = () => resolve(undefined);
+        }),
+      );
+      const controller = new AbortController();
+      const result = invoke(monitor()).execute(controller.signal);
+      await vi.waitFor(() =>
+        expect(hookSystem.fireSubagentStartEvent).toHaveBeenCalledOnce(),
+      );
+
+      controller.abort();
+      releaseHook();
+
+      expectDisplay(await result, { status: 'failed' });
+      expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalledOnce();
+      expect(mockRegistry.register).not.toHaveBeenCalled();
       expect(mockAgent.execute).not.toHaveBeenCalled();
     });
 

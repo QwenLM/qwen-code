@@ -22,11 +22,12 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -96,6 +97,16 @@ class ManagedAgentMySqlIT {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"TASK", "SESSION"})
+    void latestTurnIgnoresOtherStreamsWithTheSameSequence(String streamKind) {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+        ManagedTurnQueryTest.assertLatestTurnStreamIsolation(
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source),
+                new ObjectMapper(), streamKind);
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"default", "auto-edit", "yolo"})
     @Order(0)
     void freezesInitialCatalogModelAndApprovalInOneTransaction(String mode) {
@@ -119,7 +130,7 @@ class ManagedAgentMySqlIT {
             return option;
         }).toList());
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         for (String model : List.of("model-a", "model-b")) {
             var input = List.<Map<String, Object>>of(Map.of("type", "input_text", "text", "first"));
@@ -174,7 +185,7 @@ class ManagedAgentMySqlIT {
                         new ObjectMapper(),
                         Clock.systemUTC(),
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
+                        new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String createTenant = "mysql-create-mode-" + runId;
         store.insertSessionCommand(
@@ -287,8 +298,8 @@ class ManagedAgentMySqlIT {
 
         TransactionTemplate transactions =
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        ManagedSessionStore firstInstance = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
-        ManagedSessionStore secondInstance = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        JdbcManagedSessionStore firstInstance = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        JdbcManagedSessionStore secondInstance = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String storeTenant = "mysql-private-store-" + runId;
         String sessionId = "mysql-private-session-" + runId;
         String workspaceId = "mysql-private-workspace-" + runId;
@@ -529,7 +540,7 @@ class ManagedAgentMySqlIT {
 
         TransactionTemplate transactions =
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        ManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        JdbcManagedSessionStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         WriterGrant grant =
                 inTransaction(
                         transactions,
@@ -696,7 +707,7 @@ class ManagedAgentMySqlIT {
                         new ObjectMapper(),
                         Clock.systemUTC(),
                         ignored -> {},
-                        new com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry(jdbc),
+                        new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         Admission lower =
                 store.insertSessionCommand(
@@ -746,7 +757,7 @@ class ManagedAgentMySqlIT {
                         new ObjectMapper(),
                         Clock.systemUTC(),
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
+                        new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String tenant = "mysql-workspace-" + UUID.randomUUID();
         try {
@@ -834,7 +845,7 @@ class ManagedAgentMySqlIT {
                 .migrate();
         JdbcTemplate jdbc =
                 new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource);
-        ManagedWorkspaceRegistry registry = new ManagedWorkspaceRegistry(jdbc);
+        JdbcManagedWorkspaceRegistry registry = new JdbcManagedWorkspaceRegistry(jdbc);
         ManagedAgentStore store =
                 com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                         jdbc,
@@ -899,7 +910,7 @@ class ManagedAgentMySqlIT {
             assertThat(registry.canRead(tenant, "actor-a", workspace)).isFalse();
             assertThat(registry.canRead(tenant, actor, "workspace-a")).isFalse();
             assertThat(registry.listReadable(tenant, actor, null, 1))
-                    .extracting(ManagedWorkspaceRegistry.WorkspaceSummary::workspaceId)
+                    .extracting(JdbcManagedWorkspaceRegistry.WorkspaceSummary::workspaceId)
                     .containsExactly(workspace);
             assertThat(registry.listReadable(tenant, "actor-a", null, 1)).isEmpty();
             assertThat(registry.listReadable(tenant.toUpperCase(), actor, null, 1)).isEmpty();
@@ -996,7 +1007,7 @@ class ManagedAgentMySqlIT {
                                     revision.required("monitorRun"),
                                     revision.required("occurredAt").longValue()));
         }
-        ManagedExtensionRecordStore records = new ManagedExtensionRecordStore(jdbc, null);
+        JdbcManagedExtensionRecordStore records = new JdbcManagedExtensionRecordStore(jdbc, null);
         TaskProjection before =
                 records.listTasks(tenant, session, null, null, 10).tasks().get(0).projection();
 
@@ -1022,7 +1033,7 @@ class ManagedAgentMySqlIT {
                         ManagedAgentException.class,
                         error ->
                                 assertThat(error.getCode())
-                                        .isEqualTo(ManagedExtensionRecordStore.ERROR_REJECTED));
+                                        .isEqualTo(JdbcManagedExtensionRecordStore.ERROR_REJECTED));
         assertThat(
                         jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM"
@@ -1056,20 +1067,18 @@ class ManagedAgentMySqlIT {
         // A first revision checks its opening command through an index, not
         // by reading every record of its Session. The plan is asked of a
         // Session with enough records for the choice to matter.
-        String scopeKey = sha256("explain-" + session);
         jdbc.batchUpdate(
                 "INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
-                        + " task_kind, task_state, gmt_create) VALUES (?, ?,"
+                        + " task_kind, task_state, gmt_create) VALUES (?,"
                         + " ?, ?, ?, 'monitor_run', ?, ?, 1, ?, 'monitor',"
                         + " 'pending', ?)",
                 IntStream.range(0, 500)
                         .mapToObj(
                                 index ->
                                         new Object[] {
-                                            scopeKey,
                                             sha256("record-" + index),
                                             tenant,
                                             "mysql-extension-workspace",
@@ -1083,8 +1092,9 @@ class ManagedAgentMySqlIT {
         jdbc.queryForList("ANALYZE TABLE" + " ma_session_record");
         assertThat(
                         jdbc.queryForList(
-                                "EXPLAIN " + ManagedExtensionRecordStore.OPENING_COMMAND_QUERY,
-                                scopeKey,
+                                "EXPLAIN " + JdbcManagedExtensionRecordStore.OPENING_COMMAND_QUERY,
+                                tenant,
+                                "explain",
                                 sha256("command-7")))
                 .extracting(row -> row.get("key"))
                 .containsExactly("idx_ma_record_operation");
@@ -1107,7 +1117,7 @@ class ManagedAgentMySqlIT {
                         new ObjectMapper(),
                         Clock.systemUTC(),
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
+                        new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         TransactionTemplate transactions =
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource));
@@ -1288,7 +1298,7 @@ class ManagedAgentMySqlIT {
                         new ObjectMapper(),
                         Clock.systemUTC(),
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
+                        new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         TransactionTemplate transactions =
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource));
@@ -1437,7 +1447,7 @@ class ManagedAgentMySqlIT {
                         new ObjectMapper(),
                         Clock.systemUTC(),
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
+                        new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         TransactionTemplate transactions =
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource));
@@ -1588,7 +1598,7 @@ class ManagedAgentMySqlIT {
                         "session.closed",
                         "session.archived");
 
-        ManagedSessionStore journals = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        JdbcManagedSessionStore journals = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "mysql-lifecycle-writer-token-00000000";
         assertThatThrownBy(() -> inTransaction(transactions,
                 () -> journals.acquireWriter(tenant, sessionId, token,
@@ -1651,7 +1661,7 @@ class ManagedAgentMySqlIT {
                         new ObjectMapper(),
                         Clock.systemUTC(),
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
+                        new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String tenant = "mysql-turns-" + UUID.randomUUID();
         String sessionId =
@@ -1872,10 +1882,10 @@ class ManagedAgentMySqlIT {
                         new ObjectMapper(),
                         Clock.systemUTC(),
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
+                        new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var authority =
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore(
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(
                         jdbc, new DataSourceTransactionManager(source)));
         com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryContract.verify(
                 source, jdbc, store, authority);
@@ -1928,7 +1938,6 @@ class ManagedAgentMySqlIT {
         JdbcTemplate jdbc =
                 new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource);
         jdbc.queryForList("ANALYZE TABLE ma_session_record");
-        String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("mysql-hook-index", session);
         for (Object[] lookup :
                 List.of(
                         new Object[] {
@@ -1948,13 +1957,14 @@ class ManagedAgentMySqlIT {
                             "hook_definition_hash = ?",
                             sha256("catalog-1\u00001")
                         })) {
-            Object[] arguments = new Object[lookup.length - 1];
-            arguments[0] = scopeKey;
-            System.arraycopy(lookup, 2, arguments, 1, lookup.length - 2);
+            Object[] arguments = new Object[lookup.length];
+            arguments[0] = "mysql-hook-index";
+            arguments[1] = session;
+            System.arraycopy(lookup, 2, arguments, 2, lookup.length - 2);
             String query =
                     "SELECT record_resource_id FROM"
                             + " ma_session_record WHERE record_kind = 'DOMAIN'"
-                            + " AND session_scope_key = ? AND "
+                            + " AND tenant_id = ? AND session_id = ? AND "
                             + lookup[1]
                             + " LIMIT 1";
             assertThat(history.sql()).as((String) lookup[1]).contains(query);
@@ -1982,7 +1992,7 @@ class ManagedAgentMySqlIT {
                 .load()
                 .migrate();
         var store =
-                new ManagedAgentDefinitionStore(
+                new JdbcManagedAgentDefinitionStore(
                         new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                                 source), new RequestDigests());
         var service =
@@ -2033,7 +2043,7 @@ class ManagedAgentMySqlIT {
                 .load()
                 .migrate();
         var store =
-                new ManagedAgentDefinitionStore(
+                new JdbcManagedAgentDefinitionStore(
                         new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                                 source), new RequestDigests());
         var service =
@@ -2066,7 +2076,7 @@ class ManagedAgentMySqlIT {
                 .load()
                 .migrate();
         var jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
-        var store = new ManagedAgentDefinitionStore(jdbc, new RequestDigests());
+        var store = new JdbcManagedAgentDefinitionStore(jdbc, new RequestDigests());
         var service =
                 new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
@@ -2100,7 +2110,7 @@ class ManagedAgentMySqlIT {
         var winnerSource = dataSource();
         var winnerService =
                 new ManagedAgentDefinitionService(
-                        new ManagedAgentDefinitionStore(new JdbcTemplate(winnerSource), new RequestDigests()),
+                        new JdbcManagedAgentDefinitionStore(new JdbcTemplate(winnerSource), new RequestDigests()),
                         new RequestDigests(),
                         new ObjectMapper());
         var winnerTransactions =
@@ -2125,7 +2135,7 @@ class ManagedAgentMySqlIT {
                 };
         var racingService =
                 new ManagedAgentDefinitionService(
-                        new ManagedAgentDefinitionStore(racingJdbc, new RequestDigests()),
+                        new JdbcManagedAgentDefinitionStore(racingJdbc, new RequestDigests()),
                         new RequestDigests(),
                         new ObjectMapper());
 
@@ -2277,7 +2287,7 @@ class ManagedAgentMySqlIT {
         Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
         JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         TransactionTemplate transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
-        ManagedSessionStore resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        JdbcManagedSessionStore resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String tenant = "mysql-skills-" + UUID.randomUUID();
         String session = UUID.randomUUID().toString();
         String token = "s".repeat(32);

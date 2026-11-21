@@ -8,12 +8,14 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.PublicationVerification;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationVerifier;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
@@ -322,6 +324,9 @@ class Issue13181QueryBudgetTest {
     @Test
     void sessionListsAssemblePagesFromGroupedBatchQueries() {
         Fixture fixture = new Fixture();
+        fixture.ledger.reset();
+        assertThat(fixture.store.findLatestLifecycleOperations("tenant", List.of())).isEmpty();
+        assertThat(fixture.ledger.total()).isZero();
         String plain = "tenant-" + UUID.randomUUID();
         List<String> plainIds = new ArrayList<>();
         List<String> plainTurnIds = new ArrayList<>();
@@ -364,6 +369,8 @@ class Issue13181QueryBudgetTest {
                 + fixture.ledger.summary());
         // Page + active turns + message coverage.
         assertThat(fixture.ledger.total()).isEqualTo(3);
+        assertThat(fixture.ledger.count("ma_session.model_config_ciphertext")).isZero();
+        assertThat(fixture.ledger.count("ma_session.permission_rules_json")).isZero();
         // The batch turn read projects only the summary columns; the page
         // never holds a parsed prompt graph per row.
         assertThat(fixture.ledger.count("select * from ma_turn"))
@@ -397,7 +404,9 @@ class Issue13181QueryBudgetTest {
                 + fixture.ledger.summary());
         // Page + latest turns + environment events + lifecycle summary; unbound rows read no model metadata.
         assertThat(fixture.ledger.total()).isEqualTo(4);
-        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
+        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id",
+                "where o.tenant_id = ? and o.session_id in (",
+                "!session_scope_key is null")).isEqualTo(1);
         // The latest-turn batch read projects only the summary columns.
         assertThat(fixture.ledger.count("turn_record.*")).isZero();
         assertThat(fixture.ledger.count("turn_record.session_id,"
@@ -464,15 +473,15 @@ class Issue13181QueryBudgetTest {
                 bound, boundIds.get(3));
         String closeSession = boundIds.get(5);
         String closeId = "op_" + UUID.randomUUID();
-        String closeScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(bound, closeSession);
-        fixture.jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind,"
+        String closeScope = ManagedSessionStore.sessionScopeKey(bound, closeSession);
+        fixture.jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, target_kind,"
                 + " target_key, request_json, phase, tenant_id, session_id, operation_id, operation_kind, actor_digest,"
                 + " idempotency_key, request_digest, state, admission_stage, delivery_state, session_status_before,"
                 + " receipt_id, available_at, gmt_create, gmt_modified, completed_at)"
-                + " VALUES (?, ?, ?, 'SESSION', ?, '{}', 'COMPLETED', ?, ?, ?, 'CLOSE', '', 'close-key',"
+                + " VALUES (?, ?, 'SESSION', ?, '{}', 'COMPLETED', ?, ?, ?, 'CLOSE', '', 'close-key',"
                 + " 'digest', 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED', 'CLOSED', 'rcpt', 0, 0, 0, 0)",
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(closeScope, "CLOSE", closeId),
-                closeScope, closeScope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(closeSession),
+                closeScope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(closeSession),
                 bound, closeSession, closeId);
         fixture.ledger.reset();
         var boundPublic = fixture.service.listPublicSessions(bound, "actor",
@@ -623,7 +632,9 @@ class Issue13181QueryBudgetTest {
         // compression projection, missing-head and operation batches remain
         // constant, not per row.
         assertThat(fixture.ledger.total()).isEqualTo(13);
-        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
+        assertThat(fixture.ledger.count("row_number() over (partition by o.session_id",
+                "where o.tenant_id = ? and o.session_id in (",
+                "!session_scope_key is null")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
         assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
@@ -673,7 +684,9 @@ class Issue13181QueryBudgetTest {
             assertThat(fixture.ledger.count("select session_id, revision from ma_session_record")).isEqualTo(1);
             assertThat(fixture.ledger.count("head_kind = 'managed_session'")).isEqualTo(1);
             assertThat(fixture.ledger.count("operation_kind = 'context_compression'")).isEqualTo(1);
-            assertThat(fixture.ledger.count("row_number() over (partition by o.session_id")).isEqualTo(1);
+            assertThat(fixture.ledger.count("row_number() over (partition by o.session_id",
+                    "where o.tenant_id = ? and o.session_id in (",
+                    "!session_scope_key is null")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
             assertThat(fixture.ledger.count("select session_id, model_id, model_revision from ma_session")).isEqualTo(1);
@@ -951,7 +964,7 @@ class Issue13181QueryBudgetTest {
                 .isEqualTo("env-b");
     }
 
-    private record PublicationFixture(ManagedSessionStore sessions,
+    private record PublicationFixture(JdbcManagedSessionStore sessions,
             JdbcRuntimeBindingRepository bindings,
             JdbcToolExecutionRepository executions, ToolPublicationStore store) {
     }
@@ -971,6 +984,16 @@ class Issue13181QueryBudgetTest {
         PublicationFixture publication = publicationFixture(fixture);
         byte[] bytes = new byte[16];
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] input) {}
 
@@ -1003,12 +1026,11 @@ class Issue13181QueryBudgetTest {
                 publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofSeconds(2),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
         data.publishSegment(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat",
-                "stdout", 0, bytes, null, true);
+                "stdout", 0, bytes, null);
         fixture.ledger.reset();
         try (var verifier = new ToolPublicationVerifier(data, 1)) {
             assertThat(verifier.runOnce()).isTrue();
-            long renewals = fixture.ledger.count("update ma_operation set",
-                    "claim_until = ?, verification_next_at = case when");
+            long renewals = fixture.ledger.count("update ma_operation set", HEARTBEAT_RENEWAL);
             assertThat(renewals).isGreaterThanOrEqualTo(2);
             assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
             assertThat(fixture.ledger.count("from ma_session_head", "for update"))
@@ -1036,6 +1058,16 @@ class Issue13181QueryBudgetTest {
         byte[] bytes = new byte[1024];
         var reads = new java.util.concurrent.atomic.AtomicInteger();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override public void putIfAbsent(String key, byte[] input) {}
             @Override public InputStream open(String key) { return open(key, () -> {}); }
             @Override public InputStream open(String key, Runnable guard) {
@@ -1054,7 +1086,7 @@ class Issue13181QueryBudgetTest {
                 publication.store(), publication.sessions(), bucket, Duration.ofMinutes(10), Duration.ofMinutes(5),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
         data.publishSegment(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-fast-read",
-                "stdout", 0, bytes, null, true);
+                "stdout", 0, bytes, null);
         fixture.ledger.reset();
         try (var verifier = new ToolPublicationVerifier(data, 1)) {
             assertThat(verifier.runOnce()).isTrue();
@@ -1062,8 +1094,7 @@ class Issue13181QueryBudgetTest {
         assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-fast-read")
                 .path("state").asText()).isEqualTo("SUCCEEDED");
         assertThat(reads).hasValueGreaterThan(1000);
-        assertThat(fixture.ledger.count("update ma_operation set",
-                "claim_until = ?, verification_next_at = case when")).isZero();
+        assertThat(fixture.ledger.count("update ma_operation set", HEARTBEAT_RENEWAL)).isZero();
         assertThat(fixture.ledger.count("select inline_bytes from ma_resource")).isZero();
         assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
     }
@@ -1072,7 +1103,7 @@ class Issue13181QueryBudgetTest {
     void publicationAuthorizationReadsTheActivationFromTheJournalHead() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        ManagedSessionStore sessions = publication.sessions();
+        JdbcManagedSessionStore sessions = publication.sessions();
         ToolPublicationStore store = publication.store();
         JdbcToolExecutionRepository executions = publication.executions();
         long activationRevision = fixture.jdbc.queryForObject(
@@ -1110,6 +1141,16 @@ class Issue13181QueryBudgetTest {
         Map<String, byte[]> objects = new java.util.HashMap<>();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 objects.putIfAbsent(key, bytes.clone());
             }
@@ -1130,20 +1171,18 @@ class Issue13181QueryBudgetTest {
                         16 * 1024 * 1024, Duration.ofMinutes(25)));
         byte[] bytes = "hello".getBytes(StandardCharsets.UTF_8);
         fixture.ledger.reset();
-        data.publishSegment(binding.get("sessionKey"), "pub-1",
+        PublicationVerification.verified(data).publishSegment(binding.get("sessionKey"), "pub-1",
                 PUBLICATION_TOKEN, "op-1", "stdout", 0, bytes, digest("hello"));
-        // publish() authorizes twice per call (claim + install); both read
-        // the activation state from the head row.
+        // Admission (claim and ready) and verification (verifier claim and
+        // install) each authorize from the activation state in the head row.
         assertThat(fixture.ledger.count("from ma_session_journal_tx",
                 "for update")).isZero();
-        // Positive control: the publish path locks the head row six times
-        // (claim's authorize, the retention put, the verify-open read
-        // lease, install's authorize, and each authorization's final writer
-        // lease recheck), so the zero above cannot pass
-        // vacuously on a broken store.
+        // Positive control: admission and verification together lock the head
+        // row twelve times, so the zero above cannot pass vacuously on a
+        // broken store.
         assertThat(fixture.ledger.count(
                 "from ma_session_head", "for update"))
-                .isEqualTo(6);
+                .isEqualTo(12);
     }
 
     @Test
@@ -1552,8 +1591,8 @@ class Issue13181QueryBudgetTest {
             jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource);
             manager = new DataSourceTransactionManager(dataSource);
             tx = new TransactionTemplate(manager);
-            ManagedWorkspaceRegistry registry =
-                    new ManagedWorkspaceRegistry(jdbc);
+            JdbcManagedWorkspaceRegistry registry =
+                    new JdbcManagedWorkspaceRegistry(jdbc);
             ManagedAgentProperties properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(workspaceFilesEnabled);
             if (modelSelection) {
@@ -1589,6 +1628,10 @@ class Issue13181QueryBudgetTest {
     }
 
     /** Records each SQL statement and how many rows its ResultSet yielded. */
+    // The verifier's claim also sets both columns; only a renewal follows the timestamp directly.
+    private static final String HEARTBEAT_RENEWAL = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW
+            .toLowerCase(Locale.ROOT) + ", claim_until = ?, verification_next_at = ? where";
+
     static final class QueryLedger {
         static final class Query {
             final String sql;

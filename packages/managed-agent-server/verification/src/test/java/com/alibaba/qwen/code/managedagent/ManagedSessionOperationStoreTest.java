@@ -3,13 +3,15 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -228,6 +230,10 @@ class ManagedSessionOperationStoreTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: these witness v1 termination mechanics, so the Session rides
+        // external-files (ordinary files is v2 now).
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, TENANT, sessionId);
         String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
                 OperationKind.CLOSE, "owner", "a".repeat(64), "close",
                 "digest", true, 1).operation().operationId();
@@ -269,7 +275,7 @@ class ManagedSessionOperationStoreTest {
     void aFailedTerminationReleasesTheLifecycleClaimMirror() {
         ManagedAgentStore store = workspaceStore();
         // insertWorkspaceSessionCommand resolves the Workspace under a
-        // creation transaction (ManagedWorkspaceRegistry.resolveForCreation
+        // creation transaction (JdbcManagedWorkspaceRegistry.resolveForCreation
         // requires one), and this suite builds the store without Spring
         // proxies, so the call is wrapped explicitly.
         var transactions = new TransactionTemplate(
@@ -283,6 +289,10 @@ class ManagedSessionOperationStoreTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: these witness v1 termination mechanics, so the Session rides
+        // external-files (ordinary files is v2 now).
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, TENANT, sessionId);
         String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
                 OperationKind.CLOSE, "owner", "a".repeat(64), "close",
                 "digest", true, 1).operation().operationId();
@@ -452,7 +462,7 @@ class ManagedSessionOperationStoreTest {
         ManagedAgentStore store = store();
         String sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
                 null, null, List.of(), null).sessionId();
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         String target = ManagedSchemaKeys.key(sessionId);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id, session_id,"
                         + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, claim_until,"
@@ -528,7 +538,7 @@ class ManagedSessionOperationStoreTest {
             public Instant instant() {
                 return Instant.ofEpochMilli(now.get());
             }
-        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        }, ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private List<String> targets(ManagedAgentStore store) {

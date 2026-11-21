@@ -19,7 +19,7 @@ class ManagedSchemaRelayLoadMySqlIT {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             ManagedSchema.initialize(database.source());
             var jdbc = new QueryRecorder(database.source());
-            var relay = new SessionMessageRelayStore(jdbc);
+            var relay = new JdbcSessionMessageRelayStore(jdbc);
             for (String state : List.of("planned", "accepting", "unknown")) {
                 record(jdbc, "session_message", "pending-" + state, state, 20_000);
             }
@@ -29,7 +29,7 @@ class ManagedSchemaRelayLoadMySqlIT {
                 history(jdbc, "session_message", "accepted", first, history);
                 jdbc.recorded.clear();
                 assertThat(relay.findPendingMessages("worker", 30_000, 50))
-                        .extracting(SessionMessageRelayStore.PendingMessage::messageId)
+                        .extracting(JdbcSessionMessageRelayStore.PendingMessage::messageId)
                         .containsExactly("pending-accepting", "pending-planned", "pending-unknown");
                 var plan = explain(database.source(), jdbc.recorded.getFirst());
                 assertThat(plan.usesIndex("idx_ma_record_delivery")).as(plan.text()).isTrue();
@@ -49,7 +49,7 @@ class ManagedSchemaRelayLoadMySqlIT {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             ManagedSchema.initialize(database.source());
             var jdbc = new QueryRecorder(database.source());
-            var channels = new ChannelInstanceStore(jdbc);
+            var channels = new JdbcChannelInstanceStore(jdbc);
             record(jdbc, "channel_delivery", "pending", "planned", 20_000);
             long previousScan = -1;
             int first = 0;
@@ -57,7 +57,7 @@ class ManagedSchemaRelayLoadMySqlIT {
                 history(jdbc, "channel_delivery", "delivered", first, history);
                 jdbc.recorded.clear();
                 assertThat(channels.findPendingDeliveries("tenant", "sender", 50))
-                        .extracting(ChannelInstanceStore.PendingDelivery::deliveryId).containsExactly("pending");
+                        .extracting(JdbcChannelInstanceStore.PendingDelivery::deliveryId).containsExactly("pending");
                 var plan = explain(database.source(), jdbc.recorded.getFirst());
                 assertThat(plan.usesIndex("idx_ma_record_session_delivery")).as(plan.text()).isTrue();
                 long scanned = plan.scannedRows();
@@ -88,13 +88,12 @@ class ManagedSchemaRelayLoadMySqlIT {
     }
 
     private static Object[] row(String domain, String id, String state, long createdAt) {
-        return new Object[] {com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "sender"),
-                ManagedSchemaKeys.key(domain, id), domain, id, state, createdAt};
+        return new Object[] {ManagedSchemaKeys.key(domain, id), domain, id, state, createdAt};
     }
 
-    private static final String INSERT = "INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id,"
+    private static final String INSERT = "INSERT INTO ma_session_record (record_key, tenant_id,"
             + " workspace_id, session_id, domain, record_id, revision, record_resource_id, delivery_state, gmt_create)"
-            + " VALUES (?, ?, 'tenant', 'workspace', 'sender', ?, ?, 1, 'resource', ?, ?)";
+            + " VALUES (?, 'tenant', 'workspace', 'sender', ?, ?, 1, 'resource', ?, ?)";
 
     private record Statement(String sql, Object[] arguments) {}
 

@@ -20,9 +20,12 @@ on:
     # Daily Java and Desktop checks report main regressions through the same
     # routing as the nightly CLI checks.
     # The Managed Agent gate's post-merge fast tier rides the push arm.
+    # The Managed loop verification lane covers the same agent loop end to end
+    # on push and nightly, so both of its main-side runs report here too.
     workflows:
       - 'E2E Tests'
       - 'Managed Agent gate'
+      - 'Managed Agent loop verification'
       - 'SDK Java'
       - 'SDK Python'
       - 'Qwen Code CI'
@@ -45,13 +48,16 @@ jobs:
     # A job that hits its execution cap concludes `cancelled`, so a
     # failure-only gate let timed-out main runs hide for weeks (#16214);
     # the live step keeps a plain concurrency supersede out (#16272).
+    # The schedule arm below is name-scoped, so a watched workflow with a
+    # cron trigger has to appear in its fromJSON list as well — being in
+    # `workflow_run.workflows` alone gets its nightly red filtered out here.
     if: >-
       ${{ github.repository == 'QwenLM/qwen-code' &&
       contains(fromJSON('["failure","cancelled"]'), github.event.workflow_run.conclusion) &&
       ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
-      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]'), github.event.workflow.name)))) ||
+      contains(fromJSON('["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]'), github.event.workflow.name)))) ||
       (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') ||
       (github.event.workflow.name == 'Managed Agent gate' &&
       contains(fromJSON('["pull_request","pull_request_review"]'), github.event.workflow_run.event))) }}
@@ -389,8 +395,18 @@ jobs:
           # Keep in sync with qwen-autofix.yml's INFRA_FAILURE_SIGNATURES — a
           # test pins the equality. There the same annotation class auto-reruns
           # a PR's red check; here it suppresses the issue failure record.
+          # Deterministic configuration errors are deliberately absent: a
+          # re-run cannot change a repository variable, so they file instead.
           # Full rationale → qwen-autofix.md#af-076
-          INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within'
+          # The built-tree handoff is anchored to the RETRY step's name: the
+          # artifact fetch expiring is a host routing fault, not the commit's
+          # code, and clears on a re-run that lands elsewhere (#16927). The
+          # first attempt is continue-on-error and the retry covers it on
+          # failure, so its annotation stays on the check run after a
+          # recovery — admitting it would file nothing for a real assertion
+          # failure carrying that residue. A bare 'has timed out after' would
+          # also swallow a hung test or install step, which must keep filing.
+          INFRA_FAILURE_SIGNATURES: "lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within|QWEN_CI_RPC_RETRY must be a non-negative integer|Host load gate breached|Disk floor breached|The action 'Retry downloading the built tree' has timed out"
         run: |-
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
 

@@ -2,6 +2,18 @@
 
 [English](managed-runtime-0263-test-repair.md) | [简体中文](managed-runtime-0263-test-repair.zh-CN.md)
 
+> **Retired — superseded by the dead-tag release-repair cleanup.** The v0.26.3
+> and v0.26.5 repair steps and their checked-in patches were removed from
+> `release-managed-runtime.yml` (pre-production convergence, Slice 2). Locked
+> decision D3 abandons the v0.26.3 and v0.26.5 managed-runtime backfills: no
+> released managed-runtime artifact has users, so the repair paths have no
+> service object. A `tag=v0.26.3` dispatch now fails at the Java gate
+> (`Issue13180HardenedVerificationTest`), and a `tag=v0.26.5` dispatch fails at
+> Javadoc generation (`ManagedEventEnvelopes.java:335` unescaped `<` under
+> `-Pcentral-release`), because those repairs are no longer applied. The
+> procedure below is retained as a historical record only; the requirement that
+> "the recovery step must remain available" is superseded by D3.
+
 ## Problem and scope
 
 CLI 0.26.3 is already published. Its separate Managed runtime release fails in

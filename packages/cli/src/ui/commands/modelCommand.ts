@@ -36,8 +36,13 @@ import {
   parseAcpModelOption,
   resolveAcpFastModelSelector,
 } from '../../utils/acpModelUtils.js';
+import { VISION_BRIDGE_TIMEOUT_MS } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
 import { formatAuxModelSelectorForDisplay } from '../../utils/aux-model-selector.js';
 import { recordDaemonSessionModelFromConfig } from '../../acp-integration/session-model-persistence.js';
+import {
+  modelAuthPolicyError,
+  switchPrimaryModel,
+} from '../models/primary-model-switch.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -74,6 +79,42 @@ const MODEL_PICKER_ONLY_PATTERN = new RegExp(
 
 export function isPickerOnlyModelInvocation(args: string): boolean {
   return MODEL_PICKER_ONLY_PATTERN.test(args);
+}
+
+const VISION_TIMEOUT_FLAG_PATTERN =
+  /(?:^|\s)--timeout(?=\s|$)(?:\s+(?!--)(\S+))?/;
+
+function isVisionArgs(args: string): boolean {
+  return args === '--vision' || args.startsWith('--vision ');
+}
+
+/**
+ * Splits `--timeout <value>` out of a `/model --vision` invocation, in any
+ * position. Other invocations are returned untouched so an inline
+ * `<model-id> <prompt>` keeps a literal `--timeout` in its prompt.
+ */
+function extractVisionTimeoutFlag(args: string): {
+  args: string;
+  timeoutFlag: RegExpExecArray | null;
+} {
+  const timeoutFlag = VISION_TIMEOUT_FLAG_PATTERN.exec(args);
+  const remaining = timeoutFlag
+    ? args.replace(timeoutFlag[0], ' ').trim()
+    : args;
+  return timeoutFlag && isVisionArgs(remaining)
+    ? { args: remaining, timeoutFlag }
+    : { args, timeoutFlag: null };
+}
+
+function parseVisionTimeoutMs(value: string | undefined): number | undefined {
+  const match = value ? /^(\d+)(s|ms)?$/.exec(value) : null;
+  if (!match) return undefined;
+  const timeoutMs = Number(match[1]) * (match[2] === 'ms' ? 1 : 1000);
+  return timeoutMs > 0 && timeoutMs <= 2_147_483_647 ? timeoutMs : undefined;
+}
+
+function formatVisionTimeout(timeoutMs: number): string {
+  return timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}s` : `${timeoutMs}ms`;
 }
 
 /**
@@ -174,7 +215,9 @@ async function switchMainModel(
   persistSelection = true,
 ): Promise<string> {
   if (parsed.authType) {
-    await config.switchModel(
+    await switchPrimaryModel(
+      config,
+      settings,
       parsed.authType,
       parsed.modelId,
       parsed.authType === AuthType.QWEN_OAUTH &&
@@ -201,7 +244,7 @@ async function switchMainModel(
     return parsed.modelId;
   }
 
-  await config.switchModel(currentAuthType, parsed.modelId, undefined);
+  await switchPrimaryModel(config, settings, currentAuthType, parsed.modelId);
   if (persistSelection) {
     persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
     persistSetting(settings, 'model.baseUrl', '', scopeOverride);
@@ -426,7 +469,7 @@ export const modelCommand: SlashCommand = {
     );
   },
   argumentHint:
-    '[--fast|--voice|--vision|--compaction|--image] [--project|--global] [<model-id>] | <model-id> <prompt>',
+    '[--fast|--voice|--vision [--timeout <seconds>]|--compaction|--image] [--project|--global] [<model-id>] | <model-id> <prompt>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -446,6 +489,12 @@ export const modelCommand: SlashCommand = {
           value: '--vision',
           description: t(
             'Set the image-capable model used to transcribe images for a text-only main model',
+          ),
+        },
+        {
+          value: '--timeout',
+          description: t(
+            'Set the vision bridge timeout in seconds (use with --vision)',
           ),
         },
         {
@@ -492,6 +541,7 @@ export const modelCommand: SlashCommand = {
           .replace(/(?:^|\s)--image(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--project(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--global(?:\s|$)/, ' ')
+          .replace(VISION_TIMEOUT_FLAG_PATTERN, ' ')
           .trim();
         if (/(?:^|\s)--fast(?:\s|$)/.test(trimmed)) mode = 'fast';
         else if (/(?:^|\s)--voice(?:\s|$)/.test(trimmed)) mode = 'voice';
@@ -529,10 +579,11 @@ export const modelCommand: SlashCommand = {
     const rawArgs = context.invocation?.args?.trim() || actionArgs.trim();
     const {
       scopeOverride,
-      remaining: args,
+      remaining: scopedArgs,
       hasProject,
       hasGlobal,
     } = parseScopeFlags(rawArgs);
+    const { args, timeoutFlag } = extractVisionTimeoutFlag(scopedArgs);
     // Reject mutually exclusive scope flags
     if (hasProject && hasGlobal) {
       return {
@@ -576,6 +627,15 @@ export const modelCommand: SlashCommand = {
         : scopeOverride === SettingScope.User
           ? t(' (global)')
           : '';
+    // Selector flags never take an inline prompt, so a leftover --timeout is a
+    // misplaced flag rather than prompt text.
+    if (args.startsWith('--') && VISION_TIMEOUT_FLAG_PATTERN.test(args)) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('--timeout can only be used with --vision.'),
+      };
+    }
     const isVoiceModelCommand =
       args === '--voice' || args.startsWith('--voice ');
     if (isVoiceModelCommand) {
@@ -756,27 +816,96 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    const isVisionModelCommand =
-      args === '--vision' || args.startsWith('--vision ');
-    if (isVisionModelCommand) {
+    if (isVisionArgs(args)) {
       const modelName = args.replace('--vision', '').trim();
+      const timeoutMs = timeoutFlag
+        ? parseVisionTimeoutMs(timeoutFlag[1])
+        : undefined;
+      if (timeoutFlag && timeoutMs === undefined) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.',
+            { value: timeoutFlag[1] ?? '' },
+          ),
+        };
+      }
+      const persistTimeout = (
+        settings: LoadedSettings,
+        timeoutMs: number,
+        visionModel?: string,
+      ): string => {
+        settings.setTopLevelValues(resolveScope(settings, scopeOverride), {
+          ...(visionModel === undefined ? {} : { visionModel }),
+          visionBridgeTimeoutMs: timeoutMs,
+        });
+        const effectiveTimeoutMs = settings.merged.visionBridgeTimeoutMs;
+        config.setVisionBridgeTimeoutMs(effectiveTimeoutMs);
+        const timeout = formatVisionTimeout(timeoutMs);
+        if (effectiveTimeoutMs === timeoutMs) {
+          return (
+            t('Vision bridge timeout: {{timeout}}', { timeout }) + scopeSuffix
+          );
+        }
+        return t(
+          'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.',
+          {
+            timeout,
+            scope: scopeSuffix,
+            effectiveTimeout: formatVisionTimeout(
+              config.getVisionBridgeTimeoutMs() ?? VISION_BRIDGE_TIMEOUT_MS,
+            ),
+          },
+        );
+      };
+      if (!modelName && timeoutMs !== undefined) {
+        if (!settings) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Settings service not available.'),
+          };
+        }
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: persistTimeout(settings, timeoutMs),
+        };
+      }
       if (!modelName) {
         // Open the model picker in vision mode (interactive) or print the
         // current vision model (non-interactive).
         if (context.executionMode !== 'interactive') {
           const visionModel =
             context.services.settings?.merged?.visionModel?.trim();
+          const currentTimeoutMs = config.getVisionBridgeTimeoutMs();
           return {
             type: 'message',
             messageType: 'info',
-            content: t(
-              'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
-              {
-                visionModel: visionModel
-                  ? formatAuxModelSelectorForDisplay(visionModel)
-                  : t('not set'),
-              },
-            ),
+            content:
+              t(
+                'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+                {
+                  visionModel: visionModel
+                    ? formatAuxModelSelectorForDisplay(visionModel)
+                    : t('not set'),
+                },
+              ) +
+              '\n' +
+              t(
+                'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.',
+                {
+                  timeout:
+                    currentTimeoutMs === undefined
+                      ? t('{{timeout}} (default)', {
+                          timeout: formatVisionTimeout(
+                            VISION_BRIDGE_TIMEOUT_MS,
+                          ),
+                        })
+                      : formatVisionTimeout(currentTimeoutMs),
+                },
+              ),
           };
         }
         return {
@@ -859,7 +988,12 @@ export const modelCommand: SlashCommand = {
       const visionModel = matched.baseUrl
         ? `${qualifiedModelName}\0${matched.baseUrl}`
         : qualifiedModelName;
-      persistSetting(settings, 'visionModel', visionModel, scopeOverride);
+      let timeoutLine: string | undefined;
+      if (timeoutMs === undefined) {
+        persistSetting(settings, 'visionModel', visionModel, scopeOverride);
+      } else {
+        timeoutLine = persistTimeout(settings, timeoutMs, visionModel);
+      }
       // Sync runtime Config so the vision bridge picks it up without a restart.
       config.setVisionModel(visionModel);
       // The pin is honored even if the model isn't image-capable (the user may
@@ -871,7 +1005,11 @@ export const modelCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content:
-          t('Vision Model') + ': ' + modelName + scopeSuffix + visionWarning,
+          t('Vision Model') +
+          ': ' +
+          modelName +
+          (timeoutLine === undefined ? scopeSuffix : `\n${timeoutLine}`) +
+          visionWarning,
       };
     }
 
@@ -1128,10 +1266,13 @@ export const modelCommand: SlashCommand = {
         ...persistScopeSpread(scopeOverride),
       };
     }
-    if (
-      modelName &&
-      (parsed.authType ?? authType) === AuthType.QWEN_SUBSCRIPTION
-    ) {
+    const requestedAuthType = parsed.authType ?? authType;
+    const policyError =
+      modelName && modelAuthPolicyError(settings, requestedAuthType);
+    if (policyError) {
+      return { type: 'message', messageType: 'error', content: policyError };
+    }
+    if (modelName && requestedAuthType === AuthType.QWEN_SUBSCRIPTION) {
       context.ui.addItem(
         { type: MessageType.INFO, text: t('Loading models from provider…') },
         Date.now(),

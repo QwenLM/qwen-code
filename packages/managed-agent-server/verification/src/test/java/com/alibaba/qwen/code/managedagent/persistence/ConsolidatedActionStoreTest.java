@@ -6,6 +6,9 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -35,7 +38,7 @@ class ConsolidatedActionStoreTest {
     private static final String ACTION = "tool_approval_01234567890123456789012345678901";
     private ConsolidatedStoreFixture fixture;
     private JdbcTemplate jdbc;
-    private ManagedActionStore actions;
+    private JdbcManagedActionStore actions;
     private TransactionTemplate transactions;
     private String scope;
 
@@ -46,7 +49,7 @@ class ConsolidatedActionStoreTest {
         ManagedSchema.initialize(source);
         jdbc = new JdbcTemplate(source);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
-        scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,approval_mode,gmt_create,gmt_modified)"
                 + " VALUES (?,?,?,'ACTIVE','manual',0,0)", "tenant", "session", "agent");
         AgentStateStore state = mock(AgentStateStore.class);
@@ -57,7 +60,7 @@ class ConsolidatedActionStoreTest {
                         row.getString("delivery_state"), row.getString("session_status_before"), row.getString("receipt_id"),
                         row.getString("claim_owner"), row.getLong("claim_generation"), row.getInt("attempt_count")),
                 call.getArgument(0), call.getArgument(1), call.getArgument(2)).stream().findFirst());
-        actions = new ManagedActionStore(jdbc, state);
+        actions = new JdbcManagedActionStore(jdbc, state);
         project("requested", null, 1);
     }
 
@@ -72,11 +75,11 @@ class ConsolidatedActionStoreTest {
     void actionProjectionOwnsReferencesAndDoesNotEnterDomainQueries() throws Exception {
         assertThat(actions.find("tenant", "session", ACTION).orElseThrow().state()).isEqualTo("requested");
         assertThat(actions.list("tenant", "session", null, null, 10)).hasSize(1);
-        assertThat(new ManagedExtensionRecordStore(jdbc).listTasks("tenant", "session", null, null, 10).tasks()).isEmpty();
+        assertThat(new JdbcManagedExtensionRecordStore(jdbc).listTasks("tenant", "session", null, null, 10).tasks()).isEmpty();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD'", Long.class)).isEqualTo(1);
         project("decided", response("allow"), 2);
         assertThat(actions.find("tenant", "session", ACTION).orElseThrow().decisionDigest())
-                .isEqualTo(com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.decisionDigest(response("allow")));
+                .isEqualTo(ManagedActionStore.decisionDigest(response("allow")));
         assertThat(actions.list("tenant", "session", null, null, 10)).isEmpty();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD'", Long.class)).isEqualTo(2);
     }
@@ -115,7 +118,7 @@ class ConsolidatedActionStoreTest {
         jdbc.update("UPDATE ma_session SET workspace_id='workspace',workspace_generation=1,"
                 + "workspace_storage_id='storage',cwd_relative='.',context_config_ref='config',"
                 + "context_revision=1,workspace_config_ref='config',workspace_policy_ref='policy'");
-        byte[] actor = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor");
+        byte[] actor = ManagedWorkspaceRegistry.actorKey("tenant", "actor");
         ManagedReceipts.insert(jdbc,
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.SESSION_CREATE_ACTOR,
                 "tenant", com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.ACTOR,
@@ -133,7 +136,7 @@ class ConsolidatedActionStoreTest {
         JsonNode response = JSON.createObjectNode()
                 .put("policyRevision", "p1").put("inputRevision", 7).put("optionId", "allow");
 
-        assertThat(com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.decisionDigest(response)).isEqualTo(
+        assertThat(ManagedActionStore.decisionDigest(response)).isEqualTo(
                 "d61ff840d95b8aaa9b24999e2910fc687098d73b225c0837b6ec6718fb038ae5");
     }
 
@@ -142,7 +145,7 @@ class ConsolidatedActionStoreTest {
     }
 
     private void project(String state, JsonNode answer, long sequence) throws Exception {
-        ObjectNode options = JSON.createObjectNode().put("v", 1).put("requestId", ACTION).put("turnId", "turn")
+        ObjectNode options = JSON.createObjectNode().put("v", 3).put("requestId", ACTION).put("turnId", "turn")
                 .put("functionCallId", "call").put("toolName", "write_file").put("policyRevision", "hosted-tool-approval/1")
                 .put("inputRevision", 1).put("createdAt", 1).put("expiresAt", 1000);
         options.putArray("options").addObject().put("id", "allow").put("label", "Allow");
@@ -177,10 +180,10 @@ class ConsolidatedActionStoreTest {
     private ObjectNode storeBody(String id, String kind, JsonNode body) throws Exception {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
         String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
+        jdbc.update("INSERT INTO ma_resource (resource_key,tenant_id,workspace_id,session_id,resource_id,kind,"
                         + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
-                        + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
-                ManagedSchemaKeys.key(scope, id), scope, "tenant", "workspace", "session", id, kind, bytes.length, digest, bytes);
+                        + " VALUES (?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
+                ManagedSchemaKeys.key(scope, id), "tenant", "workspace", "session", id, kind, bytes.length, digest, bytes);
         return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
     }
 

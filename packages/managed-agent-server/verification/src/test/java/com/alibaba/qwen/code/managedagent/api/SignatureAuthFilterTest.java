@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 import org.springframework.core.Ordered;
@@ -28,8 +30,13 @@ public class SignatureAuthFilterTest {
             "0123456789abcdef0123456789abcdef";
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    @Test
-    public void authenticatesExtensionArchivesFromADiskSpoolAndSignsTheirManifestQuery()
+    @ParameterizedTest
+    @ValueSource(strings = {"/v1/agents/workspaces/workspace/extensions",
+        "/v1/agents/workspaces/workspace/extensions/imports",
+        "/v1/agents/workspaces/workspace/extensions/imports/preview",
+        "/api/agent/web-shell/v1/workspace-extensions/imports",
+        "/api/agent/web-shell/v1/workspace-extensions/imports/preview"})
+    public void authenticatesExtensionArchivesFromADiskSpoolAndSignsTheirMetadataQuery(String path)
             throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getAuth().setMode("signed");
@@ -39,8 +46,12 @@ public class SignatureAuthFilterTest {
         server.setAddress(InetAddress.getByName("127.0.0.1"));
         SignatureAuthFilter filter = filter(new BrokerSecurity(properties, server, new WebMvcProperties()));
         byte[] archive = "a binary archive larger than the JSON body limit".getBytes(StandardCharsets.UTF_8);
-        String path = "/v1/agents/workspaces/workspace/extensions";
-        String query = "packageDigest=" + sha256Hex(archive) + "&manifest=eyJzY2hlbWFWZXJzaW9uIjoxfQ";
+        String metadata = "{\"sourceKind\":\"skill\",\"sourceDigest\":\"" + sha256Hex(archive)
+                + "\",\"compilerVersion\":1,\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}";
+        String query = path.endsWith("/extensions")
+                ? "packageDigest=" + sha256Hex(archive) + "&manifest=eyJzY2hlbWFWZXJzaW9uIjoxfQ"
+                : "metadata=" + java.util.Base64.getUrlEncoder().withoutPadding()
+                        .encodeToString(metadata.getBytes(StandardCharsets.UTF_8));
         String timestamp = now();
         String signature = sign("POST", path, query, "tenant-a", "actor-a", timestamp, archive, "publish");
         for (boolean tamper : new boolean[] {false, true}) {
@@ -522,6 +533,44 @@ public class SignatureAuthFilterTest {
                 path);
         request.addHeader(TenantContextFilter.HEADER, "tenant-a");
         return request;
+    }
+
+    @Test
+    public void exemptsTheTerminalUpgradeInSignedMode() throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        // The upgrade authenticates with the single-use ticket, not the
+        // signature headers a browser WebSocket cannot set.
+        MockHttpServletRequest upgrade = request("GET",
+                "/api/agent/web-shell/v1/sessions/s1/terminal");
+        MockFilterChain passed = new MockFilterChain();
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        filter.doFilter(upgrade, response, passed);
+        assertThat(passed.getRequest()).isSameAs(upgrade);
+        assertThat(response.getStatus()).isEqualTo(200);
+
+        // A plain non-upgrade method on the upgrade path keeps the signed
+        // surface: the exemption is the GET upgrade shape, not the path alone.
+        MockHttpServletRequest plainPost = request("POST",
+                "/api/agent/web-shell/v1/sessions/s1/terminal");
+        MockFilterChain postBlocked = new MockFilterChain();
+        MockHttpServletResponse postResponse = new MockHttpServletResponse();
+        filter.doFilter(plainPost, postResponse, postBlocked);
+        assertThat(postResponse.getStatus()).isEqualTo(401);
+        assertThat(postResponse.getContentAsString())
+                .contains("authentication_required");
+        assertThat(postBlocked.getRequest()).isNull();
+
+        // The ticket-minting POST stays on the signed surface: without the
+        // signature headers it is refused, not exempted.
+        MockHttpServletRequest mint = request("POST",
+                "/api/agent/web-shell/v1/sessions/terminal-ticket");
+        MockFilterChain blocked = new MockFilterChain();
+        MockHttpServletResponse mintResponse = new MockHttpServletResponse();
+        filter.doFilter(mint, mintResponse, blocked);
+        assertThat(mintResponse.getStatus()).isEqualTo(401);
+        assertThat(mintResponse.getContentAsString())
+                .contains("authentication_required");
+        assertThat(blocked.getRequest()).isNull();
     }
 
     private static SignatureAuthFilter filter(BrokerSecurity security) {

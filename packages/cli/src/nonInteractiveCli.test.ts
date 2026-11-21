@@ -19,6 +19,7 @@ import type {
   ServerLlmStreamEvent,
   SessionMetrics,
   WorkflowApprovalRequestCallback,
+  WorkflowRunCompletionCallback,
 } from '@qwen-code/qwen-code-core';
 import type { CLIMessage, CLIUserMessage } from './nonInteractive/types.js';
 import {
@@ -61,6 +62,7 @@ import {
 import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { Content, Part } from '@google/genai';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { LoopEventBus } from '@qwen-code/qwen-code-core/event-bus/bus.js';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { EventEmitter, getEventListeners } from 'node:events';
 import {
@@ -273,6 +275,14 @@ describe('runNonInteractive', () => {
     hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
     abortAll: ReturnType<typeof vi.fn>;
   };
+  let mockWorkflowRunRegistry: {
+    setCompletionCallback: ReturnType<typeof vi.fn>;
+    setApprovalRequestCallback: ReturnType<typeof vi.fn>;
+    hasRunningEntries: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
+    getHandle: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
+  };
   let mockMonitorRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
     setRegisterCallback: ReturnType<typeof vi.fn>;
@@ -347,6 +357,15 @@ describe('runNonInteractive', () => {
       setRegisterCallback: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
       hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+      abortAll: vi.fn(),
+    };
+
+    mockWorkflowRunRegistry = {
+      setCompletionCallback: vi.fn(),
+      setApprovalRequestCallback: vi.fn(),
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
+      getHandle: vi.fn(),
       abortAll: vi.fn(),
     };
 
@@ -432,6 +451,7 @@ describe('runNonInteractive', () => {
         .fn()
         .mockReturnValue(mockBackgroundTaskRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue(mockWorkflowRunRegistry),
       // Phase C: headless --resume reads the resumed session + sidecar to
       // restore worktree context. These tests don't exercise resume, so
       // return undefined to short-circuit the helper.
@@ -2015,6 +2035,662 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('restores the base prompt id for a Goal continuation after a teammate turn (R8-F2)', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+
+    let leaderMessageCallback: ((formatted: string) => void) | null = null;
+    const teamEvents = new EventEmitter();
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: ((formatted: string) => void) | null) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+
+    let host: Parameters<typeof goalRuntime.bindHost>[0] | undefined;
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((bound) => {
+      host = bound;
+      return goalRuntime.bindHost(bound);
+    });
+
+    mockCoreExecuteToolCall.mockImplementation(async () => {
+      // A teammate message joins the Goal tool continuation, and the runtime
+      // queues a follow-up Goal segment that runs after the teammate turn.
+      leaderMessageCallback?.('Teammate finished the delegated task.');
+      const goal = goalRuntime.getSnapshot().goal!;
+      await host!.startGoalTurn({
+        permit: {
+          goalId: goal.goalId,
+          revision: goal.revision,
+          turnId: 'goal-f2-next',
+        },
+        continuationContext: 'continue after the teammate handoff',
+      });
+      return { responseParts: [{ text: 'tool response' }] };
+    });
+
+    let requestCount = 0;
+    mockLlmClient.sendMessageStream.mockImplementation(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: { goalPermit?: GoalTurnPermit },
+      ) => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'goal-f2-tool',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-f2',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]);
+        }
+        return createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+          },
+        ]);
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-f2',
+    );
+
+    const calls = mockLlmClient.sendMessageStream.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    const [, , firstPromptId] = calls[0]!;
+    const [, , secondPromptId, secondOptions] = calls[1]!;
+    const [, , thirdPromptId, thirdOptions] = calls[2]!;
+    expect(firstPromptId).toBe('goal-f2');
+    expect(secondPromptId).toBe('goal-f2/teammate/2');
+    expect(secondOptions).toMatchObject({ type: SendMessageType.Teammate });
+    // The follow-up Goal segment must restore the base id, not inherit the
+    // teammate turn's registered id (which would drop it from the ledger for
+    // the rest of the run).
+    expect(thirdPromptId).toBe('goal-f2');
+    expect(thirdOptions).toMatchObject({ type: SendMessageType.Goal });
+  });
+
+  it('opens a fresh ledger turn for a runtime Goal run while keeping the base prompt id (R10-4)', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+
+    let leaderMessageCallback: ((formatted: string) => void) | null = null;
+    const teamEvents = new EventEmitter();
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: ((formatted: string) => void) | null) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+
+    let host: Parameters<typeof goalRuntime.bindHost>[0] | undefined;
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((bound) => {
+      host = bound;
+      return goalRuntime.bindHost(bound);
+    });
+
+    mockCoreExecuteToolCall.mockImplementation(async () => {
+      leaderMessageCallback?.('Teammate finished the delegated task.');
+      const goal = goalRuntime.getSnapshot().goal!;
+      await host!.startGoalTurn({
+        permit: {
+          goalId: goal.goalId,
+          revision: goal.revision,
+          turnId: 'goal-ledger-next',
+        },
+        continuationContext: 'continue the goal run',
+      });
+      return { responseParts: [{ text: 'tool response' }] };
+    });
+
+    let requestCount = 0;
+    mockLlmClient.sendMessageStream.mockImplementation(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: { goalPermit?: GoalTurnPermit },
+      ) => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'goal-ledger-tool',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-ledger-key',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]);
+        }
+        return createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+          },
+        ]);
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-ledger-key',
+    );
+
+    const calls = mockLlmClient.sendMessageStream.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    const [, , firstPromptId, firstOptions] = calls[0]!;
+    const [, , thirdPromptId, thirdOptions] = calls[2]!;
+    // Both runtime Goal segments keep the base prompt id for identity.
+    expect(firstPromptId).toBe('goal-ledger-key');
+    expect(thirdPromptId).toBe('goal-ledger-key');
+    expect(thirdOptions).toMatchObject({ type: SendMessageType.Goal });
+    // Each runtime Goal run opens its own ledger turn, derived from its stable
+    // goalTurnKey and distinct from the base prompt id, so a fallback the
+    // foreground turn exhausted is re-probed for the Goal run instead of
+    // staying skipped for the rest of the session. Pin the key shape concretely
+    // (not derived from the goalTurnKey field it must prove); the third call
+    // below pins the exact prompt_id + goalTurnKey formula.
+    expect(firstOptions.ledgerTurnKey).toMatch(
+      /^goal-ledger-key\/goal\/goal-runtime:[\w-]+$/,
+    );
+    expect(firstOptions.ledgerTurnKey).not.toBe(firstPromptId);
+    expect(thirdOptions.ledgerTurnKey).toBe(
+      'goal-ledger-key/goal/goal-runtime:goal-ledger-next',
+    );
+    // The two Goal runs are distinct ledger turns, not one shared foreground
+    // turn.
+    expect(thirdOptions.ledgerTurnKey).not.toBe(firstOptions.ledgerTurnKey);
+  });
+
+  it('keeps the teammate id for a teammate turn’s own ToolResult continuation (S3)', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+
+    let leaderMessageCallback: ((formatted: string) => void) | null = null;
+    const teamEvents = new EventEmitter();
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: ((formatted: string) => void) | null) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+
+    let toolExecCount = 0;
+    mockCoreExecuteToolCall.mockImplementation(async () => {
+      toolExecCount += 1;
+      // Only the Goal segment's tool handoff raises the teammate message; the
+      // teammate turn's own tool must not raise another one.
+      if (toolExecCount === 1) {
+        leaderMessageCallback?.('Teammate finished the delegated task.');
+      }
+      return { responseParts: [{ text: 'tool response' }] };
+    });
+
+    let requestCount = 0;
+    mockLlmClient.sendMessageStream.mockImplementation(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: { goalPermit?: GoalTurnPermit },
+      ) => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'goal-s3-tool',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-s3-cont',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]);
+        }
+        if (requestCount === 2) {
+          return createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'teammate-s3-tool',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-s3-cont/teammate/2',
+              },
+            },
+          ]);
+        }
+        return createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+          },
+        ]);
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-s3-cont',
+    );
+
+    const calls = mockLlmClient.sendMessageStream.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    const [, , secondPromptId, secondOptions] = calls[1]!;
+    const [, , thirdPromptId, thirdOptions] = calls[2]!;
+    expect(secondPromptId).toBe('goal-s3-cont/teammate/2');
+    expect(secondOptions).toMatchObject({ type: SendMessageType.Teammate });
+    // The teammate turn's tool continuation is still background: it keeps the
+    // registered teammate id rather than restoring the base id, so it stays
+    // excluded from the live turn's ledger for the whole teammate turn.
+    expect(thirdPromptId).toBe('goal-s3-cont/teammate/2');
+    expect(thirdOptions).toMatchObject({ type: SendMessageType.ToolResult });
+  });
+
+  it('restores the base id for a queued Goal after a teammate turn ends via terminateTurn (S3)', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+
+    let leaderMessageCallback: ((formatted: string) => void) | null = null;
+    const teamEvents = new EventEmitter();
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: ((formatted: string) => void) | null) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+
+    let host: Parameters<typeof goalRuntime.bindHost>[0] | undefined;
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((bound) => {
+      host = bound;
+      return goalRuntime.bindHost(bound);
+    });
+
+    let toolExecCount = 0;
+    mockCoreExecuteToolCall.mockImplementation(async () => {
+      toolExecCount += 1;
+      if (toolExecCount === 1) {
+        // The Goal segment's tool handoff raises the teammate message and
+        // queues a follow-up Goal run.
+        leaderMessageCallback?.('Teammate finished the delegated task.');
+        const goal = goalRuntime.getSnapshot().goal!;
+        await host!.startGoalTurn({
+          permit: {
+            goalId: goal.goalId,
+            revision: goal.revision,
+            turnId: 'goal-s3-term-next',
+          },
+          continuationContext: 'continue after the teammate handoff',
+        });
+        return { responseParts: [{ text: 'tool response' }] };
+      }
+      // The teammate turn's own tool ends the turn via terminateTurn.
+      return {
+        responseParts: [{ text: 'proposal recorded' }],
+        terminateTurn: true,
+      };
+    });
+
+    let requestCount = 0;
+    mockLlmClient.sendMessageStream.mockImplementation(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: { goalPermit?: GoalTurnPermit },
+      ) => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'goal-s3-term-tool',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-s3-term',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]);
+        }
+        if (requestCount === 2) {
+          return createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'teammate-s3-update-goal',
+                name: 'update_goal',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-s3-term/teammate/2',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]);
+        }
+        return createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+          },
+        ]);
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-s3-term',
+    );
+
+    const calls = mockLlmClient.sendMessageStream.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    const [, , secondPromptId, secondOptions] = calls[1]!;
+    const [, , thirdPromptId, thirdOptions] = calls[2]!;
+    expect(secondPromptId).toBe('goal-s3-term/teammate/2');
+    expect(secondOptions).toMatchObject({ type: SendMessageType.Teammate });
+    // The terminateTurn queued-goal branch must clear the teammate flag, so the
+    // follow-up Goal run restores the base id rather than inheriting the
+    // teammate turn's registered id.
+    expect(thirdPromptId).toBe('goal-s3-term');
+    expect(thirdOptions).toMatchObject({ type: SendMessageType.Goal });
+  });
+
+  it('restores the base id for a queued Goal after a teammate turn ends via tool_ended_turn (S3)', async () => {
+    useSharedLoopWithModToolHooks();
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+
+    let leaderMessageCallback: ((formatted: string) => void) | null = null;
+    const teamEvents = new EventEmitter();
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: ((formatted: string) => void) | null) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+
+    let host: Parameters<typeof goalRuntime.bindHost>[0] | undefined;
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((bound) => {
+      host = bound;
+      return goalRuntime.bindHost(bound);
+    });
+
+    let toolExecCount = 0;
+    mockCoreExecuteToolCall.mockImplementation(async () => {
+      toolExecCount += 1;
+      if (toolExecCount === 1) {
+        leaderMessageCallback?.('Teammate finished the delegated task.');
+        const goal = goalRuntime.getSnapshot().goal!;
+        await host!.startGoalTurn({
+          permit: {
+            goalId: goal.goalId,
+            revision: goal.revision,
+            turnId: 'goal-s3-shared-next',
+          },
+          continuationContext: 'continue after the teammate handoff',
+        });
+        return { responseParts: [{ text: 'tool response' }] };
+      }
+      return {
+        responseParts: [{ text: 'proposal recorded' }],
+        terminateTurn: true,
+      };
+    });
+
+    let requestCount = 0;
+    mockLlmClient.sendMessageStream.mockImplementation(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: { goalPermit?: GoalTurnPermit },
+      ) => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'goal-s3-shared-tool',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-s3-shared',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]);
+        }
+        if (requestCount === 2) {
+          return createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'teammate-s3-shared-update-goal',
+                name: 'update_goal',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-s3-shared/teammate/2',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]);
+        }
+        return createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+          },
+        ]);
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-s3-shared',
+    );
+
+    const calls = mockLlmClient.sendMessageStream.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    const [, , secondPromptId, secondOptions] = calls[1]!;
+    const [, , thirdPromptId, thirdOptions] = calls[2]!;
+    expect(secondPromptId).toBe('goal-s3-shared/teammate/2');
+    expect(secondOptions).toMatchObject({ type: SendMessageType.Teammate });
+    // The shared loop's tool_ended_turn queued-goal branch must clear the
+    // teammate flag, so the follow-up Goal run restores the base id rather than
+    // inheriting the teammate turn's registered id.
+    expect(thirdPromptId).toBe('goal-s3-shared');
+    expect(thirdOptions).toMatchObject({ type: SendMessageType.Goal });
+  });
+
+  it('keeps the base id for a Goal first segment coinciding with a teammate batch (R14)', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+
+    let leaderMessageCallback: ((formatted: string) => void) | null = null;
+    const teamEvents = new EventEmitter();
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: ((formatted: string) => void) | null) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+
+    let host: Parameters<typeof goalRuntime.bindHost>[0] | undefined;
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((bound) => {
+      host = bound;
+      return goalRuntime.bindHost(bound);
+    });
+
+    let toolExecCount = 0;
+    mockCoreExecuteToolCall.mockImplementation(async () => {
+      toolExecCount += 1;
+      if (toolExecCount === 1) {
+        leaderMessageCallback?.('Teammate finished the delegated task.');
+        const goal = goalRuntime.getSnapshot().goal!;
+        await host!.startGoalTurn({
+          permit: {
+            goalId: goal.goalId,
+            revision: goal.revision,
+            turnId: 'goal-r14-next',
+          },
+          continuationContext: 'continue after the teammate handoff',
+        });
+        return { responseParts: [{ text: 'tool response' }] };
+      }
+      // The teammate turn's tool raises ANOTHER teammate message (left pending
+      // for the next Goal first segment) and ends the turn via terminateTurn.
+      leaderMessageCallback?.('Another teammate result.');
+      return {
+        responseParts: [{ text: 'proposal recorded' }],
+        terminateTurn: true,
+      };
+    });
+
+    let requestCount = 0;
+    mockLlmClient.sendMessageStream.mockImplementation(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: { goalPermit?: GoalTurnPermit },
+      ) => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'goal-r14-tool',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-r14',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]);
+        }
+        if (requestCount === 2) {
+          return createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'teammate-r14-update-goal',
+                name: 'update_goal',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-r14/teammate/2',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]);
+        }
+        return createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+          },
+        ]);
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-r14',
+    );
+
+    const calls = mockLlmClient.sendMessageStream.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    const [, , secondPromptId, secondOptions] = calls[1]!;
+    const [, , thirdPromptId, thirdOptions] = calls[2]!;
+    expect(secondPromptId).toBe('goal-r14/teammate/2');
+    expect(secondOptions).toMatchObject({ type: SendMessageType.Teammate });
+    // The next Goal first segment coincides with the pending teammate batch:
+    // it is a Goal send (not a Teammate send), so it keeps the base id rather
+    // than wearing the teammate id and rotating the ledger key mid-turn.
+    expect(thirdPromptId).toBe('goal-r14');
+    expect(thirdOptions).toMatchObject({ type: SendMessageType.Goal });
+  });
+
   it('ends a Goal turn without another model call after update_goal', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
@@ -2926,10 +3602,8 @@ describe('runNonInteractive', () => {
 
   it('registers and clears the stream-json workflow approval channel', async () => {
     setupMetricsMock();
-    const setApprovalRequestCallback = vi.fn();
-    mockConfig.getWorkflowRunRegistry = vi.fn().mockReturnValue({
-      setApprovalRequestCallback,
-    });
+    const setApprovalRequestCallback =
+      mockWorkflowRunRegistry.setApprovalRequestCallback;
     const handleWorkflowApproval = vi.fn().mockResolvedValue(undefined);
     const controlService = {
       permission: { handleWorkflowApproval },
@@ -2975,10 +3649,8 @@ describe('runNonInteractive', () => {
 
   it('does not register a workflow approval channel in plain headless mode', async () => {
     setupMetricsMock();
-    const setApprovalRequestCallback = vi.fn();
-    mockConfig.getWorkflowRunRegistry = vi.fn().mockReturnValue({
-      setApprovalRequestCallback,
-    });
+    const setApprovalRequestCallback =
+      mockWorkflowRunRegistry.setApprovalRequestCallback;
     mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
         {
@@ -2995,6 +3667,210 @@ describe('runNonInteractive', () => {
 
     expect(setApprovalRequestCallback).not.toHaveBeenCalled();
   });
+
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((settle) => {
+      resolve = settle;
+    });
+    return { promise, resolve };
+  }
+
+  it('waits for a failed workflow to finish persisting before notifying the model', async () => {
+    setupMetricsMock();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const onResultEmitted = vi.fn();
+    const { promise: completion, resolve: finishPersisting } = deferred();
+    mockWorkflowRunRegistry.hasRunningEntries.mockReturnValue(true);
+    mockWorkflowRunRegistry.getHandle.mockReturnValue({
+      runId: 'wf_bg',
+      completion,
+    });
+    mockLlmClient.sendMessageStream
+      .mockImplementationOnce(async function* () {
+        const notify = mockWorkflowRunRegistry.setCompletionCallback.mock
+          .calls[0]?.[0] as WorkflowRunCompletionCallback | undefined;
+        expect(notify).toBeTypeOf('function');
+        setTimeout(() => {
+          notify?.(
+            'Background workflow "review" failed.',
+            '<task-notification>workflow failed</task-notification>',
+            { runId: 'wf_bg', status: 'failed' },
+          );
+          mockWorkflowRunRegistry.hasRunningEntries.mockReturnValue(false);
+          mockWorkflowRunRegistry.list.mockReturnValue([
+            { runId: 'wf_bg', status: 'failed' },
+          ]);
+        }, 150);
+        yield { type: LlmEventType.Content, value: 'Started it.' };
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        };
+      })
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'It finished.' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 0 },
+            },
+          },
+        ]),
+      );
+
+    try {
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'run it',
+        'p-wf-bg',
+        { onResultEmitted },
+      );
+      await vi.advanceTimersByTimeAsync(400);
+      const turnsBeforePersistence =
+        mockLlmClient.sendMessageStream.mock.calls.length;
+      const resultsBeforePersistence = onResultEmitted.mock.calls.length;
+      finishPersisting();
+      mockWorkflowRunRegistry.getHandle.mockReturnValue(undefined);
+      await vi.advanceTimersByTimeAsync(100);
+      await run;
+      expect(turnsBeforePersistence).toBe(1);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(resultsBeforePersistence).toBe(0);
+      expect(onResultEmitted).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(
+      JSON.stringify(mockLlmClient.sendMessageStream.mock.calls[1]?.[0]),
+    ).toContain('workflow failed');
+    expect(
+      mockWorkflowRunRegistry.setCompletionCallback,
+    ).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it.each([
+    { reason: 'interrupt', exitCode: 130 },
+    { reason: 'turn limit', exitCode: 53 },
+    { reason: 'provider error', exitCode: 1 },
+  ])(
+    'lets a cancelled workflow record its end before exit on $reason',
+    async ({ reason, exitCode }) => {
+      setupMetricsMock();
+      const order: string[] = [];
+      const { promise: completion, resolve: settle } = deferred();
+      mockWorkflowRunRegistry.list.mockReturnValue([{ runId: 'wf_bg' }]);
+      mockWorkflowRunRegistry.getHandle.mockReturnValue({ completion });
+      mockWorkflowRunRegistry.abortAll.mockImplementation(() => {
+        order.push('aborted');
+        setTimeout(() => {
+          order.push('settled');
+          settle();
+        }, 20);
+      });
+      vi.mocked(process.exit).mockImplementation((code) => {
+        order.push('exit');
+        throw new Error(`process.exit(${code}) called`);
+      });
+      const controller = new AbortController();
+      if (reason === 'turn limit') {
+        vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(0);
+      }
+      if (reason === 'provider error') {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.JSON,
+        );
+      }
+      mockLlmClient.sendMessageStream.mockImplementation(async function* () {
+        yield { type: LlmEventType.Content, value: 'Started it.' };
+        if (reason === 'provider error') {
+          yield {
+            type: LlmEventType.Error,
+            value: { error: { message: 'Provider failure', status: 500 } },
+          };
+          return;
+        }
+        controller.abort();
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        };
+      });
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'run it', 'p-wf-int', {
+          abortController: controller,
+        }),
+      ).rejects.toThrow(`process.exit(${exitCode}) called`);
+
+      expect(order.slice(0, 3)).toEqual(['aborted', 'settled', 'exit']);
+    },
+  );
+
+  it.each([
+    { kind: 'recoverable', recoverable: true },
+    { kind: 'terminal', recoverable: false },
+  ])(
+    'classifies a $kind interrupt during the workflow wait before cancelling',
+    async ({ recoverable }) => {
+      setupMetricsMock();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const controller = new AbortController();
+      const { promise: waiting, resolve: enterHoldback } = deferred();
+      mockWorkflowRunRegistry.hasRunningEntries.mockImplementation(() => {
+        enterHoldback();
+        return true;
+      });
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf_bg', status: 'running' },
+      ]);
+      mockWorkflowRunRegistry.getHandle.mockReturnValue({
+        completion: new Promise<never>(() => {}),
+      });
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+          },
+        ]),
+      );
+
+      try {
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'run it',
+          'p-wf-wait',
+          {
+            abortController: controller,
+            recoverableCancellation: recoverable,
+          },
+        ).catch((error: unknown) => error);
+        await waiting;
+        controller.abort(recoverable ? new TurnInterruptedError() : undefined);
+        await vi.advanceTimersByTimeAsync(2_100);
+        const exitedWithinOneWindow = vi.mocked(process.exit).mock.calls.length;
+        await vi.advanceTimersByTimeAsync(2_000);
+
+        if (recoverable) {
+          expect(await run).toBe(130);
+          expect(process.exit).not.toHaveBeenCalled();
+          expect(mockWorkflowRunRegistry.abortAll).not.toHaveBeenCalled();
+        } else {
+          expect(await run).toEqual(new Error('process.exit(130) called'));
+          expect(exitedWithinOneWindow).toBe(1);
+          expect(mockWorkflowRunRegistry.abortAll).toHaveBeenCalledOnce();
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('prepends the recovered background agents notice on a resumed headless prompt', async () => {
     setupMetricsMock();
@@ -4175,6 +5051,77 @@ describe('runNonInteractive', () => {
       );
       // Verify getPendingMemoryTaskPromises is called at the end of the session.
       expect(mockLlmClient.getPendingMemoryTaskPromises).toHaveBeenCalled();
+    },
+  );
+
+  it.each(bothLoops)(
+    'records the result of a tool call the run cancelled ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const recordToolResult = vi.fn();
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
+      const controller = new AbortController();
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, request: { callId: string; name: string }) => {
+          controller.abort();
+          const error = new Error('Tool call cancelled by user.');
+          return {
+            callId: request.callId,
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: request.name,
+                  response: { error: error.message },
+                },
+              },
+            ],
+            resultDisplay: error.message,
+            error,
+            errorType: ToolErrorType.EXECUTION_FAILED,
+            executionStatus: 'cancelled',
+          };
+        },
+      );
+      const request = (callId: string): ServerLlmStreamEvent => ({
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-cancel',
+        },
+      });
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([request('cancelled-1')]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use a tool',
+        'prompt-cancel',
+        { abortController: controller },
+      ).catch(() => undefined);
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+      expect(
+        recordToolResult.mock.calls.map((call) => call[1]?.callId),
+      ).toEqual(['cancelled-1']);
     },
   );
 
@@ -8247,6 +9194,78 @@ describe('runNonInteractive', () => {
       expect(close).toHaveBeenCalled();
     },
   );
+
+  describe('event-bus agent loop opt-in', () => {
+    const answerStream = () =>
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'Answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]);
+
+    it.each([false, true])(
+      'runs the shared loop on the bus only when the flag is on (bus=%s)',
+      async (bus) => {
+        setupMetricsMock();
+        Object.assign(mockConfig, {
+          isUnifiedAgentLoopEnabled: vi.fn(() => true),
+          isEventBusAgentLoopEnabled: vi.fn(() => bus),
+        });
+        // Execution marker: the bus path publishes loop events, the
+        // procedural shared loop never touches the bus.
+        const publishSpy = vi.spyOn(LoopEventBus.prototype, 'publish');
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(answerStream());
+
+        await expect(
+          runNonInteractive(mockConfig, mockSettings, 'Hello', 'prompt-bus'),
+        ).resolves.toBe(0);
+
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+        // Headless must resolve both switches for the 'headless' surface.
+        expect(
+          (
+            mockConfig as unknown as {
+              isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+            }
+          ).isUnifiedAgentLoopEnabled,
+        ).toHaveBeenCalledWith('headless');
+        expect(
+          (
+            mockConfig as unknown as {
+              isEventBusAgentLoopEnabled: ReturnType<typeof vi.fn>;
+            }
+          ).isEventBusAgentLoopEnabled,
+        ).toHaveBeenCalledWith('headless');
+        if (bus) {
+          expect(publishSpy).toHaveBeenCalled();
+        } else {
+          expect(publishSpy).not.toHaveBeenCalled();
+        }
+        const stdout = processStdoutSpy.mock.calls
+          .map(([chunk]) => String(chunk))
+          .join('');
+        expect(stdout).toContain('Answer');
+      },
+    );
+
+    it('leaves the legacy loop untouched when only the bus flag is on', async () => {
+      setupMetricsMock();
+      Object.assign(mockConfig, {
+        isUnifiedAgentLoopEnabled: () => false,
+        isEventBusAgentLoopEnabled: () => true,
+      });
+      const publishSpy = vi.spyOn(LoopEventBus.prototype, 'publish');
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(answerStream());
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'Hello', 'prompt-bus-only'),
+      ).resolves.toBe(0);
+
+      expect(publishSpy).not.toHaveBeenCalled();
+    });
+  });
 
   describe.each([false, true])('Mod turns (shared loop: %s)', (shared) => {
     beforeEach(() => {

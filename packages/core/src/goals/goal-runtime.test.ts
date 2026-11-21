@@ -8,7 +8,6 @@ import { describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import { type GoalRecoveryRecord } from './goal-persistence.js';
 import {
-  GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_NO_PROGRESS_TURN_LIMIT,
   GOAL_PAUSE_REASON_NO_PROGRESS,
@@ -989,7 +988,7 @@ describe('goal runtime', () => {
     );
   });
 
-  it('accepts an evidenced infeasible blocker on its first turn, with the next step spelled out', async () => {
+  it('accepts an evidenced infeasible blocker on its first turn, keeping the reason as the verifier wrote it', async () => {
     const { journal, host, runtime, verifier, receipt } = await verifiedTurn({
       verifier: accepting('The named branch does not exist'),
       objective: 'Rebase onto the v9 branch',
@@ -1019,7 +1018,30 @@ describe('goal runtime', () => {
     expectCauses(journal, 'create turn_finished verifier_accept blocked');
     expectState(runtime, 'idle', {
       status: 'blocked',
-      lastReason: `The named branch does not exist ${GOAL_INFEASIBLE_NEXT_STEP}`,
+      lastReason: 'The named branch does not exist',
+    });
+    expect(host.started).toHaveLength(1);
+  });
+
+  it('keeps a non-English infeasible reason in one language, with no English suffix', async () => {
+    const { host, runtime, receipt } = await verifiedTurn({
+      verifier: accepting('Заданной ветки не существует'),
+      objective: 'Rebase onto the v9 branch',
+      evidence: (p, cursorId) => {
+        const [cursor, probe] = verifierEvidenceRecords(p, cursorId, 'probe');
+        return [cursor!, asToolResult(probe!, "fatal: branch 'v9' not found")];
+      },
+      proposal: blocked(
+        'Checked the remote: no v9 branch exists, so nothing in scope can rebase onto it.',
+        'infeasible',
+        ['probe'],
+      ),
+    });
+
+    expect(receipt).toEqual({ recorded: true, readyForVerification: true });
+    expectState(runtime, 'idle', {
+      status: 'blocked',
+      lastReason: 'Заданной ветки не существует',
     });
     expect(host.started).toHaveLength(1);
   });
@@ -3103,20 +3125,25 @@ describe('goal runtime', () => {
       });
     });
 
-    it('restarts the streak on a turn that records a tool result', async () => {
-      const { host, runtime, toolResults, goal } = await noProgressGoal();
+    it.each([false, true])(
+      'restarts the streak on a turn that records a tool result (Send now: %s)',
+      async (interruptedForUserInput) => {
+        const { host, runtime, toolResults, goal } = await noProgressGoal();
 
-      await finishDelivered(runtime, host.started[0]!);
-      expect(goal()?.noProgressTurns).toBe(1);
+        await finishDelivered(runtime, host.started[0]!);
+        expect(goal()?.noProgressTurns).toBe(1);
 
-      toolResults.set(host.started[1]!.turnId, 1);
-      await finishDelivered(runtime, host.started[1]!);
-      expect(goal()?.noProgressTurns).toBeUndefined();
+        const turn = host.started[1]!;
+        toolResults.set(turn.turnId, 1);
+        runtime.markTurnDelivered(turnKey(turn));
+        await runtime.finishTurn(turn, { interruptedForUserInput });
+        expect(goal()?.noProgressTurns).toBeUndefined();
 
-      await finishDelivered(runtime, host.started[2]!);
-      await finishDelivered(runtime, host.started[3]!);
-      expect(goal()).toMatchObject({ status: 'active', noProgressTurns: 2 });
-    });
+        await finishDelivered(runtime, host.started[2]!);
+        await finishDelivered(runtime, host.started[3]!);
+        expect(goal()).toMatchObject({ status: 'active', noProgressTurns: 2 });
+      },
+    );
 
     it('restarts the streak on a turn that proposes a terminal state', async () => {
       const { host, runtime, goal } = await noProgressGoal();
@@ -3216,6 +3243,24 @@ describe('goal runtime', () => {
         status: 'paused',
         noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT,
         lastReason: GOAL_PAUSE_REASON_NO_PROGRESS,
+      });
+    });
+
+    it('keeps a Goal active after Send now while counting the interrupted turn', async () => {
+      const { host, runtime, spend, goal } = await noProgressGoal({
+        restore: [restoredStreak(2, GOAL_NO_PROGRESS_TURN_LIMIT - 1)],
+      });
+      await vi.waitFor(() => expect(host.started).toHaveLength(1));
+      const interrupted = host.started[0]!;
+      spend.set(interrupted.turnId, 42);
+      runtime.markTurnDelivered(turnKey(interrupted));
+      await runtime.finishTurn(interrupted, { interruptedForUserInput: true });
+
+      expect(goal()).toMatchObject({
+        status: 'active',
+        noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT - 1,
+        turnCount: 3,
+        tokensUsed: 42,
       });
     });
 

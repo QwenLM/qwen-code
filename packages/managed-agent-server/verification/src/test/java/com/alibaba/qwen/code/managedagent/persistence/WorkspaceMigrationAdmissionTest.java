@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -42,8 +42,8 @@ class WorkspaceMigrationAdmissionTest {
             WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, TENANT, STORAGE);
             WorkspaceMigrationAdmission.requirePhysicalOpenForAdmission(jdbc, TENANT, STORAGE);
         });
-        jdbc.update("UPDATE ma_storage_owner SET physical_key = ? WHERE storage_key = ?",
-                "b".repeat(64), PHYSICAL);
+        jdbc.update("UPDATE ma_storage SET physical_key = ? WHERE alias_key = ?",
+                "b".repeat(64), alias());
         assertPhysicalBlocked();
     }
 
@@ -114,17 +114,16 @@ class WorkspaceMigrationAdmissionTest {
     }
 
     private void storage(String kind) {
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id,"
                         + " physical_key, storage_kind, registration_state, registration_revision, registration_json)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, 'REGISTERED', 1, '{}')",
-                alias(), JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                JdbcRuntimeBindingRepository.storageFenceKey(STORAGE), TENANT, STORAGE, PHYSICAL, kind);
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, tenant_id, storage_id,"
-                        + " storage_kind, mount_state) VALUES (?, ?, ?, ?, ?, 'READY')",
-                PHYSICAL, PHYSICAL, TENANT, STORAGE, kind);
+                        + " VALUES (?, ?, ?, ?, ?, 'REGISTERED', 1, '{}')",
+                alias(), TENANT, STORAGE, PHYSICAL, kind);
+        jdbc.update("INSERT INTO ma_storage_owner (storage_key, tenant_id, storage_id,"
+                        + " storage_kind, mount_state) VALUES (?, ?, ?, ?, 'READY')",
+                PHYSICAL, TENANT, STORAGE, kind);
     }
 
     private static String alias() {
-        return JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE);
+        return RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE);
     }
 }

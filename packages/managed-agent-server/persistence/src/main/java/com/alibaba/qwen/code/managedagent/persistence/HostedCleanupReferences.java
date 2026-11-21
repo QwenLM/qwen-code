@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.dao.DuplicateKeyException;
@@ -29,18 +31,18 @@ final class HostedCleanupReferences {
      */
     static boolean containsCleanup(byte[] recordBytes) {
         return Arrays.stream(new String(recordBytes, StandardCharsets.UTF_8).split("\n"))
-                .map(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore::parse)
+                .map(ManagedExtensionRecordStore::parse)
                 .filter(Objects::nonNull)
                 .anyMatch(record -> "hosted.cleanup".equals(record.path("managedSession").path("kind").asText()));
     }
 
     static void apply(JdbcTemplate jdbc, String tenant, String workspace, String session,
             JsonNode payload, Function<String, StoredResource> resources, long revision, long now) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String owner = ManagedSchemaKeys.key("hosted-cleanup", payload.path("cleanupId").textValue());
         String resourceId = payload.path("descriptorRef").path("resourceId").textValue();
         StoredResource resource = resources.apply(resourceId);
-        JsonNode descriptor = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
+        JsonNode descriptor = ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
         if (descriptor == null) {
             throw new IllegalStateException("Validated cleanup descriptor is unreadable");
         }
@@ -61,7 +63,7 @@ final class HostedCleanupReferences {
                         "Cleanup Runtime binding is missing or differs from its original descriptor");
             }
         }
-        String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, resourceId);
+        String key = ManagedSessionStore.resourceKey(scope, resourceId);
         // Only this Session's commits insert its cleanup references, and they
         // queue on its Session row before their first read, so a plain probe
         // sees every earlier one. Retirement deletes them only under the head
@@ -69,31 +71,32 @@ final class HostedCleanupReferences {
         // lock. A locking probe of a missing owner would gap-lock the index
         // other Sessions' commits insert into (design
         // 2026-11-03-managed-journal-commit-tenant-guard).
-        var previous = references(jdbc, scope, owner, false);
+        var previous = references(jdbc, tenant, session, owner, false);
         if (!previous.isEmpty()) {
-            previous = references(jdbc, scope, owner, true);
+            previous = references(jdbc, tenant, session, owner, true);
         }
         requireSameIdentity(previous, key, binding, generation);
         if ("confirmed".equals(payload.path("state").textValue())) {
-            jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
+            jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
                     + " AND owner_kind = 'HOSTED_CLEANUP' AND owner_key = ? AND owner_revision = ?"
-                    + " AND resource_key = ? AND runtime_binding_key = ?", scope, owner, generation, key, binding);
+                    + " AND resource_key = ? AND runtime_binding_key = ?", tenant, session, owner, generation, key, binding);
         } else if (previous.isEmpty()) {
             try {
-                jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
+                jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision,"
                         + " resource_key, tenant_id, workspace_id, session_id, journal_revision, resource_id,"
-                        + " gmt_create, runtime_binding_key) VALUES (?, 'HOSTED_CLEANUP', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        scope, owner, generation, key, tenant, workspace, session, revision, resourceId, now, binding);
+                        + " gmt_create, runtime_binding_key) VALUES ('HOSTED_CLEANUP', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        owner, generation, key, tenant, workspace, session, revision, resourceId, now, binding);
             } catch (DuplicateKeyException race) {
-                requireSameIdentity(references(jdbc, scope, owner, true), key, binding, generation);
+                requireSameIdentity(references(jdbc, tenant, session, owner, true), key, binding, generation);
             }
         }
     }
 
-    private static List<Map<String, Object>> references(JdbcTemplate jdbc, String scope, String owner, boolean lock) {
+    private static List<Map<String, Object>> references(JdbcTemplate jdbc, String tenant, String session, String owner,
+            boolean lock) {
         return jdbc.queryForList("SELECT resource_key, runtime_binding_key, owner_revision"
-                + " FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'HOSTED_CLEANUP'"
-                + " AND owner_key = ?" + (lock ? " FOR UPDATE" : ""), scope, owner);
+                + " FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'HOSTED_CLEANUP'"
+                + " AND owner_key = ?" + (lock ? " FOR UPDATE" : ""), tenant, session, owner);
     }
 
     private static void requireSameIdentity(List<Map<String, Object>> rows, String key, String binding,

@@ -38,7 +38,9 @@ import {
   HostedHookInputConflictError,
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
+  hostedConfigScopedOwnerId,
   hostedHookOccurrenceId,
+  isHostedConfigScopedOwner,
   semanticInputDigest,
   type HostedToolInputOrder,
 } from './hosted-hook-session.js';
@@ -315,6 +317,33 @@ it.each([HookEventName.SessionEnd, HookEventName.SessionDelete])(
     expect(hooks.hasPendingOperations).toBe(false);
   },
 );
+
+it('recognises every owner id its own builder produces (R1-6)', () => {
+  // The producers and the predicate must agree: a renamed prefix or a
+  // different hashed tuple at any construction site would otherwise leave
+  // the predicate compiling and returning false, handing every detach the
+  // terminal arm and bringing the R13-1 tombstone back with the suite green.
+  const sessionKey = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    sessionId: 'session',
+  };
+  for (const revision of [1, 2, 17])
+    expect(
+      isHostedConfigScopedOwner(
+        hostedConfigScopedOwnerId(sessionKey, revision),
+      ),
+    ).toBe(true);
+  // The round trip above moves builder and predicate together, so it cannot
+  // see a reordered tuple or a renamed prefix — while every id already
+  // persisted under the old derivation stops matching what a reload
+  // computes. One literal pins the derivation itself (R3-3).
+  expect(hostedConfigScopedOwnerId(sessionKey, 1)).toBe(
+    'extensions-components-ce4d6156e1132eef477c4c5a8cb8f1813945abdfe281612862d3575d8efc2de4',
+  );
+  expect(isHostedConfigScopedOwner('hooks-activation-1')).toBe(false);
+  expect(isHostedConfigScopedOwner('turn-ordinary')).toBe(false);
+});
 
 it('keeps a lifecycle Hook intent retryable when its original owner cannot be restored', async () => {
   let lifecycle = false;
@@ -4183,4 +4212,33 @@ it('keeps a shared Hook+MCP deterministic owner re-acquirable on a non-terminal 
     owner,
   );
   await reloaded.acquire();
+});
+
+it.each([
+  ['hands the mount back when it owns its broker', true],
+  ['leaves a mount shared with MCP alone', false],
+])('on a non-terminal close %s', async (_name, ownsBroker) => {
+  const owner = `extensions-components-${'b'.repeat(64)}`;
+  const shared = new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    owner,
+  );
+  const closing = new HostedHookSession(
+    options,
+    session,
+    pin,
+    ownsBroker ? undefined : shared,
+    () => false,
+    owner,
+  );
+  await closing.acquire();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'close-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  await closing.close({ terminal: false });
+  expect(releaseMount).toHaveBeenCalledTimes(ownsBroker ? 1 : 0);
 });

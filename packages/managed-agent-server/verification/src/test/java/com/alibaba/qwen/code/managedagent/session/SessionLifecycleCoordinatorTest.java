@@ -14,11 +14,15 @@ import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.workspace.ChildLifecycleAdmissions;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -64,19 +68,19 @@ class SessionLifecycleCoordinatorTest {
         Mockito.when(store.hasMcpServers(session)).thenReturn(mcp);
         var operation = new StoreModels.OperationRecord("tenant", "session", "operation", OperationKind.DELETE,
                 "digest", "DELIVERING", "ACCEPTED", "DRAINING", "ACTIVE", "receipt", "server", 1, 1, null, 2);
-        var lifecycle = Mockito.mock(com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class);
+        var lifecycle = Mockito.mock(JdbcWorkspaceLifecycleStore.class);
         Mockito.when(lifecycle.recoverEffects(operation)).thenReturn(new ObjectMapper().createObjectNode().put("neverInitialized", false));
         var harness = Mockito.mock(HarnessConnector.class);
         var warmer = Mockito.mock(RuntimeWarmer.class);
         Mockito.when(warmer.supportsWorkspaceClose(session.workspace())).thenReturn(true);
-        var authority = com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation);
+        var authority = WorkspaceLifecycleStore.authority(operation);
         Mockito.when(warmer.prepareWorkspaceResources("tenant", "session", authority)).thenReturn(CompletableFuture.completedFuture(null));
         Mockito.when(warmer.drainWorkspaceResources("tenant", "session", authority)).thenReturn(CompletableFuture.completedFuture(null));
         Mockito.when(warmer.closeWorkspace("tenant", "session")).thenReturn(CompletableFuture.completedFuture(null));
-        var relay = Mockito.mock(ChildResultRelayStore.class);
+        var relay = Mockito.mock(JdbcChildResultRelayStore.class);
         Mockito.when(relay.findLiveScopes("tenant", "session")).thenReturn(List.of());
         try (var executor = Executors.newSingleThreadExecutor()) {
-            var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(ManagedSessionStore.class), harness, warmer,
+            var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(JdbcManagedSessionStore.class), harness, warmer,
                     relay, new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor, Clock.systemUTC(), new ManagedAgentProperties());
             coordinator.setWorkspaceLifecycleStore(lifecycle);
             try {
@@ -103,6 +107,69 @@ class SessionLifecycleCoordinatorTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void detachTearsDownTheClientFilesBindingOnlyPastTheLiveWriterGate(boolean liveWriter) throws Exception {
+        var store = Mockito.mock(AgentStateStore.class);
+        var session = Mockito.mock(StoreModels.SessionRecord.class);
+        Mockito.when(session.workspace()).thenReturn(
+                Mockito.mock(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding.class));
+        Mockito.when(session.toolProfile()).thenReturn("hosted-workspace-shell/1");
+        Mockito.when(store.requireSession("tenant", "session")).thenReturn(session);
+        Mockito.when(store.hasMcpServers(session)).thenReturn(false);
+        var operation = new StoreModels.OperationRecord("tenant", "session", "operation", OperationKind.DELETE,
+                "digest", "DELIVERING", "ACCEPTED", "DRAINING", "ACTIVE", "receipt", "server", 1, 1, null, 2);
+        var lifecycle = Mockito.mock(JdbcWorkspaceLifecycleStore.class);
+        Mockito.when(lifecycle.recoverEffects(operation)).thenReturn(
+                new ObjectMapper().createObjectNode().put("neverInitialized", false));
+        var harness = Mockito.mock(HarnessConnector.class);
+        var warmer = Mockito.mock(RuntimeWarmer.class);
+        Mockito.when(warmer.supportsWorkspaceClose(session.workspace())).thenReturn(true);
+        var authority = WorkspaceLifecycleStore.authority(operation);
+        Mockito.when(warmer.prepareWorkspaceResources("tenant", "session", authority))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        Mockito.when(warmer.drainWorkspaceResources("tenant", "session", authority))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        Mockito.when(warmer.closeWorkspace("tenant", "session")).thenReturn(CompletableFuture.completedFuture(null));
+        var relay = Mockito.mock(JdbcChildResultRelayStore.class);
+        Mockito.when(relay.findLiveScopes("tenant", "session")).thenReturn(List.of());
+        var sessionStore = Mockito.mock(JdbcManagedSessionStore.class);
+        Mockito.when(sessionStore.hasLiveWriter("tenant", "session")).thenReturn(liveWriter);
+        var clientFiles = Mockito.mock(ClientFilesRelayService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<ClientFilesRelayService> clientFilesProvider = Mockito.mock(ObjectProvider.class);
+        Mockito.doAnswer(invocation -> {
+            invocation.getArgument(0, java.util.function.Consumer.class).accept(clientFiles);
+            return null;
+        }).when(clientFilesProvider).ifAvailable(Mockito.any());
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(store, sessionStore, harness, warmer,
+                    relay, new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null),
+                    executor, Clock.systemUTC(), new ManagedAgentProperties());
+            coordinator.setWorkspaceLifecycleStore(lifecycle);
+            coordinator.setClientFilesRelay(clientFilesProvider);
+            var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle",
+                    StoreModels.OperationRecord.class, AtomicBoolean.class);
+            settle.setAccessible(true);
+            try {
+                if (liveWriter) {
+                    // A live writer means the detach is refused: the binding must
+                    // not be torn down (it is still serving a live client).
+                    org.junit.jupiter.api.Assertions.assertThrows(
+                            java.lang.reflect.InvocationTargetException.class,
+                            () -> settle.invoke(coordinator, operation, new AtomicBoolean()));
+                    Mockito.verify(clientFiles, Mockito.never())
+                            .closeForSession(Mockito.anyString(), Mockito.anyString());
+                } else {
+                    assertThat(settle.invoke(coordinator, operation, new AtomicBoolean())).isEqualTo(true);
+                    Mockito.verify(clientFiles).closeForSession("tenant", "session");
+                }
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({
         "hosted-workspace-mcp/1,workspace_close_identity_unverified,true",
         "hosted-workspace-shell/1,workspace_close_identity_unverified,false",
@@ -117,7 +184,7 @@ class SessionLifecycleCoordinatorTest {
         Mockito.when(session.workspace()).thenReturn(Mockito.mock(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding.class));
         Mockito.when(session.toolProfile()).thenReturn(profile);
         Mockito.when(store.requireSession("tenant", "session")).thenReturn(session);
-        var lifecycle = Mockito.mock(com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class);
+        var lifecycle = Mockito.mock(JdbcWorkspaceLifecycleStore.class);
         var operation = new StoreModels.OperationRecord("tenant", "session", "operation", OperationKind.DELETE,
                 "digest", "DELIVERING", "ACCEPTED", "DRAINING", "ACTIVE", "receipt", "server", 1, 1, null, 2);
         Mockito.when(lifecycle.recoverEffects(operation)).thenReturn(new ObjectMapper().createObjectNode().put("neverInitialized", false));
@@ -128,13 +195,13 @@ class SessionLifecycleCoordinatorTest {
         var warmer = Mockito.mock(RuntimeWarmer.class);
         Mockito.when(warmer.supportsWorkspaceClose()).thenReturn(true);
         Mockito.when(warmer.supportsWorkspaceClose(session.workspace())).thenReturn(true);
-        var authority = com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation);
+        var authority = WorkspaceLifecycleStore.authority(operation);
         Mockito.when(warmer.recoverStoppedWorkspaceResources("tenant", "session", authority)).thenReturn(CompletableFuture.completedFuture(null));
         Mockito.when(warmer.closeWorkspace("tenant", "session")).thenReturn(CompletableFuture.completedFuture(null));
-        var relay = Mockito.mock(ChildResultRelayStore.class);
+        var relay = Mockito.mock(JdbcChildResultRelayStore.class);
         Mockito.when(relay.findLiveScopes("tenant", "session")).thenReturn(List.of());
         try (var executor = Executors.newSingleThreadExecutor()) {
-            var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(ManagedSessionStore.class), harness, warmer,
+            var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(JdbcManagedSessionStore.class), harness, warmer,
                     relay, new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor, Clock.systemUTC(), new ManagedAgentProperties());
             coordinator.setWorkspaceLifecycleStore(lifecycle);
             var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle", StoreModels.OperationRecord.class,
@@ -178,14 +245,14 @@ class SessionLifecycleCoordinatorTest {
         Mockito.when(warmer.closeWorkspace("tenant", "session")).thenReturn(CompletableFuture.completedFuture(null));
         var operation = new StoreModels.OperationRecord("tenant", "session", "operation", OperationKind.CLOSE,
                 "digest", "DELIVERING", "ACCEPTED", "DRAINING", "ACTIVE", "receipt", "server", 1, 1, null, protocol);
-        var lifecycle = Mockito.mock(com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class);
+        var lifecycle = Mockito.mock(JdbcWorkspaceLifecycleStore.class);
         Mockito.when(lifecycle.recoverEffects(operation)).thenReturn(new ObjectMapper().createObjectNode().put("neverInitialized", true));
-        var relay = Mockito.mock(ChildResultRelayStore.class);
+        var relay = Mockito.mock(JdbcChildResultRelayStore.class);
         Mockito.when(relay.findLiveScopes("tenant", "session")).thenReturn(List.of());
         var harness = Mockito.mock(HarnessConnector.class);
         Mockito.when(harness.supportsLifecycle(WorkspaceExecutionProfile.PROFILE)).thenReturn(true);
         try (var executor = Executors.newSingleThreadExecutor()) {
-            var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(ManagedSessionStore.class), harness,
+            var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(JdbcManagedSessionStore.class), harness,
                     warmer, relay, new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor,
                     Clock.systemUTC(), new ManagedAgentProperties());
             coordinator.setWorkspaceLifecycleStore(lifecycle);
@@ -244,7 +311,7 @@ class SessionLifecycleCoordinatorTest {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                 WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -268,7 +335,7 @@ class SessionLifecycleCoordinatorTest {
         };
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(store, com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc),
-                    new UnavailableHarnessConnector(), unsupported, new ChildResultRelayStore(jdbc),
+                    new UnavailableHarnessConnector(), unsupported, new JdbcChildResultRelayStore(jdbc),
                     new ObjectMapper(), admissions(store, unsupported), noTurnCancels(), brokerProvider(null), executor,
                     Clock.systemUTC(), properties);
             try {
@@ -302,8 +369,8 @@ class SessionLifecycleCoordinatorTest {
         }).when(executor).execute(Mockito.any(Runnable.class));
         var properties = new ManagedAgentProperties();
         properties.getDispatch().setLeaseDuration(Duration.ofSeconds(42));
-        var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(ManagedSessionStore.class),
-                harness, warmer, Mockito.mock(ChildResultRelayStore.class),
+        var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(JdbcManagedSessionStore.class),
+                harness, warmer, Mockito.mock(JdbcChildResultRelayStore.class),
                 new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor,
                 Clock.systemUTC(), properties);
         Logger log = (Logger) LoggerFactory.getLogger(SessionLifecycleCoordinator.class);
@@ -335,14 +402,14 @@ class SessionLifecycleCoordinatorTest {
     private static final class World {
         final JdbcTemplate jdbc;
         final ManagedAgentStore store;
-        final ChildResultRelayStore relayStore;
+        final JdbcChildResultRelayStore relayStore;
         final ManagedAgentProperties properties;
         final String session;
         final String child;
         final String operation;
 
         World(JdbcTemplate jdbc, ManagedAgentStore store,
-                ChildResultRelayStore relayStore,
+                JdbcChildResultRelayStore relayStore,
                 ManagedAgentProperties properties, String session,
                 String child, String operation) {
             this.jdbc = jdbc;
@@ -357,15 +424,15 @@ class SessionLifecycleCoordinatorTest {
 
     /** A workspace-bound parent with one child Session, close admitted. */
     private static World closingWorld(String suffix) {
-        return closingWorldOp(suffix, false);
+        return closingWorldOp(suffix, 0);
     }
 
-    /** The same world, but closing under the lifecycle protocol (P1). */
+    /** The same world, but deleting under lifecycle v2 (ordinary files). */
     private static World closingWorldLifecycle(String suffix) {
-        return closingWorldOp(suffix, true);
+        return closingWorldOp(suffix, 2);
     }
 
-    private static World closingWorldOp(String suffix, boolean protocolOne) {
+    private static World closingWorldOp(String suffix, int lifecycleProtocol) {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:close-cascade-" + suffix + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
@@ -376,7 +443,7 @@ class SessionLifecycleCoordinatorTest {
         properties.getDispatch().setLeaseDuration(Duration.ofMillis(200));
         properties.getDispatch().setRetryInitialDelay(Duration.ofMillis(50));
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
-                Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                Clock.systemUTC(), ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
@@ -409,15 +476,18 @@ class SessionLifecycleCoordinatorTest {
                         new StoreModels.SessionLineage(session, session,
                                 "run-1", 1))
                 .sessionId());
-        String operation = transactions.execute(ignored -> protocolOne
+        // D3: ordinary files closes on lifecycle v2. The cascade claim
+        // tagging is protocol-independent (any active lifecycle claim
+        // tags the child updates).
+        String operation = transactions.execute(ignored -> lifecycleProtocol != 0
                 ? store.beginWorkspaceLifecycle("tenant", session,
                         OperationKind.DELETE, "owner", "a".repeat(64),
-                        "delete", "digest", true, 1)
+                        "delete", "digest", true, lifecycleProtocol)
                         .operation().operationId()
                 : store.beginWorkspaceClose("tenant", session, "owner",
                         "a".repeat(64), "close", "digest", true)
                         .operation().operationId());
-        return new World(jdbc, store, new ChildResultRelayStore(jdbc),
+        return new World(jdbc, store, new JdbcChildResultRelayStore(jdbc),
                 properties, session, child, operation);
     }
 
@@ -489,29 +559,27 @@ class SessionLifecycleCoordinatorTest {
     private static void jdbcLiveScope(JdbcTemplate jdbc, String session,
             String resourceBody, String taskKind) {
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, 'tenant',"
+                        + " VALUES (?, 'tenant',"
                         + " 'workspace', ?, 'child_run', 'run-1', 'h', 1,"
                         + " 'res-run-1', '" + taskKind + "', 'running', 'session',"
                         + " 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(session, "child_run", "run-1"), session);
         byte[] bytes = resourceBody.getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource"
-                        + " (resource_key, session_scope_key, tenant_id, workspace_id,"
+                        + " (resource_key, tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes,"
                         + " publish_command_id, state, gmt_create)"
-                        + " VALUES (?, ?, 'tenant', 'workspace', ?,"
+                        + " VALUES (?, 'tenant', 'workspace', ?,"
                         + " 'res-run-1', 'managed-input', 1, ?,"
                         + " '" + "b".repeat(64) + "', 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session), "res-run-1"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session), session, bytes.length, bytes);
+                ManagedSessionStore.resourceKey(
+                        ManagedSessionStore.sessionScopeKey("tenant", session), "res-run-1"), session, bytes.length, bytes);
     }
 
     private String childCloseOperation(World world) {
@@ -760,14 +828,13 @@ class SessionLifecycleCoordinatorTest {
         World world = closingWorld("team-");
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " gmt_create)"
-                        + " VALUES (?, ?, 'tenant',"
+                        + " VALUES (?, 'tenant',"
                         + " 'workspace', ?, 'team_state', 'team-1', 'h', 2,"
                         + " 'res-team-1', 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", world.session),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(world.session, "team_state", "team-1"), world.session);
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
@@ -810,7 +877,7 @@ class SessionLifecycleCoordinatorTest {
                 world.jdbc.update("UPDATE ma_session SET status ="
                         + " 'CLOSED' WHERE session_id = ?", world.child);
             }
-            var workspaces = new com.alibaba.qwen.code.managedagent.persistence.ChildWorkspaceStore(
+            var workspaces = new JdbcChildWorkspaceStore(
                     world.jdbc, new DataSourceTransactionManager(
                             world.jdbc.getDataSource()));
             if (!"shared".equals(start)) {
@@ -987,7 +1054,7 @@ class SessionLifecycleCoordinatorTest {
         // The attach revision never landed: the run's own body carries no
         // child Session reference, and only the relay ledger names it.
         liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
-        ChildResultRelayStore.RelayRow claimed = world.relayStore.claim(
+        JdbcChildResultRelayStore.RelayRow claimed = world.relayStore.claim(
                 "tenant", world.session, "run-1", "key-run-1", "owner",
                 30_000, 100);
         assertThat(claimed).isNotNull();
@@ -1041,7 +1108,7 @@ class SessionLifecycleCoordinatorTest {
     void aRetiredBindingStillSettlesTheLedgerKnownChild() {
         World world = closingWorld("retired-");
         liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
-        ChildResultRelayStore.RelayRow claimed = world.relayStore.claim(
+        JdbcChildResultRelayStore.RelayRow claimed = world.relayStore.claim(
                 "tenant", world.session, "run-1", "key-run-1", "owner",
                 30_000, 100);
         assertThat(claimed).isNotNull();
@@ -1184,7 +1251,7 @@ class SessionLifecycleCoordinatorTest {
         // IllegalStateException. The physical close must still run, and
         // the unpaid reconstruction must not block the next drive.
         liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
-        ChildResultRelayStore.RelayRow claimed = world.relayStore.claim(
+        JdbcChildResultRelayStore.RelayRow claimed = world.relayStore.claim(
                 "tenant", world.session, "run-1", "key-run-1", "owner",
                 30_000, 100);
         assertThat(claimed).isNotNull();
@@ -1280,9 +1347,11 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
-    // P1: the cascade's child updates ride the parent's own lifecycle
-    // claim — the fence's matching key. An ordinary parent's updates
-    // stay exactly plain.
+    // The cascade's child updates ride the parent's own lifecycle claim
+    // — the fence's matching key — under lifecycle v2 (ordinary files);
+    // a protocol-0 parent's updates stay exactly plain. External-files
+    // (v1) parents cannot admit children, so v2 is the only reachable
+    // claimed shape.
     @Test
     void lifecycleProtocolClaimTagsEveryCascadeOperation() {
         World plainWorld = closingWorld("claim-plain-");
@@ -1310,6 +1379,8 @@ class SessionLifecycleCoordinatorTest {
                 var lifecycleRecord = lifecycleWorld.store.findOperation(
                         "tenant", lifecycleWorld.session,
                         lifecycleWorld.operation).orElseThrow();
+                assertThat(lifecycleRecord.lifecycleProtocolVersion())
+                        .isEqualTo(2);
                 coordinator.runLifecycleChildOperation(lifecycleRecord,
                         tagged);
                 assertThat(tagged).containsEntry("authority", Map.of(
@@ -1644,11 +1715,15 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
-    // The relay's stop arm tolerates a child that waits on its recovery or
-    // is already closing; the cascade mirrors exactly those two refusal
-    // codes — any other failure defers the Turn cancel, these two do not.
-    @Test
-    void aToleratedMessageStopRefusalStillCancelsTheTurn() {
+    // The relay's stop arm tolerates a child that waits on its recovery,
+    // is already closing, or is out of cold-open slots; the cascade mirrors
+    // exactly those refusal codes — any other failure defers the Turn
+    // cancel, these do not.
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "hosted_turn_recovery_required", "hosted_session_closing",
+            "hosted_session_open_busy"})
+    void aToleratedMessageStopRefusalStillCancelsTheTurn(String refusalCode) {
         World world = closingWorld("msg-tolerated-");
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
@@ -1662,8 +1737,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         var refusal = Mockito.mock(
                 com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure.class);
-        Mockito.when(refusal.getErrorCode())
-                .thenReturn("hosted_session_closing");
+        Mockito.when(refusal.getErrorCode()).thenReturn(refusalCode);
         harness.messageFailure = refusal;
         List<String> calls = new CopyOnWriteArrayList<>();
         harness.messageApplied = body -> calls.add("message-stop");
@@ -1783,14 +1857,13 @@ class SessionLifecycleCoordinatorTest {
      * (journalTurns), for the cascade's message-stop tests (#13875). */
     private static void pendingSessionMessage(World world) {
         world.jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " gmt_create)"
-                        + " VALUES (?, ?, 'tenant', 'workspace', ?,"
+                        + " VALUES (?, 'tenant', 'workspace', ?,"
                         + " 'session_message', 'msg_1:message', 'h', 1,"
                         + " 'res-msg-1', 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", world.child),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(world.child, "session_message", "msg_1:message"),
                 world.child);
         byte[] journal = ("{\"subtype\":\"managed_session_event_v1\","

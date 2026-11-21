@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -156,11 +157,11 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                 // arms the store-proxy faults.
                 "resources", jdbc.queryForList(
                         "SELECT resource_id, kind, byte_length, sha256 FROM"
-                                + " ma_resource WHERE session_scope_key = ?"
-                                + " AND tenant_id = ? AND session_id = ? AND"
+                                + " ma_resource WHERE"
+                                + " tenant_id = ? AND session_id = ? AND"
                                 + " kind LIKE 'managed-tool-result-%' ORDER"
                                 + " BY gmt_create, resource_id",
-                        scopeKey(sessionId), tenant, sessionId),
+                        tenant, sessionId),
                 "relayAlive", relay != null && !relay.isDone(),
                 "relayFailure", relayFailure == null ? ""
                         : relayFailure.toString());
@@ -173,7 +174,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
     // case), so each later letter polls slower. The record read leads with
     // the same key.
     private String scopeKey(String sessionId) {
-        return com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        return ManagedSessionStore.sessionScopeKey(tenant, sessionId);
     }
 
     // FG8c: the in-JVM embedded broker spawns each binding's managed worker

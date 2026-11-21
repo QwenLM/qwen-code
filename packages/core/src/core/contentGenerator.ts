@@ -90,6 +90,8 @@ export type ContentGeneratorConfig = {
   baseUrl?: string;
   vertexai?: boolean;
   authType?: AuthType | undefined;
+  /** Separate model route that must use its own provider configuration. */
+  isolatedRoute?: boolean;
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds
@@ -130,11 +132,12 @@ export type ContentGeneratorConfig = {
   // See issue #6642.
   forceGlobalCacheScope?: boolean;
   /**
-   * Default Anthropic `cache_control` retention for every cache anchor
-   * (system text, last tool, trailing user message) unless overridden
-   * per-anchor by {@link cacheRetentionByBlock}. `'ephemeral'` (default)
-   * omits `ttl` on the wire (spec default is 5m); `'1h'` requests the
-   * extended cache tier (`ttl: '1h'`).
+   * Default `cache_control` retention for every cache anchor. On Anthropic
+   * (system text, last tool, trailing user message) it is overridden
+   * per-anchor by {@link cacheRetentionByBlock}; on DashScope it stamps the
+   * qwen4 cache breakpoints. `'ephemeral'` (default) omits `ttl` on the wire
+   * (spec default is 5m); `'1h'` requests the extended cache tier
+   * (`ttl: '1h'`).
    */
   cacheRetention?: 'ephemeral' | '1h';
   /**
@@ -197,6 +200,11 @@ export type ContentGeneratorConfig = {
   // Supported input modalities. Unsupported media types are replaced with text
   // placeholders. Leave undefined to use automatic detection from model name.
   modalities?: InputModalities;
+  // Image understanding detail sent on each `image_url` part. Undefined leaves
+  // the decision to the server (qwen4-max defaults to 'high', ~16K image
+  // tokens); 'low' trades resolution for tokens (~2.5K on qwen4-max). Only
+  // applies to providers that read the OpenAI `detail` field.
+  imageDetail?: 'low' | 'high' | 'auto';
   // When true, media parts in tool responses (including the built-in read_file
   // and MCP tools) are split into a follow-up `role: "user"` message instead of
   // being embedded inside the `role: "tool"` message. The OpenAI Chat

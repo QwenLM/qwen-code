@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -45,6 +46,11 @@ final class WorkspaceRecoveryReader {
         check(text(head, "workspaceId").equals(row.get("workspace_id"))
                 && "identity".equals(row.get("record_encoding")), "transaction_scope_conflict");
         byte[] bytes = (byte[]) row.get("record_bytes");
+        if (bytes == null) {
+            bytes = new JdbcJournalPacks(jdbc, objects, null).resolveBytes(text(head, "tenantId"),
+                    text(head, "sessionId"), revision, (String) row.get("record_digest"),
+                    ((Number) row.get("byte_length")).longValue());
+        }
         check(bytes != null && bytes.length <= ManagedSessionStoreModels.MAX_TRANSACTION_BYTES
                 && bytes.length == ((Number) row.get("byte_length")).longValue()
                 && hash(bytes).equals(row.get("record_digest")), "transaction_corrupt");
@@ -59,14 +65,28 @@ final class WorkspaceRecoveryReader {
         return JSON.valueToTree(value);
     }
 
+    private byte[] readExternalObject(Map<String, Object> row) {
+        String key = row.get("object_key") instanceof byte[] b
+                ? new String(b, StandardCharsets.UTF_8) : (String) row.get("object_key");
+        byte[] bytes;
+        try (InputStream stream = objects.open(key, () -> {})) {
+            bytes = stream.readAllBytes();
+        } catch (IOException error) {
+            throw new IllegalStateException("Session resource read failed", error);
+        }
+        check(bytes.length == ((Number) row.get("byte_length")).longValue()
+                && hash(bytes).equals(row.get("sha256")), "resource_corrupt");
+        return bytes;
+    }
+
     JsonNode resource(JsonNode source, JsonNode ref) {
         validateRef(ref);
         JsonNode head = head(source);
-        String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId"));
-        String resourceKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(sessionScope, text(ref, "resourceId"));
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND tenant_id = ?"
+        String sessionScope = ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId"));
+        String resourceKey = ManagedSessionStore.resourceKey(sessionScope, text(ref, "resourceId"));
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND tenant_id = ?"
                 + " AND workspace_id = ? AND session_id = ? AND resource_id = ?",
-                resourceKey, sessionScope, text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"));
+                resourceKey, text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"));
         byte[] bytes;
         if (!rows.isEmpty()) {
             check(rows.size() == 1, "resource_scope_conflict");
@@ -101,9 +121,9 @@ final class WorkspaceRecoveryReader {
                         "resource_layout_unsupported");
                 bytes = (byte[]) row.get("inline_bytes");
                 var references = jdbc.queryForList("SELECT resource_key FROM ma_resource_ref USE INDEX (idx_ma_ref_resource)"
-                        + " WHERE resource_key = ? AND session_scope_key = ? AND owner_kind IN ('JOURNAL','SESSION_RECORD')"
+                        + " WHERE resource_key = ? AND owner_kind IN ('JOURNAL','SESSION_RECORD')"
                         + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND resource_id = ?"
-                        + " AND journal_revision <= ? LIMIT 1", String.class, resourceKey, sessionScope,
+                        + " AND journal_revision <= ? LIMIT 1", String.class, resourceKey,
                         text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"), head.path("journalRevision").asLong());
                 check(published || !references.isEmpty(), "resource_out_of_cut");
                 if (bytes == null) {
@@ -117,6 +137,12 @@ final class WorkspaceRecoveryReader {
                     check(collected != null && collected > 0, "resource_corrupt");
                     throw com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.failure("resource_collected");
                 }
+            } else if ("OSS_OBJECT".equals(row.get("storage_kind"))) {
+                check(("PUBLISHED".equals(row.get("state")) || "REFERENCED".equals(row.get("state")))
+                        && row.get("inline_bytes") == null && row.get("object_key") != null
+                        && row.get("object_version_id") == null && row.get("encryption_key_id") == null,
+                        "resource_layout_unsupported");
+                bytes = readExternalObject(row);
             } else {
                 check("TOOL_PUBLICATION".equals(row.get("storage_kind")) && "REFERENCED".equals(row.get("state"))
                         && row.get("inline_bytes") == null && row.get("object_version_id") == null
@@ -138,7 +164,7 @@ final class WorkspaceRecoveryReader {
         JsonNode head = head(source);
         var rows = WorkspaceOperations.rows(jdbc, "SELECT publication_id, slot_key FROM ma_resource"
                 + " WHERE resource_key = ? AND scope_key = ? AND resource_id = ?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId")), text(ref, "resourceId")),
+                ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId")), text(ref, "resourceId")),
                 scope(head), text(ref, "resourceId"));
         check(rows.size() == 1, "resource_missing");
         var row = rows.getFirst();

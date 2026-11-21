@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -549,9 +550,9 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
         check(receipts.size() == 1, "source_drift");
         check(count(jdbc, "SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                 + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')", tenant, session) == 0, "source_drift");
-        check(count(jdbc, "SELECT COUNT(*) FROM ma_operation WHERE session_scope_key = ?"
+        check(count(jdbc, "SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL')"
-                + " AND state NOT IN ('COMPLETED', 'FAILED')", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session)) == 0, "source_drift");
+                + " AND state NOT IN ('COMPLETED', 'FAILED')", tenant, session) == 0, "source_drift");
         ObjectNode source = JSON.createObjectNode().put("sessionId", session);
         ObjectNode binding = source.putObject("binding").put("tenantId", tenant);
         fields(binding, row, "workspaceId", "workspace_id", "workspaceGeneration", "workspace_generation",
@@ -579,7 +580,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                 "turnId", "turn_id", "createdAt", "gmt_create");
         if (receipt.get("result_json") != null) {
             try {
-                var skills = ManagedSessionSkills.decode((String) receipt.get("result_json"), JSON, SKILL_DIGESTS);
+                var skills = JdbcManagedSessionSkills.decode((String) receipt.get("result_json"), JSON, SKILL_DIGESTS);
                 creation.put("skillsDigest", SKILL_DIGESTS.digest(skills));
             } catch (ManagedAgentException error) {
                 var drift = failure("source_drift");
@@ -589,10 +590,9 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
         }
         // Missing keys gap-lock other tenants; the retention authority lock prevents new writers here.
         boolean lockHead = lockSources && count(jdbc,
-                "SELECT COUNT(*) FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(session)) != 0;
-        var heads = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'"
+                "SELECT COUNT(*) FROM ma_session_head WHERE tenant_id = ? AND harness_session_id = ?",
+                tenant, session) != 0;
+        var heads = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'"
                 + (lockHead ? " FOR UPDATE" : ""),
                 (result, index) -> {
                     var value = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(result);
@@ -601,10 +601,11 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                     value.put("writer_lease_fingerprint", lease == null ? null
                             : LocalDateTime.ofInstant(lease.toInstant(), java.time.ZoneOffset.UTC).toString());
                     return value;
-                }, com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(session));
+                }, tenant, session);
         check(heads.size() <= 1, "source_drift");
         if (heads.isEmpty()) {
+            // A head for this pair under another tenant is drift, not absence.
+            check(count(jdbc, "SELECT COUNT(*) FROM ma_session_head WHERE harness_session_id = ? AND session_id = ?", session, session) == 0, "source_drift");
             source.putNull("head");
         } else {
             Map<String, Object> head = heads.getFirst();
@@ -612,25 +613,25 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             Timestamp lease = (Timestamp) head.get("writer_lease_until");
             check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now(jdbc)), "source_drift");
             check(Set.of("ACTIVE", "SEALED", "DELETED").contains(head.get("state"))
-                    && List.of(1, 2).contains(((Number) head.get("storage_version")).intValue())
                     && ((Number) head.get("compacted_through_revision")).longValue() >= 0
                     && ((Number) head.get("compacted_through_revision")).longValue() <= ((Number) head.get("journal_revision")).longValue()
                     && "READY".equals(head.get("recovery_status")), "source_drift");
             ObjectNode value = source.putObject("head");
             fields(value, head, "tenantId", "tenant_id", "workspaceId", "workspace_id", "sessionId", "session_id",
-                    "state", "state", "storageVersion", "storage_version", "writerId", "writer_id",
+                    "state", "state", "writerId", "writer_id",
                     "writerGeneration", "writer_generation", "writerLeaseUntil", "writer_lease_fingerprint",
                     "journalRevision", "journal_revision", "committedSequence", "committed_sequence",
                     "lastCommitDigest", "last_commit_digest", "activationEpoch", "activation_epoch",
                     "latestCheckpointResourceId", "latest_checkpoint_resource_id", "compactedThroughRevision", "compacted_through_revision",
                     "recoveryStatus", "recovery_status", "recoveryDetailCode", "recovery_detail_code");
         }
-        String privateScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String privateScope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String currentRead = lockSources ? " FOR UPDATE" : "";
         check(jdbc.queryForList("SELECT r.resource_key FROM ma_resource r JOIN ma_resource_ref f"
-                + " ON f.resource_key = r.resource_key AND f.session_scope_key = r.session_scope_key"
-                + " WHERE r.session_scope_key = ? AND r.state = 'REFERENCED' AND r.deletion_operation_key IS NOT NULL"
-                + " AND f.owner_kind IN ('JOURNAL','SESSION_RECORD') LIMIT 1" + currentRead, String.class, privateScope).isEmpty(), "source_drift");
+                + " ON f.resource_key = r.resource_key AND f.tenant_id = r.tenant_id AND f.session_id = r.session_id"
+                + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.state = 'REFERENCED' AND r.deletion_operation_key IS NOT NULL"
+                + " AND f.owner_kind IN ('JOURNAL','SESSION_RECORD') LIMIT 1" + currentRead, String.class, tenant, session).isEmpty(),
+                "source_drift");
         var captureScopes = new java.util.LinkedHashSet<String>();
         captureScopes.add(ToolPublicationDataStore.scope(tenant, (String) row.get("workspace_id"), session));
         if (!heads.isEmpty()) {
@@ -657,10 +658,10 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             check(retiredHead.isNull() || "DELETED".equals(retiredHead.path("state").asText())
                     && retiredHead.path("latestCheckpointResourceId").isNull()
                     && retiredHead.path("writerId").isNull() && retiredHead.path("writerLeaseUntil").isNull(), "source_drift");
-            check(count(jdbc, "SELECT COUNT(*) FROM ma_operation WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+            check(count(jdbc, "SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
                     + " AND operation_id = ? AND operation_kind = 'DELETE' AND state = 'COMPLETED'"
                     + " AND delivery_state = 'CONFIRMED' AND completed_at IS NOT NULL",
-                    privateScope, tenant, session, retirement.get("operation_id")) == 1, "source_drift");
+                    tenant, session, retirement.get("operation_id")) == 1, "source_drift");
             ObjectNode value = source.putObject("retirement");
             fields(value, retirement, "tenantId", "tenant_id", "sessionId", "session_id", "operationId", "operation_id",
                     "generation", "generation", "retiredAt", "retired_at");
@@ -672,10 +673,10 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             long revision = ((Number) head.get("journal_revision")).longValue();
             if (compacted > 0 || revision == 0 && "DELETED".equals(head.get("state"))) {
                 check(!retirements.isEmpty() && "DELETED".equals(head.get("state")) && compacted == revision, "source_drift");
-                var completedGc = jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE session_scope_key = ?"
+                var completedGc = jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
                         + " AND scope_key = ? AND target_key = ? AND operation_kind = 'SESSION_RESOURCE_GC' AND state = 'SUCCEEDED'"
                         + " AND operation_id = ? LIMIT 1" + currentRead, String.class,
-                        privateScope, privateScope, privateScope, "session-resources-" + privateScope);
+                        tenant, session, privateScope, privateScope, "session-resources-" + privateScope);
                 check(completedGc.size() == 1, "source_drift");
                 source.set("retiredHead", source.path("head").deepCopy());
                 source.putNull("head");

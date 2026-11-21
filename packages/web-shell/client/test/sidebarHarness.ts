@@ -156,6 +156,7 @@ export interface SidebarWorkspaceClient {
   /** Paginated standalone catalog read. */
   listStandaloneSessionsPage: Mock;
   archiveStandaloneSessions: Mock;
+  updateSessionMetadata: Mock;
 }
 
 export interface SidebarWorkspace {
@@ -183,11 +184,19 @@ export function createSidebarWorkspace(
     listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
     listStandaloneSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
     archiveStandaloneSessions: vi.fn(),
+    updateSessionMetadata: vi.fn().mockResolvedValue({ prs: [] }),
     workspaceByCwd: vi.fn(() => ({
       listWorkspaceSessions: vi.fn().mockResolvedValue([]),
       listSessionGroups: vi.fn().mockResolvedValue({
         groups: [],
         colorOptions: options.colorOptions ?? [],
+      }),
+      updateSessionMetadata: vi.fn().mockResolvedValue({ prs: [] }),
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/tmp/project',
+        available: true,
+        pullRequests: [],
       }),
     })),
   };
@@ -283,7 +292,7 @@ export interface SidebarMocks {
   workspace: SidebarWorkspace;
   workspaceActions: SidebarWorkspaceActions;
   /** Stable `useActions()` payload. */
-  actions: { renameSession: Mock };
+  actions: { renameSession: Mock; bindSessionPr: Mock };
   /** Stable `useChannels()` payload. */
   channels: {
     data: undefined;
@@ -319,7 +328,10 @@ export function createSidebarMocks(
     workspaceActions: createSidebarWorkspaceActions({
       colorOptions: options.colorOptions,
     }),
-    actions: { renameSession: vi.fn() },
+    actions: {
+      renameSession: vi.fn(),
+      bindSessionPr: vi.fn().mockResolvedValue({ prs: [] }),
+    },
     channels: { data: undefined, catalog: [], channels: {} },
     active: createSidebarSessionPageState(pageOptions),
     pinned: createSidebarSessionPageState(pageOptions),

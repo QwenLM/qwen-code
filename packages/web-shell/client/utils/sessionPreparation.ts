@@ -6,10 +6,19 @@ import {
 import type {
   DaemonSessionClient,
   ReasoningSelection,
+  SessionStartupConfig,
 } from '@qwen-code/sdk/daemon';
 import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
 
 const SESSION_CREATED_CALLBACK_TIMEOUT_MS = 30_000;
+
+type CreatedPromptSession = {
+  sessionId: string;
+  worktree?: { slug: string; path: string; branch: string };
+  branch?: { name: string; baseBranch: string };
+  modelApplied?: boolean;
+  updateMetadata?: DaemonSessionClient['updateMetadata'];
+};
 
 type PromptSessionActions = {
   createSession: (options?: {
@@ -17,6 +26,7 @@ type PromptSessionActions = {
     getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
+    startupConfig?: SessionStartupConfig;
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
     worktree?: { slug?: string };
@@ -25,12 +35,7 @@ type PromptSessionActions = {
     navigationOutcome?: { bound: boolean };
     sourceVersion?: number;
     getCurrentSourceVersion?: () => number;
-  }) => Promise<{
-    sessionId: string;
-    worktree?: { slug: string; path: string; branch: string };
-    branch?: { name: string; baseBranch: string };
-    modelApplied?: boolean;
-  }>;
+  }) => Promise<CreatedPromptSession>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
@@ -60,6 +65,7 @@ function isSupersededSessionLoad(error: unknown): boolean {
 export async function createAndAttachSessionForPrompt({
   sessionActions,
   modelId,
+  startupConfig,
   reasoningEffort,
   modeId,
   planMode = false,
@@ -78,6 +84,7 @@ export async function createAndAttachSessionForPrompt({
 }: {
   sessionActions: PromptSessionActions;
   modelId?: string;
+  startupConfig?: SessionStartupConfig;
   reasoningEffort?: ReasoningSelection;
   modeId?: string;
   planMode?: boolean;
@@ -97,7 +104,8 @@ export async function createAndAttachSessionForPrompt({
    */
   onSessionCreated?: (
     sessionId: string,
-    detachedSession?: DaemonSessionClient,
+    detachedSession: DaemonSessionClient | undefined,
+    createdSession: CreatedPromptSession,
   ) => Promise<void> | void;
   onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
@@ -143,6 +151,7 @@ export async function createAndAttachSessionForPrompt({
           getCurrentWorkspaceCwd,
           sessionContext,
           sourceType: sessionSourceType,
+          ...(startupConfig ? { startupConfig } : {}),
           ...(approvalMode ? { approvalMode } : {}),
           ...(worktree ? { worktree } : {}),
           ...(branch ? { branch } : {}),
@@ -170,7 +179,7 @@ export async function createAndAttachSessionForPrompt({
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
-          onSessionCreated(sessionId, detachedSession),
+          onSessionCreated(sessionId, detachedSession, created),
           new Promise<never>((_, reject) => {
             timeout = setTimeout(
               () => reject(new Error('onSessionCreated timed out')),
