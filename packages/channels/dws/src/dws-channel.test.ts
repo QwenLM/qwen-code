@@ -18,8 +18,10 @@ import {
 } from '@qwen-code/channel-base';
 import { DwsChannel } from './dws-channel.js';
 import {
+  DWS_CALLER_HEAD_BUDGET,
   DwsClient,
   DwsCommandError,
+  describeDwsCommandFailure,
   type DwsClientLike,
   type DwsCommandRunner,
   type DwsIdentity,
@@ -6064,6 +6066,52 @@ describe('DwsChannel', () => {
         '赞',
       );
     });
+  });
+
+  it('bounds the written reaction failure inside the shared log budget', async () => {
+    // Drives the sink rather than re-deriving it: logReactionFailure is the
+    // only production reader of DWS_CALLER_HEAD_BUDGET, so a narrower literal
+    // there would cut the reason and drop the `…` that marks truncation.
+    const client = new FakeDwsClient();
+    const composed = describeDwsCommandFailure(
+      ['chat', 'message', 'send'],
+      1,
+      'x'.repeat(400),
+    );
+    client.addImReaction.mockRejectedValueOnce(
+      new DwsCommandError(composed, 'unknown'),
+    );
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ endReaction: '赞' }),
+    );
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', 'message-1', 'do the task'),
+      );
+
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledOnce();
+        const line = write.mock.calls
+          .map((call) => String(call[0]))
+          .find((text) => text.includes('DWS start reaction add failed'));
+        expect(line).toBeDefined();
+        expect(line?.endsWith('…\n')).toBe(true);
+        // Prefix through the closing bracket, then the reason.
+        const reason = line?.slice(
+          line.indexOf('failed: ') + 'failed: '.length,
+        );
+        expect(Array.from(reason ?? '').length).toBeLessThanOrEqual(
+          DWS_CALLER_HEAD_BUDGET,
+        );
+      });
+    } finally {
+      write.mockRestore();
+    }
   });
 
   it('replaces the start reaction with the end reaction when a task fails', async () => {
