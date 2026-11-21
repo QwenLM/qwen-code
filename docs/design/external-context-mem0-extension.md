@@ -265,11 +265,13 @@ until a maintainer completes the one-time public bootstrap publish and binds
 the package to the `release.yml` workflow in the `production-release`
 environment. The bootstrap should publish the version of a release that has
 already shipped with the package skipped — not an upcoming release version —
-and should not invent a second version line. Hand-publishing an upcoming
-version does not get the release refused: for a stable release the version
-step probes this package too, finds that version on npm and increments past
-it, leaving the stray version on npm for good. Future releases use trusted
-publishing and require no npm token.
+and should not invent a second version line. The version probe runs once, in
+`prepare`: a stable release increments past a hand publish that landed before
+that probe, leaving the stray version on npm for good. Once the version is
+frozen a hand publish breaks the release instead — landing before the push
+guard refuses the release without a failure issue, and landing after it fails
+the publish step with part of the set already shipped. Future releases use
+trusted publishing and require no npm token.
 
 When a service fits `DialectV1`, its administrator writes and validates a local
 dialect file. When it does not fit, the service owner publishes a separate MCP

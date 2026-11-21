@@ -95,10 +95,12 @@ bootstrap-publishes it and binds it to `release.yml` in the `production-release`
 environment, then sets `NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED`
 to `true` (it defaults to off). Bootstrap at a version that has already shipped
 — the first release that ships with the package skipped — never at an upcoming
-one, and do not invent a second version line. Hand-publishing an upcoming
-version does not get the release refused: for a stable release the version step
-probes every published package, finds that version on npm and increments past
-it, leaving the stray version on npm for good.
+one, and do not invent a second version line. The version probe runs once, in
+`prepare`: a stable release increments past a hand publish that landed before
+that probe, leaving the stray version on npm for good. Once the version is
+frozen a hand publish breaks the release instead — landing before the push
+guard refuses the release without a failure issue, and landing after it fails
+the publish step with part of the set already shipped.
 
 `@qwen-code/channel-msteams` was bootstrap-published on 2026-11-20 and has been
 published by the release workflow since, so it is no longer awaiting a
