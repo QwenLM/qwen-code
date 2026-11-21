@@ -510,6 +510,7 @@ export * from './services/session-goal-sidecar.js';
 export {
   stripTerminalControlSequences,
   stripDisplayControlChars,
+  stripBidiControls,
   truncateNotificationLabel,
   TERMINAL_OSC_REGEX,
   TERMINAL_CSI_REGEX,

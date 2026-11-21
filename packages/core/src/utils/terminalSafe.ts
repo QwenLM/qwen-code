@@ -52,18 +52,40 @@ export function stripTerminalControlSequences(s: string): string {
   );
 }
 
+const BIDI_CONTROL_CHARACTERS = String.fromCharCode(
+  0x061c,
+  0x200e,
+  0x200f,
+  0x202a,
+  0x202b,
+  0x202c,
+  0x202d,
+  0x202e,
+  0x2066,
+  0x2067,
+  0x2068,
+  0x2069,
+);
+const BIDI_CONTROL_CODES = new Set(
+  Array.from(BIDI_CONTROL_CHARACTERS, (char) => char.charCodeAt(0)),
+);
+const BIDI_CONTROLS_REGEX = new RegExp(`[${BIDI_CONTROL_CHARACTERS}]`, 'g');
+
 /**
- * Whether a UTF-16 code unit is a Unicode bidirectional override /
- * isolate codepoint: `\u202a-\u202e` (LRE / RLE / PDF / LRO / RLO) or
+ * Whether a UTF-16 code unit is in the shared bidi control set. It
+ * includes ALM, LRM, RLM, embeddings and overrides, and isolates: `\u202a-\u202e` (LRE / RLE / PDF / LRO / RLO) or
  * `\u2066-\u2069` (LRI / RLI / FSI / PDI). These reorder how adjacent
  * text renders without changing a byte — the "Trojan Source" class
  * (CVE-2021-42574). The range set lives here so every display sanitizer
  * strips from one home.
  */
 export function isBidiControlChar(code: number): boolean {
-  return (
-    (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069)
-  );
+  return BIDI_CONTROL_CODES.has(code);
+}
+
+/** Remove ALM/LRM/RLM and every bidi embedding, override, and isolate. */
+export function stripBidiControls(text: string): string {
+  return text.replace(BIDI_CONTROLS_REGEX, '');
 }
 
 /**
@@ -85,6 +107,8 @@ export function isBidiControlChar(code: number): boolean {
  *   ST `0x9C`, NEL `0x85`, …).
  * - `\u202a-\u202e` LRE / RLE / PDF / LRO / RLO — embedding & override.
  * - `\u2066-\u2069` LRI / RLI / FSI / PDI — isolates.
+ *
+ * ALM, LRM, and RLM are stripped through {@link isBidiControlChar} as well.
  *
  * The bidi stripping defends against "Trojan Source"-style attacks
  * (CVE-2021-42574) where shell or monitor output containing bidi

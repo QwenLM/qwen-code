@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { stripBidiControls } from '../utils/terminalSafe.js';
 import {
   CRON_GATE_OUTPUT_CAP_BYTES,
   buildGatedFirePrompt,
@@ -626,13 +627,8 @@ export function decodeAutomationInputEnvelope(
   });
 }
 
-// The Legacy run framing strips terminal control and bidi override marks
-// from the metadata lines, so a goal cannot restyle or reorder the frame.
-const BIDI_MARKS = /[؜‎‏‪-‮⁦-⁩]/g;
-
 function cleanLine(value: string): string {
-  return stripAnsiAndControl(value)
-    .replace(BIDI_MARKS, '')
+  return stripBidiControls(stripAnsiAndControl(value))
     .trim()
     .replace(/\s+/g, ' ');
 }

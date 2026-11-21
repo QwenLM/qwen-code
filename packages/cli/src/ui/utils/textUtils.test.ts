@@ -20,6 +20,7 @@ import {
   sanitizeMultilineForDisplay,
   sanitizeSensitiveText,
   sanitizeTerminalLine,
+  sanitizeTerminalText,
   sliceTextByVisualHeight,
   toCodePoints,
   truncateToWidth,
@@ -242,6 +243,20 @@ describe('textUtils', () => {
         expect(sanitized.g).toBe(null);
         expect(sanitized.h()).toBe('\u001b[35mpurple\u001b[0m');
       });
+    });
+  });
+
+  describe('terminal text sanitization', () => {
+    it('strips ALM and every shared bidi control from text and rows', () => {
+      const marks = [
+        0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066,
+        0x2067, 0x2068, 0x2069,
+      ];
+      for (const mark of marks) {
+        const char = String.fromCharCode(mark);
+        expect(sanitizeTerminalText(`left${char}right`)).toBe('leftright');
+        expect(sanitizeTerminalLine(`left${char}right`)).toBe('leftright');
+      }
     });
   });
 

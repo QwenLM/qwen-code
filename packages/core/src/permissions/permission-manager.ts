@@ -1439,9 +1439,6 @@ export class PermissionManager {
       const rule = parseRule(raw);
       if (options?.trustGated) rule.trustGated = true;
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
-        );
         warnDroppedPermissionRule(rule.raw, 'allow');
         return;
       }
@@ -1493,9 +1490,6 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed deny rule (unbalanced parentheses): ${rule.raw}`,
-        );
         warnDroppedPermissionRule(rule.raw, 'deny');
         return;
       }
@@ -1510,9 +1504,6 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed ask rule (unbalanced parentheses): ${rule.raw}`,
-        );
         warnDroppedPermissionRule(rule.raw, 'ask');
         return;
       }
@@ -1536,9 +1527,6 @@ export class PermissionManager {
   addPersistentRule(raw: string, type: RuleType): PermissionRule {
     const rule = parseRule(raw);
     if (rule.invalid) {
-      debugLogger.warn(
-        `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
-      );
       warnDroppedPermissionRule(rule.raw, type);
       return rule;
     }
@@ -1623,8 +1611,8 @@ export class PermissionManager {
   // ---------------------------------------------------------------------------
 
   /**
-   * Return all active rules with their types and scopes, suitable for
-   * display in the /permissions dialog.
+   * Return all parsed rules with their types and scopes, including invalid
+   * entries that must be marked as not applied in the /permissions dialog.
    */
   listRules(): RuleWithSource[] {
     const result: RuleWithSource[] = [];
@@ -1635,9 +1623,7 @@ export class PermissionManager {
       scope: RuleScope,
     ) => {
       for (const rule of rules) {
-        if (!rule.invalid) {
-          result.push({ rule, type, scope });
-        }
+        result.push({ rule, type, scope });
       }
     };
 
