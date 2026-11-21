@@ -26,6 +26,7 @@ vi.mock('../WebShellContexts', async () => {
 // rest are inert. MessageTimestamp remains real to verify row spacing.
 const captured = vi.hoisted(() => ({
   userMessageProps: null as null | {
+    source?: string;
     editing?: boolean;
     submittingEdit?: boolean;
   },
@@ -36,6 +37,7 @@ vi.mock('./messages/UserMessage', async () => {
   return {
     UserMessage: (props: {
       content: string;
+      source?: string;
       editing?: boolean;
       submittingEdit?: boolean;
       onEditSubmit?: (content: string) => void;
@@ -710,4 +712,26 @@ it('updates the Tool calls entry when the user message source is filled in', () 
   expect(messageMenuItem('View tool calls')).toBeDefined();
   act(() => root.render(row('goal_runtime')));
   expect(messageMenuItem('View tool calls')).toBeUndefined();
+});
+
+it('forwards automatic source updates to UserMessage', () => {
+  const row = (source?: string) => (
+    <MessageItem
+      message={{
+        id: 'automatic-prompt',
+        role: 'user',
+        content: 'Same automatic text',
+        timestamp: 0,
+        source,
+      }}
+    />
+  );
+  const { root } = renderWithRoot(row());
+  expect(captured.userMessageProps?.source).toBeUndefined();
+  act(() => root.render(row('cron')));
+  expect(captured.userMessageProps?.source).toBe('cron');
+  act(() => root.render(row('loop')));
+  expect(captured.userMessageProps?.source).toBe('loop');
+  act(() => root.render(row()));
+  expect(captured.userMessageProps?.source).toBeUndefined();
 });

@@ -45,7 +45,10 @@ import type {
 import { AuthorAvatar } from './AuthorAvatar';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { useI18n } from '../../i18n';
-import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import {
+  useTranscriptDocumentExpanded,
+  useTranscriptRenderMode,
+} from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
 import { workspaceBasename } from '../../utils/workspace';
 import flashStyles from '../MessageLocateFlash.module.css';
@@ -67,6 +70,7 @@ interface UserMessageFile {
 
 interface UserMessageProps {
   content: string;
+  source?: string;
   images?: UserMessageImage[];
   files?: UserMessageFile[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
@@ -188,6 +192,72 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
   );
 }
 
+function AutomaticTriggerMessage({
+  source,
+  content,
+  expanded,
+  onToggle,
+  children,
+}: {
+  source: 'cron' | 'loop';
+  content: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
+  const summary = content.replace(/\s+/g, ' ').trim();
+  // These runtime echoes contain only a label, not the full modelText.
+  const hasDetails =
+    content !== 'Autonomous loop tick' && !content.startsWith('Loop tick — ');
+  return (
+    <div
+      className={styles.scheduledTaskRun}
+      data-web-shell-automatic-trigger-message
+      data-source={source}
+    >
+      <div
+        className={`${styles.scheduledTaskHeader} ${styles.automaticTriggerHeader}`}
+      >
+        <span className={styles.scheduledTaskIcon} aria-hidden="true">
+          <CalendarClockIcon />
+        </span>
+        <span className={styles.scheduledTaskHeading}>
+          <span className={styles.scheduledTaskEyebrow}>
+            {t('userMessage.automatic.title')}
+          </span>
+          <span
+            className={styles.scheduledTaskName}
+            data-web-shell-automatic-trigger-summary
+            title={summary}
+          >
+            {summary}
+          </span>
+        </span>
+        {!documentMode && hasDetails && (
+          <button
+            type="button"
+            className={`${styles.toggleButton} ${styles.automaticTriggerToggle}`}
+            aria-expanded={expanded}
+            onClick={onToggle}
+          >
+            {t(expanded ? 'userMessage.showLess' : 'userMessage.showMore')}
+          </button>
+        )}
+      </div>
+      {expanded && hasDetails && (
+        <div
+          className={styles.scheduledTaskPrompt}
+          data-web-shell-automatic-trigger-instructions
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function renderUserMessageText(text: string, isContinuation?: boolean) {
   // Preserve captured line breaks separately from the slash tokens.
   return text.split(/(^|\r\n?|\n)(\/[^ \r\n]*)/g).map((part, index) => {
@@ -260,6 +330,7 @@ function DefaultUserMessageContent({
 
 export const UserMessage = memo(function UserMessage({
   content,
+  source,
   images,
   files,
   inputAnnotations,
@@ -278,6 +349,7 @@ export const UserMessage = memo(function UserMessage({
 }: UserMessageProps) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const {
     parseUserMessageContent,
     renderUserMessageContent,
@@ -338,10 +410,20 @@ export const UserMessage = memo(function UserMessage({
     () => parseScheduledTaskRunContent(content),
     [content],
   );
+  const automaticTriggerSource =
+    !scheduledTaskRun && (source === 'cron' || source === 'loop')
+      ? source
+      : undefined;
+  const automaticInstructionsExpanded = automaticTriggerSource
+    ? documentMode
+      ? documentExpanded
+      : expanded
+    : true;
   const renderedContent = useMemo(() => {
     if (scheduledTaskRun) {
       return <ScheduledTaskRunMessage run={scheduledTaskRun} />;
     }
+    if (!automaticInstructionsExpanded) return null;
     const explicit = renderUserMessageContent?.({
       content,
       images,
@@ -414,7 +496,20 @@ export const UserMessage = memo(function UserMessage({
     renderComposerTagTooltip,
     renderUserMessageContent,
     scheduledTaskRun,
+    automaticInstructionsExpanded,
   ]);
+  const bodyContent = automaticTriggerSource ? (
+    <AutomaticTriggerMessage
+      source={automaticTriggerSource}
+      content={content}
+      expanded={documentMode ? documentExpanded : expanded}
+      onToggle={() => setExpanded((value) => !value)}
+    >
+      {renderedContent}
+    </AutomaticTriggerMessage>
+  ) : (
+    renderedContent
+  );
 
   const measureOverflow = useCallback(() => {
     const el = contentRef.current;
@@ -427,7 +522,13 @@ export const UserMessage = memo(function UserMessage({
     measureOverflow();
     // `editing` is a dep so leaving the editor re-measures the re-shown
     // content: it is `hidden` while editing, which reads as zero height.
-  }, [content, images?.length, editing, measureOverflow]);
+  }, [
+    content,
+    images?.length,
+    editing,
+    automaticTriggerSource,
+    measureOverflow,
+  ]);
 
   useEffect(() => {
     const el = contentRef.current;
@@ -553,20 +654,27 @@ export const UserMessage = memo(function UserMessage({
         {(content.trim().length > 0 || editing) && (
           <div
             className={`${styles.chatBubble}${
-              scheduledTaskRun ? ` ${styles.scheduledTaskBubble}` : ''
+              scheduledTaskRun || automaticTriggerSource
+                ? ` ${styles.scheduledTaskBubble}`
+                : ''
+            }${
+              automaticTriggerSource ? ` ${styles.automaticTriggerBubble}` : ''
             }${isLocateFlashing ? ` ${flashStyles.flash}` : ''}`}
             data-web-shell-user-bubble
           >
             <div
               ref={contentRef}
               className={`${styles.chatContent} ${
-                heightOverflowing && !documentMode && !expanded
+                heightOverflowing &&
+                !documentMode &&
+                !expanded &&
+                !automaticTriggerSource
                   ? styles.chatContentCollapsed
                   : ''
               }`}
               hidden={editing}
             >
-              {renderedContent}
+              {bodyContent}
             </div>
             {editing && (
               <div className={styles.editArea}>
@@ -604,34 +712,37 @@ export const UserMessage = memo(function UserMessage({
                 </div>
               </div>
             )}
-            {heightOverflowing && !documentMode && !editing && (
-              <button
-                type="button"
-                className={styles.toggleButton}
-                onClick={() => setExpanded((value) => !value)}
-              >
-                <span>
-                  {expanded
-                    ? t('userMessage.showLess')
-                    : t('userMessage.showMore')}
-                </span>
-                <svg
-                  className={`${styles.toggleIcon} ${
-                    expanded ? styles.toggleIconExpanded : ''
-                  }`}
-                  viewBox="0 0 16 16"
-                  aria-hidden="true"
+            {heightOverflowing &&
+              !documentMode &&
+              !editing &&
+              !automaticTriggerSource && (
+                <button
+                  type="button"
+                  className={styles.toggleButton}
+                  onClick={() => setExpanded((value) => !value)}
                 >
-                  <path
-                    d="m4 6 4 4 4-4"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </button>
-            )}
+                  <span>
+                    {expanded
+                      ? t('userMessage.showLess')
+                      : t('userMessage.showMore')}
+                  </span>
+                  <svg
+                    className={`${styles.toggleIcon} ${
+                      expanded ? styles.toggleIconExpanded : ''
+                    }`}
+                    viewBox="0 0 16 16"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="m4 6 4 4 4-4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              )}
           </div>
         )}
         {sendFailed && onRetrySend && (

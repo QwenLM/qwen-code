@@ -218,6 +218,19 @@
   word-break: break-word;
 }
 
+.automaticTriggerBubble {
+  width: min(560px, 100%);
+}
+
+.automaticTriggerHeader {
+  flex-wrap: wrap;
+}
+
+.automaticTriggerToggle {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 .sendFailure {
   display: flex;
   align-items: center;

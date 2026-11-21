@@ -219,6 +219,7 @@ export const MessageItem = memo(function MessageItem({
         return (
           <UserMessage
             content={message.content}
+            source={message.source}
             images={message.images}
             files={message.files}
             inputAnnotations={message.inputAnnotations}
