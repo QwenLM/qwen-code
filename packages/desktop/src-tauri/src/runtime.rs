@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use crate::runtime_recovery::{RecoveryHandle, RecoveryNamespace};
 use command_group::{CommandGroup, GroupChild};
 use rand::RngCore;
 use std::ffi::OsString;
@@ -34,6 +36,8 @@ pub struct DesktopRuntime {
     token: String,
     child: Arc<Mutex<Option<GroupChild>>>,
     stopping: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")]
+    recovery: Option<Arc<RecoveryHandle>>,
 }
 
 impl DesktopRuntime {
@@ -49,6 +53,53 @@ impl DesktopRuntime {
     ) -> Result<Self, String> {
         let id = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
         let layout = RuntimeLayout::resolve(app)?;
+        #[cfg(target_os = "linux")]
+        let recovery_disabled = crate::desktop_state::settings_persistence_disabled();
+        #[cfg(target_os = "linux")]
+        let recovery_namespace = RecoveryNamespace::capture(
+            app.path()
+                .home_dir()
+                .map_err(|error| format!("Failed to identify Desktop home directory: {error}"))?,
+            std::env::var_os("QWEN_DESKTOP_RUNTIME_DIR")
+                .is_some()
+                .then_some(layout.entry.as_path()),
+            app.package_info().version.to_string(),
+        )?;
+        #[cfg(target_os = "linux")]
+        let recovery_directory = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Failed to resolve Desktop recovery directory: {error}"))?
+            .join("runtime-recovery");
+        #[cfg(target_os = "linux")]
+        if let Some(recovery) = RecoveryHandle::find(
+            &recovery_directory,
+            workspace,
+            &recovery_namespace,
+            recovery_disabled,
+        )? {
+            if wait_for_recovered_health(&recovery)? {
+                let recovery = Arc::new(recovery);
+                let child = Arc::new(Mutex::new(None));
+                let stopping = Arc::new(AtomicBool::new(false));
+                monitor_runtime(
+                    app.clone(),
+                    id,
+                    Arc::clone(&child),
+                    Arc::clone(&stopping),
+                    Some(Arc::clone(&recovery)),
+                );
+                return Ok(Self {
+                    id,
+                    base_url: recovery.url().clone(),
+                    token: recovery.token().to_string(),
+                    child,
+                    stopping,
+                    recovery: Some(recovery),
+                });
+            }
+            recovery.remove_if_stopped()?;
+        }
         // Callers pass a workspace already resolved by resolve_workspace.
         let token = random_token();
         let mut command = Command::new(&layout.node);
@@ -107,7 +158,40 @@ impl DesktopRuntime {
                 return Err(error);
             }
         };
-        monitor_runtime(app.clone(), id, Arc::clone(&child), Arc::clone(&stopping));
+        #[cfg(target_os = "linux")]
+        let recovery = {
+            let pid = child
+                .lock()
+                .map_err(|_| "Desktop child handle is poisoned.".to_string())?
+                .as_mut()
+                .map(|process| process.inner().id())
+                .ok_or_else(|| {
+                    "Desktop startup was stopped before recovery registration.".to_string()
+                })?;
+            match RecoveryHandle::publish(
+                &recovery_directory,
+                workspace,
+                &recovery_namespace,
+                pid,
+                &base_url,
+                &token,
+                recovery_disabled,
+            ) {
+                Ok(recovery) => recovery.map(Arc::new),
+                Err(error) => {
+                    stop_runtime_handle(&child);
+                    return Err(error);
+                }
+            }
+        };
+        monitor_runtime(
+            app.clone(),
+            id,
+            Arc::clone(&child),
+            Arc::clone(&stopping),
+            #[cfg(target_os = "linux")]
+            recovery.clone(),
+        );
 
         Ok(Self {
             id,
@@ -115,12 +199,39 @@ impl DesktopRuntime {
             token,
             child,
             stopping,
+            #[cfg(target_os = "linux")]
+            recovery,
         })
     }
 
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::SeqCst);
+        #[cfg(target_os = "linux")]
+        let adopted = match self.child.lock() {
+            Ok(child) => child.is_none(),
+            Err(poisoned) => poisoned.into_inner().is_none(),
+        };
+        #[cfg(target_os = "linux")]
+        if adopted {
+            if let Some(recovery) = &self.recovery {
+                if let Err(error) = recovery.stop() {
+                    eprintln!("{error}");
+                }
+                return;
+            }
+        }
+        self.stop_owned();
+    }
+
+    pub fn stop_owned(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
         stop_runtime_handle(&self.child);
+        #[cfg(target_os = "linux")]
+        if let Some(recovery) = &self.recovery {
+            if let Err(error) = recovery.remove_if_stopped() {
+                eprintln!("{error}");
+            }
+        }
     }
 
     pub fn base_url(&self) -> &Url {
@@ -136,7 +247,7 @@ impl DesktopRuntime {
 
 impl Drop for DesktopRuntime {
     fn drop(&mut self) {
-        self.stop();
+        self.stop_owned();
     }
 }
 
@@ -346,6 +457,7 @@ fn monitor_runtime(
     id: u64,
     child: Arc<Mutex<Option<GroupChild>>>,
     stopping: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")] recovery: Option<Arc<RecoveryHandle>>,
 ) {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_millis(250));
@@ -357,26 +469,43 @@ fn monitor_runtime(
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let Some(process) = guard.as_mut() else {
+            if let Some(process) = guard.as_mut() {
+                match process.try_wait() {
+                    Ok(Some(status)) => {
+                        if let Some(mut process) = guard.take() {
+                            let _ = process.kill();
+                        }
+                        Some(status.to_string())
+                    }
+                    Ok(None) => None,
+                    Err(error) => {
+                        if let Some(mut process) = guard.take() {
+                            let _ = process.kill();
+                        }
+                        Some(format!("failed to inspect daemon: {error}"))
+                    }
+                }
+            } else {
+                #[cfg(target_os = "linux")]
+                {
+                    match recovery.as_ref().map(|recovery| recovery.is_alive()) {
+                        Some(Ok(true)) => None,
+                        Some(Ok(false)) => Some("adopted daemon exited".to_string()),
+                        Some(Err(error)) => Some(error),
+                        None => return,
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
                 return;
-            };
-            match process.try_wait() {
-                Ok(Some(status)) => {
-                    if let Some(mut process) = guard.take() {
-                        let _ = process.kill();
-                    }
-                    Some(status.to_string())
-                }
-                Ok(None) => None,
-                Err(error) => {
-                    if let Some(mut process) = guard.take() {
-                        let _ = process.kill();
-                    }
-                    Some(format!("failed to inspect daemon: {error}"))
-                }
             }
         };
         if let Some(status) = exit {
+            #[cfg(target_os = "linux")]
+            if let Some(recovery) = &recovery {
+                if let Err(error) = recovery.remove_if_stopped() {
+                    eprintln!("{error}");
+                }
+            }
             if !stopping.load(Ordering::SeqCst) {
                 let _ = app.emit(
                     "runtime-process-stopped",
@@ -522,6 +651,40 @@ fn wait_for_health(
     ))
 }
 
+#[cfg(target_os = "linux")]
+fn wait_for_recovered_health(recovery: &RecoveryHandle) -> Result<bool, String> {
+    let health_url = recovery
+        .url()
+        .join("health?deep=true")
+        .map_err(|error| format!("Failed to construct recovery health URL: {error}"))?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(HEALTH_REQUEST_TIMEOUT))
+        .max_redirects(0)
+        .build()
+        .into();
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    while Instant::now() < deadline {
+        if !recovery.is_alive()? {
+            return Ok(false);
+        }
+        let response = agent
+            .get(health_url.as_str())
+            .header("Authorization", &format!("Bearer {}", recovery.token()))
+            .call();
+        if response.is_ok_and(|response| {
+            response.into_body().read_to_string().is_ok_and(|body| {
+                serde_json::from_str::<serde_json::Value>(&body).is_ok_and(|body| {
+                    body.get("status").and_then(|status| status.as_str()) == Some("ok")
+                })
+            })
+        }) {
+            return Ok(true);
+        }
+        thread::sleep(HEALTH_RETRY_INTERVAL);
+    }
+    Err("The previous Desktop backend is alive but could not be authenticated; no competing backend was started.".to_string())
+}
+
 fn startup_error(message: &str, output: &Mutex<String>) -> String {
     let output = match output.lock() {
         Ok(guard) => guard.clone(),
@@ -611,10 +774,10 @@ mod tests {
         merged_daemon_path, parse_listening_url, resolve_workspace, runtime_arguments,
         DesktopRuntime, RuntimeStopped, FAILURE_OUTPUT_LIMIT,
     };
-    #[cfg(unix)]
-    use super::{stop_runtime_handle, wait_for_listening};
     #[cfg(windows)]
     use super::{layout_from_root, spawn_runtime_group};
+    #[cfg(unix)]
+    use super::{stop_runtime_handle, wait_for_listening};
     use std::path::Path;
     #[cfg(windows)]
     use std::path::PathBuf;
@@ -744,12 +907,69 @@ mod tests {
             token: "secret-token".to_string(),
             child: std::sync::Arc::new(std::sync::Mutex::new(None)),
             stopping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(target_os = "linux")]
+            recovery: None,
         };
         assert_eq!(
             runtime.authenticated_web_url().as_str(),
             "http://127.0.0.1:49152/#token=secret-token"
         );
         assert_eq!(runtime.base_url().as_str(), "http://127.0.0.1:49152/");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancelled_adoption_detaches_without_stopping_the_survivor() {
+        use crate::runtime_recovery::{RecoveryHandle, RecoveryNamespace};
+        use std::os::unix::fs::DirBuilderExt;
+        use std::sync::atomic::AtomicBool;
+
+        let directory =
+            std::env::temp_dir().join(format!("qwen-cancelled-adoption-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let base_url = Url::parse("http://127.0.0.1:49152/").unwrap();
+        let namespace =
+            RecoveryNamespace::capture(directory.clone(), None, "test-runtime".to_string())
+                .unwrap();
+        let recovery = Arc::new(
+            RecoveryHandle::publish(
+                &directory,
+                &directory,
+                &namespace,
+                child.id(),
+                &base_url,
+                &"a".repeat(64),
+                false,
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let runtime = DesktopRuntime {
+            id: 1,
+            base_url,
+            token: "a".repeat(64),
+            child: Arc::new(Mutex::new(None)),
+            stopping: Arc::new(AtomicBool::new(false)),
+            recovery: Some(Arc::clone(&recovery)),
+        };
+        runtime.stop_owned();
+        assert!(recovery.is_alive().unwrap());
+        assert!(
+            RecoveryHandle::find(&directory, &directory, &namespace, false)
+                .unwrap()
+                .is_some()
+        );
+        runtime.stop();
+        assert!(!recovery.is_alive().unwrap());
+        child.wait().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
