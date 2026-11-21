@@ -1,5 +1,7 @@
 # ACP child process tree reaping
 
+[English](acp-child-process-tree-reaping.md) | [简体中文](acp-child-process-tree-reaping.zh-CN.md)
+
 Status: implemented for PR2
 
 Proposed PR title: `fix(acp-bridge): Reap ACP child process trees`
