@@ -379,6 +379,71 @@ describe('ManagedArtifactLibraryPage', () => {
     },
   );
 
+  it('clears an initial error after a successful refresh', async () => {
+    vi.mocked(library.listArtifacts)
+      .mockRejectedValueOnce(new Error('first boom'))
+      .mockResolvedValueOnce(page([other]));
+    await render();
+    expect(document.querySelector('[role="alert"]')).not.toBeNull();
+
+    await click('Refresh');
+
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(row(other.id)?.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('clears loading when the refreshed page fails', async () => {
+    vi.mocked(library.listArtifacts)
+      .mockResolvedValueOnce(page([]))
+      .mockRejectedValueOnce(new Error('refresh failed'));
+    await render();
+
+    await click('Refresh');
+
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'refresh failed',
+    );
+    expect(document.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it('shows loading instead of the empty state when a settled page refreshes', async () => {
+    const refresh = pendingPage();
+    vi.mocked(library.listArtifacts)
+      .mockResolvedValueOnce(page([]))
+      .mockReturnValueOnce(refresh.promise);
+    await render();
+
+    await click('Refresh');
+
+    expect(document.querySelector('[role="status"]')).not.toBeNull();
+    expect(document.body.textContent).not.toContain(
+      'No artifacts have been produced in this workspace yet.',
+    );
+    await act(async () => refresh.resolve(page([other])));
+    expect(row(other.id)).toBeDefined();
+    expect(document.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it('clears a cursor error after a successful retry', async () => {
+    const failed = pendingPage();
+    const retry = pendingPage();
+    vi.mocked(library.listArtifacts)
+      .mockResolvedValueOnce(page([artifact], true, 'page-2'))
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retry.promise);
+    await render();
+    await click('Load more');
+    await act(async () => failed.reject(new Error('page boom')));
+    expect(document.querySelector('[role="alert"]')).not.toBeNull();
+
+    await click('Load more');
+    await act(async () => retry.resolve(page([other])));
+
+    expect(row(artifact.id)).toBeDefined();
+    expect(row(other.id)).toBeDefined();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it('refreshes the page and closes on demand', async () => {
     await render();
     await click('Refresh');
