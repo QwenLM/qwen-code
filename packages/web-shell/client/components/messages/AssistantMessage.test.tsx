@@ -865,6 +865,18 @@ describe('AssistantMessage Mod rows', () => {
 });
 
 describe('AssistantMessage Markdown copy', () => {
+  it('declares the action footer as selection-copy row chrome', () => {
+    const container = render(
+      <AssistantMessage
+        content="A reply rendered with footer actions."
+        showFooterActions
+      />,
+    );
+    const footer = container.querySelector(`.${styles.messageFooter}`);
+    expect(footer).not.toBeNull();
+    expect(footer!.hasAttribute('data-selection-copy-chrome')).toBe(true);
+  });
+
   it.each([
     ['en', 'Copy content', 'Copy Markdown source'],
     ['zh-CN', '复制内容', '复制 Markdown 源文'],
