@@ -248,11 +248,20 @@ describe('startChannelLivenessMonitor', () => {
       throw new Error('ping rejected');
     });
     const onFailure = vi.fn();
+    const sampleProcess = vi.fn(
+      (): ChannelProcessSample => ({
+        cpuTicks: 7,
+        state: 'S',
+        wchan: 'pipe_wait',
+        rssBytes: 2048,
+      }),
+    );
     startChannelLivenessMonitor({
       probe,
       onFailure,
       isActive: () => true,
       now: () => 0,
+      sampleProcess,
     });
 
     await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_INTERVAL_MS);
@@ -266,8 +275,9 @@ describe('startChannelLivenessMonitor', () => {
     expect(failure.evidence).toMatchObject({
       consecutiveTimeouts: 0,
       busyExtensions: 0,
+      lastSample: { state: 'S', wchan: 'pipe_wait', cpuTicks: 7 },
     });
-    expect(failure.evidence.lastSample).toBeUndefined();
+    expect(failure.evidence.lastCpuDeltaTicks).toBeUndefined();
   });
 
   it('cancels an active timeout when stopped', async () => {
@@ -321,6 +331,12 @@ describe('startChannelLivenessMonitor', () => {
         extension: i,
         limit: CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT,
         cpuDeltaTicks: 10,
+        sample: {
+          cpuTicks: i * 20,
+          state: 'R',
+          wchan: '',
+          rssBytes: 1024,
+        },
       });
     }
 
@@ -338,6 +354,44 @@ describe('startChannelLivenessMonitor', () => {
       // 6 windows x 2 samples x 10 ticks: the failure must carry the
       // timeout-side sample (call 12), not the probe-start baseline (110).
       lastSample: { state: 'R', cpuTicks: 120 },
+    });
+  });
+
+  it('keeps charged strikes across a busy extension', async () => {
+    vi.useFakeTimers();
+    const probe = vi.fn(() => new Promise<never>(() => {}));
+    const onFailure = vi.fn();
+    const onBusyExtension = vi.fn();
+    let calls = 0;
+    const sampleProcess = vi.fn((): ChannelProcessSample => {
+      calls++;
+      return {
+        cpuTicks: calls <= 3 ? 100 : 110,
+        state: calls <= 3 ? 'T' : 'R',
+        wchan: '',
+        rssBytes: 1024,
+      };
+    });
+    startChannelLivenessMonitor({
+      probe,
+      onFailure,
+      isActive: () => true,
+      now: () => 0,
+      sampleProcess,
+      onBusyExtension,
+    });
+
+    // window 1: zero CPU -> strike 1; window 2: CPU advances -> extension
+    // (must NOT clear the strike); window 3: zero CPU -> strike 2 -> fail.
+    await vi.advanceTimersByTimeAsync(
+      CHANNEL_LIVENESS_INTERVAL_MS + 3 * CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+    );
+    expect(onBusyExtension).toHaveBeenCalledOnce();
+    expect(onFailure).toHaveBeenCalledOnce();
+    expect(onFailure.mock.calls[0]?.[0].evidence).toMatchObject({
+      consecutiveTimeouts: 2,
+      busyExtensions: 1,
+      lastCpuDeltaTicks: 0,
     });
   });
 

@@ -96,7 +96,8 @@ SIGKILL 销毁了现场：没有任何记录保存 kill 时刻 agent 的进程�
 新可选选项：
 
 - `sampleProcess?: () => ChannelProcessSample | undefined`
-- `onBusyExtension?: (info: { extension: number; limit: number; cpuDeltaTicks: number }) => void`
+- `onBusyExtension?: (info: { extension: number; limit: number; cpuDeltaTicks: number; sample?: ChannelProcessSample }) => void`
+  ——`sample` 为超时侧快照，使宽限行携带与 kill 行相同的守卫证据字段。
 
 行为：
 
@@ -129,7 +130,11 @@ SIGKILL 销毁了现场：没有任何记录保存 kill 时刻 agent 的进程�
 
 - 传入 `sampleProcess: () => sampleChannelProcess(info.channel.pid)`。
 - 传入 `onBusyExtension`，每次宽限写一条 stderr：
-  `qwen serve: channel liveness probe timed out but agent pid=<pid> consumed CPU (<n> ticks); extending grace <k>/<limit>`。
+  `qwen serve: channel liveness probe timed out but agent pid=<pid> consumed CPU (<n> ticks) state=<S> wchan=<w> rssMB=<m>; extending grace <k>/<limit>`。
+  `state`/`wchan`/`rssMB` 来自该次宽限的超时侧样本，守卫与失败行相同
+  （空 wchan 渲染 `?`；样本缺失时省略这三个字段），使宽限期内就能区分
+  "事件循环卡死且处于 R 烧 CPU"与"worker 线程烧 CPU 而循环卡死"，
+  而不必等到 kill 行。
 - 增强 `failChannelLiveness`：stderr 日志与 `channel.liveness_failed` 遥测
   事件在现有通道 id、会话数之外携带证据字段（pid、state、wchan、CPU 增量、
   RSS、计数器）。kill 路径本身不变。

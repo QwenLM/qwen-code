@@ -1,5 +1,7 @@
 # Daemon ACP channel transport liveness
 
+[English](2026-08-24-daemon-channel-transport-liveness.md) | [简体中文](2026-08-24-daemon-channel-transport-liveness.zh-CN.md)
+
 ## Problem
 
 The daemon knows when an ACP child exits or its bounded NDJSON transport rejects a frame, but it cannot detect a child that remains alive while its event loop or transport stops answering. Session active-work snapshots cannot fill this gap: silence from one Session is not proof that the shared channel is dead, and using that signal to recycle the child would destroy every multiplexed Session.
@@ -43,6 +45,8 @@ The fixed internal policy is:
 - after a second consecutive on-time timeout, fail the transport and recycle the channel.
 
 This bounds detection to 35 seconds when a child wedges just after a healthy probe, while requiring two independent unanswered requests before taking down multiplexed Sessions. A successful response resets the consecutive-timeout count. These values are implementation policy, not public configuration, matching #8586's non-goal.
+
+> **Superseded in part (2026-11-21):** the two-strike escalation above now applies only to timeouts with no observed CPU progress. A CPU-advancing agent receives bounded busy extensions (at most six) before condemnation, and every failure and every busy extension carries process evidence (pid, state, wchan, CPU delta, RSS, counters). The 35-second bound therefore holds for zero-CPU wedges only. See [channel liveness busy grace and failure evidence](2026-11-21-channel-liveness-busy-grace.md) ([简体中文](2026-11-21-channel-liveness-busy-grace.zh-CN.md)).
 
 At most two requests can remain unresolved: the first timed-out request and its retry. ACP request ids keep a late first response separate from the retry. Once the channel is condemned, the existing transport teardown closes both.
 

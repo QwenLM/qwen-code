@@ -113,7 +113,9 @@ New constant: `CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT = 6`.
 New optional options:
 
 - `sampleProcess?: () => ChannelProcessSample | undefined`
-- `onBusyExtension?: (info: { extension: number; limit: number; cpuDeltaTicks: number }) => void`
+- `onBusyExtension?: (info: { extension: number; limit: number; cpuDeltaTicks: number; sample?: ChannelProcessSample }) => void`
+  — `sample` is the timeout-side snapshot, so grace lines carry the same
+  guarded evidence fields as the kill line.
 
 Behavior:
 
@@ -153,7 +155,12 @@ unaffected.
 
 - Pass `sampleProcess: () => sampleChannelProcess(info.channel.pid)`.
 - Pass `onBusyExtension`, writing one stderr line per extension:
-  `qwen serve: channel liveness probe timed out but agent pid=<pid> consumed CPU (<n> ticks); extending grace <k>/<limit>`.
+  `qwen serve: channel liveness probe timed out but agent pid=<pid> consumed CPU (<n> ticks) state=<S> wchan=<w> rssMB=<m>; extending grace <k>/<limit>`.
+  The `state`/`wchan`/`rssMB` fields come from the extension's timeout-side
+  sample with the same guards as the failure line (empty wchan renders `?`;
+  an absent sample omits the three fields), so a grace episode separates
+  "loop blocked and burning CPU in R" from "a worker thread burns CPU while
+  the loop is stuck" during the stall, not only at the kill.
 - Enrich `failChannelLiveness`: the stderr line and the
   `channel.liveness_failed` telemetry event carry the evidence fields
   (pid, state, wchan, cpu delta, RSS, counters) alongside the existing

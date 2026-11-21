@@ -482,9 +482,12 @@ export function createChannelStartup({
             nonce,
           }),
         sampleProcess: () => sampleChannelProcess(info.channel.pid),
-        onBusyExtension: ({ extension, limit, cpuDeltaTicks }) => {
+        onBusyExtension: ({ extension, limit, cpuDeltaTicks, sample }) => {
+          const graceSuffix = sample
+            ? ` state=${sample.state} wchan=${sample.wchan || '?'} rssMB=${Math.round(sample.rssBytes / 1048576)}`
+            : '';
           writeStderrLine(
-            `qwen serve: channel liveness probe timed out but agent pid=${info.channel.pid ?? '?'} consumed CPU (${cpuDeltaTicks} ticks); extending grace ${extension}/${limit}`,
+            `qwen serve: channel liveness probe timed out but agent pid=${info.channel.pid ?? '?'} consumed CPU (${cpuDeltaTicks} ticks)${graceSuffix}; extending grace ${extension}/${limit}`,
           );
         },
         onFailure: failChannelLiveness,

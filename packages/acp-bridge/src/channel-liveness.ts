@@ -42,6 +42,8 @@ export interface ChannelLivenessBusyExtension {
   extension: number;
   limit: number;
   cpuDeltaTicks: number;
+  /** Timeout-side snapshot, so grace lines carry the same evidence as kills. */
+  sample?: ChannelProcessSample;
 }
 
 export class ChannelLivenessFailure extends Error {
@@ -208,6 +210,7 @@ export function startChannelLivenessMonitor(
           extension: busyExtensions,
           limit: CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT,
           cpuDeltaTicks,
+          sample: afterSample,
         });
         void runProbe();
         return;
