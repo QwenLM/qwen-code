@@ -10,6 +10,11 @@ import type { Config, ServerLlmStreamEvent } from '@qwen-code/qwen-code-core';
 import { LlmEventType, OutputFormat } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { JsonOutputAdapter } from './JsonOutputAdapter.js';
+
+const mockRecordUsageStatisticsNoticeShown = vi.hoisted(() => vi.fn());
+vi.mock('../usage-statistics-notice.js', () => ({
+  recordUsageStatisticsNoticeShown: mockRecordUsageStatisticsNoticeShown,
+}));
 import {
   HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET,
   HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
@@ -387,6 +392,32 @@ describe('JsonOutputAdapter', () => {
         value: 'Response text',
       });
       adapter.finalizeAssistantMessage();
+    });
+
+    it('records a delivered usage statistics notice only after writing the document', () => {
+      mockRecordUsageStatisticsNoticeShown.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1,
+        apiDurationMs: 1,
+        numTurns: 1,
+      });
+      expect(mockRecordUsageStatisticsNoticeShown).toHaveBeenCalledTimes(1);
+      expect(
+        mockRecordUsageStatisticsNoticeShown.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(stdoutWriteSpy.mock.invocationCallOrder[0]);
+    });
+
+    it('does not record the notice in text mode', () => {
+      mockRecordUsageStatisticsNoticeShown.mockClear();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1,
+        apiDurationMs: 1,
+        numTurns: 1,
+      });
+      expect(mockRecordUsageStatisticsNoticeShown).not.toHaveBeenCalled();
     });
 
     it('should emit success result as JSON array', () => {
