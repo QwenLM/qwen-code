@@ -480,6 +480,10 @@ import {
 } from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
 import {
+  OVERLOAD_REFUSAL_TTL_MS,
+  useDaemonOverloadPause,
+} from './daemon/workspace/hooks/useDaemonOverloadPause.js';
+import {
   getLocalCommands,
   localizeBuiltinDescriptions,
   skillDescriptionKey,
@@ -10735,6 +10739,37 @@ export function App({
   const sessionLimitScopeRef = useRef<
     { sessionId?: string; workspaceCwd?: string } | undefined
   >(undefined);
+  // Load-admission pause: the proactive poll verdict OR an unexpired
+  // `system_overloaded` refusal. The refusal hint matches the daemon's
+  // Retry-After so the UI never stays paused longer than advised without
+  // poll confirmation.
+  const [overloadRefusal, setOverloadRefusal] = useState<{
+    message: string;
+    expiresAt: number;
+  } | null>(null);
+  const clearOverloadRefusal = useCallback(() => setOverloadRefusal(null), []);
+  const {
+    paused: overloadPaused,
+    pollOverloaded,
+    loadAdmission: pollLoadAdmission,
+    refusalMessage: overloadRefusalMessage,
+  } = useDaemonOverloadPause({
+    enabled: daemonAvailable,
+    refusal: overloadRefusal,
+    onRefusalExpired: clearOverloadRefusal,
+  });
+  const overloadDetail =
+    pollOverloaded && pollLoadAdmission
+      ? t('sidebar.overloadDetail', {
+          ratio: pollLoadAdmission.loadRatio.toFixed(2),
+          lag: Math.round(pollLoadAdmission.eventLoopLagP99Ms),
+          reason: pollLoadAdmission.reason ?? 'unknown',
+        })
+      : overloadRefusalMessage;
+  const overloadPausedRef = useRef(overloadPaused);
+  overloadPausedRef.current = overloadPaused;
+  const overloadDetailRef = useRef(overloadDetail);
+  overloadDetailRef.current = overloadDetail;
   const [showRewindDialog, setShowRewindDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
@@ -14928,6 +14963,15 @@ export function App({
       ) {
         setSessionLimitReached(true);
       }
+      if (
+        notice.code === 'system_overloaded' &&
+        notice.operation === 'create_session'
+      ) {
+        setOverloadRefusal({
+          message: notice.message,
+          expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
+        });
+      }
       if (shouldToastNotice(notice)) {
         pushToast(
           toastToneFromNotice(notice),
@@ -17321,6 +17365,13 @@ export function App({
         carryManualTitle?: string;
       },
     ) => {
+      if (overloadPausedRef.current) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
+      }
       if (
         connectionRef.current.standaloneSession?.creationRecovery &&
         !opts?.allowRecoveryReset
@@ -24977,6 +25028,8 @@ export function App({
                   // in the composer's workspace picker instead. From a Live
                   // chat it opens an ordinary task; a fresh voice conversation
                   // comes from the Live controls.
+                  overloadPaused={overloadPaused}
+                  overloadDetail={overloadDetail}
                   onNewSession={(workspaceCwd) => {
                     if (managedMode && typeof workspaceCwd !== 'string') {
                       if (

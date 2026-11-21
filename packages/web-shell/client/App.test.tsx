@@ -1508,6 +1508,20 @@ vi.mock('./daemon/session/DaemonSessionProvider', async (importOriginal) => {
   };
 });
 
+// This harness renders App without a DaemonWorkspaceProvider; the overload
+// pause hook reads the workspace status resource, so stub it here. Its real
+// behavior is covered by useDaemonOverloadPause.test.ts and the sidebar
+// overload-strip suite.
+vi.mock('./daemon/workspace/hooks/useDaemonOverloadPause.js', () => ({
+  OVERLOAD_REFUSAL_TTL_MS: 15_000,
+  useDaemonOverloadPause: () => ({
+    paused: false,
+    pollOverloaded: false,
+    loadAdmission: undefined,
+    refusalMessage: undefined,
+  }),
+}));
+
 vi.mock('./components/ChatEditor', async () => {
   const React = await import('react');
   const { useWebShellCustomization } = await import('./customization');

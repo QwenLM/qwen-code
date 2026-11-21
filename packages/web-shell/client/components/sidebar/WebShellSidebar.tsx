@@ -92,6 +92,7 @@ import {
   SettingsIcon,
   SquarePenIcon,
   SunIcon,
+  TriangleAlertIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useBrand, useBrandName } from '../../brandContext';
@@ -603,6 +604,10 @@ interface WebShellSidebarProps {
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
   onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
+  /** Load-admission pause: while true the create entry points are disabled
+   * and a warning strip explains the daemon overload. */
+  overloadPaused?: boolean;
+  overloadDetail?: string;
   onNewStandaloneSession?: () => Promise<boolean> | boolean;
   standaloneSessionsReloadToken?: number;
   onLoadSession: (
@@ -1279,6 +1284,8 @@ export function WebShellSidebar({
   splitSessionIds,
   canOpenSplitView,
   onNewSession,
+  overloadPaused = false,
+  overloadDetail,
   onNewStandaloneSession,
   standaloneSessionsReloadToken = 0,
   onLoadSession,
@@ -3162,7 +3169,7 @@ export function WebShellSidebar({
     '--web-shell-sidebar-min-width': `${sidebarMinWidth}px`,
     '--web-shell-sidebar-max-width': `${getSidebarMaxWidth()}px`,
   } as CSSProperties;
-  const newSessionDisabled = creatingSession;
+  const newSessionDisabled = creatingSession || overloadPaused;
 
   useEffect(() => {
     if (!currentSessionId) return;
@@ -3807,7 +3814,7 @@ export function WebShellSidebar({
 
   const handleNewSession = useCallback(
     (workspaceCwd?: string, fromRecent = false) => {
-      if (creatingSessionRef.current) return;
+      if (creatingSessionRef.current || overloadPaused) return;
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
@@ -3841,6 +3848,7 @@ export function WebShellSidebar({
       currentRowIdentity,
       onError,
       onNewSession,
+      overloadPaused,
       primaryWorkspaceCwd,
       sessionCatalogController,
       sessionContent,
@@ -3852,7 +3860,8 @@ export function WebShellSidebar({
   // new task; only the creation callback differs.
   const handleNewWorktreeSession = useCallback(
     (workspaceCwd?: string) => {
-      if (!onNewWorktreeSession || creatingSessionRef.current) return;
+      if (!onNewWorktreeSession || creatingSessionRef.current || overloadPaused)
+        return;
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
@@ -3880,6 +3889,7 @@ export function WebShellSidebar({
       bumpWorkspaceReload,
       onError,
       onNewWorktreeSession,
+      overloadPaused,
       primaryWorkspaceCwd,
       sessionCatalogController,
       t,
@@ -8168,6 +8178,24 @@ export function WebShellSidebar({
                 </div>
               </div>
             </>
+          )}
+          {!sectionView && !selectionMode && overloadPaused && (
+            <div
+              className={styles.overloadStrip}
+              data-web-shell-overload-strip
+              role="status"
+              title={overloadDetail}
+              aria-label={
+                overloadDetail
+                  ? `${t('sidebar.overloadPaused')}: ${overloadDetail}`
+                  : t('sidebar.overloadPaused')
+              }
+            >
+              <TriangleAlertIcon size={14} strokeWidth={1.5} />
+              {(!collapsed || homePreviewOpen) && (
+                <span>{t('sidebar.overloadPaused')}</span>
+              )}
+            </div>
           )}
           {!sectionView &&
             (selectionMode ||
