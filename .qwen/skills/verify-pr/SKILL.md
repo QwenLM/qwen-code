@@ -740,9 +740,42 @@ Build the task in this order and stop at the first failure:
    order, and `--start --artifact-dir` is still accepted, so nothing forces the
    upgrade. Re-creating it through the standard install does not work: step 3 is
    blocked by the probe cursor as well as the claim, and `--release` clears only
-   the claim — so such a watch keeps the old order until it is manually migrated
-   (a residual tracked in #17371). Do not delete another session's live watch to
-   make room; the claim guard forbids it.
+   the claim — so such a watch keeps the old order until it is manually migrated.
+   Do not delete another session's live watch to make room; the claim guard
+   forbids it. To migrate this PR's own `verify-pr`
+   watch in place, first run `cron_delete` for this watch task and confirm the
+   deletion succeeded (do not touch any cursor if deletion fails), and check
+   `cron_list` (not merely absence of `.qwen/tmp/autofix-pr-<n>-state.json`,
+   since `autofix-pr cleanup` deletes the state file while leaving the gate
+   cursor behind) to confirm no `autofix-pr` watch is running. Then run
+   `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor`
+   (which unlinks the cursor before releasing the `verify-pr` ownership claim,
+   prints the cursor's last `headSha`, and refuses with exit 3 when
+   `.qwen/tmp/autofix-pr-<n>-state.json` exists). If `--release --reset-cursor`
+   exits 3 due to `autofix-pr` state, stop migrating and do **not** remove the
+   cursor or re-run steps 3–4 — run
+   `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release` to drop only
+   this watch's claim until the `autofix-pr` consumer is retired. If an
+   earlier plain `--release` already removed `verify-pr-watch-<n>.owner.json`
+   and stranded `.qwen/tmp/autofix-pr-<n>-gate.json`, confirm via `cron_list`
+   (and state-file absence) that no `autofix-pr` watch is active before
+   removing `.qwen/tmp/autofix-pr-<n>-gate.json` in `<clone>`'s main worktree.
+   Before re-running steps 3–4, inspect `.qwen/tmp/verify-pr-watch-<n>.json` in
+   `<clone>`'s main worktree for any dead round in `inFlightHeads` and release
+   it with
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <dead head> [--round <r>] --repo <owner>/<repo>`
+   (or `--restart` if immediately resuming that head) so `"one round per PR"`
+   does not block the migrated watch. After re-running steps 3–4, check the
+   live PR head (`gh pr view <n> --repo <owner>/<repo> --json headRefOid`) and
+   the printed `last head` against `.qwen/tmp/verify-pr-watch-<n>.json`: if the
+   live head is neither verified nor in flight — whether it moved during
+   migration or sat unverified under the prior cursor — register and run a
+   round for it with `--start` because a fresh cursor's first tick records the
+   live head as its baseline without emitting an event. When a `resync` event
+   fires, the gate pre-records its `headSha` in `deferredHeads` before waking
+   the model whenever the state lock and state file allow it, narrowing the
+   silent-drop window to the hop between the probe child's cursor write and
+   pre-recording.
 
 The prompt consumes the gate's JSON and nothing else. On
 `head_moved_externally`, take `headSha` and run the round for that sha.
@@ -774,7 +807,10 @@ A transient prepare failure (the round still runs) leaves the marker intact —
 prepare never reads the watch state — so retrying prepare against it and
 completing at the original round recovers the head with no release; the
 release + restart is for a round that died, and a kill between its two commands
-would re-open the silent drop. `--repo` is required on both: `--start` recorded
+would re-open the silent drop. To avoid that two-command window on a dead
+round, prefer the atomic form
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --restart --head <headSha> --from-round <r> --round <r+1> --repo <owner>/<repo>`,
+which replaces the dead marker in one lock acquisition. `--repo` is required on both: `--start` recorded
 it, and every verb refuses an omitted `--repo` once a repo is recorded. The
 restarted round's number (`<r+1>`) becomes this round's number — repeat that
 value in `--complete`. Do not recover with `--complete inconclusive` instead —
@@ -874,11 +910,23 @@ refused (exit 3), including when no markers exist at all: check
 refused (exit 1), never silently rewritten: inspect or remove it before the
 next round.
 
-On `action: "stop"` (merged or closed), delete the task with `cron_delete`,
-drop the claim with
-`node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`, and stop
-watching; drop it too when task creation fails. Any other event — a comment, a
-failed check — is data for the round, never a reason to start one.
+On `action: "stop"` (merged or closed), run `cron_delete` and confirm the
+deletion succeeded before touching any cursor, drop the claim and probe cursor
+with
+`node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor`
+(so reopening the PR later does not run into a stranded cursor; if it exits 3
+because `.qwen/tmp/autofix-pr-<n>-state.json` exists, drop only this watch's
+claim with `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release` and
+leave the shared cursor to the `autofix-pr` consumer), clear any dead round's
+`inFlightHeads` entry in `.qwen/tmp/verify-pr-watch-<n>.json` (when no round is
+still running) with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <dead head> [--round <r>] --repo <owner>/<repo>`
+so reopening the PR later does not stay blocked by `"one round per PR"`, and
+stop watching; when task creation fails, drop the claim with
+`node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor`
+(falling back to `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`
+if `autofix-pr` state causes exit 3). Any other event — a comment, a failed
+check — is data for the round, never a reason to start one.
 
 The probe's cursor lives under the **clone's main worktree**
 (`.qwen/tmp/autofix-pr-<n>-gate.json`), not the worktree a round runs in. One
@@ -1046,7 +1094,10 @@ ambiguous rather than verify a guessed PR. Then, in order:
    recorded it). A transient prepare failure (the round still runs) leaves the
    marker intact — prepare never reads the watch state — so retrying prepare
    against it and completing at the original round recovers `H` with no
-   release; the release + restart is for a round that died. The restarted
+   release; the release + restart is for a round that died. For a dead round,
+   the single-command atomic form
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --restart --head <H> --from-round <r> --round <r+1> --repo <owner>/<repo>`
+   replaces the marker in one lock acquisition with no unregistered window. The restarted
    round's number (`<r+1>`) becomes this round's number — repeat that value in
    `--complete`. Do not recover with `--complete
 inconclusive` instead: it increments the retry counter whose cap is the
@@ -2424,6 +2475,14 @@ workflow globs). It must contain:
     --title 'A/B: the gate flips on noisy data' -- node my-harness.mjs
   # or pipe:  my-harness | node scripts/verify-capture.mjs --out …/02-matrix.png
   ```
+
+  In the local container recipe, run the helper from the host's trusted
+  clone (for example, pipe `docker exec` output into
+  `node <trusted-clone>/scripts/verify-capture.mjs --out …`) so
+  `@xterm/headless` and `sharp` resolve from `<trusted-clone>/node_modules`
+  rather than the PR-writable `/work` tree; an isolated copy of
+  `verify-capture.mjs` outside a checkout refuses to load modules from
+  `process.cwd()` unless `--allow-cwd-modules` is explicitly passed.
 
   It runs the command, parses its ANSI through `@xterm/headless`, and
   rasterises the cell grid with `sharp` — the 16 base ANSI colours and bold

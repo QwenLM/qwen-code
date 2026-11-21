@@ -170,33 +170,81 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
 ## 涉及文件
 
 - `scripts/verify-pr-watch-state.mjs` —— 移除 `parseArgs` 强制；HELP 真实回退；
-  `completeRound` 返回解析目录；非 inconclusive 的 null 目录完成给警告。
+  `completeRound` 返回解析目录；非 inconclusive 的 null 目录完成给警告；后续
+  #17371 推进补入 `recordDelivery`（gate 预记入 `deferredHeads`）与
+  `restartRound`（`--restart`，单锁原子替换死轮次且拒绝不高于当前轮次的
+  `--round`）。
+- `scripts/verify-pr-watch-gate.mjs` —— 后续 #17371 推进补入 `deliverGateOutput`
+  与 `resolveDeliveryRoot`（派发探针前验证已解析根为仓库的主 git worktree 顶层，
+  并将探针子进程 `cwd` 对齐至该主 worktree 根，要求 `--state-root` 为绝对路径，
+  在 stdout 唤醒模型前按脚本所在主 git worktree 预记 `resync` `headSha`，绝不回退
+  到 `cwd`，锁/损坏/repo 异常时 fail-open），以及 `resetWatchCursor`
+  （`--release --reset-cursor [--repo <owner>/<repo>]`，先读出末次 `headSha` 并删除
+  游标、再释放 claim，兼顾所有权、`autofix-pr` 状态与仓库身份匹配保护）。
+- `scripts/verify-capture.mjs` —— 当脚本旁缺失 `@xterm/headless` 或 `sharp`
+  时提供显式 `--allow-cwd-modules` 回退开关（默认拒绝从 `cwd` 加载，防止隔离的
+  `/trusted-scripts` 副本误执行 PR 可写树中的依赖）。
 - `.qwen/skills/verify-pr/SKILL.md` —— watch prompt + 手动复验顺序；start 后
-  prepare 失败的恢复。
+  prepare 失败的恢复；`--restart`、停止/迁移 `--release --reset-cursor` 与宿主克
+  隆截屏指引。
 - `scripts/tests/qwen-triage-workflow.test.js` —— 命令/顺序钉。
-- `scripts/tests/verify-pr-watch-state.test.js` —— 提前注册见证。
-- `docs/design/verify-pr-register-ahead-of-prepare.md` + `.zh-CN.md` —— 本文档。
+- `scripts/tests/verify-pr-watch-state.test.js` —— 提前注册与 `recordDelivery` /
+  `--restart` 见证。
+- `scripts/tests/verify-pr-watch-gate.test.js` —— pre-delivery、默认根解析与
+  `--release --reset-cursor` 见证。
+- `scripts/tests/verify-capture.test.js` —— 隔离挂载下拒绝 `cwd` 模块及
+  `--allow-cwd-modules` 显式开关见证。
+- `docs/design/verify-pr-register-ahead-of-prepare.md` + `.zh-CN.md` —— 本文档
+  （并同步 `docs/design/verify-pr-watch.md` + `.zh-CN.md`）。
 
 ## 范围边界
 
-- 仅注册顺序与 `--start` 参数要求。watch-gate 所有权/游标、去重/defer/release
-  语义、信任边界检查（R17-1，已由 #17375 闭合）均不变。
-- below-Critical 延后项（D17-4…14、R5-2、第 7/8 轮 deferred）仍由 #17371 跟踪；
-  本改动不触碰。
+- PR #17185 引入了 `scripts/verify-pr-watch-state.mjs` 及其去重/defer/release 语义；
+  PR #17550 在此基础上将注册提前到 prepare 之前并放宽 `--start` 参数要求（保持
+  watch-gate 所有权/游标与原子重启未改）；本文档记录的后续改动继续扩展 watch-gate
+  与 watch-state 助手，专门推进 #17371 的三条 watch 活性残余（及
+  `verify-capture.mjs` 的显式 cwd 依赖开关）。
+- 信任边界检查（R17-1，已由 #17375 闭合）及剩余 below-Critical 延后项（D17-4…14、
+  R5-2、第 7/8 轮 deferred）不在本改动范围内。
 
 ## 待决问题
 
 - 无阻塞项。活性收益是可观测/可恢复性：投递后在 prepare 被杀的 head 现在留下
-  在飞标记，操作者或下一次 head move 可恢复，而非消失。修复**收窄**静默丢弃窗口，
-  并未消除。三条残余仍存，跟踪于 #17371：(1) 闸门先写游标再打印事件
-  （`packages/cli/src/commands/autofix-pr/snapshot.ts`），故会话在闸门投递与首次
-  `--start` 之间被杀仍使 head 无记录——窗口收窄到该「投递→--start」区间，并未
-  闭合（闭合需把标记写在闸门侧，那里本就握着 headSha）；(2) watch prompt 是任务上
-  的持久快照，故本改动前安装的 watch 仍按 prepare→register 旧顺序，直到任务手动
-  迁移——标准安装无法重建（步骤 3 被探针游标与 claim 共同阻挡、`--release` 只清
-  claim），而 `--start --artifact-dir` 仍被接受，无机制强制升级；(3) 死轮恢复把
-  `--release` 与重启成对，两命令之间被杀会使 head 失去记录——瞬时路径通过对完好
-  标记重试 prepare、不 release 来避免此窗口，但死轮恢复仍带该窗口。watch 只在
-  head move 时醒来，故*最后一个* head 上被杀的轮仍等待新 move，或手动
-  `--release --head <H> [--round <r>] --repo <owner>/<repo>` **后再重启**
-  （`--start … --round <r+1>`）——单独 release 会让 head 失去记录。
+  在飞标记，操作者或下一次 head move 可恢复，而非消失。此前由 #17371 跟踪的
+  三条残余现按如下边界推进（其中残余 1 为收窄而非彻底关闭）：
+  1. `scripts/verify-pr-watch-gate.mjs`（`deliverGateOutput` + `resolveDeliveryRoot`
+     → `scripts/verify-pr-watch-state.mjs` 中的 `recordDelivery`）在派发探针子进程前
+     先证明已解析出的状态根确实为仓库的**主** git worktree 顶层（与
+     `git worktree list --porcelain` 首条路径做 realpath 比对，否则直接以 exit 2 拒
+     绝，绝不在调用方 `cwd` 下运行探针——涵盖 `/trusted-scripts` 孤立副本以及指向
+     非 git 目录、worktree 子目录或 linked worktree 的显式 `--state-root`），将探针子
+     进程的 `cwd` 设到该主 worktree 根（保证游标、claim 与状态文件落在同一仓库树），并
+     在向 stdout 输出 `resync` 事件唤醒模型前把 `headSha` 预记入 `deferredHeads`
+     （`startRound` 按保留的 `seq` 将该条目晋升为在飞）。由于探针在子进程退出给
+     `deliverGateOutput` 之前就已经写完游标，该机制只是将静默丢弃窗口**收窄**到
+     "探针写游标 → 门禁预记录"这一跳，并未彻底关闭（彻底关闭需在游标推进前写入标
+     记）。按设计，`deliverGateOutput` 自身刻意保持 **fail-open**：若状态锁被占用、
+     `repo` 不匹配、状态文件损坏或调用未传入状态根，会在 stderr 记录警告并仍投递该事
+     件，避免因瞬时状态故障吞掉已经被游标消费的事件。
+  2. `scripts/verify-pr-watch-gate.mjs --release --reset-cursor [--repo <owner>/<repo>]`
+     （`resetWatchCursor`）在删除前读取并汇报探针游标的末次 `headSha`，先删除
+     `autofix-pr-<n>-gate.json` 再移除 `verify-pr` 所有权声明（保证 unlink 失败时
+     claim 留存以便重试），并在存在 `autofix-pr-<n>-state.json` 时以 exit 3 拒绝、
+     提示调用方改用普通 `--release` 仅释放 `verify-pr` 声明并保留共享游标，或在游标
+     `owner/repo` / watch 状态 `repo` 与调用方 `--repo` / 已记录状态不一致时同样以
+     exit 3 拒绝（保留游标与 claim 并提示改用普通 `--release`），或在游标无
+     `verify-pr` 声明时拒绝，支持干净停止与既有 `verify-pr` watch 的就地迁移，同时
+     禁止误删其他消费者或跨仓库同号 PR 的游标；gate 全部动词
+     （`--check`/`--claim`/`--release`/`--release --reset-cursor`、探针子进程 `cwd`
+     与 pre-delivery）统一从 `SCRIPT_CLONE` 的主 git worktree 解析默认状态根、绝不读
+     取 `process.cwd()`，要求 `--state-root` 为绝对路径；非 git worktree 下调用
+     `--check`/`--release` 退出 2（显式传入任意绝对目录给 `--check`/`--release` 时仍
+     保留接受），探针 tick 在解析根不是仓库主 git worktree 顶层时退出 2。
+  3. `scripts/verify-pr-watch-state.mjs --restart --head <oid> [--from-round <r>] --round <r+1>`
+     （`restartRound`）在单次状态锁内原子替换死轮次的在飞标记，完整保留其他
+     deferred 条目（包括在飞期间因 force-push 回退并以原低 `seq` 重新投递的提交）与
+     其他 `retiredSeqs` 墓碑（仅消费被重启 head 自身的条目与墓碑），并拒绝任何
+     `--round <= entry.round` 的回退（同时兼容升级 `round: null` 的旧版标记），
+     消除 `--release` 与 `--start` 之间失去记录的窗口（原有的 `--release` 后接
+     `--start` 仍保留兼容；watch 仅在 head move 时唤醒，故*最后一个* head 上被杀
+     的轮次仍需等待新 move，或手动执行 `--restart` / `--release` + `--start`）。

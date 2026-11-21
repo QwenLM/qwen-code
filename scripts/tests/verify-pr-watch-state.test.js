@@ -25,7 +25,9 @@ import {
   completeRound,
   duplicateHead,
   readState,
+  recordDelivery,
   releaseRound,
+  restartRound,
   sameCommit,
   startRound,
   statePath,
@@ -3516,5 +3518,624 @@ describe('R17-2 register ahead of prepare', () => {
     ]);
     expect(res.status).toBe(0);
     expect(res.stderr).not.toMatch(/no artifact directory/);
+  });
+});
+
+describe('#17371 recordDelivery and --restart', () => {
+  it('recordDelivery records unseen heads, skips verified/in-flight/terminal, and enforces repo', () => {
+    const root = makeRoot();
+    const first = recordDelivery(root, {
+      pr: 1,
+      head: HEAD,
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(first.recorded).toBe(true);
+    expect(readState(root, 1).deferredHeads.map((e) => e.head)).toEqual([HEAD]);
+
+    // Wrong or omitted repo is refused once a repo is recorded.
+    expect(
+      recordDelivery(root, { pr: 1, head: PREV, repo: 'other/repo' })
+        .repoMismatch,
+    ).toBe(true);
+    expect(recordDelivery(root, { pr: 1, head: PREV }).repoMismatch).toBe(true);
+
+    // startRound promotes HEAD from deferredHeads keeping its seq.
+    const seqBefore = readState(root, 1).deferredHeads[0].seq;
+    const started = startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 1,
+      artifactDir: null,
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(started.duplicate).toBeUndefined();
+    expect(readState(root, 1).deferredHeads).toEqual([]);
+    expect(readState(root, 1).inFlightHeads[0]).toMatchObject({
+      head: HEAD,
+      seq: seqBefore,
+    });
+
+    // In-flight head itself is a no-op; another head is deferred.
+    expect(
+      recordDelivery(root, { pr: 1, head: HEAD, repo: 'QwenLM/qwen-code' })
+        .duplicate,
+    ).toBe('in-flight');
+    expect(
+      recordDelivery(root, { pr: 1, head: PREV, repo: 'QwenLM/qwen-code' })
+        .recorded,
+    ).toBe(true);
+    expect(readState(root, 1).deferredHeads.map((e) => e.head)).toEqual([PREV]);
+
+    // Verified head is a no-op.
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 1,
+      verdict: 'merge-ready',
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(
+      recordDelivery(root, { pr: 1, head: HEAD, repo: 'QwenLM/qwen-code' })
+        .duplicate,
+    ).toBe('verified');
+
+    // Twice-inconclusive terminal head is not re-opened by recordDelivery,
+    // even while another head is in flight.
+    startRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 2,
+      artifactDir: null,
+      repo: 'QwenLM/qwen-code',
+    });
+    completeRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 2,
+      verdict: 'inconclusive',
+      repo: 'QwenLM/qwen-code',
+    });
+    startRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 3,
+      artifactDir: null,
+      repo: 'QwenLM/qwen-code',
+    });
+    completeRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 3,
+      verdict: 'inconclusive',
+      repo: 'QwenLM/qwen-code',
+    });
+    startRound(root, {
+      pr: 1,
+      head: OLDER,
+      round: 4,
+      artifactDir: null,
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(
+      recordDelivery(root, { pr: 1, head: PREV, repo: 'QwenLM/qwen-code' })
+        .duplicate,
+    ).toBe('not-covered');
+
+    // R2-5: recordDelivery preserves releasedHeads/retiredSeqs seq and retries
+    // so starting A afterwards never retires a newer deferred head B.
+    const hintRoot = makeRoot();
+    mkdirSync(join(hintRoot, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(hintRoot, 2),
+      JSON.stringify({
+        pr: 2,
+        repo: 'QwenLM/qwen-code',
+        verifiedHeads: [],
+        inFlightHeads: [],
+        deferredHeads: [
+          {
+            head: PREV,
+            round: null,
+            artifactDir: null,
+            deferredAt: '2026-11-20T00:00:00.000Z',
+            seq: 2,
+            retries: 0,
+          },
+        ],
+        releasedHeads: [
+          {
+            head: HEAD,
+            seq: 1,
+            retries: 1,
+            releasedAt: '2026-11-20T00:00:00.000Z',
+          },
+        ],
+        seqCounter: 2,
+      }),
+    );
+    const reRecorded = recordDelivery(hintRoot, {
+      pr: 2,
+      head: HEAD,
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(reRecorded.recorded).toBe(true);
+    expect(
+      readState(hintRoot, 2).deferredHeads.map((e) => [
+        e.head,
+        e.seq,
+        e.retries,
+      ]),
+    ).toEqual([
+      [HEAD, 1, 1],
+      [PREV, 2, 0],
+    ]);
+    expect(readState(hintRoot, 2).releasedHeads).toEqual([]);
+    expect(
+      startRound(hintRoot, {
+        pr: 2,
+        head: HEAD,
+        round: 5,
+        artifactDir: null,
+        repo: 'QwenLM/qwen-code',
+      }).duplicate,
+    ).toBeUndefined();
+    expect(readState(hintRoot, 2).deferredHeads.map((e) => e.head)).toEqual([
+      PREV,
+    ]);
+    expect(readState(hintRoot, 2).inFlightHeads[0]).toMatchObject({
+      head: HEAD,
+      seq: 1,
+      retries: 1,
+    });
+
+    // Also preserves retiredSeqs tombstone seq/retries on redelivery.
+    const retiredRoot = makeRoot();
+    mkdirSync(join(retiredRoot, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(retiredRoot, 3),
+      JSON.stringify({
+        pr: 3,
+        repo: 'QwenLM/qwen-code',
+        verifiedHeads: [],
+        inFlightHeads: [],
+        deferredHeads: [
+          {
+            head: PREV,
+            round: null,
+            artifactDir: null,
+            deferredAt: '2026-11-20T00:00:00.000Z',
+            seq: 3,
+            retries: 0,
+          },
+        ],
+        retiredSeqs: { [HEAD]: { seq: 1, retries: 1 } },
+        seqCounter: 3,
+      }),
+    );
+    expect(
+      recordDelivery(retiredRoot, {
+        pr: 3,
+        head: HEAD,
+        repo: 'QwenLM/qwen-code',
+      }).recorded,
+    ).toBe(true);
+    expect(
+      readState(retiredRoot, 3).deferredHeads.map((e) => [
+        e.head,
+        e.seq,
+        e.retries,
+      ]),
+    ).toEqual([
+      [HEAD, 1, 1],
+      [PREV, 3, 0],
+    ]);
+    expect(
+      startRound(retiredRoot, {
+        pr: 3,
+        head: HEAD,
+        round: 6,
+        artifactDir: null,
+        repo: 'QwenLM/qwen-code',
+      }).duplicate,
+    ).toBeUndefined();
+    expect(readState(retiredRoot, 3).deferredHeads.map((e) => e.head)).toEqual([
+      PREV,
+    ]);
+  });
+
+  it('restartRound preserves a head redelivered at its preserved lower seq after the marker started (force-push back)', () => {
+    const root = makeRoot();
+    // R4-1 exact 5-step witness: HEAD (seq 1) deferred, PREV (seq 2) deferred,
+    // PREV starts round 1 (retiring HEAD), HEAD is redelivered via force-push
+    // back (at preserved seq 1), and --restart on PREV keeps HEAD deferred.
+    expect(
+      recordDelivery(root, { pr: 16867, head: HEAD, repo: 'o/r' }).recorded,
+    ).toBe(true);
+    expect(
+      recordDelivery(root, { pr: 16867, head: PREV, repo: 'o/r' }).recorded,
+    ).toBe(true);
+    expect(
+      startRound(root, {
+        pr: 16867,
+        head: PREV,
+        round: 1,
+        artifactDir: null,
+        repo: 'o/r',
+      }).duplicate,
+    ).toBeUndefined();
+    expect(
+      recordDelivery(root, { pr: 16867, head: HEAD, repo: 'o/r' }).recorded,
+    ).toBe(true);
+
+    const restarted = run(root, [
+      '16867',
+      '--restart',
+      '--head',
+      PREV,
+      '--from-round',
+      '1',
+      '--round',
+      '2',
+      '--repo',
+      'o/r',
+    ]);
+    expect(restarted.status).toBe(0);
+    expect(restarted.stdout).toContain(
+      `deferred heads awaiting a round: ${HEAD}`,
+    );
+
+    const st = readState(root, 16867);
+    expect(st.deferredHeads.map((e) => [e.head, e.seq])).toEqual([[HEAD, 1]]);
+    expect(st.inFlightHeads[0]).toMatchObject({
+      head: PREV,
+      round: 2,
+      seq: 2,
+    });
+
+    const completed = run(root, [
+      '16867',
+      '--complete',
+      '--head',
+      PREV,
+      '--round',
+      '2',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'r2',
+      '--repo',
+      'o/r',
+    ]);
+    expect(completed.status).toBe(0);
+    expect(completed.stdout).toContain(
+      `deferred heads awaiting a round: ${HEAD}`,
+    );
+
+    // Other retired tombstones and newer higher-seq deferrals also stay intact.
+    expect(
+      recordDelivery(root, { pr: 16868, head: HEAD, repo: 'o/r' }).recorded,
+    ).toBe(true);
+    expect(
+      recordDelivery(root, { pr: 16868, head: PREV, repo: 'o/r' }).recorded,
+    ).toBe(true);
+    expect(
+      startRound(root, {
+        pr: 16868,
+        head: PREV,
+        round: 1,
+        artifactDir: null,
+        repo: 'o/r',
+      }).duplicate,
+    ).toBeUndefined();
+    expect(
+      recordDelivery(root, { pr: 16868, head: OLDER, repo: 'o/r' }).recorded,
+    ).toBe(true);
+    const restartedOther = run(root, [
+      '16868',
+      '--restart',
+      '--head',
+      PREV,
+      '--from-round',
+      '1',
+      '--round',
+      '2',
+      '--repo',
+      'o/r',
+    ]);
+    expect(restartedOther.status).toBe(0);
+    const stOther = readState(root, 16868);
+    expect(stOther.deferredHeads.map((e) => [e.head, e.seq])).toEqual([
+      [OLDER, 3],
+    ]);
+    expect(stOther.retiredSeqs[HEAD]).toEqual({ seq: 1, retries: 0 });
+  });
+
+  it('restartRound and CLI --restart atomically replace a dead marker preserving seq, retries, and deferrals', () => {
+    const root = makeRoot();
+    // Round 11 inconclusive -> retries=1, seq=1; round 12 starts HEAD -> inFlight with retries=1, seq=1.
+    expect(
+      run(root, [...START, '--repo', 'o/r', '--artifact-dir', 'r11']).status,
+    ).toBe(0);
+    expect(
+      run(root, [
+        '16866',
+        '--complete',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--verdict',
+        'inconclusive',
+        '--repo',
+        'o/r',
+      ]).status,
+    ).toBe(0);
+    expect(
+      run(root, [
+        '16866',
+        '--start',
+        '--head',
+        HEAD,
+        '--round',
+        '12',
+        '--repo',
+        'o/r',
+      ]).status,
+    ).toBe(0);
+    // PREV pushed while round 12 runs -> deferred at seq=2.
+    expect(
+      run(root, [
+        '16866',
+        '--start',
+        '--head',
+        PREV,
+        '--round',
+        '13',
+        '--repo',
+        'o/r',
+      ]).status,
+    ).toBe(3);
+
+    const restarted = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      HEAD,
+      '--from-round',
+      '12',
+      '--round',
+      '13',
+      '--repo',
+      'o/r',
+    ]);
+    expect(restarted.status).toBe(0);
+    expect(restarted.stdout).toContain(
+      `restarted ${HEAD} as round 13 (from round 12)`,
+    );
+    expect(restarted.stdout).toContain(
+      `deferred heads awaiting a round: ${PREV}`,
+    );
+
+    const st = readState(root, 16866);
+    expect(st.inFlightHeads).toHaveLength(1);
+    expect(st.inFlightHeads[0]).toMatchObject({
+      head: HEAD,
+      round: 13,
+      seq: 1,
+      retries: 1,
+      artifactDir: null,
+    });
+    expect(st.releasedHeads).toEqual([]);
+    expect(st.deferredHeads.map((e) => e.head)).toEqual([PREV]);
+  });
+
+  it('refuses --restart on missing marker, head mismatch, from-round mismatch, same round, or repo mismatch', () => {
+    const root = makeRoot();
+    // No marker at all -> exit 3.
+    const empty = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      HEAD,
+      '--round',
+      '12',
+    ]);
+    expect(empty.status).toBe(3);
+    expect(empty.stderr).toMatch(/nothing to restart/);
+
+    expect(run(root, [...START, '--repo', 'o/r']).status).toBe(0);
+    // Different head -> exit 3.
+    const wrongHead = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      PREV,
+      '--round',
+      '12',
+      '--repo',
+      'o/r',
+    ]);
+    expect(wrongHead.status).toBe(3);
+    expect(wrongHead.stderr).toMatch(
+      /refusing to restart another round's marker/,
+    );
+
+    // Stale --from-round -> exit 3.
+    const wrongFrom = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      HEAD,
+      '--from-round',
+      '10',
+      '--round',
+      '12',
+      '--repo',
+      'o/r',
+    ]);
+    expect(wrongFrom.status).toBe(3);
+    expect(wrongFrom.stderr).toMatch(/refusing a stale restart/);
+
+    // Same or lower round as live marker -> exit 3, marker unchanged.
+    for (const staleOrSame of ['11', '10']) {
+      const res = run(root, [
+        '16866',
+        '--restart',
+        '--head',
+        HEAD,
+        '--round',
+        staleOrSame,
+        '--repo',
+        'o/r',
+      ]);
+      expect(res.status).toBe(3);
+      expect(res.stderr).toMatch(/already in flight as round 11/);
+      expect(readState(root, 16866).inFlightHeads[0].round).toBe(11);
+    }
+
+    // Foreign repo -> exit 3.
+    const foreign = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      HEAD,
+      '--from-round',
+      '11',
+      '--round',
+      '12',
+      '--repo',
+      'other/repo',
+    ]);
+    expect(foreign.status).toBe(3);
+    expect(foreign.stderr).toMatch(/state belongs to o\/r/);
+
+    // Usage errors -> exit 2.
+    for (const badArgs of [
+      [
+        '16866',
+        '--start',
+        '--head',
+        HEAD,
+        '--round',
+        '12',
+        '--from-round',
+        '11',
+      ],
+      [
+        '16866',
+        '--restart',
+        '--head',
+        HEAD,
+        '--from-round',
+        '0',
+        '--round',
+        '12',
+      ],
+      [
+        '16866',
+        '--restart',
+        '--head',
+        HEAD,
+        '--from-round',
+        '11',
+        '--round',
+        '11',
+      ],
+      [
+        '16866',
+        '--restart',
+        '--head',
+        HEAD,
+        '--from-round',
+        '11',
+        '--round',
+        '10',
+      ],
+      ['16866', '--restart', '--head', HEAD],
+    ]) {
+      expect(run(root, badArgs).status, badArgs.join(' ')).toBe(2);
+    }
+
+    // Legacy round-less/seq-less marker keeps seq null without retiring live deferrals
+    // or wiping other tombstones.
+    writeFileSync(
+      statePath(root, 16866),
+      JSON.stringify({
+        pr: 16866,
+        repo: 'o/r',
+        inFlightHead: HEAD,
+        deferredHeads: [
+          {
+            head: PREV,
+            round: null,
+            artifactDir: null,
+            deferredAt: '2026-11-20T00:00:00.000Z',
+            seq: 1,
+            retries: 0,
+          },
+        ],
+        retiredSeqs: { [OLDER]: { seq: 1, retries: 1 } },
+        seqCounter: 1,
+      }),
+    );
+    expect(
+      restartRound(root, {
+        pr: 16866,
+        head: HEAD,
+        fromRound: 11,
+        round: 12,
+        repo: 'o/r',
+      }).restarted,
+    ).toBe(true);
+    const legacyAfter = readState(root, 16866);
+    expect(legacyAfter.inFlightHeads[0]).toMatchObject({
+      round: 12,
+      seq: null,
+    });
+    expect(legacyAfter.deferredHeads.map((e) => [e.head, e.seq])).toEqual([
+      [PREV, 1],
+    ]);
+    expect(legacyAfter.retiredSeqs).toEqual({
+      [OLDER]: { seq: 1, retries: 1 },
+    });
+  });
+
+  it('restartRound and CLI --restart thread --artifact-dir through to omitted-dir completion', () => {
+    const root = makeRoot();
+    expect(
+      run(root, [...START, '--repo', 'o/r', '--artifact-dir', 'r11']).status,
+    ).toBe(0);
+    const restarted = run(root, [
+      '16866',
+      '--restart',
+      '--head',
+      HEAD,
+      '--from-round',
+      '11',
+      '--round',
+      '12',
+      '--artifact-dir',
+      'r12',
+      '--repo',
+      'o/r',
+    ]);
+    expect(restarted.status).toBe(0);
+    expect(readState(root, 16866).inFlightHeads[0].artifactDir).toBe('r12');
+
+    const completed = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '12',
+      '--verdict',
+      'merge-ready',
+      '--repo',
+      'o/r',
+    ]);
+    expect(completed.status).toBe(0);
+    expect(completed.stderr).not.toMatch(/no artifact directory/);
+    expect(readState(root, 16866).verifiedHeads[0].artifactDir).toBe('r12');
   });
 });
