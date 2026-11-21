@@ -6,7 +6,7 @@
 
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import { useDialogSize } from '../../contexts/DialogSizeContext.js';
 import type { HookEventDisplayInfo } from './types.js';
 import { t } from '../../../i18n/index.js';
 
@@ -28,7 +28,7 @@ export function HooksListStep({
   selectedIndex,
   hooksReloadable,
 }: HooksListStepProps): React.JSX.Element {
-  const { columns: terminalWidth } = useTerminalSize();
+  const { columns: terminalWidth } = useDialogSize();
 
   const hookNameWidth = Math.min(
     35,

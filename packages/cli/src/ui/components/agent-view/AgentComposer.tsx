@@ -34,6 +34,7 @@ import {
 } from '../../contexts/AgentViewContext.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
+import { useVirtualViewport } from '../../contexts/VirtualViewportContext.js';
 import { StreamingState } from '../../types.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useAgentStreamingState } from '../../hooks/useAgentStreamingState.js';
@@ -49,37 +50,18 @@ import { keyMatchers, Command } from '../../keyMatchers.js';
 import { theme } from '../../semantic-colors.js';
 import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
 import { t } from '../../../i18n/index.js';
-import { getApprovalModePromptStyle } from '../approvalModeVisuals.js';
+import {
+  getApprovalModeCycleHint,
+  getApprovalModeIndicatorColor,
+  getApprovalModeLabel,
+  getApprovalModePromptStyle,
+} from '../approvalModeVisuals.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
 interface AgentComposerProps {
   agentId: string;
-}
-
-// ─── Layout key ─────────────────────────────────────────────
-
-/**
- * Build the layout key AppContainer's controls-height measure effect depends
- * on to re-measure the agent footer. The footer's height shifts with the
- * agent's streaming state (LoadingIndicator row), terminal status row
- * (Completed/Failed/Cancelled), queued-message display, and input text
- * wrapping — none of which AppContainer can observe through its own state.
- * Syncing this key to AgentViewContext is what triggers the re-measure;
- * mirrors getLiveAgentPanelLayoutKey for the LiveAgentPanel.
- */
-export function getAgentComposerLayoutKey(parts: {
-  streamingState: StreamingState;
-  statusLabel: string;
-  queuedMessageCount: number;
-  inputText: string;
-}): string {
-  return [
-    parts.streamingState,
-    parts.statusLabel,
-    parts.queuedMessageCount,
-    parts.inputText,
-  ].join('|');
+  active?: boolean;
 }
 
 /**
@@ -143,7 +125,10 @@ export function getAgentContextWindowSize(
 // every render.
 const EMPTY_MESSAGE_QUEUE: readonly string[] = [];
 
-export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
+export const AgentComposer: React.FC<AgentComposerProps> = ({
+  agentId,
+  active = true,
+}) => {
   const {
     agents,
     agentTabBarFocused,
@@ -153,7 +138,6 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   } = useAgentViewState();
   const {
     setAgentInputBufferText,
-    setAgentComposerLayoutKey,
     setAgentTabBarFocused,
     setAgentApprovalMode,
     appendToAgentMessageQueue,
@@ -196,6 +180,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     },
     {
       isActive:
+        active &&
         streamingState === StreamingState.Responding &&
         !agentShellFocused &&
         contextMenu === null,
@@ -227,7 +212,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     // itself. This one writes straight through to the agent runtime's
     // tool-scheduling policy, so a Shift+Tab aimed at the menu would silently
     // change the approval mode of the very teammate being decided about.
-    { isActive: !agentShellFocused && contextMenu === null },
+    { isActive: active && !agentShellFocused && contextMenu === null },
   );
 
   // ── Input buffer (independent from main agent) ──
@@ -256,10 +241,10 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   // but isInputActive stays false throughout, so without this extra
   // dependency the focus would never be restored.
   useEffect(() => {
-    if (!isInputActive) {
+    if (active && !isInputActive) {
       setAgentTabBarFocused(true);
     }
-  }, [isInputActive, streamingState, setAgentTabBarFocused]);
+  }, [active, isInputActive, streamingState, setAgentTabBarFocused]);
 
   // ── Focus management between input and tab bar ──
 
@@ -366,25 +351,10 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     }
   }, [status, interactiveAgent]);
 
-  // Sync a layout key that changes whenever this footer's height can change
-  // (loading row toggling, status row appearing, queued messages growing,
-  // input wrapping). AppContainer's controls-height measure effect depends on
-  // it via AgentViewContext; without the sync, controlsHeight stays
-  // stale-high after the footer grows and the transcript viewport pushes the
-  // composer and tab bar past the terminal bottom (#9507).
-  const composerLayoutKey = getAgentComposerLayoutKey({
-    streamingState,
-    statusLabel: statusLabel?.text ?? '',
-    queuedMessageCount: messageQueue.length,
-    inputText: buffer.text,
-  });
-  useEffect(() => {
-    setAgentComposerLayoutKey(composerLayoutKey);
-  }, [composerLayoutKey, setAgentComposerLayoutKey]);
-
   // ── Approval-mode styling (mirrors main InputPrompt) ──
 
   const approvalModePromptStyle = getApprovalModePromptStyle(agentApprovalMode);
+  const approvalModeInInput = useVirtualViewport();
   const statusColor = approvalModePromptStyle.color;
 
   const inputBorderColor =
@@ -398,6 +368,8 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     </Text>
   );
   const prefixWidth = 2; // "> " or "* " = 2 chars
+
+  if (!active) return null;
 
   return (
     <StreamingContext.Provider value={streamingState}>
@@ -432,12 +404,21 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
           prefix={prefixNode}
           prefixWidth={prefixWidth}
           borderColor={inputBorderColor}
+          bottomRightLabel={
+            approvalModeInInput && !agentShellFocused
+              ? `${getApprovalModeLabel(agentApprovalMode)} ${getApprovalModeCycleHint()}`
+              : undefined
+          }
+          bottomRightLabelColor={getApprovalModeIndicatorColor(
+            agentApprovalMode,
+          )}
           isActive={isInputActive && !agentShellFocused}
         />
 
         {/* Footer: approval mode + context usage */}
         <AgentFooter
           approvalMode={agentApprovalMode}
+          showApprovalMode={!approvalModeInInput && !agentShellFocused}
           promptTokenCount={lastPromptTokenCount}
           contextWindowSize={getAgentContextWindowSize(
             config,

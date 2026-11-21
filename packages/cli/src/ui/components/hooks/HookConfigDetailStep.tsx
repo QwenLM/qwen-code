@@ -6,7 +6,7 @@
 
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import { useDialogSize } from '../../contexts/DialogSizeContext.js';
 import type { HookConfigDisplayInfo, HookEventDisplayInfo } from './types.js';
 import { HooksConfigSource } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { t } from '../../../i18n/index.js';
@@ -24,7 +24,7 @@ export function HookConfigDetailStep({
   hookEvent,
   hookConfig,
 }: HookConfigDetailStepProps): React.JSX.Element {
-  const { columns: terminalWidth } = useTerminalSize();
+  const { columns: terminalWidth } = useDialogSize();
 
   const sourceDisplay = getTranslatedSourceDisplayMap()[hookConfig.source];
 

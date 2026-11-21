@@ -44,6 +44,8 @@ export interface CustomTheme {
   };
   background?: {
     primary?: string;
+    surface?: string;
+    code?: string;
     diff?: {
       added?: string;
       removed?: string;
@@ -439,6 +441,8 @@ export function createCustomTheme(customTheme: CustomTheme): Theme {
     },
     background: {
       primary: customTheme.background?.primary ?? colors.Background,
+      surface: customTheme.background?.surface,
+      code: customTheme.background?.code,
       diff: {
         added: customTheme.background?.diff?.added ?? colors.DiffAdded,
         removed: customTheme.background?.diff?.removed ?? colors.DiffRemoved,

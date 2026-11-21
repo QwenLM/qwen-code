@@ -6,8 +6,9 @@
 
 import type React from 'react';
 import { useCallback, useState } from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useIsScreenReaderEnabled } from 'ink';
 import { theme } from '../semantic-colors.js';
+import { DialogFrame } from './shared/DialogFrame.js';
 import {
   themeManager,
   DEFAULT_THEME,
@@ -42,6 +43,7 @@ export function ThemeDialog({
   availableTerminalHeight,
   terminalWidth,
 }: ThemeDialogProps): React.JSX.Element {
+  const screenReader = useIsScreenReaderEnabled();
   const [selectedScope, setSelectedScope] = useState<SettingScope>(
     SettingScope.User,
   );
@@ -162,25 +164,24 @@ export function ThemeDialog({
   availableTerminalHeight -= 2; // Top and bottom borders.
   availableTerminalHeight -= TAB_TO_SELECT_HEIGHT;
 
-  let totalLeftHandSideHeight = DIALOG_PADDING + selectThemeHeight;
+  const totalLeftHandSideHeight = DIALOG_PADDING + selectThemeHeight;
 
   let includePadding = true;
 
   // Remove content from the LHS that can be omitted if it exceeds the available height.
   if (totalLeftHandSideHeight > availableTerminalHeight) {
     includePadding = false;
-    totalLeftHandSideHeight -= DIALOG_PADDING;
   }
 
   // Vertical space taken by elements other than the two code blocks in the preview pane.
   // Includes "Preview" title, borders, and margin between blocks.
   const PREVIEW_PANE_FIXED_VERTICAL_SPACE = 8;
 
-  // The right column doesn't need to ever be shorter than the left column.
-  availableTerminalHeight = Math.max(
-    availableTerminalHeight,
-    totalLeftHandSideHeight,
+  const maxThemeItems = Math.max(
+    1,
+    Math.min(12, availableTerminalHeight - (includePadding ? 2 : 0) - 3),
   );
+  const showPreview = terminalWidth >= 80 && availableTerminalHeight >= 12;
   const availableTerminalHeightCodeBlock =
     availableTerminalHeight -
     PREVIEW_PANE_FIXED_VERTICAL_SPACE -
@@ -196,20 +197,15 @@ export function ThemeDialog({
   const codeBlockHeight = Math.ceil(availableHeightForPanes * 0.6);
   const diffHeight = Math.floor(availableHeightForPanes * 0.4);
   return (
-    <Box
-      borderStyle="round"
-      borderColor={theme.border.default}
-      flexDirection="column"
-      paddingTop={includePadding ? 1 : 0}
-      paddingBottom={includePadding ? 1 : 0}
-      paddingLeft={1}
-      paddingRight={1}
-      width="100%"
-    >
+    <DialogFrame paddingY={includePadding ? 1 : 0}>
       {mode === 'theme' ? (
         <Box flexDirection="row">
           {/* Left Column: Selection */}
-          <Box flexDirection="column" width="45%" paddingRight={2}>
+          <Box
+            flexDirection="column"
+            width={showPreview ? '45%' : '100%'}
+            paddingRight={showPreview ? 2 : 0}
+          >
             <Text bold={mode === 'theme'} wrap="truncate">
               {mode === 'theme' ? '> ' : '  '}
               {t('Select Theme')}{' '}
@@ -223,64 +219,69 @@ export function ThemeDialog({
               onSelect={handleThemeSelect}
               onHighlight={handleThemeHighlight}
               isFocused={mode === 'theme'}
-              maxItemsToShow={12}
+              maxItemsToShow={maxThemeItems}
               showScrollArrows={true}
               showNumbers={mode === 'theme'}
             />
           </Box>
 
           {/* Right Column: Preview */}
-          <Box flexDirection="column" width="55%" paddingLeft={2}>
-            <Text bold color={theme.text.primary}>
-              {t('Preview')}
-            </Text>
-            {/* Get the Theme object for the highlighted theme, fall back to default if not found */}
-            {(() => {
-              // For 'auto', show the currently resolved theme (set by onHighlight → applyTheme)
-              const previewTheme =
-                highlightedThemeName === AUTO_THEME_NAME
-                  ? themeManager.getActiveTheme()
-                  : themeManager.getTheme(
-                      highlightedThemeName || DEFAULT_THEME.name,
-                    ) || DEFAULT_THEME;
-              return (
-                <Box
-                  borderStyle="single"
-                  borderColor={theme.border.default}
-                  paddingTop={includePadding ? 1 : 0}
-                  paddingBottom={includePadding ? 1 : 0}
-                  paddingLeft={1}
-                  paddingRight={1}
-                  flexDirection="column"
-                >
-                  {colorizeCode(
-                    `# function
+          {showPreview && (
+            <Box flexDirection="column" width="55%" paddingLeft={2}>
+              <Text bold color={theme.text.primary}>
+                {t('Preview')}
+              </Text>
+              {/* Get the Theme object for the highlighted theme, fall back to default if not found */}
+              {(() => {
+                // For 'auto', show the currently resolved theme (set by onHighlight → applyTheme)
+                const previewTheme =
+                  highlightedThemeName === AUTO_THEME_NAME
+                    ? themeManager.getActiveTheme()
+                    : themeManager.getTheme(
+                        highlightedThemeName || DEFAULT_THEME.name,
+                      ) || DEFAULT_THEME;
+                return (
+                  <Box
+                    borderStyle="single"
+                    borderColor={theme.border.default}
+                    backgroundColor={
+                      screenReader ? undefined : theme.background.code
+                    }
+                    paddingTop={includePadding ? 1 : 0}
+                    paddingBottom={includePadding ? 1 : 0}
+                    paddingLeft={1}
+                    paddingRight={1}
+                    flexDirection="column"
+                  >
+                    {colorizeCode(
+                      `# function
 def fibonacci(n):
     a, b = 0, 1
     for _ in range(n):
         a, b = b, a + b
     return a`,
-                    'python',
-                    codeBlockHeight,
-                    colorizeCodeWidth,
-                  )}
-                  <Box marginTop={1} />
-                  <DiffRenderer
-                    diffContent={`--- a/util.py
+                      'python',
+                      codeBlockHeight,
+                      colorizeCodeWidth,
+                    )}
+                    <Box marginTop={1} />
+                    <DiffRenderer
+                      diffContent={`--- a/util.py
 +++ b/util.py
 @@ -1,2 +1,2 @@
 - print("Hello, " + name)
 + print(f"Hello, {name}!")
 `}
-                    availableTerminalHeight={diffHeight}
-                    contentWidth={colorizeCodeWidth}
-                    theme={previewTheme}
-                    settings={settings}
-                  />
-                </Box>
-              );
-            })()}
-          </Box>
+                      availableTerminalHeight={diffHeight}
+                      contentWidth={colorizeCodeWidth}
+                      theme={previewTheme}
+                      settings={settings}
+                    />
+                  </Box>
+                );
+              })()}
+            </Box>
+          )}
         </Box>
       ) : (
         <ScopeSelector
@@ -297,6 +298,6 @@ def fibonacci(n):
             : t('(Use Enter to apply scope, Tab to go back)')}
         </Text>
       </Box>
-    </Box>
+    </DialogFrame>
   );
 }

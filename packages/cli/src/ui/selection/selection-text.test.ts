@@ -96,6 +96,43 @@ describe('getSelectedText', () => {
     );
   });
 
+  it('clips all rows and line joins to the selected viewport', () => {
+    const frame = frameFromLines([
+      'outside',
+      'AAhelloZZ',
+      'BBworldYY',
+      'outside',
+    ]);
+    expect(
+      getSelectedText(
+        frame,
+        { sx: 0, sy: 0, ex: 8, ey: 3 },
+        { x: 2, y: 1, width: 5, height: 2 },
+      ),
+    ).toBe('hello\nworld');
+  });
+
+  it('ignores unrelated flows and boundary claims outside the viewport', () => {
+    const frame = frameFromLines(['AAhelloZZ', 'BBworldYY']);
+    setBoundary(frame, 0, 'soft', ' ');
+    for (const row of frame.cells) {
+      for (const x of [0, 1, 7, 8]) {
+        (row[x] as FrameCell).flowId = 2;
+      }
+    }
+    const claims = frame.boundaries[0] as Array<
+      ReadonlyFrame['boundaries'][number][number]
+    >;
+    claims[0] = { kind: 'hard', joiner: '\n', selectable: true, flowId: 1 };
+    expect(
+      getSelectedText(
+        frame,
+        { sx: 2, sy: 0, ex: 6, ey: 1 },
+        { x: 2, y: 0, width: 5, height: 2 },
+      ),
+    ).toBe('hello world');
+  });
+
   it('joins across rows with the first/last partial', () => {
     const frame = frameFromLines(['hello', 'world']);
     expect(getSelectedText(frame, { sx: 2, sy: 0, ex: 2, ey: 1 })).toBe(

@@ -45,16 +45,23 @@ export const TabBar = ({ tabs, activeTab, canSwitch }: TabBarProps) => (
               bold
               backgroundColor={theme.text.accent}
               color={theme.background.primary}
+              wrap="truncate-end"
             >
               {` ${tabLabel(tab.id)} `}
             </Text>
           ) : (
-            <Text color={theme.text.secondary}>{` ${tabLabel(tab.id)} `}</Text>
+            <Text color={theme.text.secondary} wrap="truncate-end">
+              {` ${tabLabel(tab.id)} `}
+            </Text>
           )}
         </Box>
       );
     })}
-    <Text color={theme.text.secondary} dimColor={!canSwitch}>
+    <Text
+      color={theme.text.secondary}
+      dimColor={!canSwitch}
+      wrap="truncate-end"
+    >
       {t('(Tab / ←→ to switch)')}
     </Text>
   </Box>

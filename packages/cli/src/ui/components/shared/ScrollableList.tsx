@@ -46,33 +46,6 @@ function ScrollableList<T>(
   const virtualizedListRef = useRef<VirtualizedListRef<T>>(null);
   const isDraggingScrollbar = useRef(false);
 
-  useImperativeHandle(
-    ref,
-    () => ({
-      scrollBy: (delta) => virtualizedListRef.current?.scrollBy(delta),
-      scrollTo: (offset) => virtualizedListRef.current?.scrollTo(offset),
-      scrollToEnd: () => virtualizedListRef.current?.scrollToEnd(),
-      scrollToIndex: (params) =>
-        virtualizedListRef.current?.scrollToIndex(params),
-      scrollToItem: (params) =>
-        virtualizedListRef.current?.scrollToItem(params),
-      hitTestScrollbar: (location) =>
-        virtualizedListRef.current?.hitTestScrollbar(location) ?? false,
-      scrollToScrollbarRow: (row) =>
-        virtualizedListRef.current?.scrollToScrollbarRow(row),
-      getScrollIndex: () => virtualizedListRef.current?.getScrollIndex() ?? 0,
-      getScrollState: () =>
-        virtualizedListRef.current?.getScrollState() ?? {
-          scrollTop: 0,
-          scrollHeight: 0,
-          innerHeight: 0,
-        },
-      getViewportRect: () =>
-        virtualizedListRef.current?.getViewportRect() ?? null,
-    }),
-    [],
-  );
-
   const getScrollState = useCallback(
     () =>
       virtualizedListRef.current?.getScrollState() ?? {
@@ -83,61 +56,48 @@ function ScrollableList<T>(
     [],
   );
 
-  useKeypress(
-    useCallback(
-      (key: Key) => {
-        if (keyMatchers[Command.SCROLL_UP](key)) {
-          virtualizedListRef.current?.scrollBy(-1);
-        } else if (keyMatchers[Command.SCROLL_DOWN](key)) {
-          virtualizedListRef.current?.scrollBy(1);
-        } else if (keyMatchers[Command.PAGE_UP](key)) {
-          const state = getScrollState();
-          const delta = state.innerHeight > 0 ? state.innerHeight : 20;
-          virtualizedListRef.current?.scrollBy(-delta);
-        } else if (keyMatchers[Command.PAGE_DOWN](key)) {
-          const state = getScrollState();
-          const delta = state.innerHeight > 0 ? state.innerHeight : 20;
-          virtualizedListRef.current?.scrollBy(delta);
-        } else if (keyMatchers[Command.SCROLL_HOME](key)) {
-          virtualizedListRef.current?.scrollTo(0);
-        } else if (keyMatchers[Command.SCROLL_END](key)) {
-          virtualizedListRef.current?.scrollToEnd();
-        }
-      },
-      [getScrollState],
-    ),
-    { isActive: hasFocus },
-  );
-
-  // Mouse scrolling. Legacy `<Static>` mode let the host terminal scroll its
-  // native scrollback. In VP mode the list owns the visible region, so route
-  // wheel ticks and scrollbar drags to the virtualized viewport.
-  const WHEEL_LINES_PER_TICK = 3;
-
-  // Terminal mouse reporting emits one event per row the pointer crosses, so a
-  // brisk wheel spin or scrollbar drag fires a rapid burst. Applying each event
-  // synchronously forced one Ink reflow + terminal flush per event — the source
-  // of the "一顿一顿" stutter. Accumulate the intent in refs and let
-  // useFrameCoalescedFlush apply the latest at most once per frame. A drag is
-  // absolute (snap to the newest row); a wheel burst is relative (sum the
-  // ticks); a drag in the same window wins.
+  // Warp already reports three events per wheel notch. Multiplying every
+  // reported event by three made gentle gestures jump nine rows.
   const pendingWheelDelta = useRef(0);
   const pendingDragRow = useRef<number | null>(null);
+  const wheelSinceFlush = useRef(false);
+  const coastSpent = useRef(0);
 
   const applyPendingScroll = useCallback(() => {
     const list = virtualizedListRef.current;
     const dragRow = pendingDragRow.current;
     const wheelDelta = pendingWheelDelta.current;
     pendingDragRow.current = null;
-    pendingWheelDelta.current = 0;
-    if (!list) return;
+    if (!list) return false;
     if (dragRow !== null) {
+      pendingWheelDelta.current = 0;
       list.scrollToScrollbarRow(dragRow);
-      return;
+      return false;
     }
     if (wheelDelta !== 0) {
-      list.scrollBy(wheelDelta);
+      const state = list.getScrollState();
+      const limit = Math.max(1, Math.floor(state.innerHeight / 2));
+      const coasting = !wheelSinceFlush.current;
+      wheelSinceFlush.current = false;
+      const budget = coasting ? Math.max(0, limit - coastSpent.current) : limit;
+      const delta =
+        Math.sign(wheelDelta) * Math.min(Math.abs(wheelDelta), budget);
+      pendingWheelDelta.current -= delta;
+      if (coasting) {
+        coastSpent.current += Math.abs(delta);
+        // Do not replay a flooded input buffer for seconds after release.
+        if (coastSpent.current >= limit) pendingWheelDelta.current = 0;
+      }
+      list.scrollBy(delta);
+      const next = list.getScrollState();
+      if (
+        next.scrollTop === 0 ||
+        next.scrollTop >= next.scrollHeight - next.innerHeight
+      ) {
+        pendingWheelDelta.current = 0;
+      }
     }
+    return pendingWheelDelta.current !== 0;
   }, []);
 
   const { schedule: scheduleScrollFlush, cancel: cancelScrollFlush } =
@@ -150,14 +110,95 @@ function ScrollableList<T>(
   const cancelPendingScroll = useCallback(() => {
     pendingWheelDelta.current = 0;
     pendingDragRow.current = null;
+    wheelSinceFlush.current = false;
+    coastSpent.current = 0;
     cancelScrollFlush();
   }, [cancelScrollFlush]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      scrollBy: (delta) => {
+        cancelPendingScroll();
+        virtualizedListRef.current?.scrollBy(delta);
+      },
+      scrollTo: (offset) => {
+        cancelPendingScroll();
+        virtualizedListRef.current?.scrollTo(offset);
+      },
+      scrollToEnd: () => {
+        cancelPendingScroll();
+        virtualizedListRef.current?.scrollToEnd();
+      },
+      scrollToIndex: (params) => {
+        cancelPendingScroll();
+        virtualizedListRef.current?.scrollToIndex(params);
+      },
+      scrollToItem: (params) => {
+        cancelPendingScroll();
+        virtualizedListRef.current?.scrollToItem(params);
+      },
+      hitTestScrollbar: (location) =>
+        virtualizedListRef.current?.hitTestScrollbar(location) ?? false,
+      scrollToScrollbarRow: (row) => {
+        cancelPendingScroll();
+        virtualizedListRef.current?.scrollToScrollbarRow(row);
+      },
+      getScrollIndex: () => virtualizedListRef.current?.getScrollIndex() ?? 0,
+      getScrollState: () =>
+        virtualizedListRef.current?.getScrollState() ?? {
+          scrollTop: 0,
+          scrollHeight: 0,
+          innerHeight: 0,
+        },
+      getViewportRect: () =>
+        virtualizedListRef.current?.getViewportRect() ?? null,
+    }),
+    [cancelPendingScroll],
+  );
+
+  useKeypress(
+    useCallback(
+      (key: Key) => {
+        const commands = [
+          Command.SCROLL_UP,
+          Command.SCROLL_DOWN,
+          Command.PAGE_UP,
+          Command.PAGE_DOWN,
+          Command.SCROLL_HOME,
+          Command.SCROLL_END,
+        ];
+        if (!commands.some((command) => keyMatchers[command](key))) return;
+        cancelPendingScroll();
+        if (keyMatchers[Command.SCROLL_UP](key)) {
+          virtualizedListRef.current?.scrollBy(-1);
+        } else if (keyMatchers[Command.SCROLL_DOWN](key)) {
+          virtualizedListRef.current?.scrollBy(1);
+        } else if (keyMatchers[Command.PAGE_UP](key)) {
+          const state = getScrollState();
+          virtualizedListRef.current?.scrollBy(-(state.innerHeight || 20));
+        } else if (keyMatchers[Command.PAGE_DOWN](key)) {
+          const state = getScrollState();
+          virtualizedListRef.current?.scrollBy(state.innerHeight || 20);
+        } else if (keyMatchers[Command.SCROLL_HOME](key)) {
+          virtualizedListRef.current?.scrollTo(0);
+        } else if (keyMatchers[Command.SCROLL_END](key)) {
+          virtualizedListRef.current?.scrollToEnd();
+        }
+      },
+      [getScrollState, cancelPendingScroll],
+    ),
+    { isActive: hasFocus },
+  );
 
   // Losing focus unsubscribes the keypress and mouse handlers, so a still-armed
   // flush belongs to a gesture the user can no longer steer. Letting it fire
   // after the flip scrolls the surface out from under whatever took focus.
   useEffect(() => {
-    if (!hasFocus) cancelPendingScroll();
+    if (!hasFocus) {
+      isDraggingScrollbar.current = false;
+      cancelPendingScroll();
+    }
   }, [hasFocus, cancelPendingScroll]);
 
   const handleMouseEvent = useCallback(
@@ -168,13 +209,10 @@ function ScrollableList<T>(
         return;
       }
       if (event.name === 'left-press') {
+        cancelPendingScroll();
         isDraggingScrollbar.current =
           virtualizedListRef.current.hitTestScrollbar(event);
         if (isDraggingScrollbar.current) {
-          // A press should feel instant — apply now and drop any queued
-          // wheel/drag intent (and its timer) so a flush scheduled moments
-          // earlier can't yank the view off the clicked row.
-          cancelPendingScroll();
           virtualizedListRef.current.scrollToScrollbarRow(event.row);
         }
         return;
@@ -184,11 +222,17 @@ function ScrollableList<T>(
         scheduleScrollFlush();
         return;
       }
-      if (event.name === 'scroll-up') {
-        pendingWheelDelta.current -= WHEEL_LINES_PER_TICK;
-        scheduleScrollFlush();
-      } else if (event.name === 'scroll-down') {
-        pendingWheelDelta.current += WHEEL_LINES_PER_TICK;
+      if (event.name === 'right-press' || event.name === 'middle-press') {
+        cancelPendingScroll();
+      }
+      if (event.name === 'scroll-up' || event.name === 'scroll-down') {
+        const delta = event.name === 'scroll-up' ? -1 : 1;
+        if (pendingWheelDelta.current * delta < 0) {
+          cancelPendingScroll();
+        }
+        pendingWheelDelta.current += delta;
+        wheelSinceFlush.current = true;
+        coastSpent.current = 0;
         scheduleScrollFlush();
       }
     },

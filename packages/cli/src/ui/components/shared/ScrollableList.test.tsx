@@ -5,9 +5,9 @@
  */
 
 import type React from 'react';
-import { createRef } from 'react';
-import { describe, it, expect, vi } from 'vitest';
-import { render } from 'ink-testing-library';
+import { createRef, useState } from 'react';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { cleanup, render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
 import { Text } from 'ink';
 import { ScrollableList, type ScrollableListRef } from './ScrollableList.js';
@@ -35,6 +35,8 @@ vi.mock('ink', async (importOriginal) => {
 });
 
 type Item = { id: number; label: string };
+
+afterEach(cleanup);
 
 // `useKeypress` (called unconditionally inside ScrollableList) requires a
 // KeypressProvider ancestor or it throws. Wrap every test render in one.
@@ -105,7 +107,7 @@ describe('<ScrollableList /> mouse scrolling', () => {
     expect(lastFrame()).toContain('item-0');
   });
 
-  it('preserves the full delta of a coalesced wheel burst', async () => {
+  it('preserves one row per event for a wheel burst within the viewport budget', async () => {
     const listRef = createRef<ScrollableListRef<Item>>();
     const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
     const Wrapper = () => (
@@ -118,7 +120,7 @@ describe('<ScrollableList /> mouse scrolling', () => {
         keyExtractor={keyExtractor}
         initialScrollIndex={SCROLL_TO_ITEM_END}
         initialScrollOffsetInIndex={SCROLL_TO_ITEM_END}
-        containerHeight={5}
+        containerHeight={50}
         width={40}
         showScrollbar={false}
       />
@@ -127,14 +129,16 @@ describe('<ScrollableList /> mouse scrolling', () => {
     const { stdin, rerender } = render(withKeypress(<Wrapper />));
     rerender(withKeypress(<Wrapper />));
     await act(async () => {});
-    expect(listRef.current?.getScrollState().scrollTop).toBe(195);
+    expect(listRef.current?.getScrollState().scrollTop).toBe(150);
 
     await act(async () => {
       for (let i = 0; i < 30; i++) stdin.write(wheelUp(5, 5));
     });
     await flushScrollFrame();
 
-    expect(listRef.current?.getScrollState().scrollTop).toBe(105);
+    await vi.waitFor(() => {
+      expect(listRef.current?.getScrollState().scrollTop).toBe(120);
+    });
   });
 
   it('does not crash when hasFocus is false (mouse pipeline inactive)', () => {
@@ -158,6 +162,62 @@ describe('<ScrollableList /> mouse scrolling', () => {
       stdin.write(wheelUp());
     }).not.toThrow();
   });
+
+  it.each(['coast', 'reverse', 'press', 'keyboard', 'imperative'])(
+    'bounds buffered motion after %s takes over',
+    async (takeover) => {
+      const listRef = createRef<ScrollableListRef<Item>>();
+      const { stdin, rerender } = render(
+        withKeypress(
+          <ScrollableList<Item>
+            ref={listRef}
+            hasFocus
+            data={makeItems(200)}
+            renderItem={({ item }) => <Text>{item.label}</Text>}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={SCROLL_TO_ITEM_END}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />,
+        ),
+      );
+      // Trigger the measurement pass before delivering pointer input.
+      rerender(
+        withKeypress(
+          <ScrollableList<Item>
+            ref={listRef}
+            hasFocus
+            data={makeItems(200)}
+            renderItem={({ item }) => <Text>{item.label}</Text>}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={SCROLL_TO_ITEM_END}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />,
+        ),
+      );
+      await act(async () => {});
+      expect(listRef.current?.getScrollState().scrollTop).toBe(195);
+      await act(async () => {
+        stdin.write(wheelUp(5, 3).repeat(30));
+        if (takeover === 'reverse') stdin.write(wheelDown(5, 3));
+        if (takeover === 'press') stdin.write(leftPress(5, 3));
+        if (takeover === 'keyboard') stdin.write(`${ESC}[1;5F`);
+        if (takeover === 'imperative') listRef.current?.scrollToEnd();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+      const offset = listRef.current?.getScrollState().scrollTop;
+      if (takeover === 'coast') expect(offset).toBe(190);
+      else if (takeover === 'press') expect(offset).toBe(194);
+      else expect(offset).toBe(195);
+    },
+  );
 
   it('does not move the rendered window on content-area clicks', async () => {
     const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
@@ -324,6 +384,48 @@ describe('<ScrollableList /> mouse scrolling', () => {
     expect(lastFrame()).toContain('item-0');
   });
 
+  it('PR17541 R1-6 clears a scrollbar drag across focus loss before hover', async () => {
+    let setFocused!: (value: boolean) => void;
+    function Wrapper() {
+      const [focused, updateFocused] = useState(true);
+      setFocused = updateFocused;
+      return (
+        <ScrollableList<Item>
+          hasFocus={focused}
+          data={makeItems(50)}
+          renderItem={({ item }) => <Text>{item.label}</Text>}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={0}
+          containerHeight={5}
+          width={40}
+          showScrollbar
+        />
+      );
+    }
+    const view = render(withKeypress(<Wrapper />));
+    view.rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    await act(async () => {
+      view.stdin.write(leftPress(40, 1));
+    });
+    await act(async () => {
+      setFocused(false);
+    });
+    await flushScrollFrame();
+    await act(async () => {
+      setFocused(true);
+    });
+    await flushScrollFrame();
+    const beforeHover = view.lastFrame();
+    await act(async () => {
+      view.stdin.write(`${ESC}[<35;5;5M`);
+    });
+    await flushScrollFrame();
+    expect(view.lastFrame()).toBe(beforeHover);
+    expect(view.lastFrame()).toContain('item-0');
+  });
+
   it('a focus loss cancels a still-pending wheel flush', async () => {
     // Regression: whoever takes focus may have just pulled the tail into view
     // (a pending approval dialog at the end of the transcript). A burst armed
@@ -360,7 +462,8 @@ describe('<ScrollableList /> mouse scrolling', () => {
     });
     await flushScrollFrame();
 
-    expect(lastFrame()).toContain('item-0');
+    expect(lastFrame()).toContain('item-1');
+    expect(lastFrame()).not.toContain('item-6');
   });
 
   it('does not start a scrollbar drag when content fits the viewport', async () => {

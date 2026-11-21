@@ -204,7 +204,7 @@ export const AgentChatContent = ({
     // without consuming, so this subscriber has to go quiet itself: flipping
     // embedded-shell focus deactivates both controllers below, which closes
     // the menu and CLEARS the selection its Copy Selection item offers.
-    { isActive: !readonly && contextMenuOpen === null },
+    { isActive: !readonly && !dialogsVisible && contextMenuOpen === null },
   );
 
   // tickRef.current in deps ensures we rebuild when events fire even if
@@ -319,7 +319,7 @@ export const AgentChatContent = ({
             availableTerminalHeight={
               constrainHeight ? availableTerminalHeight : undefined
             }
-            isFocused={!readonly}
+            isFocused={!readonly && !dialogsVisible}
             activeShellPtyId={activePtyId}
             embeddedShellFocused={embeddedShellFocused}
           />
@@ -329,6 +329,7 @@ export const AgentChatContent = ({
         <HistoryItemDisplay
           item={vpItem.item}
           isPending={false}
+          isFocused={!readonly && !dialogsVisible}
           terminalWidth={terminalWidth}
           mainAreaWidth={contentWidth}
           thoughtHeadId={thoughtHeadIdByItem.get(vpItem.item)}
@@ -346,6 +347,7 @@ export const AgentChatContent = ({
       constrainHeight,
       availableTerminalHeight,
       readonly,
+      dialogsVisible,
       fullDetail,
       activePtyId,
       embeddedShellFocused,

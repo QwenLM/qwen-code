@@ -19,6 +19,7 @@ import { SettingScope } from '../../config/settings.js';
 import { TextInput } from './shared/TextInput.js';
 import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
+import { useDialogSize } from '../contexts/DialogSizeContext.js';
 import type { PermissionManager } from '@qwen-code/qwen-code-core/permissions/permission-manager.js';
 import type {
   RuleWithSource,
@@ -139,6 +140,8 @@ function scopeLabel(scope: string): string {
 
 interface PermissionsDialogProps {
   onExit: () => void;
+  availableTerminalHeight?: number;
+  width?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +150,15 @@ interface PermissionsDialogProps {
 
 export function PermissionsDialog({
   onExit,
+  availableTerminalHeight,
+  width,
 }: PermissionsDialogProps): React.JSX.Element {
+  const { columns: terminalColumns } = useDialogSize();
+  const columns = Math.min(width ?? terminalColumns, terminalColumns);
+  const maxListItems = Math.max(
+    1,
+    Math.min(15, (availableTerminalHeight ?? 40) - 12),
+  );
   const config = useConfig();
   const settings = useSettings();
   const pm = config.getPermissionManager?.() as PermissionManager | null;
@@ -753,7 +764,7 @@ export function PermissionsDialog({
     const initialDirArray = Array.from(initialDirs);
     return (
       <Box flexDirection="column">
-        <TabBar tabs={tabs} activeIndex={activeTabIndex} />
+        <TabBar tabs={tabs} activeIndex={activeTabIndex} columns={columns} />
         <Text color={theme.text.secondary} wrap="wrap">
           {t(
             'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.',
@@ -778,8 +789,8 @@ export function PermissionsDialog({
           onSelect={handleDirListSelect}
           isFocused={view === 'ws-dir-list'}
           showNumbers={true}
-          showScrollArrows={false}
-          maxItemsToShow={15}
+          showScrollArrows={true}
+          maxItemsToShow={maxListItems}
         />
         <FooterHint view={view} />
       </Box>
@@ -923,32 +934,32 @@ export function PermissionsDialog({
 
   return (
     <Box flexDirection="column">
-      <TabBar tabs={tabs} activeIndex={activeTabIndex} />
-      <Text>{activeTab.description}</Text>
+      <TabBar tabs={tabs} activeIndex={activeTabIndex} columns={columns} />
+      <Text wrap="truncate-end">{activeTab.description}</Text>
       {/* Search box */}
       <Box
         borderStyle="round"
         borderColor={theme.border.default}
         paddingLeft={1}
         paddingRight={1}
-        width={60}
+        width={Math.min(60, Math.max(4, columns - 4))}
       >
         <Text color={theme.text.accent}>{'> '}</Text>
         {searchQuery ? (
-          <Text>{searchQuery}</Text>
+          <Text wrap="truncate-start">{searchQuery}</Text>
         ) : (
           <Text color={Colors.Gray}>{t('Search…')}</Text>
         )}
       </Box>
-      <Box height={1} />
+      {columns >= 80 && <Box height={1} />}
       {/* Rule list */}
       <RadioButtonSelect
         items={listItems}
         onSelect={handleListSelect}
         isFocused={view === 'rule-list'}
         showNumbers={true}
-        showScrollArrows={false}
-        maxItemsToShow={15}
+        showScrollArrows={true}
+        maxItemsToShow={maxListItems}
       />
       <FooterHint view={view} />
     </Box>
@@ -962,30 +973,40 @@ export function PermissionsDialog({
 function TabBar({
   tabs,
   activeIndex,
+  columns,
 }: {
   tabs: Tab[];
   activeIndex: number;
+  columns: number;
 }): React.JSX.Element {
+  const narrow = columns < 80;
   return (
-    <Box marginBottom={1}>
-      <Text color={theme.text.accent} bold>
-        {t('Permissions:')}{' '}
-      </Text>
-      {tabs.map((tab, i) => (
-        <Box key={tab.id} marginRight={2}>
-          {i === activeIndex ? (
-            <Text
-              bold
-              backgroundColor={theme.text.accent}
-              color={theme.background.primary}
-            >
-              {` ${tab.label} `}
-            </Text>
-          ) : (
-            <Text color={theme.text.secondary}>{` ${tab.label} `}</Text>
-          )}
-        </Box>
-      ))}
+    <Box
+      marginBottom={narrow ? 0 : 1}
+      flexDirection={narrow ? 'column' : 'row'}
+    >
+      {!narrow && (
+        <Text color={theme.text.accent} bold>
+          {t('Permissions:')}{' '}
+        </Text>
+      )}
+      <Box>
+        {tabs.map((tab, i) => (
+          <Box key={tab.id} marginRight={narrow ? 1 : 2}>
+            {i === activeIndex ? (
+              <Text
+                bold
+                backgroundColor={theme.text.accent}
+                color={theme.background.primary}
+              >
+                {` ${tab.label} `}
+              </Text>
+            ) : (
+              <Text color={theme.text.secondary}>{` ${tab.label} `}</Text>
+            )}
+          </Box>
+        ))}
+      </Box>
       <Text color={theme.text.secondary}>{t('(←/→ or tab to cycle)')}</Text>
     </Box>
   );

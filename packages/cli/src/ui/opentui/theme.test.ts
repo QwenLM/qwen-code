@@ -241,6 +241,24 @@ describe('GRADIENT (banner wordmark ramp)', () => {
 });
 
 describe('SYNTAX_DIM (thought body)', () => {
+  it('clears themed surfaces when switching to native or uncolored themes', () => {
+    const surfaced = {
+      name: 'Surfaced',
+      type: 'dark',
+      palette: { ...PALETTE, surface: '#242424' },
+      syntaxStyles: {},
+      gradient: [],
+    } satisfies OpenTuiThemeDefinition;
+    applyOpenTuiTheme(surfaced);
+    expect(C.surface).toBe('#242424');
+    applyThemeMode('dark');
+    expect(C.surface).toBeUndefined();
+    applyOpenTuiTheme(surfaced);
+    applyOpenTuiTheme({ ...surfaced, palette: EMPTY_PALETTE });
+    expect(C.surface).toBeUndefined();
+    applyThemeMode('dark');
+  });
+
   it('dims plain text and headings, keeping inline code and links', () => {
     applyOpenTuiTheme({
       name: 'Some Dark',

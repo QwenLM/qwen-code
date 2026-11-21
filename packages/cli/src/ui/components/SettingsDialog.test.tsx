@@ -255,6 +255,22 @@ describe('SettingsDialog', () => {
       expect(output).toContain('Enter to select');
     });
 
+    it('keeps the existing eight-item list limit on tall terminals', () => {
+      const { lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog
+            settings={createMockSettings()}
+            onSelect={vi.fn()}
+            availableTerminalHeight={100}
+          />
+        </KeypressProvider>,
+      );
+      const ninthLabel = getSettingDefinition(getDialogSettingKeys()[8])?.label;
+      expect(ninthLabel).toBeTruthy();
+      expect(lastFrame()).not.toContain(ninthLabel);
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThan(32);
+    });
+
     it('should show settings list with default values', () => {
       const settings = createMockSettings();
       const onSelect = vi.fn();

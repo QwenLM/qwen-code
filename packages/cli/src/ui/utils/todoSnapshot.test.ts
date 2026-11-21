@@ -12,7 +12,6 @@ import {
   getStickyTodoMaxVisibleItems,
   getStickyTodoMaxVisibleItemsForMode,
   getStickyTodos,
-  getStickyTodosLayoutKey,
   getStickyTodosRenderKey,
 } from './todoSnapshot.js';
 
@@ -325,8 +324,8 @@ describe('getStickyTodos', () => {
   });
 });
 
-describe('sticky todo layout helpers', () => {
-  it('changes the layout key for status-only updates', () => {
+describe('sticky todo display helpers', () => {
+  it('changes the render key for status-only updates', () => {
     const pendingTodos = [
       {
         id: 'todo-1',
@@ -342,114 +341,8 @@ describe('sticky todo layout helpers', () => {
       },
     ];
 
-    expect(getStickyTodosLayoutKey(pendingTodos, 64, 5)).not.toBe(
-      getStickyTodosLayoutKey(inProgressTodos, 64, 5),
-    );
     expect(getStickyTodosRenderKey(pendingTodos)).not.toBe(
       getStickyTodosRenderKey(inProgressTodos),
-    );
-  });
-
-  it('uses the rendered open todos for the layout key', () => {
-    const todos = [
-      {
-        id: 'todo-1',
-        content: 'Finished task',
-        status: 'completed' as const,
-      },
-      {
-        id: 'todo-2',
-        content: 'Active task',
-        status: 'in_progress' as const,
-      },
-      {
-        id: 'todo-3',
-        content: 'Pending task',
-        status: 'pending' as const,
-      },
-    ];
-
-    expect(getStickyTodosLayoutKey(todos, 64, 5)).toBe(
-      getStickyTodosLayoutKey(todos.slice(1), 64, 5),
-    );
-    expect(getStickyTodosLayoutKey(todos, 64, 1)).not.toBe(
-      getStickyTodosLayoutKey(todos, 64, 2),
-    );
-  });
-
-  it('changes the layout key when wrapping-sensitive inputs change', () => {
-    const todos = [
-      {
-        id: 'todo-1',
-        content: 'Run focused tests',
-        status: 'pending' as const,
-      },
-    ];
-
-    expect(getStickyTodosLayoutKey(todos, 64, 5)).not.toBe(
-      getStickyTodosLayoutKey(todos, 40, 5),
-    );
-    expect(getStickyTodosLayoutKey(todos, 64, 5)).not.toBe(
-      getStickyTodosLayoutKey(
-        [{ ...todos[0], content: 'Run focused tests and build' }],
-        64,
-        5,
-      ),
-    );
-    expect(getStickyTodosLayoutKey(todos, 64, 5)).not.toBe(
-      getStickyTodosLayoutKey(todos, 64, 2),
-    );
-  });
-
-  it('keeps the layout key stable when only hidden todos change', () => {
-    const todos = Array.from({ length: 6 }, (_, index) => ({
-      id: `todo-${index + 1}`,
-      content: `Task ${index + 1}`,
-      status: 'pending' as const,
-    }));
-    const changedHiddenTodo = todos.map((todo, index) =>
-      index === 5 ? { ...todo, content: 'Changed hidden task' } : todo,
-    );
-
-    expect(getStickyTodosLayoutKey(todos, 64, 5)).toBe(
-      getStickyTodosLayoutKey(changedHiddenTodo, 64, 5),
-    );
-    expect(getStickyTodosLayoutKey(todos, 64, 5)).toBe(
-      getStickyTodosLayoutKey(
-        [
-          ...todos,
-          {
-            id: 'todo-7',
-            content: 'Additional hidden task',
-            status: 'pending' as const,
-          },
-        ],
-        64,
-        5,
-      ),
-    );
-  });
-
-  it('changes the layout key when the hidden item summary first appears', () => {
-    const visibleTodos = Array.from({ length: 5 }, (_, index) => ({
-      id: `todo-${index + 1}`,
-      content: `Task ${index + 1}`,
-      status: 'pending' as const,
-    }));
-
-    expect(getStickyTodosLayoutKey(visibleTodos, 64, 5)).not.toBe(
-      getStickyTodosLayoutKey(
-        [
-          ...visibleTodos,
-          {
-            id: 'todo-6',
-            content: 'First hidden task',
-            status: 'pending' as const,
-          },
-        ],
-        64,
-        5,
-      ),
     );
   });
 

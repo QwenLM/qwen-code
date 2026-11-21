@@ -17,7 +17,7 @@ import type {
 import type { HistoryItem } from '../types.js';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useDialogSize } from '../contexts/DialogSizeContext.js';
 import { useTurnDiffs, type TurnDiffEntry } from '../hooks/useTurnDiffs.js';
 import { useDiffData } from '../hooks/useDiffData.js';
 import { DiffRenderer } from './messages/DiffRenderer.js';
@@ -237,12 +237,12 @@ export function DiffDialog({
 
   useKeypress(handleKeypress, { isActive: true });
 
-  const { columns, rows } = useTerminalSize();
+  const { columns, rows, isDialog } = useDialogSize();
   // Cap to the app's main content area (AppContainer caps it at 100). The old
   // 110 cap exceeded that container, so on wide terminals the dialog overflowed
   // and its right border/edge was clipped off-screen.
-  const dialogWidth = Math.min(columns - 4, 100);
-  const detailHeight = Math.max(8, rows - 12);
+  const dialogWidth = Math.max(4, Math.min(columns - (isDialog ? 0 : 4), 100));
+  const detailHeight = Math.max(isDialog ? 1 : 8, rows - 12);
 
   const headerTitle =
     activeSource?.kind === 'turn'

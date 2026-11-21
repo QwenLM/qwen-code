@@ -253,7 +253,7 @@ export function buildBrailleLineChart(
   chartWidth: number,
   chartHeight: number = 8,
 ): BrailleLineResult | null {
-  if (data.length === 0) return null;
+  if (data.length === 0 || chartWidth < 1 || chartHeight < 1) return null;
 
   const pixelW = chartWidth * 2;
   const pixelH = chartHeight * 4;

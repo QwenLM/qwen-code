@@ -27,6 +27,12 @@ import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
+import { useToolDetailsExpanded } from '../contexts/ToolDetailsExpandedContext.js';
+import {
+  projectProcessHistory,
+  type ProcessHistoryItem,
+} from '../utils/process-history.js';
+import { ProcessSummary } from './messages/ProcessSummary.js';
 import type { ScrollActions } from '../contexts/ScrollContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
@@ -53,6 +59,25 @@ import { measureElementPosition } from '../utils/measure-element-position.js';
 // This threshold is arbitrary but should be high enough to never impact normal
 // usage.
 const MAX_GEMINI_MESSAGE_LINES = 65536;
+
+function isProcessExpanded(
+  item: ProcessHistoryItem,
+  expandedBatchIds: ReadonlySet<string>,
+  expandedHeadIds: ReadonlySet<number>,
+): boolean {
+  return (
+    expandedBatchIds.has(`process:${item.id}`) ||
+    item.members.some(
+      (member) =>
+        ((member.type === 'gemini_thought' ||
+          member.type === 'gemini_thought_content') &&
+          expandedHeadIds.has(member.thoughtGroupId ?? member.id)) ||
+        (member.type === 'tool_group' &&
+          member.batchId !== undefined &&
+          expandedBatchIds.has(member.batchId)),
+    )
+  );
+}
 
 function createEmptySourceCopyOffsets(): MarkdownSourceCopyIndexOffsets {
   return {
@@ -112,7 +137,7 @@ const VirtualHistoryItem = memo(HistoryItemDisplay);
 // content instead of being pinned at the top (saves vertical space on small
 // terminals).
 type VpBannerItem = { type: 'vp-banner'; id: number };
-type VpItem = HistoryItem | VpBannerItem;
+type VpItem = HistoryItem | VpBannerItem | ProcessHistoryItem;
 const VP_BANNER_ID = Number.MIN_SAFE_INTEGER;
 const VP_BANNER_ITEM: VpBannerItem = { type: 'vp-banner', id: VP_BANNER_ID };
 
@@ -123,9 +148,11 @@ const virtualEstimatedItemHeight = (index: number) => (index === 0 ? 10 : 3);
 const virtualKeyExtractor = (item: VpItem) =>
   item.type === 'vp-banner'
     ? 'vp-banner'
-    : item.id >= 0
-      ? `h-${item.id}`
-      : `p-${-item.id - 1}`;
+    : item.type === 'process'
+      ? `process-${item.id}-${item.members.length}`
+      : item.id >= 0
+        ? `h-${item.id}`
+        : `p-${-item.id - 1}`;
 const virtualIsStaticItem = (item: VpItem) =>
   item.type === 'vp-banner' || item.id > 0;
 
@@ -141,7 +168,12 @@ export const MainContent = ({
   const { version } = useAppContext();
   const uiState = useUIState();
   const transcriptSessionId = uiState.historyManager.sessionId;
-  const { allExpanded: fullDetail } = useThoughtExpanded();
+  const {
+    allExpanded: fullDetail,
+    expandedHeadIds,
+    toggle: toggleThought,
+  } = useThoughtExpanded();
+  const { expandedBatchIds, toggleBatch } = useToolDetailsExpanded();
   const streamingState = uiState.streamingState;
   const showScrollbar = uiState.showScrollbar ?? true;
   const {
@@ -158,8 +190,6 @@ export const MainContent = ({
     () => uiState.history.filter(isHistoryItemVisibleAfterRestore),
     [uiState.history],
   );
-
-  // History is rendered as-is (no cross-group merging).
 
   // Virtual viewport path short-circuits below before any of the
   // <Static>-only machinery is needed. The offsets / progressive-replay
@@ -327,8 +357,7 @@ export const MainContent = ({
   // The banner sentinel is prepended so it scrolls with content (not pinned).
   // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
   const allVirtualItems = useMemo((): VpItem[] => {
-    const combined: VpItem[] = [
-      VP_BANNER_ITEM,
+    const combined: HistoryItem[] = [
       ...visibleHistory,
       ...pendingHistoryItems.map((item, i) => ({ ...item, id: -(i + 1) })),
     ];
@@ -350,11 +379,10 @@ export const MainContent = ({
         livePendingBatchIds.add(item.batchId);
       }
     }
-    if (livePendingBatchIds.size === 0) return combined;
-    const dropped = new Set<VpItem>();
-    const committedByBatchId = new Map<string, VpItem>();
+    const dropped = new Set<HistoryItem>();
+    const committedByBatchId = new Map<string, HistoryItem>();
     // Same batch twice within the pending list: keep the latest copy only.
-    const keptPendingByBatchId = new Map<string, VpItem>();
+    const keptPendingByBatchId = new Map<string, HistoryItem>();
     for (const item of combined) {
       if (
         item.type !== 'tool_group' ||
@@ -372,9 +400,47 @@ export const MainContent = ({
       }
     }
     for (const item of committedByBatchId.values()) dropped.add(item);
-    if (dropped.size === 0) return combined;
-    return combined.filter((item) => !dropped.has(item));
-  }, [visibleHistory, pendingHistoryItems]);
+    const deduplicated = combined.filter((item) => !dropped.has(item));
+    const projected = fullDetail
+      ? deduplicated
+      : projectProcessHistory(deduplicated).flatMap<
+          HistoryItem | ProcessHistoryItem
+        >((item) => {
+          if (item.type !== 'process') return [item];
+          return isProcessExpanded(item, expandedBatchIds, expandedHeadIds)
+            ? [item, ...item.members]
+            : [item];
+        });
+    return [VP_BANNER_ITEM, ...projected];
+  }, [
+    visibleHistory,
+    pendingHistoryItems,
+    fullDetail,
+    expandedHeadIds,
+    expandedBatchIds,
+  ]);
+  const expandedMembers = useMemo(
+    () =>
+      new Set<HistoryItem>(
+        allVirtualItems.flatMap((item) =>
+          item.type === 'process' &&
+          isProcessExpanded(item, expandedBatchIds, expandedHeadIds)
+            ? item.members
+            : [],
+        ),
+      ),
+    [allVirtualItems, expandedBatchIds, expandedHeadIds],
+  );
+  const getVirtualKey = useCallback(
+    (item: VpItem) =>
+      `${virtualKeyExtractor(item)}${
+        item.type === 'process' &&
+        isProcessExpanded(item, expandedBatchIds, expandedHeadIds)
+          ? '-expanded'
+          : ''
+      }`,
+    [expandedBatchIds, expandedHeadIds],
+  );
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
   // per-item offsets so `/copy mermaid N` / `/copy latex N` hints under each
@@ -471,6 +537,49 @@ export const MainContent = ({
           </Box>
         );
       }
+      if (item.type === 'process') {
+        const expansionKey = `process:${item.id}`;
+        const expanded = isProcessExpanded(
+          item,
+          expandedBatchIds,
+          expandedHeadIds,
+        );
+        return (
+          <ProcessSummary
+            item={item}
+            width={Math.max(1, terminalWidth - 4)}
+            expanded={expanded}
+            interactive={!uiState.dialogsVisible}
+            onToggle={() => {
+              if (!expanded) {
+                toggleBatch(expansionKey);
+                return;
+              }
+              const batches = new Set([expansionKey]);
+              const thoughts = new Set<number>();
+              for (const member of item.members) {
+                if (
+                  member.type === 'tool_group' &&
+                  member.batchId !== undefined
+                ) {
+                  batches.add(member.batchId);
+                } else if (
+                  member.type === 'gemini_thought' ||
+                  member.type === 'gemini_thought_content'
+                ) {
+                  thoughts.add(member.thoughtGroupId ?? member.id);
+                }
+              }
+              for (const id of batches) {
+                if (expandedBatchIds.has(id)) toggleBatch(id);
+              }
+              for (const id of thoughts) {
+                if (expandedHeadIds.has(id)) toggleThought(id);
+              }
+            }}
+          />
+        );
+      }
       const isPending = item.id < 0;
       const sourceCopyIndexOffsets = isPending
         ? pendingSourceCopyOffsetsRef.current[-item.id - 1]
@@ -482,9 +591,12 @@ export const MainContent = ({
             terminalWidth={terminalWidth}
             mainAreaWidth={mainAreaWidth}
             availableTerminalHeight={pendingAvailableTerminalHeight}
+            availableTerminalHeightLlm={
+              uiState.constrainHeight ? MAX_GEMINI_MESSAGE_LINES : undefined
+            }
             item={{ ...item, id: 0 }}
             isPending={true}
-            isFocused={!ps.isEditorDialogOpen}
+            isFocused={!ps.isEditorDialogOpen && !uiState.dialogsVisible}
             activeShellPtyId={ps.activePtyId}
             embeddedShellFocused={ps.embeddedShellFocused}
             commands={uiState.slashCommands}
@@ -505,10 +617,12 @@ export const MainContent = ({
           }
           item={item}
           isPending={false}
+          isFocused={!uiState.dialogsVisible}
           commands={uiState.slashCommands}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
           thoughtHeadId={thoughtHeadIdByItemRef.current.get(item)}
           fullDetail={fullDetail}
+          isProcessMember={expandedMembers.has(item)}
           modSessionId={transcriptSessionId}
           isInViewport={isInViewport}
         />
@@ -522,6 +636,12 @@ export const MainContent = ({
       uiState.slashCommands,
       sourceCopyOffsetsByHistoryItem,
       fullDetail,
+      expandedMembers,
+      expandedBatchIds,
+      toggleBatch,
+      expandedHeadIds,
+      toggleThought,
+      uiState.dialogsVisible,
       pendingAvailableTerminalHeight,
       uiState.constrainHeight,
       transcriptSessionId,
@@ -559,7 +679,7 @@ export const MainContent = ({
           data={allVirtualItems}
           renderItem={renderVirtualItem}
           estimatedItemHeight={virtualEstimatedItemHeight}
-          keyExtractor={virtualKeyExtractor}
+          keyExtractor={getVirtualKey}
           initialScrollIndex={
             allVirtualItems.length <= 1 ? 0 : SCROLL_TO_ITEM_END
           }

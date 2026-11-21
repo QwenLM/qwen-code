@@ -5,13 +5,14 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useIsScreenReaderEnabled } from 'ink';
 import stringWidth from 'string-width';
 import {
   MarkdownDisplay,
   type MarkdownSourceCopyIndexOffsets,
 } from '../../utils/MarkdownDisplay.js';
 import { theme } from '../../semantic-colors.js';
+import { themeManager } from '../../themes/theme-manager.js';
 import {
   SCREEN_READER_MODEL_PREFIX,
   SCREEN_READER_USER_PREFIX,
@@ -276,19 +277,25 @@ const ContinuationMarkdownMessage: React.FC<
   );
 };
 
-export const UserMessage: React.FC<UserMessageProps> = ({ text }) => (
-  // The TUI paints no background of its own; user messages render directly on
-  // the terminal background so they blend in across terminals and themes.
-  <PrefixedTextMessage
-    text={text}
-    prefix=">"
-    prefixColor={theme.text.accent}
-    textColor={theme.text.accent}
-    ariaLabel={SCREEN_READER_USER_PREFIX}
-    alignSelf="flex-start"
-    marginTop={1}
-  />
-);
+export const UserMessage: React.FC<UserMessageProps> = ({ text }) => {
+  const screenReader = useIsScreenReaderEnabled();
+  const surface = screenReader ? undefined : theme.background.surface;
+  return (
+    <Box marginTop={1} backgroundColor={surface}>
+      <PrefixedTextMessage
+        text={text}
+        prefix=">"
+        prefixColor={theme.text.accent}
+        textColor={
+          surface
+            ? themeManager.getActiveTheme().defaultColor
+            : theme.text.primary
+        }
+        ariaLabel={SCREEN_READER_USER_PREFIX}
+      />
+    </Box>
+  );
+};
 
 export const UserShellMessage: React.FC<UserShellMessageProps> = ({ text }) => {
   const commandToDisplay = text.startsWith('!') ? text.substring(1) : text;

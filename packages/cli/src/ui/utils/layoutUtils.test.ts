@@ -15,14 +15,30 @@ import {
 } from './layoutUtils.js';
 
 describe('layoutUtils', () => {
+  it('R3-2 fits the command-search prefix inside the same input frame', () => {
+    const widths = calculatePromptWidths(100, 6);
+    expect(widths.inputWidth).toBe(90);
+    expect(widths.inputWidth + 6).toBe(widths.containerWidth);
+  });
+
   it('calculates prompt widths', () => {
     expect(calculatePromptWidths(100)).toEqual({
-      inputWidth: 84,
-      containerWidth: 90,
-      suggestionsWidth: 100,
+      inputWidth: 94,
+      containerWidth: 96,
+      suggestionsWidth: 96,
       frameOverhead: 6,
     });
   });
+
+  it.each([20, 40, 80, 120])(
+    'keeps prompt text inside a %i-column frame',
+    (columns) => {
+      const widths = calculatePromptWidths(columns);
+      expect(widths.inputWidth + 2 + 4).toBe(columns);
+      expect(widths.containerWidth + 4).toBe(columns);
+      expect(widths.suggestionsWidth).toBe(widths.containerWidth);
+    },
+  );
 
   it('reserves static chrome and a bottom safety margin for dialog height', () => {
     expect(getDialogMaxHeight(24, STATIC_EXTRA_HEIGHT)).toBe(19);

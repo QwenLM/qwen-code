@@ -101,7 +101,10 @@ export function DialogFrame(props: {
    * region, with the unused rows blank below it.
    */
   fill?: boolean;
-  bodyLayout?: ReturnType<typeof scrollDialogLayout>;
+  bodyLayout?: Pick<
+    ReturnType<typeof scrollDialogLayout>,
+    'compact' | 'border'
+  >;
 }) {
   return (
     <box
@@ -114,6 +117,7 @@ export function DialogFrame(props: {
       borderStyle="rounded"
       border={props.bodyLayout?.border === false ? [] : true}
       borderColor={props.borderColor ?? C.borderDefault}
+      backgroundColor={C.surface}
       paddingLeft={1}
       paddingRight={1}
       paddingTop={props.bodyLayout?.compact ? 0 : 1}

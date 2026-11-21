@@ -28,6 +28,8 @@ import {
   ThinkMessageContent,
 } from './messages/ConversationMessages.js';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
+import { CompactToolCallList } from './messages/CompactToolGroupDisplay.js';
+import { isProcessToolGroup } from '../utils/process-history.js';
 import { CompressionMessage } from './messages/CompressionMessage.js';
 import { SummaryMessage } from './messages/SummaryMessage.js';
 import {
@@ -39,7 +41,7 @@ import {
   SuccessMessage,
   AwayRecapMessage,
 } from './messages/StatusMessages.js';
-import { Box, Text, useStdout } from 'ink';
+import { Box, Text, getFrameController, useStdout } from 'ink';
 import { theme } from '../semantic-colors.js';
 import {
   MarkdownDisplay,
@@ -111,6 +113,7 @@ interface HistoryItemDisplayProps {
    * Default false (main view stays at the #5661 partition baseline).
    */
   fullDetail?: boolean;
+  isProcessMember?: boolean;
   /**
    * Head id of the thought group this item belongs to (the `gemini_thought`
    * head id for both the head and its `gemini_thought_content` continuations).
@@ -133,6 +136,7 @@ interface HistoryItemDisplayProps {
 const ClickableThinkMessage: React.FC<{
   text: string;
   isPending: boolean;
+  isFocused: boolean;
   expanded: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
@@ -141,6 +145,7 @@ const ClickableThinkMessage: React.FC<{
 }> = ({
   text,
   isPending,
+  isFocused,
   expanded,
   availableTerminalHeight,
   contentWidth,
@@ -159,7 +164,7 @@ const ClickableThinkMessage: React.FC<{
   // Quiet while the context menu owns the pointer so a click on the menu
   // overlay can't also toggle the thought underneath it.
   const { menu: contextMenu } = useContextMenu();
-  const isActive = !isPending && contextMenu === null;
+  const isActive = !isPending && isFocused && contextMenu === null;
 
   useMouseEvents(
     useCallback(
@@ -195,7 +200,12 @@ const ClickableThinkMessage: React.FC<{
         }
         const press = pressRef.current;
         pressRef.current = null;
-        if (isInside && press?.col === event.col && press.row === event.row) {
+        if (
+          isInside &&
+          press?.col === event.col &&
+          press.row === event.row &&
+          !getFrameController(stdout)?.getSelection()
+        ) {
           // 鼠标事件广播给所有订阅者：单击落在 OSC 8 链接上时，
           // ContentMouseController 负责打开链接，这里不再切换折叠，
           // 否则一次单击会既折叠思考块又打开链接。
@@ -229,7 +239,7 @@ const ClickableThinkMessage: React.FC<{
   );
 };
 
-function hasRequiredToolInteraction(
+function mustShowToolDetails(
   props: React.ComponentProps<typeof ToolGroupMessage>,
 ): boolean {
   if (props.isUserInitiated) return true;
@@ -245,7 +255,16 @@ function hasRequiredToolInteraction(
   }
 
   return props.toolCalls.some((tool) => {
-    if (tool.status === ToolCallStatus.Confirming) return true;
+    if (
+      tool.status === ToolCallStatus.Confirming ||
+      tool.status === ToolCallStatus.Error ||
+      tool.status === ToolCallStatus.Canceled ||
+      tool.images?.length ||
+      tool.omittedImageCount ||
+      tool.visionBridgeNotice
+    ) {
+      return true;
+    }
     const display = tool.resultDisplay;
     return (
       typeof display === 'object' &&
@@ -269,25 +288,29 @@ export const CollapsibleToolGroupMessage: React.FC<
 > = ({ expansionKey, ...props }) => {
   const settings = useSettings();
   const [locallyExpanded, setLocallyExpanded] = useState(false);
-  const { expandedBatchIds, expandBatch } = useToolDetailsExpanded();
+  const { expandedBatchIds, toggleBatch } = useToolDetailsExpanded();
   const ref = useRef<DOMElement>(null);
   const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
+  const { stdout } = useStdout();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
+  const { menu } = useContextMenu();
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
-    mouseTrackingEnabled;
-  const collapsed =
+    mouseTrackingEnabled &&
+    menu === null;
+  const collapsible =
     settings.merged.ui?.showToolCallDetails === false &&
-    !locallyExpanded &&
-    !(expansionKey && expandedBatchIds.has(expansionKey)) &&
     !props.fullDetail &&
-    !hasRequiredToolInteraction(props);
+    !mustShowToolDetails(props);
+  const expanded =
+    locallyExpanded ||
+    Boolean(expansionKey && expandedBatchIds.has(expansionKey));
 
   useMouseEvents(
     useCallback(
       (event: MouseEvent) => {
-        if (!collapsed || !ref.current) return;
+        if (!ref.current) return;
         if (event.name === 'move') {
           if (
             pressRef.current &&
@@ -318,28 +341,61 @@ export const CollapsibleToolGroupMessage: React.FC<
         }
         const press = pressRef.current;
         pressRef.current = null;
-        if (isInside && press?.col === event.col && press.row === event.row) {
+        if (
+          isInside &&
+          press?.col === event.col &&
+          press.row === event.row &&
+          !getFrameController(stdout)?.getSelection()
+        ) {
           if (expansionKey) {
-            expandBatch(expansionKey);
+            toggleBatch(expansionKey);
           } else {
-            setLocallyExpanded(true);
+            setLocallyExpanded((previous) => !previous);
           }
         }
       },
-      [collapsed, terminalHeight, expansionKey, expandBatch],
+      [terminalHeight, expansionKey, toggleBatch, stdout],
     ),
-    { isActive: collapsed && clickable },
+    { isActive: collapsible && clickable && props.isFocused !== false },
   );
 
-  if (!collapsed) return <ToolGroupMessage {...props} />;
+  if (!collapsible) return <ToolGroupMessage {...props} />;
+
+  const compact = isProcessToolGroup({
+    id: props.groupId,
+    type: 'tool_group',
+    tools: props.toolCalls,
+    isUserInitiated: props.isUserInitiated,
+  });
 
   return (
-    <ToolGroupMessage
-      {...props}
-      hideDetails
-      expandHint={clickable ? 'click to expand' : 'ctrl+o to expand'}
-      summaryRef={ref}
-    />
+    <Box flexDirection="column">
+      <ToolGroupMessage
+        {...props}
+        hideDetails
+        expandHint={
+          expanded
+            ? clickable
+              ? 'click to collapse · ctrl+o for details'
+              : 'ctrl+o for details'
+            : clickable
+              ? 'click to expand'
+              : 'ctrl+o to expand'
+        }
+        summaryRef={ref}
+      />
+      {expanded &&
+        (compact ? (
+          <Box paddingLeft={2}>
+            <CompactToolCallList
+              toolCalls={props.toolCalls}
+              contentWidth={Math.max(1, props.contentWidth - 2)}
+            />
+          </Box>
+        ) : (
+          <ToolGroupMessage {...props} />
+        ))}
+    </Box>
   );
 };
 
@@ -392,10 +448,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   sourceCopyIndexOffsets,
   thoughtExpanded,
   fullDetail = false,
+  isProcessMember = false,
   thoughtHeadId,
   modSessionId,
   isInViewport = false,
 }) => {
+  const compactProcessMember = isProcessMember && !fullDetail;
   const marginTop = getHistoryItemMarginTop(item);
   const {
     allExpanded,
@@ -476,15 +534,15 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       ),
     [item, modProps, isThought],
   );
-  const contentWidth = terminalWidth - 4;
+  const contentWidth = terminalWidth - (compactProcessMember ? 6 : 4);
   const boxWidth = mainAreaWidth || contentWidth;
 
   return (
     <Box
       flexDirection="column"
       key={itemForDisplay.id}
-      marginTop={marginTop}
-      marginLeft={2}
+      marginTop={compactProcessMember ? 0 : marginTop}
+      marginLeft={compactProcessMember ? 4 : 2}
       marginRight={2}
     >
       {/* Render standard message types */}
@@ -539,30 +597,33 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           sourceCopyText={sourceCopyText}
         />
       )}
-      {itemForDisplay.type === 'gemini_thought' && (
-        <ClickableThinkMessage
-          text={itemForDisplay.text.trimEnd()}
-          isPending={isPending && itemForDisplay.isStreaming !== false}
-          expanded={resolvedThoughtExpanded}
-          availableTerminalHeight={
-            availableTerminalHeightLlm ?? availableTerminalHeight
-          }
-          contentWidth={contentWidth}
-          durationMs={itemForDisplay.durationMs}
-          onToggle={() => toggleThought(thoughtGroupHeadId)}
-        />
-      )}
-      {itemForDisplay.type === 'gemini_thought_content' && (
-        <ThinkMessageContent
-          text={itemForDisplay.text.trimEnd()}
-          isPending={isPending && itemForDisplay.isStreaming !== false}
-          expanded={resolvedThoughtExpanded}
-          availableTerminalHeight={
-            availableTerminalHeightLlm ?? availableTerminalHeight
-          }
-          contentWidth={contentWidth}
-        />
-      )}
+      {itemForDisplay.type === 'gemini_thought' &&
+        (!compactProcessMember || resolvedThoughtExpanded) && (
+          <ClickableThinkMessage
+            text={itemForDisplay.text.trimEnd()}
+            isFocused={isFocused}
+            isPending={isPending && itemForDisplay.isStreaming !== false}
+            expanded={resolvedThoughtExpanded}
+            availableTerminalHeight={
+              availableTerminalHeightLlm ?? availableTerminalHeight
+            }
+            contentWidth={contentWidth}
+            durationMs={itemForDisplay.durationMs}
+            onToggle={() => toggleThought(thoughtGroupHeadId)}
+          />
+        )}
+      {itemForDisplay.type === 'gemini_thought_content' &&
+        (!compactProcessMember || resolvedThoughtExpanded) && (
+          <ThinkMessageContent
+            text={itemForDisplay.text.trimEnd()}
+            isPending={isPending && itemForDisplay.isStreaming !== false}
+            expanded={resolvedThoughtExpanded}
+            availableTerminalHeight={
+              availableTerminalHeightLlm ?? availableTerminalHeight
+            }
+            contentWidth={contentWidth}
+          />
+        )}
       {itemForDisplay.type === 'info' && (
         <InfoMessage
           text={itemForDisplay.text}
@@ -613,23 +674,29 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           width={boxWidth}
         />
       )}
-      {itemForDisplay.type === 'tool_group' && (
-        <CollapsibleToolGroupMessage
-          toolCalls={itemForDisplay.tools}
-          groupId={itemForDisplay.id}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth}
-          isFocused={isFocused}
-          isPending={isPending}
-          activeShellPtyId={activeShellPtyId}
-          embeddedShellFocused={embeddedShellFocused}
-          memoryWriteCount={itemForDisplay.memoryWriteCount}
-          memoryReadCount={itemForDisplay.memoryReadCount}
-          isUserInitiated={itemForDisplay.isUserInitiated}
-          fullDetail={fullDetail}
-          expansionKey={itemForDisplay.batchId}
-        />
-      )}
+      {itemForDisplay.type === 'tool_group' &&
+        (compactProcessMember ? (
+          <CompactToolCallList
+            toolCalls={itemForDisplay.tools}
+            contentWidth={contentWidth}
+          />
+        ) : (
+          <CollapsibleToolGroupMessage
+            toolCalls={itemForDisplay.tools}
+            groupId={itemForDisplay.id}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={contentWidth}
+            isFocused={isFocused}
+            isPending={isPending}
+            activeShellPtyId={activeShellPtyId}
+            embeddedShellFocused={embeddedShellFocused}
+            memoryWriteCount={itemForDisplay.memoryWriteCount}
+            memoryReadCount={itemForDisplay.memoryReadCount}
+            isUserInitiated={itemForDisplay.isUserInitiated}
+            fullDetail={fullDetail}
+            expansionKey={itemForDisplay.batchId}
+          />
+        ))}
       {itemForDisplay.type === 'tool_use_summary' && (
         <Box flexDirection="row">
           <Box width={2} flexShrink={0}>

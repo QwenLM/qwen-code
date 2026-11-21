@@ -12874,12 +12874,16 @@ describe('useLlmStream', () => {
   });
 
   describe('Cancellation', () => {
-    it('buffers streamed content until the throttle interval elapses', async () => {
+    it('batches streamed content within one 60 Hz frame across successive updates', async () => {
       vi.useFakeTimers();
 
       let releaseStream!: () => void;
       const holdStream = new Promise<void>((resolve) => {
         releaseStream = resolve;
+      });
+      let releaseNextChunk!: () => void;
+      const nextChunk = new Promise<void>((resolve) => {
+        releaseNextChunk = resolve;
       });
 
       const mockStream = (async function* () {
@@ -12890,6 +12894,11 @@ describe('useLlmStream', () => {
         yield {
           type: ServerLlmEventType.Content,
           value: 'lo',
+        };
+        await nextChunk;
+        yield {
+          type: ServerLlmEventType.Content,
+          value: ' 世界',
         };
         await holdStream;
       })();
@@ -12914,7 +12923,13 @@ describe('useLlmStream', () => {
       expect(result.current.pendingHistoryItems).toEqual([]);
 
       await act(async () => {
-        vi.advanceTimersByTime(60);
+        vi.advanceTimersByTime(16);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([]);
+
+      await act(async () => {
+        vi.advanceTimersByTime(1);
       });
 
       expect(result.current.pendingHistoryItems).toEqual([
@@ -12922,6 +12937,27 @@ describe('useLlmStream', () => {
           type: 'gemini',
           text: 'Hello',
         }),
+      ]);
+
+      await act(async () => {
+        vi.advanceTimersByTime(8);
+      });
+
+      await act(async () => {
+        releaseNextChunk();
+        await vi.advanceTimersByTimeAsync(8);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({ text: 'Hello' }),
+      ]);
+
+      await act(async () => {
+        vi.advanceTimersByTime(1);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({ text: 'Hello 世界' }),
       ]);
 
       act(() => {
@@ -13972,7 +14008,7 @@ describe('useLlmStream', () => {
       });
     });
 
-    it('buffers streamed thoughts until the throttle interval elapses', async () => {
+    it('batches streamed thoughts within one 60 Hz frame', async () => {
       vi.useFakeTimers();
 
       let releaseStream!: () => void;
@@ -14010,7 +14046,13 @@ describe('useLlmStream', () => {
       expect(result.current.pendingHistoryItems).toEqual([]);
 
       await act(async () => {
-        vi.advanceTimersByTime(60);
+        vi.advanceTimersByTime(16);
+      });
+
+      expect(result.current.pendingHistoryItems).toEqual([]);
+
+      await act(async () => {
+        vi.advanceTimersByTime(1);
       });
 
       expect(result.current.pendingHistoryItems).toEqual([

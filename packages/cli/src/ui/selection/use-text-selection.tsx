@@ -75,6 +75,7 @@ const sameViewportRect = (
 export interface SelectionQuery {
   /** Reading-order range of the current selection, or null when none. */
   getRange: () => NormalizedSelection | null;
+  getBounds: () => ViewportRect | null;
 }
 
 export interface TextSelectionControllerProps {
@@ -96,6 +97,8 @@ export interface TextSelectionControllerProps {
   hitTestScrollbar: (location: { col: number; row: number }) => boolean;
   /** Optional sink exposing the live selection range to other components. */
   selectionQueryRef?: MutableRefObject<SelectionQuery | null>;
+  /** Input buffers can preserve logical newlines across visually wrapped rows. */
+  getSelectionText?: (selection: NormalizedSelection) => string;
 }
 
 /**
@@ -105,6 +108,7 @@ export interface TextSelectionControllerProps {
  */
 export const MULTI_CLICK_MS = 400;
 const debugLogger = createDebugLogger('TEXT_SELECTION');
+const selectionOwners = new WeakMap<NodeJS.WriteStream, SelectionState>();
 
 interface ClickRecord {
   x: number;
@@ -163,16 +167,11 @@ export function TextSelectionController(
       return;
     }
     selection.clear();
-    getBuffer()?.setSelection(null);
-  }, [getBuffer]);
-
-  const applyHighlight = useCallback(() => {
-    const selection = selectionRef.current;
-    const normalized = selection.normalized();
-    getBuffer()?.setSelection(
-      normalized && !selection.isBareClick ? normalized : null,
-    );
-  }, [getBuffer]);
+    if (selectionOwners.get(stdout) === selection) {
+      selectionOwners.delete(stdout);
+      getBuffer()?.setSelection(null);
+    }
+  }, [getBuffer, stdout]);
 
   const getSelectableRects = useCallback((): readonly ViewportRect[] => {
     const viewportRect = propsRef.current.getViewportRect();
@@ -189,6 +188,17 @@ export function TextSelectionController(
     return index === null ? null : (getSelectableRects()[index] ?? null);
   }, [getSelectableRects]);
 
+  const applyHighlight = useCallback(() => {
+    const selection = selectionRef.current;
+    const normalized = selection.normalized();
+    selectionOwners.set(stdout, selection);
+    getBuffer()?.setSelection(
+      normalized && !selection.isBareClick
+        ? { ...normalized, bounds: getActiveRect() ?? undefined }
+        : null,
+    );
+  }, [getBuffer, getActiveRect, stdout]);
+
   const recordBaseline = useCallback(
     (rect: ViewportRect) => {
       const scrollState = propsRef.current.getScrollState();
@@ -201,16 +211,22 @@ export function TextSelectionController(
   );
 
   const copySelection = useCallback(() => {
+    if (selectionOwners.get(stdout) !== selectionRef.current) return;
     const normalized = selectionRef.current.normalized();
     const text = normalized
-      ? getSelectedText(getBuffer()?.frame ?? null, normalized)
+      ? (propsRef.current.getSelectionText?.(normalized) ??
+        getSelectedText(
+          getBuffer()?.frame ?? null,
+          normalized,
+          getActiveRect() ?? undefined,
+        ))
       : '';
     if (text) {
       void copyToClipboard(text).catch((error: unknown) => {
         debugLogger.warn('Failed to copy selected text:', error);
       });
     }
-  }, [getBuffer]);
+  }, [getBuffer, getActiveRect, stdout]);
 
   const mapEvent = useCallback(
     (event: MouseEvent): ReturnType<typeof terminalToGrid> | null => {
@@ -360,6 +376,10 @@ export function TextSelectionController(
       }
 
       if (event.name === 'move') {
+        if (selectionOwners.get(stdout) !== selection) {
+          clearSelection();
+          return;
+        }
         if (!selection.dragging) {
           return;
         }
@@ -389,6 +409,10 @@ export function TextSelectionController(
       }
 
       if (event.name === 'left-release') {
+        if (selectionOwners.get(stdout) !== selection) {
+          clearSelection();
+          return;
+        }
         if (!selection.dragging) {
           return;
         }
@@ -428,6 +452,7 @@ export function TextSelectionController(
       getSelectableRects,
       getActiveRect,
       extendActiveDrag,
+      stdout,
     ],
   );
 
@@ -452,6 +477,10 @@ export function TextSelectionController(
       if (selectionRef.current.isEmpty) {
         return;
       }
+      if (selectionOwners.get(stdout) !== selectionRef.current) {
+        clearSelection();
+        return;
+      }
       const { scrollTop, scrollHeight } = propsRef.current.getScrollState();
       const activeRect = getActiveRect();
       const isViewportSelection = activeRectIndexRef.current === 0;
@@ -472,7 +501,7 @@ export function TextSelectionController(
         });
       }
     });
-  }, [getBuffer, getActiveRect, clearSelection]);
+  }, [getBuffer, getActiveRect, clearSelection, stdout]);
 
   useEffect(() => {
     if (!props.isActive) {
@@ -480,18 +509,8 @@ export function TextSelectionController(
     }
   }, [props.isActive, clearSelection]);
 
-  // The painted range lives on the per-stdout frame controller, outside React,
-  // so it outlives this controller: ink re-reads it on every serialization pass
-  // and stamps the highlight onto whatever cells now occupy those coordinates.
-  // A view that unmounts with a selection on screen (switching away from a
-  // teammate tab, or between teammates) would therefore leave a highlight band
-  // over content the user never selected there. `clearSelection()` cannot do
-  // this teardown: it early-returns while its own selection is empty, and a
-  // successor controller always starts empty, so nothing downstream repairs it
-  // either. Unmount only — never `eventsPaused`, which must keep the selection
-  // the open context menu's "Copy Selection" offers. `getBuffer` is a
-  // `useCallback` keyed on `[stdout]`, so this cleanup runs once, on unmount.
-  useEffect(() => () => getBuffer()?.setSelection(null), [getBuffer]);
+  // A sibling input/history controller may already own the renderer selection.
+  useEffect(() => clearSelection, [clearSelection]);
 
   // Expose the live selection to an external query ref (context menu "Copy
   // Selection"). A collapsed char-mode selection is a bare click (cleared on
@@ -503,9 +522,14 @@ export function TextSelectionController(
       return;
     }
     selectionQueryRef.current = {
+      getBounds: () =>
+        selectionOwners.get(stdout) === selectionRef.current
+          ? getActiveRect()
+          : null,
       getRange: () => {
         const selection = selectionRef.current;
         if (
+          selectionOwners.get(stdout) !== selection ||
           selection.isEmpty ||
           (selection.isCollapsed && selection.mode === 'char')
         ) {
@@ -517,7 +541,7 @@ export function TextSelectionController(
     return () => {
       selectionQueryRef.current = null;
     };
-  }, [selectionQueryRef]);
+  }, [selectionQueryRef, getActiveRect, stdout]);
 
   return null;
 }

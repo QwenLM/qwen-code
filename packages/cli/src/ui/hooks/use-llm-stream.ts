@@ -606,7 +606,7 @@ const EDIT_TOOL_NAMES = new Set([
   ToolNames.WRITE_FILE,
   ToolNames.NOTEBOOK_EDIT,
 ]);
-const STREAM_UPDATE_THROTTLE_MS = 60;
+const STREAM_UPDATE_THROTTLE_MS = 17;
 const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
 // Rows kept in reserve below the commit budget so the incremental commit fires
 // BEFORE MarkdownDisplay's safety-net clip (which reserves 2). Keeping the
@@ -3244,6 +3244,7 @@ export const useLlmStream = (
         : undefined;
       const bufferedEvents: BufferedStreamEvent[] = [];
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      let lastStreamFlushAt: number | undefined;
 
       const discardBufferedStreamEvents = () => {
         if (flushTimer) {
@@ -3251,6 +3252,7 @@ export const useLlmStream = (
           flushTimer = null;
         }
         bufferedEvents.length = 0;
+        lastStreamFlushAt = undefined;
       };
 
       const flushBufferedStreamEvents = () => {
@@ -3262,6 +3264,7 @@ export const useLlmStream = (
         if (bufferedEvents.length === 0) {
           return;
         }
+        lastStreamFlushAt = performance.now();
 
         while (bufferedEvents.length > 0) {
           const nextEvent = bufferedEvents.shift()!;
@@ -3382,9 +3385,22 @@ export const useLlmStream = (
           return;
         }
 
+        const remaining =
+          lastStreamFlushAt === undefined
+            ? STREAM_UPDATE_THROTTLE_MS
+            : Math.max(
+                0,
+                lastStreamFlushAt +
+                  STREAM_UPDATE_THROTTLE_MS -
+                  performance.now(),
+              );
+        if (remaining === 0) {
+          flushBufferedStreamEvents();
+          return;
+        }
         flushTimer = setTimeout(() => {
           flushBufferedStreamEvents();
-        }, STREAM_UPDATE_THROTTLE_MS);
+        }, Math.ceil(remaining));
       };
 
       const handleStreamEvent = (

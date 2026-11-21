@@ -15,7 +15,6 @@ export {
 } from '../../utils/tool-group-summary.js';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
-import wrapAnsi from 'wrap-ansi';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
@@ -25,6 +24,7 @@ import {
 } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 import { formatDuration } from '../../utils/formatters.js';
+import { theme } from '../../semantic-colors.js';
 
 interface CompactToolGroupDisplayProps {
   toolCalls: IndividualToolCallDisplay[];
@@ -104,27 +104,9 @@ function getElapsedTimeReservedWidth(
 
 export function estimateCompactToolGroupHeight(
   toolCalls: IndividualToolCallDisplay[],
-  contentWidth: number,
+  _contentWidth: number,
 ): number {
-  if (toolCalls.length === 0) return 0;
-
-  const overallStatus = getOverallStatus(toolCalls);
-  const activeTool = getActiveTool(toolCalls);
-  const isActive = isToolGroupActive(overallStatus);
-  const summary = `${buildToolSummary(toolCalls, isActive)}${isActive ? '…' : ''}`;
-  const hint = getActiveToolHint(toolCalls);
-  const summaryWidth = Math.max(
-    1,
-    contentWidth -
-      STATUS_INDICATOR_WIDTH -
-      getElapsedTimeReservedWidth(activeTool, overallStatus),
-  );
-  const wrappedSummary = wrapAnsi(summary, summaryWidth, {
-    hard: true,
-    trim: false,
-  });
-
-  return Math.max(1, wrappedSummary.split('\n').length) + (hint ? 1 : 0);
+  return toolCalls.length === 0 ? 0 : 1;
 }
 
 export const CompactToolGroupDisplay: React.FC<
@@ -136,30 +118,58 @@ export const CompactToolGroupDisplay: React.FC<
   const activeTool = getActiveTool(toolCalls);
   const isActive = isToolGroupActive(overallStatus);
   const hint = getActiveToolHint(toolCalls);
+  const timerWidth = Math.min(
+    getElapsedTimeReservedWidth(activeTool, overallStatus),
+    Math.max(0, contentWidth - STATUS_INDICATOR_WIDTH - 12),
+  );
 
   return (
-    <Box flexDirection="column" width={contentWidth} gap={0}>
-      <Box flexDirection="row">
-        <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
-        <Box flexGrow={1}>
-          <Text wrap="wrap" bold>
-            {buildToolSummary(toolCalls, isActive)}
-            {isActive && <Text key="ellipsis">…</Text>}
-          </Text>
-        </Box>
-        <ToolElapsedTime
-          status={overallStatus}
-          executionStartTime={activeTool.executionStartTime}
-          timeoutMs={getShellTimeoutMs(activeTool)}
-        />
+    <Box flexDirection="row" width={contentWidth} height={1}>
+      <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
+      <Box flexGrow={1} minWidth={0}>
+        <Text
+          wrap="truncate-end"
+          color={isActive ? theme.text.primary : theme.text.secondary}
+        >
+          {buildToolSummary(toolCalls, isActive)}
+          {isActive && <Text key="ellipsis">…</Text>}
+          {hint && (
+            <Text color={theme.text.secondary}>
+              {' · '}
+              {hint}
+            </Text>
+          )}
+        </Text>
       </Box>
-      {hint && (
-        <Box paddingLeft={STATUS_INDICATOR_WIDTH}>
-          <Text dimColor wrap="truncate-end">
-            ⎿ {hint}
-          </Text>
+      {timerWidth > 0 && (
+        <Box
+          width={timerWidth}
+          flexShrink={0}
+          justifyContent="flex-end"
+          overflow="hidden"
+        >
+          <ToolElapsedTime
+            status={overallStatus}
+            executionStartTime={activeTool.executionStartTime}
+            timeoutMs={getShellTimeoutMs(activeTool)}
+          />
         </Box>
       )}
     </Box>
   );
 };
+
+export const CompactToolCallList: React.FC<CompactToolGroupDisplayProps> = ({
+  toolCalls,
+  contentWidth,
+}) => (
+  <Box flexDirection="column" width={contentWidth}>
+    {toolCalls.map((tool) => (
+      <CompactToolGroupDisplay
+        key={tool.callId}
+        toolCalls={[tool]}
+        contentWidth={contentWidth}
+      />
+    ))}
+  </Box>
+);

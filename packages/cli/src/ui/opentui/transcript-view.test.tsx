@@ -1989,7 +1989,7 @@ describe('OpenTuiTranscriptView scroll host', () => {
     const originalRows = [...items];
     const originalSources = items.map((item) => item.canonicalHistoryItem);
     const originalHistory = structuredClone(history);
-    const summary = 'Read TURN_0080.txt, TURN_0081.txt';
+    const summary = 'Read 2 files';
     const view = mountHosted({
       rows: Array.from({ length: 200 }, () => 3),
       items,
@@ -2570,7 +2570,7 @@ describe('Ink compact read-summary parity', () => {
   it('summarizes two successful reads once in the same canonical group', () => {
     const view = mountReadGroup(ToolCallStatus.Success, { secondRead: true });
     try {
-      const summary = 'Read owned-checkpoint.txt, second.txt';
+      const summary = 'Read 2 files';
       expect(view.container.textContent?.split(summary)).toHaveLength(2);
       expect(view.container.textContent).not.toContain('ReadFile');
     } finally {
@@ -2693,9 +2693,7 @@ describe('canonical compact group boundaries', () => {
       <OpenTuiTranscriptView items={items} availableTerminalHeight={5} />,
     );
     try {
-      expect(view.container.textContent).toContain(
-        'Read file-0.txt, file-1.txt, ... and 198 more',
-      );
+      expect(view.container.textContent).toContain('Read 200 files');
       expect(snapshotCanonicalHistory(items)).toEqual(history);
       expect(items.filter((item) => item.kind === 'tool')).toHaveLength(200);
     } finally {

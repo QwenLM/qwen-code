@@ -9,7 +9,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { ICON } from '../../../constants.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
-import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
+import { useDialogSize } from '../../../contexts/DialogSizeContext.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { t } from '../../../../i18n/index.js';
 import { stripUnsafeCharacters } from '../../../utils/textUtils.js';
@@ -347,10 +347,13 @@ export const InstalledTab = ({
     return () => removeMCPStatusChangeListener(listener);
   }, []);
 
-  const { rows: terminalRows } = useTerminalSize();
-  // One line per display row; reserve space for the dialog border, tab bar,
-  // scroll hints, status line (which may wrap) and footer around this tab.
-  const visibleCount = Math.max(6, (terminalRows || 24) - 12);
+  const { rows: terminalRows, isDialog } = useDialogSize();
+  // One line per display row. Dialog bounds already exclude the parent
+  // chrome, leaving only this tab's scroll hints to reserve.
+  const visibleCount = Math.max(
+    isDialog ? 1 : 6,
+    (terminalRows || 24) - (isDialog ? 2 : 12),
+  );
   const [scrollOffset, setScrollOffset] = useState(0);
 
   // Flatten the grouped list into display rows (headers, items, gaps) so the
@@ -391,7 +394,10 @@ export const InstalledTab = ({
       (r) => r.type === 'item' && r.item.key === selectedItem?.key,
     );
     if (idx < 0) return;
-    const top = displayRows[idx - 1]?.type === 'header' ? idx - 1 : idx;
+    const top =
+      visibleCount > 1 && displayRows[idx - 1]?.type === 'header'
+        ? idx - 1
+        : idx;
     if (top < scrollOffset) {
       setScrollOffset(top);
     } else if (idx >= scrollOffset + visibleCount) {
@@ -748,7 +754,12 @@ export const InstalledTab = ({
         }
         if (row.type === 'header') {
           return (
-            <Text key={`header-${row.group}`} color={theme.text.accent} bold>
+            <Text
+              key={`header-${row.group}`}
+              color={theme.text.accent}
+              bold
+              wrap="truncate-end"
+            >
               {groupLabel(row.group)} ({row.count})
             </Text>
           );
@@ -804,7 +815,10 @@ export const InstalledTab = ({
               </Text>
             </Box>
             <Box flexGrow={1}>
-              <Text color={isSelected ? theme.text.accent : theme.text.primary}>
+              <Text
+                color={isSelected ? theme.text.accent : theme.text.primary}
+                wrap="truncate-end"
+              >
                 {isChild ? '  └ ' : ''}
                 {item.name}
               </Text>
@@ -812,10 +826,16 @@ export const InstalledTab = ({
                 <Text color={theme.status.warning}> {ICON.STAR}</Text>
               ) : null}
             </Box>
-            <Text color={isSelected ? theme.text.accent : theme.text.secondary}>
+            <Text
+              color={isSelected ? theme.text.accent : theme.text.secondary}
+              wrap="truncate-end"
+            >
               {kindBadge}{' '}
             </Text>
-            <Text color={isSelected ? theme.text.accent : statusColor}>
+            <Text
+              color={isSelected ? theme.text.accent : statusColor}
+              wrap="truncate-end"
+            >
               ({statusLabel})
             </Text>
           </Box>

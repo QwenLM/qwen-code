@@ -6,7 +6,6 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  getLiveAgentPanelLayoutKey,
   getLiveAgentPanelVpMaxRows,
   isLiveAgentPanelVisibleEntry,
   TERMINAL_VISIBLE_MS,
@@ -44,65 +43,6 @@ function shellEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
   } as DialogEntry;
 }
 
-describe('getLiveAgentPanelLayoutKey', () => {
-  it('changes when an agent is added (panel grows)', () => {
-    const before = getLiveAgentPanelLayoutKey([], false);
-    const after = getLiveAgentPanelLayoutKey([agentEntry({ id: 'a1' })], false);
-    expect(after).not.toBe(before);
-  });
-
-  it('changes when an agent is removed (panel shrinks)', () => {
-    const two = getLiveAgentPanelLayoutKey(
-      [agentEntry({ id: 'a1' }), agentEntry({ id: 'a2' })],
-      false,
-    );
-    const one = getLiveAgentPanelLayoutKey([agentEntry({ id: 'a1' })], false);
-    expect(one).not.toBe(two);
-  });
-
-  it('changes when an agent status flips (running -> completed)', () => {
-    const running = getLiveAgentPanelLayoutKey(
-      [agentEntry({ id: 'a1', status: 'running' })],
-      false,
-    );
-    const done = getLiveAgentPanelLayoutKey(
-      [agentEntry({ id: 'a1', status: 'completed', endTime: 1 })],
-      false,
-    );
-    expect(done).not.toBe(running);
-  });
-
-  it('changes when panel focus toggles (adds the navigation hint row)', () => {
-    const entries = [agentEntry({ id: 'a1' })];
-    expect(getLiveAgentPanelLayoutKey(entries, true)).not.toBe(
-      getLiveAgentPanelLayoutKey(entries, false),
-    );
-  });
-
-  it('is STABLE across per-second elapsed-time ticks (no height change)', () => {
-    // The panel re-renders every second to refresh elapsed time, but that
-    // tick never touches the roster — the key must not churn, or AppContainer
-    // would needlessly re-measure the footer every second.
-    const entries = [
-      agentEntry({ id: 'a1', status: 'running', startTime: 0 }),
-      agentEntry({ id: 'a2', status: 'running', startTime: 0 }),
-    ];
-    const k1 = getLiveAgentPanelLayoutKey(entries, false);
-    const k2 = getLiveAgentPanelLayoutKey(entries, false);
-    expect(k2).toBe(k1);
-  });
-
-  it('ignores non-agent entries (panel renders only agents)', () => {
-    const onlyShell = getLiveAgentPanelLayoutKey([shellEntry()], false);
-    const empty = getLiveAgentPanelLayoutKey([], false);
-    expect(onlyShell).toBe(empty);
-  });
-});
-
-// Guard the assumption the layout key relies on: a finished agent stays
-// visible (so its row keeps occupying height) for the eviction window, and
-// only then shrinks the panel — the "safe" direction the key intentionally
-// does not track.
 describe('isLiveAgentPanelVisibleEntry (eviction window)', () => {
   it('returns false for non-agent entries', () => {
     expect(isLiveAgentPanelVisibleEntry(shellEntry(), 1000)).toBe(false);

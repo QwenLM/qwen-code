@@ -110,6 +110,38 @@ describe('<CompactToolGroupDisplay /> — shell timeout plumbing', () => {
     expect(lastFrame()).toContain('5s');
     expect(lastFrame()).not.toContain('timeout');
   });
+
+  it('keeps a CJK batch on one row across timer visibility and completion', () => {
+    const tools = [
+      toolCall({ name: 'ReadFile', description: '已完成.ts' }),
+      toolCall({
+        callId: 'current',
+        name: 'ReadFile',
+        description: '目录/当前正在读取的长文件名.ts',
+        status: ToolCallStatus.Executing,
+        executionStartTime: NOW,
+      }),
+    ];
+    const { lastFrame, rerender } = render(
+      <CompactToolGroupDisplay toolCalls={tools} contentWidth={40} />,
+    );
+    expect(lastFrame()!.split('\n')).toHaveLength(1);
+    expect(lastFrame()).not.toContain('0s');
+    vi.advanceTimersByTime(5_000);
+    rerender(<CompactToolGroupDisplay toolCalls={tools} contentWidth={40} />);
+    expect(lastFrame()).toContain('5s');
+    expect(lastFrame()!.split('\n')).toHaveLength(1);
+    const completed = tools.map((tool) => ({
+      ...tool,
+      status: ToolCallStatus.Success,
+    }));
+    rerender(
+      <CompactToolGroupDisplay toolCalls={completed} contentWidth={40} />,
+    );
+    expect(lastFrame()).toContain('Read 2 files');
+    expect(lastFrame()!.split('\n')).toHaveLength(1);
+    expect(lastFrame()).not.toContain('当前');
+  });
 });
 
 describe('<CompactToolGroupDisplay /> — summary label', () => {
@@ -124,8 +156,8 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     );
     const frame = lastFrame()!;
     // CATEGORY_ORDER: search → read → list → ...
-    expect(frame).toContain('Searched search pattern');
-    expect(frame).toContain('read a.ts, b.ts');
+    expect(frame).toContain('Searched 1 pattern');
+    expect(frame).toContain('read 2 files');
   });
 
   it('renders nothing for empty tool calls', () => {
@@ -149,7 +181,7 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     expect(lastFrame()).toContain('Ran ls -la');
   });
 
-  it('wraps long summaries instead of truncating them', () => {
+  it('keeps a long path on one truncated row', () => {
     const description =
       'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx';
     const tool = toolCall({ name: 'ReadFile', description });
@@ -158,12 +190,12 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     );
     const frame = lastFrame()!;
 
-    expect(frame.split('\n').length).toBeGreaterThan(1);
-    expect(frame).not.toContain('…');
-    expect(frame.replace(/\s/g, '')).toContain(`Read${description}`);
+    expect(frame.split('\n')).toHaveLength(1);
+    expect(frame).toContain('Read packages/');
+    expect(frame).toContain('…');
   });
 
-  it('shows all descriptions inline when a batch is active with ≤ 3 tools', () => {
+  it('shows the active path beside a count summary on the same row', () => {
     const tools = [
       toolCall({
         callId: 'c1',
@@ -188,8 +220,8 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     );
     const frame = lastFrame()!;
 
-    expect(frame).toContain('Reading completed.ts, current.ts, queued.ts…');
-    // No redundant hint line when descriptions are already inline.
+    expect(frame).toContain('Reading 3 files… · current.ts');
+    expect(frame.split('\n')).toHaveLength(1);
     expect(frame).not.toContain('⎿');
   });
 
@@ -203,7 +235,7 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     );
     const frame = lastFrame()!;
 
-    expect(frame).toContain('Read a.ts, b.ts');
+    expect(frame).toContain('Read 2 files');
     expect(frame).not.toContain('⎿');
   });
 
@@ -227,7 +259,7 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     expect(frame).not.toContain('file_path');
   });
 
-  it('does not repeat a description already shown for a single-tool category', () => {
+  it('uses category counts in a mixed active group', () => {
     const tools = [
       toolCall({
         callId: 'c1',
@@ -246,12 +278,12 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     );
     const frame = lastFrame()!;
 
-    expect(frame).toContain('Searching needle, reading a.ts…');
+    expect(frame).toContain('Searching 1 pattern, reading 1 file');
     expect(frame).not.toContain('⎿');
     expect(estimateCompactToolGroupHeight(tools, 80)).toBe(1);
   });
 
-  it('keeps a 30-file active batch to two rows at 80 columns', () => {
+  it('keeps a 30-file active batch to one row at 80 columns', () => {
     const tools = Array.from({ length: 30 }, (_, index) =>
       toolCall({
         callId: `c${index + 1}`,
@@ -268,14 +300,13 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     );
     const frame = lastFrame()!;
 
-    // Summary line wraps + hint line → at least 2 rows at 80 columns.
-    expect(frame.split('\n').length).toBeGreaterThanOrEqual(2);
-    expect(frame).toContain('... and 28 more');
-    expect(frame).toContain('⎿ packages/cli/src/ui/components/example-30.tsx');
+    expect(frame.split('\n')).toHaveLength(1);
+    expect(frame).toContain('Reading 30 files');
+    expect(frame).not.toContain('... and 28 more');
     expect(frame).not.toContain('example-03.tsx');
   });
 
-  it('wraps a long inline summary without a redundant hint', () => {
+  it('truncates the active path without adding a hint row', () => {
     const currentPath =
       'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx';
     const tools = [
@@ -292,11 +323,9 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     );
     const frame = lastFrame()!;
 
-    // Summary wraps across multiple lines but no hint row.
-    expect(frame).not.toContain('⎿');
-    // Both descriptions appear in the wrapped summary (may be split across lines).
-    expect(frame).toContain('a.ts');
-    expect(frame).toContain('Display.tsx');
+    expect(frame.split('\n')).toHaveLength(1);
+    expect(frame).toContain('Reading 2 files');
+    expect(frame).not.toContain('Display.tsx');
   });
 });
 
@@ -325,13 +354,13 @@ describe('buildToolSummary', () => {
     expect(buildToolSummary([make({})], true)).toBe('Reading a.ts');
   });
 
-  it('multiple same-type tools show descriptions inline when ≤ 3', () => {
+  it('multiple same-type tools use localized counts', () => {
     const tools = [
       make({ callId: 'c1', description: 'a.ts' }),
       make({ callId: 'c2', description: 'b.ts' }),
       make({ callId: 'c3', description: 'c.ts' }),
     ];
-    expect(buildToolSummary(tools, false)).toBe('Read a.ts, b.ts, c.ts');
+    expect(buildToolSummary(tools, false)).toBe('Read 3 files');
   });
 
   it('multiple same-type tools use progressive verb when active', () => {
@@ -339,19 +368,17 @@ describe('buildToolSummary', () => {
       make({ callId: 'c1', description: 'a.ts' }),
       make({ callId: 'c2', description: 'b.ts' }),
     ];
-    expect(buildToolSummary(tools, true)).toBe('Reading a.ts, b.ts');
+    expect(buildToolSummary(tools, true)).toBe('Reading 2 files');
   });
 
-  it('multiple same-type tools show first 2 + "...and N more" when > 3', () => {
+  it('large batches use counts without path previews', () => {
     const tools = [
       make({ callId: 'c1', description: 'a.ts' }),
       make({ callId: 'c2', description: 'b.ts' }),
       make({ callId: 'c3', description: 'c.ts' }),
       make({ callId: 'c4', description: 'd.ts' }),
     ];
-    expect(buildToolSummary(tools, false)).toBe(
-      'Read a.ts, b.ts, ... and 2 more',
-    );
+    expect(buildToolSummary(tools, false)).toBe('Read 4 files');
   });
 
   it('multiple same-type tools fall back to count when descriptions are missing', () => {
@@ -381,7 +408,7 @@ describe('buildToolSummary', () => {
     ];
     // CATEGORY_ORDER: search → read → list → command → edit
     expect(buildToolSummary(tools, false)).toBe(
-      'Read a.ts, ran npm test, edited b.ts',
+      'Read 1 file, ran 1 command, edited 1 file',
     );
   });
 
@@ -391,7 +418,7 @@ describe('buildToolSummary', () => {
       make({ callId: 'c2', name: 'Shell', description: 'ls' }),
     ];
     const result = buildToolSummary(tools, false);
-    expect(result).toBe('Read a.ts, ran ls');
+    expect(result).toBe('Read 1 file, ran 1 command');
   });
 
   it('unknown tool names fall to other category', () => {
@@ -473,15 +500,13 @@ describe('buildToolSummary', () => {
     expect(buildToolSummary(tools, false)).toBe('Ran echo hello world');
   });
 
-  it('mixed group shows descriptions inline per category', () => {
+  it('mixed group uses a count for each category', () => {
     const tools = [
       make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
       make({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
       make({ callId: 'c3', name: 'Shell', description: 'npm test' }),
     ];
-    expect(buildToolSummary(tools, false)).toBe(
-      'Read a.ts, b.ts, ran npm test',
-    );
+    expect(buildToolSummary(tools, false)).toBe('Read 2 files, ran 1 command');
   });
 
   it('legacy display names map to correct categories', () => {
@@ -490,7 +515,7 @@ describe('buildToolSummary', () => {
       make({ callId: 'c2', name: 'ReadFolder', description: '/src' }),
     ];
     expect(buildToolSummary(tools, false)).toBe(
-      'Searched pattern, listed /src',
+      'Searched 1 pattern, listed 1 directory',
     );
   });
 });
@@ -504,15 +529,15 @@ describe('estimateCompactToolGroupHeight', () => {
     expect(estimateCompactToolGroupHeight([toolCall()], 80)).toBe(1);
   });
 
-  it('accounts for wrapped long summaries', () => {
+  it('keeps long summaries at one row', () => {
     const description =
       'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx';
     const tool = toolCall({ name: 'ReadFile', description });
 
-    expect(estimateCompactToolGroupHeight([tool], 30)).toBeGreaterThan(1);
+    expect(estimateCompactToolGroupHeight([tool], 30)).toBe(1);
   });
 
-  it('adds one row for an active batch description hint when > 3 tools', () => {
+  it('includes active hints without spending another row', () => {
     const tools = [
       toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
       toolCall({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
@@ -525,10 +550,10 @@ describe('estimateCompactToolGroupHeight', () => {
       }),
     ];
 
-    expect(estimateCompactToolGroupHeight(tools, 80)).toBe(2);
+    expect(estimateCompactToolGroupHeight(tools, 80)).toBe(1);
   });
 
-  it('uses one row for an active batch with ≤ 3 tools (descriptions inline)', () => {
+  it('uses one row for a small active batch', () => {
     const tools = [
       toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
       toolCall({
@@ -565,7 +590,7 @@ describe('estimateCompactToolGroupHeight', () => {
     expect(estimateCompactToolGroupHeight(tools, 80)).toBe(1);
   });
 
-  it('reserves additional width for active summary status', () => {
+  it('keeps the same height when a tool starts executing', () => {
     const description =
       'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx';
     const completed = toolCall({ name: 'ReadFile', description });
@@ -575,12 +600,12 @@ describe('estimateCompactToolGroupHeight', () => {
       status: ToolCallStatus.Executing,
     });
 
-    expect(estimateCompactToolGroupHeight([active], 30)).toBeGreaterThan(
+    expect(estimateCompactToolGroupHeight([active], 30)).toBe(
       estimateCompactToolGroupHeight([completed], 30),
     );
   });
 
-  it('reserves timeout label width for active shell summaries', () => {
+  it('keeps timeout labels inside the same compact row', () => {
     const description =
       'npm test -- --filter packages/cli/src/ui/components/messages';
     const activeShell = shellTool({ description });
@@ -594,9 +619,9 @@ describe('estimateCompactToolGroupHeight', () => {
       },
     });
 
-    expect(
-      estimateCompactToolGroupHeight([activeShellWithTimeout], 55),
-    ).toBeGreaterThan(estimateCompactToolGroupHeight([activeShell], 55));
+    expect(estimateCompactToolGroupHeight([activeShellWithTimeout], 55)).toBe(
+      estimateCompactToolGroupHeight([activeShell], 55),
+    );
   });
 
   it('uses terminal display width for wide characters', () => {
@@ -605,7 +630,7 @@ describe('estimateCompactToolGroupHeight', () => {
       description: '中文中文中文中文',
     });
 
-    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(3);
+    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(1);
   });
 });
 

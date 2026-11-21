@@ -26,6 +26,7 @@ import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { createUntil } from './wait.js';
+import { composerValue } from './composer-screen.js';
 import {
   InteractiveSession,
   sendAboutUntilRendered,
@@ -672,21 +673,6 @@ it(
         await api.session.idle(150, 750);
         api.frames[label] = await api.session.viewport();
         return api.frames[label];
-      };
-      const composerValue = (frame: string): string | undefined => {
-        const lines = frame.split('\n');
-        const borders = lines.flatMap((line, index) =>
-          /^\s*─{20,}\s*$/.test(line) ? [index] : [],
-        );
-        if (borders.length < 2) return;
-        const [top, bottom] = borders.slice(-2);
-        const body = lines.slice(top + 1, bottom);
-        if (body.length !== 1) return;
-        const match = /^\s*\* (.*)$/.exec(body[0].trimEnd());
-        if (!match) return;
-        return match[1] === '  Type your message or @path/to/file'
-          ? ''
-          : match[1];
       };
       const draftIs = (value: string, label: string) =>
         frameWhere((frame) => composerValue(frame) === value, label);

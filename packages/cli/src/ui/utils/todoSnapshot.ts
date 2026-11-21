@@ -190,30 +190,6 @@ export function getStickyTodosRenderKey(
   );
 }
 
-export function getStickyTodosLayoutKey(
-  todos: readonly TodoItem[] | null,
-  width: number,
-  maxVisibleItems: number,
-): string {
-  if (!todos) {
-    return 'null';
-  }
-
-  const visibleTodoCount = clampStickyTodoVisibleItems(maxVisibleItems);
-  const orderedOpenTodos = getOrderedStickyTodos(todos).filter(
-    (todo) => todo.status !== 'completed',
-  );
-  const visibleTodos = orderedOpenTodos.slice(0, visibleTodoCount);
-  const hasHiddenTodos = orderedOpenTodos.length > visibleTodos.length;
-
-  return JSON.stringify({
-    width,
-    maxVisibleItems: visibleTodoCount,
-    hasHiddenTodos,
-    todos: visibleTodos.map((todo) => [todo.id, todo.content, todo.status]),
-  });
-}
-
 export function getStickyTodoMaxVisibleItems(terminalHeight: number): number {
   if (!Number.isFinite(terminalHeight) || terminalHeight <= 0) {
     return STICKY_TODO_MAX_VISIBLE_ITEMS;
