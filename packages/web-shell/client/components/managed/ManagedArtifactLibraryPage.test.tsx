@@ -380,15 +380,18 @@ describe('ManagedArtifactLibraryPage', () => {
   );
 
   it('clears an initial error after a successful refresh', async () => {
+    const refresh = pendingPage();
     vi.mocked(library.listArtifacts)
       .mockRejectedValueOnce(new Error('first boom'))
-      .mockResolvedValueOnce(page([other]));
+      .mockReturnValueOnce(refresh.promise);
     await render();
     expect(document.querySelector('[role="alert"]')).not.toBeNull();
 
     await click('Refresh');
 
     expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.querySelector('[role="status"]')).not.toBeNull();
+    await act(async () => refresh.resolve(page([other])));
     expect(row(other.id)?.getAttribute('aria-pressed')).toBe('true');
   });
 
@@ -437,6 +440,8 @@ describe('ManagedArtifactLibraryPage', () => {
     expect(document.querySelector('[role="alert"]')).not.toBeNull();
 
     await click('Load more');
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.querySelector('[role="status"]')).not.toBeNull();
     await act(async () => retry.resolve(page([other])));
 
     expect(row(artifact.id)).toBeDefined();
