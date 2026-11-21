@@ -2608,6 +2608,128 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
   });
 
+  it.each([true, false])(
+    'honors the dead folder-trust key on a file the migration already stamped (value %s)',
+    async (choice) => {
+      delete process.env['QWEN_SERVER_TOKEN'];
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      const qwenHome = useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-dead-trust-')),
+      );
+      writeFileSync(
+        join(qwenHome, 'settings.json'),
+        JSON.stringify({
+          $version: 4,
+          security: { folderTrust: { featureEnabled: choice } },
+        }),
+      );
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+        qwenHome,
+        'trustedFolders.json',
+      );
+      writeFileSync(
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+        JSON.stringify({ [tempWorkspace]: TrustLevel.DO_NOT_TRUST }),
+      );
+      writeFileSync(
+        join(tempWorkspace, '.env'),
+        [
+          'QWEN_SERVER_TOKEN=from-untrusted-workspace-env',
+          'FAST_PATH_REFERENCED_TOKEN=from-untrusted-workspace-env',
+        ].join('\n'),
+      );
+
+      await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+      if (choice) {
+        expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+        expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
+      } else {
+        // A boolean false must survive as a real opinion, not "no opinion":
+        // with the gate off the workspace is admitted and its .env loads.
+        // QWEN_SERVER_TOKEN is hardcoded-excluded from project .env files,
+        // so the loadable key is the one to assert on.
+        expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe(
+          'from-untrusted-workspace-env',
+        );
+        delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      }
+    },
+  );
+
+  it('keeps the canonical folder-trust value ahead of the dead key', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-dead-trust-both-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        $version: 4,
+        security: { folderTrust: { enabled: true, featureEnabled: false } },
+      }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({ [tempWorkspace]: TrustLevel.DO_NOT_TRUST }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      [
+        'QWEN_SERVER_TOKEN=from-untrusted-workspace-env',
+        'FAST_PATH_REFERENCED_TOKEN=from-untrusted-workspace-env',
+      ].join('\n'),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    // The canonical key outranks the dead one, mirroring the precedence the
+    // load-time repair enforces: the gate stays on and the untrusted
+    // workspace's .env stays out.
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
+  });
+
+  it('honors a pre-V2 top-level folderTrustFeature before any CLI load', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-flat-trust-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ folderTrustFeature: true }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({ [tempWorkspace]: TrustLevel.DO_NOT_TRUST }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      [
+        'QWEN_SERVER_TOKEN=from-untrusted-workspace-env',
+        'FAST_PATH_REFERENCED_TOKEN=from-untrusted-workspace-env',
+      ].join('\n'),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
+  });
+
   it('caches trusted folders during a single fast-path bootstrap', () => {
     delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();

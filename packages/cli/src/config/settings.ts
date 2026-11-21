@@ -41,6 +41,7 @@ import {
 import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
+  getNestedProperty,
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
   WORKSPACE_RESTRICTED_ROOT_SETTINGS,
@@ -317,6 +318,55 @@ function getSettingsFileKeyWarnings(
   }
 
   return warnings;
+}
+
+const FOLDER_TRUST_ENABLED_PATH = 'security.folderTrust.enabled';
+const FOLDER_TRUST_DEAD_KEY = 'featureEnabled';
+
+/**
+ * Repairs the dead `security.folderTrust.featureEnabled` key left behind on
+ * settings files that a V1 file was migrated into before that legacy key was
+ * remapped. The V1 -> V2 chain is one-shot and version-gated, so those files
+ * never run it again: the key stays nested under a valid container, every
+ * top-level key warning loop skips it, and `isFolderTrustEnabled` reads only
+ * the canonical sibling — silently switching folder-trust gating off for a
+ * user who opted in.
+ *
+ * Runs independently of `needsMigration`, which short-circuits at the current
+ * version. Self-limiting: once the key is removed the guard stops matching, so
+ * it does not write on every startup.
+ */
+function repairDeadFolderTrustKey(
+  settings: Record<string, unknown>,
+): string | undefined {
+  const folderTrust = getNestedProperty(settings, 'security.folderTrust');
+  if (!isPlainObject(folderTrust)) {
+    return undefined;
+  }
+  if (!Object.hasOwn(folderTrust, FOLDER_TRUST_DEAD_KEY)) {
+    return undefined;
+  }
+
+  const legacy = folderTrust[FOLDER_TRUST_DEAD_KEY];
+  if (typeof legacy !== 'boolean') {
+    return undefined;
+  }
+
+  // A boolean canonical value keeps precedence; the dead key is dropped
+  // either way so it does not survive as a second, unread copy of the choice.
+  // A canonical value of any other type (e.g. a null written for "unset")
+  // is not a choice any consumer honors — readers resolve the key as
+  // `boolean ?? false` or reject it — so the usable legacy boolean replaces
+  // it instead of being deleted alongside it.
+  delete folderTrust[FOLDER_TRUST_DEAD_KEY];
+  if (
+    typeof getNestedProperty(settings, FOLDER_TRUST_ENABLED_PATH) === 'boolean'
+  ) {
+    return `Removed the unused 'security.folderTrust.${FOLDER_TRUST_DEAD_KEY}' key; '${FOLDER_TRUST_ENABLED_PATH}' already set the folder-trust choice.`;
+  }
+
+  setNestedPropertySafe(settings, FOLDER_TRUST_ENABLED_PATH, legacy);
+  return `Migrated 'security.folderTrust.${FOLDER_TRUST_DEAD_KEY}' to '${FOLDER_TRUST_ENABLED_PATH}'.`;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1449,9 +1499,11 @@ function readSettingsLayers(
         }
         let migrationWarnings: string[] | undefined;
 
-        const persistSettingsObject = (warningPrefix: string) => {
-          if (snapshot) return;
-          if (operatorSandbox && scope === SettingScope.Workspace) return;
+        // Reports whether the file was actually rewritten, so callers never
+        // claim a disk change the helper skipped or swallowed.
+        const persistSettingsObject = (warningPrefix: string): boolean => {
+          if (snapshot) return false;
+          if (operatorSandbox && scope === SettingScope.Workspace) return false;
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
             // while preserving comments and formatting from the original file.
@@ -1467,8 +1519,10 @@ function readSettingsLayers(
                 `${warningPrefix}: updateSettingsFilePreservingFormat returned false for ${filePath}`,
               );
             }
+            return written;
           } catch (e) {
             debugLogger.error(`${warningPrefix}: ${getErrorMessage(e)}`);
+            return false;
           }
         };
 
@@ -1509,6 +1563,33 @@ function readSettingsLayers(
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           persistSettingsObject('Error normalizing settings version on disk');
         }
+
+        // Independent of the needsMigration gate above: files already stamped
+        // at the current version still carry the dead key. Skipped on
+        // recovered settings for the same reason as version normalization —
+        // the repair persists on the next startup.
+        const folderTrustRepairWarning = corruptedSaved
+          ? undefined
+          : repairDeadFolderTrustKey(settingsObject);
+        if (folderTrustRepairWarning !== undefined) {
+          // The repair stays scope-blind in memory, but the persist is gated:
+          // `security.folderTrust` is stripped from workspace settings before
+          // the merge, so rewriting a repository-tracked .qwen/settings.json
+          // would only dirty the checkout for a choice this scope can never
+          // contribute.
+          const persisted =
+            scope !== SettingScope.Workspace &&
+            persistSettingsObject(
+              'Error repairing folder-trust settings on disk',
+            );
+          migrationWarnings = [
+            ...(migrationWarnings ?? []),
+            persisted
+              ? folderTrustRepairWarning
+              : `${folderTrustRepairWarning} (repaired in memory for this run; the file could not be updated)`,
+          ];
+        }
+
         if (
           snapshot &&
           settingsObject[SETTINGS_VERSION_KEY] !== SETTINGS_VERSION

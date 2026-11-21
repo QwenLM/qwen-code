@@ -254,8 +254,27 @@ function folderTrustSetting(
       ),
     };
   }
-  if (!('enabled' in folderTrust)) return {};
-  const enabled = (folderTrust as Record<string, unknown>)['enabled'];
+  const record = folderTrust as Record<string, unknown>;
+  if (!('enabled' in record)) {
+    // A file the current V1 -> V2 chain migrates carries `featureEnabled` —
+    // the map still targets it — and is stamped at the current version, so
+    // the version-gated chain never rewrites it. Read the leftover key here
+    // too: this snapshot is taken before `loadSettings` repairs the file, and
+    // answering "disabled" admits every workspace.
+    const legacy = record['featureEnabled'];
+    if (typeof legacy === 'boolean') return { value: legacy };
+    if (legacy !== undefined) {
+      return {
+        error: policyError(
+          'trust_policy_invalid',
+          filePath,
+          new Error('`security.folderTrust.featureEnabled` must be a boolean.'),
+        ),
+      };
+    }
+    return {};
+  }
+  const enabled = record['enabled'];
   if (typeof enabled === 'boolean') return { value: enabled };
   return {
     error: policyError(

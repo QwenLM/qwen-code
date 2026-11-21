@@ -592,25 +592,35 @@ function pickFastPathSettings(
       }
       if (enabled !== undefined) {
         out.security = { folderTrust: { enabled } };
+      } else {
+        // A file the current V1 -> V2 chain migrates carries `featureEnabled`
+        // — the map still targets it — and is stamped at the current version,
+        // so the version-gated chain never rewrites it. Read the leftover key
+        // here too: this reader runs before `loadSettings` repairs the file,
+        // and treating a missing `enabled` as off admits every workspace.
+        const legacy = folderTrust['featureEnabled'];
+        if (typeof legacy === 'boolean') {
+          out.security = { folderTrust: { enabled: legacy } };
+        } else if (legacy !== undefined) {
+          throw new Error(
+            'Serve fast path settings security.folderTrust.featureEnabled must be a boolean.',
+          );
+        }
       }
     }
   }
-  if (
-    useLegacyKeys &&
-    out.security === undefined &&
-    Object.hasOwn(value, 'folderTrust')
-  ) {
-    const legacyFolderTrust = value['folderTrust'];
-    if (
-      legacyFolderTrust !== undefined &&
-      typeof legacyFolderTrust !== 'boolean'
-    ) {
-      throw new Error(
-        'Serve fast path settings folderTrust must be a boolean.',
-      );
-    }
-    if (legacyFolderTrust !== undefined) {
+  if (useLegacyKeys && out.security === undefined) {
+    // The canonical V1 spelling wins when a file carries both, mirroring the
+    // precedence `repairDeadFolderTrustKey` gives the canonical nested key.
+    for (const key of ['folderTrust', 'folderTrustFeature']) {
+      if (!Object.hasOwn(value, key)) continue;
+      const legacyFolderTrust = value[key];
+      if (legacyFolderTrust === undefined) continue;
+      if (typeof legacyFolderTrust !== 'boolean') {
+        throw new Error(`Serve fast path settings ${key} must be a boolean.`);
+      }
       out.security = { folderTrust: { enabled: legacyFolderTrust } };
+      break;
     }
   }
 
