@@ -648,6 +648,7 @@ async function resolveGitCommonDir(cwd: string): Promise<string | null> {
         cwd,
         timeout: 30_000,
         maxBuffer: 1024 * 1024,
+        windowsHide: true,
         env: gitEnv(),
       },
     );
@@ -729,6 +730,7 @@ export async function resolveBranchWorktreeBaseCheckout(args: {
     {
       cwd: canonicalCheckoutTop,
       timeout: 30_000,
+      windowsHide: true,
       env: gitEnv(),
     },
   )
@@ -767,6 +769,7 @@ export async function isBranchWorktreeCreationSupported(
         cwd: base.checkoutCwd,
         timeout: 30_000,
         maxBuffer: 1024 * 1024,
+        windowsHide: true,
         env: gitEnv(),
       }),
       execFileAsync(
@@ -783,6 +786,7 @@ export async function isBranchWorktreeCreationSupported(
           cwd: base.checkoutCwd,
           timeout: 30_000,
           maxBuffer: 1024 * 1024,
+          windowsHide: true,
           env: gitEnv(),
         },
       ),

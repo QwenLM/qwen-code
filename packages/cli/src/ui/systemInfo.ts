@@ -94,7 +94,11 @@ function probeVersion(binary: string): Promise<string> {
     execFile(
       binary,
       ['--version'],
-      { timeout: VERSION_PROBE_TIMEOUT_MS, encoding: 'utf-8' },
+      {
+        timeout: VERSION_PROBE_TIMEOUT_MS,
+        encoding: 'utf-8',
+        windowsHide: true,
+      },
       (err, stdout) => {
         if (err) {
           resolve('unknown');

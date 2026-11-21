@@ -9,6 +9,7 @@ import {
   getSystemInfo,
   getExtendedSystemInfo,
   getNpmVersion,
+  getGitVersion,
   getSandboxEnv,
   getIdeClientName,
 } from './systemInfo.js';
@@ -171,6 +172,29 @@ describe('systemInfo', () => {
       setExecFileError(new Error('npm not found'));
       const version = await getNpmVersion();
       expect(version).toBe('unknown');
+    });
+
+    it('should hide the console window of the version probe on Windows', async () => {
+      // A detached daemon spawning the probed binary without `windowsHide`
+      // raises a visible console window per probe on Windows (#17266). Both
+      // `getNpmVersion` and `getGitVersion` go through the same
+      // `probeVersion` helper, so pinning the option on each probe covers
+      // the shared spawn options.
+      setExecFileStdout('10.0.0\n');
+      await getNpmVersion();
+      expect(mockedExecFile).toHaveBeenCalledWith(
+        'npm',
+        ['--version'],
+        expect.objectContaining({ windowsHide: true }),
+        expect.any(Function),
+      );
+      await getGitVersion();
+      expect(mockedExecFile).toHaveBeenCalledWith(
+        'git',
+        ['--version'],
+        expect.objectContaining({ windowsHide: true }),
+        expect.any(Function),
+      );
     });
   });
 
