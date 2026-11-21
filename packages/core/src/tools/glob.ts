@@ -81,7 +81,7 @@ export function sortFileEntries(
  */
 export interface GlobToolParams {
   /**
-   * The glob pattern to match files against
+   * The glob pattern to match file and directory paths against
    */
   pattern: string;
 
@@ -391,12 +391,12 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
     super(
       GlobTool.Name,
       ToolDisplayNames.GLOB,
-      'Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n- Returns matching file paths sorted by modification time\n- Use this tool when you need to find files by name patterns',
+      'Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n- Returns matching file and directory paths sorted by modification time\n- Use this tool when you need to find files or directories by name patterns',
       Kind.Search,
       {
         properties: {
           pattern: {
-            description: 'The glob pattern to match files against',
+            description: 'The glob pattern to match files and directories',
             type: 'string',
           },
           path: {
