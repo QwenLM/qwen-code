@@ -272,6 +272,26 @@ describe('ChatSurface', () => {
     });
   });
 
+  it('forwards the submit payload images, files, and metadata to the controller', async () => {
+    const controller = fakeController();
+    mountReact(<ChatSurface controller={controller} />);
+    const onSubmit = captured.editor?.onSubmit as SubmitHandler;
+    const images = [{ data: 'aW1n', media_type: 'image/png' }];
+    const files = [{ name: 'a.ts', media_type: 'text/plain' }];
+    const metadata = { inputAnnotations: [] };
+    await act(async () => {
+      onSubmit('hello', images, files, vi.fn(), metadata);
+    });
+    await vi.waitFor(() => expect(controller.submit).toHaveBeenCalled());
+    // Dropping any of the three payload fields at the surface must turn this red.
+    expect(controller.submit).toHaveBeenCalledWith({
+      text: 'hello',
+      images,
+      files,
+      metadata,
+    });
+  });
+
   it('does not clear the draft when the submit admission is rejected', async () => {
     const controller = fakeController({
       submit: vi.fn(async () => ({
@@ -413,6 +433,10 @@ describe('ChatSurface', () => {
     ).toHaveLength(1);
     expect(captured.editor?.dialogOpen).toBe(true);
     expect(captured.transcript?.approvalOverlayActive).toBe(true);
+    // Both decision cards render as floating variants; dropping either forward
+    // must turn this red.
+    expect(captured.approval?.variant).toBe('floating');
+    expect(captured.question?.variant).toBe('floating');
     // Visibility comes solely from composerHidden (dialogOpen hides nothing),
     // so pin the positive class, not just dialogOpen.
     const composerWrap = container.querySelector(
