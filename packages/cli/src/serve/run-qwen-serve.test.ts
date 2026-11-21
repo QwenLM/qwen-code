@@ -7981,12 +7981,12 @@ describe('runQwenServe deployment profiles', () => {
     }
   });
 
-  it('restores an inherited marker when a default-profile startup fails inside the stamp window', async () => {
+  it('restores the ambient marker value when a hosted startup fails inside the stamp window', async () => {
     const workspace = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-default-early-restore-')),
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-early-ambient-')),
     );
     const originalMarker = process.env['QWEN_CODE_MANAGED_RUNTIME'];
-    process.env['QWEN_CODE_MANAGED_RUNTIME'] = '1';
+    process.env['QWEN_CODE_MANAGED_RUNTIME'] = 'operator-value';
     const scrubSpy = vi
       .spyOn(sharedEnvKeysModule, 'acquireInheritedLoaderEnvScrub')
       .mockImplementationOnce(() => {
@@ -8000,7 +8000,12 @@ describe('runQwenServe deployment profiles', () => {
             hostname: '127.0.0.1',
             mode: 'http-bridge',
             workspace,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
             serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+            managedRuntimeBrokerUrl: 'https://broker.internal',
+            managedRuntimeBrokerToken: 'broker-secret',
           },
           {
             bridge: makeRuntimeBridge(),
@@ -8008,12 +8013,67 @@ describe('runQwenServe deployment profiles', () => {
           },
         ),
       ).rejects.toThrow('loader scrub acquire failed');
-      // The default profile dropped the inherited marker at boot; the early
-      // restore must bring it back so the embedded caller's env is intact.
-      expect(process.env['QWEN_CODE_MANAGED_RUNTIME']).toBe('1');
+      // The stamp overwrote a distinct ambient value; only the early
+      // marker-only restore (registered before the loader scrub) can bring
+      // it back in this window. A default-profile boot never touches the
+      // shared slot, so it cannot exercise this restore.
+      expect(process.env['QWEN_CODE_MANAGED_RUNTIME']).toBe('operator-value');
     } finally {
       scrubSpy.mockRestore();
       fs.rmSync(workspace, { recursive: true, force: true });
+      if (originalMarker === undefined) {
+        delete process.env['QWEN_CODE_MANAGED_RUNTIME'];
+      } else {
+        process.env['QWEN_CODE_MANAGED_RUNTIME'] = originalMarker;
+      }
+    }
+  });
+
+  it('keeps the managed marker until the last co-resident hosted harness closes in LIFO order', async () => {
+    const workspaceA = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-cohost-lifo-a-')),
+    );
+    const workspaceB = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-cohost-lifo-b-')),
+    );
+    const originalMarker = process.env['QWEN_CODE_MANAGED_RUNTIME'];
+    delete process.env['QWEN_CODE_MANAGED_RUNTIME'];
+    let a: RunHandle | undefined;
+    let b: RunHandle | undefined;
+    const hostedOpts = (workspace: string) => ({
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge' as const,
+      workspace,
+      profile: 'hosted-harness' as const,
+      token: 'hosted-secret',
+      serveWebShell: false,
+      hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      managedRuntimeBrokerUrl: 'https://broker.internal',
+      managedRuntimeBrokerToken: 'broker-secret',
+    });
+    try {
+      a = await runQwenServe(hostedOpts(workspaceA), {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(workspaceA, 'debug'),
+      });
+      b = await runQwenServe(hostedOpts(workspaceB), {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(workspaceB, 'debug'),
+      });
+      // LIFO: the first-booted handle closes first. A per-handle restore
+      // would clear the slot under the still-live second harness here.
+      await a.close();
+      a = undefined;
+      expect(process.env['QWEN_CODE_MANAGED_RUNTIME']).toBe('1');
+      await b.close();
+      b = undefined;
+      expect(process.env['QWEN_CODE_MANAGED_RUNTIME']).toBeUndefined();
+    } finally {
+      await a?.close();
+      await b?.close();
+      fs.rmSync(workspaceA, { recursive: true, force: true });
+      fs.rmSync(workspaceB, { recursive: true, force: true });
       if (originalMarker === undefined) {
         delete process.env['QWEN_CODE_MANAGED_RUNTIME'];
       } else {

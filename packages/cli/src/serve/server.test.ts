@@ -35442,10 +35442,9 @@ describe('createServeApp', () => {
     ])('exports %s format', async (format, mimeType, marker) => {
       const sid = `55555555-bbbb-cccc-dddd-${format.padEnd(12, '0')}`;
       await writeExportSession(sid);
-      const app = createExportApp();
-      // The export label resolves from the live environment now; pin a
-      // marker-free ambient so the daemon expectation is deterministic even
-      // when the test process itself runs inside a marked session.
+      // The export label is resolved from the launch environment frozen at
+      // createServeApp entry, so the marker-free ambient must be pinned
+      // BEFORE the app is built, not after.
       const attributionKeys = [
         'QWEN_CODE_MANAGED_RUNTIME',
         'QWEN_CODE_DESKTOP',
@@ -35457,6 +35456,7 @@ describe('createServeApp', () => {
         delete process.env[key];
       }
       try {
+        const app = createExportApp();
         const res = await request(app)
           .get(`/session/${sid}/export?format=${format}`)
           .set('Host', `127.0.0.1:${baseOpts.port}`);

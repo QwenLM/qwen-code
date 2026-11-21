@@ -16,9 +16,12 @@
 //    snapshot — valid for children, which exec after the daemon's stamp/drop);
 //    the child's marker-to-channel resolution is pinned by the parseArguments
 //    and loadCliConfig unit cases on the same env shapes;
-//  - the real export route labels the committed transcript with the daemon's
-//    live process.env channel (the daemon's own in-process stamp/drop is NOT
-//    visible in /proc/<daemon>/environ, which is an exec-time snapshot).
+//  - the real export route labels the committed transcript with the channel
+//    resolved once at daemon boot from the frozen launch env (hosted profile
+//    managed, desktop launcher marker desktop, otherwise daemon), so a
+//    co-resident daemon cannot relabel it; the daemon's own in-process
+//    stamp/drop is NOT visible in /proc/<daemon>/environ (exec-time snapshot),
+//    which is why the export label and the child env carry this observation.
 // The generic OpenAI provider used against a loopback fixture sends no
 // metadata.channel (DashScope provider only binds official hosts/oauth), so
 // the wire channel is not observable here; the hosted in-process channel is
