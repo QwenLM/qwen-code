@@ -319,12 +319,8 @@ describe('bundled agent-delegation skill', () => {
   it('travels in the description when no skill can be loaded', async () => {
     const description = await agentDescription({ skills: false });
 
-    expect(description).toContain('Skills cannot be loaded in this session');
-    // The clause that reconciles this preamble with the same request's
-    // <available_skills> prelude, which lists this skill by name: without it
-    // the description denies a skill the listing just offered, and the model
-    // spends a call finding out. Dropping it from INLINE_NOTE turns this red.
-    expect(description).toContain('even one named in a skill listing');
+    expect(description).toContain('The delegation reference follows in full');
+    expect(description).toContain('Use this inline guidance directly');
     expect(description).toContain('Never delegate understanding');
     expect(description).not.toContain(
       `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
@@ -358,7 +354,7 @@ describe('bundled agent-delegation skill', () => {
         `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
       );
       expect(description).not.toContain(
-        'Skills cannot be loaded in this session',
+        'The delegation reference follows in full',
       );
       expect(description).not.toContain('Never delegate understanding');
       expect(description).not.toContain('## Writing the prompt');
@@ -393,7 +389,7 @@ describe('bundled agent-delegation skill', () => {
       `load the \`${AGENT_DELEGATION_SKILL_NAME}\` skill`,
     );
     expect(description).not.toContain(
-      'Skills cannot be loaded in this session',
+      'The delegation reference follows in full',
     );
     expect(description).not.toContain('Never delegate understanding');
     expect(description).not.toContain('## Writing the prompt');

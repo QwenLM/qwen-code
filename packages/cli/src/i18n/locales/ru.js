@@ -2727,6 +2727,10 @@ export default {
     'URL страниц YouTube нельзя отправить как нативный видеоввод. Скачайте видео в рабочую область и передайте локальный путь к файлу в /learn.',
   'The local video could not be attached for /learn.':
     'Не удалось прикрепить локальное видео для /learn.',
+  'Tool Mode (Experimental)': 'Режим инструментов (экспериментально)',
+  Default: 'По умолчанию',
+  'Code Mode': 'Режим кода',
+  'Code Mode Only': 'Только режим кода',
   'Code Mode Only (Experimental)': 'Только режим кода (экспериментально)',
   'Mods (Experimental)': 'Mods (экспериментально)',
   'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.':

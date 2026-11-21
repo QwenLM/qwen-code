@@ -165,7 +165,7 @@ describe('Workflow tool description shape', () => {
         "authoring reference in this tool's description",
       );
       expect(instance.description).toContain(
-        'that skill is not available here either',
+        'references to other skills do not establish that those skills are available',
       );
     });
 

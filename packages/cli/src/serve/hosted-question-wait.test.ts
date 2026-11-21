@@ -16,6 +16,27 @@ import {
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
 
+type PromiseDelay = (
+  ms?: number,
+  value?: unknown,
+  options?: { signal?: AbortSignal; ref?: boolean },
+) => Promise<void>;
+const timer = vi.hoisted(() => ({
+  override: undefined as PromiseDelay | undefined,
+}));
+// A plain wrapper rather than vi.fn, whose implementation afterEach would
+// clear; the deadline case below overrides the timer explicitly.
+vi.mock('node:timers/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:timers/promises')>();
+  return {
+    ...actual,
+    setTimeout: (ms?: number, value?: unknown, options?: never) =>
+      timer.override
+        ? timer.override(ms, value, options)
+        : (actual.setTimeout as PromiseDelay)(ms, value, options),
+  };
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
@@ -230,6 +251,34 @@ describe('question wait ownership', () => {
       expect(f.acquire).toHaveBeenCalledOnce();
     },
   );
+
+  it('does not acquire again when a retry timer fires a millisecond early', async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    timer.override = async (ms) => {
+      // A real timer may fire up to 1 ms before the requested wall-clock
+      // delay, so the loop must not re-check the deadline one millisecond
+      // short and issue an acquire past it.
+      now += Math.max(1, Number(ms) - 1);
+    };
+    try {
+      const f = fixture();
+      f.acquire.mockRejectedValue(
+        new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+      );
+      await expect(
+        acquireHostedQuestionRuntime(
+          f.broker,
+          original,
+          f.abort.signal,
+          now + 30,
+        ),
+      ).resolves.toBe(false);
+      expect(f.acquire).toHaveBeenCalledOnce();
+    } finally {
+      timer.override = undefined;
+    }
+  });
 
   it('does not acquire an already cancelled question', async () => {
     const f = fixture();

@@ -13,6 +13,7 @@ import {
   deriveWorktreeConfig,
 } from './config.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
 import {
   ExecutionCleanupError,
@@ -203,15 +204,49 @@ describe('execution environment ownership', () => {
   );
 
   it('rejects a code-mode-only container registry for direct derived Config callers', async () => {
-    const parent = new Config({ ...params, codeModeOnly: true });
+    const parent = new Config({
+      ...params,
+      toolMode: ToolMode.CodeModeOnly,
+    });
     const child = deriveConfig(parent, {
       getExecutionEnvironment: () => ({}) as ExecutionEnvironment,
     });
     await expect(
       child.createToolRegistry(undefined, { skipDiscovery: true }),
-    ).rejects.toThrow('tools.codeModeOnly');
+    ).rejects.toThrow('tools.mode = "code_mode_only"');
     expect(parent.getCodeModeOnly()).toBe(true);
     expect(parent.getExecutionEnvironment()).toBeUndefined();
+  });
+
+  it('warns once per root session when hybrid container registries fall back to direct tools', async () => {
+    const parent = new Config({ ...params, toolMode: ToolMode.CodeMode });
+    const child = deriveConfig(parent, {
+      getExecutionEnvironment: () => ({}) as ExecutionEnvironment,
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const registry = await child.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      expect(registry.getAllToolNames()).toContain(ToolNames.READ_FILE);
+      expect(registry.getAllToolNames()).not.toContain(ToolNames.EXEC);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('continuing with direct tools'),
+      );
+      await child.createToolRegistry(undefined, { skipDiscovery: true });
+      await deriveConfig(parent, {
+        getExecutionEnvironment: () => ({}) as ExecutionEnvironment,
+      }).createToolRegistry(undefined, { skipDiscovery: true });
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      await deriveConfig(
+        new Config({ ...params, toolMode: ToolMode.CodeMode }),
+        { getExecutionEnvironment: () => ({}) as ExecutionEnvironment },
+      ).createToolRegistry(undefined, { skipDiscovery: true });
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it.each(['ready', 'starting'])(

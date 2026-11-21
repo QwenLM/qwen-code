@@ -25,6 +25,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { ExecTool } from '../tools/exec.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -88,7 +89,7 @@ function setup(
   });
   const registry = new ToolRegistry(config);
   registry.registerTool(tool);
-  if (options.config?.codeModeOnly) {
+  if (options.config?.toolMode === ToolMode.CodeModeOnly) {
     registry.registerTool(new ExecTool(config));
   }
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
@@ -527,7 +528,10 @@ describe('headless-owned Mod tool.check restriction', () => {
       }),
     );
     const harness = setup(check, {
-      config: { codeModeOnly: true, approvalMode: ApprovalMode.YOLO },
+      config: {
+        toolMode: ToolMode.CodeModeOnly,
+        approvalMode: ApprovalMode.YOLO,
+      },
     });
     const call = await harness.run(
       { source: 'text(await tools.checked_tool({value: "nested"}));' },

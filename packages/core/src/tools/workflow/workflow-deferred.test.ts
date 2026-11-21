@@ -19,6 +19,7 @@ import { ToolSearchTool } from '../tool-search.js';
 import { resolveDeferredToolCall, ToolCallTool } from '../tool-call.js';
 import { ToolErrorType } from '../tool-error.js';
 import { ToolNames } from '../tool-names.js';
+import { ToolMode } from '../code-mode.js';
 import { WorkflowTool } from './workflow.js';
 
 afterEach(() => vi.restoreAllMocks());
@@ -145,7 +146,7 @@ describe('deferred Workflow discovery', () => {
 
   it('keeps CodeMode discovery behind exec without Direct bridge instructions', async () => {
     const { config, registry, workflow, lookup } = fixture({
-      codeModeOnly: true,
+      toolMode: ToolMode.CodeModeOnly,
     });
     const declarations = registry.getFunctionDeclarations();
     expect(JSON.stringify(declarations)).not.toContain('tools.workflow(args:');

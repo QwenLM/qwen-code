@@ -252,6 +252,90 @@ describe('collectContextData (contextCommand)', () => {
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith();
   });
 
+  it('accounts for decorated CodeMode declarations in per-tool rows', async () => {
+    const execTool = {
+      name: 'exec',
+      schema: { name: 'exec', description: 'raw' },
+    };
+    const decoratedExec = {
+      name: 'exec',
+      description: 'decorated '.repeat(200),
+    };
+    const config = {
+      ...mockConfig,
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: vi.fn().mockReturnValue([execTool]),
+        getFunctionDeclarations: vi.fn().mockReturnValue([decoratedExec]),
+        isDeferredAndHidden: vi.fn().mockReturnValue(false),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools).toHaveLength(1);
+    expect(data.builtinTools[0]?.name).toBe('exec');
+    expect(data.builtinTools[0]?.tokens).toBeGreaterThan(100);
+  });
+
+  it('counts only emitted declarations when ordinary tools are nested in exec', async () => {
+    const decoratedExec = {
+      name: 'exec',
+      description: 'tools.read_file and tools.skill '.repeat(100),
+    };
+    const config = {
+      ...mockConfig,
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: () =>
+          ['exec', 'read_file', 'skill'].map((name) => ({
+            name,
+            schema: { name, description: 'raw schema '.repeat(20) },
+          })),
+        getFunctionDeclarations: () => [decoratedExec],
+        isDeferredAndHidden: () => false,
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools.map((tool) => tool.name)).toEqual(['exec']);
+    expect(data.breakdown.skills).toBe(0);
+    expect(data.breakdown.builtinTools).toBe(
+      estimateContextTextTokens(JSON.stringify([decoratedExec])),
+    );
+  });
+
+  it('charges the decorated Skill declaration once and leaves the residual in built-ins', async () => {
+    const decoratedExec = { name: 'exec', description: 'exec '.repeat(100) };
+    const decoratedSkill = {
+      name: 'skill',
+      description: 'skill plus its nested declaration '.repeat(100),
+    };
+    const declarations = [decoratedExec, decoratedSkill];
+    const config = {
+      ...mockConfig,
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: () =>
+          ['exec', 'skill'].map((name) => ({
+            name,
+            schema: { name, description: 'raw' },
+          })),
+        getFunctionDeclarations: () => declarations,
+        isDeferredAndHidden: () => false,
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+    const skillTokens = estimateContextTextTokens(
+      JSON.stringify(decoratedSkill),
+    );
+
+    expect(data.breakdown.skills).toBe(skillTokens);
+    expect(data.breakdown.builtinTools).toBe(
+      estimateContextTextTokens(JSON.stringify(declarations)) - skillTokens,
+    );
+    expect(data.builtinTools.map((tool) => tool.name)).toEqual(['exec']);
+  });
+
   it.each(['legacy', 'structured'] as const)(
     'reports only declared memory tools in %s recall mode',
     async (mode) => {
@@ -1558,6 +1642,10 @@ describe('collectContextData (contextCommand)', () => {
           history,
         }),
         true,
+      );
+      // The mcp schema is declared, so the guard bills it to the mcp row.
+      expect(exposed.breakdown.mcpTools).toBe(
+        estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
       );
       expect(exposed.mcpTools).toEqual([
         {
