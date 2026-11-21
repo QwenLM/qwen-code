@@ -2581,6 +2581,45 @@ export class LlmChat {
   private lastCachedContentTokenCount = 0;
 
   /**
+   * The live context-usage numbers behind `get_context_remaining`: the last
+   * prompt count the route reported (or the local estimate when the route
+   * has not reported yet), the previous response's output count, and the
+   * window those are measured against. Read-only; the fields themselves
+   * stay private so the send path keeps owning them (#17313).
+   */
+  getContextUsageSnapshot(): {
+    promptTokens: number;
+    promptTokensIsEstimated: boolean;
+    outputTokens: number;
+    contextWindowTokens: number;
+    /**
+     * Whether the counts describe the session's ACTIVE route. The slots hold
+     * whatever route last reported them; on a `/model` switch (or an override
+     * turn) that route differs from the active one, and presenting its
+     * numbers as the current route's usage would certify a falsehood
+     * (#17320 R6-3).
+     */
+    countsMatchActiveRoute: boolean;
+  } {
+    // PURE read of the single-slot counters — no adoption, so the read
+    // cannot mutate the slots, the retained per-route map, or telemetry.
+    // `tokenCountsRouteKey` names the route that recorded the counts; the
+    // caller decides what to do when it is not the active route.
+    const recordedRouteKey = this.tokenCountsRouteKey;
+    return {
+      promptTokens: this.lastPromptTokenCount,
+      promptTokensIsEstimated: this.lastPromptTokenCountIsEstimated,
+      outputTokens: this.lastOutputTokenCount,
+      contextWindowTokens:
+        this.config.getContentGeneratorConfig()?.contextWindowSize ??
+        DEFAULT_TOKEN_LIMIT,
+      countsMatchActiveRoute:
+        recordedRouteKey === undefined ||
+        recordedRouteKey === this.currentRouteKey(),
+    };
+  }
+
+  /**
    * Route identity (model + auth type + endpoint; see
    * Config.getModelRouteIdentity) of the content generator that produced
    * the counts above. API-reported sizes are wire-specific: one route's
