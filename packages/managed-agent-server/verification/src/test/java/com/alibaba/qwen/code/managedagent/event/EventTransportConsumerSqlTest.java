@@ -388,8 +388,7 @@ public class EventTransportConsumerSqlTest {
                 + (leaseOffsetSeconds == null ? "NULL"
                         : "(" + ManagedSchemaTime.SQL_NOW + " + " + leaseOffsetSeconds * 1000L + ")")
                 + ", 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, 'MANAGED_SESSION')",
-                TENANT, workspace, session, state, committed,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(TENANT));
+                TENANT, workspace, session, state, committed, session);
     }
 
     private void event(String session, long sequence, String type) {

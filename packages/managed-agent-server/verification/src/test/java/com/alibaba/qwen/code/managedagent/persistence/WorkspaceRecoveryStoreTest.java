@@ -385,7 +385,11 @@ class WorkspaceRecoveryStoreTest {
         head(session);
         retireSession(session);
         switch (damage) {
-            case "owner" -> jdbc.update("UPDATE ma_session_head SET tenant_id = X'666f726569676e' WHERE session_id = ?", session);
+            // tenant_id is the head lookup key now, so corrupting it reassigns the
+            // head to another tenant — invisible here, and "no head" is a legal
+            // retirement state. session_id stays denormalized beside the
+            // harness_session_id lookup, so it is the ownership drift still caught.
+            case "owner" -> jdbc.update("UPDATE ma_session_head SET session_id = X'666f726569676e' WHERE session_id = ?", session);
             case "generation" -> jdbc.update("UPDATE ma_session SET retirement_generation = 2 WHERE session_id = ?", session);
             case "protected" -> jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE session_id = ?", session);
             case "operation" -> jdbc.update("UPDATE ma_operation SET delivery_state = 'PENDING' WHERE session_id = ?", session);

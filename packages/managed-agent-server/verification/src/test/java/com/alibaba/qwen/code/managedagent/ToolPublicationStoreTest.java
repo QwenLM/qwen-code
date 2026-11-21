@@ -2199,7 +2199,7 @@ class ToolPublicationStoreTest {
         secondRequest.set("binding", second);
         assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
         assertThat(aggregates).hasSize(2);
-        assertThat(aggregates.getFirst()).contains("tenant_key = ?", "AS used");
+        assertThat(aggregates.getFirst()).contains("tenant_id = ?", "AS used");
         assertThat(aggregates.getLast()).contains("scope_key = ?", "AS retained", "producer_phase <> 'FINISHING'");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isEqualTo(1);
     }

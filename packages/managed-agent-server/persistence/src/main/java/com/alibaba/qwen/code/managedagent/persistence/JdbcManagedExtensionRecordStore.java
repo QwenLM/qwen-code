@@ -169,7 +169,7 @@ public class JdbcManagedExtensionRecordStore
     public Optional<JsonNode> findRecord(String tenantId, String sessionId, String domain, String recordId) {
         Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
         require(body != null, "Unknown extension record domain.");
-        JsonNode record = recordBody(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionId,
+        JsonNode record = recordBody(tenantId, sessionId,
                 domain, recordId, id -> readResource(tenantId, sessionId, id));
         if (record != null) {
             body.require().accept(record);

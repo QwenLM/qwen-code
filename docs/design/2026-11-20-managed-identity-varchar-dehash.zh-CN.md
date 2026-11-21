@@ -311,9 +311,9 @@ VARBINARY 类型不变；VARCHAR 转换、跨表引用与上文各项决策仍�
 取自 `ma_session` 与 `ma_workspace`（512 字节）；而 journal writer 是唯一写入 workspace 的
 head 写入方，它本就拒绝超过 128 字节的租户 id 和超过 512 字节的 workspace 与 Session id，
 因此不会丢失任何已接受的值。这取代上表 `ma_session` 一行中关于 Session head 的部分：head 的
-租户收窄到 512 字节后，原始 head 键为 2560 字节。两个非唯一索引使用键前缀：
-`idx_ma_record_identity` 与 `idx_ma_ref_journal`（`record_id` 与 `resource_id` 限 1024 字节，
-仅 MySQL）；所有唯一键都用完整列。最宽的重建键 `uk_ma_resource_id` 与 `idx_ma_head_workspace`
+租户收窄到 512 字节后，原始 head 键为 2560 字节。三个非唯一索引使用键前缀：
+`idx_ma_record_identity`、`idx_ma_ref_journal` 与 `idx_ma_delivery_source`
+（`record_id`、`resource_id` 与 `delivery_id` 限 1024 字节，仅 MySQL）；所有唯一键都用完整列。最宽的重建键 `uk_ma_resource_id` 与 `idx_ma_head_workspace`
 正好 3072 字节，InnoDB 接受。
 
 保留（因为不冗余）：

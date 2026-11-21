@@ -191,7 +191,7 @@ class ManagedMessagePagingTest {
                 .extracting(StoreModels.ItemPartRecord::text).containsExactly("resource body");
         jdbc.update("UPDATE ma_resource SET sha256=? WHERE resource_key=?", "0".repeat(64), resource);
         assertThatThrownBy(() -> read(null, 1, true)).hasMessageContaining("digest differs");
-        jdbc.update("UPDATE ma_resource SET sha256=?,tenant_id = ? AND session_id = ? WHERE resource_key=?",
+        jdbc.update("UPDATE ma_resource SET sha256=?,tenant_id=?,session_id=? WHERE resource_key=?",
                 WorkspaceEvidenceResources.digest(bytes), "other", "session", resource);
         assertThatThrownBy(() -> read(null, 1, true)).hasMessageContaining("unavailable");
     }

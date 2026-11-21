@@ -197,7 +197,7 @@ final class AgentExecutionOperations {
             }
         }
         jdbc.query("SELECT session_id, operation_id FROM ma_operation WHERE tenant_id = ?"
-                + " AND scope_key IN (" + AgentStoreRows.placeholders(sessionIds.size()) + ")"
+                + " AND session_id IN (" + AgentStoreRows.placeholders(sessionIds.size()) + ")"
                 + " AND operation_kind = 'CONTEXT_COMPRESSION' AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED')",
                 (RowCallbackHandler) row -> {
                     String id = row.getString("session_id");

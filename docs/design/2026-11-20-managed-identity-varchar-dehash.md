@@ -381,10 +381,10 @@ narrowed to its parent's width, 512 bytes: `ma_session_head.tenant_id` and
 of `ma_session` and `ma_workspace` (512 bytes), and the journal writer, the only head
 writer that sets a workspace, already rejects tenant ids over 128 bytes and workspace
 and Session ids over 512 bytes, so no accepted value is lost. This supersedes the Session-head part of the `ma_session` row
-above: with the head tenant at 512 bytes the raw head key is 2560 bytes. Two
-non-unique indexes use a key prefix, `idx_ma_record_identity` and `idx_ma_ref_journal`
-(`record_id` and `resource_id` limited to 1024 bytes, MySQL only); every unique uses
-full columns. The widest rebuilt keys, `uk_ma_resource_id` and `idx_ma_head_workspace`,
+above: with the head tenant at 512 bytes the raw head key is 2560 bytes. Three
+non-unique indexes use a key prefix, `idx_ma_record_identity`, `idx_ma_ref_journal`
+and `idx_ma_delivery_source` (`record_id`, `resource_id` and `delivery_id` limited
+to 1024 bytes, MySQL only); every unique uses full columns. The widest rebuilt keys, `uk_ma_resource_id` and `idx_ma_head_workspace`,
 are exactly 3072 bytes, which InnoDB accepts.
 
 Kept, because they are not redundant:
