@@ -154,11 +154,7 @@ async function activityFixture(
       const cwd = decodeURIComponent(
         new URL(route.request().url()).pathname.split('/')[2]!,
       );
-      if (cwd === secondary && secondaryResponseDelayMs > 0) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, secondaryResponseDelayMs),
-        );
-      }
+      await delaySecondary(cwd);
       await route.fulfill({
         json: {
           v: 1,
