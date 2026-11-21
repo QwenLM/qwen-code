@@ -942,6 +942,7 @@ export type {
   DaemonSessionAttachmentReference,
   PromptResult,
   PromptTextContent,
+  RateSessionTurnResult,
   SetModelResult,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,

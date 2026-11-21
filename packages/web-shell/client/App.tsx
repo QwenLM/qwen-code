@@ -4148,6 +4148,41 @@ export function App({
 
   const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
   const hostOwnsArtifactPreview = Boolean(onRightPanelOpen);
+  const connection = useConnection();
+  const standalone = useContext(StandaloneContext);
+  const sessionActions = useActions();
+  // Standalone opt-in for the per-turn marks: the entry has no session
+  // client, so the app wires the telemetry notification itself, gated by
+  // the daemon capability. A host-provided option always wins.
+  const effectiveAssistantFeedback = useMemo<
+    WebShellAssistantFeedbackOptions | undefined
+  >(() => {
+    if (assistantFeedback !== undefined) return assistantFeedback;
+    if (!standalone) return undefined;
+    if (!connection.capabilities?.features.includes('session_turn_feedback'))
+      return undefined;
+    return {
+      onRate: (info) => {
+        if (info.rating === null) return;
+        // Split panes inherit this option but own a different session; a
+        // mark must never be recorded under a session that did not admit
+        // its turn. Pane marks stay local-only until dispatch can reach
+        // the pane's own session client.
+        if (
+          info.sessionId !== undefined &&
+          info.sessionId !== connection.sessionId
+        )
+          return;
+        void sessionActions.rateAssistantTurn(info.promptId, info.rating);
+      },
+    };
+  }, [
+    assistantFeedback,
+    standalone,
+    connection.capabilities,
+    connection.sessionId,
+    sessionActions,
+  ]);
   const customization = useMemo(
     () => ({
       onRefreshModels,
@@ -4174,7 +4209,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
-      assistantFeedback,
+      assistantFeedback: effectiveAssistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -4219,7 +4254,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
-      assistantFeedback,
+      effectiveAssistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -4251,9 +4286,7 @@ export function App({
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot({
     structuralOnly: true,
   });
-  const connection = useConnection();
   const modelRefresh = useModelRefresh(onRefreshModels);
-  const standalone = useContext(StandaloneContext);
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
     connection.workspaceCwd,
@@ -4631,7 +4664,6 @@ export function App({
         : ordinaryWorkspaces,
     [lockedWorkspaceCwd, ordinaryWorkspaces],
   );
-  const sessionActions = useActions();
   const {
     intent: capacityRecovery,
     offer: offerCapacityRecovery,
