@@ -156,6 +156,9 @@ describe('opentui resume mapping', () => {
           callId: CALL_ID,
           name: 'read_file',
           args: {},
+          // No config in these fixtures, so the registry miss resolves the
+          // flag to the live builder's false default.
+          renderOutputAsMarkdown: false,
           description: '',
           confirmationDetails: undefined,
           resultDisplay: '# README\nhello',
@@ -302,6 +305,7 @@ describe('opentui resume mapping', () => {
             callId: 'c1',
             name: 'edit',
             args: {},
+            renderOutputAsMarkdown: false,
             description: '',
             confirmationDetails: undefined,
             status: 'Success',
@@ -361,6 +365,7 @@ describe('opentui resume mapping', () => {
             callId: 'c1',
             name: 'todo_write',
             args: {},
+            renderOutputAsMarkdown: false,
             description: '',
             confirmationDetails: undefined,
             resultDisplay: { type: 'todo_list', todos },
@@ -438,6 +443,7 @@ describe('opentui resume mapping', () => {
             callId: 'c1',
             name: 'run_shell',
             args: {},
+            renderOutputAsMarkdown: false,
             description: '',
             confirmationDetails: undefined,
             resultDisplay: undefined,

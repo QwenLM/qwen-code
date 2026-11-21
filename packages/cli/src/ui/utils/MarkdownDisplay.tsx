@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useContext } from 'react';
 import { Text, Box } from 'ink';
 import stringWidth from 'string-width';
 import { theme } from '../semantic-colors.js';
@@ -12,7 +12,7 @@ import { ICON } from '../constants.js';
 import { colorizeCode } from './CodeColorizer.js';
 import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
-import { useSettings } from '../contexts/SettingsContext.js';
+import { SettingsContext, useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
@@ -23,19 +23,11 @@ import {
   TABLE_ROW_RE,
   TABLE_SEPARATOR_RE,
   CODE_FENCE_RE,
+  CODE_BLOCK_PREFIX_PADDING,
+  pendingRenderedBudget,
+  pendingTableClampRows,
   isClosingCodeFence,
 } from './pending-rendered-height.js';
-// Minimum content lines to keep in a clipped live preview (own constant — not
-// coupled to MaxSizedBox's floor).
-const MIN_PENDING_CONTENT_LINES = 1;
-
-// Rows reserved from the viewport when clamping a streaming table's height:
-// marginY 2 + one row of wrapped-cell safety headroom. Tables under-estimate
-// their rendered height the most (a wrapped cell), so they keep one more
-// reserved row than the other blocks. Shared by the render-side clamp
-// (RenderTable's `maxHeight`) and the slice-side estimate (`tableClampRows`)
-// so the two never diverge and let a table overflow the render cap.
-const TABLE_PENDING_RESERVED_ROWS = 3;
 
 interface MarkdownDisplayProps {
   text: string;
@@ -177,7 +169,6 @@ function originalCopyHint(
 // Constants for Markdown parsing and rendering
 
 const EMPTY_LINE_HEIGHT = 1;
-const CODE_BLOCK_PREFIX_PADDING = 1;
 const LIST_ITEM_PREFIX_PADDING = 1;
 const LIST_ITEM_TEXT_FLEX_GROW = 1;
 const BLOCKQUOTE_PREFIX_PADDING = 1;
@@ -195,6 +186,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   enforceHeightBudget = false,
 }) => {
   const { renderMode } = useRenderMode();
+  const settings = useContext(SettingsContext);
   const copyHint = React.useMemo(() => {
     if (!showSourceCopyHints) return () => undefined;
     return sourceCopyText === undefined
@@ -234,9 +226,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // `exit_plan_mode` confirmation dialog inside MainContent's `maxHeight` +
   // `overflow="hidden"` wrapper) can opt in via `enforceHeightBudget` so their
   // content is pre-sliced the same way, avoiding silent bottom-clipping.
-  const pendingRenderedBudget =
+  const renderedBudget =
     (isPending || enforceHeightBudget) && availableTerminalHeight !== undefined
-      ? Math.max(MIN_PENDING_CONTENT_LINES, availableTerminalHeight - 2)
+      ? pendingRenderedBudget(availableTerminalHeight)
       : undefined;
   const headerRegex = /^ *(#{1,4}) +(.*)/;
   const codeFenceRegex = CODE_FENCE_RE;
@@ -266,16 +258,17 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // tail means the user is asked to approve a plan whose remainder never
   // appears — a model could hide steps past the budget. See #6867.
   let droppedSourceLines = 0;
-  if (pendingRenderedBudget !== undefined) {
+  if (renderedBudget !== undefined) {
     const tableClampRows =
       availableTerminalHeight !== undefined
-        ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
+        ? pendingTableClampRows(availableTerminalHeight)
         : Number.MAX_SAFE_INTEGER;
     const { keptLines } = fitPendingSlice(
       allLines,
       contentWidth,
-      pendingRenderedBudget,
+      renderedBudget,
       tableClampRows,
+      { showLineNumbers: settings?.merged.ui?.showLineNumbers ?? true },
     );
     if (keptLines < allLines.length) {
       lines = allLines.slice(0, keptLines);
@@ -1227,7 +1220,7 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
   // clamped cost still matches the render and cannot under-estimate.
   const maxHeight =
     isPending && availableTerminalHeight !== undefined
-      ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
+      ? pendingTableClampRows(availableTerminalHeight)
       : undefined;
   return (
     <TableRenderer

@@ -8,6 +8,8 @@ import { describe, it, expect } from 'vitest';
 import {
   TABLE_CHROME_ROWS,
   estimateWrappedRows,
+  estimateLineRows,
+  hasMermaidFence,
   isTableStart,
   fitPendingSlice,
   splitMarkdownTableRow,
@@ -87,6 +89,66 @@ describe('estimateWrappedRows', () => {
     expect(estimateWrappedRows('a'.repeat(50), 0)).toBe(1);
     expect(estimateWrappedRows('a'.repeat(50), -5)).toBe(1);
   });
+
+  it('charges the rows the renderer wraps at word boundaries', () => {
+    // "aa aa aa" is 8 cols and ceils to 2 rows at width 4, but Ink's
+    // wrapAnsi breaks after each word pair and draws 3.
+    expect(estimateWrappedRows('aa aa aa', 4)).toBe(3);
+  });
+});
+
+describe('estimateLineRows', () => {
+  it('charges a bullet at the width its text box actually gets', () => {
+    // MarkdownDisplay insets the item text by the padding (1) and the "x "
+    // marker (2), so 98 chars get 97 cols and wrap to 2 rows; charging the
+    // whole line at contentWidth 100 would call it one row.
+    expect(estimateWrappedRows(`- ${'x'.repeat(98)}`, 100)).toBe(1);
+    expect(estimateLineRows(`- ${'x'.repeat(98)}`, 100)).toBe(2);
+    expect(estimateLineRows(`- ${'x'.repeat(97)}`, 100)).toBe(1);
+  });
+
+  it('charges a blockquote at the width left of its marker', () => {
+    // "│ " is 2 cols plus the 1-col block padding.
+    expect(estimateWrappedRows(`> ${'x'.repeat(98)}`, 100)).toBe(1);
+    expect(estimateLineRows(`> ${'x'.repeat(98)}`, 100)).toBe(2);
+  });
+
+  it('widens the marker for ordered list items', () => {
+    // "100. " is 5 cols, so the item text gets 94 cols.
+    expect(estimateLineRows(`100. ${'x'.repeat(95)}`, 100)).toBe(2);
+    expect(estimateLineRows(`100. ${'x'.repeat(94)}`, 100)).toBe(1);
+  });
+
+  it('charges a task item by its glyph, not its literal [ ] prefix', () => {
+    // RenderListItemInternal matches `[ ] ` and draws a 2-column glyph, so
+    // charging the literal prefix over-charges a fitting checklist by four
+    // columns and demotes it to plain text (#13956 in the safe direction).
+    expect(estimateLineRows(`- [ ] ${'x'.repeat(75)}`, 78)).toBe(1);
+    expect(estimateLineRows(`- [ ] ${'x'.repeat(76)}`, 78)).toBe(2);
+  });
+
+  it('insets a nested item by its indent, padding and marker', () => {
+    // RenderListItemInternal insets at every nesting level: the text box is
+    // contentWidth - indent - padding - marker. ' - ' + 75 chars at 78 puts
+    // 75 chars in a 74-col box — 2 rows, while a full-width charge calls it
+    // one.
+    expect(estimateLineRows(` - ${'x'.repeat(75)}`, 78)).toBe(2);
+    expect(estimateLineRows(` - ${'x'.repeat(74)}`, 78)).toBe(1);
+  });
+
+  it('leaves a plain line on the full content width', () => {
+    expect(estimateLineRows('x'.repeat(100), 100)).toBe(1);
+    expect(estimateLineRows('x'.repeat(101), 100)).toBe(2);
+  });
+
+  it('does not narrow a nested bullet a second time', () => {
+    // The indent is charged once — as the renderer's paddingLeft inset — not
+    // twice (once via the inset and once via the source line's own columns).
+    const line = `  - ${'x'.repeat(90)}`;
+    expect(estimateLineRows(line, 100)).toBe(
+      estimateWrappedRows(`-${'x'.repeat(90)}`, 100 - 2 - 1 - 2),
+    );
+  });
 });
 
 describe('isTableStart', () => {
@@ -119,6 +181,51 @@ describe('isTableStart', () => {
   });
 });
 
+describe('hasMermaidFence', () => {
+  it('flags a mermaid fence', () => {
+    expect(hasMermaidFence(['```mermaid', 'flowchart TD', '```'])).toBe(true);
+    expect(hasMermaidFence(['~~~mermaid', 'flowchart TD', '~~~'])).toBe(true);
+    expect(
+      hasMermaidFence(['prose', '```mermaid', 'graph LR', '```', 'more']),
+    ).toBe(true);
+  });
+
+  it('flags an info string that only starts with mermaid', () => {
+    // The renderer takes the language from the first token of the info
+    // string, so these draw a diagram and must not be charged by source lines.
+    expect(hasMermaidFence(['```mermaid title="flow"', 'A-->B', '```'])).toBe(
+      true,
+    );
+    expect(
+      hasMermaidFence(['```mermaid qwen-code:start-line=12', 'A-->B', '```']),
+    ).toBe(true);
+    expect(hasMermaidFence(['```Mermaid extra', 'A-->B', '```'])).toBe(true);
+  });
+
+  it('ignores non-mermaid fences and fence-looking content', () => {
+    expect(hasMermaidFence(['```ts', 'const x = 1;', '```'])).toBe(false);
+    expect(hasMermaidFence(['prose only'])).toBe(false);
+    // A mermaid info string inside a code block is code, not a fence opener.
+    expect(hasMermaidFence(['```ts', '```mermaid', '```'])).toBe(false);
+  });
+
+  it('keeps a fence open on a line carrying an info string', () => {
+    // The renderer keeps the outer fence open through '```mermaid' and draws
+    // 'flowchart TD' as a diagram; a closer test that ignores the info string
+    // would swallow the real opener and miss it.
+    expect(
+      hasMermaidFence([
+        '```md',
+        '```mermaid',
+        '```',
+        '```mermaid',
+        'flowchart TD',
+        '```',
+      ]),
+    ).toBe(true);
+  });
+});
+
 describe('fitPendingSlice', () => {
   const CLAMP = 1000; // effectively unclamped unless a test sets it small
 
@@ -127,7 +234,69 @@ describe('fitPendingSlice', () => {
     expect(fitPendingSlice(lines, 80, 10, CLAMP)).toEqual({
       keptLines: 3,
       clipped: false,
+      renderedRows: 3,
     });
+  });
+
+  it('charges a fence body at the code box width the renderer draws', () => {
+    // RenderCodeBlock insets code by CODE_BLOCK_PREFIX_PADDING and
+    // colorizeCode prefixes each line with a right-padded line number plus a
+    // space, so a 98-char line renders 2 rows in a 6-line block at width 100
+    // (box 100 - 1 - (1 + 1) = 97). A full-width charge calls it one row and
+    // admits prose + fence past the budget with no cue.
+    const lines = [
+      'prose one',
+      'prose two',
+      'prose three',
+      '```',
+      ...Array.from({ length: 6 }, () => 'x'.repeat(98)),
+      '```',
+    ];
+    const slice = fitPendingSlice(lines, 100, 14, 11, {
+      showLineNumbers: true,
+    });
+    expect(slice.clipped).toBe(true);
+
+    // Without the gutter the same block fits: the option is load-bearing.
+    const unguttered = fitPendingSlice(lines, 100, 14, 11, {
+      showLineNumbers: false,
+    });
+    expect(unguttered.clipped).toBe(false);
+  });
+
+  it('charges a fence body opened by a line that carries an info string', () => {
+    // The lookahead must close on the same block the walk closes: '```ts'
+    // inside the open '```js' block is content, so the body is 12 lines and
+    // the gutter is three columns wide, not a zero-line block's two.
+    const body = Array.from({ length: 11 }, () => 'x'.repeat(17));
+    const withInfo = fitPendingSlice(
+      ['```js', '```ts', ...body, '```'],
+      20,
+      1000,
+      1000,
+    );
+    const withoutInfo = fitPendingSlice(
+      ['```js', 'zzzzz', ...body, '```'],
+      20,
+      1000,
+      1000,
+    );
+    expect(withInfo.renderedRows).toBe(withoutInfo.renderedRows);
+  });
+
+  it('reports renderedRows even when a kept first table overflows the budget', () => {
+    // The over-budget leading table is kept whole (the cut is gated on
+    // `i > 0`), so `clipped` is false. A height gate reading `clipped` would
+    // conclude the result fits; `renderedRows` is what says it does not.
+    const lines = [
+      '| A | B |',
+      '| - | - |',
+      ...Array.from({ length: 12 }, (_, i) => `|${i}|x|`),
+    ];
+    const result = fitPendingSlice(lines, 80, 14, CLAMP);
+    expect(result.clipped).toBe(false);
+    expect(result.keptLines).toBe(lines.length);
+    expect(result.renderedRows).toBeGreaterThan(14);
   });
 
   it('clips plain text at the budget', () => {
@@ -257,6 +426,7 @@ describe('fitPendingSlice', () => {
     expect(fitPendingSlice(lines, 80, 7, CLAMP)).toEqual({
       keptLines: 7,
       clipped: false,
+      renderedRows: 7,
     });
   });
 
@@ -295,7 +465,7 @@ describe('fitPendingSlice', () => {
         8,
         10,
       );
-      expect(lf).toEqual({ keptLines: 4, clipped: true });
+      expect(lf).toEqual({ keptLines: 4, clipped: true, renderedRows: 4 });
       expect(crlf).toEqual(lf);
       expect(crcrlf).toEqual(lf);
     },
