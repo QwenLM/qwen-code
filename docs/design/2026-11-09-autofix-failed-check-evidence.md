@@ -176,28 +176,31 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    base cost on an adversarial long line. The clamp is NOT a no-leak guarantee:
    a value that is itself cut can only ship a sub-minimum fragment, but a
    credential whose TERMINATOR (the `-----END …-----` label, the URL `@`) falls
-   past the cut never matches its rule and ships its COMPLETE value in clear —
-   the strip welds it contiguous where the merge base shipped it split by the
-   control. A repair can also lengthen a line, so a near-300-character line can
-   lose its tail to the final slice, including a trailing `##[error]` marker.
-   These are recorded as limits, not closed; a value cannot
-   tell a weld INSIDE the credential from a weld BEFORE following word-like
-   text, so a bare failure keyword (no `##[error]`) welded onto a value is still
-   consumed (the message tail survives); and a `##[error]` inside a BEGIN…END
-   span stops the private-key match, preserving the marker over redacting the
-   span — a real PEM with no marker, and a body with a non-marker `#`, are still
-   fully redacted (an intact-label block containing a marker is redacted whole
-   by the first pass, as in base). The strip class also does not cover the
-   wider Unicode whitespace/format families — zero-width (U+200B, U+2060,
-   U+FEFF), NBSP (U+00A0), U+2000–U+200A, U+3000. Whether a split by one of
-   these leaks depends on the rule: a character that breaks the contiguity a
+   past the cut never matches its rule and ships the value — or the prefix of it
+   that fits within the clamp — in clear; the strip welds it contiguous where
+   the merge base shipped it split by the control. A repair can also lengthen a
+   line, so a near-300-character line can lose its tail to the final slice,
+   including a trailing `##[error]` marker. And the repair only sees the selected
+   window: a control-split key longer than that window loses its BEGIN label and
+   ships its body, as in base. These are recorded as limits, not closed; a value
+   cannot tell a weld INSIDE the credential from a weld BEFORE following
+   word-like text, so a bare failure keyword (no `##[error]`) welded onto a value
+   is still consumed (the message tail survives); and a `##[error]` inside a
+   BEGIN…END span stops the private-key match, preserving the marker over
+   redacting the span — a real PEM with no marker, and a body with a non-marker
+   `#`, are still fully redacted (an intact-label block containing a marker is
+   redacted whole by the first pass, as in base). The strip class also does not
+   cover the wider Unicode whitespace/format families — zero-width (U+200B,
+   U+2060, U+FEFF), NBSP (U+00A0), U+2000–U+200A, U+3000. Whether a split by one
+   of these leaks depends on the rule: a character that breaks the contiguity a
    fixed-prefix token rule needs (`npm_`, `sk-`, `ghp_`, AKIA, JWT) leaves the
    token unredacted, and a whitespace-family character terminates the
    whitespace-bounded value classes; but a non-whitespace format character
    INSIDE an env / Bearer / URL value is part of that value and is redacted. A
    tab inside a credential is preserved by the strip and terminates both
    passes' value classes, so that shape is unmatched too. These are recorded as
-   gaps, not closed here; the list is illustrative, not exhaustive.
+   gaps, not closed here; the record is illustrative of an unbounded adversarial
+   surface, not an exhaustive enumeration.
    Living in
    `skillLog`, the strip covers both the collector's excerpt and the patrol's
    rendered evidence (its only `jobLog` caller goes through `skillLog`). The
@@ -206,9 +209,10 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    patrol's `GhClient.jobLog` still returns them to its caller. One transition
    cost: the patrol also keys its marker comment off `skillLog`'s output
    (`fingerprint(target, log)` in `scan`), and `alreadyHandled` matches that key
-   exactly, so removing controls re-keys the fingerprint — a marker written
-   before this lands stops matching once, the patrol re-triages that failure and
-   posts a fresh marker, and it self-heals from the next marker on.
+   exactly. Both the strip and the welded-token repair change that output — the
+   repair rewrites control-free logs too — so the fingerprint re-keys: a marker
+   written before this lands stops matching once, the patrol re-triages that
+   failure and posts a fresh marker, and it self-heals from the next marker on.
 9. **The fence cannot be closed by the log.** The excerpt's Markdown fence is
    sized longer than the longest backtick run inside it, so a log line carrying
    backticks cannot close the fence early and spill the rest into `feedback.md`
@@ -318,23 +322,24 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   `gh` (the flag is passed) with no raw ANSI, terminal control characters
   (bare CR, backspace, C0/C1) or Bidi overrides reaching `feedback.md` or step
   stdout.
-- No secret from a job log reaches `feedback.md` or step stdout for the weld
-  shapes the suite pins: a control inside a credential, in front of its leading
+- The redaction is BEST-EFFORT over the weld shapes the suite pins, not a
+  completeness guarantee: a control inside a credential, in front of its leading
   word boundary, or inside its keyword; a value carrying `#`, `[`, `]`, `@`,
   `}` or a quote; a log-supplied `[redacted]` prefix; a welded scheme prefix; a
-  deleted `Bearer` separator. The exceptions are the gaps recorded in the Costs
-  paragraph above — notably any split by a character OUTSIDE the strip class
-  (the broader Unicode whitespace/format families such as NBSP, U+2000–U+200A,
-  U+3000, zero-width and tab, not just the ones named there), a bare failure
-  keyword welded onto a value, a split header keyword, a credential whose
-  terminator falls past the 300-character repair clamp (its complete value
-  ships), and a control-split key longer than the selection window (its body
-  ships). That list is illustrative, not closed: this criterion does not claim
-  to cover splits the strip class does not remove, nor shapes the clamp or the
-  selection window cut off.
+  deleted `Bearer` separator. Adversarial inputs can still ship credential
+  material, as they do in base — the Costs paragraph above records the known
+  mechanisms (splits by characters outside the strip class, which leak only for
+  the rules whose matching they break; a bare failure keyword welded onto a
+  value; a split header keyword; a credential whose terminator falls past the
+  300-character pre-strip clamp, which ships the value or the prefix of it that
+  fits; a control-split key longer than the selection window, which ships its
+  body). That record is illustrative, not an exhaustive enumeration of an
+  unbounded adversarial surface.
 - A NON-EMPTY whitespace-bounded credential value terminated by a bare CR
   leaves the failure line that follows it in the excerpt, and a control that
-  splits the credential keyword does not consume the `##[error]` marker. An
+  splits the credential keyword does not consume the `##[error]` marker, provided
+  the value and marker fit within the clamp and selection window (an
+  attacker-length value can push the marker past the pre-strip clamp). An
   empty-value header already loses the next line in the first pass, in base too
   (see Costs).
 - An absent script, an unreadable rollup, or a failed API read never fails a

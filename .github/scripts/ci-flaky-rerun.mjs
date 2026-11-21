@@ -333,8 +333,10 @@ export function skillLog(log) {
   // windows need not be adjacent in the log; joining them all would let the
   // private-key rule pair a BEGIN in one window with an END in another and
   // delete every selected line between them — including the failure the
-  // excerpt was fetched for. A real multi-line key lives inside one window, so
-  // grouping keeps that repair while a synthetic cross-window pair cannot form.
+  // excerpt was fetched for. Grouping keeps the private-key repair only when
+  // the whole BEGIN…END span falls inside one selected window; a synthetic
+  // cross-window pair cannot form. A key longer than the window loses its BEGIN
+  // label and ships its body (a window limit, as in base — see the design doc).
   // The strip drops the terminal controls (C0/DEL/C1, keeping \n and \t) plus
   // the full Unicode Bidi_Control set — the same class safeReason drops — so a
   // fork-controlled line can neither repaint nor reorder the excerpt.
@@ -349,9 +351,11 @@ export function skillLog(log) {
     .map((group) =>
       redactWeldedTokens(
         group
-          // Clamp to the shipped width BEFORE the repair: the output is sliced
-          // to 300 anyway, and redaction only shortens, so this is equivalent
-          // for what ships while bounding the quadratic keyword rule's input.
+          // Clamp to 300 PRE-strip characters before the repair, to bound the
+          // quadratic keyword rule's input. Not a no-leak guarantee: a value
+          // whose terminator falls past the cut ships (the strip welds it), and
+          // a repair can lengthen a line so a near-300 line loses its tail to
+          // the final post-strip slice. See the design doc's Costs.
           .map((index) => lines[index].slice(0, 300))
           .join('\n')
           .replace(TERMINAL_CONTROLS, ''),
