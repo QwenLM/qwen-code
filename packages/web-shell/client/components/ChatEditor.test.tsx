@@ -6112,6 +6112,55 @@ describe('ChatEditor mobile composer actions', () => {
     expect(mouseDown.defaultPrevented).toBe(false);
   });
 
+  it('clears the touch flag when the press starts from a real mouse pointer', () => {
+    mobileComposer('draft');
+    composerCoreState.hasContent = true;
+    const container = renderChatEditor({});
+    const send = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    const pointerDown = new MouseEvent('pointerdown', { bubbles: true });
+    Object.defineProperty(pointerDown, 'pointerType', { value: 'mouse' });
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+
+    // A hybrid device sends `pointerdown` for the mouse press that follows a
+    // touch press; that writer is the only one clearing the flag, so without
+    // it this `mousedown` stays prevented and the history-search outside
+    // handler bails, leaving the panel over the sent draft.
+    act(() => {
+      send.dispatchEvent(new Event('touchstart', { bubbles: true }));
+      send.dispatchEvent(pointerDown);
+      send.dispatchEvent(mouseDown);
+    });
+
+    expect(mouseDown.defaultPrevented).toBe(false);
+  });
+
+  it('marks a touch pointer press as touch so its mousedown stays prevented', () => {
+    mobileComposer('draft');
+    composerCoreState.hasContent = true;
+    const container = renderChatEditor({});
+    const send = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    const pointerDown = new MouseEvent('pointerdown', { bubbles: true });
+    Object.defineProperty(pointerDown, 'pointerType', { value: 'touch' });
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      send.dispatchEvent(pointerDown);
+      send.dispatchEvent(mouseDown);
+    });
+
+    expect(mouseDown.defaultPrevented).toBe(true);
+  });
+
   it('opens history from the add drawer without simulated keyboard keys', async () => {
     mobileComposer();
     renderChatEditor({ visibleToolbarActions: ['addMenu'] });

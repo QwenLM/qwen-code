@@ -647,6 +647,49 @@ test('anchors the empty mobile composer with the textarea backend', async ({
   const layout = await emptyMobileComposerLayout(page);
   expectEmptyMobileComposerAnchored(layout);
 
+  // The bottom-anchored compact layout above is gated on the visual viewport
+  // actually being occluded. With no keyboard open the group must stay
+  // vertically centred, so this pins the `inset > 0` half of the toggle:
+  // forcing the attribute on would bottom-anchor a phone that has no keyboard.
+  const unoccluded = await page
+    .getByTestId('chat-pane-container')
+    .evaluate((chatPane) => {
+      const root = document.querySelector('[data-web-shell-root]');
+      const pane = chatPane.getBoundingClientRect();
+      const header = chatPane
+        .querySelector('[data-e2e-mobile-welcome-header]')!
+        .getBoundingClientRect();
+      const composer = chatPane
+        .querySelector('[data-web-shell-composer-surface]')!
+        .getBoundingClientRect();
+      return {
+        occluded: root?.hasAttribute('data-visual-viewport-occluded') ?? null,
+        inset: root
+          ? getComputedStyle(root).getPropertyValue(
+              '--web-shell-visual-viewport-inset-bottom',
+            )
+          : null,
+        paneTop: pane.top,
+        paneBottom: pane.bottom,
+        headerTop: header.top,
+        headerBottom: header.bottom,
+        composerTop: composer.top,
+        composerBottom: composer.bottom,
+        footerBottom:
+          chatPane
+            .querySelector('[data-e2e-mobile-welcome-footer]')
+            ?.getBoundingClientRect().bottom ?? null,
+      };
+    });
+  expect(unoccluded.occluded).toBe(false);
+  expect(unoccluded.inset).toBe('0px');
+  const paneCentre = (unoccluded.paneTop + unoccluded.paneBottom) / 2;
+  const groupCentre =
+    (unoccluded.headerTop +
+      (unoccluded.footerBottom ?? unoccluded.headerBottom)) /
+    2;
+  expect(Math.abs(groupCentre - paneCentre)).toBeLessThan(20);
+
   await textarea.tap();
   await textarea.fill('Composer remains interactive on touch devices');
   await expect(textarea).toHaveValue(
