@@ -271,6 +271,16 @@ const classifierDelegation = (text) => {
   const fakes = [];
   const loopAnswerSites = [];
   const loopHandBuilt = [];
+  // Each hit carries its line and source text: a bare clause name would leave
+  // a maintainer bisecting a 7,900-line runner to find which construct tripped.
+  const sites = [];
+  const record = (clause, node) => {
+    sites.push({
+      clause,
+      line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
+      text: node.getText(file).slice(0, 80),
+    });
+  };
   const isFakeToolCall = (node) =>
     isCallExpression(node) &&
     isIdentifier(node.expression) &&
@@ -331,12 +341,14 @@ const classifierDelegation = (text) => {
         touchesToolCallsMember(node.expression.expression);
       if ((assigned && touchesToolCallsMember(node.left)) || mutated) {
         loopHandBuilt.push(node.pos);
+        record('no-loop-hand-built', node);
       }
       if (
         isFakeToolCall(node) &&
         literalText(node.arguments[0]) === 'respond_in_schema'
       ) {
         loopAnswerSites.push(node.pos);
+        record('no-loop-answer-site', node);
       }
       if (isPropertyAssignment(node) || isShorthandPropertyAssignment(node)) {
         const key = isIdentifier(node.name)
@@ -346,6 +358,7 @@ const classifierDelegation = (text) => {
         // `toolCalls` spelled as a computed expression.
         if (key === undefined) {
           loopHandBuilt.push(node.pos);
+          record('no-loop-hand-built', node);
         } else if (key === 'toolCalls') {
           const declared = isShorthandPropertyAssignment(node)
             ? undefined
@@ -358,6 +371,7 @@ const classifierDelegation = (text) => {
               : declared;
           if (source === undefined || !isArrayLiteralExpression(source)) {
             loopHandBuilt.push(node.pos);
+            record('no-loop-hand-built', node);
           } else {
             for (const element of source.elements) {
               // A computed tool name is as unattributable as a hand-built
@@ -367,6 +381,7 @@ const classifierDelegation = (text) => {
                 literalText(element.arguments[0]) === undefined
               ) {
                 loopHandBuilt.push(element.pos);
+                record('no-loop-hand-built', element);
               }
             }
           }
@@ -387,7 +402,7 @@ const classifierDelegation = (text) => {
   const fakeArms = fakes
     .map((fn) => outerArmFlag(fn))
     .filter((arm) => arm !== undefined && armNames.has(arm));
-  return { calls, fakeArms, loopAnswerSites, loopHandBuilt };
+  return { calls, fakeArms, loopAnswerSites, loopHandBuilt, sites };
 };
 
 // The pin's judgement, named clause by clause so one predicate serves both the
@@ -418,8 +433,8 @@ const delegationViolations = (delegation) => {
   }
   // One fake per arm: a second fake wrapped in the same flag would let a
   // delegation sit in the durable failover server while borrowing the arm.
-  // The count is enough — which arms the two delegations sit in is already
-  // judged by arm-scoping, so a multiset here would be a second copy of it.
+  // The set is what catches the nested form: a fire block inside the skill
+  // arm gives two fakes with the same outer flag, so a bare count passes.
   if (
     delegation.fakeArms.length !== 2 ||
     new Set(delegation.fakeArms).size !== 2
@@ -3876,7 +3891,13 @@ describe('managed-agent-server e2e runner', () => {
     // delegation, judged by one predicate that the hostile-source control
     // below proves clause by clause — the unbounded spelling family lived
     // inside the decision, and it is gone with the scanner.
-    expect(delegationViolations(classifierDelegation(source))).toEqual([]);
+    const delegation = classifierDelegation(source);
+    expect(
+      delegationViolations(delegation),
+      delegation.sites
+        .map((s) => `${s.clause} @ runner:${s.line} — ${s.text}`)
+        .join('\n'),
+    ).toEqual([]);
     // The create -> list lifecycle claim: cron_list must echo the created
     // prompt; a mere tool result must not pass.
     expect(source).toMatch(/includes\('\/loop check the deploy'\)/);
@@ -4358,6 +4379,27 @@ describe('managed-agent-server e2e runner', () => {
         clause,
       ).toContain(clause);
     }
+    // Each hit must carry its site, or a red on the real runner names a clause
+    // and leaves 7,900 lines to bisect. Two different constructs that trip the
+    // same clause must be distinguishable.
+    const located = (lines) =>
+      classifierDelegation(withSkill(SKILL + '\n' + lines)).sites;
+    const nonArray = located(
+      "const forged = buildCalls();\nif (body['x']) return { toolCalls: forged };",
+    );
+    const computedKey = located(
+      "if (body['x']) return { ['tool' + 'Calls']: [" + HAND + '] };',
+    );
+    for (const sites of [nonArray, computedKey]) {
+      expect(sites.length).toBeGreaterThan(0);
+      for (const site of sites) {
+        expect(site.clause).toBe('no-loop-hand-built');
+        expect(site.line).toBeGreaterThan(0);
+        expect(site.text.length).toBeGreaterThan(0);
+      }
+    }
+    expect(nonArray[0].line).not.toBe(computedKey[0].line);
+    expect(nonArray[0].text).not.toBe(computedKey[0].text);
     // Behaviour-preserving rewrites of the same wiring must stay green.
     const equivalent = [
       // The fire arm placed before the skill arm.
