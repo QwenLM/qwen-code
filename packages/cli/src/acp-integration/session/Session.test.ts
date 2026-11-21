@@ -56071,6 +56071,37 @@ describe('Session', () => {
       );
     });
 
+    it('surfaces a todo_write that fails after running as a failed card', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'Failed to modify todos.',
+        returnDisplay: 'Error writing todos: disk full',
+        error: { message: 'Error writing todos: disk full' },
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.TODO_WRITE, execute),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-todo-failed',
+        [{ id: 'todo_failed_call', name: core.ToolNames.TODO_WRITE, args: {} }],
+      );
+
+      const updates = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([params]) => params.update);
+      expect(updates).toContainEqual(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'todo_failed_call',
+          status: 'failed',
+          kind: 'think',
+        }),
+      );
+    });
+
     it('records one successful terminal when ACP updates fail', async () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
@@ -60867,7 +60898,6 @@ describe('Session', () => {
         duplicatePart.functionCall!,
       ]);
 
-      expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
       const { parts } = result;
       expect(result.stopAfterPermissionCancel).toBe(false);
       expect(parts[0].functionResponse?.id).toBe('todo_1__qwen_dup_2');
@@ -60882,6 +60912,9 @@ describe('Session', () => {
             sessionUpdate: 'tool_call_update',
             toolCallId: 'todo_1__qwen_dup_2',
             status: 'failed',
+            // A todo_write never emits a start frame, so the duplicate update
+            // must carry its own kind or channel transports drop it.
+            kind: 'think',
           }),
         }),
       );
@@ -61770,6 +61803,10 @@ describe('Session', () => {
         llmContent: 'Failed to modify todos',
         returnDisplay:
           'Error writing todos: Todo dependency graph contains a cycle',
+        error: {
+          message: 'Todo dependency graph contains a cycle',
+          type: 'execution_failed',
+        },
       });
       queuePendingTodoThenNaturalStops();
 
@@ -61782,6 +61819,17 @@ describe('Session', () => {
             ([params]) => params.update.sessionUpdate === 'plan',
           ),
       ).toBe(false);
+      // The failure has to reach the wire: without an `error` on the result
+      // the call looked successful and published no frame at all.
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.filter(
+            ([params]) =>
+              params.update.sessionUpdate === 'tool_call_update' &&
+              params.update.status === 'failed',
+          ),
+      ).toHaveLength(1);
     });
 
     it('preserves feature-off Stop hook loop reporting before token rejection', async () => {

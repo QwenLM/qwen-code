@@ -18,6 +18,7 @@ import {
   type SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core';
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { summarizeReplay } from '@qwen-code/acp-bridge';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { replayTranscriptRecordPage } from '../acp-integration/session/history-replay-page.js';
@@ -155,10 +156,22 @@ export async function readSessionToolCalls({
       | { sourceRecordIds?: string[] }
       | undefined;
     const callId = update['toolCallId'];
+    const ownedRecord =
+      transcript?.sourceRecordIds?.some((id) => ownedRecordIds.has(id)) ??
+      false;
     if (
       update['sessionUpdate'] === 'tool_call' &&
       typeof callId === 'string' &&
-      transcript?.sourceRecordIds?.some((id) => ownedRecordIds.has(id))
+      ownedRecord
+    ) {
+      ownedCallIds.add(callId);
+    } else if (
+      update['sessionUpdate'] === 'tool_call_update' &&
+      typeof callId === 'string' &&
+      ownedRecord &&
+      // Replay emits no `tool_call` start for `todo_write` even on failure, so
+      // its own terminal frame is what makes the call id known.
+      meta?.['toolName'] === ToolNames.TODO_WRITE
     ) {
       ownedCallIds.add(callId);
     }

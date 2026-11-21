@@ -506,6 +506,13 @@ export async function runAcpToolBatch(
           success: status === 'success',
           artifacts: response.artifacts,
           persistedOutputFiles: response.persistedOutputFiles,
+          // `cancel()` only runs pre-execution, so a cancel message exists
+          // exactly when `executed` is false; gating it on `executed` made the
+          // todo_write failure card read "todo_write failed" instead of the
+          // cancellation text every sibling call reports.
+          ...(state.cancelMessage
+            ? { cancelMessage: state.cancelMessage }
+            : {}),
         }),
       'tool result update',
       // A todo result can publish a new plan revision, so it stays turn-scoped.
@@ -781,12 +788,18 @@ function emitDuplicate(
   emit: (task: () => Promise<unknown>, what: string) => void,
 ): void {
   if (request.name === ToolNames.TODO_WRITE) {
+    // A todo_write never emits a start frame, so channel transports have no
+    // remembered kind to fall back on and drop a kindless update. `think`
+    // matches the kind the todo_write emitter stamps on its failure frames.
+    const { title } = host.toolCallEmitter.resolveToolMetadata(request.name);
     emit(
       () =>
         host.sendUpdate({
           sessionUpdate: 'tool_call_update',
           toolCallId: response.callId,
           status: 'failed',
+          title,
+          kind: 'think',
           content: [
             {
               type: 'content',

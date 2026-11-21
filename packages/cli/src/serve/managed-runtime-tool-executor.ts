@@ -2746,8 +2746,8 @@ export class ManagedToolExecutor {
         }
         result = relativizeGlobResult(result, root);
       }
-      // #15076: core turns a `todo_write` filesystem failure into a
-      // success-shaped result whose text embeds the absolute runtime path,
+      // #15076: core reports a `todo_write` filesystem failure as an error
+      // result, but the write error still embeds the absolute runtime path,
       // which sits outside the Workspace the glob rewrite anchors on. Scrub
       // the runtime root itself before the result is durably committed.
       if (entry.toolName === TodoWriteTool.Name) {
@@ -3109,8 +3109,9 @@ export function relativizeGlobText(text: string, directory: string): string {
 
 /**
  * #15076: strip the Worker's runtime root, which sits outside the Workspace.
- * Core reports a `todo_write` filesystem failure inside a success-shaped
- * result, so the Workspace-rooted glob rewrite cannot reach that path.
+ * Core reports a `todo_write` filesystem failure as an error result, but both
+ * model-facing channels still embed the todos path, so the Workspace-rooted
+ * glob rewrite cannot reach it.
  */
 export function relativizeRuntimeText(text: string): string {
   return relativizeRootedText(text, path.resolve(Storage.getRuntimeBaseDir()));
