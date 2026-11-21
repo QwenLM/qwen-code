@@ -6,11 +6,14 @@ import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class LocalRuntimeProviderFactoryTest {
     @TempDir
@@ -72,8 +75,67 @@ class LocalRuntimeProviderFactoryTest {
         assertThat(new LocalRuntimeProviderFactory().preflight(ephemeral))
                 .filteredOn(check -> check.name().equals("broker-state"))
                 .singleElement()
-                .satisfies(check -> assertThat(check.status())
-                        .isEqualTo(RuntimeProviderFactory.Status.FAIL));
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                    assertThat(check.detail()).contains(blocker.toString());
+                });
+    }
+
+    @Test
+    void preflightRejectsAnEphemeralStateDirectoryBehindADanglingLink() throws Exception {
+        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"));
+        Path link = temporary.resolve("state");
+        Files.createSymbolicLink(link, temporary.resolve("missing"));
+        var ephemeral = settings();
+        ephemeral.getRuntimeBroker().setDurableLocalProcess(false);
+        ephemeral.getRuntimeBroker().setStateDirectory(link.toString());
+        assertThat(new LocalRuntimeProviderFactory().preflight(ephemeral))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                    assertThat(check.detail()).contains(link.toString());
+                });
+    }
+
+    @Test
+    void preflightRejectsAnEphemeralStateDirectoryWhoseAncestorIsNotWritable() throws Exception {
+        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"));
+        Path ancestor = Files.createDirectory(temporary.resolve("read-only"));
+        var permissions = Files.getPosixFilePermissions(ancestor);
+        Files.setPosixFilePermissions(ancestor, PosixFilePermissions.fromString("r-xr-xr-x"));
+        try {
+            var ephemeral = settings();
+            ephemeral.getRuntimeBroker().setDurableLocalProcess(false);
+            ephemeral.getRuntimeBroker().setStateDirectory(ancestor.resolve("state").toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(ephemeral))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> assertThat(check.status())
+                            .isEqualTo(RuntimeProviderFactory.Status.FAIL));
+        } finally {
+            Files.setPosixFilePermissions(ancestor, permissions);
+        }
+    }
+
+    @Test
+    void preflightRejectsAnEphemeralStateDirectoryWhoseAncestorIsNotSearchable() throws Exception {
+        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"));
+        Path ancestor = Files.createDirectory(temporary.resolve("unsearchable"));
+        var permissions = Files.getPosixFilePermissions(ancestor);
+        Files.setPosixFilePermissions(ancestor, PosixFilePermissions.fromString("rw-------"));
+        try {
+            var ephemeral = settings();
+            ephemeral.getRuntimeBroker().setDurableLocalProcess(false);
+            ephemeral.getRuntimeBroker().setStateDirectory(ancestor.resolve("state").toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(ephemeral))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> assertThat(check.status())
+                            .isEqualTo(RuntimeProviderFactory.Status.FAIL));
+        } finally {
+            Files.setPosixFilePermissions(ancestor, permissions);
+        }
     }
 
     private ManagedAgentProperties settings() {

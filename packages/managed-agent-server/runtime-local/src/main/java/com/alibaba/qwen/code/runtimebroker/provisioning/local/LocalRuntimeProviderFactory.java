@@ -11,7 +11,9 @@ import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
@@ -144,29 +146,54 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
             return new Check("broker-state", Status.FAIL, "not configured",
                     "set the directory");
         }
-        Path directory = Path.of(path);
+        Path directory = Path.of(path).toAbsolutePath();
         if (Files.isDirectory(directory)) {
-            return Files.isWritable(directory)
+            if (!Files.isWritable(directory)) {
+                return new Check("broker-state", Status.FAIL, path + " is not writable",
+                        "grant write access to the service account");
+            }
+            return searchable(directory)
                     ? new Check("broker-state", Status.PASS, path, null)
-                    : new Check("broker-state", Status.FAIL, path + " is not writable",
-                            "grant write access to the service account");
+                    : new Check("broker-state", Status.FAIL, path + " is not searchable",
+                            "grant execute access to the service account");
+        }
+        if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            return new Check("broker-state", Status.FAIL,
+                    path + " exists but is not a directory",
+                    "remove the file or link at " + path);
         }
         if (!broker.isDurableLocalProcess()) {
             // The ephemeral spawn creates the directory, so an idle broker is
-            // healthy with it absent; only an ancestor that prevents creation
+            // healthy with it absent; only a component that prevents creation
             // is a hard failure.
-            Path ancestor = directory.toAbsolutePath();
-            while (ancestor != null && !Files.exists(ancestor)) {
+            Path ancestor = directory.getParent();
+            while (ancestor != null && !Files.exists(ancestor, LinkOption.NOFOLLOW_LINKS)) {
                 ancestor = ancestor.getParent();
             }
-            return ancestor != null && Files.isDirectory(ancestor) && Files.isWritable(ancestor)
+            if (ancestor == null || !Files.isDirectory(ancestor)) {
+                return new Check("broker-state", Status.FAIL,
+                        (ancestor == null ? path : ancestor.toString()) + " is not a directory",
+                        "replace it with a directory");
+            }
+            if (!Files.isWritable(ancestor)) {
+                return new Check("broker-state", Status.FAIL,
+                        ancestor + " is not writable",
+                        "grant write access to the service account");
+            }
+            return searchable(ancestor)
                     ? new Check("broker-state", Status.PASS,
                             path + " (created on the first Runtime spawn)", null)
-                    : new Check("broker-state", Status.FAIL, path + " cannot be created",
-                            "make its nearest existing parent a writable directory");
+                    : new Check("broker-state", Status.FAIL,
+                            ancestor + " is not searchable",
+                            "grant execute access to the service account");
         }
         return new Check("broker-state", Status.FAIL,
                 path + " is not a directory", "create it");
+    }
+
+    private static boolean searchable(Path directory) {
+        return !FileSystems.getDefault().supportedFileAttributeViews().contains("posix")
+                || Files.isExecutable(directory);
     }
 
     private static Check executableCheck(String name, String path) {
