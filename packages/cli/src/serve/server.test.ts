@@ -162,6 +162,7 @@ import {
   SessionLimitExceededError,
   SessionNotFoundError,
   SessionResetPendingError,
+  SystemOverloadedError,
   TotalSessionLimitExceededError,
   WorkspaceDrainingError,
   WorkspaceMismatchError,
@@ -41567,6 +41568,40 @@ describe('createServeApp', () => {
           route: 'POST /session',
           limit: 10,
           scope: 'total',
+        }),
+      );
+    });
+
+    it('503 + Retry-After 15 + readings and daemon log when bridge throws SystemOverloadedError', async () => {
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new SystemOverloadedError('cpu_load', 2.5, 120);
+        },
+      });
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        daemonLog,
+      });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/a' });
+      expect(res.status).toBe(503);
+      expect(res.headers['retry-after']).toBe('15');
+      expect(res.body).toMatchObject({
+        code: 'system_overloaded',
+        reason: 'cpu_load',
+        loadRatio: 2.5,
+        eventLoopLagP99Ms: 120,
+      });
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'load admission rejected',
+        expect.objectContaining({
+          route: 'POST /session',
+          reason: 'cpu_load',
+          loadRatio: 2.5,
+          eventLoopLagP99Ms: 120,
         }),
       );
     });

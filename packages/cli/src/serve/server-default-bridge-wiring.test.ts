@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import request from 'supertest';
 import * as path from 'node:path';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import { comparableBridgeOptions } from '../test-utils/bridge-options.js';
@@ -48,6 +49,28 @@ function makeBridge(
       return sessionCount;
     },
     getSessionSummary,
+    getDaemonStatusSnapshot: () => ({
+      limits: {
+        maxSessions: 20,
+        maxPendingPromptsPerSession: 5,
+        eventRingSize: 8_000,
+        eventRingMaxBytes: 8 * 1024 * 1024,
+        compactedReplayMaxBytes: 4 * 1024 * 1024,
+        maxJournalEvents: 10_000,
+        maxJournalBytes: 8 * 1024 * 1024,
+        journalGrowth: null,
+        channelIdleTimeoutMs: 0,
+        sessionIdleTimeoutMs: 1_800_000,
+        sessionPromptSettledCloseGraceMs: 0,
+      },
+      sessionCount,
+      pendingPermissionCount: 0,
+      channelLive: true,
+      permissionPolicy: 'first-responder',
+      sessions: [],
+    }),
+    activePromptCount: 0,
+    lastActivityAt: null,
     async shutdown() {},
     killAllSync() {},
   } as unknown as AcpSessionBridge;
@@ -424,6 +447,69 @@ describe('createServeApp default bridge wiring', () => {
       scope: 'total',
       operation: 'spawn',
       workspaceCwd: WS_BOUND,
+    });
+  });
+
+  it('reports disabled load admission on the default-bridge path when opted out', async () => {
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn(() => makeBridge()),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const { DISABLED_LOAD_ADMISSION_SNAPSHOT } = await import(
+      './load-admission.js'
+    );
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+        loadAdmission: false,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toEqual(
+      DISABLED_LOAD_ADMISSION_SNAPSHOT,
+    );
+  });
+
+  it('enables load admission by default on the default-bridge path', async () => {
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn(() => makeBridge()),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toMatchObject({
+      enabled: true,
+      overloaded: false,
     });
   });
 

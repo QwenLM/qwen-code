@@ -180,6 +180,7 @@ import {
   type ServeChannelSelection,
   type ChannelWebhookConfigSource,
 } from './types.js';
+import type { LoadAdmissionMonitor } from './load-admission.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type {
   WorkspaceGenerationGuard,
@@ -2382,6 +2383,7 @@ async function loadServeRuntimeModules() {
     workspaceProvidersStatusModule,
     workspaceSkillsStatusModule,
     totalSessionAdmissionModule,
+    loadAdmissionModule,
     workspaceRegistryModule,
     workspaceRuntimeCoordinatorModule,
     promptLedgerModule,
@@ -2398,6 +2400,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-providers-status.js'),
     import('./workspace-skills-status.js'),
     import('./total-session-admission.js'),
+    import('./load-admission.js'),
     import('./workspace-registry.js'),
     import('./workspace-runtime-coordinator.js'),
     import('./prompt-terminal-ledger.js'),
@@ -2425,6 +2428,9 @@ async function loadServeRuntimeModules() {
       workspaceSkillsStatusModule.createWorkspaceSkillsStatusProvider,
     createTotalSessionAdmissionController:
       totalSessionAdmissionModule.createTotalSessionAdmissionController,
+    createLoadAdmissionMonitor: loadAdmissionModule.createLoadAdmissionMonitor,
+    DISABLED_LOAD_ADMISSION_SNAPSHOT:
+      loadAdmissionModule.DISABLED_LOAD_ADMISSION_SNAPSHOT,
     createWorkspaceRegistry: workspaceRegistryModule.createWorkspaceRegistry,
     createWorkspaceSessionOwnerIndex:
       workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
@@ -4970,6 +4976,10 @@ async function runQwenServeImpl(
   // bucket plus the window-scoped event-loop histogram it resets each seal.
   // Torn down together with the event-loop monitor on runtime restart/stop.
   let daemonMetricsSampler: { dispose(): void } | undefined;
+  // Load-based fresh-session admission monitor: same teardown group as the
+  // metrics sampler, recreated per buildRuntime next to the admission
+  // controller it feeds.
+  let loadAdmissionMonitor: LoadAdmissionMonitor | undefined;
   // Low-frequency sweep refreshing bound-PR state snapshots (open → merged).
   // The refresh module loads via dynamic import (see start site) because it
   // pulls the SessionService chain, which must stay out of the pre-listen
@@ -5020,6 +5030,8 @@ async function runQwenServeImpl(
     daemonEventLoopMonitor = undefined;
     const metricsSampler = daemonMetricsSampler;
     daemonMetricsSampler = undefined;
+    const loadMonitor = loadAdmissionMonitor;
+    loadAdmissionMonitor = undefined;
     const prRefreshTimer = sessionPrRefreshTimer;
     sessionPrRefreshTimer = undefined;
     sessionPrRefreshGeneration += 1;
@@ -5038,6 +5050,15 @@ async function runQwenServeImpl(
     } catch (err) {
       daemonLog.warn(
         `metrics sampler dispose error: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    try {
+      loadMonitor?.dispose();
+    } catch (err) {
+      daemonLog.warn(
+        `load admission monitor dispose error: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -6010,6 +6031,14 @@ async function runQwenServeImpl(
         mcpAuthenticationActive = false;
       };
     };
+    // Retire any prior monitor before building a new one so a runtime
+    // rebuild (buildRuntime re-entry) can't leak the old interval +
+    // histogram — symmetric with the metrics sampler below.
+    loadAdmissionMonitor?.dispose();
+    loadAdmissionMonitor =
+      opts.loadAdmission !== false
+        ? runtime.createLoadAdmissionMonitor()
+        : undefined;
     const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
       {
         maxTotalSessions: opts.maxTotalSessions,
@@ -6019,6 +6048,9 @@ async function runQwenServeImpl(
             : bridgeRef
               ? [bridgeRef]
               : [],
+        ...(loadAdmissionMonitor
+          ? { loadAdmission: loadAdmissionMonitor }
+          : {}),
       },
     );
     const sessionOwnerIndex = runtime.createWorkspaceSessionOwnerIndex();
@@ -9266,6 +9298,9 @@ async function runQwenServeImpl(
       }),
       getMetricsSeries: () => metricsRing.snapshot(),
       getTotalSessionAdmissionSnapshot: totalSessionAdmission.snapshot,
+      getLoadAdmissionSnapshot: () =>
+        loadAdmissionMonitor?.snapshot() ??
+        runtime.DISABLED_LOAD_ADMISSION_SNAPSHOT,
       getChildHeapPolicySnapshot: () => managedChildHeapPolicy?.snapshot(),
       ...(childHeapPolicy
         ? {

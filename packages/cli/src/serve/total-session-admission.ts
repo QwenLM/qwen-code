@@ -5,12 +5,14 @@
  */
 
 import {
+  SystemOverloadedError,
   TotalSessionLimitExceededError,
   WorkspaceDrainingError,
   type BridgeFreshSessionAdmission,
   type BridgeFreshSessionAdmissionContext,
   type BridgeFreshSessionReservation,
 } from './acp-session-bridge.js';
+import type { LoadAdmissionSnapshot } from './load-admission.js';
 
 interface SessionCountSource {
   readonly sessionCount: number;
@@ -19,6 +21,7 @@ interface SessionCountSource {
 export interface TotalSessionAdmissionOptions {
   readonly maxTotalSessions?: number;
   readonly getBridges: () => readonly SessionCountSource[];
+  readonly loadAdmission?: { snapshot: () => LoadAdmissionSnapshot };
 }
 
 export interface TotalSessionAdmissionSnapshot {
@@ -40,6 +43,7 @@ export interface TotalSessionAdmissionController {
 export function createTotalSessionAdmissionController({
   maxTotalSessions,
   getBridges,
+  loadAdmission,
 }: TotalSessionAdmissionOptions): TotalSessionAdmissionController {
   let inFlight = 0;
   const inFlightByWorkspace = new Map<string, number>();
@@ -57,6 +61,14 @@ export function createTotalSessionAdmissionController({
     ): BridgeFreshSessionReservation {
       if (drainingWorkspaces.has(context.workspaceCwd)) {
         throw new WorkspaceDrainingError(context.workspaceCwd);
+      }
+      const load = loadAdmission?.snapshot();
+      if (load?.overloaded) {
+        throw new SystemOverloadedError(
+          load.reason ?? 'cpu_load',
+          load.loadRatio,
+          load.eventLoopLagP99Ms,
+        );
       }
       if (limit !== Number.POSITIVE_INFINITY) {
         if (getLiveCount(getBridges()) + inFlight >= limit) {
