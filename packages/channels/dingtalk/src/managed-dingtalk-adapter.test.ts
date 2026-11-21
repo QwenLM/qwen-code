@@ -677,14 +677,25 @@ describe('managed DingTalk adapter inbound', () => {
     expect(plane.submit).toHaveLength(0);
     // "Visibly" is the half a silent drop would also satisfy: the operator must
     // be told which event was skipped, without the payload being echoed.
-    const refusal = lines.filter((line) =>
-      line.includes('admission of dingtalk:msg-poison was refused (400)'),
-    );
-    expect(refusal).toHaveLength(1);
-    expect(refusal[0]).not.toContain('session=');
+    const refusalLines = () =>
+      lines.filter((line) =>
+        line.includes('admission of dingtalk:msg-poison was refused (400)'),
+      );
+    expect(refusalLines()).toHaveLength(1);
+    // Neither half of the payload may reach the operator log: the webhook is a
+    // bearer capability and the text is user content.
+    expect(refusalLines()[0]).not.toContain('session=');
+    expect(refusalLines()[0]).not.toContain('hello agent');
     // The claim is gone, so a later tick never re-drives it.
     await adapter.tick();
     expect(plane.submitAttempts()).toBe(1);
+    // A provider redelivery after a lost ack must be deduped by the recent
+    // window the drop appended to, not refused a second time — otherwise every
+    // redelivery costs another submit and another operator line.
+    fake.push('msg-poison', messageData({ msgId: 'msg-poison' }));
+    await adapter.tick();
+    expect(plane.submitAttempts()).toBe(1);
+    expect(refusalLines()).toHaveLength(1);
     // The rest of the inbound still flows once the refusal clears.
     plane.setRefuseSubmit(undefined);
     fake.push('msg-fine', messageData({ msgId: 'msg-fine' }));
@@ -889,6 +900,18 @@ describe('managed DingTalk adapter outbox', () => {
       [0, 'accepted'],
       [undefined, 'unknown'],
     ]);
+    // The shape alone would also accept a receipt keyed to the wrong delivery,
+    // which the control plane cannot match — leaving the whole reply unsettled.
+    expect(plane.receipts.map((entry) => entry.deliveryId)).toEqual([
+      'd-partial',
+      'd-partial',
+    ]);
+    // "Settles" is the other half of the title: the failed entry is stamped and
+    // removed from the ledger in the same send, so a later tick must neither
+    // resend nor replay a second settlement for it.
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(2);
+    expect(plane.receipts).toHaveLength(2);
     await adapter.disconnect();
   });
 
