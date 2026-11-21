@@ -1330,6 +1330,13 @@ export class ChatRecordingService {
   /** Serializes appends and authoritative read barriers. Always settles. */
   private operationTail: Promise<void> = Promise.resolve();
   private acceptingWrites = false;
+  /**
+   * Set while a session close is canceling its in-flight turn. Persisting
+   * that cancel would durably settle a turn the restart recovery has to
+   * re-open, so assistant turns and turn results are withheld until the
+   * close is rolled back. Peer notifications still land.
+   */
+  private turnRecordsWithheld = false;
   private closePromise: Promise<void> | undefined;
   private handoffRequested = false;
   /** Prevents asynchronous metadata writers from becoming checkpoint siblings. */
@@ -3289,6 +3296,7 @@ export class ChatRecordingService {
     contextWindowSize?: number;
     goalContext?: GoalTurnPermit;
   }): void {
+    if (this.turnRecordsWithheld) return;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('assistant'),
@@ -4655,7 +4663,23 @@ export class ChatRecordingService {
    * recording failure must never break turn settlement, so this uses the
    * non-strict append path (inactive/failed writers skip silently).
    */
+  /**
+   * Withholds assistant turns and turn results until the returned release
+   * runs. A session close cancels its in-flight turn; that cancel must not
+   * reach the transcript, because the restart recovery re-opens the turn from
+   * the unanswered prompt rather than resuming a `cancelled` terminal.
+   * Notifications and every other record type still land, so the close can
+   * flush peer reports after the cancel settles.
+   */
+  withholdTurnRecords(): () => void {
+    this.turnRecordsWithheld = true;
+    return () => {
+      this.turnRecordsWithheld = false;
+    };
+  }
+
   recordTurnResult(payload: TurnResultRecordPayload, promptId?: string): void {
+    if (this.turnRecordsWithheld) return;
     if (!isTurnResultRecordPayload(payload)) {
       debugLogger.error(
         'Skipping turn result record that violates the bounded contract:',

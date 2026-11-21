@@ -646,6 +646,7 @@ describe('Session', () => {
     readActiveTranscriptChain: ReturnType<typeof vi.fn>;
     recordTurnAttempt: ReturnType<typeof vi.fn>;
     recordTurnResult: ReturnType<typeof vi.fn>;
+    withholdTurnRecords: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
     recordCronPrompt: ReturnType<typeof vi.fn>;
     recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
@@ -1056,6 +1057,7 @@ describe('Session', () => {
       readActiveTranscriptChain: vi.fn().mockResolvedValue([] as ChatRecord[]),
       recordTurnAttempt: vi.fn().mockResolvedValue(undefined),
       recordTurnResult: vi.fn(),
+      withholdTurnRecords: vi.fn().mockReturnValue(vi.fn()),
       recordUserMessage: vi.fn(),
       recordCronPrompt: vi.fn(),
       recordGoalRuntimeMessage: vi.fn(),
@@ -1327,6 +1329,39 @@ describe('Session', () => {
       mockClient,
       mockSettings,
     );
+  });
+
+  describe('turn record withholding', () => {
+    it('withholds a dispose-cancelled turn and releases it on rollback', () => {
+      const releaseRecords = vi.fn();
+      vi.mocked(mockChatRecordingService.withholdTurnRecords).mockReturnValue(
+        releaseRecords,
+      );
+
+      const release = session.beginClose();
+      expect(
+        mockChatRecordingService.withholdTurnRecords,
+      ).toHaveBeenCalledOnce();
+      expect(releaseRecords).not.toHaveBeenCalled();
+
+      release();
+      expect(releaseRecords).toHaveBeenCalledOnce();
+    });
+
+    it('keeps a user cancel in the transcript', () => {
+      const release = session.beginClose('user');
+      expect(
+        mockChatRecordingService.withholdTurnRecords,
+      ).not.toHaveBeenCalled();
+      release();
+    });
+
+    it('withholds when a session is disposed without a close gate', () => {
+      session.dispose();
+      expect(
+        mockChatRecordingService.withholdTurnRecords,
+      ).toHaveBeenCalledOnce();
+    });
   });
 
   describe('Agent Team leader sink', () => {

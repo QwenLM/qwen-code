@@ -2962,6 +2962,8 @@ export class Session implements SessionContext {
    */
   private peerNotificationsSealed = false;
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
+  /** Releases {@link ChatRecordingService.withholdTurnRecords} on rollback. */
+  private releaseTurnRecordWithholding: (() => void) | undefined;
   private historyMutationActive = false;
   private pendingDeletedApiPromptIds: Set<string> | undefined;
   private closeGateCompletion: Promise<void> | null = null;
@@ -5531,6 +5533,15 @@ export class Session implements SessionContext {
       cancelReason === 'user'
         ? USER_CANCEL_ABORT_REASON
         : SESSION_DISPOSE_ABORT_REASON;
+    if (this.closeAbortReason === SESSION_DISPOSE_ABORT_REASON) {
+      // The close cancels the in-flight turn, and the settlement that follows
+      // would durably end it as `cancelled`. Restart recovery re-opens that
+      // turn from the unanswered prompt, so the cancel stays out of the
+      // transcript; peer reports still land.
+      this.releaseTurnRecordWithholding ??= this.config
+        .getChatRecordingService()
+        ?.withholdTurnRecords();
+    }
 
     let resolveGate!: () => void;
     const completion = new Promise<void>((resolve) => {
@@ -5550,6 +5561,10 @@ export class Session implements SessionContext {
       if (this.disposed) return;
       this.closing = false;
       this.closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
+      // Turn records reach the writer again from here on; an irreversible
+      // close keeps them withheld until the process ends.
+      this.releaseTurnRecordWithholding?.();
+      this.releaseTurnRecordWithholding = undefined;
       // The close was reversible and just got rolled back, so the session is
       // live again: un-seal peer intake or every later teammate report takes
       // the cold-copy branch above, never enters the queue and never reaches
@@ -5774,6 +5789,11 @@ export class Session implements SessionContext {
     this.detachTeamSink = undefined;
     this.teamSinkAbort.abort(SESSION_DISPOSE_ABORT_REASON);
     this.requestLifecycleExecutions.clear();
+    if (!this.releaseTurnRecordWithholding) {
+      this.releaseTurnRecordWithholding = this.config
+        .getChatRecordingService()
+        ?.withholdTurnRecords();
+    }
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
