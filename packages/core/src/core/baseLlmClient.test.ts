@@ -550,6 +550,26 @@ describe('BaseLlmClient', () => {
       expect(result.hadToolCall).toBe(false);
     });
 
+    it('captures the final streamed finish reason', async () => {
+      const stream = (async function* () {
+        yield createMockTextResponse('partial');
+        yield {
+          candidates: [{ finishReason: 'STOP' }],
+        } as GenerateContentResponse;
+        yield {
+          candidates: [{ finishReason: 'MAX_TOKENS' }],
+        } as GenerateContentResponse;
+        // Providers can emit usage-only chunks after the final candidate.
+        yield {
+          usageMetadata: { totalTokenCount: 3 },
+        } as GenerateContentResponse;
+      })();
+
+      const result = await streamHi(stream);
+
+      expect(result.finishReason).toBe('MAX_TOKENS');
+    });
+
     it('forwards tool declarations and reports function calls without executing them', async () => {
       const tools = [
         {
@@ -619,6 +639,22 @@ describe('BaseLlmClient', () => {
       expect(mockGenerateContentStream).not.toHaveBeenCalled();
       expect(result.text).toBe('plain');
       expect(result.hadToolCall).toBe(false);
+    });
+
+    it('captures the non-streaming provider finish reason', async () => {
+      const response = {
+        candidates: [
+          {
+            content: content('model', { text: 'partial' }),
+            finishReason: 'MAX_TOKENS',
+          },
+        ],
+      } as GenerateContentResponse;
+      mockGenerateContent.mockResolvedValue(response);
+
+      const result = await askHi();
+
+      expect(result.finishReason).toBe('MAX_TOKENS');
     });
 
     it('reports function calls from the non-streaming response', async () => {

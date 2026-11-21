@@ -416,6 +416,8 @@ export interface GenerateTextResult {
   usage: GenerateContentResponseUsageMetadata | undefined;
   /** Whether the response contained a function call. No call is executed here. */
   hadToolCall?: boolean;
+  /** Provider stop reason, such as `STOP` or `MAX_TOKENS`, when available. */
+  finishReason?: string;
 }
 
 /**
@@ -738,14 +740,19 @@ export class BaseLlmClient {
             let text = '';
             let usage: GenerateContentResponseUsageMetadata | undefined;
             let hadToolCall = false;
+            let finishReason: string | undefined;
             for await (const chunk of responseStream) {
               text += getResponseText(chunk) ?? '';
               hadToolCall ||= (getFunctionCalls(chunk)?.length ?? 0) > 0;
               if (chunk.usageMetadata) {
                 usage = chunk.usageMetadata;
               }
+              const chunkFinishReason = chunk.candidates?.[0]?.finishReason;
+              if (chunkFinishReason !== undefined) {
+                finishReason = chunkFinishReason;
+              }
             }
-            return { text, usage, hadToolCall };
+            return { text, usage, hadToolCall, finishReason };
           }
         : async () => {
             const result = await contentGenerator.generateContent(
@@ -756,6 +763,7 @@ export class BaseLlmClient {
               text: getResponseText(result) ?? '',
               usage: result.usageMetadata,
               hadToolCall: (getFunctionCalls(result)?.length ?? 0) > 0,
+              finishReason: result.candidates?.[0]?.finishReason,
             };
           };
 
@@ -791,6 +799,7 @@ export class BaseLlmClient {
         text: result.text.trim(),
         usage: result.usage,
         hadToolCall: result.hadToolCall,
+        finishReason: result.finishReason,
       };
     } catch (error) {
       if (abortSignal.aborted) {
