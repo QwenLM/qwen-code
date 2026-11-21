@@ -400,6 +400,7 @@ describeDaemon('qwen serve — restart recovery', () => {
     if (!daemon || !fake) return;
     const fakeServer = fake;
     const baseUrl = daemon.baseUrl;
+    holdNext = true;
     await waitFor(
       'daemon runtime',
       async () => {
@@ -434,6 +435,7 @@ describeDaemon('qwen serve — restart recovery', () => {
       throw new Error('session create returned no sessionId');
     }
 
+    const requestCount = fakeServer.requests.length;
     const prompt = await jsonFetch(baseUrl, `/session/${sessionId}/prompt`, {
       method: 'POST',
       body: JSON.stringify({
@@ -443,22 +445,28 @@ describeDaemon('qwen serve — restart recovery', () => {
     expect(prompt.status).toBe(202);
     await waitFor(
       'fake model request',
-      async () => fakeServer.requests.length > 0,
+      async () => fakeServer.requests.length > requestCount,
       30_000,
     );
-    // The transcript is created empty and appended asynchronously, so the
-    // model request alone does not make the prompt recoverable across a kill.
-    await waitFor(
-      'recorded prompt',
-      async () => {
-        const transcriptPath = findSessionFile(workspace, sessionId, '.jsonl');
-        if (!transcriptPath) return false;
-        return readFileSync(transcriptPath, 'utf8').includes(
-          'E2E restart recovery',
-        );
-      },
-      30_000,
-    );
+    await waitFor('persisted user transcript', async () => {
+      const transcriptPath = findSessionFile(workspace, sessionId, '.jsonl');
+      if (!transcriptPath) return false;
+      return readFileSync(transcriptPath, 'utf8')
+        .split('\n')
+        .some((line) => {
+          if (!line) return false;
+          try {
+            const record = asRecord(JSON.parse(line));
+            return (
+              record?.['type'] === 'user' &&
+              record['sessionId'] === sessionId &&
+              line.includes('E2E restart recovery')
+            );
+          } catch {
+            return false;
+          }
+        });
+    });
 
     const oldDaemon = daemon;
     await stopDaemon(oldDaemon);
