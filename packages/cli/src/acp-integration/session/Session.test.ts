@@ -50411,6 +50411,77 @@ describe('Session', () => {
           expect(executeSpy).not.toHaveBeenCalled();
         });
 
+        it('emits the PreToolUse block notice as a discrete message', async () => {
+          const reason =
+            '[Fact-Forcing Gate]\n\nPresent these facts:\n\n1. Call sites';
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: { decision: 'deny', reason },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+
+          const executeSpy = vi.fn();
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-block-notice',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+
+          expect(executeSpy).not.toHaveBeenCalled();
+          const blockCalls = vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.filter(
+              ([params]) =>
+                params.update.sessionUpdate === 'agent_message_chunk' &&
+                params.update.content.type === 'text' &&
+                params.update.content.text.includes('PreToolUse blocked'),
+            );
+          expect(blockCalls).toHaveLength(1);
+          const blockUpdate = blockCalls[0][0].update;
+          if (blockUpdate.content.type === 'text') {
+            expect(blockUpdate.content.text).toContain(reason);
+          }
+          expect(blockUpdate._meta).toEqual(
+            expect.objectContaining({
+              source: 'pre_tool_use_block',
+              qwenDiscreteMessage: true,
+            }),
+          );
+        });
+
         it('runs the host guard with final params and denies before execution', async () => {
           mockConfig.getApprovalMode = vi
             .fn()

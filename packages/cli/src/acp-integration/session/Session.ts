@@ -18260,8 +18260,9 @@ export class Session implements SessionContext {
             const blockReason =
               preHookResult.blockReason || 'Blocked by PreToolUse hook';
             try {
-              await this.messageEmitter.emitAgentMessage(
-                `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
+              await this.messageEmitter.emitPreToolUseBlockNotice(
+                toolName,
+                blockReason,
               );
             } catch (emitError) {
               debugLogger.debug(

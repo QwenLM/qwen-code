@@ -110,6 +110,35 @@ describe('MessageEmitter', () => {
     });
   });
 
+  describe('emitPreToolUseBlockNotice', () => {
+    it('should send a discrete agent_message_chunk so clients render it apart from model prose', async () => {
+      const reason =
+        '[Fact-Forcing Gate]\n\nPresent these facts:\n\n1. Call sites';
+      await emitter.emitPreToolUseBlockNotice('write_file', reason);
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: `✗ **PreToolUse blocked**: write_file - ${reason}`,
+        },
+        _meta: {
+          source: 'pre_tool_use_block',
+          qwenDiscreteMessage: true,
+        },
+      });
+    });
+
+    it('should preserve the hook reason verbatim, including newlines', async () => {
+      const reason = 'line one\nline two\n\nline three';
+      await emitter.emitPreToolUseBlockNotice('edit', reason);
+
+      const update = sendUpdateSpy.mock.calls[0][0];
+      expect(update.content.text.endsWith(reason)).toBe(true);
+    });
+  });
+
   describe('emitSlashCommandOutput', () => {
     it('should identify slash-command output in metadata', async () => {
       await emitter.emitSlashCommandOutput('Compressing context...');
