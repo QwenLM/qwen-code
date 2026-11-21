@@ -179,6 +179,7 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
     writeFileSync(join(checkout, 'package.json'), '{"version":"1.2.3"}\n');
     git('add', '.');
     git('commit', '-m', `Bump\n\n${trailer}`);
+    const original = git('rev-parse', 'HEAD');
     git('init', '--bare', remote);
     git('remote', 'add', 'origin', remote);
     git('push', 'origin', 'HEAD:refs/heads/release/v1.2.3');
@@ -271,7 +272,6 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
     writeFileSync(join(checkout, 'package.json'), '{"version":"1.2.3"}\n');
     git('add', '.');
     git('commit', '-m', `Bump\n\n${trailer}`);
-    const original = git('rev-parse', 'HEAD');
     git('init', '--bare', remote);
     git('remote', 'add', 'origin', remote);
     git('push', 'origin', 'HEAD:refs/heads/release/v1.2.3');
