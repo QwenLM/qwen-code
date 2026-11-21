@@ -19,9 +19,11 @@ import {
   ToolConfirmationOutcome,
   runLogger,
   type Config,
+  type Model,
   type SerializableConfirmationDetails,
 } from '@qwen-code/core';
 import { z } from 'zod';
+import { getPreferredReasoningEffort } from '../utils/modelPreference.js';
 import { safeHostname } from '../ui/utils/urlSecurityUtils.js';
 import type { AcpSupportedCommand } from './commandAvailability.js';
 
@@ -54,14 +56,90 @@ export interface AcpModelAdapter {
   ): Promise<acp.SessionConfigOption | null>;
 }
 
-/** 默认视图：只暴露当前配置模型。 */
+function buildDefaultModelDescription(model: Model): string {
+  const parts: string[] = [];
+  if (model.capabilities?.reasoning?.supported) parts.push('Reasoning');
+  if (model.capabilities?.vision) parts.push('Vision');
+  return parts.join(' · ');
+}
+
+/** 默认视图：从会话 ModelProviderManager 读取可用模型目录与推理档位。 */
 export function createDefaultAcpModelAdapter(): AcpModelAdapter {
   return {
     async buildAvailableModels(config) {
-      const currentModelId = config.getModel() || 'auto';
+      const selectedModel = config.getModel?.() || '';
+      const manager = config.getModelProviderManager?.();
+      let listedModels: Model[] = [];
+      if (manager?.listModels) {
+        try {
+          listedModels = await manager.listModels();
+        } catch {
+          listedModels = [];
+        }
+      }
+      const enabledModels = listedModels.filter(
+        (model) => model.enabled !== false,
+      );
+      if (enabledModels.length === 0) {
+        const currentModelId = selectedModel || 'auto';
+        return {
+          availableModels: [{ modelId: currentModelId, name: currentModelId }],
+          currentModelId,
+        };
+      }
+      const availableModels = enabledModels.map((model) => {
+        const description = buildDefaultModelDescription(model);
+        return {
+          modelId: model.key,
+          name:
+            (model.displayName || model.key) +
+            (model.isDefault ? ' (default)' : ''),
+          ...(description ? { description } : {}),
+        };
+      });
+      const currentModelId =
+        selectedModel &&
+        enabledModels.some((model) => model.key === selectedModel)
+          ? selectedModel
+          : (enabledModels.find((model) => model.isDefault === true)?.key ??
+            enabledModels[0]!.key);
       return {
-        availableModels: [{ modelId: currentModelId, name: currentModelId }],
+        availableModels,
         currentModelId,
+      };
+    },
+    async buildReasoningEffortOption(config) {
+      const manager = config.getModelProviderManager?.();
+      const modelKey = config.getModel?.();
+      if (!manager?.getModel || !modelKey) {
+        return null;
+      }
+      const model = await manager.getModel(modelKey);
+      const efforts = model?.capabilities?.reasoning?.supportedEfforts ?? [];
+      if (efforts.length === 0) {
+        return null;
+      }
+      const currentValue = getPreferredReasoningEffort(config, model);
+      const validCurrent =
+        currentValue && efforts.includes(currentValue)
+          ? currentValue
+          : undefined;
+      const defaultEffort = model?.defaultModelConfig?.reasoning?.effort;
+      const validDefault =
+        defaultEffort && efforts.includes(defaultEffort)
+          ? defaultEffort
+          : undefined;
+      const resolvedValue = validCurrent ?? validDefault ?? efforts[0];
+      return {
+        type: 'select',
+        id: 'reasoning_effort',
+        name: 'Reasoning Effort',
+        category: 'thought_level',
+        currentValue: resolvedValue,
+        options: efforts.map((effort) => ({
+          value: effort,
+          name: formatReasoningEffortName(effort),
+        })),
       };
     },
   };

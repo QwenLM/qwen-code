@@ -19,6 +19,11 @@ import {
   BRAND_PROTOCOL_NAMESPACE,
   ASK_USER_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
+  FatalAuthenticationError,
+  MISSING_SESSION_MODEL_PROVIDER_MESSAGE,
+  MissingSessionModelProviderError,
+  QWEN_SUBSCRIPTION_SIGNED_OUT_HINT,
+  QwenSubscriptionOAuthError,
   ROOT_TOOL_CALL_SCOPE_ID,
   TASK_MUTATION_TOOL_NAMES,
   ToolConfirmationOutcome,
@@ -139,6 +144,7 @@ export interface CreateAcpSessionHostParams {
   readonly modelAdapter: AcpModelAdapter;
   readonly connection: acp.AgentSideConnection;
   readonly ensureAuthReady: () => Promise<void>;
+  readonly getAuthMethods?: () => readonly acp.AuthMethod[];
   readonly prepareInference?: ThreadHostRequests['prepareInference'];
   readonly resolveConfig: (sessionId: string) => Config;
   readonly setModeForExitPlan: (
@@ -745,7 +751,9 @@ export function createAcpSessionHost(params: CreateAcpSessionHostParams): {
         return;
       }
       if (!message.includes('Operation aborted')) {
-        pending.reject(toAcpRequestError(new Error(message)));
+        pending.reject(
+          toAcpRequestError(new Error(message), params.getAuthMethods?.()),
+        );
         return;
       }
     }
@@ -770,7 +778,7 @@ export function createAcpSessionHost(params: CreateAcpSessionHostParams): {
       state.activeCommandUuid = undefined;
     }
     await flushToolPublisher();
-    pending.reject(toAcpRequestError(error));
+    pending.reject(toAcpRequestError(error, params.getAuthMethods?.()));
   }
 
   async function flushToolPublisher(): Promise<void> {
@@ -1136,7 +1144,7 @@ export function createAcpSessionHost(params: CreateAcpSessionHostParams): {
         if (pending.finalized) return;
         pending.finalized = true;
         state.pendingCommands.delete(uuid);
-        pending.reject(toAcpRequestError(error));
+        pending.reject(toAcpRequestError(error, params.getAuthMethods?.()));
       },
     };
   }
@@ -1366,9 +1374,40 @@ export function getSingleTextPrompt(
     : undefined;
 }
 
-export function toAcpRequestError(error: unknown): acp.RequestError {
+function isAcpAuthRequiredError(error: unknown): boolean {
+  if (
+    error instanceof FatalAuthenticationError ||
+    error instanceof MissingSessionModelProviderError
+  ) {
+    return true;
+  }
+  if (
+    error instanceof QwenSubscriptionOAuthError &&
+    (error.code === 'session_changed' ||
+      error.code === 'invalid_grant' ||
+      error.status === 401)
+  ) {
+    return true;
+  }
+  const message = getAcpErrorMessage(error);
+  return (
+    message === MISSING_SESSION_MODEL_PROVIDER_MESSAGE ||
+    message === QWEN_SUBSCRIPTION_SIGNED_OUT_HINT
+  );
+}
+
+export function toAcpRequestError(
+  error: unknown,
+  authMethods: readonly acp.AuthMethod[] = [],
+): acp.RequestError {
   if (error instanceof acp.RequestError) {
     return error;
+  }
+  if (isAcpAuthRequiredError(error)) {
+    return acp.RequestError.authRequired(
+      { authMethods },
+      getAcpErrorMessage(error),
+    );
   }
   if (getErrorStatus(error) === 429) {
     return new acp.RequestError(429, 'Rate limit exceeded. Try again later.');

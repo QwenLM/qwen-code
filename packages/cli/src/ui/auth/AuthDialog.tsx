@@ -28,6 +28,7 @@ import {
   getQwenSubscriptionAuthorizationUrl,
   getQwenSubscriptionPlansUrl,
   isGenerationModelId,
+  isPaidQwenSubscriptionPlan,
   isQoderAccountRegion,
   isReservedProviderId,
   openBrowserSecurely,
@@ -2496,8 +2497,7 @@ const choosePlanMessage =
   "Your subscription isn't active yet. If you've completed payment, please wait a moment and check again.";
 
 function isPaidPlan(memberType: string): boolean {
-  const value = memberType.toLowerCase();
-  return value === 'plus' || value === 'pro';
+  return isPaidQwenSubscriptionPlan(memberType);
 }
 
 function planLabel(memberType: string): string {

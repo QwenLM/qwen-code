@@ -20,9 +20,11 @@ import * as acp from '@agentclientprotocol/sdk';
 import {
   BRAND_CLI_NAME,
   BRAND_CLI_SLUG,
+  QwenSubscriptionSession,
   Storage,
   TranscriptSessionError,
   ResumeReadError,
+  createQoderClient,
   deleteSessionArtifactsAsync,
   deleteSubagentTranscriptDirAndArtifactsAsync,
   findTranscriptSessionForDeletion,
@@ -31,6 +33,7 @@ import {
   getVersion,
   MCPServerConfig,
   createWorkingStdio,
+  openBrowserSecurely,
   parseReasoningEffortLevel,
   isFsTouchUnsafePath,
   isSafeSessionFileStem,
@@ -41,8 +44,16 @@ import {
   type AuthType,
   type Config,
   type FileSystemService,
+  type QoderAccountRegion,
 } from '@qwen-code/core';
-import { getAcpErrorMessage } from './acpErrors.js';
+import type { LoadedSettings } from '../config/settings.js';
+import {
+  AcpAuthCoordinator,
+  hasUsableSessionModels,
+  registerAccountProvidersOnConfig,
+  type AccountProviderFactory,
+  type QoderDeviceLoginHandle,
+} from './acpAuth.js';
 import { getPreferredReasoningEffort } from '../utils/modelPreference.js';
 import {
   createDefaultAcpModelAdapter,
@@ -90,6 +101,7 @@ export interface AcpServerParams {
   readonly manager: ThreadManager;
   /** Framework 发起的 ThreadManager 初始化；会话 open 之前等它结算。 */
   readonly managerReady: Promise<unknown>;
+  readonly settings?: LoadedSettings;
   readonly worktreeStartupRequest?: WorktreeStartupRequest;
   /** Fired after the ACP initialize response is built, without delaying it. */
   readonly onInitialized?: () => void | Promise<void>;
@@ -162,7 +174,9 @@ export class AcpServer {
   protected readonly connection: acp.AgentSideConnection;
   protected readonly manager: ThreadManager;
   protected readonly managerReady: Promise<unknown>;
+  protected readonly settings: LoadedSettings | undefined;
   private readonly onInitialized: (() => void | Promise<void>) | undefined;
+  private readonly authCoordinator = new AcpAuthCoordinator();
   private pendingWorktreeStartupRequest: WorktreeStartupRequest | undefined;
   private worktreeStartupRequestResolved: boolean;
 
@@ -171,6 +185,7 @@ export class AcpServer {
     this.connection = params.connection;
     this.manager = params.manager;
     this.managerReady = params.managerReady;
+    this.settings = params.settings;
     this.onInitialized = params.onInitialized;
     this.pendingWorktreeStartupRequest = params.worktreeStartupRequest;
     this.worktreeStartupRequestResolved =
@@ -213,11 +228,11 @@ export class AcpServer {
   protected async prepareAuth(): Promise<void> {}
 
   /**
-   * Auth methods are owned by product builds; the open build exposes none and
-   * requires authentication to complete before the session starts.
+   * Default authentication methods exposed by the open build. Product builds
+   * may override this to advertise their own authentication flows.
    */
   protected buildAuthMethods(): acp.AuthMethod[] {
-    return [];
+    return this.authCoordinator.buildAuthMethods();
   }
 
   protected buildAgentInfo(version: string): acp.Implementation {
@@ -251,10 +266,21 @@ export class AcpServer {
   }
 
   async authenticate(request: acp.AuthenticateRequest): Promise<void> {
-    throw new acp.RequestError(
-      -32602,
-      `Unknown auth method: ${request.methodId}`,
-    );
+    try {
+      await this.authCoordinator.authenticate(
+        request.methodId,
+        {
+          createSubscriptionSession: () => this.createSubscriptionSession(),
+          startQoderDeviceLogin: (region) => this.startQoderDeviceLogin(region),
+          notifyAuthUri: (authUri) => this.notifyAuthUri(authUri),
+          getAuthMethods: () => this.buildAuthMethods(),
+          settings: this.settings,
+        },
+        (factory) => this.attachProviderToActiveSessions(factory),
+      );
+    } catch (error) {
+      throw this.toRequestError(error);
+    }
   }
 
   newSession(params: acp.NewSessionRequest): Promise<acp.NewSessionResponse> {
@@ -355,6 +381,7 @@ export class AcpServer {
     }
 
     const config = this.requireConfig(state);
+    await this.ensureSessionProvidersReady(state, config);
 
     const rewind = parseRewindInvocation(params.prompt);
     if (rewind !== null) {
@@ -393,7 +420,7 @@ export class AcpServer {
       );
     } catch (error) {
       handle.fail(error);
-      throw toAcpRequestError(error);
+      throw toAcpRequestError(error, this.buildAuthMethods());
     }
     return handle.promise;
   }
@@ -597,6 +624,9 @@ export class AcpServer {
     try {
       await this.openAcpSession(state, {
         ...(worktreeRequest === undefined ? {} : { worktreeRequest }),
+      });
+      await this.ensureSessionProvidersReady(state, this.requireConfig(state), {
+        syncModels: true,
       });
       // session/new acknowledges a resumable ID, including an empty session.
       await this.manager.requireSession(sessionId).persistSessionCheckpoint();
@@ -841,6 +871,7 @@ export class AcpServer {
       connection: this.connection,
       clientCapabilities: this.clientCapabilities,
       ensureAuthReady: () => this.ensureAuthReady(),
+      getAuthMethods: () => this.buildAuthMethods(),
       prepareInference: (input) => this.prepareInference(input),
       resolveConfig: (sessionId) =>
         this.manager.requireSession(sessionId).requireConfig(),
@@ -1143,6 +1174,143 @@ export class AcpServer {
     return createDefaultAcpModelAdapter();
   }
 
+  protected createSubscriptionSession(): QwenSubscriptionSession {
+    return new QwenSubscriptionSession();
+  }
+
+  protected startQoderDeviceLogin(
+    region: QoderAccountRegion,
+  ): QoderDeviceLoginHandle {
+    return createQoderClient({ region }).api.auth.startDeviceLogin();
+  }
+
+  protected openBrowser(url: string): Promise<void> {
+    return openBrowserSecurely(url);
+  }
+
+  private notifyAuthUri(authUri: string): void {
+    void this.connection
+      .extNotification?.('authenticate/update', {
+        _meta: { authUri },
+      })
+      ?.catch?.(() => undefined);
+    void this.openBrowser(authUri).catch((error: unknown) => {
+      runLogger.warn(
+        `[acp] failed to open browser for auth: ${getErrorMessage(error)}`,
+      );
+    });
+  }
+
+  private async attachProviderToActiveSessions(
+    factory: AccountProviderFactory,
+  ): Promise<void> {
+    for (const state of this.sessions.values()) {
+      let config: Config;
+      try {
+        config = this.requireConfig(state);
+      } catch {
+        continue;
+      }
+      let registered = false;
+      try {
+        registered = await registerAccountProvidersOnConfig(config, factory);
+      } catch (error) {
+        runLogger.warn(
+          `[acp] failed to attach provider to session ${state.sessionId}: ${getErrorMessage(error)}`,
+        );
+        continue;
+      }
+      if (registered) {
+        try {
+          await config.getModelProviderManager?.()?.listModels?.({
+            skipCache: true,
+          });
+        } catch {
+          // Best-effort catalog warm-up.
+        }
+        await this.syncSessionModelsAndNotify(state, config, true);
+      }
+    }
+  }
+
+  private async syncSessionModelsAndNotify(
+    state: AcpSessionState,
+    config: Config,
+    notifyClient: boolean,
+  ): Promise<void> {
+    let modelsChanged = false;
+    try {
+      const first = await refreshAcpSessionState(state, config);
+      modelsChanged = first?.modelsChanged === true;
+    } catch {
+      return;
+    }
+    const resolvedModelId = state.models?.currentModelId;
+    const currentConfigModel = config.getModel?.();
+    const availableIds =
+      state.models?.availableModels?.map((m) => m.modelId) ?? [];
+    if (
+      resolvedModelId &&
+      availableIds.includes(resolvedModelId) &&
+      (!currentConfigModel || !availableIds.includes(currentConfigModel))
+    ) {
+      try {
+        await config.setModel?.(resolvedModelId, true);
+      } catch {
+        // Best-effort model sync.
+      }
+      try {
+        const second = await refreshAcpSessionState(state, config);
+        modelsChanged = modelsChanged || second?.modelsChanged === true;
+      } catch {
+        // Keep previously refreshed state.
+      }
+    }
+    if (notifyClient && modelsChanged && state.configOptions) {
+      try {
+        await sendSessionUpdate(state, this.connection, {
+          sessionUpdate: 'config_option_update',
+          configOptions: state.configOptions,
+        });
+      } catch {
+        // Best-effort notification.
+      }
+    }
+  }
+
+  protected async ensureSessionProvidersReady(
+    state: AcpSessionState,
+    config: Config,
+    options: { readonly syncModels?: boolean } = {},
+  ): Promise<void> {
+    if (this.argv.fakeResponses) {
+      return;
+    }
+    if (await hasUsableSessionModels(config)) {
+      if (options.syncModels || this.needsModelAlignment(state, config)) {
+        await this.syncSessionModelsAndNotify(state, config, false);
+      }
+      return;
+    }
+    throw acp.RequestError.authRequired(
+      { authMethods: this.buildAuthMethods() },
+      'no model provider is available. Sign in with Qwen or Qoder, or configure a model provider first.',
+    );
+  }
+
+  private needsModelAlignment(state: AcpSessionState, config: Config): boolean {
+    const currentModel = config.getModel?.();
+    if (!currentModel) {
+      return true;
+    }
+    const availableIds = state.models?.availableModels?.map((m) => m.modelId);
+    return (
+      availableIds !== undefined &&
+      availableIds.length > 0 &&
+      !availableIds.includes(currentModel)
+    );
+  }
+
   private takeWorktreeStartupRequest(
     cwd: string,
   ): WorktreeStartupRequest | undefined {
@@ -1235,10 +1403,7 @@ export class AcpServer {
   }
 
   private toRequestError(error: unknown): acp.RequestError {
-    if (error instanceof acp.RequestError) {
-      return error;
-    }
-    return new acp.RequestError(500, getAcpErrorMessage(error));
+    return toAcpRequestError(error, this.buildAuthMethods());
   }
 }
 

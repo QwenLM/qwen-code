@@ -35,8 +35,12 @@ export {
   type QwenSubscriptionTokens,
   type QwenSubscriptionUserInfo,
 } from './oauth-client.js';
-export { QwenSubscriptionSession } from './session.js';
 export {
+  QWEN_SUBSCRIPTION_SIGNED_OUT_HINT,
+  QwenSubscriptionSession,
+} from './session.js';
+export {
+  isPaidQwenSubscriptionPlan,
   orderSubscriptionModels,
   QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
   qwenSubscriptionModel,

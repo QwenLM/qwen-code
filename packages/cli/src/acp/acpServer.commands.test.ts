@@ -9,19 +9,26 @@ import type * as acp from '@agentclientprotocol/sdk';
 import { ThreadManager } from '../thread-manager/threadManager.js';
 import type { CliArgs } from '../config/config.js';
 import { AcpServer } from './acpServer.js';
-import type { AcpSessionState } from './acpSessionHost.js';
+import {
+  refreshAcpSessionState,
+  type AcpSessionState,
+} from './acpSessionHost.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
 import {
+  AuthType,
   beginResumeRead,
   resolveSameRepoTranscriptSession,
   TranscriptStore,
   ModelTransportManager,
   ResourceService,
   type Config,
+  type QoderAccountRegion,
+  type QwenSubscriptionSession,
   type ResumeTranscriptResult,
 } from '@qwen-code/core';
+import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import { SettingsService } from '@qwen-code/resource';
 import { createTestPermissionManager } from '../test-utils/permissionManager.js';
 import { ThreadSession } from '../thread-manager/thread-session/threadSession.js';
@@ -478,5 +485,577 @@ describe('ACP initial command notification ordering', () => {
     await f.server.closeSession({ sessionId });
     await vi.runAllTimersAsync();
     expect(mocks.notify).not.toHaveBeenCalled();
+  });
+});
+
+describe('ACP authentication and provider readiness', () => {
+  class TestAuthAcpServer extends AcpServer {
+    constructor(
+      params: ConstructorParameters<typeof AcpServer>[0],
+      private readonly subscriptionSession: QwenSubscriptionSession,
+      readonly openedUrls: string[] = [],
+      private readonly options: {
+        readonly qoderDeviceLogin?: (region: QoderAccountRegion) => {
+          readonly authUrl: string;
+          readonly completion: Promise<unknown>;
+        };
+      } = {},
+    ) {
+      super(params);
+    }
+
+    protected override createSubscriptionSession(): QwenSubscriptionSession {
+      return this.subscriptionSession;
+    }
+
+    protected override startQoderDeviceLogin(region: QoderAccountRegion) {
+      if (this.options.qoderDeviceLogin) {
+        return this.options.qoderDeviceLogin(region);
+      }
+      return super.startQoderDeviceLogin(region);
+    }
+
+    protected override async openBrowser(url: string): Promise<void> {
+      this.openedUrls.push(url);
+    }
+  }
+
+  it('advertises qwen-subscription and qoder-oauth options in initialize authMethods', async () => {
+    const manager = {
+      provideHost: vi.fn(),
+      subscribe: vi.fn(),
+    } as unknown as ThreadManager;
+    const server = new AcpServer({
+      argv: {} as CliArgs,
+      manager,
+      managerReady: Promise.resolve(),
+      connection: {} as acp.AgentSideConnection,
+    });
+    const response = await server.initialize({ protocolVersion: 1 });
+    expect(response.authMethods).toEqual([
+      expect.objectContaining({
+        id: AuthType.QWEN_SUBSCRIPTION,
+      }),
+      expect.objectContaining({
+        id: `${AuthType.QODER_OAUTH}:global`,
+      }),
+      expect.objectContaining({
+        id: `${AuthType.QODER_OAUTH}:cn`,
+      }),
+    ]);
+  });
+
+  it('rejects prompt with authRequired and authMethods when no session ModelProvider is available', async () => {
+    const submitMessage = vi.fn(async (..._args: unknown[]) => {});
+    const manager = {
+      provideHost: vi.fn(),
+      subscribe: vi.fn(),
+      requireSession: () => ({
+        requireConfig: () => ({
+          hasModelProviderManager: () => false,
+        }),
+      }),
+      submitMessage,
+    } as unknown as ThreadManager;
+    const session = {
+      isSignedIn: vi.fn(() => false),
+    } as unknown as QwenSubscriptionSession;
+    const server = new TestAuthAcpServer(
+      {
+        argv: {} as CliArgs,
+        manager,
+        managerReady: Promise.resolve(),
+        connection: {
+          sessionUpdate: vi.fn(async () => ({})),
+        } as unknown as acp.AgentSideConnection,
+      },
+      session,
+    );
+    const state = {
+      sessionId: 'session-1',
+      host: { beginPrompt: vi.fn() },
+      callContext: {},
+      abortController: new AbortController(),
+      active: false,
+    } as unknown as AcpSessionState;
+    (
+      server as unknown as { sessions: Map<string, AcpSessionState> }
+    ).sessions.set('session-1', state);
+
+    await expect(
+      server.prompt({
+        sessionId: 'session-1',
+        prompt: [{ type: 'text', text: 'hello' }],
+      }),
+    ).rejects.toMatchObject({
+      code: -32000,
+      data: {
+        authMethods: [
+          expect.objectContaining({ id: AuthType.QWEN_SUBSCRIPTION }),
+          expect.objectContaining({ id: `${AuthType.QODER_OAUTH}:global` }),
+          expect.objectContaining({ id: `${AuthType.QODER_OAUTH}:cn` }),
+        ],
+      },
+    });
+    expect(submitMessage).not.toHaveBeenCalled();
+  });
+
+  it('authenticates qwen-subscription, notifies client, persists setting, and attaches provider to active sessions', async () => {
+    const extNotification = vi.fn(async () => {});
+    const setValue = vi.fn(() => true);
+    const registerAccountProvider = vi.fn(async () => {});
+    const config = {
+      getModelProviderManager: () => ({ registerAccountProvider }),
+      getSettingsService: () => new SettingsService(),
+      getModelTransportManager: () => ({ resolve: vi.fn(() => ({})) }),
+    };
+    const manager = {
+      provideHost: vi.fn(),
+      subscribe: vi.fn(),
+      requireSession: () => ({ requireConfig: () => config }),
+    } as unknown as ThreadManager;
+    const signIn = vi.fn(async (onDevice: (device: { user_code: string }) => void) => {
+      onDevice({ user_code: 'ABCD-1234' });
+      return { email: 'user@example.com', member_type: 'pro' };
+    });
+    const getModels = vi.fn(async () => ({
+      models: ['qwen4.0-max-preview'],
+      cached: false,
+    }));
+    const session = {
+      signIn,
+      getModels,
+      isSignedIn: () => true,
+    } as unknown as QwenSubscriptionSession;
+    const server = new TestAuthAcpServer(
+      {
+        argv: {} as CliArgs,
+        manager,
+        managerReady: Promise.resolve(),
+        settings: { setValue } as unknown as LoadedSettings,
+        connection: {
+          extNotification,
+        } as unknown as acp.AgentSideConnection,
+      },
+      session,
+    );
+    const state = {
+      sessionId: 'session-1',
+      host: { beginPrompt: vi.fn() },
+      callContext: {},
+      abortController: new AbortController(),
+      active: false,
+    } as unknown as AcpSessionState;
+    (
+      server as unknown as { sessions: Map<string, AcpSessionState> }
+    ).sessions.set('session-1', state);
+
+    await Promise.all([
+      server.authenticate({ methodId: AuthType.QWEN_SUBSCRIPTION }),
+      server.authenticate({ methodId: AuthType.QWEN_SUBSCRIPTION }),
+    ]);
+
+    expect(signIn).toHaveBeenCalledOnce();
+    expect(extNotification).toHaveBeenCalledWith(
+      'authenticate/update',
+      expect.objectContaining({
+        _meta: expect.objectContaining({
+          authUri: expect.stringContaining('user_code=ABCD-1234'),
+        }),
+      }),
+    );
+    expect(server.openedUrls).toHaveLength(1);
+    expect(server.openedUrls[0]).toContain('user_code=ABCD-1234');
+    expect(getModels).toHaveBeenCalledOnce();
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'security.auth.selectedType',
+      AuthType.QWEN_SUBSCRIPTION,
+    );
+    expect(registerAccountProvider).toHaveBeenCalledOnce();
+  });
+
+  it('rejects authenticate with authRequired when the account does not have an active paid subscription', async () => {
+    const manager = {
+      provideHost: vi.fn(),
+      subscribe: vi.fn(),
+    } as unknown as ThreadManager;
+    const session = {
+      signIn: vi.fn(async () => ({ email: 'free@example.com', member_type: 'free' })),
+      getModels: vi.fn(),
+    } as unknown as QwenSubscriptionSession;
+    const server = new TestAuthAcpServer(
+      {
+        argv: {} as CliArgs,
+        manager,
+        managerReady: Promise.resolve(),
+        connection: {} as acp.AgentSideConnection,
+      },
+      session,
+    );
+
+    await expect(
+      server.authenticate({ methodId: AuthType.QWEN_SUBSCRIPTION }),
+    ).rejects.toMatchObject({
+      code: -32000,
+    });
+    expect(session.getModels).not.toHaveBeenCalled();
+  });
+
+  it('rejects newSession with authRequired and skips checkpoint when no session ModelProvider is available', async () => {
+    const persistSessionCheckpoint = vi.fn(async () => {});
+    const close = vi.fn(async () => {});
+    const manager = {
+      provideHost: vi.fn(),
+      subscribe: vi.fn(),
+      open: vi.fn(async () => {}),
+      initialize: vi.fn(async () => ({ afterResponseSent: async () => {} })),
+      close,
+      requireSession: () => ({
+        requireConfig: () => ({
+          hasModelProviderManager: () => false,
+        }),
+        getQueryRunner: vi.fn(async () => ({})),
+        persistSessionCheckpoint,
+      }),
+    } as unknown as ThreadManager;
+    const session = {
+      isSignedIn: vi.fn(() => false),
+    } as unknown as QwenSubscriptionSession;
+    const server = new TestAuthAcpServer(
+      {
+        argv: {} as CliArgs,
+        manager,
+        managerReady: Promise.resolve(),
+        connection: {} as acp.AgentSideConnection,
+      },
+      session,
+    );
+
+    await expect(
+      server.newSession({ cwd: '/workspace', mcpServers: [] }),
+    ).rejects.toMatchObject({
+      code: -32000,
+      data: {
+        authMethods: [
+          expect.objectContaining({ id: AuthType.QWEN_SUBSCRIPTION }),
+          expect.objectContaining({ id: `${AuthType.QODER_OAUTH}:global` }),
+          expect.objectContaining({ id: `${AuthType.QODER_OAUTH}:cn` }),
+        ],
+      },
+    });
+    expect(persistSessionCheckpoint).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('rejects newSession with authRequired when registered providers have an empty model catalog', async () => {
+    const persistSessionCheckpoint = vi.fn(async () => {});
+    const close = vi.fn(async () => {});
+    const manager = {
+      provideHost: vi.fn(),
+      subscribe: vi.fn(),
+      open: vi.fn(async () => {}),
+      initialize: vi.fn(async () => ({ afterResponseSent: async () => {} })),
+      close,
+      requireSession: () => ({
+        requireConfig: () => ({
+          hasModelProviderManager: () => true,
+          getModelProviderManager: () => ({
+            listModels: vi.fn(async () => []),
+          }),
+        }),
+        getQueryRunner: vi.fn(async () => ({})),
+        persistSessionCheckpoint,
+      }),
+    } as unknown as ThreadManager;
+    const session = {
+      isSignedIn: vi.fn(() => false),
+    } as unknown as QwenSubscriptionSession;
+    const server = new TestAuthAcpServer(
+      {
+        argv: {} as CliArgs,
+        manager,
+        managerReady: Promise.resolve(),
+        connection: {} as acp.AgentSideConnection,
+      },
+      session,
+    );
+
+    await expect(
+      server.newSession({ cwd: '/workspace', mcpServers: [] }),
+    ).rejects.toMatchObject({
+      code: -32000,
+      data: {
+        authMethods: [
+          expect.objectContaining({ id: AuthType.QWEN_SUBSCRIPTION }),
+          expect.objectContaining({ id: `${AuthType.QODER_OAUTH}:global` }),
+          expect.objectContaining({ id: `${AuthType.QODER_OAUTH}:cn` }),
+        ],
+      },
+    });
+    expect(persistSessionCheckpoint).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('authenticates qoder-oauth:cn, notifies client, persists region/type, and attaches provider', async () => {
+    const extNotification = vi.fn(async () => {});
+    const setValue = vi.fn(() => true);
+    const registerAccountProvider = vi.fn(async () => {});
+    const listModels = vi.fn(async () => [{ key: 'auto', source: 'qoder' }]);
+    const config = {
+      getModelProviderManager: () => ({ registerAccountProvider, listModels }),
+      getSettingsService: () => new SettingsService(),
+      getModelTransportManager: () => ({ resolve: vi.fn(() => ({})) }),
+    };
+    const manager = {
+      provideHost: vi.fn(),
+      subscribe: vi.fn(),
+      requireSession: () => ({ requireConfig: () => config }),
+    } as unknown as ThreadManager;
+    const qoderDeviceLogin = vi.fn((region: QoderAccountRegion) => ({
+      authUrl: `https://qoder.${region === 'cn' ? 'cn' : 'com'}/oauth/authorize`,
+      completion: Promise.resolve(),
+    }));
+    const session = {
+      isSignedIn: () => false,
+    } as unknown as QwenSubscriptionSession;
+    const server = new TestAuthAcpServer(
+      {
+        argv: {} as CliArgs,
+        manager,
+        managerReady: Promise.resolve(),
+        settings: { setValue } as unknown as LoadedSettings,
+        connection: {
+          extNotification,
+        } as unknown as acp.AgentSideConnection,
+      },
+      session,
+      [],
+      { qoderDeviceLogin },
+    );
+    const state = {
+      sessionId: 'session-1',
+      host: { beginPrompt: vi.fn() },
+      callContext: {},
+      abortController: new AbortController(),
+      active: false,
+    } as unknown as AcpSessionState;
+    (
+      server as unknown as { sessions: Map<string, AcpSessionState> }
+    ).sessions.set('session-1', state);
+
+    await server.authenticate({ methodId: `${AuthType.QODER_OAUTH}:cn` });
+
+    expect(qoderDeviceLogin).toHaveBeenCalledWith('cn');
+    expect(extNotification).toHaveBeenCalledWith('authenticate/update', {
+      _meta: { authUri: 'https://qoder.cn/oauth/authorize' },
+    });
+    expect(server.openedUrls).toEqual(['https://qoder.cn/oauth/authorize']);
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'security.auth.qoderRegion',
+      'cn',
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'security.auth.selectedType',
+      AuthType.QODER_OAUTH,
+    );
+    expect(registerAccountProvider).toHaveBeenCalledOnce();
+    expect(listModels).toHaveBeenCalledWith({ skipCache: true });
+  });
+
+  it('preserves modelsChanged across model sync and sends config_option_update after authenticate', async () => {
+    const sessionUpdate = vi.fn(async () => ({}));
+    const setModel = vi.fn(async () => true);
+    const registerAccountProvider = vi.fn(async () => {});
+    const config = {
+      getModel: () => 'auto',
+      setModel,
+      getModelProviderManager: () => ({ registerAccountProvider }),
+      getSettingsService: () => new SettingsService(),
+      getModelTransportManager: () => ({ resolve: vi.fn(() => ({})) }),
+    };
+    const manager = {
+      provideHost: vi.fn(),
+      subscribe: vi.fn(),
+      requireSession: () => ({ requireConfig: () => config }),
+    } as unknown as ThreadManager;
+    const session = {
+      signIn: vi.fn(async () => ({ email: 'u@example.com', member_type: 'pro' })),
+      getModels: vi.fn(async () => ({ models: ['qwen4-max'], cached: false })),
+    } as unknown as QwenSubscriptionSession;
+    const server = new TestAuthAcpServer(
+      {
+        argv: {} as CliArgs,
+        manager,
+        managerReady: Promise.resolve(),
+        connection: { sessionUpdate } as unknown as acp.AgentSideConnection,
+      },
+      session,
+    );
+    const updatedOptions = [{ type: 'select', id: 'model', name: 'Model', currentValue: 'qwen-subscription/qwen4-max', options: [] }];
+    const state = {
+      sessionId: 'session-1',
+      host: { beginPrompt: vi.fn() },
+      callContext: {},
+      abortController: new AbortController(),
+      active: true,
+      disposed: false,
+      updateChain: Promise.resolve(),
+      models: {
+        availableModels: [{ modelId: 'qwen-subscription/qwen4-max', name: 'Qwen4-Max' }],
+        currentModelId: 'qwen-subscription/qwen4-max',
+      },
+      configOptions: updatedOptions,
+    } as unknown as AcpSessionState;
+    (
+      server as unknown as { sessions: Map<string, AcpSessionState> }
+    ).sessions.set('session-1', state);
+
+    vi.mocked(refreshAcpSessionState)
+      .mockResolvedValueOnce({ modeChanged: false, modelsChanged: true })
+      .mockResolvedValueOnce({ modeChanged: false, modelsChanged: false });
+
+    await server.authenticate({ methodId: AuthType.QWEN_SUBSCRIPTION });
+
+    expect(setModel).toHaveBeenCalledWith('qwen-subscription/qwen4-max', true);
+    expect(sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'config_option_update',
+        configOptions: updatedOptions,
+      },
+    });
+  });
+
+  it('isolates per-session provider attachment failures during authenticate', async () => {
+    const failingRegister = vi.fn(async () => {
+      throw new Error('provider start failed');
+    });
+    const succeedingRegister = vi.fn(async () => {});
+    const configs = new Map<string, unknown>([
+      [
+        'session-bad',
+        {
+          getModelProviderManager: () => ({
+            registerAccountProvider: failingRegister,
+          }),
+          getSettingsService: () => new SettingsService(),
+          getModelTransportManager: () => ({ resolve: vi.fn(() => ({})) }),
+        },
+      ],
+      [
+        'session-good',
+        {
+          getModelProviderManager: () => ({
+            registerAccountProvider: succeedingRegister,
+          }),
+          getSettingsService: () => new SettingsService(),
+          getModelTransportManager: () => ({ resolve: vi.fn(() => ({})) }),
+        },
+      ],
+    ]);
+    const manager = {
+      provideHost: vi.fn(),
+      subscribe: vi.fn(),
+      requireSession: (id: string) => ({ requireConfig: () => configs.get(id) }),
+    } as unknown as ThreadManager;
+    const session = {
+      signIn: vi.fn(async () => ({ email: 'u@example.com', member_type: 'pro' })),
+      getModels: vi.fn(async () => ({ models: ['qwen4-max'], cached: false })),
+    } as unknown as QwenSubscriptionSession;
+    const server = new TestAuthAcpServer(
+      {
+        argv: {} as CliArgs,
+        manager,
+        managerReady: Promise.resolve(),
+        connection: {} as acp.AgentSideConnection,
+      },
+      session,
+    );
+    const sessions = (
+      server as unknown as { sessions: Map<string, AcpSessionState> }
+    ).sessions;
+    sessions.set('session-bad', { sessionId: 'session-bad' } as AcpSessionState);
+    sessions.set('session-good', { sessionId: 'session-good' } as AcpSessionState);
+
+    await expect(
+      server.authenticate({ methodId: AuthType.QWEN_SUBSCRIPTION }),
+    ).resolves.toBeUndefined();
+    expect(failingRegister).toHaveBeenCalledOnce();
+    expect(succeedingRegister).toHaveBeenCalledOnce();
+  });
+
+  it('skips redundant refreshAcpSessionState on prompt when session models are already aligned', async () => {
+    vi.mocked(refreshAcpSessionState).mockClear();
+    const submitMessage = vi.fn(async (..._args: unknown[]) => {});
+    const beginPrompt = vi.fn(() => ({
+      promise: Promise.resolve({ stopReason: 'end_turn' as const }),
+      fail: vi.fn(),
+    }));
+    const config = {
+      hasModelProviderManager: () => true,
+      getModel: () => 'qwen-subscription/qwen4-max',
+      getModelProviderManager: () => ({
+        listModels: vi.fn(async () => [{ key: 'qwen-subscription/qwen4-max' }]),
+      }),
+    };
+    const manager = {
+      provideHost: vi.fn(),
+      subscribe: vi.fn(),
+      requireSession: () => ({ requireConfig: () => config }),
+      submitMessage,
+    } as unknown as ThreadManager;
+    const server = new TestAuthAcpServer(
+      {
+        argv: {} as CliArgs,
+        manager,
+        managerReady: Promise.resolve(),
+        connection: {} as acp.AgentSideConnection,
+      },
+      { isSignedIn: () => true } as unknown as QwenSubscriptionSession,
+    );
+    const state = {
+      sessionId: 'session-1',
+      host: { beginPrompt },
+      callContext: {},
+      abortController: new AbortController(),
+      active: false,
+      models: {
+        availableModels: [{ modelId: 'qwen-subscription/qwen4-max', name: 'Qwen4-Max' }],
+        currentModelId: 'qwen-subscription/qwen4-max',
+      },
+    } as unknown as AcpSessionState;
+    (
+      server as unknown as { sessions: Map<string, AcpSessionState> }
+    ).sessions.set('session-1', state);
+
+    await server.prompt({
+      sessionId: 'session-1',
+      prompt: [{ type: 'text', text: 'hello' }],
+    });
+
+    expect(refreshAcpSessionState).not.toHaveBeenCalled();
+    expect(submitMessage).toHaveBeenCalledOnce();
+  });
+
+  it('rejects unknown auth methods with invalid params', async () => {
+    const manager = {
+      provideHost: vi.fn(),
+      subscribe: vi.fn(),
+    } as unknown as ThreadManager;
+    const server = new AcpServer({
+      argv: {} as CliArgs,
+      manager,
+      managerReady: Promise.resolve(),
+      connection: {} as acp.AgentSideConnection,
+    });
+
+    await expect(
+      server.authenticate({ methodId: 'unknown-method' }),
+    ).rejects.toMatchObject({
+      code: -32602,
+    });
   });
 });

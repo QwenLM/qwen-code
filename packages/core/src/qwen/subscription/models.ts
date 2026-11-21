@@ -77,6 +77,12 @@ export function selectQwenSubscriptionModel(
   return models[0];
 }
 
+/** Whether a Qwen membership tier grants access to Qwen Subscription inference. */
+export function isPaidQwenSubscriptionPlan(memberType: string): boolean {
+  const value = memberType.toLowerCase();
+  return value === 'plus' || value === 'pro';
+}
+
 export function qwenSubscriptionModelKey(modelId: string): string {
   return `${QWEN_SUBSCRIPTION_PROVIDER_ID}/${modelId}`;
 }

@@ -41,6 +41,7 @@ import type { QueuedCommand } from '../../services/messageQueueManager.js';
 import { loadLatestSessionUsage } from '../../services/session-state-usage.js';
 
 import { uiTelemetryService } from '../../services/session-stats.js';
+import { MissingSessionModelProviderError } from '../../utils/errors.js';
 
 import {
   TASK_UPDATE_TOOL_NAME,
@@ -253,7 +254,7 @@ async function selectInitialModel(
   const options = input.params;
   const { config, selectInput } = input;
   if (!config.hasModelProviderManager()) {
-    throw new Error('A session ModelProvider is required for inference.');
+    throw new MissingSessionModelProviderError();
   }
   const manager = config.getModelProviderManager();
   const selected = await manager.select({

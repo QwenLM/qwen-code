@@ -7,7 +7,14 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type * as acp from '@agentclientprotocol/sdk';
-import type { Config, SDKMessage } from '@qwen-code/core';
+import {
+  FatalAuthenticationError,
+  MissingSessionModelProviderError,
+  QWEN_SUBSCRIPTION_SIGNED_OUT_HINT,
+  QwenSubscriptionOAuthError,
+  type Config,
+  type SDKMessage,
+} from '@qwen-code/core';
 import {
   createAcpSessionHost,
   refreshAcpSessionState,
@@ -545,5 +552,207 @@ describe('ACP request error mapping', () => {
     const mapped = toAcpRequestError(error);
     expect(mapped.code).toBe(502);
     expect(mapped.message).toBe('upstream failed');
+  });
+
+  it('maps missing session ModelProvider errors to authRequired with authMethods', () => {
+    const authMethods = [
+      { id: 'qwen-subscription', name: 'Sign in with Qwen' },
+    ];
+    const mapped = toAcpRequestError(
+      new MissingSessionModelProviderError(),
+      authMethods,
+    );
+    expect(mapped.code).toBe(-32000);
+    expect(mapped.data).toEqual({ authMethods });
+
+    const serialized = toAcpRequestError(
+      new Error('A session ModelProvider is required for inference.'),
+      authMethods,
+    );
+    expect(serialized.code).toBe(-32000);
+    expect(serialized.data).toEqual({ authMethods });
+  });
+
+  it('maps subscription session_changed, signed-out hint, and FatalAuthenticationError to authRequired', () => {
+    const subError = new QwenSubscriptionOAuthError(
+      'session_changed',
+      undefined,
+      'Your Qwen session expired.',
+    );
+    const mappedSub = toAcpRequestError(subError);
+    expect(mappedSub.code).toBe(-32000);
+
+    const hintError = new Error(QWEN_SUBSCRIPTION_SIGNED_OUT_HINT);
+    expect(toAcpRequestError(hintError).code).toBe(-32000);
+
+    const fatalAuth = new FatalAuthenticationError('Token revoked');
+    const mappedFatal = toAcpRequestError(fatalAuth);
+    expect(mappedFatal.code).toBe(-32000);
+  });
+
+  it('preserves generic HTTP 401 for custom providers without forcing authRequired', () => {
+    const error = Object.assign(new Error('Invalid API key'), { status: 401 });
+    const mapped = toAcpRequestError(error);
+    expect(mapped.code).toBe(401);
+    expect(mapped.message).toBe('Invalid API key');
+  });
+});
+
+describe('createDefaultAcpModelAdapter', () => {
+  it('lists enabled models from ModelProviderManager and picks the provider default instead of auto', async () => {
+    const adapter = createDefaultAcpModelAdapter();
+    const config = {
+      getModel: () => 'auto',
+      getModelProviderManager: () => ({
+        listModels: vi.fn(async () => [
+          {
+            source: 'qwen-subscription',
+            key: 'qwen-subscription/qwen4-max',
+            displayName: 'Qwen4-Max',
+            enabled: true,
+            isDefault: true,
+            capabilities: {
+              tools: true,
+              vision: true,
+              reasoning: { supported: true, supportedEfforts: ['low', 'high'] },
+              contextWindows: [],
+            },
+            limits: { maxContextTokens: 1_000_000 },
+          },
+          {
+            source: 'qwen-subscription',
+            key: 'qwen-subscription/disabled',
+            displayName: 'Disabled',
+            enabled: false,
+            capabilities: {
+              tools: true,
+              vision: false,
+              reasoning: { supported: false, supportedEfforts: [] },
+              contextWindows: [],
+            },
+            limits: { maxContextTokens: 128_000 },
+          },
+        ]),
+        getModel: vi.fn(async () => ({
+          source: 'qwen-subscription',
+          key: 'qwen-subscription/qwen4-max',
+          displayName: 'Qwen4-Max',
+          capabilities: {
+            tools: true,
+            vision: true,
+            reasoning: { supported: true, supportedEfforts: ['low', 'high'] },
+            contextWindows: [],
+          },
+          limits: { maxContextTokens: 1_000_000 },
+        })),
+        getModelConfig: vi.fn(() => ({ reasoning: { effort: 'high' } })),
+      }),
+    } as unknown as Config;
+
+    const models = await adapter.buildAvailableModels(config);
+    expect(models).toEqual({
+      availableModels: [
+        {
+          modelId: 'qwen-subscription/qwen4-max',
+          name: 'Qwen4-Max (default)',
+          description: 'Reasoning · Vision',
+        },
+      ],
+      currentModelId: 'qwen-subscription/qwen4-max',
+    });
+
+    const effort = await adapter.buildReasoningEffortOption?.(config);
+    expect(effort).toMatchObject({
+      id: 'reasoning_effort',
+      currentValue: 'high',
+      options: [
+        { value: 'low', name: 'Low' },
+        { value: 'high', name: 'High' },
+      ],
+    });
+  });
+
+  it('uses model defaultModelConfig reasoning effort when no user preference is stored', async () => {
+    const adapter = createDefaultAcpModelAdapter();
+    const config = {
+      getModel: () => 'qwen-subscription/qwen4-max',
+      getModelProviderManager: () => ({
+        getModel: vi.fn(async () => ({
+          source: 'qwen-subscription',
+          key: 'qwen-subscription/qwen4-max',
+          displayName: 'Qwen4-Max',
+          capabilities: {
+            tools: true,
+            vision: true,
+            reasoning: {
+              supported: true,
+              supportedEfforts: ['none', 'low', 'medium', 'high'],
+            },
+            contextWindows: [],
+          },
+          limits: { maxContextTokens: 1_000_000 },
+          defaultModelConfig: {
+            reasoning: { effort: 'medium' },
+          },
+        })),
+        getModelConfig: vi.fn(() => undefined),
+      }),
+    } as unknown as Config;
+
+    const effort = await adapter.buildReasoningEffortOption?.(config);
+    expect(effort).toMatchObject({
+      id: 'reasoning_effort',
+      currentValue: 'medium',
+    });
+  });
+
+  it('clamps a stale stored reasoning effort preference that is no longer supported', async () => {
+    const adapter = createDefaultAcpModelAdapter();
+    const config = {
+      getModel: () => 'qwen-subscription/qwen4-max',
+      getModelProviderManager: () => ({
+        getModel: vi.fn(async () => ({
+          source: 'qwen-subscription',
+          key: 'qwen-subscription/qwen4-max',
+          displayName: 'Qwen4-Max',
+          capabilities: {
+            tools: true,
+            vision: true,
+            reasoning: {
+              supported: true,
+              supportedEfforts: ['none', 'low', 'medium', 'high'],
+            },
+            contextWindows: [],
+          },
+          limits: { maxContextTokens: 1_000_000 },
+          defaultModelConfig: {
+            reasoning: { effort: 'medium' },
+          },
+        })),
+        getModelConfig: vi.fn(() => ({ reasoning: { effort: 'xhigh' } })),
+      }),
+    } as unknown as Config;
+
+    const effort = await adapter.buildReasoningEffortOption?.(config);
+    expect(effort).toMatchObject({
+      id: 'reasoning_effort',
+      currentValue: 'medium',
+    });
+  });
+
+  it('falls back to auto when no models are returned', async () => {
+    const adapter = createDefaultAcpModelAdapter();
+    const config = {
+      getModel: () => '',
+      getModelProviderManager: () => ({
+        listModels: vi.fn(async () => []),
+      }),
+    } as unknown as Config;
+
+    const models = await adapter.buildAvailableModels(config);
+    expect(models).toEqual({
+      availableModels: [{ modelId: 'auto', name: 'auto' }],
+      currentModelId: 'auto',
+    });
   });
 });

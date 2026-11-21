@@ -272,6 +272,16 @@ export class FatalAuthenticationError extends FatalError {
     this.name = 'FatalAuthenticationError';
   }
 }
+
+export const MISSING_SESSION_MODEL_PROVIDER_MESSAGE =
+  'A session ModelProvider is required for inference.';
+
+export class MissingSessionModelProviderError extends Error {
+  constructor(message: string = MISSING_SESSION_MODEL_PROVIDER_MESSAGE) {
+    super(message);
+    this.name = 'MissingSessionModelProviderError';
+  }
+}
 export class FatalInputError extends FatalError {
   constructor(message: string) {
     super(message, 42);
