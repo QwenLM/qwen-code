@@ -5871,6 +5871,16 @@ export function WebShellSidebar({
               short: t('sidebar.userInputNeededShort'),
             }
           : null;
+      // Persisted cut-off hint: only while nothing live owns the turn, so a
+      // running or attention session never shows it. backgroundTurn is
+      // checked alongside backgroundRunning because a notification turn can
+      // ride it without a running background task.
+      const needsContinuation =
+        session.needsContinuation === true &&
+        !running &&
+        !backgroundRunning &&
+        !session.backgroundTurn &&
+        !attention;
       const showPin = !standalone && canOrganizeSession(session, 'pin');
       const showArchive = standalone
         ? sessionActionItems.has('archive') && Boolean(standalone.onArchive)
@@ -6128,6 +6138,15 @@ export function WebShellSidebar({
                     {attention.short}
                   </span>
                 )}
+                {needsContinuation && (
+                  <span
+                    className={styles.sessionContinuation}
+                    aria-label={t('sidebar.continuationNeeded')}
+                    data-web-shell-session-continuation
+                  >
+                    {t('sidebar.continuationNeededShort')}
+                  </span>
+                )}
                 {running ? (
                   <span
                     className={cx(
@@ -6147,7 +6166,7 @@ export function WebShellSidebar({
                         : undefined
                     }
                   />
-                ) : !attention && gitIcon ? (
+                ) : !attention && !needsContinuation && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>
                 ) : null}
                 {recent && (
