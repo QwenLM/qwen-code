@@ -1693,6 +1693,38 @@ describe('startOpenTuiUI fallback contract', () => {
     expect(renderedInitialDialog()).toBeNull();
   });
 
+  it('seeds thoughtsExpanded from ui.startExpanded and defaults it closed', async () => {
+    // ui.startExpanded only seeds the initial value; ctrl+o owns it afterwards.
+    const open = async (ui: Record<string, unknown>) => {
+      const started = await startOpenTuiUI(
+        buildConfig(),
+        {
+          merged: { ui: { hideWindowTitle: true, ...ui } },
+        } as unknown as LoadedSettings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      );
+      expect(started).toBe(true);
+      const write = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      const calls = mocks.state.root.render.mock.calls;
+      render(calls[calls.length - 1]?.[0] as ReactElement);
+      write.mockRestore();
+      const main = mocks.state.appProps?.renderMain?.() as
+        | { props?: { children?: { props?: Record<string, unknown> } } }
+        | undefined;
+      return main?.props?.children?.props;
+    };
+
+    expect((await open({ startExpanded: true }))?.['thoughtsExpanded']).toBe(
+      true,
+    );
+    mocks.state.keyboard = [];
+    expect((await open({}))?.['thoughtsExpanded']).toBe(false);
+  });
+
   // The transcript itself is mocked away, so the two props Decision 36 adds are
   // read off the element the entry's own render seam returns: they are the only
   // production wiring of the parked-call marker and of the args setting. Both
