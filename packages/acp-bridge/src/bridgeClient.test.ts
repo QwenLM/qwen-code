@@ -1863,7 +1863,11 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       requiresAutoMode: true,
       callerSessionId: 'caller-1',
     });
-    for (const requiresAutoMode of [false, 'true']) {
+    for (const requiresAutoMode of [
+      false,
+      'true',
+      { requiresAutoMode: true },
+    ]) {
       await expect(
         client.extMethod(METHOD, {
           prompt: 'go',

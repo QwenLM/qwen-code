@@ -29,12 +29,12 @@ import type {
   ToolExecutionStatus,
   ToolResult,
   ToolResultDisplay,
-  ToolRegistry,
 } from '../index.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolCallEvent } from '../telemetry/types.js';
 import { QwenLogger } from '../telemetry/qwen-logger/qwen-logger.js';
 import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
+import type { SubSessionSpawnRequest } from '../config/config.js';
 import {
   ApprovalMode,
   BaseDeclarativeTool,
@@ -99,6 +99,8 @@ import { IdeClient } from '../ide/ide-client.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
 import { CreateSubSessionTool } from '../tools/create-sub-session.js';
+import { ToolRegistry } from '../tools/tool-registry.js';
+import { makeFakeConfig } from '../test-utils/config.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import type { ShellToolParams } from '../tools/shell.js';
@@ -3557,6 +3559,8 @@ describe('CoreToolScheduler', () => {
       execute: siblingExecute,
     });
     const build = siblingTool.build.bind(siblingTool);
+    // This pins the general ToolInvocation contract, not a named remote
+    // confirmation, whose hideAlwaysAllow excludes it from this sweep.
     vi.spyOn(siblingTool, 'build').mockImplementation((params) => {
       const invocation = build(params);
       invocation.requiresAutoReviewOnAllow = () => true;
@@ -3641,6 +3645,13 @@ describe('CoreToolScheduler', () => {
     const realTargetTool = new CreateSubSessionTool(
       config,
     ) as unknown as MockTool;
+    let targetInvocation: ReturnType<typeof realTargetTool.build> | undefined;
+    const build = realTargetTool.build.bind(realTargetTool);
+    vi.spyOn(realTargetTool, 'build').mockImplementation((params) => {
+      targetInvocation = build(params);
+      vi.spyOn(targetInvocation, 'getDefaultPermission');
+      return targetInvocation;
+    });
     const firstTool = new MockTool({
       name: 'ordinary_confirmation',
       getDefaultPermission: async () => 'ask',
@@ -3692,6 +3703,9 @@ describe('CoreToolScheduler', () => {
       'ordinary-confirmation',
     );
 
+    expect(
+      vi.mocked(targetInvocation!.getDefaultPermission),
+    ).toHaveBeenCalledTimes(2);
     expect(resolveWorkspace).toHaveBeenCalledTimes(1);
     expect(spawner).not.toHaveBeenCalled();
     expect(
@@ -3699,6 +3713,102 @@ describe('CoreToolScheduler', () => {
         (call) => call.request.callId === 'resolved-ask-sibling',
       )?.status,
     ).toBe('awaiting_approval');
+  });
+
+  it('reschedules an ordinary invocation after adding an allow rule in AUTO', async () => {
+    const targetToolName = ToolNames.READ_FILE;
+    const siblingPermission = vi.fn(
+      async (): Promise<PermissionDecision> => 'ask',
+    );
+    const siblingExecute = vi
+      .fn()
+      .mockResolvedValue(textResult('sibling executed'));
+    const siblingTool = askingTool({
+      name: targetToolName,
+      getDefaultPermission: siblingPermission,
+      requiresUserInteraction: () => false,
+      getConfirmationDetails: async () =>
+        infoConfirmation('Delegate locally', 'Approve?'),
+      execute: siblingExecute,
+    });
+    let approvalMode = ApprovalMode.DEFAULT;
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => approvalMode,
+    });
+    permissionManager.initialize();
+    const firstTool = new MockTool({
+      name: 'ordinary_confirmation',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () =>
+        infoConfirmation('Ordinary approval', 'Approve?'),
+    });
+    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([
+        [firstTool.name, firstTool],
+        [siblingTool.name, siblingTool],
+      ]),
+      getApprovalMode: () => approvalMode,
+      permissionManager,
+    });
+    await scheduler.schedule(
+      [
+        toolRequest('ordinary-confirmation', firstTool.name, {}, 'p'),
+        toolRequest(
+          'ordinary-sibling',
+          siblingTool.name,
+          { prompt: 'delegate' },
+          'p',
+        ),
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() =>
+      expect(
+        new Set(
+          reportedCalls(onToolCallsUpdate)
+            .filter((call) => call.status === 'awaiting_approval')
+            .map((call) => call.request.callId),
+        ),
+      ).toEqual(new Set(['ordinary-confirmation', 'ordinary-sibling'])),
+    );
+
+    approvalMode = ApprovalMode.AUTO;
+    permissionManager.addSessionAllowRule(targetToolName);
+    await autoApprovePendingTools(
+      scheduler,
+      new AbortController().signal,
+      'ordinary-confirmation',
+    );
+
+    expect(siblingPermission).toHaveBeenCalledTimes(2);
+    expect(runSideQueryMock).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(
+        reportedCalls(onToolCallsUpdate).findLast(
+          (call) => call.request.callId === 'ordinary-sibling',
+        )?.status,
+      ).toBe('scheduled'),
+    );
+    expect(siblingExecute).not.toHaveBeenCalled();
+    const firstWaiting = reportedCalls(onToolCallsUpdate).findLast(
+      (call) =>
+        call.request.callId === 'ordinary-confirmation' &&
+        call.status === 'awaiting_approval',
+    ) as WaitingToolCall;
+    await firstWaiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await vi.waitFor(() => expect(siblingExecute).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(
+        reportedCalls(onToolCallsUpdate).findLast(
+          (call) => call.request.callId === 'ordinary-sibling',
+        )?.status,
+      ).toBe('success'),
+    );
   });
 
   it('dispatches legacy tool names through their canonical registered tools', async () => {
@@ -6276,6 +6386,339 @@ describe('CoreToolScheduler', () => {
     });
   });
 
+  it.each([
+    { initialMode: ApprovalMode.YOLO, finalMode: ApprovalMode.AUTO },
+    { initialMode: ApprovalMode.AUTO, finalMode: ApprovalMode.YOLO },
+    { initialMode: ApprovalMode.DEFAULT, finalMode: ApprovalMode.YOLO },
+    {
+      initialMode: ApprovalMode.DEFAULT,
+      finalMode: ApprovalMode.AUTO,
+      invalidAtConfirmation: true,
+    },
+    {
+      initialMode: ApprovalMode.DEFAULT,
+      finalMode: ApprovalMode.AUTO,
+      abortDuringConfirmation: true,
+    },
+    {
+      initialMode: ApprovalMode.DEFAULT,
+      finalMode: ApprovalMode.AUTO,
+      abortAfterAutoConfirmation: true,
+    },
+  ])(
+    'preserves actual AUTO approval from $initialMode to $finalMode during remote workspace checks',
+    async ({
+      initialMode,
+      finalMode,
+      invalidAtConfirmation = false,
+      abortDuringConfirmation = false,
+      abortAfterAutoConfirmation = false,
+    }) => {
+      let approvalMode = initialMode;
+      const spawn = vi.fn(async (_request: SubSessionSpawnRequest) => ({
+        sessionId: 'child-id',
+      }));
+      const resolverModes: ApprovalMode[] = [];
+      const classifierModes: ApprovalMode[] = [];
+      const resolveWorkspace = vi.fn(async () => {
+        resolverModes.push(approvalMode);
+        return {
+          workspaceId: 'repo-b-id',
+          workspaceCwd: '/repo-b',
+          workspaceGeneration: 'generation-b',
+          sameWorkspace: false,
+        };
+      });
+      let markModGateEntered!: () => void;
+      let releaseModGate!: () => void;
+      const modGateEntered = new Promise<void>((resolve) => {
+        markModGateEntered = resolve;
+      });
+      const modGate = new Promise<void>((resolve) => {
+        releaseModGate = resolve;
+      });
+      let markClassifierEntered!: () => void;
+      let releaseClassifier!: () => void;
+      const classifierEntered = new Promise<void>((resolve) => {
+        markClassifierEntered = resolve;
+      });
+      const classifierGate = new Promise<void>((resolve) => {
+        releaseClassifier = resolve;
+      });
+      const classifier = vi.fn(async () => {
+        classifierModes.push(approvalMode);
+        markClassifierEntered();
+        await classifierGate;
+        return { shouldBlock: false };
+      });
+      runSideQueryMock.mockImplementation(classifier);
+      let markRulesEntered!: () => void;
+      let releaseRules!: () => void;
+      const rulesEntered = new Promise<void>((resolve) => {
+        markRulesEntered = resolve;
+      });
+      const rulesGate = new Promise<void>((resolve) => {
+        releaseRules = resolve;
+      });
+      let defaultPermissionReturned = false;
+      let permissionGateConsumed = false;
+      const config = makeFakeConfig({
+        sessionId: `workspace-mode-switch-${initialMode}-${finalMode}`,
+        cwd: '/repo-a',
+        targetDir: '/repo-a',
+        approvalMode: initialMode,
+        interactive: true,
+        disableAllHooks: true,
+        chatRecording: false,
+        usageStatisticsEnabled: false,
+      });
+      const permissionManager =
+        initialMode === ApprovalMode.DEFAULT
+          ? new PermissionManager({
+              getPermissionsAllow: () => [ToolNames.CREATE_SUB_SESSION],
+              getPermissionsAsk: () => [],
+              getPermissionsDeny: () => [],
+              getApprovalMode: () => approvalMode,
+            })
+          : ({
+              isToolEnabled: async () => true,
+              hasRelevantRules: () => false,
+              hasMatchingAskRule: () => false,
+              findMatchingDenyRule: () => undefined,
+            } as unknown as PermissionManager);
+      if (initialMode === ApprovalMode.DEFAULT) {
+        permissionManager.initialize();
+        const evaluate = permissionManager.evaluate.bind(permissionManager);
+        vi.spyOn(permissionManager, 'evaluate').mockImplementation(
+          async (context) => {
+            if (!permissionGateConsumed && defaultPermissionReturned) {
+              permissionGateConsumed = true;
+              markRulesEntered();
+              await rulesGate;
+            }
+            return evaluate(context);
+          },
+        );
+      }
+      config.getApprovalMode = () => approvalMode;
+      config.getPermissionManager = () => permissionManager;
+      config.setSubSessionSpawner(spawn, resolveWorkspace);
+      config.getLlmClient = () =>
+        ({
+          getHistoryTail: () => [],
+          getTrustedUserAnswers: () => [],
+        }) as unknown as ReturnType<Config['getLlmClient']>;
+      config.getBaseLlmClient = () =>
+        ({ generateJson: classifier }) as unknown as ReturnType<
+          Config['getBaseLlmClient']
+        >;
+      config.getAutoModeDenialState = () => ({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+      config.setAutoModeDenialState = vi.fn();
+      config.getAutoModeSettings = () => ({});
+      const workspaceContext = config.getWorkspaceContext();
+      vi.spyOn(workspaceContext, 'isPathWithinWorkspace').mockReturnValue(
+        false,
+      );
+      const registry = new ToolRegistry(config);
+      const tool = new CreateSubSessionTool(config);
+      const controller = new AbortController();
+      const confirmedAutoModes: ApprovalMode[] = [];
+      let confirmationInvocation: ReturnType<typeof tool.build> | undefined;
+      if (initialMode === ApprovalMode.DEFAULT) {
+        const build = tool.build.bind(tool);
+        vi.spyOn(tool, 'build').mockImplementation((params) => {
+          const invocation = build(params);
+          if (
+            invalidAtConfirmation ||
+            abortDuringConfirmation ||
+            abortAfterAutoConfirmation
+          ) {
+            confirmationInvocation = invocation;
+            vi.spyOn(invocation, 'execute');
+            const getConfirmationDetails =
+              invocation.getConfirmationDetails.bind(invocation);
+            vi.spyOn(invocation, 'getConfirmationDetails').mockImplementation(
+              async (signal) => {
+                expect(classifierModes).toEqual([ApprovalMode.AUTO]);
+                expect(approvalMode).toBe(ApprovalMode.AUTO);
+                const details = await getConfirmationDetails(signal);
+                if (abortDuringConfirmation) {
+                  controller.abort('cancelled-during-confirmation');
+                }
+                if (abortAfterAutoConfirmation) {
+                  const onAutoConfirm = details.onAutoConfirm?.bind(details);
+                  expect(onAutoConfirm).toBeTypeOf('function');
+                  return {
+                    ...details,
+                    onAutoConfirm: async (mode: ApprovalMode) => {
+                      await onAutoConfirm?.(mode);
+                      confirmedAutoModes.push(mode);
+                      controller.abort('cancelled-after-auto-confirmation');
+                    },
+                  };
+                }
+                approvalMode = ApprovalMode.DEFAULT;
+                return details;
+              },
+            );
+          }
+          const getDefaultPermission =
+            invocation.getDefaultPermission.bind(invocation);
+          vi.spyOn(invocation, 'getDefaultPermission').mockImplementation(
+            async (signal) => {
+              const permission = await getDefaultPermission(signal);
+              expect(
+                (
+                  invocation as unknown as {
+                    permissionApprovalMode: ApprovalMode;
+                  }
+                ).permissionApprovalMode,
+              ).toBe(ApprovalMode.DEFAULT);
+              defaultPermissionReturned = true;
+              return permission;
+            },
+          );
+          return invocation;
+        });
+      }
+      registry.registerTool(tool);
+      config.getToolRegistry = () => registry;
+      const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+        schedulerWithCallbacks(config, {
+          modToolCheck: async (_input, verdict) => {
+            markModGateEntered();
+            await modGate;
+            return verdict;
+          },
+        });
+      const unexpectedCompletion = new Promise<never>((_, reject) => {
+        onAllToolCallsComplete.mockImplementation(
+          (calls: CompletedToolCall[]) => {
+            reject(
+              new Error(
+                `Tool completed before the expected gate: ${calls
+                  .map(
+                    (call) =>
+                      `${call.request.callId}: ${call.status}: ${
+                        call.response.error?.message ?? 'no error message'
+                      }`,
+                  )
+                  .join('\n')}`,
+              ),
+            );
+          },
+        );
+        onToolCallsUpdate.mockImplementation((calls: ToolCall[]) => {
+          for (const call of calls) {
+            if (call.status === 'awaiting_approval') {
+              const details = call.confirmationDetails;
+              reject(
+                new Error(
+                  `Unexpected manual approval: type=${details.type}, ` +
+                    `reason=${details.autoModeFallback?.reason ?? 'unknown'}, ` +
+                    `title=${details.title}`,
+                ),
+              );
+            }
+          }
+        });
+      });
+      const waitForGate = <T>(gate: Promise<T>) =>
+        Promise.race([gate, unexpectedCompletion]);
+
+      const scheduling = scheduler.schedule(
+        toolRequest(
+          `workspace-mode-switch-${initialMode}-${finalMode}`,
+          ToolNames.CREATE_SUB_SESSION,
+          {
+            prompt: 'answer directly',
+            workspace: 'repo-b-id',
+            completion: 'sent',
+          },
+          'workspace-mode-switch-prompt',
+        ),
+        controller.signal,
+      );
+      if (initialMode === ApprovalMode.DEFAULT) {
+        await waitForGate(rulesEntered);
+        approvalMode = ApprovalMode.AUTO;
+        releaseRules();
+      }
+      await waitForGate(modGateEntered);
+      if (initialMode === ApprovalMode.YOLO) {
+        approvalMode = ApprovalMode.AUTO;
+      }
+      releaseModGate();
+      await waitForGate(classifierEntered);
+      approvalMode = finalMode;
+      releaseClassifier();
+      await scheduling;
+      await vi.waitFor(() =>
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+
+      expect(resolverModes).toEqual([initialMode]);
+      expect(classifierModes).toEqual([ApprovalMode.AUTO]);
+      expect(resolveWorkspace).toHaveBeenCalledOnce();
+      const expectedMarker =
+        finalMode === ApprovalMode.AUTO ? 'requiresAutoMode' : 'requiresYolo';
+      const otherMarker =
+        finalMode === ApprovalMode.AUTO ? 'requiresYolo' : 'requiresAutoMode';
+      const [call] = firstBatch<CompletedToolCall>(onAllToolCallsComplete);
+      if (
+        invalidAtConfirmation ||
+        abortDuringConfirmation ||
+        abortAfterAutoConfirmation
+      ) {
+        expect(spawn).not.toHaveBeenCalled();
+        expect(call.status).toBe(invalidAtConfirmation ? 'error' : 'cancelled');
+        expect(confirmationInvocation).toBeDefined();
+        expect(
+          vi.mocked(confirmationInvocation!.execute),
+        ).not.toHaveBeenCalled();
+        if (invalidAtConfirmation) {
+          expect(call.response).toMatchObject({
+            errorType: ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
+            error: {
+              message:
+                'Approval mode changed before confirmation. Please retry.',
+            },
+          });
+        } else {
+          expect(call.response).toMatchObject({
+            executionStatus: 'not_started',
+          });
+        }
+        if (abortAfterAutoConfirmation) {
+          expect(confirmedAutoModes).toEqual([ApprovalMode.AUTO]);
+        }
+        return;
+      }
+      if (call.status !== 'success') {
+        throw new Error(
+          call.response.error?.message ?? 'Tool failed before spawning',
+        );
+      }
+      expect(spawn).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          prompt: 'answer directly',
+          completion: 'sent',
+          workspace: 'repo-b-id',
+          workspaceGeneration: 'generation-b',
+          [expectedMarker]: true,
+        }),
+      );
+      expect(spawn.mock.calls[0][0]).not.toHaveProperty(otherMarker);
+      expect(call.status).toBe('success');
+    },
+  );
+
   it('consumes AUTO review for allowed invocations in the main scheduler path', async () => {
     const execute = vi.fn().mockResolvedValue(textResult('must not execute'));
     const tool = askingTool({ execute });
@@ -6399,32 +6842,163 @@ describe('CoreToolScheduler', () => {
     expect(execute).toHaveBeenCalledOnce();
   });
 
+  it.each(['permission-request', 'execution-guard'] as const)(
+    'blocks a current-workspace ask added at %s',
+    async (checkpoint) => {
+      const spawn = vi.fn(async (_request: SubSessionSpawnRequest) => ({
+        sessionId: 'child-id',
+      }));
+      const resolveWorkspace = vi.fn(async () => ({
+        workspaceId: 'repo-a-id',
+        workspaceCwd: '/repo-a',
+        workspaceGeneration: 'generation-a',
+        sameWorkspace: true,
+      }));
+      const permissionManager = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      });
+      permissionManager.initialize();
+      const config = makeFakeConfig({
+        cwd: '/repo-a',
+        targetDir: '/repo-a',
+        approvalMode: ApprovalMode.DEFAULT,
+        interactive: true,
+        disableAllHooks: false,
+        chatRecording: false,
+        usageStatisticsEnabled: false,
+      });
+      config.getPermissionManager = () => permissionManager;
+      config.setSubSessionSpawner(spawn, resolveWorkspace);
+      const addLateAsk = () =>
+        permissionManager.addPersistentRule(
+          'create_sub_session(workspace:repo-a-id)',
+          'ask',
+        );
+      const executionGuard =
+        checkpoint === 'execution-guard'
+          ? vi.fn(async () => {
+              addLateAsk();
+              return { allowed: true };
+            })
+          : undefined;
+      config.getToolInvocationGuard = vi.fn(() => executionGuard);
+      const messageBus = hookBus(async (request) => {
+        if (
+          checkpoint === 'permission-request' &&
+          request.eventName === 'PermissionRequest'
+        ) {
+          addLateAsk();
+        }
+        return hookResponse(request.eventName, {
+          hookSpecificOutput: {
+            ...(request.eventName === 'PermissionRequest'
+              ? { decision: { behavior: 'allow' } }
+              : { decision: 'allow' }),
+          },
+        });
+      });
+      config.getMessageBus = () =>
+        messageBus as unknown as ReturnType<Config['getMessageBus']>;
+      const tool = new CreateSubSessionTool(config);
+      const registry = new ToolRegistry(config);
+      registry.registerTool(tool);
+      config.getToolRegistry = () => registry;
+      const { scheduler, onAllToolCallsComplete } =
+        schedulerWithCallbacks(config);
+
+      await scheduler.schedule(
+        [
+          toolRequest(
+            `late-current-workspace-${checkpoint}`,
+            tool.name,
+            { prompt: 'summarize', workspace: 'repo-a-id' },
+            `late-current-prompt-${checkpoint}`,
+          ),
+        ],
+        new AbortController().signal,
+      );
+
+      const [call] = firstBatch<CompletedToolCall>(onAllToolCallsComplete);
+      expect(call.status).toBe('error');
+      expect(call.response).toMatchObject({
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus:
+          checkpoint === 'execution-guard' ? 'error' : 'not_started',
+        error: { message: expect.stringContaining('one-time human approval') },
+      });
+      expect(
+        messageBus.request.mock.calls.filter(
+          ([request]) => request.eventName === 'PermissionRequest',
+        ),
+      ).toHaveLength(1);
+      expect(resolveWorkspace).toHaveBeenCalledOnce();
+      expect(spawn).not.toHaveBeenCalled();
+      if (executionGuard) expect(executionGuard).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each([
     { finalMode: ApprovalMode.AUTO, expectExecution: true },
     { finalMode: ApprovalMode.DEFAULT, expectExecution: false },
-    { finalMode: ApprovalMode.YOLO, expectExecution: false },
+    { finalMode: ApprovalMode.YOLO, expectExecution: true },
+    {
+      finalMode: ApprovalMode.DEFAULT,
+      expectExecution: true,
+      requiresAutoReview: false,
+    },
+    {
+      finalMode: ApprovalMode.AUTO,
+      expectExecution: false,
+      requiresHumanAfterReview: true,
+    },
+    {
+      finalMode: ApprovalMode.AUTO,
+      expectExecution: false,
+      requiresAutoReview: false,
+      requiresHumanAfterReview: true,
+    },
   ])(
     'revalidates an automatic hook approval after switching to $finalMode',
-    async ({ finalMode, expectExecution }) => {
+    async ({
+      finalMode,
+      expectExecution,
+      requiresAutoReview = true,
+      requiresHumanAfterReview = false,
+    }) => {
       let approvalMode = ApprovalMode.AUTO;
+      let requiresHuman = false;
       let permissionRequestReached = false;
       const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const onAutoConfirmSpy = vi.fn().mockResolvedValue(undefined);
       const execute = vi.fn().mockResolvedValue(textResult('executed'));
       const tool = askingTool({
         kind: Kind.Execute,
-        getConfirmationDetails: vi
-          .fn()
-          .mockResolvedValue(
-            execDetails('Delegate remotely', 'create', 'create', onConfirmSpy),
-          ),
+        requiresUserInteraction: () => requiresHuman,
+        getConfirmationDetails: vi.fn().mockImplementation(async () => {
+          if (requiresHumanAfterReview) requiresHuman = true;
+          return {
+            ...execDetails(
+              'Delegate remotely',
+              'create',
+              'create',
+              onConfirmSpy,
+            ),
+            ...(requiresAutoReview ? { onAutoConfirm: onAutoConfirmSpy } : {}),
+          };
+        }),
         execute,
       });
-      const build = tool.build.bind(tool);
-      vi.spyOn(tool, 'build').mockImplementation((params) => {
-        const invocation = build(params);
-        invocation.requiresAutoReviewOnAllow = () => true;
-        return invocation;
-      });
+      if (requiresAutoReview) {
+        const build = tool.build.bind(tool);
+        vi.spyOn(tool, 'build').mockImplementation((params) => {
+          const invocation = build(params);
+          invocation.requiresAutoReviewOnAllow = () => true;
+          return invocation;
+        });
+      }
       const messageBus = hookBus(async (request) => {
         if (request.eventName === 'PermissionRequest') {
           permissionRequestReached = true;
@@ -6450,7 +7024,15 @@ describe('CoreToolScheduler', () => {
       );
 
       expect(permissionRequestReached).toBe(true);
-      expect(onConfirmSpy).toHaveBeenCalledTimes(expectExecution ? 1 : 0);
+      expect(onConfirmSpy).toHaveBeenCalledTimes(
+        expectExecution && !requiresAutoReview ? 1 : 0,
+      );
+      expect(onAutoConfirmSpy).toHaveBeenCalledTimes(
+        expectExecution && requiresAutoReview ? 1 : 0,
+      );
+      if (expectExecution && requiresAutoReview) {
+        expect(onAutoConfirmSpy).toHaveBeenCalledWith(finalMode);
+      }
       expect(execute).toHaveBeenCalledTimes(expectExecution ? 1 : 0);
       const [call] = firstBatch<CompletedToolCall>(
         harness.onAllToolCallsComplete,
@@ -6462,7 +7044,9 @@ describe('CoreToolScheduler', () => {
           errorType: ToolErrorType.EXECUTION_DENIED,
           executionStatus: 'not_started',
           error: {
-            message: 'Approval mode changed before confirmation. Please retry.',
+            message: requiresHumanAfterReview
+              ? expect.stringContaining('one-time human approval')
+              : 'Approval mode changed before confirmation. Please retry.',
           },
         });
         expect(call.status).toBe('error');

@@ -23704,43 +23704,78 @@ describe('Session', () => {
       );
     });
 
-    it('returns the resolved workspace from the daemon', async () => {
+    it('forwards AUTO approval markers on actual spawner requests', async () => {
       const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
         .calls[0]?.[0];
-      const resolveWorkspace = vi.mocked(mockConfig.setSubSessionSpawner).mock
-        .calls[0]?.[1];
-      expect(resolveWorkspace).toBeTypeOf('function');
-      vi.mocked(mockClient.extMethod)
-        .mockResolvedValueOnce({
+      expect(spawn).toBeTypeOf('function');
+      vi.mocked(mockClient.extMethod).mockResolvedValue({
+        sessionId: 'child-auto',
+        workspaceCwd: '/repos/b',
+      });
+      await spawn?.({
+        prompt: 'delegate',
+        completion: 'sent',
+        workspace: 'repo-b-id',
+        workspaceGeneration: 'generation-b',
+        requiresAutoMode: true,
+      });
+      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        expect.objectContaining({ requiresAutoMode: true }),
+      );
+
+      vi.mocked(mockClient.extMethod).mockClear();
+      await spawn?.({
+        prompt: 'delegate again',
+        completion: 'sent',
+        workspace: 'repo-b-id',
+        workspaceGeneration: 'generation-b',
+      });
+      const [, params] = vi.mocked(mockClient.extMethod).mock.calls.at(-1)!;
+      expect(params).not.toHaveProperty('requiresAutoMode');
+      expect(params).not.toHaveProperty('requiresYolo');
+    });
+
+    it.each([true, false])(
+      'returns the resolved workspace from the daemon with sameWorkspace: %s',
+      async (expectedSameWorkspace) => {
+        const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
+          .calls[0]?.[0];
+        const resolveWorkspace = vi.mocked(mockConfig.setSubSessionSpawner).mock
+          .calls[0]?.[1];
+        expect(resolveWorkspace).toBeTypeOf('function');
+        vi.mocked(mockClient.extMethod)
+          .mockResolvedValueOnce({
+            workspaceId: 'b-id',
+            workspaceCwd: '/repos/b',
+            workspaceGeneration: 'generation-b',
+            sameWorkspace: expectedSameWorkspace,
+          })
+          .mockResolvedValueOnce({
+            sessionId: 'child-id',
+            workspaceCwd: '/repos/b',
+          });
+        const destination = await resolveWorkspace?.('b-id');
+        expect(destination).toEqual({
           workspaceId: 'b-id',
           workspaceCwd: '/repos/b',
           workspaceGeneration: 'generation-b',
-          sameWorkspace: false,
-        })
-        .mockResolvedValueOnce({
-          sessionId: 'child-id',
-          workspaceCwd: '/repos/b',
+          sameWorkspace: expectedSameWorkspace,
         });
-      const destination = await resolveWorkspace?.('b-id');
-      expect(destination).toEqual({
-        workspaceId: 'b-id',
-        workspaceCwd: '/repos/b',
-        workspaceGeneration: 'generation-b',
-        sameWorkspace: false,
-      });
-      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
-        SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace,
-        { workspace: 'b-id', callerSessionId: 'test-session-id' },
-      );
-      await expect(
-        spawn?.({
-          prompt: 'p',
-          completion: 'first-turn',
-          workspace: 'b-id',
-          workspaceGeneration: destination?.workspaceGeneration,
-        }),
-      ).resolves.toEqual({ sessionId: 'child-id', workspaceCwd: '/repos/b' });
-    });
+        expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+          SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace,
+          { workspace: 'b-id', callerSessionId: 'test-session-id' },
+        );
+        await expect(
+          spawn?.({
+            prompt: 'p',
+            completion: 'first-turn',
+            workspace: 'b-id',
+            workspaceGeneration: destination?.workspaceGeneration,
+          }),
+        ).resolves.toEqual({ sessionId: 'child-id', workspaceCwd: '/repos/b' });
+      },
+    );
 
     it.each([undefined, 'false', 0])(
       'rejects a non-boolean sameWorkspace binding (%s)',
@@ -23777,6 +23812,14 @@ describe('Session', () => {
         mode: ApprovalMode.AUTO,
         classify: true,
         asks: false,
+        launches: true,
+      },
+      {
+        label: 'manual confirmation in AUTO keeps its human provenance',
+        mode: ApprovalMode.AUTO,
+        askRule: '/repo-b',
+        noAllow: true,
+        asks: true,
         launches: true,
       },
       {
@@ -23938,16 +23981,22 @@ describe('Session', () => {
           ...mockLlmClient,
           getHistoryTail: () => [],
         });
-        const classifyAuto = classify
-          ? vi.spyOn(core, 'evaluateAutoMode').mockResolvedValue({
-              via: 'classifier',
-              shouldBlock: block,
-              reason: block ? 'test block' : 'test approval',
-              unavailable: false,
-              stage: 'fast',
-              durationMs: 0,
-            })
-          : undefined;
+        const generateJson =
+          classify || mode === ApprovalMode.AUTO
+            ? vi
+                .fn()
+                .mockResolvedValueOnce({ shouldBlock: block })
+                .mockResolvedValueOnce({
+                  thinking: 'test review',
+                  shouldBlock: block,
+                  reason: block ? 'test block' : '',
+                })
+            : undefined;
+        if (generateJson) {
+          mockConfig.getBaseLlmClient = vi
+            .fn()
+            .mockReturnValue({ generateJson });
+        }
         vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
           shouldProceed: true,
         });
@@ -23984,12 +24033,22 @@ describe('Session', () => {
           prompt: [{ type: 'text', text: 'Delegate' }],
         });
 
-        if (classifyAuto) {
-          expect(classifyAuto).toHaveBeenCalledOnce();
-          expect(classifyAuto.mock.calls[0]?.[0]).toMatchObject({
-            toolParams: args,
-            pmForcedAsk: false,
-          });
+        if (generateJson) {
+          if (!classify) {
+            expect(generateJson).not.toHaveBeenCalled();
+          }
+          if (classify) {
+            expect(generateJson).toHaveBeenCalledTimes(block ? 2 : 1);
+            const contents = generateJson.mock.calls.map(([request]) =>
+              JSON.stringify(request.contents),
+            );
+            expect(
+              contents.every(
+                (text) =>
+                  text.includes('summarize') && text.includes('repo-b-id'),
+              ),
+            ).toBe(true);
+          }
         }
         expect(permissionHook).toHaveBeenCalledTimes(asks ? 1 : 0);
         expect(request).toHaveBeenCalledTimes(asks ? 1 : 0);
@@ -24066,10 +24125,61 @@ describe('Session', () => {
         launches: true,
         modeAfterPermissionSnapshot: ApprovalMode.YOLO,
       },
+
+      {
+        label: 'new ask blocks the completed AUTO decision',
+        replacement: false,
+        initialMode: ApprovalMode.AUTO,
+        shouldBlock: false,
+        launches: false,
+        addAskAfterClassification: true,
+      },
       {
         label: 'direct call follows the completed AUTO decision',
         replacement: false,
         initialMode: ApprovalMode.YOLO,
+        shouldBlock: false,
+        launches: true,
+      },
+      {
+        label: 'direct AUTO callback overrides an older YOLO snapshot',
+        replacement: false,
+        initialMode: ApprovalMode.YOLO,
+        shouldBlock: false,
+        launches: true,
+        modeAfterPermissionSnapshot: ApprovalMode.AUTO,
+      },
+      {
+        label: 'stale automatic grant stops at destination confirmation',
+        replacement: false,
+        initialMode: ApprovalMode.DEFAULT,
+        shouldBlock: false,
+        launches: false,
+        modeAfterPermissionSnapshot: ApprovalMode.AUTO,
+        modeAfterConfirmationDetails: ApprovalMode.DEFAULT,
+      },
+      {
+        label: 'confirmation cancellation after details',
+        replacement: false,
+        initialMode: ApprovalMode.DEFAULT,
+        shouldBlock: false,
+        launches: false,
+        modeAfterPermissionSnapshot: ApprovalMode.AUTO,
+        abortDuringConfirmation: true,
+      },
+      {
+        label: 'confirmation cancellation after auto confirmation',
+        replacement: false,
+        initialMode: ApprovalMode.DEFAULT,
+        shouldBlock: false,
+        launches: false,
+        modeAfterPermissionSnapshot: ApprovalMode.AUTO,
+        abortAfterAutoConfirmation: true,
+      },
+      {
+        label: 'hook-allowed AUTO grant carries its automatic provenance',
+        replacement: true,
+        initialMode: ApprovalMode.DEFAULT,
         shouldBlock: false,
         launches: true,
       },
@@ -24079,6 +24189,15 @@ describe('Session', () => {
         initialMode: ApprovalMode.DEFAULT,
         shouldBlock: true,
         launches: false,
+      },
+      {
+        label: 'direct DEFAULT snapshot to AUTO approval, then YOLO',
+        replacement: false,
+        initialMode: ApprovalMode.DEFAULT,
+        shouldBlock: false,
+        launches: true,
+        modeAfterPermissionSnapshot: ApprovalMode.AUTO,
+        modeAfterClassification: ApprovalMode.YOLO,
       },
       {
         label:
@@ -24108,7 +24227,11 @@ describe('Session', () => {
         modeAfterClassification,
         modeAfterDestination,
         modeAfterPermissionSnapshot,
+        modeAfterConfirmationDetails,
+        abortDuringConfirmation,
+        abortAfterAutoConfirmation,
         changeBeforeExecution,
+        addAskAfterClassification,
       }) => {
         const toolName = core.ToolNames.CREATE_SUB_SESSION;
         const args = {
@@ -24166,6 +24289,9 @@ describe('Session', () => {
           .spyOn(core, 'evaluateAutoMode')
           .mockImplementation(async () => {
             if (modeAfterClassification) await classificationGate;
+            if (addAskAfterClassification) {
+              pm.addPersistentRule(`${toolName}(workspace:repo-b-id)`, 'ask');
+            }
             if (changeBeforeExecution) {
               return {
                 via: 'fallback' as const,
@@ -24198,29 +24324,69 @@ describe('Session', () => {
           ...(replacement ? { updatedInput } : {}),
         });
         const realTool = new core.CreateSubSessionTool(mockConfig);
-        if (modeAfterPermissionSnapshot) {
-          const permissionSnapshotGate = new Promise<void>((resolve) => {
-            releasePermissionSnapshot = resolve;
-          });
-          const build = realTool.build.bind(realTool);
-          vi.spyOn(realTool, 'build').mockImplementation((params) => {
-            const invocation = build(params);
+        const automaticConfirmation = vi.fn();
+        let confirmationInvocation:
+          | ReturnType<typeof realTool.build>
+          | undefined;
+        const build = realTool.build.bind(realTool);
+        vi.spyOn(realTool, 'build').mockImplementation((params) => {
+          const invocation = build(params);
+          if (
+            modeAfterConfirmationDetails ||
+            abortDuringConfirmation ||
+            abortAfterAutoConfirmation ||
+            addAskAfterClassification
+          ) {
+            confirmationInvocation = invocation;
+            vi.spyOn(invocation, 'execute');
+          }
+          const getConfirmationDetails =
+            invocation.getConfirmationDetails.bind(invocation);
+          vi.spyOn(invocation, 'getConfirmationDetails').mockImplementation(
+            async (signal) => {
+              const details = await getConfirmationDetails(signal);
+              if (modeAfterConfirmationDetails) {
+                expect(classify).toHaveBeenCalledOnce();
+                approvalMode = modeAfterConfirmationDetails;
+              }
+              if (abortDuringConfirmation) {
+                expect(classify).toHaveBeenCalledOnce();
+                await session.cancelPendingPrompt();
+              }
+              return {
+                ...details,
+                onAutoConfirm: details.onAutoConfirm
+                  ? async (approvalMode) => {
+                      await details.onAutoConfirm?.(approvalMode);
+                      automaticConfirmation(approvalMode);
+                      if (abortAfterAutoConfirmation) {
+                        await session.cancelPendingPrompt();
+                      }
+                    }
+                  : undefined,
+              };
+            },
+          );
+          if (modeAfterPermissionSnapshot) {
+            const permissionSnapshotGate = new Promise<void>((resolve) => {
+              releasePermissionSnapshot = resolve;
+            });
             const getDefaultPermission =
               invocation.getDefaultPermission.bind(invocation);
             vi.spyOn(invocation, 'getDefaultPermission').mockImplementation(
               async (signal) => {
                 const permission = await getDefaultPermission(signal);
                 if (invocation.requiresAutoReviewOnAllow?.()) {
-                  expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+                  expect(approvalMode).toBe(initialMode);
                   permissionSnapshot();
                   await permissionSnapshotGate;
                 }
                 return permission;
               },
             );
-            return invocation;
-          });
-        }
+          }
+          return invocation;
+        });
         mockToolRegistry.getTool.mockReturnValue(realTool);
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           createStreamWithChunks([
@@ -24275,7 +24441,16 @@ describe('Session', () => {
         const expectsYoloWaiver =
           modeAfterDestination === ApprovalMode.YOLO ||
           modeAfterPermissionSnapshot === ApprovalMode.YOLO;
+        const expectsYoloMarker =
+          expectsYoloWaiver ||
+          (!replacement && modeAfterClassification === ApprovalMode.YOLO);
         const expectedClassifierCalls = expectsYoloWaiver ? 0 : 1;
+
+        if (replacement && launches) {
+          expect(automaticConfirmation).toHaveBeenCalledExactlyOnceWith(
+            approvalMode,
+          );
+        }
         expect(classify).toHaveBeenCalledTimes(expectedClassifierCalls);
         if (expectedClassifierCalls === 1) {
           expect(classify.mock.calls[0]?.[0]).toMatchObject({
@@ -24287,14 +24462,78 @@ describe('Session', () => {
             ...args,
             ...(replacement ? { workspace: updatedInput.workspace } : {}),
             workspaceGeneration: 'generation-b',
-            ...(expectsYoloWaiver ? { requiresYolo: true } : {}),
-            ...(!replacement && approvalMode === ApprovalMode.AUTO
+            ...(expectsYoloMarker ? { requiresYolo: true } : {}),
+            ...(approvalMode === ApprovalMode.AUTO
               ? { requiresAutoMode: true }
               : {}),
             completion: 'first-turn',
           });
         } else {
           expect(spawn).not.toHaveBeenCalled();
+          if (addAskAfterClassification) {
+            expect(
+              mockChatRecordingService.recordToolResult,
+            ).toHaveBeenCalledWith(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  functionResponse: expect.objectContaining({
+                    response: expect.objectContaining({
+                      error: expect.stringContaining('one-time human approval'),
+                    }),
+                  }),
+                }),
+              ]),
+              expect.objectContaining({ executionStatus: 'not_started' }),
+            );
+          }
+          if (changeBeforeExecution || abortAfterAutoConfirmation) {
+            expect(automaticConfirmation).toHaveBeenCalledExactlyOnceWith(
+              ApprovalMode.AUTO,
+            );
+          } else {
+            expect(automaticConfirmation).not.toHaveBeenCalled();
+          }
+          if (
+            modeAfterConfirmationDetails ||
+            abortDuringConfirmation ||
+            abortAfterAutoConfirmation ||
+            addAskAfterClassification
+          ) {
+            expect(confirmationInvocation).toBeDefined();
+            expect(
+              vi.mocked(confirmationInvocation!.execute),
+            ).not.toHaveBeenCalled();
+            if (modeAfterConfirmationDetails) {
+              expect(
+                mockChatRecordingService.recordToolResult,
+              ).toHaveBeenCalledWith(
+                expect.arrayContaining([
+                  expect.objectContaining({
+                    functionResponse: expect.objectContaining({
+                      response: expect.objectContaining({
+                        error:
+                          'Approval mode changed before confirmation. Please retry.',
+                      }),
+                    }),
+                  }),
+                ]),
+                expect.objectContaining({
+                  executionStatus: 'not_started',
+                }),
+              );
+            }
+            if (abortDuringConfirmation || abortAfterAutoConfirmation) {
+              expect(
+                mockChatRecordingService.recordToolResult,
+              ).toHaveBeenCalledWith(
+                expect.anything(),
+                expect.objectContaining({
+                  status: 'cancelled',
+                  executionStatus: 'not_started',
+                }),
+              );
+            }
+          }
         }
         if (changeBeforeExecution) {
           expect(invocationGuard).toHaveBeenCalledOnce();
@@ -46352,6 +46591,75 @@ describe('Session', () => {
         .mock.calls[0][0].options as Array<{ kind: string }>;
       expect(options.some((option) => option.kind === 'allow_always')).toBe(
         false,
+      );
+    });
+
+    it('hides allow-always when the invocation requires a human decision', async () => {
+      const invocation = {
+        params: { command: 'edit /tmp/demo.txt' },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        requiresUserInteraction: () => true,
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Allow workspace edit',
+          command: 'edit /tmp/demo.txt',
+          rootCommand: 'edit',
+          onConfirm: vi.fn(),
+        }),
+        getDescription: vi.fn().mockReturnValue('Edit a workspace file'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: vi.fn(),
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      const permissionManager = new core.PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      });
+      permissionManager.initialize();
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue(permissionManager);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-required-human',
+                  name: core.ToolNames.SHELL,
+                  args: { command: 'edit /tmp/demo.txt' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+      mockClient.requestPermission = vi.fn().mockResolvedValue({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.Cancel,
+        },
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'Edit the file' }],
+      });
+
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      const request = vi.mocked(mockClient.requestPermission).mock.calls[0][0];
+      expect(request.options).not.toContainEqual(
+        expect.objectContaining({ kind: 'allow_always' }),
       );
     });
 

@@ -250,9 +250,9 @@ import {
   formatDenialStateLog,
   recordAllow,
   recordFallbackApprove,
-  shouldClassifyAllShellForAutoMode,
+  confirmAutomaticReviewOnAllow,
   finalizeToolResponses,
-  shouldForceAutoModeReviewForAllow,
+  shouldRequireAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
@@ -18638,9 +18638,12 @@ export class Session implements SessionContext {
           // prompt right after an allow-rule call just worked.
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            (invocation.requiresAutoReviewOnAllow?.() === true ||
-              shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-              shouldClassifyAllShellForAutoMode(policyToolName, this.config));
+            shouldRequireAutoModeReviewForAllow(
+              invocation,
+              pmCtx,
+              policyToolName,
+              this.config,
+            );
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -18825,9 +18828,36 @@ export class Session implements SessionContext {
             if ('cancelled' in classified) return classified.cancelled;
             const { outcome, denialState } = classified;
             switch (outcome.kind) {
-              case 'approved':
+              case 'approved': {
+                const automaticApproval = await confirmAutomaticReviewOnAllow(
+                  this.config,
+                  invocation,
+                  activeToolAbortSignal,
+                );
+                if (
+                  automaticApproval === 'mode-changed' ||
+                  automaticApproval === 'requires-human'
+                ) {
+                  return earlyErrorResponse(
+                    new Error(
+                      automaticApproval === 'mode-changed'
+                        ? 'Approval mode changed before confirmation. Please retry.'
+                        : 'This tool call requires one-time human approval under the current permission rules. Please retry.',
+                    ),
+                    toolName,
+                    {
+                      status: 'error',
+                      errorType: ToolErrorType.EXECUTION_DENIED,
+                      executionStatus: 'not_started',
+                    },
+                  );
+                }
+                if (automaticApproval === 'cancelled') {
+                  return cancelBeforeExecutionIfAborted(toolName)!;
+                }
                 autoModeAllowed = true;
                 break;
+              }
               case 'blocked':
                 return earlyErrorResponse(
                   new Error(outcome.errorMessage),
@@ -19218,15 +19248,12 @@ export class Session implements SessionContext {
                         replacementFlow.finalPermission === 'allow' &&
                         !(
                           replacementApprovalMode === ApprovalMode.AUTO &&
-                          (replacement.requiresAutoReviewOnAllow?.() === true ||
-                            shouldForceAutoModeReviewForAllow(
-                              replacementFlow.pmCtx,
-                              this.config.getCwd(),
-                            ) ||
-                            shouldClassifyAllShellForAutoMode(
-                              policyToolName,
-                              this.config,
-                            ))
+                          shouldRequireAutoModeReviewForAllow(
+                            replacement,
+                            replacementFlow.pmCtx,
+                            policyToolName,
+                            this.config,
+                          )
                         );
                       if (
                         replacementAllowed &&
@@ -19276,13 +19303,20 @@ export class Session implements SessionContext {
                       hookHandled = false;
                     } else {
                       if (
-                        invocation.requiresAutoReviewOnAllow?.() === true &&
-                        this.config.getApprovalMode() !==
-                          confirmationApprovalMode
+                        invocation.requiresUserInteraction?.() === true ||
+                        (invocation.requiresAutoReviewOnAllow?.() === true &&
+                          this.config.getApprovalMode() !==
+                            confirmationApprovalMode &&
+                          !(
+                            confirmationApprovalMode === ApprovalMode.AUTO &&
+                            this.config.getApprovalMode() === ApprovalMode.YOLO
+                          ))
                       ) {
                         return earlyErrorResponse(
                           new Error(
-                            'Approval mode changed before confirmation. Please retry.',
+                            invocation.requiresUserInteraction?.()
+                              ? 'This tool call requires one-time human approval under the current permission rules. Please retry.'
+                              : 'Approval mode changed before confirmation. Please retry.',
                           ),
                           toolName,
                           {
@@ -19292,9 +19326,11 @@ export class Session implements SessionContext {
                           },
                         );
                       }
+                      // Automatic callbacks are provided by the resolved
+                      // destination-specific confirmation object.
                       if (confirmationDetails.onAutoConfirm) {
                         await confirmationDetails.onAutoConfirm(
-                          confirmationApprovalMode,
+                          this.config.getApprovalMode(),
                         );
                       } else {
                         await confirmationDetails.onConfirm(

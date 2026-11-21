@@ -170,8 +170,8 @@ import {
   getAutoModeActionFingerprint,
   getAutoModePermissionDeniedReason,
   prepareAutoModeFallback,
-  shouldClassifyAllShellForAutoMode,
-  shouldForceAutoModeReviewForAllow,
+  confirmAutomaticReviewOnAllow,
+  shouldRequireAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from '../permissions/autoMode.js';
@@ -4062,9 +4062,12 @@ export class CoreToolScheduler {
 
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            (invocation.requiresAutoReviewOnAllow?.() === true ||
-              shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-              shouldClassifyAllShellForAutoMode(canonicalName, this.config));
+            shouldRequireAutoModeReviewForAllow(
+              invocation,
+              pmCtx,
+              canonicalName,
+              this.config,
+            );
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -4357,13 +4360,53 @@ export class CoreToolScheduler {
               continue;
             }
             switch (outcome.kind) {
-              case 'approved':
+              case 'approved': {
+                const automaticApproval = await confirmAutomaticReviewOnAllow(
+                  this.config,
+                  invocation,
+                  signal,
+                );
+                if (
+                  automaticApproval === 'mode-changed' ||
+                  automaticApproval === 'requires-human'
+                ) {
+                  this.setStatusInternal(
+                    reqInfo.callId,
+                    'error',
+                    createErrorResponse(
+                      reqInfo,
+                      new Error(
+                        automaticApproval === 'mode-changed'
+                          ? 'Approval mode changed before confirmation. Please retry.'
+                          : 'This tool call requires one-time human approval under the current permission rules. Please retry.',
+                      ),
+                      ToolErrorType.EXECUTION_DENIED,
+                      'not_started',
+                    ),
+                  );
+                  setToolSpanFailure(
+                    toolSpan,
+                    TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                    TOOL_SPAN_STATUS_PERMISSION_DENIED,
+                  );
+                  this.finalizeToolSpan(reqInfo.callId);
+                  continue;
+                }
+                if (automaticApproval === 'cancelled') {
+                  this.cancelPreExecutionIfAborted(
+                    reqInfo.callId,
+                    signal,
+                    toolSpan,
+                  );
+                  continue;
+                }
                 this.setToolCallOutcome(
                   reqInfo.callId,
                   ToolConfirmationOutcome.ProceedAlways,
                 );
                 this.setStatusInternal(reqInfo.callId, 'scheduled');
                 continue;
+              }
               case 'blocked':
                 debugLogger.warn(
                   `Auto mode blocked (${outcome.reason}): tool=${canonicalName}, ` +
@@ -4792,8 +4835,13 @@ export class CoreToolScheduler {
                     continue;
                   }
                   if (
-                    invocation.requiresAutoReviewOnAllow?.() === true &&
-                    this.config.getApprovalMode() !== approvalMode
+                    invocation.requiresUserInteraction?.() === true ||
+                    (invocation.requiresAutoReviewOnAllow?.() === true &&
+                      this.config.getApprovalMode() !== approvalMode &&
+                      !(
+                        approvalMode === ApprovalMode.AUTO &&
+                        this.config.getApprovalMode() === ApprovalMode.YOLO
+                      ))
                   ) {
                     this.setStatusInternal(
                       reqInfo.callId,
@@ -4801,7 +4849,9 @@ export class CoreToolScheduler {
                       createErrorResponse(
                         reqInfo,
                         new Error(
-                          'Approval mode changed before confirmation. Please retry.',
+                          invocation.requiresUserInteraction?.()
+                            ? 'This tool call requires one-time human approval under the current permission rules. Please retry.'
+                            : 'Approval mode changed before confirmation. Please retry.',
                         ),
                         ToolErrorType.EXECUTION_DENIED,
                         'not_started',
@@ -4818,7 +4868,7 @@ export class CoreToolScheduler {
                   await runInRequestGoalContext(reqInfo, async () => {
                     if (preparedConfirmationDetails.onAutoConfirm) {
                       await preparedConfirmationDetails.onAutoConfirm(
-                        approvalMode,
+                        this.config.getApprovalMode(),
                       );
                     } else {
                       await preparedConfirmationDetails.onConfirm(
@@ -8687,18 +8737,20 @@ export class CoreToolScheduler {
           continue;
         }
 
+        // Preserve this contract for future invocation implementations.
+        // Named-workspace confirmations are excluded by hideAlwaysAllow above.
         const forceAutoReviewForAllow =
           this.config.getApprovalMode() === ApprovalMode.AUTO &&
-          (pendingTool.invocation.requiresAutoReviewOnAllow?.() === true ||
-            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-            shouldClassifyAllShellForAutoMode(
-              pendingTool.request.name,
-              this.config,
-            ));
+          shouldRequireAutoModeReviewForAllow(
+            pendingTool.invocation,
+            pmCtx,
+            pendingTool.request.name,
+            this.config,
+          );
 
         if (finalPermission === 'allow' && forceAutoReviewForAllow) {
           debugLogger.info(
-            `Auto mode: pending L4 allow overridden by protected-write guard or classifyAllShell for ${pendingTool.request.name}`,
+            `Auto mode: pending L4 allow requires AUTO review for ${pendingTool.request.name}`,
           );
           const actionFingerprint = getAutoModeActionFingerprint(
             pendingTool.request.name,

@@ -12,6 +12,7 @@ import {
 import { ToolConfirmationOutcome } from './tools.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import { confirmAutomaticReviewOnAllow } from '../permissions/autoMode.js';
 import type {
   Config,
   SubSessionSpawner,
@@ -183,7 +184,103 @@ describe('CreateSubSessionTool', () => {
     );
     await invocation.getDefaultPermission();
     expect(invocation.requiresUserInteraction?.()).toBe(true);
+    for (const selector of ['/canonical/current repo', 'repo-a']) {
+      const denyRule = `create_sub_session(workspace:${selector})`;
+      permissions.addPersistentRule(denyRule, 'deny');
+      await expect(invocation.getDefaultPermission()).rejects.toThrow('denied');
+      permissions.removePersistentRule(denyRule, 'deny');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    }
     expect(resolveWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires human approval for an ask added before automatic confirmation', async () => {
+    const permissions = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => ApprovalMode.AUTO,
+    });
+    permissions.initialize();
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const config = makeConfig(spawner, ApprovalMode.AUTO);
+    config.getPermissionManager = () => permissions;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/b',
+    });
+    const signal = new AbortController().signal;
+    await invocation.getDefaultPermission(signal);
+    permissions.addPersistentRule(
+      'create_sub_session(workspace:repo-b)',
+      'ask',
+    );
+
+    await expect(
+      confirmAutomaticReviewOnAllow(config, invocation, signal),
+    ).resolves.toBe('requires-human');
+    expect(spawner).not.toHaveBeenCalled();
+    const confirmation = await invocation.getConfirmationDetails(signal);
+    await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    const result = await invocation.execute(signal);
+    expect(result.error).toBeUndefined();
+    expect(spawner).toHaveBeenCalledExactlyOnceWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b',
+    });
+  });
+
+  it('rechecks a new workspace ask after automatic confirmation', async () => {
+    const permissions = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => ApprovalMode.AUTO,
+    });
+    permissions.initialize();
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const config = makeConfig(spawner, ApprovalMode.AUTO);
+    config.getPermissionManager = () => permissions;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/b',
+    });
+    const signal = new AbortController().signal;
+    await invocation.getDefaultPermission(signal);
+    await expect(
+      confirmAutomaticReviewOnAllow(config, invocation, signal),
+    ).resolves.toBe('confirmed');
+    permissions.addPersistentRule(
+      'create_sub_session(workspace:/canonical/other repo)',
+      'ask',
+    );
+
+    const result = await invocation.execute(signal);
+    expect(result.error?.message).toContain('one-time human approval');
+    expect(spawner).not.toHaveBeenCalled();
+  });
+
+  it('preserves ordinary current-workspace automatic approval', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-current' }));
+    const invocation = new CreateSubSessionTool(
+      makeConfig(spawner, ApprovalMode.DEFAULT, true),
+    ).build({ prompt: 'summarize', workspace: '/repos/a' });
+    const signal = new AbortController().signal;
+    await invocation.getDefaultPermission(signal);
+    const confirmation = await invocation.getConfirmationDetails(signal);
+    expect(confirmation.onAutoConfirm).toBeTypeOf('function');
+    await confirmation.onAutoConfirm?.(ApprovalMode.DEFAULT);
+
+    const result = await invocation.execute(signal);
+    expect(result.error).toBeUndefined();
+    expect(spawner).toHaveBeenCalledExactlyOnceWith({
+      prompt: 'summarize',
+      completion: 'first-turn',
+      workspace: '/repos/a',
+      workspaceGeneration: 'generation-b',
+    });
   });
 
   it('requires AUTO review only for a named remote workspace', async () => {
@@ -299,6 +396,172 @@ describe('CreateSubSessionTool', () => {
       invocation.getDefaultPermission(controller.signal),
     ).rejects.toThrow('stop');
     expect(resolveWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('cancels permission evaluation while the workspace resolver is pending', async () => {
+    const spawner = vi.fn();
+    const controller = new AbortController();
+    const resolveWorkspace = vi.fn(
+      () => new Promise<SubSessionWorkspaceBinding>(() => {}),
+    );
+    const config = makeConfig(spawner);
+    config.getSubSessionWorkspaceResolver = () => resolveWorkspace;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/b',
+    });
+
+    const permissions = invocation.getDefaultPermission(controller.signal);
+    await vi.waitFor(() => expect(resolveWorkspace).toHaveBeenCalledOnce());
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(
+        () => reject(new Error('workspace resolution did not cancel')),
+        50,
+      );
+    });
+    controller.abort('cancelled while resolving');
+
+    await expect(Promise.race([permissions, timeout])).rejects.toThrow(
+      'cancelled while resolving',
+    );
+    expect(spawner).not.toHaveBeenCalled();
+  });
+
+  it('cancels execution while the workspace resolver is pending', async () => {
+    const spawner = vi.fn();
+    const controller = new AbortController();
+    const resolveWorkspace = vi.fn(
+      () => new Promise<SubSessionWorkspaceBinding>(() => {}),
+    );
+    const config = makeConfig(spawner);
+    config.getSubSessionWorkspaceResolver = () => resolveWorkspace;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/b',
+    });
+
+    const execution = invocation.execute(controller.signal);
+    await vi.waitFor(() => expect(resolveWorkspace).toHaveBeenCalledOnce());
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(
+        () => reject(new Error('workspace resolution did not cancel')),
+        50,
+      );
+    });
+    controller.abort('cancelled while resolving');
+
+    await expect(Promise.race([execution, timeout])).resolves.toMatchObject({
+      returnDisplay: 'Cancelled',
+      interruptedBeforeCompletion: true,
+    });
+    expect(spawner).not.toHaveBeenCalled();
+  });
+
+  it('does not retain a destination resolved after cancellation', async () => {
+    const spawner = vi.fn(async () => ({
+      sessionId: 'sub-after-cancel',
+      result: 'ok',
+    }));
+    const controller = new AbortController();
+    let resolveBinding!: (value: SubSessionWorkspaceBinding) => void;
+    const binding = new Promise<SubSessionWorkspaceBinding>((resolve) => {
+      resolveBinding = resolve;
+    });
+    const resolveWorkspace = vi.fn(() => binding);
+    const config = makeConfig(spawner);
+    config.getSubSessionWorkspaceResolver = () => resolveWorkspace;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/b',
+    });
+
+    const permissions = invocation.getDefaultPermission(controller.signal);
+    await vi.waitFor(() => expect(resolveWorkspace).toHaveBeenCalledOnce());
+    controller.abort('cancelled while resolving');
+    resolveBinding({
+      workspaceId: 'repo-b-id',
+      workspaceCwd: '/repos/b',
+      workspaceGeneration: 'generation-b',
+      sameWorkspace: false,
+    });
+
+    await expect(permissions).rejects.toThrow('cancelled while resolving');
+    expect(spawner).not.toHaveBeenCalled();
+
+    resolveWorkspace.mockResolvedValue({
+      workspaceId: 'repo-b-id',
+      workspaceCwd: '/repos/b',
+      workspaceGeneration: 'generation-b-fresh',
+      sameWorkspace: false,
+    });
+    config.getApprovalMode = () => ApprovalMode.YOLO;
+    const retryController = new AbortController();
+    await invocation.getDefaultPermission(retryController.signal);
+    const confirmation = await invocation.getConfirmationDetails(
+      retryController.signal,
+    );
+    expect(confirmation.onAutoConfirm).toBeTypeOf('function');
+    await confirmation.onAutoConfirm?.(ApprovalMode.YOLO);
+    const result = await invocation.execute(retryController.signal);
+
+    expect(resolveWorkspace).toHaveBeenCalledTimes(2);
+    expect(result.error).toBeUndefined();
+    expect(spawner).toHaveBeenCalledExactlyOnceWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b-fresh',
+      requiresYolo: true,
+    });
+  });
+
+  it('does not cache a destination when cancellation follows resolution', async () => {
+    let resolveBinding!: (value: SubSessionWorkspaceBinding) => void;
+    const binding = new Promise<SubSessionWorkspaceBinding>((resolve) => {
+      resolveBinding = resolve;
+    });
+    const resolveWorkspace = vi.fn(() => binding);
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-after-cancel' }));
+    const config = makeConfig(spawner);
+    config.getSubSessionWorkspaceResolver = () => resolveWorkspace;
+    config.getApprovalMode = () => ApprovalMode.YOLO;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/b',
+    });
+    const controller = new AbortController();
+
+    const permissions = invocation.getDefaultPermission(controller.signal);
+    await Promise.resolve();
+    binding.then(() =>
+      controller.abort('cancelled after destination resolved'),
+    );
+    resolveBinding({
+      workspaceId: 'repo-b-id',
+      workspaceCwd: '/repos/b',
+      workspaceGeneration: 'generation-b',
+      sameWorkspace: false,
+    });
+    await expect(permissions).rejects.toThrow(
+      'cancelled after destination resolved',
+    );
+
+    resolveWorkspace.mockResolvedValue({
+      workspaceId: 'repo-b-id',
+      workspaceCwd: '/repos/b',
+      workspaceGeneration: 'generation-b-fresh',
+      sameWorkspace: false,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(resolveWorkspace).toHaveBeenCalledTimes(2);
+    expect(spawner).toHaveBeenCalledExactlyOnceWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b-fresh',
+      requiresYolo: true,
+    });
   });
 
   it('runs a named workspace without a prompt in YOLO mode', async () => {

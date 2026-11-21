@@ -98,9 +98,9 @@ export interface ToolInvocation<
   requiresAutoReviewOnAllow?(): boolean;
 
   /**
-   * Constructs the confirmation dialog details for this invocation.
-   * Only called when the final permission decision is `'ask'` and the user
-   * needs to be prompted interactively.
+   * Constructs confirmation details and optional automatic-approval hooks.
+   * A host may call this after a real automatic decision even when no human
+   * interaction is required.
    *
    * @param abortSignal Signal to cancel the operation.
    * @returns The confirmation details for the UI to display.

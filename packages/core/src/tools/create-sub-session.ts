@@ -116,6 +116,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
   private destination?: SubSessionWorkspaceBinding;
   private approvedDestination?: SubSessionWorkspaceBinding;
   private automaticApprovalMode?: ApprovalMode;
+  private isAutomaticallyApproved = false;
   private permissionApprovalMode?: ApprovalMode;
   private requestedWorkspaceAsk = false;
 
@@ -185,6 +186,9 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
 
   override requiresUserInteraction(): boolean {
     if (this.params.workspace === undefined) return false;
+    if (this.destination) {
+      this.updateRequestedWorkspaceAsk(this.destination);
+    }
     const approvalMode = this.config.getApprovalMode();
     if (approvalMode === ApprovalMode.PLAN || this.requestedWorkspaceAsk) {
       return true;
@@ -211,8 +215,21 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       const confirmation = await super.getConfirmationDetails(abortSignal);
       return {
         ...confirmation,
+        onAutoConfirm: async () => {
+          this.updateRequestedWorkspaceAsk(destination);
+          if (this.requestedWorkspaceAsk) {
+            throw new StructuredToolError(
+              'This named workspace requires one-time human approval under the current permission rules.',
+              ToolErrorType.EXECUTION_DENIED,
+            );
+          }
+          this.automaticApprovalMode = undefined;
+          this.approvedDestination = destination;
+          this.isAutomaticallyApproved = true;
+        },
         onConfirm: async (outcome, payload) => {
           this.automaticApprovalMode = undefined;
+          this.isAutomaticallyApproved = false;
           this.approvedDestination =
             outcome === ToolConfirmationOutcome.ProceedOnce ||
             outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault
@@ -237,11 +254,20 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       hideAlwaysAllow: true,
       permissionRules: [],
       onAutoConfirm: async (approvalMode) => {
+        this.updateRequestedWorkspaceAsk(destination);
+        if (this.requestedWorkspaceAsk) {
+          throw new StructuredToolError(
+            'This named workspace requires one-time human approval under the current permission rules.',
+            ToolErrorType.EXECUTION_DENIED,
+          );
+        }
         this.approvedDestination = destination;
         this.automaticApprovalMode = approvalMode;
+        this.isAutomaticallyApproved = true;
       },
       onConfirm: async (outcome) => {
         this.automaticApprovalMode = undefined;
+        this.isAutomaticallyApproved = false;
         this.approvedDestination =
           outcome === ToolConfirmationOutcome.ProceedOnce ||
           outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault
@@ -262,7 +288,13 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     }
     const resolveWorkspace = this.config.getSubSessionWorkspaceResolver();
     if (!resolveWorkspace) throw new Error(DAEMON_ONLY_MESSAGE);
-    const destination = await resolveWorkspace(this.params.workspace!);
+    const destination = abortSignal
+      ? await raceCancellation(
+          () => resolveWorkspace(this.params.workspace!),
+          abortSignal,
+        )
+      : await resolveWorkspace(this.params.workspace!);
+    if (destination === CANCELLED) throw abortSignal!.reason;
     abortSignal?.throwIfAborted();
     this.assertWorkspaceAllowed(destination);
     this.updateRequestedWorkspaceAsk(destination);
@@ -338,75 +370,103 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     let requestStarted = false;
 
     try {
-      if (this.params.workspace !== undefined && !this.destination) {
-        await this.resolveDestination(signal);
-      }
-      const res = await raceCancellation(async () => {
-        const approvedDestination = this.approvedDestination;
-        this.approvedDestination = undefined;
-        const approvalMode = this.config.getApprovalMode();
-        this.permissionApprovalMode ??= approvalMode;
-        const autoApproved =
-          (approvalMode === ApprovalMode.AUTO &&
-            this.permissionApprovalMode === ApprovalMode.AUTO) ||
-          (approvalMode === ApprovalMode.YOLO &&
-            (this.permissionApprovalMode === ApprovalMode.AUTO ||
-              this.permissionApprovalMode === ApprovalMode.YOLO));
-        const destination =
-          approvalMode === ApprovalMode.PLAN
-            ? undefined
-            : (approvedDestination ??
-              (this.destination?.sameWorkspace === true || autoApproved
-                ? this.destination
-                : undefined));
-        const requiresYolo =
-          approvalMode === ApprovalMode.YOLO &&
-          (this.automaticApprovalMode === ApprovalMode.YOLO ||
-            (approvedDestination === undefined && autoApproved));
-        const requiresAutoMode =
-          this.params.workspace !== undefined &&
-          this.destination?.sameWorkspace !== true &&
-          !requiresYolo &&
-          (this.automaticApprovalMode === ApprovalMode.AUTO ||
-            (approvedDestination === undefined &&
-              autoApproved &&
-              approvalMode === ApprovalMode.AUTO));
-        const automaticApprovalMode = this.automaticApprovalMode;
-        if (
-          automaticApprovalMode !== undefined &&
-          automaticApprovalMode !== approvalMode
-        ) {
-          this.approvedDestination = undefined;
-          this.automaticApprovalMode = undefined;
-          throw new StructuredToolError(
-            'Approval mode changed before execution. Please retry.',
-            ToolErrorType.EXECUTION_DENIED,
-          );
-        }
-        this.automaticApprovalMode = undefined;
-        if (this.params.workspace !== undefined && !destination) {
-          throw new Error('A named workspace requires one-time approval.');
-        }
-        if (destination) this.assertWorkspaceAllowed(destination);
-        requestStarted = true;
-        return spawner({
-          prompt,
-          completion,
-          ...(this.params.model ? { model: this.params.model } : {}),
-          ...(this.params.name ? { name: this.params.name } : {}),
-          ...(this.params.workspace !== undefined
-            ? {
-                workspace: this.params.workspace,
-                workspaceGeneration: destination?.workspaceGeneration,
-                ...(requiresYolo ? { requiresYolo: true } : {}),
-                ...(requiresAutoMode ? { requiresAutoMode: true } : {}),
+      const resolution =
+        this.params.workspace !== undefined && !this.destination
+          ? await raceCancellation(
+              () => this.resolveDestination(signal),
+              signal,
+            )
+          : undefined;
+      const res =
+        resolution === CANCELLED
+          ? CANCELLED
+          : await raceCancellation(async () => {
+              const approvedDestination = this.approvedDestination;
+              const isAutomaticallyApproved = this.isAutomaticallyApproved;
+              this.approvedDestination = undefined;
+              this.isAutomaticallyApproved = false;
+              const approvalMode = this.config.getApprovalMode();
+              this.permissionApprovalMode ??= approvalMode;
+              const autoApproved =
+                (approvalMode === ApprovalMode.AUTO &&
+                  this.permissionApprovalMode === ApprovalMode.AUTO) ||
+                (approvalMode === ApprovalMode.YOLO &&
+                  (this.permissionApprovalMode === ApprovalMode.AUTO ||
+                    this.permissionApprovalMode === ApprovalMode.YOLO));
+              const destination =
+                approvalMode === ApprovalMode.PLAN
+                  ? undefined
+                  : (approvedDestination ??
+                    (this.destination?.sameWorkspace === true || autoApproved
+                      ? this.destination
+                      : undefined));
+              const requiresYolo =
+                approvalMode === ApprovalMode.YOLO &&
+                (this.automaticApprovalMode === ApprovalMode.YOLO ||
+                  (approvedDestination === undefined && autoApproved));
+              const requiresAutoMode =
+                this.params.workspace !== undefined &&
+                this.destination?.sameWorkspace !== true &&
+                !requiresYolo &&
+                (this.automaticApprovalMode === ApprovalMode.AUTO ||
+                  (approvedDestination === undefined &&
+                    autoApproved &&
+                    approvalMode === ApprovalMode.AUTO));
+              const automaticApprovalMode = this.automaticApprovalMode;
+              if (
+                automaticApprovalMode !== undefined &&
+                automaticApprovalMode !== approvalMode
+              ) {
+                this.approvedDestination = undefined;
+                this.automaticApprovalMode = undefined;
+                throw new StructuredToolError(
+                  'Approval mode changed before execution. Please retry.',
+                  ToolErrorType.EXECUTION_DENIED,
+                );
               }
-            : {}),
-          ...(this.params.sessionId
-            ? { sessionId: this.params.sessionId }
-            : {}),
-        });
-      }, signal);
+              this.automaticApprovalMode = undefined;
+              if (this.params.workspace !== undefined && !destination) {
+                throw new Error(
+                  'A named workspace requires one-time approval.',
+                );
+              }
+              if (destination) {
+                this.assertWorkspaceAllowed(destination);
+                if (
+                  !approvedDestination ||
+                  automaticApprovalMode !== undefined ||
+                  isAutomaticallyApproved
+                ) {
+                  this.updateRequestedWorkspaceAsk(destination);
+                  if (this.requestedWorkspaceAsk) {
+                    this.approvedDestination = undefined;
+                    this.automaticApprovalMode = undefined;
+                    throw new StructuredToolError(
+                      'This named workspace requires one-time human approval under the current permission rules.',
+                      ToolErrorType.EXECUTION_DENIED,
+                    );
+                  }
+                }
+              }
+              requestStarted = true;
+              return spawner({
+                prompt,
+                completion,
+                ...(this.params.model ? { model: this.params.model } : {}),
+                ...(this.params.name ? { name: this.params.name } : {}),
+                ...(this.params.workspace !== undefined
+                  ? {
+                      workspace: this.params.workspace,
+                      workspaceGeneration: destination?.workspaceGeneration,
+                      ...(requiresYolo ? { requiresYolo: true } : {}),
+                      ...(requiresAutoMode ? { requiresAutoMode: true } : {}),
+                    }
+                  : {}),
+                ...(this.params.sessionId
+                  ? { sessionId: this.params.sessionId }
+                  : {}),
+              });
+            }, signal);
 
       if (res === CANCELLED) {
         // Cancellation here stops the caller's wait. The daemon owns any
