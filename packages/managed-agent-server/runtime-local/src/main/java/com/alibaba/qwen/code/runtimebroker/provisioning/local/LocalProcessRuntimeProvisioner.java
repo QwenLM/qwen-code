@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Duration;
@@ -707,6 +708,16 @@ public final class LocalProcessRuntimeProvisioner
     }
 
     private ProcessBuilder workerProcess() {
+        // The ephemeral provisioner has no durable store to create the state
+        // directory, and ProcessBuilder.start fails on a missing working
+        // directory. Ensure it here, immediately before spawn, so create()
+        // stays side-effect-free while a deployment that never pre-created
+        // the directory can still start a Runtime.
+        try {
+            Files.createDirectories(workingDirectory);
+        } catch (IOException error) {
+            throw new IllegalStateException("Runtime Broker state directory is unavailable", error);
+        }
         ProcessBuilder builder = new ProcessBuilder(command).directory(workingDirectory.toFile())
                 .redirectError(ProcessBuilder.Redirect.DISCARD);
         removeControlPlaneEnvironment(builder.environment());
