@@ -1755,10 +1755,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     );
     monitorRegistry.setAgentLifecycleCallback(agentId, wake);
 
+    // Background shells this agent launches report back to it as well.
+    // `enqueue` returns false once the agent is finishing, and the shell
+    // registry then falls back to an ancestor or the session (#15748).
+    // Running shells are not cancelled on cleanup: unlike monitors, they
+    // are allowed to outlive the agent that started them.
+    const shellRegistry = this.config.getBackgroundShellRegistry();
+    shellRegistry.setAgentNotificationCallback(
+      agentId,
+      (_displayText, modelText) =>
+        enqueue({ kind: 'notification', text: modelText }),
+    );
+
     return () => {
       monitorRegistry.cancelRunningForOwner(agentId, { notify: false });
       monitorRegistry.setAgentNotificationCallback(agentId, undefined);
       monitorRegistry.setAgentLifecycleCallback(agentId, undefined);
+      shellRegistry.setAgentNotificationCallback(agentId, undefined);
     };
   }
 

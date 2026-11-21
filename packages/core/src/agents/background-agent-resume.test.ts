@@ -282,6 +282,9 @@ describe('BackgroundAgentResumeService', () => {
       setAgentLifecycleCallback: vi.fn(),
       cancelRunningForOwner: vi.fn(),
     };
+    const backgroundShellRegistry = {
+      setAgentNotificationCallback: vi.fn(),
+    };
     const config = {
       storage: {
         getProjectDir: () => tempDir,
@@ -289,6 +292,7 @@ describe('BackgroundAgentResumeService', () => {
       getBackgroundTaskRegistry: () => registry,
       getAgentExecutionBackend: () => undefined,
       getMonitorRegistry: () => monitorRegistry,
+      getBackgroundShellRegistry: () => backgroundShellRegistry,
       getSubagentManager: () => subagentManager,
       getHookSystem: () => hookSystem,
       getStopHookBlockingCap: () => options.stopHookBlockingCap ?? 8,

@@ -218,6 +218,18 @@ export class InProcessBackend implements Backend {
       .setAgentNotificationCallback(config.agentId, (_displayText, modelText) =>
         interactive.enqueueMessage(modelText),
       );
+    // Background shells this teammate launches report back to it too
+    // (#15748). The callback stays installed only while the teammate is
+    // alive, so returning true here is safe.
+    this.runtimeContext
+      .getBackgroundShellRegistry()
+      .setAgentNotificationCallback(
+        config.agentId,
+        (_displayText, modelText) => {
+          interactive.enqueueMessage(modelText);
+          return true;
+        },
+      );
 
     // Set first agent as active
     if (this.activeAgentId === null) {
@@ -507,6 +519,9 @@ export class InProcessBackend implements Backend {
     const monitorRegistry = this.runtimeContext.getMonitorRegistry();
     monitorRegistry.cancelRunningForOwner(agentId, { notify: false });
     monitorRegistry.setAgentNotificationCallback(agentId, undefined);
+    this.runtimeContext
+      .getBackgroundShellRegistry()
+      .setAgentNotificationCallback(agentId, undefined);
 
     const cleanup = this.agentApprovalCleanups.get(agentId);
     if (cleanup) {

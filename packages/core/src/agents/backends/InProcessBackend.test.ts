@@ -52,6 +52,9 @@ function createMockConfig() {
   return {
     getModel: vi.fn().mockReturnValue('test-model'),
     getToolRegistry: vi.fn().mockReturnValue(registry),
+    getBackgroundShellRegistry: vi.fn().mockReturnValue({
+      setAgentNotificationCallback: vi.fn(),
+    }),
     getMonitorRegistry: vi.fn().mockReturnValue({
       setAgentNotificationCallback: vi.fn(),
       cancelRunningForOwner: vi.fn(),
@@ -87,6 +90,7 @@ function createMockConfig() {
 type MockConfig = Record<
   | 'createToolRegistry'
   | 'getApprovalMode'
+  | 'getBackgroundShellRegistry'
   | 'getFileFilteringOptions'
   | 'getMonitorRegistry'
   | 'getPermissionManager'
@@ -295,6 +299,36 @@ describe('InProcessBackend', () => {
       { notify: false },
     );
     expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
+      'agent-1',
+      undefined,
+    );
+  });
+
+  it('routes owned background shell notifications into the agent message queue', async () => {
+    // Background shells a teammate launches report back to it (#15748).
+    // The callback reports delivery so the registry can fall back to the
+    // session once the teammate is gone; stop must remove it.
+    const parent = mockConfig();
+    const shellRegistry = parent.getBackgroundShellRegistry() as Record<
+      'setAgentNotificationCallback',
+      Mock
+    >;
+    const localBackend = await backendOn(parent, 'agent-1');
+
+    expect(shellRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
+      'agent-1',
+      expect.any(Function),
+    );
+    const callback = shellRegistry.setAgentNotificationCallback.mock
+      .calls[0]![1] as (displayText: string, modelText: string) => boolean;
+
+    const agent = localBackend.getAgent('agent-1')!;
+    const enqueueSpy = vi.spyOn(agent, 'enqueueMessage');
+    expect(callback('display text', 'shell model text')).toBe(true);
+    expect(enqueueSpy).toHaveBeenCalledWith('shell model text');
+
+    localBackend.stopAgent('agent-1');
+    expect(shellRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
       'agent-1',
       undefined,
     );
