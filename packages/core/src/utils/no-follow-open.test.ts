@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import {
   closeSync,
+  fstatSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -97,6 +99,42 @@ afterEach(() => {
 // other symlink planting tests in this repo.
 const itNoSymlink = process.platform === 'win32' ? it.skip : it;
 
+/** A FIFO in a fresh temp dir; POSIX only, like the tests that use it. */
+function plantFifo(): string {
+  const fifoPath = join(makeTempDir(), 'pipe');
+  expect(spawnSync('mkfifo', [fifoPath]).status).toBe(0);
+  return fifoPath;
+}
+
+/**
+ * Opens a writerless FIFO through the real openSyncNoFollow in a child
+ * process under a kill deadline. Without O_NONBLOCK that open waits for a
+ * writer inside a synchronous syscall, which no in-process timeout can
+ * interrupt, so only an external deadline turns the regression into a
+ * failure instead of a wedged run.
+ */
+function openFifoInChild(): ReturnType<typeof spawnSync> {
+  const moduleUrl = new URL('./no-follow-open.ts', import.meta.url).href;
+  const script = [
+    `import { closeSync, fstatSync } from 'node:fs';`,
+    `const { openSyncNoFollow } = await import(${JSON.stringify(moduleUrl)});`,
+    `const fd = openSyncNoFollow(${JSON.stringify(plantFifo())}, { nonBlocking: true });`,
+    `const isFifo = fstatSync(fd).isFIFO();`,
+    `closeSync(fd);`,
+    `process.exit(isFifo ? 0 : 1);`,
+  ].join('\n');
+  return spawnSync(
+    process.execPath,
+    ['--import', 'tsx', '--input-type=module', '-e', script],
+    // The child's stderr goes to the test log, so a failure shows its cause.
+    {
+      stdio: ['ignore', 'ignore', 'inherit'],
+      timeout: 20_000,
+      killSignal: 'SIGKILL',
+    },
+  );
+}
+
 // Copy a Stats object with identity fields patched, keeping the prototype
 // so isSymbolicLink()/isFile() keep working on the perturbed result.
 function perturbedStats<T extends BigIntStats | Stats>(
@@ -160,6 +198,15 @@ describe('openNoFollow (native O_NOFOLLOW available)', () => {
     expectThrowsCode(() => openSyncNoFollow(linkPath), 'ELOOP');
   });
 
+  itNoSymlink(
+    'opens a FIFO without waiting when nonBlocking is set',
+    () => {
+      const { status, signal } = openFifoInChild();
+      expect({ status, signal }).toEqual({ status: 0, signal: null });
+    },
+    30_000,
+  );
+
   it('propagates ENOENT for missing paths', async () => {
     const dir = makeTempDir();
     expect(await rejectionCode(openNoFollow(join(dir, 'missing.txt')))).toBe(
@@ -199,6 +246,30 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     const { openFallback, openSyncFallback } = await importWithoutNoFollow();
     expect(await rejectionCode(openFallback(linkPath))).toBe('ELOOP');
     expectThrowsCode(() => openSyncFallback(linkPath), 'ELOOP');
+  });
+
+  itNoSymlink('passes nonBlocking through the fallback open', async () => {
+    const fifoPath = plantFifo();
+    // A FIFO open without O_NONBLOCK would block this worker thread for
+    // good, so the mock refuses that open instead of making it.
+    const { openSyncFallback } = await importWithoutNoFollow((actual) => ({
+      openSync: (...args: Parameters<typeof actual.openSync>) => {
+        const [path, flags] = args;
+        if (
+          path === fifoPath &&
+          ((flags as number) & actual.constants.O_NONBLOCK) === 0
+        ) {
+          throw new Error('opened the FIFO without O_NONBLOCK');
+        }
+        return actual.openSync(...args);
+      },
+    }));
+    const fd = openSyncFallback(fifoPath, { nonBlocking: true });
+    try {
+      expect(fstatSync(fd).isFIFO()).toBe(true);
+    } finally {
+      closeSync(fd);
+    }
   });
 
   it('refuses when the file identity changes between lstat and open', async () => {

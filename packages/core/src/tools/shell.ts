@@ -154,7 +154,11 @@ function getShellOutputThreshold(config: Config): number {
 function statusFileGuidance(outputPath: string): string {
   return (
     `status file: ${statusFilePathFor(outputPath)}\n` +
-    `To check whether this process is still running, Read the status file (status: running|completed|failed|cancelled). ` +
+    `To check whether this process is still running, Read the status file (status: running|completed|failed|cancelled|unknown). ` +
+    `unknown means the session that started it ended without recording how the process finished. ` +
+    `A running value can outlive the session that wrote it: if that session ended without shutting down, check whether the recorded pid is still alive (e.g. \`ps -p <pid>\`) before treating the process as running. ` +
+    `Only judge the pid when the status file's pidScope proves it is local: the same hostname, and a bootId (/proc/sys/kernel/random/boot_id) and pidNamespace (the number in \`readlink /proc/self/ns/pid\`) that are both present and equal to this environment's. ` +
+    `If pidScope is missing, differs, or has a null bootId or pidNamespace (as on macOS and Windows), the pid cannot be shown to belong to this machine, boot and container, so do not check it and treat the outcome as unverified. ` +
     `Do NOT infer liveness from the output file: programs often block-buffer stdout when not attached to a TTY, so an empty output file is normal while the process is alive (for live output, re-run with e.g. \`python -u\` or \`stdbuf -oL\`).`
   );
 }

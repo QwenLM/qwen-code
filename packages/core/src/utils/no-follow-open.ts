@@ -127,14 +127,30 @@ function getNoFollowFlag(): number | undefined {
   return fs.constants?.O_NOFOLLOW;
 }
 
+/** Options for {@link openSyncNoFollow}. */
+export interface OpenSyncNoFollowOptions {
+  /**
+   * Also pass `O_NONBLOCK`, so a FIFO at the path does not hold the open
+   * until a writer appears. It changes nothing for a regular file. Windows
+   * has no such flag, and a FIFO cannot sit at a path there.
+   */
+  nonBlocking?: boolean;
+}
+
 /**
  * Synchronous variant of {@link openNoFollow}. Returns a raw fd; the caller
- * owns closing it.
+ * owns closing it. The open stays read-only: `nonBlocking` is its one
+ * option, for callers that must not wait on a FIFO.
  */
-export function openSyncNoFollow(filePath: string): number {
+export function openSyncNoFollow(
+  filePath: string,
+  options: OpenSyncNoFollowOptions = {},
+): number {
   // Optional chain so strict vitest mocks of node:fs that omit `constants`
   // degrade to plain O_RDONLY (= 0) instead of throwing at call time.
-  const baseFlags = fs.constants?.O_RDONLY ?? 0;
+  const baseFlags =
+    (fs.constants?.O_RDONLY ?? 0) |
+    (options.nonBlocking ? (fs.constants?.O_NONBLOCK ?? 0) : 0);
   const noFollowFlag = getNoFollowFlag();
   if (typeof noFollowFlag === 'number') {
     return fs.openSync(filePath, baseFlags | noFollowFlag);

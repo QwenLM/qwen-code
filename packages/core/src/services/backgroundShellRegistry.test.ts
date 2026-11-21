@@ -5,6 +5,7 @@
  */
 
 import {
+  appendFileSync,
   chmodSync,
   constants as fsConstants,
   lstatSync,
@@ -16,22 +17,46 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import fs from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { hostname, tmpdir } from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BackgroundShellRegistry,
   MAX_NOTIFICATION_OUTPUT_TAIL_BYTES,
   MAX_RETAINED_TERMINAL_SHELLS,
+  settleOrphanedShellStatusFiles,
   statusFilePathFor,
+  watchOrphanedShellStatusFiles,
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
+import {
+  readLocalBootId,
+  readPidNamespaceId,
+} from '../utils/process-liveness.js';
 import {
   promptIdContext,
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
 import { escapeXml } from '../utils/xml.js';
 import { stripDisplayControlChars } from '../utils/terminalSafe.js';
+
+// The registry's logger is module-private, so its warnings are counted
+// through this stand-in. Without a debug log session the real logger
+// writes nothing, so no other test here depends on it.
+const debugLogger = vi.hoisted(() => ({
+  isEnabled: () => false,
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/debugLogger.js')>()),
+  createDebugLogger: () => debugLogger,
+}));
 
 /**
  * Builds the expected `<output-file>` element with the same
@@ -1051,6 +1076,534 @@ describe('BackgroundShellRegistry', () => {
       expect(() => reg.register(e)).not.toThrow();
       expect(() => reg.complete('a', 0, 2000)).not.toThrow();
     });
+  });
+});
+
+describe('settleOrphanedShellStatusFiles', () => {
+  let dir: string;
+  const scope = {
+    hostname: 'host-a',
+    bootId: 'boot-a',
+    pidNamespace: 4026531836,
+  };
+  const running = {
+    id: 'bg_1',
+    status: 'running',
+    command: 'sleep 6',
+    cwd: '/work',
+    startTime: '2026-11-07T00:00:00.000Z',
+    updatedAt: '2026-11-07T00:00:00.000Z',
+    pid: 4242,
+    pidScope: scope,
+  };
+  const dead = { isAlive: () => false, scope };
+  const write = (name: string, payload: unknown) =>
+    writeFileSync(
+      join(dir, name),
+      typeof payload === 'string' ? payload : JSON.stringify(payload),
+    );
+  const read = (name: string) =>
+    JSON.parse(readFileSync(join(dir, name), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+  const cannotDenyWrites =
+    process.platform === 'win32' || process.getuid?.() === 0;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'qwen-shell-status-'));
+  });
+  afterEach(() => {
+    chmodSync(dir, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('settles a running sidecar whose process is gone and keeps its fields', () => {
+    write('shell-bg_1.status', running);
+    expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
+      settled: 1,
+      unsettled: [],
+    });
+    const { updatedAt, ...kept } = running;
+    const settled = read('shell-bg_1.status');
+    expect(settled).toMatchObject({ ...kept, status: 'unknown' });
+    expect(settled['updatedAt']).not.toBe(updatedAt);
+  });
+
+  it('keeps a running sidecar whose process is alive and reports it', () => {
+    write('shell-bg_1.status', running);
+    expect(
+      settleOrphanedShellStatusFiles(dir, { isAlive: () => true, scope }),
+    ).toEqual({
+      settled: 0,
+      unsettled: [{ statusPath: join(dir, 'shell-bg_1.status'), pid: 4242 }],
+    });
+    expect(read('shell-bg_1.status')).toEqual(running);
+  });
+
+  it('leaves a sidecar written in another pid scope, or without one, running', () => {
+    const { pidScope: _pidScope, ...withoutScope } = running;
+    write('shell-ns.status', {
+      ...running,
+      pidScope: { ...scope, pidNamespace: 4026532512 },
+    });
+    write('shell-boot.status', {
+      ...running,
+      pidScope: { ...scope, bootId: 'boot-b' },
+    });
+    write('shell-host.status', {
+      ...running,
+      pidScope: { ...scope, hostname: 'host-b' },
+    });
+    write('shell-legacy.status', withoutScope);
+    expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
+      settled: 0,
+      unsettled: [],
+    });
+    for (const name of [
+      'shell-ns.status',
+      'shell-boot.status',
+      'shell-host.status',
+      'shell-legacy.status',
+    ]) {
+      expect(read(name)['status']).toBe('running');
+    }
+  });
+
+  it.each([
+    { ...scope, bootId: null },
+    { ...scope, pidNamespace: null },
+    { ...scope, bootId: null, pidNamespace: null },
+  ])(
+    'does not infer a shared pid scope from missing identities: %j',
+    (unknownScope) => {
+      const sidecar = { ...running, pidScope: unknownScope };
+      write('shell-bg_1.status', sidecar);
+      const isAlive = vi.fn(() => false);
+      expect(
+        settleOrphanedShellStatusFiles(dir, { isAlive, scope: unknownScope }),
+      ).toEqual({ settled: 0, unsettled: [] });
+      expect(isAlive).not.toHaveBeenCalled();
+      expect(read('shell-bg_1.status')).toEqual(sidecar);
+    },
+  );
+
+  it('bounds actual reads when a sidecar grows after its size check', () => {
+    const statusPath = join(dir, 'shell-bg_1.status');
+    write('shell-bg_1.status', running);
+    const originalFstat = fs.fstatSync;
+    const originalRead = fs.readSync;
+    let grew = false;
+    let bytesRead = 0;
+    const statSpy = vi.spyOn(fs, 'fstatSync').mockImplementation(((
+      ...args: Parameters<typeof fs.fstatSync>
+    ) => {
+      const stats = originalFstat(...args);
+      if (!grew && typeof stats.size === 'number') {
+        grew = true;
+        appendFileSync(statusPath, ' '.repeat(2 * 1024 * 1024));
+      }
+      return stats;
+    }) as typeof fs.fstatSync);
+    const readSpy = vi.spyOn(fs, 'readSync').mockImplementation(((
+      ...args: Parameters<typeof fs.readSync>
+    ) => {
+      const count = originalRead(...args);
+      bytesRead += count;
+      return count;
+    }) as typeof fs.readSync);
+    syncBuiltinESMExports();
+    try {
+      expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
+        settled: 0,
+        unsettled: [],
+      });
+      // One byte past the size `fstat` reported, not the 1 MiB cap.
+      expect(bytesRead).toBe(Buffer.byteLength(JSON.stringify(running)) + 1);
+      expect(grew).toBe(true);
+      expect(read('shell-bg_1.status')['status']).toBe('running');
+    } finally {
+      statSpy.mockRestore();
+      readSpy.mockRestore();
+      syncBuiltinESMExports();
+    }
+  });
+
+  it.each([1024 * 1024, 1024 * 1024 + 1])(
+    'handles a sidecar of exactly %i bytes',
+    (size) => {
+      const json = JSON.stringify(running);
+      write(
+        'shell-bg_1.status',
+        json + ' '.repeat(size - Buffer.byteLength(json)),
+      );
+      const withinLimit = size === 1024 * 1024;
+      expect(settleOrphanedShellStatusFiles(dir, dead).settled).toBe(
+        withinLimit ? 1 : 0,
+      );
+      expect(read('shell-bg_1.status')['status']).toBe(
+        withinLimit ? 'unknown' : 'running',
+      );
+    },
+  );
+
+  it('continues short reads through multibyte text to EOF', () => {
+    const command = 'echo 你好';
+    write('shell-bg_1.status', { ...running, command });
+    const originalRead = fs.readSync;
+    const readSpy = vi
+      .spyOn(fs, 'readSync')
+      .mockImplementation(((
+        fd: number,
+        buffer: NodeJS.ArrayBufferView,
+        offset: number,
+        length: number,
+        position: number | bigint | null,
+      ) =>
+        originalRead(
+          fd,
+          buffer,
+          offset,
+          Math.min(length, 1),
+          position,
+        )) as typeof fs.readSync);
+    syncBuiltinESMExports();
+    try {
+      expect(settleOrphanedShellStatusFiles(dir, dead).settled).toBe(1);
+      expect(read('shell-bg_1.status')).toMatchObject({
+        status: 'unknown',
+        command,
+      });
+      expect(readSpy.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      readSpy.mockRestore();
+      syncBuiltinESMExports();
+    }
+  });
+
+  it('leaves settled, pid-less, invalid-pid, malformed and non-status files alone', () => {
+    const { pid: _pid, ...withoutPid } = running;
+    write('shell-done.status', { ...running, status: 'completed' });
+    write('shell-nopid.status', withoutPid);
+    const invalidPids = [0, -5, 1.5, 2 ** 53, '4242'];
+    invalidPids.forEach((pid, i) =>
+      write(`shell-pid${i}.status`, { ...running, pid }),
+    );
+    write('shell-bad.status', '{not json');
+    write('shell-bg_1.output', running);
+    expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
+      settled: 0,
+      unsettled: [],
+    });
+    expect(read('shell-done.status')['status']).toBe('completed');
+    expect(read('shell-nopid.status')['status']).toBe('running');
+    invalidPids.forEach((_pid, i) =>
+      expect(read(`shell-pid${i}.status`)['status']).toBe('running'),
+    );
+    expect(read('shell-bg_1.output')['status']).toBe('running');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'skips a FIFO and an oversized file without waiting on either',
+    () => {
+      const fifo = join(dir, 'shell-fifo.status');
+      expect(spawnSync('mkfifo', [fifo]).status).toBe(0);
+      write('shell-big.status', { ...running, command: 'x'.repeat(1 << 20) });
+      // An open without O_NONBLOCK would wait for a writer forever on this
+      // thread, so it is refused here: the FIFO then reads as unreadable
+      // and the assertion below fails instead of the run hanging.
+      const originalOpen = fs.openSync;
+      const openSpy = vi.spyOn(fs, 'openSync').mockImplementation(((
+        ...args: Parameters<typeof fs.openSync>
+      ) => {
+        const [path, flags] = args;
+        if (
+          path === fifo &&
+          ((flags as number) & fsConstants.O_NONBLOCK) === 0
+        ) {
+          throw new Error('opened the FIFO without O_NONBLOCK');
+        }
+        return originalOpen(...args);
+      }) as typeof fs.openSync);
+      syncBuiltinESMExports();
+      try {
+        expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
+          settled: 0,
+          unsettled: [],
+        });
+      } finally {
+        openSpy.mockRestore();
+        syncBuiltinESMExports();
+      }
+      expect(lstatSync(fifo).isFIFO()).toBe(true);
+      expect(read('shell-big.status')['status']).toBe('running');
+    },
+  );
+
+  it('keeps checking the other sidecars when one of them throws', () => {
+    write('shell-a.status', { ...running, pid: 1 });
+    write('shell-b.status', { ...running, id: 'bg_2', pid: 4343 });
+    const isAlive = (pid: number) => {
+      if (pid === 1) throw new Error('liveness check failed');
+      return false;
+    };
+    expect(settleOrphanedShellStatusFiles(dir, { isAlive, scope })).toEqual({
+      settled: 1,
+      unsettled: [],
+    });
+    expect(read('shell-a.status')['status']).toBe('running');
+    expect(read('shell-b.status')['status']).toBe('unknown');
+  });
+
+  it('returns nothing for a session without a sidecar directory', () => {
+    expect(settleOrphanedShellStatusFiles(join(dir, 'missing'))).toEqual({
+      settled: 0,
+      unsettled: [],
+    });
+  });
+
+  it('detects an exited process with the default liveness probe', () => {
+    const { pid } = spawnSync(process.execPath, ['-e', '']);
+    write('shell-bg_1.status', { ...running, pid });
+    expect(settleOrphanedShellStatusFiles(dir, { scope }).settled).toBe(1);
+    expect(read('shell-bg_1.status')['status']).toBe('unknown');
+  });
+
+  const registerExitedShell = () => {
+    const { pid } = spawnSync(process.execPath, ['-e', '']);
+    new BackgroundShellRegistry().register(
+      makeEntry({
+        shellId: 'bg_1',
+        pid,
+        outputPath: join(dir, 'shell-bg_1.output'),
+      }),
+    );
+    return read('shell-bg_1.status')['pidScope'];
+  };
+
+  it.skipIf(process.platform !== 'linux')(
+    'settles a sidecar the registry wrote, with the native pid scope',
+    () => {
+      const pidScope = registerExitedShell();
+      expect(readLocalBootId()).not.toBeNull();
+      expect(readPidNamespaceId()).not.toBeNull();
+      expect(pidScope).toEqual({
+        hostname: hostname(),
+        bootId: readLocalBootId(),
+        pidNamespace: readPidNamespaceId(),
+      });
+      expect(settleOrphanedShellStatusFiles(dir)).toEqual({
+        settled: 1,
+        unsettled: [],
+      });
+      expect(read('shell-bg_1.status')['status']).toBe('unknown');
+    },
+  );
+
+  it.skipIf(process.platform === 'linux')(
+    'keeps a sidecar the registry wrote running where the pid scope cannot be proven',
+    () => {
+      expect(registerExitedShell()).toEqual({
+        hostname: hostname(),
+        bootId: null,
+        pidNamespace: null,
+      });
+      expect(settleOrphanedShellStatusFiles(dir)).toEqual({
+        settled: 0,
+        unsettled: [],
+      });
+      expect(read('shell-bg_1.status')['status']).toBe('running');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'skips a symlinked sidecar and leaves its target alone',
+    () => {
+      const target = join(
+        mkdtempSync(join(tmpdir(), 'qwen-shell-status-')),
+        'shell-bg_1.status',
+      );
+      writeFileSync(target, JSON.stringify(running));
+      const link = join(dir, 'shell-link.status');
+      symlinkSync(target, link);
+      try {
+        expect(settleOrphanedShellStatusFiles(dir, dead)).toEqual({
+          settled: 0,
+          unsettled: [],
+        });
+        expect(lstatSync(link).isSymbolicLink()).toBe(true);
+        expect(readFileSync(target, 'utf8')).toBe(JSON.stringify(running));
+      } finally {
+        rmSync(dirname(target), { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(cannotDenyWrites)(
+    'watches a sidecar it could not read and settles it once it can',
+    () => {
+      vi.useFakeTimers();
+      const statusPath = join(dir, 'shell-bg_1.status');
+      try {
+        write('shell-bg_1.status', running);
+        chmodSync(statusPath, 0o000);
+        const { settled, unsettled } = settleOrphanedShellStatusFiles(
+          dir,
+          dead,
+        );
+        expect({ settled, unsettled }).toEqual({
+          settled: 0,
+          unsettled: [{ statusPath }],
+        });
+        const stop = watchOrphanedShellStatusFiles(unsettled, {
+          intervalMs: 100,
+          ...dead,
+        });
+        try {
+          vi.advanceTimersByTime(100);
+          chmodSync(statusPath, 0o600);
+          expect(read('shell-bg_1.status')['status']).toBe('running');
+          vi.advanceTimersByTime(100);
+          expect(read('shell-bg_1.status')['status']).toBe('unknown');
+        } finally {
+          stop();
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('settles a watched sidecar once its process exits, until stopped', () => {
+    vi.useFakeTimers();
+    try {
+      write('shell-a.status', running);
+      write('shell-b.status', { ...running, id: 'bg_2', pid: 4343 });
+      let processesAlive = true;
+      const isAlive = () => processesAlive;
+      const { unsettled } = settleOrphanedShellStatusFiles(dir, {
+        isAlive,
+        scope,
+      });
+      const watching = watchOrphanedShellStatusFiles(
+        unsettled.filter((orphan) => orphan.pid === 4242),
+        { intervalMs: 100, isAlive, scope },
+      );
+      const stopped = watchOrphanedShellStatusFiles(
+        unsettled.filter((orphan) => orphan.pid === 4343),
+        { intervalMs: 100, isAlive, scope },
+      );
+      vi.advanceTimersByTime(100);
+      expect(read('shell-a.status')['status']).toBe('running');
+      stopped();
+      processesAlive = false;
+      vi.advanceTimersByTime(100);
+      expect(read('shell-a.status')['status']).toBe('unknown');
+      expect(read('shell-b.status')['status']).toBe('running');
+      watching();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.skipIf(cannotDenyWrites)(
+    'retries a rewrite that failed until it lands, while a sibling settles',
+    () => {
+      vi.useFakeTimers();
+      const sibling = mkdtempSync(join(tmpdir(), 'qwen-shell-status-'));
+      try {
+        write('shell-bg_1.status', running);
+        writeFileSync(
+          join(sibling, 'shell-bg_2.status'),
+          JSON.stringify({ ...running, id: 'bg_2', pid: 4343 }),
+        );
+        chmodSync(dir, 0o500);
+        const { settled, unsettled } = settleOrphanedShellStatusFiles(
+          dir,
+          dead,
+        );
+        expect({ settled, unsettled }).toEqual({
+          settled: 0,
+          unsettled: [
+            { statusPath: join(dir, 'shell-bg_1.status'), pid: 4242 },
+          ],
+        });
+        debugLogger.warn.mockClear();
+        const stop = watchOrphanedShellStatusFiles(
+          [
+            ...unsettled,
+            { statusPath: join(sibling, 'shell-bg_2.status'), pid: 4343 },
+          ],
+          { intervalMs: 100, ...dead },
+        );
+        try {
+          vi.advanceTimersByTime(100);
+          expect(read('shell-bg_1.status')['status']).toBe('running');
+          expect(
+            JSON.parse(
+              readFileSync(join(sibling, 'shell-bg_2.status'), 'utf8'),
+            )['status'],
+          ).toBe('unknown');
+          vi.advanceTimersByTime(100);
+          // Retried on every tick, but logged once for the sidecar.
+          const statusPath = join(dir, 'shell-bg_1.status');
+          expect(
+            debugLogger.warn.mock.calls.filter(([message]) =>
+              String(message).includes(statusPath),
+            ),
+          ).toHaveLength(1);
+          chmodSync(dir, 0o700);
+          vi.advanceTimersByTime(100);
+          expect(read('shell-bg_1.status')['status']).toBe('unknown');
+        } finally {
+          stop();
+        }
+      } finally {
+        vi.useRealTimers();
+        rmSync(sibling, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('does not keep the process alive while it watches', () => {
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    try {
+      const stop = watchOrphanedShellStatusFiles(
+        [{ statusPath: join(dir, 'shell-bg_1.status'), pid: 4242 }],
+        { isAlive: () => true, scope },
+      );
+      const timer = setIntervalSpy.mock.results[0]?.value as NodeJS.Timeout;
+      expect(timer.hasRef()).toBe(false);
+      stop();
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+
+  it('settles an orphan alive at takeover after it exits, with no second takeover', async () => {
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300)']);
+    const exited = new Promise((resolve) => child.once('exit', resolve));
+    write('shell-bg_1.status', { ...running, pid: child.pid });
+    const { settled, unsettled } = settleOrphanedShellStatusFiles(dir, {
+      scope,
+    });
+    expect({ settled, watched: unsettled.length }).toEqual({
+      settled: 0,
+      watched: 1,
+    });
+    const stop = watchOrphanedShellStatusFiles(unsettled, {
+      intervalMs: 20,
+      scope,
+    });
+    try {
+      await exited;
+      await vi.waitFor(
+        () => expect(read('shell-bg_1.status')['status']).toBe('unknown'),
+        { timeout: 2000, interval: 20 },
+      );
+    } finally {
+      stop();
+    }
   });
 });
 
