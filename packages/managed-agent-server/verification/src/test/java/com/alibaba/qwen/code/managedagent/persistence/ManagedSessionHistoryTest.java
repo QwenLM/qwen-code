@@ -2,9 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -24,11 +22,9 @@ class ManagedSessionHistoryTest {
                     ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             for (int i = 1; i <= 5; i++) {
                 String id = "session-" + i;
-                jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,gmt_create,gmt_modified,"
-                                + "tenant_key,session_key,session_scope_key) VALUES (?,?,?,?,?,0,?,?,?)",
-                        "tenant", id, "qwen-code", i % 2 == 0 ? "ARCHIVED" : "ACTIVE", i,
-                        ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key(id),
-                        ManagedSessionStore.sessionScopeKey("tenant", id));
+                jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,gmt_create,gmt_modified)"
+                                + " VALUES (?,?,?,?,?,0)",
+                        "tenant", id, "qwen-code", i % 2 == 0 ? "ARCHIVED" : "ACTIVE", i);
                 jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, gmt_modified)"
                         + " VALUES (?, ?, 'SESSION', X'', 0)", "tenant", id);
             }
@@ -114,20 +110,18 @@ class ManagedSessionHistoryTest {
 
     private void seedSession(JdbcTemplate jdbc, String tenant, String session, String status, String kind) {
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified,"
-                        + " tenant_key, session_key, session_scope_key, session_kind) VALUES (?, ?, 'qwen-code', ?, 0, 0, ?, ?, ?, ?)",
-                tenant, session, status, ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session),
-                ManagedSessionStore.sessionScopeKey(tenant, session), kind);
+                        + " session_kind) VALUES (?, ?, 'qwen-code', ?, 0, 0, ?)",
+                tenant, session, status, kind);
     }
 
     private void seedOperation(JdbcTemplate jdbc, String tenant, String session, String id,
             String kind, String state, long created, long modified) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, tenant_id, session_id,"
-                        + " operation_id, operation_kind, target_kind, target_key, request_digest, request_json,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, tenant_id, session_id,"
+                        + " operation_id, operation_kind, target_kind, target_id, request_digest, request_json,"
                         + " state, phase, failure_code, gmt_create, gmt_modified)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, ?, ?, ?)",
+                        + " VALUES (?, 'SESSION', ?, ?, ?, ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, ?, ?, ?)",
                 AgentStoreRows.sessionOperationKey(tenant, session, OperationKind.valueOf(kind), id),
-                scope, tenant, session, id, kind,
-                ManagedSchemaKeys.key(session), state, state, "FAILED".equals(state) ? "fixture" : null, created, modified);
+                session, tenant, session, id, kind,
+                session, state, state, "FAILED".equals(state) ? "fixture" : null, created, modified);
     }
 }

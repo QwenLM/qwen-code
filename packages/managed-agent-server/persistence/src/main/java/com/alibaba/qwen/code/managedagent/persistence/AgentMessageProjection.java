@@ -64,7 +64,7 @@ final class AgentMessageProjection {
                                 result.getLong("revision"),
                                 readParts(
                                         result.getString("parts_json"),
-                                        result.getString("body_resource_key"),
+                                        result.getString("body_resource_ref"),
                                         result.getString("tenant_id"),
                                         result.getString("session_id")));
     }
@@ -112,18 +112,32 @@ final class AgentMessageProjection {
         }
         pageArguments.addAll(List.of(position.sequence(), position.sequence(),
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(position.item()), limit + 1));
-        List<MessageSize> candidates = jdbc.query(
-                "SELECT m.item_id, m.first_sequence, OCTET_LENGTH(m.attributes_json) +"
-                        + " OCTET_LENGTH(m.parts_json) + COALESCE(OCTET_LENGTH(r.inline_bytes), 0) AS byte_length"
-                        + " FROM ma_message m LEFT JOIN ma_resource r ON r.resource_key = m.body_resource_key"
-                        + " AND r.tenant_id = m.tenant_id AND r.session_id = m.session_id"
+        List<Candidate> raw = jdbc.query(
+                "SELECT m.item_id, m.first_sequence, m.body_resource_ref,"
+                        + " OCTET_LENGTH(m.attributes_json) + OCTET_LENGTH(m.parts_json) AS inline_length,"
+                        // H2's MySQL-mode REPEATABLE READ snapshots each table at its
+                        // first access in the transaction; the body reads below must
+                        // see the same cut as these message rows, so open ma_resource
+                        // inside this statement. The predicate is always false.
+                        + " (SELECT COUNT(*) FROM ma_resource WHERE tenant_id = m.tenant_id"
+                        + " AND session_id = m.session_id AND 1 = 0) AS resource_snapshot"
+                        + " FROM ma_message m"
                         + " WHERE m.tenant_id = ? AND m.session_id = ? AND m.first_sequence <= ?"
                         + (numericBoundary ? " AND m.first_sequence > ?" : "")
                         + " AND (m.first_sequence " + comparison + " ? OR (m.first_sequence = ? AND m.item_id "
                         + comparison + " ?)) ORDER BY m.first_sequence" + order + ", m.item_id" + order + " LIMIT ?",
-                (row, index) -> new MessageSize(row.getString("item_id"), row.getLong("first_sequence"),
-                        row.getLong("byte_length")),
+                (row, index) -> new Candidate(row.getString("item_id"), row.getLong("first_sequence"),
+                        row.getString("body_resource_ref"), row.getLong("inline_length")),
                 pageArguments.toArray());
+        // The body resource ref decodes to the raw resource id; its inline bytes
+        // add to the item's own metadata length, exactly as the former join did.
+        Map<String, Long> bodyBytes = messageBodyBytes(tenantId, sessionId,
+                raw.stream().map(Candidate::resourceRef).toList());
+        List<MessageSize> candidates = raw.stream()
+                .map(candidate -> new MessageSize(candidate.id(), candidate.sequence(),
+                        candidate.inlineLength() + (candidate.resourceRef() == null ? 0L
+                                : bodyBytes.getOrDefault(candidate.resourceRef(), 0L))))
+                .toList();
         long bytes = 0;
         List<MessageSize> selected = new ArrayList<>();
         for (MessageSize candidate : candidates) {
@@ -240,7 +254,34 @@ final class AgentMessageProjection {
 
     record MessageSize(String id, long sequence, long bytes) {}
 
+    private record Candidate(String id, long sequence, String resourceRef, long inlineLength) {}
+
     record EventSize(long sequence, long bytes) {}
+
+    /** Inline body bytes of the referenced resources, keyed by body resource ref. */
+    private Map<String, Long> messageBodyBytes(String tenantId, String sessionId, List<String> refs) {
+        List<String> present = refs.stream().filter(ref -> ref != null).distinct().toList();
+        if (present.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> resourceIds = new LinkedHashMap<>();
+        List<Object> arguments = new ArrayList<>(List.of(tenantId, sessionId));
+        for (String ref : present) {
+            String resourceId = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef.decode(
+                    ref.getBytes(java.nio.charset.StandardCharsets.US_ASCII)).get(2);
+            resourceIds.put(ref, resourceId);
+            arguments.add(ManagedSchemaKeys.identity(resourceId));
+        }
+        Map<String, Long> byResource = new HashMap<>();
+        jdbc.query("SELECT resource_id, COALESCE(OCTET_LENGTH(inline_bytes), 0) AS body_length FROM ma_resource"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id IN ("
+                        + AgentStoreRows.placeholders(present.size()) + ")",
+                (RowCallbackHandler) row -> byResource.put(row.getString("resource_id"), row.getLong("body_length")),
+                arguments.toArray());
+        Map<String, Long> result = new HashMap<>();
+        resourceIds.forEach((ref, resourceId) -> result.put(ref, byResource.getOrDefault(resourceId, 0L)));
+        return result;
+    }
 
     /** The message projection coverage of each Session, in one read. */
     Map<String, Long> findMessageCoveredSequences(String tenantId,
@@ -460,7 +501,7 @@ final class AgentMessageProjection {
                         sessionId);
         Map<String, List<ItemPartRecord>> parts = new LinkedHashMap<>();
         jdbc.query(
-                "SELECT item_id, parts_json, body_resource_key FROM ma_message WHERE tenant_id = ?"
+                "SELECT item_id, parts_json, body_resource_ref FROM ma_message WHERE tenant_id = ?"
                         + " AND session_id = ? AND turn_id = ? AND item_role = 'assistant' AND"
                         + " item_type = 'message' FOR UPDATE",
                 (org.springframework.jdbc.core.RowCallbackHandler)
@@ -469,7 +510,7 @@ final class AgentMessageProjection {
                                     new ArrayList<>(
                                             readParts(
                                                     row.getString("parts_json"),
-                                                    row.getString("body_resource_key"),
+                                                    row.getString("body_resource_ref"),
                                                     tenantId,
                                                     sessionId));
                             retained.removeIf(
@@ -504,21 +545,21 @@ final class AgentMessageProjection {
                         parts);
             }
         }
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         var iterator = parts.entrySet().iterator();
         while (iterator.hasNext()) {
             var entry = iterator.next();
             List<ItemPartRecord> retained = entry.getValue();
             if (retained.isEmpty()) {
-                ManagedProjectionResourceCollector.release(jdbc, tenantId, sessionId, "MESSAGE",
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, entry.getKey()));
+                String ownerRef = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
+                        com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES,
+                        tenantId, sessionId, entry.getKey());
+                ManagedProjectionResourceCollector.release(jdbc, tenantId, sessionId, "MESSAGE", ownerRef);
                 jdbc.update(
                         "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind ="
-                                + " 'MESSAGE' AND owner_key = ?",
+                                + " 'MESSAGE' AND owner_ref = ?",
                         tenantId,
                         sessionId,
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                                scope, entry.getKey()));
+                        ManagedSchemaKeys.identity(ownerRef));
                 jdbc.update(
                         "DELETE FROM ma_message WHERE tenant_id = ? AND session_id = ? AND item_id"
                                 + " = ?",
@@ -778,40 +819,42 @@ final class AgentMessageProjection {
 
     void flushParts(
             String tenantId, String sessionId, Map<String, List<ItemPartRecord>> projectedParts) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         for (var entry : projectedParts.entrySet()) {
             String item = entry.getKey();
             byte[] bytes =
                     storeRows.writeJson(entry.getValue()).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            String owner =
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                            scope, item);
+            String ownerRef = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES,
+                    tenantId, sessionId, item);
             Map<String, Object> previous =
                     jdbc.queryForMap(
-                            "SELECT revision, body_resource_key FROM ma_message WHERE tenant_id = ?"
+                            "SELECT revision, body_resource_ref FROM ma_message WHERE tenant_id = ?"
                                     + " AND session_id = ? AND item_id = ? FOR UPDATE",
                             tenantId,
                             sessionId,
                             item);
             long revision = ((Number) previous.get("revision")).longValue();
-            if (previous.get("body_resource_key") != null) {
-                ManagedProjectionResourceCollector.release(jdbc, tenantId, sessionId, "MESSAGE", owner);
+            if (previous.get("body_resource_ref") != null) {
+                ManagedProjectionResourceCollector.release(jdbc, tenantId, sessionId, "MESSAGE", ownerRef);
             }
             jdbc.update(
                     "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind ="
-                            + " 'MESSAGE' AND owner_key = ?",
+                            + " 'MESSAGE' AND owner_ref = ?",
                     tenantId,
                     sessionId,
-                    owner);
+                    ManagedSchemaKeys.identity(ownerRef));
             String resource = null;
             if (bytes.length > 64 * 1024) {
                 String digest = WorkspaceEvidenceResources.digest(bytes);
-                String id = "message:" + owner + ":" + revision + ":" + digest;
-                resource = ManagedSessionStore.resourceKey(scope, id);
+                // The body resource id keeps its minted hash component: it is a
+                // bounded content identity, not an index key.
+                String ownerHash = ManagedSchemaKeys.key(
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId), item);
+                String id = "message:" + ownerHash + ":" + revision + ":" + digest;
+                resource = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.resourceRef(tenantId, sessionId, id);
                 try {
                     jdbc.update(
-                            "INSERT INTO ma_resource (resource_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                            resource,
+                            "INSERT INTO ma_resource (tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at) VALUES (?, ?, ?, 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                             tenantId,
                             sessionId,
                             id,
@@ -821,7 +864,7 @@ final class AgentMessageProjection {
                 } catch (DuplicateKeyException duplicate) {
                     List<Boolean> matching =
                             jdbc.query(
-                                    "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? FOR UPDATE",
+                                    "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ? FOR UPDATE",
                                     (row, index) ->
                                             tenantId.equals(row.getString("tenant_id"))
                                                     && sessionId.equals(row.getString("session_id"))
@@ -836,35 +879,46 @@ final class AgentMessageProjection {
                                                     && "MYSQL_INLINE"
                                                             .equals(row.getString("storage_kind"))
                                                     && "REFERENCED".equals(row.getString("state"))
-                                                    && row.getString("deletion_operation_key")
+                                                    && row.getString("deletion_operation_ref")
                                                             == null
                                                     && row.getString("publication_id") == null
                                                     && row.getString("object_key") == null
                                                     && row.getString("object_version_id") == null
                                                     && row.getString("encryption_key_id") == null,
-                                    resource);
+                                    tenantId,
+                                    sessionId,
+                                    ManagedSchemaKeys.identity(id));
                     if (matching.size() != 1 || !matching.getFirst()) {
                         throw new IllegalStateException(
                                 "Immutable message body identity differs.", duplicate);
                     }
                 }
+                // The minted id embeds this Session's scope hash, so the same id
+                // under another scope means the immutable row was moved: the raw
+                // unique key no longer conflicts, but the identity still differs.
+                Integer foreign = jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM ma_resource WHERE resource_id = ?"
+                                + " AND (tenant_id <> ? OR session_id <> ?)",
+                        Integer.class, id, tenantId, sessionId);
+                if (foreign != null && foreign > 0) {
+                    throw new IllegalStateException("Immutable message body identity differs.");
+                }
                 jdbc.update(
-                        "INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES ('MESSAGE', ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                        owner,
+                        "INSERT INTO ma_resource_ref (owner_kind, owner_ref, owner_revision, tenant_id, session_id, resource_id, gmt_create) VALUES ('MESSAGE', ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                        ManagedSchemaKeys.identity(ownerRef),
                         revision,
-                        resource,
                         tenantId,
                         sessionId,
                         id);
             }
             int changed =
                     jdbc.update(
-                            "UPDATE ma_message SET parts_json = ?, body_resource_key = ?"
+                            "UPDATE ma_message SET parts_json = ?, body_resource_ref = ?"
                                     + " WHERE tenant_id = ? AND session_id = ? AND item_id = ?",
                             resource == null
                                     ? new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
                                     : "[]",
-                            resource,
+                            resource == null ? null : ManagedSchemaKeys.identity(resource),
                             tenantId,
                             sessionId,
                             item);
@@ -877,7 +931,7 @@ final class AgentMessageProjection {
     List<ItemPartRecord> partsForItem(String tenantId, String sessionId, String itemId) {
         List<List<ItemPartRecord>> rows =
                 jdbc.query(
-                        "SELECT parts_json, body_resource_key FROM ma_message WHERE tenant_id = ?"
+                        "SELECT parts_json, body_resource_ref FROM ma_message WHERE tenant_id = ?"
                                 + " AND session_id = ? AND item_id = ? FOR UPDATE",
                         (row, index) -> readParts(row.getString(1), row.getString(2), tenantId, sessionId),
                         tenantId,
@@ -886,16 +940,17 @@ final class AgentMessageProjection {
         return rows.isEmpty() ? List.of() : rows.getFirst();
     }
 
-    List<ItemPartRecord> readParts(String value, String resourceKey, String tenantId, String sessionId) {
-        if (resourceKey == null) {
+    List<ItemPartRecord> readParts(String value, String resourceRef, String tenantId, String sessionId) {
+        if (resourceRef == null) {
             return readParts(value);
         }
+        String resourceId = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef.decode(
+                resourceRef.getBytes(java.nio.charset.StandardCharsets.US_ASCII)).get(2);
         List<byte[]> rows =
                 jdbc.query(
                         "SELECT inline_bytes, byte_length, sha256 FROM ma_resource WHERE"
-                            + " resource_key = ? AND tenant_id = ? AND"
-                            + " session_id = ? AND kind = ? AND schema_version = 1 AND state ="
-                            + " 'REFERENCED' AND deletion_operation_key IS NULL",
+                            + " tenant_id = ? AND session_id = ? AND resource_id = ? AND kind = ? AND schema_version = 1 AND state ="
+                            + " 'REFERENCED' AND deletion_operation_ref IS NULL",
                         (row, i) -> {
                             byte[] bytes = row.getBytes("inline_bytes");
                             if (bytes == null
@@ -907,9 +962,9 @@ final class AgentMessageProjection {
                             }
                             return bytes;
                         },
-                        resourceKey,
                         tenantId,
                         sessionId,
+                        ManagedSchemaKeys.identity(resourceId),
                         "managed-message-parts");
         if (rows.size() != 1) {
             throw new IllegalStateException("Message body resource is unavailable.");

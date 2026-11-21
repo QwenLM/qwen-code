@@ -7,7 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -96,33 +96,31 @@ public class JdbcManagedWorkspaceRegistry
         if (actorId == null || actorId.isEmpty()) {
             return false;
         }
-        byte[] key;
         try {
-            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return false;
         }
-        List<byte[]> creators = jdbc.queryForList(
+        List<String> creators = jdbc.queryForList(
                 "SELECT creator_actor_key FROM ma_session WHERE tenant_id = ? AND session_id = ?",
-                byte[].class, tenantId, sessionId);
-        return creators.size() == 1 && java.util.Arrays.equals(creators.getFirst(), key);
+                String.class, tenantId, sessionId);
+        return creators.size() == 1 && actorId.equals(creators.getFirst());
     }
 
     public boolean isSessionOwner(String tenantId, String actorId, String sessionId) {
         if (actorId == null || actorId.isEmpty()) {
             return false;
         }
-        byte[] key;
         try {
-            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return false;
         }
-        List<byte[]> owners = jdbc.queryForList(
+        List<String> owners = jdbc.queryForList(
                 "SELECT COALESCE(owner_actor_key, creator_actor_key) FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                byte[].class, tenantId, sessionId);
-        return owners.size() == 1 && java.util.Arrays.equals(owners.getFirst(), key);
+                String.class, tenantId, sessionId);
+        return owners.size() == 1 && actorId.equals(owners.getFirst());
     }
 
     /**
@@ -500,8 +498,9 @@ public class JdbcManagedWorkspaceRegistry
     }
 
     void requireSshNodeAccess(String tenantId, String actorId, String storageId) {
-        var remote = jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
-                String.class, RuntimeAdmissionFences.storageAliasKey(tenantId, storageId));
+        var remote = jdbc.queryForList("SELECT registration_json FROM ma_storage"
+                + " WHERE tenant_id = ? AND storage_id = ? AND storage_kind = 'SSH_LOCAL'",
+                String.class, tenantId, ManagedSchemaKeys.identity(storageId));
         if (!remote.isEmpty()) {
             boolean allowed = false;
             if (ssh != null && ssh.isEnabled()) {

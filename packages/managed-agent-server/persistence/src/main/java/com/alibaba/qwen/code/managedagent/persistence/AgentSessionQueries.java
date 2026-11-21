@@ -13,7 +13,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -108,10 +107,11 @@ final class AgentSessionQueries {
         }
         List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
         arguments.add(tenantId);
-        sessionIds.forEach(id -> arguments.add(ManagedSessionStore.sessionScopeKey(tenantId, id)));
+        sessionIds.forEach(id -> arguments.add(
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(id)));
         return new HashSet<>(jdbc.queryForList("SELECT session_id FROM"
                         + " ma_operation WHERE tenant_id = ?"
-                        + " AND scope_key IN (" + AgentStoreRows.placeholders(sessionIds.size())
+                        + " AND scope_kind = 'SESSION' AND scope_id IN (" + AgentStoreRows.placeholders(sessionIds.size())
                         + ") AND operation_kind = 'CLOSE' AND state = 'COMPLETED'"
                         + " AND receipt_id IS NOT NULL",
                 String.class, arguments.toArray()));
@@ -154,8 +154,9 @@ final class AgentSessionQueries {
                                 + " s.workspace_generation AND r.storage_id ="
                                 + " s.workspace_storage_id AND r.state = 'ACTIVE' LEFT JOIN"
                                 + " ma_workspace_access a ON a.tenant_id = r.tenant_id AND"
-                                + " a.workspace_id = r.workspace_id AND a.actor_id ="
-                                + " s.creator_actor_key AND a.role IN ('OPERATOR', 'OWNER') WHERE"
+                                + " a.workspace_id = r.workspace_id AND CAST(a.actor_id AS"
+                                + " BINARY(2048)) = CAST(s.creator_actor_key AS BINARY(2048))"
+                                + " AND a.role IN ('OPERATOR', 'OWNER') WHERE"
                                 + " s.tenant_id = ? AND s.session_id IN ("
                                     + AgentStoreRows.placeholders(pending.size())
                                     + ")",
@@ -222,8 +223,7 @@ final class AgentSessionQueries {
         arguments.add(tenantId);
         arguments.add(actorId == null ? null
                 : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
-        arguments.add(actorId == null ? null
-                : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        arguments.add(actorId);
         String archiveClause = switch (archiveState) {
             case "archived" -> " AND ma_session.status = 'ARCHIVED'";
             case "unarchived" -> " AND ma_session.status <> 'ARCHIVED'";
@@ -454,7 +454,7 @@ final class AgentSessionQueries {
         }
         List<Object> args = new ArrayList<>();
         args.add(tenantId);
-        args.add(ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        args.add(actorId);
         args.addAll(sessionIds);
         return new HashSet<>(jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id=?"
                         + " AND COALESCE(owner_actor_key, creator_actor_key)=? AND session_id IN ("
@@ -533,13 +533,13 @@ final class AgentSessionQueries {
     Optional<String> findLastVisibleStatusBeforeDelete(String tenantId,
             String sessionId) {
         return jdbc.query("SELECT session_status_before FROM ma_operation"
-                        + " WHERE scope_key = ? AND operation_kind = 'DELETE'"
-                        + " AND target_key = ? AND tenant_id = ? AND session_id = ?"
+                        + " WHERE scope_kind = 'SESSION' AND scope_id = ? AND operation_kind = 'DELETE'"
+                        + " AND target_id = ? AND tenant_id = ? AND session_id = ?"
                         + " AND session_status_before IS NOT NULL"
                         + " ORDER BY gmt_create DESC LIMIT 1",
                 (rows, row) -> rows.getString(1),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                AgentStoreRows.sessionOperationTarget(sessionId), tenantId, sessionId)
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)), tenantId, sessionId)
                 .stream().findFirst();
     }
 

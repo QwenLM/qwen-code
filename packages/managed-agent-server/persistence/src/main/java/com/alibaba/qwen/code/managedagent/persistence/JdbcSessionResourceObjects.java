@@ -3,8 +3,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -129,7 +129,9 @@ public class JdbcSessionResourceObjects {
         if (request.byteLength() > ManagedSessionStoreModels.MAX_INLINE_TRANSACTION_BYTES) {
             throw JournalStoreRows.payloadTooLarge("Resource exceeds its byte limit.");
         }
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        // The OSS object path keeps its scoped directory component; reads resolve the stored
+        // object_key, so this naming identity is not a schema key.
+        String scope = ManagedSchemaKeys.key(tenantId, sessionId);
         List<Map<String, Object>> existing = jdbc.queryForList(
                 "SELECT storage_kind, state, object_key, byte_length, sha256 FROM ma_resource"
                         + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? FOR UPDATE",
@@ -148,12 +150,11 @@ public class JdbcSessionResourceObjects {
         String objectKey = config.getOssKeyPrefix() + scope + "/" + request.resourceId() + "/"
                 + UUID.randomUUID();
         long now = System.currentTimeMillis();
-        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, object_key, state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OSS_OBJECT', ?, 'ALLOCATED', ?)",
-                ManagedSessionStore.resourceKey(scope, request.resourceId()), tenantId,
-                request.workspaceId(), sessionId, request.resourceId(), request.kind(),
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OSS_OBJECT', ?, 'ALLOCATED', ?)",
+                tenantId, request.workspaceId(), sessionId, request.resourceId(), request.kind(),
                 request.schemaVersion(), request.byteLength(), request.digest(), objectKey, now);
         return new Allocation(request.resourceId(), objectKey, request.byteLength(),
                 request.digest());

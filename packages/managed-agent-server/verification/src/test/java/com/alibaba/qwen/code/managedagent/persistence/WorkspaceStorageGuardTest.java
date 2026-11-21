@@ -14,7 +14,6 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -170,13 +169,13 @@ class WorkspaceStorageGuardTest {
         guard().register("tenant", "storage", UUID.randomUUID().toString());
         guard().register("tenant", "other", UUID.randomUUID().toString());
         guard().verifyProbe(binding);
-        var registrations = jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner ORDER BY storage_key");
-        jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?",
-                UUID.randomUUID().toString(), RuntimeAdmissionFences.storageAliasKey("tenant", "storage"));
+        var registrations = jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner ORDER BY physical_id");
+        jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE tenant_id = ? AND storage_id = ?",
+                UUID.randomUUID().toString(), "tenant", "storage");
         assertUnavailable(() -> guard().verify(binding));
         assertUnavailable(() -> guard().verifyProbe(binding));
         guard().verifyProbe(new ContextBinding("tenant", "other-workspace", 1, "other", ".", "config", 1));
-        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner ORDER BY storage_key"))
+        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner ORDER BY physical_id"))
                 .isEqualTo(registrations);
     }
 
@@ -395,8 +394,8 @@ class WorkspaceStorageGuardTest {
                 + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES ('tenant', 'workspace', 1, 'storage', 'workspace', ?, ?, 'ACTIVE')",
                 WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("UPDATE ma_session SET creator_actor_key = ?, owner_actor_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = ?",
-                "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), sessionId);
+        jdbc.update("UPDATE ma_session SET creator_actor_key = ?, owner_actor_key = ? WHERE tenant_id = 'tenant' AND session_id = ?",
+                "owner", "owner", sessionId);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id,"
                 + " role) VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
                 "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -426,7 +425,7 @@ class WorkspaceStorageGuardTest {
         doAnswer(invocation -> {
             invocation.callRealMethod();
             assertThat(jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                    + " WHERE tenant_id = X'74656e616e74' AND workspace_id = X'776f726b7370616365'")).isEqualTo(1);
+                    + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'")).isEqualTo(1);
             return null;
         }).doCallRealMethod().when(execution).authorizeActionResponse(session);
         assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
@@ -437,7 +436,7 @@ class WorkspaceStorageGuardTest {
         // A revoked creation grant is operator-reversible: the refusal must
         // stay retryable so a restored grant still delivers the answer.
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = X'74656e616e74' AND workspace_id = X'776f726b7370616365'");
+                + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'");
         assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getCode()).isEqualTo("workspace_unavailable");
@@ -445,9 +444,9 @@ class WorkspaceStorageGuardTest {
                 });
         // So is a registry that left ACTIVE.
         jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
-                + " WHERE tenant_id = X'74656e616e74' AND workspace_id = X'776f726b7370616365'");
+                + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'");
         jdbc.update("UPDATE ma_workspace SET state = 'DRAINING'"
-                + " WHERE tenant_id = X'74656e616e74' AND workspace_id = X'776f726b7370616365'");
+                + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'");
         assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getCode()).isEqualTo("workspace_unavailable");
@@ -456,13 +455,13 @@ class WorkspaceStorageGuardTest {
         verify(client, never()).resolveAction(any(), any(), any(), anyLong(), any());
         // Restored, the committed decision reaches the Harness.
         jdbc.update("UPDATE ma_workspace SET state = 'ACTIVE'"
-                + " WHERE tenant_id = X'74656e616e74' AND workspace_id = X'776f726b7370616365'");
+                + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'");
         connector.resolveAction("tenant", sessionId, "action", response);
         verify(client).resolveAction(attached, "action", "allow", 1L, "policy");
         // Generation drift after a re-registration stays structural: the
         // terminal exit keeps its verdict.
         jdbc.update("UPDATE ma_workspace SET workspace_generation = 2"
-                + " WHERE tenant_id = X'74656e616e74' AND workspace_id = X'776f726b7370616365'");
+                + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'");
         assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getCode()).isEqualTo("workspace_unavailable");
@@ -631,30 +630,30 @@ class WorkspaceStorageGuardTest {
         String registration = UUID.randomUUID().toString();
         var guard = guard();
         guard.register("tenant", "storage", registration);
-        String key = jdbc.queryForObject("SELECT storage_key FROM ma_storage_owner", String.class);
-        jdbc.update("INSERT INTO ma_runtime_session (scope_key, runtime_session_id, tenant_id, workspace_id,"
+        String key = jdbc.queryForObject("SELECT physical_id FROM ma_storage_owner", String.class);
+        jdbc.update("INSERT INTO ma_runtime_session (scope_id, runtime_session_id, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id, turn_kind,"
-                + " binding_id, runtime_generation, session_state, record_version, last_active_at, execution_storage_key)"
+                + " binding_id, runtime_generation, session_state, record_version, last_active_at, execution_storage_id)"
                 + " VALUES (?, 'retained', 'tenant', 'workspace', '1', '/workspace', 'digest', 'session', 'session',"
                 + " 'bootstrap', 'binding', 1, 'RELEASED', 0, 1, ?)", "a".repeat(64), key);
-        jdbc.update("UPDATE ma_storage_owner SET member_count = 1 WHERE storage_key = ?", key);
+        jdbc.update("UPDATE ma_storage_owner SET member_count = 1 WHERE physical_id = ?", key);
         assertThat(guard.inspect("tenant", "storage")).contains("holder=true");
         assertUnavailable(() -> guard.register("tenant", "storage", registration));
         String operation = UUID.randomUUID().toString();
         assertUnavailable(() -> guard.fence("tenant", "storage", 1, operation));
-        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL WHERE runtime_session_id = ?", "retained");
-        jdbc.update("UPDATE ma_storage_owner SET member_count = 0 WHERE storage_key = ?", key);
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = NULL WHERE runtime_session_id = ?", "retained");
+        jdbc.update("UPDATE ma_storage_owner SET member_count = 0 WHERE physical_id = ?", key);
         guard.fence("tenant", "storage", 1, operation);
-        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?", key, "retained");
-        jdbc.update("UPDATE ma_storage_owner SET member_count = 1 WHERE storage_key = ?", key);
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = ? WHERE runtime_session_id = ?", key, "retained");
+        jdbc.update("UPDATE ma_storage_owner SET member_count = 1 WHERE physical_id = ?", key);
         assertUnavailable(() -> guard.recoveryRegistration("tenant", "storage", 1, operation));
         assertUnavailable(() -> guard.restoreOriginal("tenant", "storage", 1, operation));
-        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL WHERE runtime_session_id = ?", "retained");
-        jdbc.update("UPDATE ma_storage_owner SET member_count = 0 WHERE storage_key = ?", key);
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = NULL WHERE runtime_session_id = ?", "retained");
+        jdbc.update("UPDATE ma_storage_owner SET member_count = 0 WHERE physical_id = ?", key);
         guard.restoreOriginal("tenant", "storage", 1, operation);
-        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?", key, "retained");
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = ? WHERE runtime_session_id = ?", key, "retained");
         guard.restoreOriginal("tenant", "storage", 1, operation);
-        assertThat(jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?", String.class, "retained"))
+        assertThat(jdbc.queryForObject("SELECT execution_storage_id FROM ma_runtime_session WHERE runtime_session_id = ?", String.class, "retained"))
                 .isEqualTo(key);
     }
 
@@ -664,7 +663,7 @@ class WorkspaceStorageGuardTest {
         String operation = UUID.randomUUID().toString();
         guard().fence("tenant", "storage", 1, operation);
         guard().restoreOriginal("tenant", "storage", 1, operation);
-        jdbc.update("UPDATE ma_storage_owner SET holder_key = 'new-holder'");
+        jdbc.update("UPDATE ma_storage_owner SET holder_id = 'new-holder'");
         var committed = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
         guard().restoreOriginal("tenant", "storage", 1, operation);
         assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(committed);
@@ -685,7 +684,7 @@ class WorkspaceStorageGuardTest {
         guard().register("tenant", "storage", UUID.randomUUID().toString());
         String operation = UUID.randomUUID().toString();
         guard().fence("tenant", "storage", 1, operation);
-        jdbc.update("UPDATE ma_storage_owner SET holder_key = 'retained-owner'");
+        jdbc.update("UPDATE ma_storage_owner SET holder_id = 'retained-owner'");
         Files.move(root, temp.resolve("old-root"));
         Files.createDirectory(root);
         var committed = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");

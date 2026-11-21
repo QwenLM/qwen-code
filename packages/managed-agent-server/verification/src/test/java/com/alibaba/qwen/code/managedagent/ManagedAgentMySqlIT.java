@@ -113,7 +113,7 @@ class ManagedAgentMySqlIT {
         var source = dataSource();
         Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
         JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
-        String tenant = "initial-model-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,"
                 + "display_name,config_ref,policy_ref,state) VALUES (?,'ws',1,'storage','Workspace',?,?,'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF,
@@ -759,7 +759,7 @@ class ManagedAgentMySqlIT {
                         ignored -> {},
                         new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        String tenant = "mysql-workspace-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         try {
             for (String id : List.of("workspace-a", "workspace-b")) {
                 jdbc.update(
@@ -856,7 +856,7 @@ class ManagedAgentMySqlIT {
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         TransactionTemplate transactions =
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        String tenant = "mysql-actor-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String workspace = "Workspace-A";
         String actor = "Actor-A";
         String digest = "sha256:" + "c".repeat(64);
@@ -966,7 +966,10 @@ class ManagedAgentMySqlIT {
                 .locations("classpath:db/managed-schema")
                 .load()
                 .migrate();
-        JdbcRepositoryContract.verify(dataSource, "flyway-" + UUID.randomUUID());
+        // The contract derives tenants up to prefix + 23 chars, which must
+        // fit the raw VARCHAR(36) tenant column.
+        JdbcRepositoryContract.verify(dataSource,
+                "f-" + UUID.randomUUID().toString().replace("-", "").substring(0, 10));
     }
 
     @Test
@@ -1069,22 +1072,21 @@ class ManagedAgentMySqlIT {
         // Session with enough records for the choice to matter.
         jdbc.batchUpdate(
                 "INSERT INTO ma_session_record"
-                        + " (record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
-                        + " task_kind, task_state, gmt_create) VALUES (?,"
+                        + " operation_id, revision, record_resource_id,"
+                        + " task_kind, task_state, gmt_create) VALUES ("
                         + " ?, ?, ?, 'monitor_run', ?, ?, 1, ?, 'monitor',"
                         + " 'pending', ?)",
                 IntStream.range(0, 500)
                         .mapToObj(
                                 index ->
                                         new Object[] {
-                                            sha256("record-" + index),
                                             tenant,
                                             "mysql-extension-workspace",
                                             "explain",
                                             "monitor-" + index,
-                                            sha256("command-" + index),
+                                            "command-" + index,
                                             "resource-" + index,
                                             1_000L + index
                                         })
@@ -1095,7 +1097,7 @@ class ManagedAgentMySqlIT {
                                 "EXPLAIN " + JdbcManagedExtensionRecordStore.OPENING_COMMAND_QUERY,
                                 tenant,
                                 "explain",
-                                sha256("command-7")))
+                                "command-7"))
                 .extracting(row -> row.get("key"))
                 .containsExactly("idx_ma_record_operation");
     }
@@ -1345,7 +1347,7 @@ class ManagedAgentMySqlIT {
             holder.setAutoCommit(false);
             try (var lock =
                     holder.prepareStatement(
-                            "SELECT record_key FROM"
+                            "SELECT record_id FROM"
                                     + " ma_session_record WHERE"
                                     + " tenant_id = ? AND session_id = ? FOR UPDATE")) {
                 lock.setString(1, tenant);
@@ -1451,7 +1453,7 @@ class ManagedAgentMySqlIT {
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         TransactionTemplate transactions =
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        String tenant = "mysql-operation-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId =
                 store.insertSessionCommand(
                                 tenant,
@@ -1663,7 +1665,7 @@ class ManagedAgentMySqlIT {
                         ignored -> {},
                         new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        String tenant = "mysql-turns-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId =
                 store.insertSessionCommand(
                                 tenant,
@@ -1941,21 +1943,22 @@ class ManagedAgentMySqlIT {
         for (Object[] lookup :
                 List.of(
                         new Object[] {
-                            "uk_ma_hook_once", "hook_once_key_hash = ?", sha256("once-7")
+                            "uk_ma_hook_once", "hook_once_key = ?", "once-7"
                         },
                         new Object[] {
                             "uk_ma_hook_occurrence",
-                            "hook_occurrence_hash = ? AND hook_ordinal = ?",
-                            sha256("occurrence-7"),
+                            "hook_occurrence_id = ? AND hook_ordinal = ?",
+                            "occurrence-7",
                             1
                         },
                         new Object[] {
-                            "uk_ma_hook_occurrence", "hook_occurrence_hash = ?", sha256("occurrence-7")
+                            "uk_ma_hook_occurrence", "hook_occurrence_id = ?", "occurrence-7"
                         },
                         new Object[] {
                             "idx_ma_hook_definition",
-                            "hook_definition_hash = ?",
-                            sha256("catalog-1\u00001")
+                            "hook_definition_id = ? AND hook_definition_revision = ?",
+                            "catalog-1",
+                            1
                         })) {
             Object[] arguments = new Object[lookup.length];
             arguments[0] = "mysql-hook-index";
@@ -1998,7 +2001,7 @@ class ManagedAgentMySqlIT {
         var service =
                 new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
-        String tenant = "mysql-definition-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String agentId =
                 inTransaction(transactions, () -> service.create(tenant, "create", DEFINITION))
                         .definition()
@@ -2049,7 +2052,7 @@ class ManagedAgentMySqlIT {
         var service =
                 new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
-        String tenant = "mysql-definition-key-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         var first = inTransaction(transactions, () -> service.create(tenant, "Key", DEFINITION));
         var second = inTransaction(transactions, () -> service.create(tenant, "key", DEFINITION));
 
@@ -2080,7 +2083,7 @@ class ManagedAgentMySqlIT {
         var service =
                 new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
-        String tenant = "mysql-definition-race-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String agentId =
                 inTransaction(transactions, () -> service.create(tenant, "create", DEFINITION))
                         .definition()
@@ -2288,7 +2291,7 @@ class ManagedAgentMySqlIT {
         JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         TransactionTemplate transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         JdbcManagedSessionStore resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
-        String tenant = "mysql-skills-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = UUID.randomUUID().toString();
         String token = "s".repeat(32);
         inTransaction(transactions, () -> resources.acquireWriter(tenant, session, token,

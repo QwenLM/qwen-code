@@ -3,10 +3,10 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionMessageRelayStore;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.JournalTurns;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore.MessageRow;
 import com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore.PendingMessage;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -66,14 +66,14 @@ class SessionMessageRelayStoreTest {
         // as a Session's commits do.
         long sequence = IDS.incrementAndGet();
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " delivery_target, delivery_state, gmt_create,"
                         + " first_sequence)"
-                        + " VALUES (?, ?, 'workspace', ?, ?, ?,"
+                        + " VALUES (?, 'workspace', ?, ?, ?,"
                         + " 'h', 1, ?, 'session', ?, ?, ?)",
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(sessionId, domain, recordId), TENANT, sessionId, domain,
+                TENANT, sessionId, domain,
                 recordId, resource, state, sequence, sequence);
     }
 
@@ -89,18 +89,13 @@ class SessionMessageRelayStoreTest {
     }
 
     private void session(String sessionId, String status) {
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, tenant_key, session_key, session_scope_key, agent_id, status,"
-                        + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'qwen-code', ?, 0, 0)"
-                        + " ON DUPLICATE KEY UPDATE status = VALUES(status)", TENANT, sessionId,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(TENANT),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(sessionId), scope, status);
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status,"
+                        + " gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', ?, 0, 0)"
+                        + " ON DUPLICATE KEY UPDATE status = VALUES(status)", TENANT, sessionId, status);
     }
 
     private void resource(String sessionId, String resourceId, byte[] bytes) {
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'workspace', ?, ?, 'managed-message', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId),
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, 'workspace', ?, ?, 'managed-message', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 TENANT, sessionId, resourceId, bytes.length, "a".repeat(64), bytes);
     }
 
@@ -112,20 +107,10 @@ class SessionMessageRelayStoreTest {
                     + "\"managedSession\":").append(event).append("}\n");
         }
         byte[] bytes = lines.toString().getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES (?, 'workspace', ?, ?, ?, 'tx', 'op', 'command', ?, 1, 1, ?, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                TENANT, sessionId, revision, hash(sessionId + revision),
-                "c".repeat(64), events.length, "t".repeat(64), bytes,
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision, command_ref, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES (?, 'workspace', ?, ?, ?, 'tx', 'op', ?, ?, 1, 1, ?, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                TENANT, sessionId, revision, ManagedIdentityRefs.commandRef("op", "command-" + revision),
+                "command-" + revision, "c".repeat(64), events.length, "t".repeat(64), bytes,
                 bytes.length, "d".repeat(64));
-    }
-
-    private static String hash(String text) {
-        try {
-            return java.util.HexFormat.of().formatHex(
-                    java.security.MessageDigest.getInstance("SHA-256")
-                            .digest(text.getBytes(StandardCharsets.UTF_8)));
-        } catch (java.security.NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
     }
 
     private static String input(String turnId, String source) {
@@ -469,14 +454,14 @@ class SessionMessageRelayStoreTest {
     void refusesToCountAnEdgeOverAnUnreadableBody() {
         String parent = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " delivery_target, delivery_state, gmt_create)"
-                        + " VALUES (?, ?, 'workspace', ?,"
+                        + " VALUES (?, 'workspace', ?,"
                         + " 'session_message', 'msg_x', 'h', 1, 'missing',"
                         + " 'session', 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(parent, "session_message", "msg_x"), TENANT, parent);
+                TENANT, parent);
         assertThatThrownBy(() -> records.edgeMessages(TENANT, parent,
                 "run-1", UUID.randomUUID().toString()))
                 .isInstanceOf(IllegalStateException.class);

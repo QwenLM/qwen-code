@@ -34,7 +34,7 @@ class TenantContextFilterTest {
     @Test
     void acceptsTrustedActorIdsAtTheUnicodeBoundary() throws Exception {
         for (String actorId : new String[] {"alice@example.com", " ",
-                "𝄞".repeat(512)}) {
+                "𝄞".repeat(36)}) {
             MockHttpServletRequest request = request("tenant-a");
             request.setUserPrincipal(actor("tenant-a", actorId));
             MockHttpServletResponse response = new MockHttpServletResponse();
@@ -68,7 +68,7 @@ class TenantContextFilterTest {
             throws ServletException, IOException {
         for (AuthenticatedTenantActor actor : new AuthenticatedTenantActor[] {
                 actor("tenant-b", "actor-a"), actor("tenant-a", "bad\nactor"),
-                actor("tenant-a", "𝄞".repeat(513))
+                actor("tenant-a", "𝄞".repeat(37))
         }) {
             MockHttpServletRequest request = request("tenant-a");
             request.setUserPrincipal(actor);
@@ -78,6 +78,19 @@ class TenantContextFilterTest {
             assertThat(response.getStatus()).isEqualTo(403);
             assertThat(response.getContentAsString())
                     .contains("actor_scope_mismatch");
+            assertThat(chain.getRequest()).isNull();
+        }
+    }
+
+    @Test
+    void rejectsInvalidTenantHeaders() throws Exception {
+        for (String tenant : new String[] {"tenant a", "tenant/a", "é",
+                "t".repeat(37)}) {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            MockFilterChain chain = new MockFilterChain();
+            filter.doFilter(request(tenant), response, chain);
+            assertThat(response.getStatus()).isEqualTo(400);
+            assertThat(response.getContentAsString()).contains("invalid_tenant");
             assertThat(chain.getRequest()).isNull();
         }
     }

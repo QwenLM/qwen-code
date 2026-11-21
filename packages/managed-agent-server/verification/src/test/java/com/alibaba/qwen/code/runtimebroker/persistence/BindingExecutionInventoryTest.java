@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolHoldRow;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
@@ -62,7 +63,7 @@ class BindingExecutionInventoryTest {
     @Test
     void binaryHarnessIdentityRejectsCaseAliasesInTheHoldInventory() {
         // #13986 review: a Harness id that differs only in case is a
-        // different owner; the canonical schema's VARBINARY identity is
+        // different owner; the canonical schema's binary identity is
         // byte-exact, so the alias must not reach the restart inventory.
         DataSource source = dataSource();
         var harnessWriter = new JdbcToolExecutionRepository(source);
@@ -77,8 +78,8 @@ class BindingExecutionInventoryTest {
     @Test
     void holdInventoryScansWithoutDecodingNonHoldPayloads() throws Exception {
         // #13986 review R1-7: the restart drain inventory reads two fields
-        // off the hold rows. A plain row whose stored call-id digest does not
-        // match its id makes the full ledger mapper throw, so the read can
+        // off the hold rows. A plain row whose stored result payload cannot
+        // be decoded makes the full ledger mapper throw, so the read can
         // only succeed if non-hold history is never materialized.
         DataSource source = dataSource();
         var writer = new JdbcToolExecutionRepository(source);
@@ -89,9 +90,9 @@ class BindingExecutionInventoryTest {
                         "turn", "callId", "plain", "argsDigest", "digest")));
         try (var connection = source.getConnection();
                 var statement = connection.prepareStatement(
-                        "UPDATE ma_tool_execution SET execution_call_id_hash = ? "
+                        "UPDATE ma_tool_execution SET result_json = ? "
                                 + "WHERE execution_call_id = ?")) {
-            statement.setString(1, "0".repeat(64));
+            statement.setString(1, "{corrupt");
             statement.setBytes(2,
                     com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
                             .identity("plain"));
@@ -121,14 +122,14 @@ class BindingExecutionInventoryTest {
     @Test
     void jdbcRejectsCorruptExecutionHashesBeforeReturningInventory() throws Exception {
         DataSource source = dataSource();
-        new JdbcToolExecutionRepository(source).findOrCreate(prepared("record", BINDING, GENERATION, "session"));
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            assertEquals(1, statement.executeUpdate("UPDATE ma_tool_execution "
-                    + "SET execution_call_id_hash = '" + "0".repeat(64) + "'"));
-        }
+        new JdbcToolExecutionRepository(source).findOrCreate(prepared("record", "bind?ng", GENERATION, "session"));
         var reader = new JdbcToolExecutionRepository(source);
-        assertThrows(IllegalStateException.class,
-                () -> reader.findByBinding(BINDING, GENERATION, null, 100));
+        // A lookup identity that cannot be encoded as raw UTF-8 is refused
+        // at the identity boundary; the stored inventory stays readable.
+        assertThrows(IllegalArgumentException.class,
+                () -> reader.findByBinding("bind\ud800ng", GENERATION, null, 100));
+        assertEquals(List.of("record"),
+                executionIds(reader.findByBinding("bind?ng", GENERATION, null, 100)));
     }
 
     @Test
@@ -137,9 +138,10 @@ class BindingExecutionInventoryTest {
         var repository = new JdbcToolExecutionRepository(source);
         repository.findOrCreate(prepared("?", BINDING, GENERATION, "session"));
         assertEquals(JdbcRepositorySupport.valueKey("?"), JdbcRepositorySupport.valueKey("\ud800"));
-        // The unique hash constraint refuses the aliasing insert; the ledger
-        // keeps exactly the original row.
-        assertThrows(IllegalStateException.class,
+        // Raw identities are exact UTF-8: the form that aliased under the
+        // hash is refused at the identity boundary, and the ledger keeps
+        // exactly the original row.
+        assertThrows(IllegalArgumentException.class,
                 () -> repository.findOrCreate(prepared("\ud800", BINDING, GENERATION, "session")));
         assertEquals(List.of("?"), executionIds(repository.findByBinding(BINDING, GENERATION, null, 100)));
     }
@@ -159,7 +161,7 @@ class BindingExecutionInventoryTest {
     private static void verifyInventory(ToolExecutionRepository writer,
             ToolExecutionRepository reader, Consumer<RuntimeBindingRecord> abandon) {
         List<String> ids = IntStream.range(0, 105).mapToObj(index -> "execution-" + index)
-                .sorted(Comparator.comparing(JdbcRepositorySupport::valueKey)).toList();
+                .sorted(Comparator.comparing(ManagedSchemaKeys::identity, Arrays::compareUnsigned)).toList();
         writer.findOrCreate(prepared(ids.getFirst(), BINDING, GENERATION, "session-0"));
         RuntimeBindingRecord lost = lostBinding();
         abandon.accept(lost);
@@ -222,8 +224,9 @@ class BindingExecutionInventoryTest {
         assertEquals(List.of("foreign-binding"),
                 executionIds(reader.findByBinding("other-binding", GENERATION, null, 100)));
         assertTrue(reader.findByBinding("absent", GENERATION, null, 100).isEmpty());
-        assertEquals(ids.stream().filter(id -> JdbcRepositorySupport.valueKey(id).compareTo(
-                        JdbcRepositorySupport.valueKey("missing-cursor")) > 0).limit(100).toList(),
+        assertEquals(ids.stream().filter(id -> Arrays.compareUnsigned(
+                        ManagedSchemaKeys.identity(id),
+                        ManagedSchemaKeys.identity("missing-cursor")) > 0).limit(100).toList(),
                 executionIds(reader.findByBinding(BINDING, GENERATION, "missing-cursor", 100)));
     }
 

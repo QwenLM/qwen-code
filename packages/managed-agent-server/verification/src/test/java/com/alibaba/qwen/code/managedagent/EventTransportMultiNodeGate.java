@@ -198,7 +198,7 @@ public class EventTransportMultiNodeGate {
 
     @BeforeEach
     public void prepareCase(TestInfo test) throws IOException {
-        tenant = "mq3-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         caseRoot = Path.of("target", "mq3-multi-node",
                 test.getTestMethod().orElseThrow().getName()).toAbsolutePath();
         deleteRecursively(caseRoot);

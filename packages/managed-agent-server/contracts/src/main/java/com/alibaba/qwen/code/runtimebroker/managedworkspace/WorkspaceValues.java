@@ -1,9 +1,12 @@
 package com.alibaba.qwen.code.runtimebroker.managedworkspace;
 
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+
 import java.util.regex.Pattern;
 
 public final class WorkspaceValues {
     public static final int MAXIMUM_TEXT_CODE_POINTS = 512;
+    private static final int MAXIMUM_ACTOR_CODE_POINTS = 36;
 
     private static final Pattern IDENTIFIER = Pattern.compile(
             "[A-Za-z0-9._:-]{1,128}");
@@ -15,12 +18,29 @@ public final class WorkspaceValues {
         return value != null && IDENTIFIER.matcher(value).matches();
     }
 
+    public static boolean isTenantIdentifier(String value) {
+        return BrokerValues.isTenantId(value);
+    }
+
     public static String requireIdentifier(String value, String name) {
         if (!isIdentifier(value)) {
             throw new IllegalArgumentException(name
                     + " must match [A-Za-z0-9._:-]{1,128}");
         }
         return value;
+    }
+
+    static String requireTenantIdentifier(String value, String name) {
+        return BrokerValues.requireTenantId(value, name);
+    }
+
+    static String requireActor(String value, String name) {
+        String actor = requireText(value, name);
+        if (actor.codePointCount(0, actor.length()) > MAXIMUM_ACTOR_CODE_POINTS) {
+            throw new IllegalArgumentException(name + " must be 1 to "
+                    + MAXIMUM_ACTOR_CODE_POINTS + " characters");
+        }
+        return actor;
     }
 
     public static String requirePrintableAscii(String value, String name,

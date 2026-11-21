@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.dao.DuplicateKeyException;
@@ -21,7 +21,7 @@ final class HostedCleanupReferences {
     private HostedCleanupReferences() {}
 
     static String bindingKey(String tenant, String workspace, String binding) {
-        return ManagedSchemaKeys.key("hosted-cleanup-binding", tenant, workspace, binding);
+        return binding;
     }
 
     /**
@@ -38,8 +38,8 @@ final class HostedCleanupReferences {
 
     static void apply(JdbcTemplate jdbc, String tenant, String workspace, String session,
             JsonNode payload, Function<String, StoredResource> resources, long revision, long now) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        String owner = ManagedSchemaKeys.key("hosted-cleanup", payload.path("cleanupId").textValue());
+        String owner = ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES,
+                "hosted-cleanup", payload.path("cleanupId").textValue());
         String resourceId = payload.path("descriptorRef").path("resourceId").textValue();
         StoredResource resource = resources.apply(resourceId);
         JsonNode descriptor = ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
@@ -63,7 +63,6 @@ final class HostedCleanupReferences {
                         "Cleanup Runtime binding is missing or differs from its original descriptor");
             }
         }
-        String key = ManagedSessionStore.resourceKey(scope, resourceId);
         // Only this Session's commits insert its cleanup references, and they
         // queue on its Session row before their first read, so a plain probe
         // sees every earlier one. Retirement deletes them only under the head
@@ -75,38 +74,44 @@ final class HostedCleanupReferences {
         if (!previous.isEmpty()) {
             previous = references(jdbc, tenant, session, owner, true);
         }
-        requireSameIdentity(previous, key, binding, generation);
+        requireSameIdentity(previous, resourceId, binding, generation);
         if ("confirmed".equals(payload.path("state").textValue())) {
             jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
-                    + " AND owner_kind = 'HOSTED_CLEANUP' AND owner_key = ? AND owner_revision = ?"
-                    + " AND resource_key = ? AND runtime_binding_key = ?", tenant, session, owner, generation, key, binding);
+                    + " AND owner_kind = 'HOSTED_CLEANUP' AND owner_ref = ? AND owner_revision = ?"
+                    + " AND resource_id = ? AND runtime_binding_id = ?", tenant, session,
+                    ManagedSchemaKeys.identity(owner), generation, ManagedSchemaKeys.identity(resourceId), binding);
         } else if (previous.isEmpty()) {
             try {
-                jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision,"
-                        + " resource_key, tenant_id, workspace_id, session_id, journal_revision, resource_id,"
-                        + " gmt_create, runtime_binding_key) VALUES ('HOSTED_CLEANUP', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        owner, generation, key, tenant, workspace, session, revision, resourceId, now, binding);
+                jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref, owner_revision,"
+                        + " tenant_id, workspace_id, session_id, journal_revision, resource_id,"
+                        + " gmt_create, runtime_binding_id) VALUES ('HOSTED_CLEANUP', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ManagedSchemaKeys.identity(owner), generation, tenant, ManagedSchemaKeys.identity(workspace),
+                        session, revision, ManagedSchemaKeys.identity(resourceId), now, binding);
             } catch (DuplicateKeyException race) {
-                requireSameIdentity(references(jdbc, tenant, session, owner, true), key, binding, generation);
+                requireSameIdentity(references(jdbc, tenant, session, owner, true), resourceId, binding, generation);
             }
         }
     }
 
     private static List<Map<String, Object>> references(JdbcTemplate jdbc, String tenant, String session, String owner,
             boolean lock) {
-        return jdbc.queryForList("SELECT resource_key, runtime_binding_key, owner_revision"
+        return jdbc.queryForList("SELECT resource_id, runtime_binding_id, owner_revision"
                 + " FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'HOSTED_CLEANUP'"
-                + " AND owner_key = ?" + (lock ? " FOR UPDATE" : ""), tenant, session, owner);
+                + " AND owner_ref = ?" + (lock ? " FOR UPDATE" : ""), tenant, session, ManagedSchemaKeys.identity(owner));
     }
 
-    private static void requireSameIdentity(List<Map<String, Object>> rows, String key, String binding,
+    private static void requireSameIdentity(List<Map<String, Object>> rows, String resourceId, String binding,
             long generation) {
         for (var row : rows) {
-            if (!key.equals(row.get("resource_key")) || !binding.equals(row.get("runtime_binding_key"))
+            if (!resourceId.equals(text(row.get("resource_id"))) || !binding.equals(row.get("runtime_binding_id"))
                     || generation != ((Number) row.get("owner_revision")).longValue()) {
                 throw new ManagedAgentException(409, "managed_session_cleanup_conflict",
                         "Cleanup identity changed its original Runtime descriptor");
             }
         }
+    }
+
+    private static String text(Object value) {
+        return value instanceof byte[] bytes ? new String(bytes, StandardCharsets.UTF_8) : (String) value;
     }
 }

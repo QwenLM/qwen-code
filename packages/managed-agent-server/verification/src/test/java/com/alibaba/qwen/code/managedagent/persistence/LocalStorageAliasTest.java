@@ -4,14 +4,12 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -87,29 +85,28 @@ class LocalStorageAliasTest {
         String physical = LocalStorageOwners.key(jdbc, "tenant", "storage");
         assertThat(LocalStorageOwners.key(jdbc, "other-tenant", "other-storage")).isEqualTo(physical);
         var owner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
-        String aliasKey = RuntimeAdmissionFences.storageAliasKey("tenant", "storage");
-        assertThat(jdbc.queryForObject("SELECT gmt_create FROM ma_storage WHERE alias_key = ?",
-                Long.class, aliasKey)).isPositive();
+        assertThat(jdbc.queryForObject("SELECT gmt_create FROM ma_storage WHERE tenant_id = ? AND storage_id = ?",
+                Long.class, "tenant", "storage")).isPositive();
         String registrationOperation = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse(jdbc.queryForObject(
-                "SELECT registration_json FROM ma_storage WHERE alias_key = ?", String.class, aliasKey))
+                "SELECT registration_json FROM ma_storage WHERE tenant_id = ? AND storage_id = ?", String.class, "tenant", "storage"))
                 .path("operationId").asText();
-        jdbc.update("UPDATE ma_storage SET storage_kind = 'UNREGISTERED', gmt_modified = 1 WHERE alias_key = ?",
-                aliasKey);
+        jdbc.update("UPDATE ma_storage SET storage_kind = 'UNREGISTERED', gmt_modified = 1 WHERE tenant_id = ? AND storage_id = ?",
+                "tenant", "storage");
         guard.register("tenant", "storage", registrationOperation);
-        assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage WHERE alias_key = ?",
-                Long.class, aliasKey)).isGreaterThan(1);
-        jdbc.update("UPDATE ma_storage SET gmt_modified = 1 WHERE alias_key = ?", aliasKey);
+        assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage WHERE tenant_id = ? AND storage_id = ?",
+                Long.class, "tenant", "storage")).isGreaterThan(1);
+        jdbc.update("UPDATE ma_storage SET gmt_modified = 1 WHERE tenant_id = ? AND storage_id = ?", "tenant", "storage");
         guard.register("tenant", "storage", registrationOperation);
-        assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage WHERE alias_key = ?",
-                Long.class, aliasKey)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage WHERE tenant_id = ? AND storage_id = ?",
+                Long.class, "tenant", "storage")).isEqualTo(1);
         byte[] marker = Files.readAllBytes(root.resolve(".qwen-managed-storage.json"));
         assertThat(owner.get("tenant_id")).isEqualTo("tenant");
         assertThat(owner.get("storage_id")).isEqualTo("storage");
-        assertThat(owner.get("storage_key")).isEqualTo(physical);
+        assertThat(owner.get("physical_id")).isEqualTo(physical);
         guard.verify(binding("tenant", "storage"));
         guard.verify(binding("other-tenant", "other-storage"));
-        jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?", UUID.randomUUID().toString(),
-                RuntimeAdmissionFences.storageAliasKey("tenant", "storage"));
+        jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE tenant_id = ? AND storage_id = ?", UUID.randomUUID().toString(),
+                "tenant", "storage");
         assertThatThrownBy(() -> guard.verify(binding("tenant", "storage"))).isInstanceOf(RuntimeBrokerException.class);
         guard.verify(binding("other-tenant", "other-storage"));
         assertThat(Files.readAllBytes(root.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
@@ -149,11 +146,11 @@ class LocalStorageAliasTest {
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_busy"));
         authority.releaseMaintenance(first, firstRow.childWorkspaceId(), firstClaim.claimGeneration(), step);
         String successor = authority.holdForMaintenance(second, secondRow.childWorkspaceId(), secondClaim.claimGeneration());
-        var holder = jdbc.queryForMap("SELECT holder_key, maintenance_id, maintenance_generation FROM ma_storage_owner");
+        var holder = jdbc.queryForMap("SELECT holder_id, maintenance_id, maintenance_generation FROM ma_storage_owner");
         authority.releaseMaintenance(first, firstRow.childWorkspaceId(), firstClaim.claimGeneration(), step);
-        assertThat(jdbc.queryForMap("SELECT holder_key, maintenance_id, maintenance_generation FROM ma_storage_owner")).isEqualTo(holder);
+        assertThat(jdbc.queryForMap("SELECT holder_id, maintenance_id, maintenance_generation FROM ma_storage_owner")).isEqualTo(holder);
         authority.releaseMaintenance(second, secondRow.childWorkspaceId(), secondClaim.claimGeneration(), successor);
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner", String.class)).isNull();
+        assertThat(jdbc.queryForObject("SELECT holder_id FROM ma_storage_owner", String.class)).isNull();
     }
 
     @Test
@@ -189,16 +186,15 @@ class LocalStorageAliasTest {
     @Test
     void driftedPhysicalMappingAndCopiedMarkersCannotAuthorizeAnAlias() throws Exception {
         String physical = LocalStorageOwners.key(jdbc, "tenant", "storage");
-        String other = RuntimeAdmissionFences.storageAliasKey("other-tenant", "other-storage");
-        jdbc.update("UPDATE ma_storage SET physical_key = ? WHERE alias_key = ?", "f".repeat(64), other);
+        jdbc.update("UPDATE ma_storage SET physical_id = ? WHERE tenant_id = ? AND storage_id = ?", "f".repeat(64), "other-tenant", "other-storage");
         assertThatThrownBy(() -> guard.verify(binding("other-tenant", "other-storage"))).isInstanceOf(RuntimeBrokerException.class);
-        jdbc.update("UPDATE ma_storage SET physical_key = ? WHERE alias_key = ?", physical, other);
+        jdbc.update("UPDATE ma_storage SET physical_id = ? WHERE tenant_id = ? AND storage_id = ?", physical, "other-tenant", "other-storage");
         Path replacement = Files.createDirectory(temporary.resolve("replacement")).toRealPath();
         Files.copy(root.resolve(".qwen-managed-storage.json"), replacement.resolve(".qwen-managed-storage.json"));
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("third", "copy", replacement.toString())));
         var copied = guard();
         assertThatThrownBy(() -> copied.register("third", "copy", UUID.randomUUID().toString())).isInstanceOf(RuntimeBrokerException.class);
-        assertThat(jdbc.queryForObject("SELECT mount_state FROM ma_storage_owner WHERE storage_key = ?", String.class, physical)).isEqualTo("READY");
+        assertThat(jdbc.queryForObject("SELECT mount_state FROM ma_storage_owner WHERE physical_id = ?", String.class, physical)).isEqualTo("READY");
     }
 
     @Test
@@ -237,7 +233,7 @@ class LocalStorageAliasTest {
         String original = LocalStorageOwners.key(jdbc, "tenant", "storage");
         String fence = UUID.randomUUID().toString();
         guard.fence("other-tenant", "other-storage", 1, fence);
-        var originalOwner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ?", original);
+        var originalOwner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE physical_id = ?", original);
         var source = guard.recoveryRegistration("other-tenant", "other-storage", 1, fence);
         Path target = Files.createDirectory(temporary.resolve("target")).toRealPath();
         Files.copy(root.resolve(".qwen-managed-storage.json"), target.resolve(".qwen-managed-storage.json"));
@@ -250,9 +246,9 @@ class LocalStorageAliasTest {
         String promoted = LocalStorageOwners.key(jdbc, "other-tenant", "other-storage");
         assertThat(promoted).isNotEqualTo(original);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(2);
-        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ?", original)).isEqualTo(originalOwner);
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE physical_id = ?", original)).isEqualTo(originalOwner);
         assertThat(LocalStorageOwners.key(jdbc, "tenant", "storage")).isEqualTo(original);
-        assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = ?", Long.class, promoted)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT mount_revision FROM ma_storage_owner WHERE physical_id = ?", Long.class, promoted)).isEqualTo(2);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("other-tenant", "other-storage", target.toString())));
         guard().verify(binding("other-tenant", "other-storage"));
         assertThatThrownBy(() -> guard.verify(binding("tenant", "storage"))).isInstanceOf(RuntimeBrokerException.class);
@@ -331,14 +327,14 @@ class LocalStorageAliasTest {
         for (String state : List.of(JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.READY, JdbcChildWorkspaceStore.MERGING,
                 JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED, JdbcChildWorkspaceStore.DISCARDING,
                 JdbcChildWorkspaceStore.CONFLICTED, JdbcChildWorkspaceStore.BLOCKED, JdbcChildWorkspaceStore.FAILED)) {
-            jdbc.update("UPDATE ma_operation SET state = ?, phase = ? WHERE operation_key = ?", state, state,
+            jdbc.update("UPDATE ma_operation SET state = ?, phase = ? WHERE operation_ref = ?", state, state,
                     WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, "other-tenant", child.childWorkspaceId()));
             jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", state, "other-tenant", child.childWorkspaceId());
             assertUncovered(() -> guard.fence("tenant", "storage", 1, UUID.randomUUID().toString()));
             assertThat(jdbc.queryForObject("SELECT mount_state FROM ma_storage_owner", String.class)).isEqualTo("READY");
         }
         for (String state : List.of(JdbcChildWorkspaceStore.MERGED, JdbcChildWorkspaceStore.DISCARDED)) {
-            jdbc.update("UPDATE ma_operation SET state = ?, phase = ? WHERE operation_key = ?", state, state,
+            jdbc.update("UPDATE ma_operation SET state = ?, phase = ? WHERE operation_ref = ?", state, state,
                     WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, "other-tenant", child.childWorkspaceId()));
             jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", state, "other-tenant", child.childWorkspaceId());
             var inventory = new TransactionTemplate(manager).execute(status ->
@@ -362,9 +358,8 @@ class LocalStorageAliasTest {
     }
 
     private void session(String tenant, String storage, String session) {
-        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, workspace_storage_id, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, 1, 1)", tenant, session, storage,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant), com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(session), ManagedSessionStore.sessionScopeKey(tenant, session));
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, workspace_storage_id, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, 'CONTROL', ?, 1, 1)", tenant, session, storage);
     }
 
     private static void assertUncovered(Runnable action) {

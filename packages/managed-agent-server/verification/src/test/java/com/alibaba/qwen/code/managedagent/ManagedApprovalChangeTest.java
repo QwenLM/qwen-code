@@ -74,7 +74,7 @@ class ManagedApprovalChangeTest {
 
     @BeforeEach
     void setup() {
-        tenant = "approval-change-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,"
                 + "display_name,config_ref,policy_ref,state) VALUES (?,'ws',1,'storage','Workspace',?,?,'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -120,9 +120,9 @@ class ManagedApprovalChangeTest {
         var admitted = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "live-turn", "digest",
                 session, input, SubmitHarnessTurn.computePayloadDigest(input)));
         var turn = store.findTurn(tenant, session, admitted.turnId()).orElseThrow();
-        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
-                + " VALUES (?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)", "a".repeat(64), tenant, session,
+                + " VALUES (?,?,'action','action',1,1,'ACTION','requested','action',1,?)", tenant, session,
                 "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         assertThat(service.queryWebShellSessionApproval(tenant, "actor", session).liveSupported()).isTrue();
         assertThat(change("actor", "live-change", "yolo", 0).approvalRevision()).isEqualTo(1);
@@ -721,9 +721,9 @@ class ManagedApprovalChangeTest {
             when(harness.supportsApprovalSelection()).thenReturn(false);
         }
         if (shape.equals("approval")) {
-            jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
+            jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
                     + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
-                    + " VALUES (?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)", "a".repeat(64), tenant, session,
+                    + " VALUES (?,?,'action','action',1,1,'ACTION','requested','action',1,?)", tenant, session,
                     "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         }
         if (shape.equals("recovery")) {

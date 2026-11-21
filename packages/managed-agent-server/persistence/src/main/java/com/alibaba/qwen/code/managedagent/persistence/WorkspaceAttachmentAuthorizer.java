@@ -196,10 +196,12 @@ final class WorkspaceAttachmentAuthorizer {
             }
             String parent = (String) row.get("parent_session_id");
             if (parent == null) {
-                if (!(row.get("creator_actor_key") instanceof byte[] actor)) {
+                if (!(row.get("creator_actor_key") instanceof String actor)) {
                     throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
                 }
-                return actor;
+                // The Session column holds raw actor text; the access grant it
+                // binds into stays VARBINARY actor bytes.
+                return actor.getBytes(java.nio.charset.StandardCharsets.UTF_8);
             }
             current = parent;
         }
@@ -209,12 +211,12 @@ final class WorkspaceAttachmentAuthorizer {
     private byte[] externalExecutionActor(ContextBinding binding, String sessionId) {
         var actors = jdbc.query("SELECT COALESCE(owner_actor_key, creator_actor_key) AS execution_actor"
                 + " FROM ma_session WHERE tenant_id = ? AND session_id = ? AND parent_session_id IS NULL",
-                (row, index) -> row.getBytes("execution_actor"),
+                (row, index) -> row.getString("execution_actor"),
                 binding.getTenantId(), sessionId);
         if (actors.size() != 1 || actors.getFirst() == null) {
             throw unavailable();
         }
-        return actors.getFirst();
+        return actors.getFirst().getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
     // qwen-code, or a Session that pinned a compiled definition (D8c-1).

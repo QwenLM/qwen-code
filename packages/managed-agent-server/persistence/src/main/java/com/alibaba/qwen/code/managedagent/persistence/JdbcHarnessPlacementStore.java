@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHarnessReleaseRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
@@ -53,11 +52,10 @@ public class JdbcHarnessPlacementStore
     }
 
     public Map<String, Object> releaseReceipt(String tenant, String session, long epoch, String operationId) {
-        String key = ManagedExtensionProjection.recordKey(session, RELEASE_DOMAIN, releaseId(epoch));
         var saved = jdbc.query("SELECT b.inline_bytes, b.sha256 FROM ma_session_record r JOIN ma_resource b"
                 + " ON b.resource_id = r.record_resource_id"
                 + " AND b.tenant_id = r.tenant_id AND b.workspace_id = r.workspace_id AND b.session_id = r.session_id"
-                + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.record_key = ?"
+                + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.record_id = ?"
                 + " AND r.domain = 'hosted_harness_release' AND r.record_kind = 'DOMAIN'"
                 + " AND b.kind = ? AND b.schema_version = 1 AND b.state = 'REFERENCED'"
                 + " AND b.storage_kind = 'MYSQL_INLINE' AND b.byte_length BETWEEN 1 AND 16384 AND LENGTH(b.inline_bytes) = b.byte_length",
@@ -67,7 +65,7 @@ public class JdbcHarnessPlacementStore
                         throw blocked("harness_release_receipt_corrupt");
                     }
                     return ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
-                }, tenant, session, key, "managed-hosted_harness_release");
+                }, tenant, session, releaseId(epoch), "managed-hosted_harness_release");
         if (saved.isEmpty()) {
             return null;
         }
@@ -207,9 +205,9 @@ public class JdbcHarnessPlacementStore
 
     static boolean released(JdbcTemplate jdbc, String tenant, String session, long epoch) {
         return !jdbc.query("SELECT record_id FROM ma_session_record WHERE tenant_id = ? AND session_id = ?"
-                + " AND record_key = ? AND domain = ? AND record_kind = 'DOMAIN'",
+                + " AND record_id = ? AND domain = ? AND record_kind = 'DOMAIN'",
                 (row, index) -> row.getString(1), tenant, session,
-                ManagedExtensionProjection.recordKey(session, RELEASE_DOMAIN, releaseId(epoch)),
+                releaseId(epoch),
                 RELEASE_DOMAIN).isEmpty();
     }
 

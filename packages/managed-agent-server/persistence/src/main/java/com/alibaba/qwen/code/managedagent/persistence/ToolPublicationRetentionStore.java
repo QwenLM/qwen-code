@@ -3,9 +3,9 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -50,9 +50,9 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     /** The instant the last live read lease expires, or 0 without one. */
     static long earliestReadLeaseExpiry(JdbcTemplate jdbc, String tenant, String session) {
         Long expiry = jdbc.queryForObject(
-                "SELECT MIN(expires_at) FROM ma_read_lease WHERE tenant_key = ? AND session_key = ?"
+                "SELECT MIN(expires_at) FROM ma_read_lease WHERE tenant_id = ? AND session_id = ?"
                         + " AND expires_at > ?",
-                Long.class, hash(tenant), hash(session), now(jdbc));
+                Long.class, tenant, session, now(jdbc));
         return expiry == null ? 0 : expiry;
     }
 
@@ -107,9 +107,8 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         long time = now(jdbc);
         JdbcManagedSessionStore.namedRootDeadlock(() -> {
             jdbc.update(
-                    "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tenant_key = VALUES(tenant_key), session_key = VALUES(session_key), session_scope_key = VALUES(session_scope_key)",
-                    boundedParameters(jdbc, timeoutSeconds, tenant, session, hash(tenant), hash(session),
-                            ManagedSessionStore.sessionScopeKey(tenant, session), time, time));
+                    "INSERT INTO ma_session (tenant_id, session_id, session_kind, is_publication_retention_registered, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', 1, ?, ?) ON DUPLICATE KEY UPDATE is_publication_retention_registered = 1",
+                    boundedParameters(jdbc, timeoutSeconds, tenant, session, time, time));
             jdbc.query(
                     "SELECT tenant_id, session_id FROM ma_session WHERE tenant_id = ? AND"
                             + " session_id = ? FOR UPDATE",
@@ -161,11 +160,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
 
     static void requireLive(JdbcTemplate jdbc, String tenant, String session) {
         if (!jdbc.query(
-                        "SELECT retirement_generation FROM ma_session WHERE tenant_key = ? AND"
-                                + " session_key = ? AND retired_at IS NOT NULL",
+                        "SELECT retirement_generation FROM ma_session WHERE tenant_id = ? AND"
+                                + " session_id = ? AND retired_at IS NOT NULL",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                        hash(tenant),
-                        hash(session))
+                        tenant,
+                        session)
                 .isEmpty()) {
             throw retired();
         }
@@ -186,10 +185,10 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         var existing =
                 jdbc.query(
                         "SELECT retirement_operation_id AS operation_id FROM ma_session WHERE"
-                                + " tenant_key = ? AND session_key = ? AND retired_at IS NOT NULL",
+                                + " tenant_id = ? AND session_id = ? AND retired_at IS NOT NULL",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                        hash(tenant),
-                        hash(session));
+                        tenant,
+                        session);
         if (!existing.isEmpty()) {
             ToolPublicationContract.require(
                     operation.equals(existing.getFirst().get("operation_id")),
@@ -217,12 +216,12 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         jdbc.update(
                 "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", retirement_operation_id = ?, retirement_generation ="
                         + " retirement_generation + 1, retired_at = ?, is_recovery_protected = ? WHERE"
-                        + " tenant_key = ? AND session_key = ? AND retired_at IS NULL",
+                        + " tenant_id = ? AND session_id = ? AND retired_at IS NULL",
                 operation,
                 time,
                 protectedRecovery,
-                hash(tenant),
-                hash(session));
+                tenant,
+                session);
         jdbc.update(
                 "UPDATE ma_session_head SET state = 'DELETED', writer_id = NULL, writer_lease_until = NULL, lease_token_hash = NULL, latest_checkpoint_resource_id = NULL, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_id = ? AND harness_session_id = ?",
                 tenant,
@@ -231,9 +230,9 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 + " AND session_id = ? AND retention_state = 'PINNED'", tenant, session);
         jdbc.update(
                 "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'SUPPRESSED', claim_until = NULL, failure_code ="
-                    + " 'session_retired' WHERE scope_key = ? AND tenant_id = ? AND session_id = ?"
+                    + " 'session_retired' WHERE scope_kind = 'SESSION' AND scope_id = ? AND tenant_id = ? AND session_id = ?"
                     + " AND operation_kind = 'TOOL_RESULT_PROJECTION' AND state <> 'READY'",
-                JdbcManagedToolResultStore.scope(tenant, session),
+                session,
                 tenant,
                 session);
         SessionResourceCollectionCollector.enqueueCollections(jdbc, tenant, session, time);
@@ -261,7 +260,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         var row =
                 jdbc.query(
                                 "SELECT tenant_id, session_id FROM ma_output_capture"
-                                        + " WHERE scope_key = ? AND publication_id = ?",
+                                        + " WHERE scope_ref = ? AND publication_id = ?",
                                 (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                                 scope,
                                 publication)
@@ -270,7 +269,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         String state =
                 jdbc.queryForObject(
                         "SELECT retention_state FROM ma_output_capture"
-                                + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
+                                + " WHERE scope_ref = ? AND publication_id = ? FOR UPDATE",
                         String.class,
                         scope,
                         publication);
@@ -283,8 +282,8 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 status -> {
                     var row =
                             jdbc.query(
-                                            "SELECT scope_key, publication_id, slot_key FROM"
-                                                + " ma_resource WHERE scope_key = ? AND resource_id"
+                                            "SELECT scope_ref, publication_id, slot_key FROM"
+                                                + " ma_resource WHERE scope_ref = ? AND resource_id"
                                                 + " = ? AND capture_object_key = ?",
                                             (schemaRow, schemaIndex) ->
                                                     ManagedSchemaRows.read(schemaRow),
@@ -297,12 +296,12 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                     // including when a reader already holds the root in this transaction.
                     lockRetainedPublication(scope, publication, false);
                     jdbc.update(
-                            "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", is_quarantined = TRUE WHERE scope_key = ?"
+                            "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", is_quarantined = TRUE WHERE scope_ref = ?"
                                     + " AND publication_id = ?",
                             scope,
                             publication);
                     jdbc.update(
-                            "UPDATE ma_resource SET capture_state = 'QUARANTINED' WHERE scope_key ="
+                            "UPDATE ma_resource SET capture_state = 'QUARANTINED' WHERE scope_ref ="
                                 + " ? AND publication_id = ? AND slot_key = ? AND capture_state ="
                                 + " 'VERIFIED'",
                             scope,
@@ -315,7 +314,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         var row =
                 jdbc.query(
                                 "SELECT tenant_id, session_id FROM ma_output_capture"
-                                        + " WHERE scope_key = ? AND publication_id = ?",
+                                        + " WHERE scope_ref = ? AND publication_id = ?",
                                 (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                                 scope,
                                 publication)
@@ -403,11 +402,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                     session);
                     String id = UUID.randomUUID().toString();
                     jdbc.update(
-                            "INSERT INTO ma_read_lease (lease_id, tenant_key, session_key,"
+                            "INSERT INTO ma_read_lease (lease_id, tenant_id, session_id,"
                                     + " retirement_generation, expires_at) VALUES (?, ?, ?, ?, ?)",
                             id,
-                            hash(tenant),
-                            hash(session),
+                            tenant,
+                            session,
                             generation,
                             Math.addExact(now(jdbc), READ_BUDGET_MILLIS));
                     return new ReadLease(id, tenant, session, generation);
@@ -452,16 +451,14 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                 + " AS generation, r.retired_at, CAST(UNIX_TIMESTAMP() AS"
                                 + " DECIMAL(20, 0)) * 1000 + EXTRACT(MICROSECOND FROM"
                                 + " CURRENT_TIMESTAMP(6)) / 1000 AS db_now FROM ma_read_lease l"
-                                + " LEFT JOIN ma_session r ON r.tenant_key = l.tenant_key AND"
-                                + " r.session_key = l.session_key AND r.tenant_id = ? AND"
-                                + " r.session_id = ? WHERE l.lease_id = ? AND l.tenant_key = ? AND"
-                                + " l.session_key = ?",
+                                + " LEFT JOIN ma_session r ON r.tenant_id = l.tenant_id AND"
+                                + " r.session_id = l.session_id AND"
+                                + " r.is_publication_retention_registered = 1 WHERE l.lease_id = ?"
+                                + " AND l.tenant_id = ? AND l.session_id = ?",
                             (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                            tenant,
-                            session,
                             id,
-                            hash(tenant),
-                            hash(session));
+                            tenant,
+                            session);
             if (closed || rows.size() != 1 || rows.getFirst().get("retired_at") != null
                     || number(rows.getFirst(), "expires_at") <= number(rows.getFirst(), "db_now")
                     || rows.getFirst().get("generation") == null
@@ -486,11 +483,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                     long time = now(jdbc);
                     return jdbc.update(
                                                     "UPDATE ma_read_lease SET expires_at = ? WHERE"
-                                                            + " lease_id = ? AND tenant_key = ? AND"
-                                                            + " session_key = ? AND"
+                                                            + " lease_id = ? AND tenant_id = ? AND"
+                                                            + " session_id = ? AND"
                                                             + " retirement_generation = ? AND"
                                                             + " expires_at > ?",
-                            Math.addExact(time, READ_BUDGET_MILLIS), id, hash(tenant), hash(session), generation, time) == 1;
+                            Math.addExact(time, READ_BUDGET_MILLIS), id, tenant, session, generation, time) == 1;
                 });
                 if (!Boolean.TRUE.equals(renewed)) {
                     throw expired();
@@ -526,7 +523,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                         .put("sha256", bodyDigest)
                         .toString();
         String digest = ToolPublicationContract.sha256(request.getBytes(StandardCharsets.UTF_8));
-        String target = ManagedSchemaKeys.key(objectKey);
+        String target = objectKey;
         PutAttempt attempt =
                 transactions.execute(
                         status -> {
@@ -537,7 +534,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                             var rows =
                                     jdbc.query(
                                             "SELECT retention_state FROM ma_output_capture WHERE"
-                                                + " scope_key = ? AND publication_id = ? AND"
+                                                + " scope_ref = ? AND publication_id = ? AND"
                                                 + " tenant_id = ? AND session_id = ? FOR UPDATE",
                                             (row, index) -> row.getString(1),
                                             scope,
@@ -549,11 +546,12 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                     "Publication is retired");
                             var previous =
                                     jdbc.query(
-                                            "SELECT operation_key, operation_id, state,"
+                                            "SELECT operation_ref, operation_id, state,"
                                                 + " claim_generation, request_digest, request_json"
-                                                + " FROM ma_operation WHERE scope_key = ? AND"
+                                                + " FROM ma_operation WHERE scope_kind ="
+                                                + " 'PUBLICATION' AND scope_id = ? AND"
                                                 + " publication_id = ? AND operation_kind ="
-                                                + " 'OBJECT_PUT' AND target_key = ? FOR UPDATE",
+                                                + " 'OBJECT_PUT' AND target_id = ? FOR UPDATE",
                                             (row, index) -> ManagedSchemaRows.read(row),
                                             scope,
                                             publication,
@@ -568,10 +566,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                         "Object write content conflicts");
                                 String id = (String) prior.get("operation_id");
                                 String originalKey =
-                                        ManagedSchemaKeys.operationKey(
-                                                OperationKind.OBJECT_PUT, scope, target, id);
+                                        ManagedIdentityRefs.operationRef(
+                                                OperationKind.OBJECT_PUT.name(), tenant, "PUBLICATION",
+                                                scope, target, id);
                                 ToolPublicationContract.require(
-                                        originalKey.equals(prior.get("operation_key")),
+                                        originalKey.equals(prior.get("operation_ref")),
                                         "Object write identity conflicts");
                                 if ("RETURNED".equals(prior.get("state"))) {
                                     return null;
@@ -587,11 +586,12 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                             }
                             String id = UUID.randomUUID().toString();
                             String originalKey =
-                                    ManagedSchemaKeys.operationKey(
-                                            OperationKind.OBJECT_PUT, scope, target, id);
+                                    ManagedIdentityRefs.operationRef(
+                                            OperationKind.OBJECT_PUT.name(), tenant, "PUBLICATION",
+                                            scope, target, id);
                             long time = now(jdbc);
                             jdbc.update(
-                                    "INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, session_id, workspace_id, target_kind, target_key, publication_id, request_digest, request_json, state, phase, claim_generation, gmt_create, gmt_modified) VALUES (?, ?, 'OBJECT_PUT', ?, ?, ?, ?, 'RESOURCE', ?, ?, ?, ?, 'IN_FLIGHT', 'PUT', 1, ?, ?)",
+                                    "INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id, tenant_id, session_id, workspace_id, target_kind, target_id, publication_id, request_digest, request_json, state, phase, claim_generation, gmt_create, gmt_modified) VALUES (?, 'PUBLICATION', ?, 'OBJECT_PUT', ?, ?, ?, ?, 'RESOURCE', ?, ?, ?, ?, 'IN_FLIGHT', 'PUT', 1, ?, ?)",
                                     originalKey,
                                     scope,
                                     id,
@@ -631,12 +631,12 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
             Boolean settled = transactions.execute(status -> {
                 lockRetainedPublication(scope, publication);
                 int changed = jdbc.update(
-                                                "UPDATE ma_operation SET state = 'RETURNED', result_json = ?, completed_at = ?, gmt_modified = ? WHERE operation_key = ? AND scope_key = ? AND publication_id = ? AND operation_kind = 'OBJECT_PUT' AND operation_id = ? AND target_key = ? AND request_digest = ? AND claim_generation = ? AND state IN ('UNKNOWN', 'IN_FLIGHT')",
+                                                "UPDATE ma_operation SET state = 'RETURNED', result_json = ?, completed_at = ?, gmt_modified = ? WHERE operation_ref = ? AND scope_kind = 'PUBLICATION' AND scope_id = ? AND publication_id = ? AND operation_kind = 'OBJECT_PUT' AND operation_id = ? AND target_id = ? AND request_digest = ? AND claim_generation = ? AND state IN ('UNKNOWN', 'IN_FLIGHT')",
                         proof, now(jdbc), now(jdbc), attempt.key(), scope, publication, attempt.id(), target,
                         digest, attempt.generation());
                 return changed == 1 || !jdbc.query(
                                                         "SELECT 1 FROM ma_operation WHERE"
-                                                            + " operation_key = ? AND"
+                                                            + " operation_ref = ? AND"
                                                             + " operation_kind = 'OBJECT_PUT' AND"
                                                             + " operation_id = ? AND request_digest"
                                                             + " = ? AND claim_generation = ? AND"
@@ -652,14 +652,14 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
             objects.putIfAbsent(objectKey, bytes);
         } catch (RuntimeException error) {
             jdbc.update(
-                    "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'UNKNOWN' WHERE operation_key = ?"
+                    "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'UNKNOWN' WHERE operation_ref = ?"
                             + " AND claim_generation = ? AND state = 'IN_FLIGHT'",
                     attempt.key(),
                     attempt.generation());
             throw error;
         }
         jdbc.update(
-                "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'RETURNED', completed_at = ? WHERE operation_key ="
+                "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'RETURNED', completed_at = ? WHERE operation_ref ="
                         + " ? AND state = 'IN_FLIGHT' AND claim_generation = ?",
                 now(jdbc),
                 attempt.key(),
@@ -677,11 +677,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         }
         return jdbc
                 .query(
-                        "SELECT scope_key, publication_id, tenant_id, session_id,"
+                        "SELECT scope_ref, publication_id, tenant_id, session_id,"
                             + " capture_used_bytes, producer_used_bytes, admission_used_bytes,"
                             + " is_write_evidence, is_quarantined, is_accepted_complete, producer_phase FROM"
                             + " ma_output_capture WHERE retention_state = 'RETIRING' ORDER BY"
-                            + " scope_key, publication_id LIMIT 100",
+                            + " scope_ref, publication_id LIMIT 100",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow))
                 .stream()
                 .map(row -> candidate(row, grace))
@@ -689,7 +689,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     Candidate candidate(Map<String, Object> row, Duration grace) {
-        String scope = (String) row.get("scope_key");
+        String scope = (String) row.get("scope_ref");
         String publication = (String) row.get("publication_id");
         String tenant = (String) row.get("tenant_id");
         String session = (String) row.get("session_id");
@@ -697,11 +697,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 + number(row, "admission_used_bytes");
         var roots =
                 jdbc.query(
-                        "SELECT retired_at, is_recovery_protected FROM ma_session WHERE tenant_key = ?"
-                                + " AND session_key = ? AND retired_at IS NOT NULL",
+                        "SELECT retired_at, is_recovery_protected FROM ma_session WHERE tenant_id = ?"
+                                + " AND session_id = ? AND retired_at IS NOT NULL",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                        hash(tenant),
-                        hash(session));
+                        tenant,
+                        session);
         String blocker;
         if (roots.isEmpty()) {
             blocker = "session_not_retired";
@@ -717,30 +717,30 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 || !flag(row, "is_accepted_complete")) {
             blocker = "not_accepted_complete";
         } else if (count(
-                        "SELECT COUNT(*) FROM ma_read_lease WHERE tenant_key = ? AND session_key ="
+                        "SELECT COUNT(*) FROM ma_read_lease WHERE tenant_id = ? AND session_id ="
                                 + " ? AND expires_at > ?",
-                        hash(tenant),
-                        hash(session),
+                        tenant,
+                        session,
                         now(jdbc))
                 != 0) {
             blocker = "reader_active";
         } else if (count(
                         "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND"
-                                + " scope_key = ? AND publication_id = ? AND state <> 'RETURNED'",
+                                + " scope_kind = 'PUBLICATION' AND scope_id = ? AND publication_id = ? AND state <> 'RETURNED'",
                         scope,
                         publication)
                 != 0) {
             blocker = "put_unresolved";
         } else if (count(
                         "SELECT COUNT(*) FROM ma_operation WHERE operation_kind IN"
-                            + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key ="
-                            + " ? AND publication_id = ? AND state NOT IN ('SUCCEEDED', 'FAILED')",
+                            + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_kind ="
+                            + " 'PUBLICATION' AND scope_id = ? AND publication_id = ? AND state NOT IN ('SUCCEEDED', 'FAILED')",
                         scope,
                         publication)
                 != 0) {
             blocker = "operation_unresolved";
         } else if (count(
-                        "SELECT COUNT(*) FROM ma_resource WHERE scope_key = ?"
+                        "SELECT COUNT(*) FROM ma_resource WHERE scope_ref = ?"
                                 + " AND publication_id = ? AND capture_state <> 'VERIFIED'",
                         scope,
                         publication)
@@ -750,7 +750,8 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
             blocker = "recovery_active";
         } else if (count(
                         "SELECT COUNT(*) FROM ma_resource r JOIN ma_resource_ref f ON"
-                                + " f.resource_key = r.resource_key WHERE r.scope_key = ? AND"
+                                + " f.resource_id = r.resource_id AND f.tenant_id = r.tenant_id AND"
+                                + " f.session_id = r.session_id WHERE r.scope_ref = ? AND"
                                 + " r.publication_id = ? AND f.owner_kind <> 'CAPTURE'",
                         scope,
                         publication)
@@ -765,8 +766,8 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     private boolean recoveryActive(String tenant, String session) {
         boolean locking = org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive();
         return !jdbc.query(
-                        "SELECT w.operation_key FROM ma_operation_work w JOIN ma_operation o ON"
-                            + " o.operation_key = w.operation_key WHERE w.tenant_id = ? AND"
+                        "SELECT w.operation_ref FROM ma_operation_work w JOIN ma_operation o ON"
+                            + " o.operation_ref = w.operation_ref WHERE w.tenant_id = ? AND"
                             + " w.session_id = ? AND w.work_kind = 'SESSION' AND o.operation_kind ="
                             + " 'WORKSPACE_RECOVERY' AND o.state IN ('CAPTURING', 'VERIFYING')"
                             + " LIMIT 1"

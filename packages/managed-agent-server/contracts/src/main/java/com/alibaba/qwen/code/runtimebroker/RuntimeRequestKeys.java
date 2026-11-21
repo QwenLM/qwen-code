@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.apache.commons.codec.digest.DigestUtils;
 
 import java.nio.ByteBuffer;
@@ -13,20 +14,23 @@ public final class RuntimeRequestKeys {
     public static String requestKey(RuntimeProvisionRequest request) {
         RuntimeScope scope = request.getScope();
         if (request.isManagedContext()) {
-            return digest("managed-context/1", scope.getTenantId(),
+            return ManagedIdentityRefs.ref(ManagedIdentityRefs.RUNTIME_REQUEST_REF_BYTES,
+                    "managed-context/1", scope.getTenantId(),
                     scope.getWorkspaceId(), scope.getWorkspaceGeneration(),
                     scope.getCanonicalCwd(), scope.getCapabilityDigest(),
                     scope.getIsolationClass(), request.getIsolationKey(),
                     request.getProvisionerKind(), request.getStorageId());
         }
-        return digest(scope.getTenantId(), scope.getWorkspaceId(),
+        return ManagedIdentityRefs.ref(ManagedIdentityRefs.RUNTIME_REQUEST_REF_BYTES,
+                scope.getTenantId(), scope.getWorkspaceId(),
                 scope.getWorkspaceGeneration(), scope.getCanonicalCwd(),
                 scope.getCapabilityDigest(), scope.getIsolationClass(),
                 request.getIsolationKey(), request.getProvisionerKind());
     }
 
     public static String scopeKey(RuntimeScope scope) {
-        return digest(scope.getTenantId(), scope.getWorkspaceId(),
+        return ManagedIdentityRefs.ref(ManagedIdentityRefs.RUNTIME_SCOPE_REF_BYTES,
+                scope.getTenantId(), scope.getWorkspaceId(),
                 scope.getWorkspaceGeneration(), scope.getCanonicalCwd(),
                 scope.getCapabilityDigest(), scope.getIsolationClass());
     }

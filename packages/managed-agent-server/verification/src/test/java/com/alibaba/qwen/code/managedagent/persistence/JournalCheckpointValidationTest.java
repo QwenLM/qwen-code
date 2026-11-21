@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.RowMapper;
@@ -32,24 +32,23 @@ class JournalCheckpointValidationTest {
                     + " session_id VARBINARY, journal_revision BIGINT,"
                     + " UNIQUE (tenant_id, session_id, journal_revision))");
             jdbc.execute("CREATE TABLE ma_resource_ref (owner_kind VARCHAR(32),"
-                    + " owner_key CHAR(64), owner_revision BIGINT, resource_key CHAR(64), tenant_id VARBINARY,"
-                    + " workspace_id VARBINARY, session_id VARBINARY, journal_revision BIGINT, resource_id VARBINARY,"
-                    + " UNIQUE (tenant_id, session_id, owner_kind, owner_key, owner_revision, resource_key))");
-            jdbc.execute("CREATE INDEX idx_ma_ref_resource ON ma_resource_ref (resource_key, tenant_id, session_id)");
+                    + " owner_ref VARBINARY(512), owner_revision BIGINT, tenant_id VARBINARY,"
+                    + " workspace_id VARBINARY, session_id VARBINARY, journal_revision BIGINT, resource_id VARBINARY(512) NOT NULL,"
+                    + " UNIQUE (tenant_id, session_id, owner_kind, owner_ref, owner_revision, resource_id))");
+            jdbc.execute("CREATE INDEX idx_ma_ref_resource ON ma_resource_ref (resource_id, tenant_id, session_id)");
             jdbc.execute("CREATE INDEX idx_ma_ref_journal ON ma_resource_ref (tenant_id, session_id, journal_revision, resource_id)");
-            String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
+            String owner = ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, "tenant", "session");
             jdbc.execute("INSERT INTO ma_session_journal_tx SELECT 'tenant', 'workspace', 'session', x"
                     + " FROM SYSTEM_RANGE(1, 1000) AS revisions(x)");
             connection.setAutoCommit(false);
-            try (var insert = connection.prepareStatement("INSERT INTO ma_resource_ref VALUES ('JOURNAL', ?, ?, ?,"
+            try (var insert = connection.prepareStatement("INSERT INTO ma_resource_ref VALUES ('JOURNAL', ?, ?,"
                     + " 'tenant', 'workspace', 'session', ?, ?)")) {
                 for (int revision = 1; revision <= 1000; revision++) {
                     for (int resource = 0; resource < 20; resource++) {
-                        insert.setString(1, scope);
+                        insert.setString(1, owner);
                         insert.setInt(2, revision);
-                        insert.setString(3, ManagedSessionStore.resourceKey(scope, "resource-" + resource));
-                        insert.setInt(4, revision);
-                        insert.setBytes(5, ("resource-" + resource).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        insert.setInt(3, revision);
+                        insert.setBytes(4, ("resource-" + resource).getBytes(java.nio.charset.StandardCharsets.UTF_8));
                         insert.addBatch();
                     }
                 }
@@ -62,8 +61,7 @@ class JournalCheckpointValidationTest {
                     .isEqualTo(1L);
             String sql = statement.get();
             var plan = new ManagedSchemaJdbcTemplate(source).queryForObject("EXPLAIN ANALYZE " + sql, String.class,
-                    ManagedSessionStore.resourceKey(scope, "resource-19"), "tenant", "workspace", "session",
-                    "resource-19", scope, 1000);
+                    "tenant", "workspace", "session", "resource-19", owner, 1000);
             var scans = Pattern.compile("scanCount: (\\d+)").matcher(plan);
             int measured = 0;
             while (scans.find()) {
@@ -75,8 +73,8 @@ class JournalCheckpointValidationTest {
             assertThat(validation.priorCheckpointResourceRevision("foreign", "workspace", "session", "resource-19", 1000)).isNull();
             assertThat(validation.priorCheckpointResourceRevision("tenant", "foreign", "session", "resource-19", 1000)).isNull();
             assertThat(validation.priorCheckpointResourceRevision("tenant", "workspace", "session", "resource-19", 0)).isNull();
-            jdbc.update("INSERT INTO ma_resource_ref VALUES ('JOURNAL', ?, 1001, ?, 'tenant', 'workspace', 'session', 1001, ?)",
-                    scope, ManagedSessionStore.resourceKey(scope, "orphan"), "orphan");
+            jdbc.update("INSERT INTO ma_resource_ref VALUES ('JOURNAL', ?, 1001, 'tenant', 'workspace', 'session', 1001, ?)",
+                    owner, "orphan");
             assertThat(validation.priorCheckpointResourceRevision("tenant", "workspace", "session", "orphan", 1001)).isNull();
             jdbc.update("INSERT INTO ma_session_journal_tx VALUES ('tenant', 'workspace', 'session', 1001)");
             assertThat(validation.priorCheckpointResourceRevision("tenant", "workspace", "session", "orphan", 1001)).isEqualTo(1001L);

@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 
 import java.sql.Connection;
@@ -41,8 +42,9 @@ public final class RuntimeAdmissionFences {
         try (PreparedStatement statement =
                 connection.prepareStatement(
                         "SELECT tenant_id, storage_id, storage_kind,"
-                                + " physical_key FROM ma_storage WHERE alias_key = ? FOR UPDATE")) {
-            statement.setString(1, storageAliasKey(tenant, storage));
+                                + " physical_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenant);
+            JdbcRepositorySupport.setIdentity(statement, 2, storage);
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()) {
                     return null;
@@ -55,7 +57,7 @@ public final class RuntimeAdmissionFences {
                         && !(includeSsh && "SSH_LOCAL".equals(row.getString("storage_kind")))) {
                     return null;
                 }
-                String physical = row.getString("physical_key");
+                String physical = ManagedSchemaRows.identity(row, "physical_id");
                 if (physical == null) {
                     throw unverifiedWorkspaceHolder();
                 }
@@ -71,8 +73,9 @@ public final class RuntimeAdmissionFences {
         }
         try (PreparedStatement statement =
                 connection.prepareStatement(
-                        "SELECT registration_state FROM ma_storage WHERE alias_key = ?")) {
-            statement.setString(1, storageAliasKey(request.getScope().getTenantId(), request.getStorageId()));
+                        "SELECT registration_state FROM ma_storage WHERE tenant_id = ? AND storage_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, request.getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, request.getStorageId());
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next() || !"REGISTERED".equals(row.getString("registration_state"))) {
                     throw new RuntimeBrokerException(
@@ -82,12 +85,12 @@ public final class RuntimeAdmissionFences {
         }
         try (PreparedStatement statement =
                 connection.prepareStatement(
-                        "SELECT storage_key, mount_state, storage_kind"
-                                + " FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
-            statement.setString(1, key);
+                        "SELECT physical_id, mount_state, storage_kind"
+                                + " FROM ma_storage_owner WHERE physical_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, key);
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()
-                        || !key.equals(row.getString("storage_key"))
+                        || !key.equals(ManagedSchemaRows.identity(row, "physical_id"))
                         || !"LOCAL".equals(row.getString("storage_kind"))
                         || !"READY".equals(row.getString("mount_state"))) {
                     throw new RuntimeBrokerException(
@@ -291,8 +294,9 @@ public final class RuntimeAdmissionFences {
         try (PreparedStatement statement =
                 connection.prepareStatement(
                         "SELECT tenant_id, storage_id, fence_operation_id"
-                                + " FROM ma_storage WHERE alias_key = ?")) {
-            statement.setString(1, storageAliasKey(tenantId, storageId));
+                                + " FROM ma_storage WHERE tenant_id = ? AND storage_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, storageId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return null;

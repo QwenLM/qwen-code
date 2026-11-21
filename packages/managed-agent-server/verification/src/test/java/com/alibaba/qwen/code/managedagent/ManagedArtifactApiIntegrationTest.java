@@ -19,7 +19,6 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecord
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolDetailsStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -471,11 +470,10 @@ class ManagedArtifactApiIntegrationTest {
 
     private JsonNode detailsResource(String id, String kind, byte[] bytes) {
         String digest = org.apache.commons.codec.digest.DigestUtils.sha256Hex(bytes);
-        String scope = ManagedSessionStore.sessionScopeKey("tenant-1", "session-1");
-        fixture.jdbc().update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id,"
+        fixture.jdbc().update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id,"
                         + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 1)",
-                org.apache.commons.codec.digest.DigestUtils.sha256Hex(id), "tenant-1", "workspace-1", "session-1",
+                        + " VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 1)",
+                "tenant-1", "workspace-1", "session-1",
                 id, kind, bytes.length, digest, bytes);
         return JSON.createObjectNode().put("resourceId", id).put("kind", kind)
                 .put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
@@ -524,7 +522,7 @@ class ManagedArtifactApiIntegrationTest {
         assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isTrue();
         assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().sessionClose()).isFalse();
         assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().sessionClose()).isFalse();
-        fixture.jdbc().update("UPDATE ma_session SET status = 'DELETING' WHERE session_id = X'73657373696f6e2d31'");
+        fixture.jdbc().update("UPDATE ma_session SET status = 'DELETING' WHERE session_id = 'session-1'");
         assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
         assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
     }
@@ -691,7 +689,7 @@ class ManagedArtifactApiIntegrationTest {
         mvc.perform(asReader(bytes(stdout))).andExpect(status().isServiceUnavailable());
         mvc.perform(asReader(get(ROOT + "/items/" + itemId + "/tool-result")))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.result.execution_status").value("success"));
-        fixture.jdbc().update("UPDATE ma_session SET status = 'DELETING' WHERE session_id = X'73657373696f6e2d31'");
+        fixture.jdbc().update("UPDATE ma_session SET status = 'DELETING' WHERE session_id = 'session-1'");
         mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isNotFound());
         mvc.perform(asReader(bytes(stdout))).andExpect(status().isNotFound());
     }
@@ -799,7 +797,7 @@ class ManagedArtifactApiIntegrationTest {
     void deletionDuringLeaseAdmissionPreservesPublicNotFound() {
         var reader = org.mockito.Mockito.spy(fixture.reader());
         org.mockito.Mockito.doAnswer(call -> {
-            fixture.jdbc().update("UPDATE ma_session SET status = 'DELETED' WHERE session_id = X'73657373696f6e2d31'");
+            fixture.jdbc().update("UPDATE ma_session SET status = 'DELETED' WHERE session_id = 'session-1'");
             throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(409,
                     "tool_output_session_retired", "Retired during lease admission");
         }).when(reader).lease(org.mockito.ArgumentMatchers.any());

@@ -4,7 +4,7 @@
 
 ## 状态与范围
 
-- 状态：**提案**。本文不改动任何代码或 schema。实施需要各自的改动、基线复现与 MySQL 证据。
+- 状态：**实施中（核心迁移已落地，待 CI 全量验证）**。混合身份表示已获维护者确认；DDL、生产 SQL、verification fixtures 已完成去哈希迁移，本地 focused H2 与双 Checkstyle 通过，MySQL/全量 H2/性能证据待 CI。
 - 修订（2026-11-20）：对"与同表另一唯一键重复的哈希键"做了后续调研，修正了 `workspace_id`
   预算，补充了回执、operation、Session 哈希列与 read lease 的约束，并对调研提出的三个
   问题作出决定（见[重复业务键](#重复业务键)）。
@@ -397,3 +397,66 @@ head 写入方，它本就拒绝超过 128 字节的租户 id 和超过 512 字�
 - 是否有 TypeScript 消费方派生身份哈希（须同步移动）。
 - 生产 tenant/actor 注入：在定死 `VARCHAR(36)` 前确认十进制串契约与各部署最大位数。
 - 是否有外部平台 id 可能超 512 字符（残留压缩情形）。
+
+## 2026-11-21 实施补充（维护者已确认）
+
+### 混合身份表示
+
+简单身份（tenant/session/actor 等）使用有界 `VARCHAR` 与显式 `utf8mb4_0900_bin`。
+过宽或多态的跨表身份不再复制大量可空原始列，而是使用**可逆 canonical readable
+reference**；它不是 SHA-256，不丢失组件信息。所有索引按 **<= 3072 字节**验收，
+编码长度 fail closed。
+
+`ManagedIdentityRef` 的编码格式为：
+
+```text
+v1|<component-count>|<component>|...
+component := "-" | <utf8-byte-length>:<escaped-payload>
+```
+
+- `null` 组件编码为 `-`；空字符串编码为 `0:`。
+- payload 按 UTF-8 字节百分号转义；仅 ASCII 字母数字与 `. _ ~ : -` 保持字面量。
+- 解码严格校验版本、数量、长度、转义规范与 UTF-8 良构，并拒绝非规范编码。
+- `encode(maximumBytes, components...)` 在写入前强制最终 ASCII 字节预算。
+
+### 表级决策
+
+- `ma_session` 新增单调布尔列 `is_publication_retention_registered`，由
+  publication-retention CONTROL upsert 设置；原 `session_scope_key IS NOT NULL`
+  过滤改为该标记。旧哈希列在完整原子簇中删除。
+- `ma_operation` 增加原始 `scope_kind/scope_id`；跨表引用使用 `operation_ref`。
+  tenant-addressed operation 的唯一性由同一 reference 机制保留，不再需要额外
+  `tenant_operation_id` 生成列。
+- `ma_resource_ref` 的 owner 是多态身份，使用非空 `owner_ref`；资源侧优先使用
+  原始 `(tenant_id, session_id, resource_id)`，过宽时退回 `resource_ref`。
+- Runtime request/scope 使用 `request_id/scope_id` canonical reference，原始组件
+  保留在权威表用于校验；`ma_tool_execution.runtime_session_key` 只是单值哈希，
+  直接由原始 `runtime_session_id` 替代。
+- delivery 增加 `source_scope_id`；channel segment 增加原始 `delivery_id`；
+  `ma_delivery.source_record_key` 无生产消费者，已删除。
+- 子 Session 的合成 actor 使用有界派生 ID `ChildActorId.of(parentSessionId)`：
+  `c:` + parentSessionId UTF-8 SHA-256 的前 32 hex（34 字符），保持 actor 36
+  预算；persistence 与 control-plane 共用同一派生。
+- 保留 `receipt_key`、workspace/storage 生成身份、extension/automation/CSI 协议
+  派生 ID、内容/提交/token 摘要与二进制 payload。
+
+### 当前检查点
+
+已完成并验证：
+
+- tenant/actor 36 字符/code-point admission 边界；
+- `ma_session` publication-retention 登记标记及四处过滤迁移；
+- 全部基线 `tenant_id`/`session_id`（含 session 族列）转换为
+  `VARCHAR(36)/VARCHAR(64)` 与 NO PAD collation；
+- Runtime Broker 身份绑定按 JDBC 参数类型区分文本/字节；
+- `ManagedIdentityRef` codec 与单测；
+- `ma_delivery.source_record_key` 删除及 projection 同步；
+- 子 Session 合成 actor 有界派生（`ChildActorId`）与相关回归修复；
+- H2 schema/catalog/projection、核心 business/session/retention/side-query/
+  client-files/channel/workspace/SSH store、Runtime Broker 失败回归套件；
+- 两个 Checkstyle execution。
+
+未完成：剩余身份哈希删除、canonical reference 列与跨表 SQL/锁序迁移、完整
+MySQL 8.4 类型/collation/索引宽度门、完整 H2 套件（本地 10 分钟预算内未跑完）、
+SQL 性能基准与 TypeScript 消费者同步。后续必须继续按原子簇实施，不得把当前
+检查点宣称为完整去哈希完成。

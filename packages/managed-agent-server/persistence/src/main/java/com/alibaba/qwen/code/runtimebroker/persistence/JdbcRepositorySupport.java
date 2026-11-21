@@ -170,8 +170,15 @@ final class JdbcRepositorySupport {
     }
 
     static void setIdentity(java.sql.PreparedStatement statement, int index, String value) throws SQLException {
-        statement.setBytes(index, value == null ? null
-                : com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(value));
+        int type = statement.getParameterMetaData().getParameterType(index);
+        if (type == java.sql.Types.BINARY
+                || type == java.sql.Types.VARBINARY
+                || type == java.sql.Types.LONGVARBINARY) {
+            statement.setBytes(index, value == null ? null
+                    : com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(value));
+            return;
+        }
+        statement.setString(index, value);
     }
 
     static void setStringParameter(java.sql.PreparedStatement statement, int index, String value)

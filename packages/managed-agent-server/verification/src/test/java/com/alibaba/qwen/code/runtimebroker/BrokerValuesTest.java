@@ -22,6 +22,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BrokerValuesTest {
     @Test
+    void tenantIdsUseTheShared36CharacterBudget() {
+        String tenant = "t".repeat(36);
+        assertTrue(BrokerValues.isTenantId(tenant));
+        assertEquals(tenant, BrokerValues.requireTenantId(tenant, "tenantId"));
+        RuntimeScope scope = new RuntimeScope(tenant, "workspace", "1",
+                "/workspace", "digest", "session");
+        assertEquals(tenant, scope.getTenantId());
+        for (String invalid : new String[] {null, "", "tenant/a", "tenant a",
+                "é", "t".repeat(37)}) {
+            assertFalse(BrokerValues.isTenantId(invalid));
+            assertThrows(IllegalArgumentException.class,
+                    () -> BrokerValues.requireTenantId(invalid, "tenantId"));
+            assertThrows(IllegalArgumentException.class,
+                    () -> new RuntimeScope(invalid, "workspace", "1",
+                            "/workspace", "digest", "session"));
+        }
+    }
+
+    @Test
     void wellFormedJsonFindsALoneSurrogateInAnyStringOrKey() {
         for (String lone : List.of("\ud800", "\udbff", "\udc00", "\udfff", "a\udc00\ud800b")) {
             for (Object value : List.of(lone, Map.of("k", lone), Map.of(lone, "v"),

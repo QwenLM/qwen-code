@@ -4,8 +4,10 @@
 
 ## Status and scope
 
-- Status: **proposal**. No code or schema is changed by this document. Implementation
-  requires its own change, baseline reproduction, and MySQL evidence.
+- Status: **in progress (core migration landed, pending full CI verification)**.
+  The mixed identity representation is maintainer-approved; DDL, production SQL,
+  and verification fixtures have been de-hashed. Local focused H2 and dual
+  Checkstyle pass; MySQL, full H2, and performance evidence remain pending CI.
 - Revision (2026-11-20): a follow-up survey of the hash keys that duplicate another unique
   key in their own table corrected the `workspace_id` budget and added constraints for
   receipts, operations, Session hash columns and read leases, then decided the three
@@ -489,3 +491,83 @@ Query rules:
 - Production tenant/actor injection: confirm the decimal-string contract and the
   maximum digit count across deployments before fixing `VARCHAR(36)`.
 - Whether any external platform id can exceed 512 chars (residual compaction case).
+
+## 2026-11-21 implementation supplement (maintainer-approved)
+
+### Mixed identity representation
+
+Simple identities (tenant/session/actor and similar) use bounded `VARCHAR` with
+explicit `utf8mb4_0900_bin`. Overly wide or polymorphic cross-table identities no
+longer duplicate many nullable raw columns; they use a **reversible canonical
+readable reference**. This is not SHA-256 and loses no component information.
+Every index is accepted at **<= 3072 bytes**, and encoded length is fail-closed.
+
+`ManagedIdentityRef` encodes:
+
+```text
+v1|<component-count>|<component>|...
+component := "-" | <utf8-byte-length>:<escaped-payload>
+```
+
+- A null component encodes as `-`; an empty string encodes as `0:`.
+- Payloads are percent-escaped UTF-8 bytes; only ASCII alphanumerics and
+  `. _ ~ : -` remain literal.
+- Decoding strictly validates version, arity, lengths, canonical escapes, and
+  UTF-8 well-formedness, and rejects non-canonical encodings.
+- `encode(maximumBytes, components...)` enforces the final ASCII byte budget
+  before writing.
+
+### Table-level decisions
+
+- `ma_session` gains a monotonic boolean
+  `is_publication_retention_registered`, set by the publication-retention
+  CONTROL upsert; the former `session_scope_key IS NOT NULL` filters use this
+  marker. The old hash columns are dropped in the full atomic cluster.
+- `ma_operation` gains raw `scope_kind/scope_id`; cross-table references use
+  `operation_ref`. Tenant-addressed operation uniqueness is preserved by the
+  same reference mechanism, so no extra `tenant_operation_id` generated column
+  is needed.
+- `ma_resource_ref` owners are polymorphic and use a non-null `owner_ref`; the
+  resource side prefers raw `(tenant_id, session_id, resource_id)` and falls
+  back to `resource_ref` when too wide.
+- Runtime request/scope use `request_id/scope_id` canonical references while
+  authoritative tables keep raw components for validation;
+  `ma_tool_execution.runtime_session_key` is a single-value hash and is replaced
+  directly by raw `runtime_session_id`.
+- Delivery gains `source_scope_id`; channel segments gain raw `delivery_id`;
+  `ma_delivery.source_record_key` has no production consumer and has been
+  removed.
+- The synthetic child-Session actor uses the bounded derived ID
+  `ChildActorId.of(parentSessionId)`: `c:` plus the first 32 hex characters of
+  the parent Session id's UTF-8 SHA-256 (34 characters), keeping the 36-character
+  actor budget; persistence and control-plane share the same derivation.
+- Preserve `receipt_key`, workspace/storage generated identities,
+  extension/automation/CSI protocol-derived IDs, content/commit/token digests,
+  and binary payloads.
+
+### Current checkpoint
+
+Completed and verified:
+
+- tenant/actor 36-character/code-point admission boundaries;
+- the `ma_session` publication-retention registration marker and four filter
+  migrations;
+- conversion of all baseline `tenant_id`/`session_id` columns (including the
+  session-family columns) to `VARCHAR(36)/VARCHAR(64)` with NO PAD collation;
+- Runtime Broker identity binding that distinguishes text from bytes by JDBC
+  parameter type;
+- the `ManagedIdentityRef` codec and its unit tests;
+- removal of `ma_delivery.source_record_key` and projection synchronization;
+- the bounded synthetic child-Session actor (`ChildActorId`) and related
+  regression fixes;
+- H2 schema/catalog/projection, core business/session/retention/side-query/
+  client-files/channel/workspace/SSH stores, and the failing Runtime Broker
+  regression suites;
+- both Checkstyle executions.
+
+Remaining: removal of the other identity hashes, canonical-reference columns
+and cross-table SQL/lock-order migration, complete MySQL 8.4
+type/collation/index-width gates, the full H2 suite (did not finish within the
+10-minute local budget), SQL performance benchmarks, and TypeScript consumer
+synchronization. Continue as an atomic cluster; do not describe this checkpoint
+as complete de-hashing.

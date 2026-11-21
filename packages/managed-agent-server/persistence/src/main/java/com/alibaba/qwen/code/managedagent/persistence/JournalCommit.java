@@ -10,8 +10,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -116,8 +116,7 @@ final class JournalCommit {
         validateHead(head, request);
         long revision = JournalStoreRows.increment(head.journalRevision(),
                 "journal revision");
-        String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        resourceWrites.commitResources(scopeKey, tenantId, sessionId, request, revision,
+        resourceWrites.commitResources(tenantId, sessionId, request, revision,
                 now, validated.resources());
         Set<String> declaredResources = new HashSet<>();
         for (var resource : request.resources() == null ? List.<CommitResource>of() : request.resources()) {
@@ -126,7 +125,7 @@ final class JournalCommit {
         var resourceCache = new HashMap<String, StoredResource>();
         var hostedReferences = new HashMap<String, JsonNode>();
         java.util.function.Function<String, StoredResource> reader = resourceId -> resourceCache.computeIfAbsent(resourceId,
-                id -> storeRows.storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, id));
+                id -> storeRows.storedResource(tenantId, request.workspaceId(), sessionId, id));
         ManagedHostedRecoveryRecords.HistoricalResources closureReader = new ManagedHostedRecoveryRecords.HistoricalResources() {
             @Override
             public StoredResource apply(String resourceId) {
@@ -212,7 +211,7 @@ final class JournalCommit {
         }
         jdbc.update("INSERT INTO ma_session_journal_tx"
                         + " (tenant_id, workspace_id, session_id,"
-                        + " journal_revision, command_key_hash,"
+                        + " journal_revision, command_ref,"
                         + " transaction_id, operation, command_id,"
                         + " content_digest, first_sequence, last_sequence,"
                         + " event_count, events_digest,"
@@ -226,7 +225,7 @@ final class JournalCommit {
                         + " ?,"
                         + " 'identity', ?, ?, ?, ?)",
                 tenantId, request.workspaceId(), sessionId, revision,
-                JournalStoreRows.commandKeyHash(request.operation(), request.commandId()),
+                ManagedSchemaKeys.identity(JournalStoreRows.commandKeyHash(request.operation(), request.commandId())),
                 request.transactionId(), request.operation(),
                 request.commandId(), request.contentDigest(),
                 request.firstSequence(), request.lastSequence(),

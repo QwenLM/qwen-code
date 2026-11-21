@@ -15,11 +15,9 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -124,8 +122,9 @@ final class AgentSessionPolicies {
     }
 
     boolean isSshWorkspace(ContextBinding binding) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
-                Long.class, RuntimeAdmissionFences.storageAliasKey(binding.getTenantId(), binding.getStorageId())) == 1;
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE tenant_id = ? AND storage_id = ? AND storage_kind = 'SSH_LOCAL'",
+                Long.class, binding.getTenantId(),
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(binding.getStorageId())) == 1;
     }
 
     static void requireSshToolProfile(String profile) {
@@ -394,13 +393,15 @@ final class AgentSessionPolicies {
                 throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval.");
             }
         }
-        if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_key=? AND target_key=?"
+        if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_kind='SESSION' AND scope_id=? AND target_id=?"
                 + " AND operation_kind IN " + AgentStoreRows.SESSION_OPERATION_KINDS
                 + " AND (state IN ('PENDING', 'RUNNING', 'UNKNOWN') OR state='RECOVERY_BLOCKED' AND operation_kind <> 'TASK_CANCEL')"
-                + " LIMIT 1 FOR UPDATE", ManagedSessionStore.sessionScopeKey(tenantId, sessionId), AgentStoreRows.sessionOperationTarget(sessionId)).isEmpty()
+                + " LIMIT 1 FOR UPDATE",
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId))).isEmpty()
                 || !jdbc.queryForList("SELECT receipt_key FROM ma_request_receipt WHERE namespace='SESSION_COMMAND'"
-                        + " AND tenant_key=? AND tenant_id=? AND session_id=? AND state='PENDING' LIMIT 1 FOR UPDATE",
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenantId), tenantId, sessionId).isEmpty()) {
+                        + " AND tenant_id=? AND session_id=? AND state='PENDING' LIMIT 1 FOR UPDATE",
+                        tenantId, sessionId).isEmpty()) {
             throw new ManagedAgentException(409, "session_context_busy", "The Session has an active operation.");
         }
     }
@@ -457,11 +458,13 @@ final class AgentSessionPolicies {
             return true;
         }
         Integer operations = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " ma_operation WHERE scope_key = ? AND"
-                        + " target_key = ? AND operation_kind IN"
+                        + " ma_operation WHERE scope_kind = 'SESSION' AND scope_id = ? AND"
+                        + " target_id = ? AND operation_kind IN"
                         + " ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE', 'CONTEXT_COMPRESSION') AND state IN"
                         + " ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED', 'UNKNOWN')",
-                Integer.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), AgentStoreRows.sessionOperationTarget(sessionId));
+                Integer.class,
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)));
         return operations != null && operations > 0;
     }
 
@@ -473,11 +476,9 @@ final class AgentSessionPolicies {
         Integer commands =
                 jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_request_receipt WHERE namespace ="
-                            + " 'SESSION_COMMAND' AND tenant_key = ? AND tenant_id = ? AND"
+                            + " 'SESSION_COMMAND' AND tenant_id = ? AND"
                             + " session_id = ? AND state = 'PENDING'",
                         Integer.class,
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                                tenantId),
                         tenantId,
                         sessionId);
         // A recovery_blocked task cancel is parked, not open (H4f): its
@@ -486,14 +487,14 @@ final class AgentSessionPolicies {
         Integer operations =
                 jdbc.queryForObject(
                         "SELECT COUNT(*) FROM"
-                                + " ma_operation WHERE scope_key = ? AND operation_kind IN "
+                                + " ma_operation WHERE scope_kind = 'SESSION' AND scope_id = ? AND operation_kind IN "
                                 + AgentStoreRows.SESSION_OPERATION_KINDS
-                                + " AND target_key = ? AND (state IN ('PENDING', 'RUNNING',"
+                                + " AND target_id = ? AND (state IN ('PENDING', 'RUNNING',"
                                 + " 'UNKNOWN') OR state = 'RECOVERY_BLOCKED' AND operation_kind <>"
                                 + " 'TASK_CANCEL') AND operation_id <> ?",
                         Integer.class,
-                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                        AgentStoreRows.sessionOperationTarget(sessionId),
+                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(sessionId),
+                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
                         com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
                                 .identity(
                                         excludingOperationId == null ? "" : excludingOperationId));

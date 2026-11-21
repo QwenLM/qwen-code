@@ -20,13 +20,12 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStor
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -107,7 +106,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void publicChildrenKeepLaunchPolicyAndModelAfterParentChangesAndDeploymentDisable() throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-public-child", "storage-public-child", WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-public-child", "actor-a", true);
@@ -185,15 +184,14 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void sshRootAdmitsBuiltinPublicChildrenWithoutExtensionExecution() throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-ssh-child", "storage-ssh-child", WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-ssh-child", "actor-a", true);
         // An open (unfenced) SSH storage registration naming the granted node.
         jdbc.update("INSERT INTO ma_storage"
-                        + " (alias_key,tenant_id,storage_id,storage_kind,registration_json,fence_operation_id)"
-                        + " VALUES (?,?,?,?,?,NULL)",
-                RuntimeAdmissionFences.storageAliasKey(tenant, "storage-ssh-child"),
+                        + " (tenant_id,storage_id,storage_kind,registration_json,fence_operation_id)"
+                        + " VALUES (?,?,?,?,NULL)",
                 tenant, "storage-ssh-child", "SSH_LOCAL", "{\"nodeId\":\"remote\"}");
         var node = new com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings.Node(
                 "remote", "Remote", "remote-host", "/node", "/cli.js", "/state",
@@ -256,7 +254,7 @@ class ManagedWorkspaceAdmissionTest {
     @ParameterizedTest
     @CsvSource({"false, yolo", "false, default", "false, auto-edit", "true, default", "true, auto-edit"})
     void internalTeamLeadPinsPrivatePolicyAndSeparatesPublicReplay(boolean shellEnabled, String mode) {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-lead", "storage-lead", WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-lead", "actor-a", true);
@@ -280,7 +278,7 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(session.toolProfile()).isEqualTo(WorkspaceToolProfiles.INTERNAL_TEAM_LEAD);
         assertThat(first.turnId()).isNull();
         assertThat(WorkspaceToolProfiles.isPublicShell(session.toolProfile())).isFalse();
-        byte[] actorKey = "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        String actorKey = "actor-a";
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
                 + " AND creator_actor_key = ? AND owner_actor_key = ?", Integer.class,
                 tenant, first.sessionId(), actorKey, actorKey)).isEqualTo(1);
@@ -349,7 +347,7 @@ class ManagedWorkspaceAdmissionTest {
     @ParameterizedTest
     @ValueSource(strings = {"files-off", "reader", "missing-mount", "config", "policy", "registry", "migration"})
     void internalTeamLeadCannotMintWithoutWorkspaceExecutionPrerequisites(String refusal) {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-lead", "storage-lead",
                 "config".equals(refusal) ? "other" : WorkspaceExecutionProfile.CONFIG_REF,
                 "policy".equals(refusal) ? "other" : WorkspaceExecutionProfile.POLICY_REF);
@@ -380,7 +378,7 @@ class ManagedWorkspaceAdmissionTest {
     @ParameterizedTest
     @CsvSource({"true, yolo", "true, unknown", "true, plan", "true, ''", "false, default", "false, auto-edit"})
     void foregroundShellRequiresFilesAndPersistedAskingApproval(boolean filesEnabled, String mode) {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-shell", "storage-shell", WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-shell", "actor-a", true);
@@ -410,7 +408,7 @@ class ManagedWorkspaceAdmissionTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void sessionReadsOmitForegroundShellForFilesAndUnbound(boolean bound) throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         if (bound) {
             register(tenant, "ws-a", "storage-a");
             grant(tenant, "ws-a", "actor-a", true);
@@ -449,7 +447,7 @@ class ManagedWorkspaceAdmissionTest {
     @ParameterizedTest
     @ValueSource(strings = {"default", "auto-edit"})
     void shellFlagChangesPreserveCreationAndTurnReplayButBlockFreshWorkAndLifecycle(String mode) {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-shell", "storage-shell", WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-shell", "actor-a", true);
@@ -482,7 +480,7 @@ class ManagedWorkspaceAdmissionTest {
                 .payloadDigest(digest)
                 .selection(selection)
                 .build()));
-        byte[] actorKey = "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        String actorKey = "actor-a";
         for (String id : List.of(session, initial.sessionId())) {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
                     + " AND creator_actor_key = ? AND owner_actor_key = ?", Integer.class,
@@ -586,7 +584,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void migrationFenceBlocksNewTurnsAndMutationsButPreservesReceipts() throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-migration", "storage-migration",
                 WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-migration", "actor-a", true);
@@ -633,7 +631,7 @@ class ManagedWorkspaceAdmissionTest {
     @Test
     void discoveryFiltersBeforePagingAndKeepsDefaultOutsidePage()
             throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "a-hidden", "physical-a");
         register(tenant, "b-visible", "physical-b");
         register(tenant, "c-readonly", "physical-c");
@@ -700,7 +698,7 @@ class ManagedWorkspaceAdmissionTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code")
                         .value("invalid_workspace_cursor"));
-        String longActor = "界".repeat(512);
+        String longActor = "界".repeat(36);
         grant(tenant, "b-visible", longActor, true);
         grant(tenant, "d-default", longActor, true);
         var longActorPage = mvc.perform(get("/v1/agents/workspaces")
@@ -801,7 +799,7 @@ class ManagedWorkspaceAdmissionTest {
     @ParameterizedTest
     @ValueSource(ints = {0, 101})
     void discoveryRejectsOutOfRangePageSizes(int limit) throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         mvc.perform(get("/v1/agents/workspaces")
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, "actor-a"))
@@ -818,7 +816,7 @@ class ManagedWorkspaceAdmissionTest {
     @Test
     void publicCreationPinsSevenFieldBindingAndReplaysAfterRegistryChange()
             throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         String body = """
@@ -894,7 +892,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void revocationHidesBoundSessionAndBlocksRetry() throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         String body = """
@@ -999,7 +997,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void aRecordedSubmitAnswersOnlyToAnActorAuthorizedForTheSession() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -1073,7 +1071,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void aBoundRenameReplaysItsRecordedOutcomeAfterTheSessionWasDeleted() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -1169,7 +1167,7 @@ class ManagedWorkspaceAdmissionTest {
     // gate there, never a 200 the COMPLETED arm refuses with 409.
     @Test
     void theSettleArmKeepsTheCreatorGateForANonCreatorOperator() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -1286,7 +1284,7 @@ class ManagedWorkspaceAdmissionTest {
     // ahead of the actor gates.
     @Test
     void aRecordedRenameAnswers404ToAGrantlessActorForEveryTitleShape() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -1377,7 +1375,7 @@ class ManagedWorkspaceAdmissionTest {
     // a Session that exists and is actor-b's.
     @Test
     void aKeyConsumedByAnotherSessionAnswersIdempotencyConflict() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -1434,7 +1432,7 @@ class ManagedWorkspaceAdmissionTest {
     // the contract reserves for the actor who recorded it.
     @Test
     void aPendingRenameReplayKeepsTheRecorderGate() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -1505,7 +1503,7 @@ class ManagedWorkspaceAdmissionTest {
     // idempotency_conflict names the live key the answer must keep hidden.
     @Test
     void aPendingRenameReplayWithADifferentTitleKeepsTheUniformRefusal() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -1547,7 +1545,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void retryOfOmittedSelectionKeepsOriginalDefault() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         register(tenant, "ws-b", "storage-b");
         grant(tenant, "ws-a", "actor-a", true);
@@ -1584,7 +1582,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void boundRetriesReplayBeforeCheckingTheRevision() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         WorkspaceSelection selection = new WorkspaceSelection("ws-a", ".");
@@ -1628,7 +1626,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void storeCannotCreateOrDispatchBoundTurnsWhenServiceIsBypassed() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         var selection = new WorkspaceSelection("ws-a", ".");
@@ -1692,7 +1690,7 @@ class ManagedWorkspaceAdmissionTest {
     // 404, instead of a valueOf IllegalArgumentException surfacing a 500.
     @Test
     void anOutOfEnumStoredRoleFailsClosedAtEveryRoleRead() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         String digest = "sha256:" + "a".repeat(64);
@@ -1734,7 +1732,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void aSessionWithNoPersistedOwnerFailsClosed() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-a", "actor-b", true);
@@ -1759,7 +1757,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void enabledStoreAdmitsALaterTurnForTheBoundSessionCreator() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-a", "actor-b", true);
@@ -1781,7 +1779,7 @@ class ManagedWorkspaceAdmissionTest {
                 .isTrue();
         assertThat(registry.createdSession(tenant, "actor-b", sessionId))
                 .isFalse();
-        assertThat(registry.createdSession("tenant-" + UUID.randomUUID(),
+        assertThat(registry.createdSession(UUID.randomUUID().toString(),
                 "actor-a", sessionId)).isFalse();
         // The lookup pins this Session, not any bound Session the actor
         // created in the tenant: actor-b's own Session does not admit
@@ -1844,7 +1842,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void boundLaterTurnAdmissionReadsTheAgentPinAndFrozenProfile() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -1922,7 +1920,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void aFailedTitleNotificationStillCompletesTheRenameAndAdmitsTheNextOne() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -2011,8 +2009,8 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void enabledCreationRefusesPolicyDriftAndAnotherTenantsMount() {
-        String tenant = "tenant-" + UUID.randomUUID();
-        String otherTenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
+        String otherTenant = UUID.randomUUID().toString();
         // Each Workspace differs from the admitted one in exactly one guard.
         register(tenant, "ws-valid", "storage-valid",
                 WorkspaceExecutionProfile.CONFIG_REF,
@@ -2096,7 +2094,7 @@ class ManagedWorkspaceAdmissionTest {
     @Test
     void webShellCreationIsMetadataOnlyUntilExecutionIsWired()
             throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         var created = mvc.perform(post(
@@ -2152,7 +2150,7 @@ class ManagedWorkspaceAdmissionTest {
     @ValueSource(booleans = {false, true})
     void rejectsIdempotencyKeyReuseAcrossCreationShapes(boolean boundFirst)
             throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         String unbound = "{\"agent_id\":\"qwen-code\"}";
@@ -2182,7 +2180,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void concurrentCreationShapesCannotBothCommit() throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         CyclicBarrier start = new CyclicBarrier(2);
@@ -2219,7 +2217,7 @@ class ManagedWorkspaceAdmissionTest {
     @Test
     void changingWorkspaceIntentConflictsAndActorsKeepSeparateReceipts()
             throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         register(tenant, "ws-b", "storage-b");
         grant(tenant, "ws-a", "actor-a", true);
@@ -2276,7 +2274,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void rejectsMissingGrantsCreateDenialAndRemovedWorkspace() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         var selection = new WorkspaceSelection("ws-a", ".");
         assertCreateError(tenant, selection, "workspace_not_found");
@@ -2302,7 +2300,7 @@ class ManagedWorkspaceAdmissionTest {
     // cancel, exempt from the facts, still aborts that live Turn.
     @Test
     void aSecondOperatorSubmitsUntilTheCreatorsFactsFail() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         grant(tenant, "ws-a", "operator2", true);
         ManagedAgentService service = boundServiceWithWorkingHarness();
@@ -2333,7 +2331,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void compressionCapabilityRequiresTheOperatorAndFrozenFacts() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = boundSession(tenant);
         grant(tenant, "ws-a", "operator2", true);
         grant(tenant, "ws-a", "reader", false);
@@ -2355,7 +2353,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void renameCapabilityUsesTheRoleAndFrozenFactsIndependentlyOfTurnApprovalSupport() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = boundSession(tenant);
         grant(tenant, "ws-a", "operator2", true);
         grant(tenant, "ws-a", "reader", false);
@@ -2377,7 +2375,7 @@ class ManagedWorkspaceAdmissionTest {
     @ParameterizedTest
     @ValueSource(strings = {"workspace_generation=workspace_generation+1", "storage_id='replacement'", "state='DRAINING'"})
     void renameCapabilityRefusesAChangedWorkspaceBinding(String changedFact) {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = boundSession(tenant);
         ManagedAgentService enabled = boundServiceWithWorkingHarness();
         assertThat(enabled.getWebShellSession(tenant, "actor-a", session).capabilities().rename()).isTrue();
@@ -2389,7 +2387,7 @@ class ManagedWorkspaceAdmissionTest {
     @CsvSource({"false,true,true", "true,false,true", "true,true,false", "true,true,true"})
     void renameCapabilityRequiresAvailableFencedTitlesAndWorkspaceFiles(boolean available,
             boolean fencedTitles, boolean workspaceFiles) {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = boundSession(tenant);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(available);
@@ -2402,7 +2400,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void cancellationNeedsOnlyTheRoleWhileNewWorkNeedsTheFacts() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         grant(tenant, "ws-a", "actor-b", true);
         ManagedAgentService enabled = boundService(true);
@@ -2447,7 +2445,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void cancelRefusesABoundSessionThatCanNoLongerExecute() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         ManagedAgentService service = boundServiceWithWorkingHarness();
         String turnId = service.submitTurn(tenant, "actor-a", "submit-1",
@@ -2470,7 +2468,7 @@ class ManagedWorkspaceAdmissionTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void reRegistrationRefusesLaterWorkBeforeAnyCommandIsWritten(boolean storageOnly) {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         ManagedAgentService enabled = boundService(true);
         jdbc.update("UPDATE ma_workspace SET"
@@ -2497,7 +2495,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void sameKeySubmitReplayRequiresWorkspaceReadAccess() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         ManagedAgentService service = boundServiceWithWorkingHarness();
         List<InputBlock> input = List.of(new InputBlock("text", "go"));
@@ -2512,7 +2510,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void sameKeyReplayStaysBehindTheRoleGate() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         grant(tenant, "ws-a", "actor-b", false);
         ManagedAgentService service = boundServiceWithWorkingHarness();
@@ -2544,7 +2542,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void sameKeySubmitReplaysTheRecordedAdmissionAfterReRegistration() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         ManagedAgentService service = boundServiceWithWorkingHarness();
 
@@ -2572,7 +2570,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void sameKeyRenameReplaysTheRecordedOutcomeAfterReRegistration() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String sessionId = boundSession(tenant);
         ManagedAgentService service = boundServiceWithWorkingHarness();
 
@@ -2597,7 +2595,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void aRecordedWorkspaceCreateReplaysWhileWorkspaceFilesAreOff() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -2629,7 +2627,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void onlyAWorkspaceCreateWithoutInputRequestsTheSessionCreateWarm() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
@@ -2663,7 +2661,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void preparingWorktreesProjectTheirTargetWithoutAdmittingMoreInput() throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = boundSession(tenant);
         persistWorktree(tenant, session, "PREPARING");
         ManagedAgentService enabled = boundServiceWithWorkingHarness();
@@ -2684,7 +2682,7 @@ class ManagedWorkspaceAdmissionTest {
     @ParameterizedTest
     @ValueSource(strings = {"PREPARING", "FAILED", "BLOCKED", "REMOVING", "REMOVED"})
     void unreadyWorktreesAllowQueueManagementButKeepRuntimeActionsGated(String state) throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = boundSession(tenant);
         grant(tenant, "ws-a", "operator2", true);
         grant(tenant, "ws-a", "reader", false);
@@ -2729,7 +2727,7 @@ class ManagedWorkspaceAdmissionTest {
     @Test
     void sessionPagesPreserveWorktreeGatingAndBlockInvalidReadyIdentities() throws Exception {
         for (String state : List.of("PREPARING", "FAILED", "READY")) {
-            String tenant = "tenant-" + UUID.randomUUID();
+            String tenant = UUID.randomUUID().toString();
             String session = boundSession(tenant);
             persistWorktree(tenant, session, state);
             var enabled = boundServiceWithWorkingHarness();
@@ -2751,7 +2749,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void worktreePreparationGatesDispatchButPreservesCancellation() throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = boundSession(tenant);
         var enabled = boundServiceWithWorkingHarness();
         var admission = enabled.submitTurn(tenant, "actor-a", "initial", session, List.of(new InputBlock("text", "go")));
@@ -2772,7 +2770,7 @@ class ManagedWorkspaceAdmissionTest {
     @Transactional("managedAgentTransactionManager")
     void failedAndBlockedWorktreesStillAllowCancellation() throws Exception {
         for (String state : List.of("FAILED", "BLOCKED")) {
-            String tenant = "tenant-" + UUID.randomUUID();
+            String tenant = UUID.randomUUID().toString();
             String session = boundSession(tenant);
             var enabled = boundServiceWithWorkingHarness();
             var admission = enabled.submitTurn(tenant, "actor-a", "initial", session, List.of(new InputBlock("text", "go")));
@@ -2784,7 +2782,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void failedWorktreePreparationSettlesInitialInputOnce() throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = boundSession(tenant);
         var admission = boundServiceWithWorkingHarness().submitTurn(tenant, "actor-a", "initial", session,
                 List.of(new InputBlock("text", "go")));
@@ -2804,15 +2802,16 @@ class ManagedWorkspaceAdmissionTest {
                 binding.getContextConfigRef(), 1, "/workspace", "root-identity", ".", ".",
                 "/workspace/.git", "common-identity", "main", "a".repeat(40), id, cwd, cwd, "qwen/" + id);
         jdbc.update("UPDATE ma_session SET cwd_relative = ? WHERE tenant_id = ? AND session_id = ?", cwd, tenant, session);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id,"
-                + " session_id, target_kind, target_key, request_digest, request_json, state, phase, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, 'SESSION_WORKTREE', ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, 1, 1)",
-                ManagedSchemaKeys.key(tenant, id), ManagedSchemaKeys.key(tenant), id, tenant, session,
-                ManagedSchemaKeys.key(session), state, state);
-        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind, tenant_id,"
+                + " session_id, target_kind, target_id, request_digest, request_json, state, phase, gmt_create, gmt_modified)"
+                + " VALUES (?, 'TENANT', ?, ?, 'SESSION_WORKTREE', ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, 1, 1)",
+                ManagedIdentityRefs.tenantOperationRef("SESSION_WORKTREE", tenant, id), tenant, id, tenant, session,
+                session, state, state);
+        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_id,"
                 + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'ws-a', 'storage-a', ?, ?, ?, ?, 1, ?, ?, 1, 1)", tenant, session,
-                "a".repeat(64), id, ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"), state, mapper.writeValueAsString(plan), id);
+                com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage.key(tenant, "storage-a"),
+                id, "actor-a", state, mapper.writeValueAsString(plan), id);
     }
 
     private ManagedAgentService workspaceFilesService(String tenant,
@@ -2935,7 +2934,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void rejectsIncompleteBindingsAndIdentifiesDescriptorDrift() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         String session = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
@@ -2965,7 +2964,7 @@ class ManagedWorkspaceAdmissionTest {
 
     @Test
     void invalidRegistryDataIsReportedAsServerFailure() throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         register(tenant, "ws-a", "invalid storage");
         grant(tenant, "ws-a", "actor-a", true);
         mvc.perform(post("/v1/agents/sessions")
@@ -2983,9 +2982,8 @@ class ManagedWorkspaceAdmissionTest {
 
     private void fenceStorage(String tenant, String storageId) {
         jdbc.update("INSERT INTO ma_storage"
-                        + " (alias_key,tenant_id,storage_id,fence_operation_id)"
-                        + " VALUES (?,?,?,?)",
-                RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
+                        + " (tenant_id,storage_id,fence_operation_id)"
+                        + " VALUES (?,?,?)",
                 tenant, storageId, UUID.randomUUID().toString());
     }
 
@@ -3045,24 +3043,22 @@ class ManagedWorkspaceAdmissionTest {
     // then the Session row as a tombstone.
     private void recordDelete(String tenant, String sessionId,
             String statusBefore) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
-        String target = ManagedSchemaKeys.key(sessionId);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id,"
                         + " operation_id, operation_kind,"
-                        + " tenant_id, session_id, target_kind, target_key,"
+                        + " tenant_id, session_id, target_kind,"
                         + " target_id, actor_digest, idempotency_key,"
                         + " idempotency_digest, request_digest, request_json,"
                         + " state, phase, admission_stage, delivery_state,"
                         + " session_status_before, available_at, gmt_create,"
-                        + " gmt_modified, completed_at) VALUES (?, ?,"
-                        + " 'op-del', 'DELETE', ?, ?, 'SESSION', ?, ?, '',"
+                        + " gmt_modified, completed_at) VALUES (?, 'SESSION', ?,"
+                        + " 'op-del', 'DELETE', ?, ?, 'SESSION', ?, '',"
                         + " 'delete', ?, 'delete-digest', '{}', 'COMPLETED',"
                         + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED', ?, 0, 0,"
                         + " 0, 0)",
-                ManagedSchemaKeys.operationKey(
-                        ManagedSchemaContract.OperationKind.DELETE, scope,
-                        target, "op-del"),
-                scope, tenant, sessionId, target, sessionId,
+                ManagedIdentityRefs.operationRef(
+                        ManagedSchemaContract.OperationKind.DELETE.name(),
+                        tenant, "SESSION", sessionId, sessionId, "op-del"),
+                sessionId, tenant, sessionId, sessionId,
                 ManagedSchemaKeys.key("delete"), statusBefore);
         jdbc.update("UPDATE ma_session SET status = 'DELETED',"
                         + " deleted_at = 1, gmt_modified = 1, version ="

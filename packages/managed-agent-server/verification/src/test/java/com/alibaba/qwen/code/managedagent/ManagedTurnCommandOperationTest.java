@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.evidence.CancelEvidence;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
@@ -623,7 +624,7 @@ class ManagedTurnCommandOperationTest {
         assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
         journalTurnResult(turn, "cancelled");
         assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.committed());
-        jdbc.update("UPDATE ma_operation SET target_key = ? WHERE operation_id = ?",
+        jdbc.update("UPDATE ma_operation SET target_id = ? WHERE operation_id = ?",
                 "0".repeat(64), cancel.operationId());
         assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
     }
@@ -717,12 +718,12 @@ class ManagedTurnCommandOperationTest {
                 + " FROM ma_session_journal_tx", Long.class);
         jdbc.update("UPDATE ma_session_head SET workspace_id = 'ws', journal_revision = ?", revision);
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
-                        + " journal_revision, command_key_hash, transaction_id, operation, command_id,"
+                        + " journal_revision, command_ref, transaction_id, operation, command_id,"
                         + " content_digest, first_sequence, last_sequence, event_count, writer_generation,"
                         + " writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes,"
                         + " byte_length, record_digest, gmt_create) VALUES (?, 'ws', ?, ?, ?, ?, ?, ?, ?,"
                         + " 1, 1, 1, 1, 'writer', ?, 0, 'identity', ?, ?, ?, 0)",
-                TENANT, sessionId, revision, DigestUtils.sha256Hex(operation + "\u0000" + commandId),
+                TENANT, sessionId, revision, ManagedIdentityRefs.commandRef(operation, commandId),
                 commandId, operation, commandId, DigestUtils.sha256Hex(bytes), "0".repeat(64),
                 bytes, bytes.length, DigestUtils.sha256Hex(bytes));
     }
@@ -781,7 +782,7 @@ class ManagedTurnCommandOperationTest {
         String promptId = store.findTurn(TENANT, sessionId, turn.turnId())
                 .orElseThrow().promptId();
         jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id,"
-                        + " session_id, journal_revision, command_key_hash,"
+                        + " session_id, journal_revision, command_ref,"
                         + " transaction_id, operation, command_id, content_digest,"
                         + " first_sequence, last_sequence, event_count,"
                         + " writer_generation, writer_id, writer_token_hash,"
@@ -790,7 +791,7 @@ class ManagedTurnCommandOperationTest {
                         + " ?, 1, ?, 'tx-1', 'submitInput', ?, ?, 1, 1, 1, 1, 'writer',"
                         + " ?, 0, 'identity', ?, 0, ?, 0)",
                 TENANT, sessionId,
-                DigestUtils.sha256Hex("submitInput\u0000" + promptId),
+                ManagedIdentityRefs.commandRef("submitInput", promptId),
                 promptId, contentDigest, "0".repeat(64), new byte[0],
                 "0".repeat(64));
     }

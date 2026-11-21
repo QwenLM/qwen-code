@@ -456,7 +456,7 @@ class ManagedTurnQueryTest {
                 .containsExactly("turn_own");
         error(turnRead(tenant, sessionId, "turn_other"), 404,
                 "turn_not_found");
-        String otherTenant = tenant + "-other";
+        String otherTenant = UUID.randomUUID().toString();
         error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
                 .header(TENANT, otherTenant)), 404, "session_not_found");
         error(turnRead(otherTenant, sessionId, "turn_own"), 404,
@@ -592,7 +592,7 @@ class ManagedTurnQueryTest {
     }
 
     private static String tenant() {
-        return "tenant-turns-" + UUID.randomUUID();
+        return UUID.randomUUID().toString();
     }
 
     private static AuthenticatedTenantActor actor(String tenant,

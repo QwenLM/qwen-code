@@ -35,24 +35,24 @@ class WorkspaceActorTest {
     }
 
     @Test
-    void acceptsAnActorIdOfUpTo512CodePoints() {
+    void acceptsAnActorIdOfUpTo36CodePoints() {
         String clef = "\uD834\uDD1E";
-        assertEquals(1024, new WorkspaceActor("tenant-a", clef.repeat(512))
+        assertEquals(72, new WorkspaceActor("tenant-a", clef.repeat(36))
                 .getActorId().length());
         assertThrows(IllegalArgumentException.class,
-                () -> new WorkspaceActor("tenant-a", clef.repeat(513)));
+                () -> new WorkspaceActor("tenant-a", clef.repeat(37)));
         // Spaces count and are kept.
         assertEquals(" ", new WorkspaceActor("tenant-a", " ").getActorId());
-        assertEquals(512, new WorkspaceActor("tenant-a", "x".repeat(511) + " ")
+        assertEquals(36, new WorkspaceActor("tenant-a", "x".repeat(35) + " ")
                 .getActorId().length());
         assertThrows(IllegalArgumentException.class,
-                () -> new WorkspaceActor("tenant-a", "x".repeat(512) + " "));
+                () -> new WorkspaceActor("tenant-a", "x".repeat(36) + " "));
     }
 
     @Test
     void rejectsAnInvalidTenant() {
         for (String tenantId : new String[] {null, "", "tenant/a", "tenant a",
-                "t".repeat(129)}) {
+                "t".repeat(37)}) {
             assertThrows(IllegalArgumentException.class,
                     () -> new WorkspaceActor(tenantId, "alice"),
                     String.valueOf(tenantId));

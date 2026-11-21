@@ -16,6 +16,8 @@ public final class BrokerValues {
     private static final int MAXIMUM_ID_LENGTH = 512;
     private static final Pattern PATH_SAFE_ID = Pattern.compile(
             "[A-Za-z0-9._-]{1," + MAXIMUM_ID_LENGTH + "}");
+    private static final Pattern TENANT_ID = Pattern.compile(
+            "[A-Za-z0-9._:-]{1,36}");
     private static final int MAXIMUM_DECIMAL_SCALE = 2048;
     // The JDBC codec's reader (fastjson2 2.0.65) refuses a number literal
     // with more digits than this, whatever its scale.
@@ -32,6 +34,18 @@ public final class BrokerValues {
                 || value.indexOf('\0') >= 0) {
             throw new IllegalArgumentException(name
                     + " must be a bounded non-empty string");
+        }
+        return value;
+    }
+
+    public static boolean isTenantId(String value) {
+        return value != null && TENANT_ID.matcher(value).matches();
+    }
+
+    public static String requireTenantId(String value, String name) {
+        if (!isTenantId(value)) {
+            throw new IllegalArgumentException(name
+                    + " must match [A-Za-z0-9._:-]{1,36}");
         }
         return value;
     }

@@ -387,8 +387,8 @@ public class ManagedChannelService {
         }
         // The first-segment guard above only proves the chain's head matches.
         // A stored chain that shares segment 0 but diverges later would slip
-        // through it, and INSERT IGNORE (unique on (delivery_key, segment_id),
-        // not on ordinal) would splice the divergent segment in beside the old
+        // through it, and INSERT IGNORE (unique on (tenant_id, channel_id,
+        // delivery_id, segment_id), not on ordinal) would splice the divergent segment in beside the old
         // one — a mixed chain with two rows at one ordinal. Compare the full
         // (segmentId, ordinal) chain before planning so any divergence is
         // refused rather than spliced (review 5853133846). A stored chain that
@@ -765,7 +765,8 @@ public class ManagedChannelService {
         }
         // The head check only proves the chain's head matches. A stored chain
         // that diverges at a later segment would be spliced by planSegments
-        // (INSERT IGNORE, unique on segment_id, not ordinal). Guard the full
+        // (INSERT IGNORE, unique on (tenant_id, channel_id, delivery_id,
+        // segment_id), not ordinal). Guard the full
         // chain at the import site too: a resend refusal alone is not durable,
         // because the funnel already committed this record as planned and the
         // sweep discovers pending work from the journal, not from claim rows.

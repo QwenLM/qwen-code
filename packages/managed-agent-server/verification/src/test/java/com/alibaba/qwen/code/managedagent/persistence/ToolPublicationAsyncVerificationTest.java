@@ -857,7 +857,7 @@ public class ToolPublicationAsyncVerificationTest {
             assertThat(verifier.runOnce()).isTrue();
         }
         assertThat(status("bad-seal").path("state").asText()).isEqualTo("FAILED");
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture WHERE seal_manifest_resource_key IS NOT NULL", Integer.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture WHERE seal_manifest_resource_ref IS NOT NULL", Integer.class))
                 .isZero();
     }
 

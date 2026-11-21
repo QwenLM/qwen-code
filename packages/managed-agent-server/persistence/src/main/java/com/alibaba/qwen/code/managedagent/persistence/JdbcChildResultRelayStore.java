@@ -1,12 +1,12 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -103,13 +103,11 @@ public class JdbcChildResultRelayStore
     private String lockedDeliveryState(String tenantId, String parentSessionId, String childRunId) {
         List<String> rows = jdbc.query(
                 "SELECT delivery_state FROM ma_session_record"
-                        + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_run' AND record_id = ?"
                         + " FOR UPDATE",
                 (result, row) -> result.getString("delivery_state"),
-                tenantId, parentSessionId,
-                ManagedExtensionProjection.recordKey(parentSessionId, "child_run", childRunId),
-                childRunId);
+                tenantId, parentSessionId, childRunId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -158,13 +156,10 @@ public class JdbcChildResultRelayStore
         List<String> rows = jdbc.query(
                 "SELECT record_resource_id FROM"
                         + " ma_session_record"
-                        + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_run' AND record_id = ?",
                 (result, row) -> result.getString("record_resource_id"),
-                tenantId, parentSessionId,
-                ManagedExtensionProjection.recordKey(parentSessionId,
-                        "child_run", childRunId),
-                childRunId);
+                tenantId, parentSessionId, childRunId);
         if (rows.isEmpty()) {
             return null;
         }
@@ -208,11 +203,10 @@ public class JdbcChildResultRelayStore
     }
 
     public byte[] readResourceBytes(String tenantId, String sessionId, String resourceId) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        return jdbc.query("SELECT inline_bytes FROM ma_resource WHERE resource_key = ?"
-                        + " AND tenant_id = ? AND session_id = ? AND resource_id = ? AND storage_kind = 'MYSQL_INLINE'"
-                        + " AND state = 'REFERENCED' AND deletion_operation_key IS NULL",
-                (row, index) -> row.getBytes(1), ManagedSchemaKeys.key(scope, resourceId), tenantId, sessionId, resourceId)
+        return jdbc.query("SELECT inline_bytes FROM ma_resource WHERE"
+                        + " tenant_id = ? AND session_id = ? AND resource_id = ? AND storage_kind = 'MYSQL_INLINE'"
+                        + " AND state = 'REFERENCED' AND deletion_operation_ref IS NULL",
+                (row, index) -> row.getBytes(1), tenantId, sessionId, resourceId)
                 .stream().findFirst().orElse(null);
     }
 
@@ -223,7 +217,7 @@ public class JdbcChildResultRelayStore
 
     public byte[] readResourceBytes(String tenantId, String resourceId) {
         List<byte[]> rows = jdbc.query("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND resource_id = ?"
-                        + " AND storage_kind = 'MYSQL_INLINE' AND state = 'REFERENCED' AND deletion_operation_key IS NULL",
+                        + " AND storage_kind = 'MYSQL_INLINE' AND state = 'REFERENCED' AND deletion_operation_ref IS NULL",
                 (row, index) -> row.getBytes(1), tenantId, resourceId);
         if (rows.size() > 1) {
             throw new IllegalStateException("Resource identity requires its Session scope");
@@ -262,7 +256,7 @@ public class JdbcChildResultRelayStore
             "SELECT COUNT(*) FROM ma_session_record r"
                     + " LEFT JOIN ma_delivery l"
                     + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.tenant_id = r.tenant_id"
-                    + " AND l.source_scope_key = ?"
+                    + " AND l.source_scope_id = ?"
                     + " AND l.source_session_id = r.session_id"
                     + " AND l.delivery_id = r.record_id"
                     + " WHERE r.tenant_id = ? AND r.session_id = ?"
@@ -316,7 +310,7 @@ public class JdbcChildResultRelayStore
             return 0;
         }
         Integer owed = jdbc.queryForObject(CHILD_OUTBOX_OWED_SQL,
-                Integer.class, ManagedSessionStore.sessionScopeKey(tenantId, childSessionId), tenantId, childSessionId);
+                Integer.class, ManagedSchemaKeys.identity(childSessionId), tenantId, childSessionId);
         return owed == null ? 0 : owed;
     }
 
@@ -338,11 +332,11 @@ public class JdbcChildResultRelayStore
 
     /** Whether a Session's journal holds any session message at all. */
     public boolean hasSessionMessages(String tenantId, String sessionId) {
-        return !jdbc.query("SELECT record_key FROM"
+        return !jdbc.query("SELECT record_id FROM"
                         + " ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND domain = 'session_message' LIMIT 1",
-                (result, row) -> result.getString("record_key"), tenantId,
+                (result, row) -> result.getString("record_id"), tenantId,
                 sessionId).isEmpty();
     }
 
@@ -552,11 +546,11 @@ public class JdbcChildResultRelayStore
     /** Whether a Session currently holds the acceptance of one child run. */
     public boolean hasAcceptance(String tenantId, String sessionId, String childRunId) {
         return !jdbc.query(
-                "SELECT record_key FROM ma_session_record"
+                "SELECT record_id FROM ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_acceptance'"
                         + " AND record_id = ?",
-                (result, row) -> result.getString("record_key"), tenantId,
+                (result, row) -> result.getString("record_id"), tenantId,
                 sessionId, childRunId).isEmpty();
     }
 
@@ -601,35 +595,27 @@ public class JdbcChildResultRelayStore
     /** The terminal result content: the completed Turn's newest assistant
      * message's joined text, or null while none exists. */
     public String terminalResultText(String tenantId, String sessionId, String turnId) {
-        List<String> messages = jdbc.query(
-                "SELECT i.parts_json, i.body_resource_key, r.inline_bytes, r.kind, r.schema_version, r.byte_length, r.sha256,"
-                        + " r.state, r.deletion_operation_key FROM ma_message i LEFT JOIN ma_resource r"
-                        + " ON r.resource_key = i.body_resource_key"
-                        + " AND r.tenant_id = i.tenant_id AND r.session_id = i.session_id"
-                        + " WHERE i.tenant_id = ? AND i.session_id = ?"
-                        + " AND i.turn_id = ? AND i.item_type = 'message'"
-                        + " AND i.item_role = 'assistant'"
-                        + " ORDER BY i.last_sequence DESC, i.item_id DESC LIMIT 1",
-                (result, row) -> {
-                    if (result.getString("body_resource_key") == null) {
-                        return result.getString("parts_json");
-                    }
-                    byte[] bytes = result.getBytes("inline_bytes");
-                    if (!"REFERENCED".equals(result.getString("state"))
-                            || !"managed-message-parts".equals(result.getString("kind"))
-                            || result.getInt("schema_version") != 1
-                            || result.getString("deletion_operation_key") != null || bytes == null
-                            || bytes.length != result.getLong("byte_length")
-                            || !ToolPublicationContract.sha256(bytes).equals(result.getString("sha256"))) {
-                        throw new IllegalStateException("Child message body resource is unavailable or corrupt");
-                    }
-                    return new String(bytes, StandardCharsets.UTF_8);
-                }, tenantId, sessionId, turnId);
+        List<String[]> messages = jdbc.query(
+                "SELECT parts_json, body_resource_ref FROM ma_message"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND turn_id = ? AND item_type = 'message'"
+                        + " AND item_role = 'assistant'"
+                        + " ORDER BY last_sequence DESC, item_id DESC LIMIT 1",
+                (result, row) -> new String[] {
+                        result.getString("parts_json"), result.getString("body_resource_ref") },
+                tenantId, sessionId, turnId);
         if (messages.isEmpty()) {
             return null;
         }
+        // The body reference encodes (tenant, Session, resource id); the
+        // resource row is keyed by that raw tuple, so decode the id and read
+        // the body with the same integrity gate the join used to apply.
+        String body = messages.getFirst()[1] == null
+                ? messages.getFirst()[0]
+                : messageBodyText(tenantId, sessionId, ManagedIdentityRef.decode(
+                        messages.getFirst()[1].getBytes(StandardCharsets.US_ASCII)).get(2));
         try {
-            JsonNode parts = MAPPER.readTree(messages.getFirst());
+            JsonNode parts = MAPPER.readTree(body);
             if (!parts.isArray()) {
                 throw new IllegalStateException("Message parts are not an ordered array");
             }
@@ -648,34 +634,51 @@ public class JdbcChildResultRelayStore
         }
     }
 
-    private static String scope(String tenant, String parent) {
-        return ManagedSessionStore.sessionScopeKey(tenant, parent);
+    private String messageBodyText(String tenantId, String sessionId, String resourceId) {
+        return jdbc.query(
+                "SELECT inline_bytes, kind, schema_version, byte_length, sha256, state, deletion_operation_ref"
+                        + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                (result, row) -> {
+                    byte[] bytes = result.getBytes("inline_bytes");
+                    if (!"REFERENCED".equals(result.getString("state"))
+                            || !"managed-message-parts".equals(result.getString("kind"))
+                            || result.getInt("schema_version") != 1
+                            || result.getString("deletion_operation_ref") != null || bytes == null
+                            || bytes.length != result.getLong("byte_length")
+                            || !ToolPublicationContract.sha256(bytes).equals(result.getString("sha256"))) {
+                        throw new IllegalStateException("Child message body resource is unavailable or corrupt");
+                    }
+                    return new String(bytes, StandardCharsets.UTF_8);
+                }, tenantId, sessionId, resourceId)
+                .stream().findFirst()
+                .orElseThrow(() -> new IllegalStateException("Child message body resource is unavailable or corrupt"));
     }
 
     private static String operationKey(String kind, String tenant, String parent, String run) {
-        return ManagedSchemaKeys.operationKey(OperationKind.valueOf(kind), scope(tenant, parent), ManagedSchemaKeys.key(run), run);
+        return ManagedIdentityRefs.operationRef(OperationKind.valueOf(kind).name(), tenant, "SESSION", parent, run, run);
     }
 
     public RelayRow claim(String tenantId, String parentSessionId, String childRunId, String creationKey, String owner, long leaseUntil, long now) {
         String request = MAPPER.createObjectNode().put("version", 1).put("creationKey", creationKey).toString();
-        jdbc.update("INSERT IGNORE INTO ma_operation (operation_key, scope_key, operation_kind, operation_id,"
-                        + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase,"
-                        + " gmt_create, gmt_modified) VALUES (?, ?, 'CHILD_SESSION_START', ?, ?, ?, 'CHILD_RUN', ?, ?, ?,"
+        jdbc.update("INSERT IGNORE INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id,"
+                        + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase,"
+                        + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'CHILD_SESSION_START', ?, ?, ?, 'CHILD_RUN', ?, ?, ?,"
                         + " 'creating', 'STARTING', ?, ?)",
-                operationKey("CHILD_SESSION_START", tenantId, parentSessionId, childRunId), scope(tenantId, parentSessionId),
-                childRunId, tenantId, parentSessionId, ManagedSchemaKeys.key(childRunId), ManagedSchemaKeys.key(request), request, now, now);
+                ManagedSchemaKeys.identity(operationKey("CHILD_SESSION_START", tenantId, parentSessionId, childRunId)),
+                "SESSION", ManagedSchemaKeys.identity(parentSessionId),
+                childRunId, tenantId, parentSessionId, ManagedSchemaKeys.identity(childRunId), ManagedSchemaKeys.key(request), request, now, now);
         RelayRow existing = find(tenantId, parentSessionId, childRunId);
         if (existing == null || !creationKey.equals(existing.creationKey())) {
             return null;
         }
-        int claimed = jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_until = ?, claim_generation = claim_generation + 1, gmt_modified = ? WHERE operation_key = ? AND state NOT IN ('done', 'orphaned', 'unknown') AND (claim_owner = ? OR claim_until IS NULL OR claim_until < ?)",
+        int claimed = jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_until = ?, claim_generation = claim_generation + 1, gmt_modified = ? WHERE operation_ref = ? AND state NOT IN ('done', 'orphaned', 'unknown') AND (claim_owner = ? OR claim_until IS NULL OR claim_until < ?)",
                 owner, leaseUntil, now,
-                operationKey(existing.operationKind(), tenantId, parentSessionId, childRunId), owner, now);
+                ManagedSchemaKeys.identity(operationKey(existing.operationKind(), tenantId, parentSessionId, childRunId)), owner, now);
         return claimed == 1 ? find(tenantId, parentSessionId, childRunId) : null;
     }
 
     public RelayRow find(String tenantId, String parentSessionId, String childRunId) {
-        return jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE scope_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND operation_kind IN ('CHILD_SESSION_START', 'CHILD_SESSION_CLOSE') ORDER BY CASE WHEN operation_kind = 'CHILD_SESSION_CLOSE' THEN 0 ELSE 1 END LIMIT 1",
+        return jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE scope_kind = 'SESSION' AND scope_id = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND operation_kind IN ('CHILD_SESSION_START', 'CHILD_SESSION_CLOSE') ORDER BY CASE WHEN operation_kind = 'CHILD_SESSION_CLOSE' THEN 0 ELSE 1 END LIMIT 1",
                 (row, index) -> {
                     JsonNode request = readBody(row.getString("request_json"));
                     JsonNode result = readBody(row.getString("result_json"));
@@ -687,7 +690,7 @@ public class JdbcChildResultRelayStore
                             until == null ? 0 : until, row.getInt("attempt_count"), row.getLong("available_at"),
                             error, row.getLong("gmt_create"), row.getLong("gmt_modified"), row.getLong("claim_generation"),
                             row.getString("operation_kind"));
-                }, scope(tenantId, parentSessionId), tenantId, parentSessionId, childRunId).stream().findFirst().orElse(null);
+                }, ManagedSchemaKeys.identity(parentSessionId), tenantId, parentSessionId, childRunId).stream().findFirst().orElse(null);
     }
 
     private static JsonNode readBody(String value) {
@@ -730,9 +733,9 @@ public class JdbcChildResultRelayStore
             retainCloseDebt(row, owner, "done", childSessionId, nextRetryAt, lastError, leaseUntil, now);
             return;
         }
-        jdbc.update("UPDATE ma_operation SET state = ?, result_json = ?, available_at = ?, claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
+        jdbc.update("UPDATE ma_operation SET state = ?, result_json = ?, available_at = ?, claim_until = ?, gmt_modified = ? WHERE operation_ref = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                 state, resultBody(childSessionId, lastError), nextRetryAt, leaseUntil, now,
-                operationKey(row.operationKind(), row.tenantId(), row.parentSessionId(), row.childRunId()),
+                ManagedSchemaKeys.identity(operationKey(row.operationKind(), row.tenantId(), row.parentSessionId(), row.childRunId())),
                 owner, row.claimGeneration(), now);
     }
 
@@ -751,32 +754,32 @@ public class JdbcChildResultRelayStore
             throw new IllegalArgumentException("A close-debt row cannot retain another close debt");
         }
         transactions.executeWithoutResult(status -> {
-            int changed = jdbc.update("UPDATE ma_operation SET state = ?, claim_owner = NULL, claim_until = NULL, result_json = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
-                    classification, resultBody(childSessionId, lastError), now, operationKey(row.operationKind(),
-                            row.tenantId(), row.parentSessionId(), row.childRunId()), owner, row.claimGeneration(), now);
+            int changed = jdbc.update("UPDATE ma_operation SET state = ?, claim_owner = NULL, claim_until = NULL, result_json = ?, gmt_modified = ? WHERE operation_ref = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
+                    classification, resultBody(childSessionId, lastError), now, ManagedSchemaKeys.identity(operationKey(row.operationKind(),
+                            row.tenantId(), row.parentSessionId(), row.childRunId())), owner, row.claimGeneration(), now);
             if (changed != 1) {
                 return;
             }
             String request = MAPPER.createObjectNode().put("version", 1).put("creationKey", row.creationKey()).toString();
-            jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, session_id, target_kind, target_key, request_digest, request_json, result_json, state, phase, claim_owner, claim_generation, claim_until, available_at, gmt_create, gmt_modified) VALUES (?, ?, 'CHILD_SESSION_CLOSE', ?, ?, ?, 'CHILD_RUN', ?, ?, ?, ?, 'close_debt', 'CLOSING', ?, 1, ?, ?, ?, ?)",
-                    operationKey("CHILD_SESSION_CLOSE", row.tenantId(), row.parentSessionId(), row.childRunId()),
-                    scope(row.tenantId(), row.parentSessionId()), row.childRunId(), row.tenantId(), row.parentSessionId(),
-                    ManagedSchemaKeys.key(row.childRunId()), ManagedSchemaKeys.key(request), request,
+            jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id, tenant_id, session_id, target_kind, target_id, request_digest, request_json, result_json, state, phase, claim_owner, claim_generation, claim_until, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, 'CHILD_SESSION_CLOSE', ?, ?, ?, 'CHILD_RUN', ?, ?, ?, ?, 'close_debt', 'CLOSING', ?, 1, ?, ?, ?, ?)",
+                    ManagedSchemaKeys.identity(operationKey("CHILD_SESSION_CLOSE", row.tenantId(), row.parentSessionId(), row.childRunId())),
+                    "SESSION", ManagedSchemaKeys.identity(row.parentSessionId()), row.childRunId(), row.tenantId(), row.parentSessionId(),
+                    ManagedSchemaKeys.identity(row.childRunId()), ManagedSchemaKeys.key(request), request,
                     resultBody(childSessionId, lastError), owner, leaseUntil, nextRetryAt, now, now);
             recordDelivery(row, childSessionId, "done".equals(classification) ? "delivered" : classification, now);
         });
     }
 
     public void scheduleRetry(RelayRow row, String owner, long nextRetryAt, long leaseUntil, long now) {
-        jdbc.update("UPDATE ma_operation SET available_at = ?, claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
-                nextRetryAt, leaseUntil, now, operationKey(row.operationKind(), row.tenantId(),
-                        row.parentSessionId(), row.childRunId()), owner, row.claimGeneration(), now);
+        jdbc.update("UPDATE ma_operation SET available_at = ?, claim_until = ?, gmt_modified = ? WHERE operation_ref = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
+                nextRetryAt, leaseUntil, now, ManagedSchemaKeys.identity(operationKey(row.operationKind(), row.tenantId(),
+                        row.parentSessionId(), row.childRunId())), owner, row.claimGeneration(), now);
     }
 
     public void defer(RelayRow row, String owner, long nextRetryAt, String lastError, long leaseUntil, long now) {
-        jdbc.update("UPDATE ma_operation SET attempt_count = ?, available_at = ?, result_json = ?, claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
+        jdbc.update("UPDATE ma_operation SET attempt_count = ?, available_at = ?, result_json = ?, claim_until = ?, gmt_modified = ? WHERE operation_ref = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                 row.attempts() + 1, nextRetryAt, resultBody(row.childSessionId(), lastError), leaseUntil, now,
-                operationKey(row.operationKind(), row.tenantId(), row.parentSessionId(), row.childRunId()),
+                ManagedSchemaKeys.identity(operationKey(row.operationKind(), row.tenantId(), row.parentSessionId(), row.childRunId())),
                 owner, row.claimGeneration(), now);
     }
 
@@ -785,9 +788,9 @@ public class JdbcChildResultRelayStore
             throw new IllegalArgumentException("Unknown child result classification " + state);
         }
         transactions.executeWithoutResult(status -> {
-            int changed = jdbc.update("UPDATE ma_operation SET state = ?, result_json = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
+            int changed = jdbc.update("UPDATE ma_operation SET state = ?, result_json = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE operation_ref = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                     state, resultBody(row.childSessionId(), lastError), now, now,
-                    operationKey(row.operationKind(), row.tenantId(), row.parentSessionId(), row.childRunId()),
+                    ManagedSchemaKeys.identity(operationKey(row.operationKind(), row.tenantId(), row.parentSessionId(), row.childRunId())),
                     owner, row.claimGeneration(), now);
             if (changed == 1 && !"CHILD_SESSION_CLOSE".equals(row.operationKind())) {
                 recordDelivery(row, row.childSessionId(), "done".equals(state) ? "delivered" : state, now);
@@ -806,24 +809,22 @@ public class JdbcChildResultRelayStore
     public void markConsumed(String tenantId, String parentSessionId, String childRunId, long now) {
         jdbc.update("UPDATE ma_delivery SET consumption_state = 'consumed',"
                         + " gmt_modified = ? WHERE delivery_kind = 'CHILD_RESULT'"
-                        + " AND tenant_id = ? AND source_scope_key = ?"
+                        + " AND tenant_id = ? AND source_scope_id = ?"
                         + " AND delivery_id = ?",
-                now, tenantId, scope(tenantId, parentSessionId), childRunId);
+                now, tenantId, ManagedSchemaKeys.identity(parentSessionId), childRunId);
     }
 
     private void recordDelivery(RelayRow row, String child, String transport, long now) {
         String delivery = lockedDeliveryState(row.tenantId(), row.parentSessionId(), row.childRunId());
         String reception = Set.of("accepted", "consumed").contains(delivery == null ? "" : delivery) ? "accepted" : "pending";
         String consumption = "consumed".equals(delivery) ? "consumed" : "pending";
-        String sourceScope = scope(row.tenantId(), row.parentSessionId());
-        String key = ManagedSchemaKeys.key("delivery", "CHILD_RESULT", sourceScope, row.childRunId());
-        jdbc.update("INSERT INTO ma_delivery (delivery_key, delivery_kind, tenant_id, source_scope_key, source_session_id,"
+        jdbc.update("INSERT INTO ma_delivery (delivery_kind, tenant_id, source_scope_id, source_session_id,"
                         + " target_session_id, delivery_id, creation_key, payload_json, transport_state, reception_state,"
-                        + " consumption_state, gmt_create, gmt_modified) VALUES (?, 'CHILD_RESULT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        + " consumption_state, gmt_create, gmt_modified) VALUES ('CHILD_RESULT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                         + " ON DUPLICATE KEY UPDATE transport_state = VALUES(transport_state),"
                         + " reception_state = VALUES(reception_state), consumption_state = VALUES(consumption_state),"
                         + " gmt_modified = VALUES(gmt_modified)",
-                key, row.tenantId(), sourceScope, child == null ? row.parentSessionId() : child, row.parentSessionId(),
+                row.tenantId(), ManagedSchemaKeys.identity(row.parentSessionId()), child == null ? row.parentSessionId() : child, row.parentSessionId(),
                 row.childRunId(), row.creationKey(), resultBody(child, null), transport, reception, consumption, now, now);
     }
 }

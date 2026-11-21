@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -28,7 +27,6 @@ final class ManagedSessionRetirementStore {
             throw new IllegalStateException("Session has not been permanently retired");
         }
         ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         var packs = jdbc.queryForList("SELECT pack_id FROM ma_journal_pack WHERE tenant_id = ? AND session_id = ?"
                 + " AND state <> 'RETIRED' ORDER BY pack_id LIMIT ? FOR UPDATE", tenant, session, limit);
         for (var pack : packs) {
@@ -39,24 +37,24 @@ final class ManagedSessionRetirementStore {
         if (!packs.isEmpty()) {
             return true;
         }
-        var nativeSnapshots = jdbc.queryForList("SELECT owner_key, owner_revision, resource_key FROM ma_resource_ref"
+        var nativeSnapshots = jdbc.queryForList("SELECT owner_ref, owner_revision, resource_id FROM ma_resource_ref"
                 + " WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'NATIVE_SNAPSHOT'"
-                + " ORDER BY owner_key, owner_revision, resource_key LIMIT ? FOR UPDATE", tenant, session, limit);
+                + " ORDER BY owner_ref, owner_revision, resource_id LIMIT ? FOR UPDATE", tenant, session, limit);
         for (var row : nativeSnapshots) {
             jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'NATIVE_SNAPSHOT'"
-                    + " AND owner_key = ? AND owner_revision = ? AND resource_key = ?",
-                    tenant, session, row.get("owner_key"), row.get("owner_revision"), row.get("resource_key"));
+                    + " AND owner_ref = ? AND owner_revision = ? AND resource_id = ?",
+                    tenant, session, row.get("owner_ref"), row.get("owner_revision"), row.get("resource_id"));
         }
         if (!nativeSnapshots.isEmpty()) {
             return true;
         }
-        var sideRefs = jdbc.queryForList("SELECT owner_key,owner_revision,resource_key FROM ma_resource_ref"
-                + " WHERE tenant_id=? AND session_id=? AND owner_kind='SIDE_QUERY' ORDER BY owner_key,owner_revision,resource_key LIMIT ? FOR UPDATE",
+        var sideRefs = jdbc.queryForList("SELECT owner_ref,owner_revision,resource_id FROM ma_resource_ref"
+                + " WHERE tenant_id=? AND session_id=? AND owner_kind='SIDE_QUERY' ORDER BY owner_ref,owner_revision,resource_id LIMIT ? FOR UPDATE",
                 tenant, session, limit);
         for (var row : sideRefs) {
             jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id=? AND session_id=? AND owner_kind='SIDE_QUERY'"
-                            + " AND owner_key=? AND owner_revision=? AND resource_key=?", tenant, session, row.get("owner_key"),
-                    row.get("owner_revision"), row.get("resource_key"));
+                            + " AND owner_ref=? AND owner_revision=? AND resource_id=?", tenant, session, row.get("owner_ref"),
+                    row.get("owner_revision"), row.get("resource_id"));
         }
         if (!sideRefs.isEmpty()) {
             return true;
@@ -109,7 +107,8 @@ final class ManagedSessionRetirementStore {
                         limit);
         for (var row : messages) {
             String id = (String) row.get("item_id");
-            release(jdbc, tenant, session, "MESSAGE", ManagedSchemaKeys.key(scope, id));
+            release(jdbc, tenant, session, "MESSAGE", com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES, tenant, session, id));
             jdbc.update(
                     "DELETE FROM ma_message WHERE tenant_id = ? AND session_id = ? AND item_id = ?",
                     tenant,
@@ -121,24 +120,27 @@ final class ManagedSessionRetirementStore {
         }
         var records =
                 jdbc.queryForList(
-                        "SELECT record_key, domain, record_id FROM ma_session_record WHERE tenant_id = ?"
-                                + " AND session_id = ? ORDER BY record_key LIMIT ? FOR UPDATE",
+                        "SELECT domain, record_id FROM ma_session_record WHERE tenant_id = ?"
+                                + " AND session_id = ? ORDER BY domain, record_id LIMIT ? FOR UPDATE",
                         tenant,
                         session,
                         limit);
         for (var row : records) {
-            String key = (String) row.get("record_key");
-            if ("automation_run".equals(row.get("domain"))) {
+            String domain = (String) row.get("domain");
+            String recordId = (String) row.get("record_id");
+            if ("automation_run".equals(domain)) {
                 jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = 0"
                                 + " WHERE tenant_id = ? AND run_id = ? AND session_id = ?",
-                        tenant, row.get("record_id"), session);
+                        tenant, recordId, session);
             }
-            release(jdbc, tenant, session, "SESSION_RECORD", key);
+            release(jdbc, tenant, session, "SESSION_RECORD", com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES, session, domain, recordId));
             jdbc.update(
-                    "DELETE FROM ma_session_record WHERE tenant_id = ? AND session_id = ? AND record_key = ?",
+                    "DELETE FROM ma_session_record WHERE tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
                     tenant,
                     session,
-                    key);
+                    domain,
+                    recordId);
         }
         if (!records.isEmpty()) {
             return true;
@@ -154,10 +156,11 @@ final class ManagedSessionRetirementStore {
         for (long revision : revisions) {
             jdbc.update(
                     "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind ="
-                            + " 'JOURNAL' AND owner_key = ? AND owner_revision = ?",
+                            + " 'JOURNAL' AND owner_ref = ? AND owner_revision = ?",
                     tenant,
                     session,
-                    scope,
+                    ManagedSchemaKeys.identity(com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
+                            com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES, tenant, session)),
                     revision);
             jdbc.update(
                     "DELETE FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND"
@@ -175,13 +178,13 @@ final class ManagedSessionRetirementStore {
                     session);
             return true;
         }
-        var cleanupOwners = jdbc.queryForList("SELECT owner_key, owner_revision, resource_key"
+        var cleanupOwners = jdbc.queryForList("SELECT owner_ref, owner_revision, resource_id"
                 + " FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'HOSTED_CLEANUP'"
-                + " ORDER BY owner_key, owner_revision, resource_key LIMIT ? FOR UPDATE", tenant, session, limit);
+                + " ORDER BY owner_ref, owner_revision, resource_id LIMIT ? FOR UPDATE", tenant, session, limit);
         for (var row : cleanupOwners) {
             jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
-                    + " AND owner_kind = 'HOSTED_CLEANUP' AND owner_key = ? AND owner_revision = ?"
-                    + " AND resource_key = ?", tenant, session, row.get("owner_key"), row.get("owner_revision"), row.get("resource_key"));
+                    + " AND owner_kind = 'HOSTED_CLEANUP' AND owner_ref = ? AND owner_revision = ?"
+                    + " AND resource_id = ?", tenant, session, row.get("owner_ref"), row.get("owner_revision"), row.get("resource_id"));
         }
         if (!cleanupOwners.isEmpty()) {
             return true;
@@ -189,7 +192,7 @@ final class ManagedSessionRetirementStore {
         var streams =
                 jdbc.queryForList(
                         "SELECT stream_kind, stream_id FROM ma_event_stream WHERE tenant_id = ? AND"
-                            + " session_id = ? AND artifact_refs_resource_key IS NOT NULL LIMIT ?"
+                            + " session_id = ? AND artifact_refs_resource_ref IS NOT NULL LIMIT ?"
                             + " FOR UPDATE",
                         tenant,
                         session,
@@ -198,7 +201,7 @@ final class ManagedSessionRetirementStore {
             String kind = (String) row.get("stream_kind");
             String id = (String) row.get("stream_id");
             jdbc.update(
-                    "UPDATE ma_event_stream SET artifact_refs_resource_key = NULL WHERE tenant_id ="
+                    "UPDATE ma_event_stream SET artifact_refs_resource_ref = NULL WHERE tenant_id ="
                             + " ? AND session_id = ? AND stream_kind = ? AND stream_id = ?",
                     tenant,
                     session,
@@ -210,22 +213,22 @@ final class ManagedSessionRetirementStore {
         }
         var streamRefs =
                 jdbc.queryForList(
-                        "SELECT owner_key, owner_revision, resource_key FROM ma_resource_ref WHERE"
+                        "SELECT owner_ref, owner_revision, resource_id FROM ma_resource_ref WHERE"
                                 + " tenant_id = ? AND session_id = ? AND owner_kind = 'EVENT_STREAM' ORDER BY"
-                                + " owner_key, owner_revision, resource_key LIMIT ? FOR UPDATE",
+                                + " owner_ref, owner_revision, resource_id LIMIT ? FOR UPDATE",
                         tenant,
                         session,
                         limit);
         for (var row : streamRefs) {
             jdbc.update(
                     "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind ="
-                            + " 'EVENT_STREAM' AND owner_key = ? AND owner_revision = ? AND"
-                            + " resource_key = ?",
+                            + " 'EVENT_STREAM' AND owner_ref = ? AND owner_revision = ? AND"
+                            + " resource_id = ?",
                     tenant,
                     session,
-                    row.get("owner_key"),
+                    row.get("owner_ref"),
                     row.get("owner_revision"),
-                    row.get("resource_key"));
+                    row.get("resource_id"));
         }
         if (!streamRefs.isEmpty()) {
             return true;
@@ -322,7 +325,7 @@ final class ManagedSessionRetirementStore {
                 .isEmpty()) {
             throw new IllegalStateException("Session journal collection is incomplete");
         }
-        if (!jdbc.queryForList("SELECT resource_key FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
+        if (!jdbc.queryForList("SELECT resource_id FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
                 + " AND owner_kind = 'NATIVE_SNAPSHOT' LIMIT 1", tenant, session).isEmpty()) {
             throw new IllegalStateException("Native snapshot collection is incomplete");
         }
@@ -332,9 +335,9 @@ final class ManagedSessionRetirementStore {
         var operations =
                 jdbc.queryForList(
                         "SELECT tenant_id, session_id, state FROM ma_operation"
-                            + " WHERE operation_key = ? AND operation_kind = 'SESSION_RESOURCE_GC'"
+                            + " WHERE operation_ref = ? AND operation_kind = 'SESSION_RESOURCE_GC'"
                             + " FOR UPDATE",
-                        operationKey);
+                        ManagedSchemaKeys.identity(operationKey));
         if (operations.size() != 1
                 || !tenant.equals(operations.getFirst().get("tenant_id"))
                 || !session.equals(operations.getFirst().get("session_id"))
@@ -358,10 +361,10 @@ final class ManagedSessionRetirementStore {
     private static void release(JdbcTemplate jdbc, String tenant, String session, String kind, String owner) {
         jdbc.update(
                 "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = ? AND"
-                        + " owner_key = ?",
+                        + " owner_ref = ?",
                 tenant,
                 session,
                 kind,
-                owner);
+                ManagedSchemaKeys.identity(owner));
     }
 }

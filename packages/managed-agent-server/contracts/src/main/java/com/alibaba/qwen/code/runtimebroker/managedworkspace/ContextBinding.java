@@ -35,7 +35,7 @@ public final class ContextBinding {
     public ContextBinding(String tenantId, String workspaceId,
             long workspaceGeneration, String storageId, String cwdRelative,
             String contextConfigRef, long contextRevision) {
-        this.tenantId = WorkspaceValues.requireIdentifier(tenantId,
+        this.tenantId = WorkspaceValues.requireTenantIdentifier(tenantId,
                 "tenantId");
         this.workspaceId = WorkspaceValues.requireIdentifier(workspaceId,
                 "workspaceId");

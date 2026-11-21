@@ -22,7 +22,7 @@ import java.util.List;
 public final class JdbcRuntimeSessionRepository
         implements RuntimeSessionRepository {
     static final String SESSION_COLUMNS = String.join(", ",
-            "scope_key", "runtime_session_id", "tenant_id", "workspace_id",
+            "scope_id", "runtime_session_id", "tenant_id", "workspace_id",
             "workspace_generation", "canonical_cwd", "capability_digest",
             "isolation_class", "harness_session_id", "turn_kind",
             "binding_id", "runtime_generation", "session_state",
@@ -53,7 +53,7 @@ public final class JdbcRuntimeSessionRepository
         String sql = "SELECT " + SESSION_COLUMNS + " FROM ma_runtime_session "
                 + "WHERE binding_id = ? AND runtime_generation = ? "
                 + "AND session_state NOT IN ('RELEASED', 'FAILED') "
-                + "ORDER BY scope_key, runtime_session_id LIMIT 100 FOR UPDATE";
+                + "ORDER BY scope_id, runtime_session_id LIMIT 100 FOR UPDATE";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
             statement.setLong(2, binding.getGeneration());
@@ -75,9 +75,9 @@ public final class JdbcRuntimeSessionRepository
             try (PreparedStatement statement = connection.prepareStatement(
                     "UPDATE ma_runtime_session SET session_state = 'RELEASED', "
                             + "record_version = record_version + 1, last_active_at = ? "
-                            + "WHERE scope_key = ? AND runtime_session_id = ?")) {
+                            + "WHERE scope_id = ? AND runtime_session_id = ?")) {
                 JdbcRepositorySupport.setInstant(statement, 1, now);
-                statement.setString(2, JdbcRepositorySupport.scopeKey(session.getSession().getScope()));
+                JdbcRepositorySupport.setIdentity(statement, 2, JdbcRepositorySupport.scopeKey(session.getSession().getScope()));
                 JdbcRepositorySupport.setIdentity(statement, 3, session.getRuntimeSessionId());
                 if (statement.executeUpdate() != 1) {
                     throw new SQLException("Lost Session release failed");
@@ -270,13 +270,13 @@ public final class JdbcRuntimeSessionRepository
         try (PreparedStatement statement = connection.prepareStatement(
                 "UPDATE ma_runtime_session SET session_state = ?, "
                         + "record_version = ?, last_active_at = ? "
-                        + "WHERE scope_key = ? "
+                        + "WHERE scope_id = ? "
                         + "AND runtime_session_id = ?")) {
             statement.setString(1, updated.getState().name());
             statement.setLong(2, updated.getVersion());
             JdbcRepositorySupport.setInstant(statement, 3,
                     updated.getLastActiveAt());
-            statement.setString(4, JdbcRepositorySupport.scopeKey(
+            JdbcRepositorySupport.setIdentity(statement, 4, JdbcRepositorySupport.scopeKey(
                     updated.getSession().getScope()));
             JdbcRepositorySupport.setIdentity(statement, 5, updated.getRuntimeSessionId());
             if (statement.executeUpdate() != 1) {
@@ -330,14 +330,14 @@ public final class JdbcRuntimeSessionRepository
             try (PreparedStatement statement = connection.prepareStatement("SELECT " + SESSION_COLUMNS
                     + " FROM ma_runtime_session WHERE harness_session_id = ? AND tenant_id = ?"
                     + " AND session_state NOT IN ('RELEASED', 'FAILED')"
-                    + " AND (scope_key > ? OR scope_key = ? AND runtime_session_id > ?)"
+                    + " AND (scope_id > ? OR scope_id = ? AND runtime_session_id > ?)"
                     + (excludeTurnKind == null ? "" : " AND turn_kind <> ?")
-                    + " ORDER BY scope_key, runtime_session_id LIMIT ?")) {
+                    + " ORDER BY scope_id, runtime_session_id LIMIT ?")) {
                 String afterScope = after == null ? "" : JdbcRepositorySupport.scopeKey(after.getSession().getScope());
                 JdbcRepositorySupport.setIdentity(statement, 1, harnessSessionId);
                 JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
-                statement.setString(3, afterScope);
-                statement.setString(4, afterScope);
+                JdbcRepositorySupport.setIdentity(statement, 3, afterScope);
+                JdbcRepositorySupport.setIdentity(statement, 4, afterScope);
                 JdbcRepositorySupport.setIdentity(statement, 5, after == null ? "" : after.getRuntimeSessionId());
                 if (excludeTurnKind == null) {
                     statement.setInt(6, limit);
@@ -394,14 +394,14 @@ public final class JdbcRuntimeSessionRepository
             RuntimeScope scope, String runtimeSessionId, boolean forUpdate,
             int queryTimeout) throws SQLException {
         String sql = "SELECT " + SESSION_COLUMNS
-                + " FROM ma_runtime_session WHERE scope_key = ? "
+                + " FROM ma_runtime_session WHERE scope_id = ? "
                 + "AND runtime_session_id = ?"
                 + (forUpdate ? " FOR UPDATE" : "");
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             if (queryTimeout > 0) {
                 statement.setQueryTimeout(queryTimeout);
             }
-            statement.setString(1, JdbcRepositorySupport.scopeKey(scope));
+            JdbcRepositorySupport.setIdentity(statement, 1, JdbcRepositorySupport.scopeKey(scope));
             JdbcRepositorySupport.setIdentity(statement, 2, runtimeSessionId);
             try (ResultSet result = statement.executeQuery()) {
                 if (!result.next()) {
@@ -426,7 +426,7 @@ public final class JdbcRuntimeSessionRepository
         RuntimeSession session = record.getSession();
         RuntimeScope scope = session.getScope();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, JdbcRepositorySupport.scopeKey(scope));
+            JdbcRepositorySupport.setIdentity(statement, 1, JdbcRepositorySupport.scopeKey(scope));
             JdbcRepositorySupport.setIdentity(statement, 2, session.getRuntimeSessionId());
             JdbcRepositorySupport.setIdentity(statement, 3, scope.getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 4, scope.getWorkspaceId());
@@ -448,20 +448,20 @@ public final class JdbcRuntimeSessionRepository
 
     static RuntimeSessionRecord mapSession(ResultSet result)
             throws SQLException {
-        RuntimeScope scope = new RuntimeScope(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "tenant_id"),
+        RuntimeScope scope = new RuntimeScope(result.getString("tenant_id"),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "workspace_id"),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "workspace_generation"),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "canonical_cwd"),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "capability_digest"),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "isolation_class"));
         if (!JdbcRepositorySupport.scopeKey(scope).equals(
-                result.getString("scope_key"))) {
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "scope_id"))) {
             throw new IllegalStateException(
                     "Runtime Session scope hash is invalid");
         }
         RuntimeSession session = new RuntimeSession(
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "harness_session_id"),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "runtime_session_id"),
+                result.getString("harness_session_id"),
+                result.getString("runtime_session_id"),
                 result.getString("turn_kind"), scope);
         return new RuntimeSessionRecord(session,
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "binding_id"),

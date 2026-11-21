@@ -61,12 +61,12 @@ public class ManagedMemoryStore implements MemoryRepository {
 
     @Override
     public List<Store> list(String tenant, String actor) {
-        byte[] owner = owner(tenant, actor);
+        String owner = owner(tenant, actor);
         requireEnabled();
         return jdbc.query("SELECT memory_store_id,gmt_create FROM ma_memory_store"
-                        + " WHERE owner_key=? AND tenant_id=? AND owner_actor_key=?",
+                        + " WHERE tenant_id=? AND owner_actor_key=?",
                 (row, index) -> new Store(ManagedSchemaRows.identity(row, "memory_store_id"), row.getLong("gmt_create")),
-                ManagedSchemaKeys.key(tenant, actor), tenant, owner);
+                tenant, owner);
     }
 
     @Override
@@ -78,8 +78,7 @@ public class ManagedMemoryStore implements MemoryRepository {
         Store result = new Store("memstore_" + UUID.randomUUID(), clock.millis());
         try {
             transaction.executeWithoutResult(status -> jdbc.update("INSERT INTO ma_memory_store"
-                            + " (owner_key,tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create) VALUES (?,?,?,?,?,?)",
-                    ManagedSchemaKeys.key(tenant, actor),
+                            + " (tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create) VALUES (?,?,?,?,?)",
                     tenant, result.id(), owner(tenant, actor), "managed_" + UUID.randomUUID(), result.createdAt()));
             return result;
         } catch (DuplicateKeyException duplicate) {
@@ -250,11 +249,13 @@ public class ManagedMemoryStore implements MemoryRepository {
 
     private static boolean write(Query query) { return "remember".equals(query.operation()) || "forget".equals(query.operation()); }
     private static String value(String value) { return value == null ? "" : value; }
-    private static byte[] owner(String tenant, String actor) {
+    private static String owner(String tenant, String actor) {
         if (!MemoryModels.text(actor, 512)) {
             throw new ManagedAgentException(401, "actor_required", "A trusted actor is required.");
         }
-        return ManagedWorkspaceRegistry.actorKey(tenant, actor);
+        // The raw actor column keeps the registry's tenant/actor validation.
+        ManagedWorkspaceRegistry.actorKey(tenant, actor);
+        return actor;
     }
     private static ManagedAgentException unavailable() {
         return new ManagedAgentException(404, "memory_store_not_found", "MemoryStore was not found.");

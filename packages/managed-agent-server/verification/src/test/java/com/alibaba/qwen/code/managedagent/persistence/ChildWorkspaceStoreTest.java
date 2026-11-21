@@ -4,8 +4,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -73,16 +71,15 @@ class ChildWorkspaceStoreTest {
     }
 
     private void alias(String id, String kind) {
-        String alias = RuntimeAdmissionFences.storageAliasKey("tenant", id);
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, ?)",
-                alias, "tenant".getBytes(StandardCharsets.UTF_8),
-                id.getBytes(StandardCharsets.UTF_8), kind);
+        jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, storage_kind) VALUES (?, ?, ?)",
+                "tenant", id.getBytes(StandardCharsets.UTF_8), kind);
         if ("LOCAL".equals(kind)) {
-            String physical = ManagedSchemaKeys.key("local-test", id);
-            jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, mount_state, mount_revision)"
+            String physical = WorkspaceTestStorage.key("tenant", id);
+            jdbc.update("INSERT INTO ma_storage_owner (physical_id, storage_kind, mount_state, mount_revision)"
                     + " VALUES (?, 'LOCAL', 'READY', 1)", physical);
-            jdbc.update("UPDATE ma_storage SET physical_key = ?, registration_state = 'REGISTERED', registration_revision = 1,"
-                    + " registration_json = '{}', mount_revision = 1 WHERE alias_key = ?", physical, alias);
+            jdbc.update("UPDATE ma_storage SET physical_id = ?, registration_state = 'REGISTERED', registration_revision = 1,"
+                    + " registration_json = '{}', mount_revision = 1 WHERE tenant_id = ? AND storage_id = ?",
+                    physical, "tenant", id.getBytes(StandardCharsets.UTF_8));
         }
     }
 

@@ -95,11 +95,9 @@ final class AgentEventJournal {
                 pairs.append(",");
             }
             pairs.append(" (?, ?)");
-            // Bound as identity bytes: H2 types row-comparison parameters
-            // as VARCHAR, and a command it recompiles after binding (any
-            // new session or SET in between) refuses VARBINARY rows against
-            // VARCHAR ones. Bytes compare the same on MySQL and MariaDB.
-            arguments.add(ManagedSchemaKeys.identity(turn.sessionId()));
+            // session_id is VARCHAR; turn_id remains binary. H2 row comparison
+            // requires each parameter to match its column type.
+            arguments.add(turn.sessionId());
             arguments.add(ManagedSchemaKeys.identity(turn.turnId()));
         }
         arguments.add(tenantId);

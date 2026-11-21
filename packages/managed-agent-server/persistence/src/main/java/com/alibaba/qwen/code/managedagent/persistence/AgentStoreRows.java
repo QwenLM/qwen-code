@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -147,13 +146,12 @@ final class AgentStoreRows {
             "('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL', 'CONTEXT_COMPRESSION')";
 
     static String sessionOperationTarget(String sessionId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(sessionId);
+        return sessionId;
     }
 
     static String sessionOperationKey(String tenantId, String sessionId, OperationKind kind, String operationId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId), operationId);
+        return com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.operationRef(
+                kind.name(), tenantId, "SESSION", sessionId, sessionId, operationId);
     }
 
     long lifecycleDatabaseTime() {

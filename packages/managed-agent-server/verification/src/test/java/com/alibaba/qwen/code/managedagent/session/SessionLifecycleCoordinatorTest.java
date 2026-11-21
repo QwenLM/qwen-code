@@ -21,13 +21,13 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegist
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.workspace.ChildLifecycleAdmissions;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -496,7 +496,9 @@ class SessionLifecycleCoordinatorTest {
         World world = closingWorld("revoked-close-");
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(world.jdbc.getDataSource()));
         assertThatThrownBy(() -> transactions.execute(ignored -> world.store.beginWorkspaceLifecycle(
-                "tenant", world.child, OperationKind.CLOSE, "child:" + world.session, "actor", "spoof", "digest", true)))
+                "tenant", world.child, OperationKind.CLOSE,
+                com.alibaba.qwen.code.managedagent.workspace.ChildActorId.of(world.session),
+                "actor", "spoof", "digest", true)))
                 .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
         world.jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", "tenant");
         var admitted = transactions.execute(ignored -> world.store.beginChildClose("tenant", world.session,
@@ -559,32 +561,31 @@ class SessionLifecycleCoordinatorTest {
     private static void jdbcLiveScope(JdbcTemplate jdbc, String session,
             String resourceBody, String taskKind) {
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, 'tenant',"
+                        + " VALUES ('tenant',"
                         + " 'workspace', ?, 'child_run', 'run-1', 'h', 1,"
                         + " 'res-run-1', '" + taskKind + "', 'running', 'session',"
                         + " 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(session, "child_run", "run-1"), session);
+                session);
         byte[] bytes = resourceBody.getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource"
-                        + " (resource_key, tenant_id, workspace_id,"
+                        + " (tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes,"
                         + " publish_command_id, state, gmt_create)"
-                        + " VALUES (?, 'tenant', 'workspace', ?,"
+                        + " VALUES ('tenant', 'workspace', ?,"
                         + " 'res-run-1', 'managed-input', 1, ?,"
                         + " '" + "b".repeat(64) + "', 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                ManagedSessionStore.resourceKey(
-                        ManagedSessionStore.sessionScopeKey("tenant", session), "res-run-1"), session, bytes.length, bytes);
+                session, bytes.length, bytes);
     }
 
     private String childCloseOperation(World world) {
         return world.jdbc.query("SELECT operation_id FROM"
-                        + " ma_operation WHERE tenant_id = X'74656e616e74'"
+                        + " ma_operation WHERE tenant_id = 'tenant'"
                         + " AND session_id = ? AND operation_kind = 'CLOSE'",
                 (result, row) -> result.getString("operation_id"),
                 world.child).stream().findFirst().orElse(null);
@@ -828,14 +829,14 @@ class SessionLifecycleCoordinatorTest {
         World world = closingWorld("team-");
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " gmt_create)"
-                        + " VALUES (?, 'tenant',"
+                        + " VALUES ('tenant',"
                         + " 'workspace', ?, 'team_state', 'team-1', 'h', 2,"
                         + " 'res-team-1', 1)",
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(world.session, "team_state", "team-1"), world.session);
+                world.session);
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
@@ -1115,7 +1116,7 @@ class SessionLifecycleCoordinatorTest {
         world.relayStore.advance(claimed, "owner", "watching", world.child,
                 0, null, 30_000, 100);
         world.jdbc.update("UPDATE ma_session SET status ="
-                        + " 'CLOSED' WHERE tenant_id = X'74656e616e74'"
+                        + " 'CLOSED' WHERE tenant_id = 'tenant'"
                         + " AND session_id = ?",
                 world.child);
         RuntimeBrokerService broker = Mockito.mock(
@@ -1469,7 +1470,7 @@ class SessionLifecycleCoordinatorTest {
         Mockito.doAnswer(invocation -> {
             world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLING',"
                             + " version = version + 1"
-                            + " WHERE tenant_id = X'74656e616e74'"
+                            + " WHERE tenant_id = 'tenant'"
                             + " AND session_id = ? AND turn_id = ?",
                     world.child, "turn-1");
             return null;
@@ -1495,7 +1496,7 @@ class SessionLifecycleCoordinatorTest {
                             world.operation);
                     return !initialTurnStatus.equals(world.jdbc.queryForObject(
                             "SELECT status FROM ma_turn WHERE tenant_id ="
-                                    + " X'74656e616e74' AND session_id = ?"
+                                    + " 'tenant' AND session_id = ?"
                                     + " AND turn_id = ?",
                             String.class, world.child, "turn-1"));
                 });
@@ -1516,7 +1517,7 @@ class SessionLifecycleCoordinatorTest {
                 // close completes without ever waiting the Turn out.
                 world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLED',"
                                 + " completed_at = 3, version = version + 1"
-                                + " WHERE tenant_id = X'74656e616e74'"
+                                + " WHERE tenant_id = 'tenant'"
                                 + " AND session_id = ? AND turn_id = ?",
                         world.child, "turn-1");
                 redispatchUntil(coordinator, world, "COMPLETED");
@@ -1557,7 +1558,7 @@ class SessionLifecycleCoordinatorTest {
             }
             world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLING',"
                             + " version = version + 1"
-                            + " WHERE tenant_id = X'74656e616e74'"
+                            + " WHERE tenant_id = 'tenant'"
                             + " AND session_id = ? AND turn_id = ?",
                     world.child, "turn-1");
             return null;
@@ -1591,7 +1592,7 @@ class SessionLifecycleCoordinatorTest {
                 });
                 world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLED',"
                                 + " completed_at = 3, version = version + 1"
-                                + " WHERE tenant_id = X'74656e616e74'"
+                                + " WHERE tenant_id = 'tenant'"
                                 + " AND session_id = ? AND turn_id = ?",
                         world.child, "turn-1");
                 redispatchUntil(coordinator, world, "COMPLETED");
@@ -1629,7 +1630,7 @@ class SessionLifecycleCoordinatorTest {
             calls.add("turn-cancel");
             world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLING',"
                             + " version = version + 1"
-                            + " WHERE tenant_id = X'74656e616e74'"
+                            + " WHERE tenant_id = 'tenant'"
                             + " AND session_id = ? AND turn_id = ?",
                     world.child, "turn-1");
             return null;
@@ -1654,7 +1655,7 @@ class SessionLifecycleCoordinatorTest {
                         .isGreaterThan(calls.indexOf("message-stop"));
                 world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLED',"
                                 + " completed_at = 3, version = version + 1"
-                                + " WHERE tenant_id = X'74656e616e74'"
+                                + " WHERE tenant_id = 'tenant'"
                                 + " AND session_id = ? AND turn_id = ?",
                         world.child, "turn-1");
                 redispatchUntil(coordinator, world, "COMPLETED");
@@ -1746,7 +1747,7 @@ class SessionLifecycleCoordinatorTest {
             calls.add("turn-cancel");
             world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLING',"
                             + " version = version + 1"
-                            + " WHERE tenant_id = X'74656e616e74'"
+                            + " WHERE tenant_id = 'tenant'"
                             + " AND session_id = ? AND turn_id = ?",
                     world.child, "turn-1");
             return null;
@@ -1771,7 +1772,7 @@ class SessionLifecycleCoordinatorTest {
                 assertThat(calls).contains("message-stop");
                 world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLED',"
                                 + " completed_at = 3, version = version + 1"
-                                + " WHERE tenant_id = X'74656e616e74'"
+                                + " WHERE tenant_id = 'tenant'"
                                 + " AND session_id = ? AND turn_id = ?",
                         world.child, "turn-1");
                 redispatchUntil(coordinator, world, "COMPLETED");
@@ -1812,7 +1813,7 @@ class SessionLifecycleCoordinatorTest {
             calls.add("turn-cancel");
             world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLING',"
                             + " version = version + 1"
-                            + " WHERE tenant_id = X'74656e616e74'"
+                            + " WHERE tenant_id = 'tenant'"
                             + " AND session_id = ? AND turn_id = ?",
                     world.child, "turn-1");
             return null;
@@ -1839,7 +1840,7 @@ class SessionLifecycleCoordinatorTest {
                         .isGreaterThan(calls.indexOf("stop-ok"));
                 world.jdbc.update("UPDATE ma_turn SET status = 'CANCELLED',"
                                 + " completed_at = 3, version = version + 1"
-                                + " WHERE tenant_id = X'74656e616e74'"
+                                + " WHERE tenant_id = 'tenant'"
                                 + " AND session_id = ? AND turn_id = ?",
                         world.child, "turn-1");
                 redispatchUntil(coordinator, world, "COMPLETED");
@@ -1857,14 +1858,13 @@ class SessionLifecycleCoordinatorTest {
      * (journalTurns), for the cascade's message-stop tests (#13875). */
     private static void pendingSessionMessage(World world) {
         world.jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " gmt_create)"
-                        + " VALUES (?, 'tenant', 'workspace', ?,"
+                        + " VALUES ('tenant', 'workspace', ?,"
                         + " 'session_message', 'msg_1:message', 'h', 1,"
                         + " 'res-msg-1', 1)",
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(world.child, "session_message", "msg_1:message"),
                 world.child);
         byte[] journal = ("{\"subtype\":\"managed_session_event_v1\","
                 + "\"managedSession\":{\"kind\":\"input.accepted\","
@@ -1874,7 +1874,7 @@ class SessionLifecycleCoordinatorTest {
                 .getBytes(StandardCharsets.UTF_8);
         world.jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id,"
                         + " workspace_id, session_id, journal_revision,"
-                        + " command_key_hash, transaction_id, operation,"
+                        + " command_ref, transaction_id, operation,"
                         + " command_id, content_digest, first_sequence,"
                         + " last_sequence, event_count, writer_generation,"
                         + " writer_id, writer_token_hash, activation_epoch,"
@@ -1883,7 +1883,7 @@ class SessionLifecycleCoordinatorTest {
                         + " 'workspace', ?, 1, ?, 'tx', 'op', 'command', ?,"
                         + " 1, 1, 1, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?,"
                         + " 1)",
-                world.child, "e".repeat(64), "c".repeat(64), "t".repeat(64),
+                world.child, ManagedIdentityRefs.commandRef("op", "command"), "c".repeat(64), "t".repeat(64),
                 journal, journal.length, "d".repeat(64));
     }
 }

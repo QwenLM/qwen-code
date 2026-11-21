@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -167,16 +166,6 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                         : relayFailure.toString());
     }
 
-    // ma_resource keys on the Session's scope key and holds the inline
-    // capture bytes, and the drivers poll these reads: filtered by the
-    // unindexed tenant and session columns alone, each poll scans all the
-    // bytes the lane has written so far (FG8f alone inlines tens of MiB a
-    // case), so each later letter polls slower. The record read leads with
-    // the same key.
-    private String scopeKey(String sessionId) {
-        return ManagedSessionStore.sessionScopeKey(tenant, sessionId);
-    }
-
     // FG8c: the in-JVM embedded broker spawns each binding's managed worker
     // as a direct child of this JVM, so the live worker set is exactly the
     // JVM's children carrying the worker argument. The driver diffs it
@@ -195,7 +184,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
     // loss fields of its execution rows.
     private Map<String, Object> runtime(String sessionId) {
         var bindings = jdbc.queryForList(
-                "SELECT CAST(binding_id AS CHAR) AS binding_id, request_key,"
+                "SELECT CAST(binding_id AS CHAR) AS binding_id, request_id,"
                         + " binding_state, runtime_generation,"
                         + " loss_evidence_json IS NOT NULL AS loss_evidence,"
                         + " stop_evidence_json IS NOT NULL AS stop_evidence,"
@@ -203,13 +192,13 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                         + " tenant_id = ? AND isolation_key = ? ORDER BY"
                         + " runtime_generation", tenant, sessionId);
         var slots = new java.util.ArrayList<Map<String, Object>>();
-        for (var key : bindings.stream().map(row -> row.get("request_key"))
+        for (var key : bindings.stream().map(row -> row.get("request_id"))
                 .distinct().toList()) {
             slots.addAll(jdbc.queryForList(
-                    "SELECT request_key, last_generation,"
+                    "SELECT request_id, last_generation,"
                             + " CAST(active_binding_id AS CHAR) AS"
                             + " active_binding_id FROM ma_runtime_slot"
-                            + " WHERE request_key = ?", key));
+                            + " WHERE request_id = ?", key));
         }
         return Map.of("bindings", bindings, "slots", slots,
                 "runtimeSessions", jdbc.queryForList(
