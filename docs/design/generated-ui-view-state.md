@@ -292,11 +292,12 @@ Step 3:
   pass; all other pins are unchanged. A branch inherits state for the same
   card ID, then restores a different value from its source after an edit.
 - Evaluator tests with a controlled host: blur the draft input before observing
-  the first Add. The save acknowledgement requires a fresh `saved` outcome and
-  a new tab restoring the added item before any further edits. It does not
-  apply when nothing persisted and the host showed no outcome. After reload,
-  Undo must clear the checkmark. A new tab must restore that state, including
-  after a delayed save, and a second Undo must restore the deleted item.
+  the first Add. The save acknowledgement requires a fresh, visible `saved`
+  outcome and a new tab restoring the added item before any further edits. It
+  does not apply when nothing persisted and the host showed no outcome. After
+  reload, Undo must clear the checkmark. A new tab must restore that state,
+  including after a delayed save, and a second Undo must restore the deleted
+  item.
 - A live run of the checklist case with the gating model, reported in the PR.
 
 ## Acceptance criteria

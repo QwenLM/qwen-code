@@ -598,8 +598,9 @@ export async function waitForCardOn(
 }
 
 /**
- * Observe the host's save bar before making a change, so an earlier `saved`
- * outcome cannot count as a receipt for this change.
+ * Observe the host's save bar before making a change and require a fresh,
+ * visible outcome for a receipt. A pending write can delay the next change
+ * even when the bar is hidden.
  */
 export async function saveOutcome(
   card: Card,
@@ -618,6 +619,13 @@ export async function saveOutcome(
     const marker = () => host?.querySelector(`[${attribute}]`);
     let previous = marker();
     let current = previous?.getAttribute(attribute) ?? undefined;
+    const visibleStatus = () =>
+      previous?.checkVisibility({
+        opacityProperty: true,
+        visibilityProperty: true,
+      })
+        ? current
+        : undefined;
     let changed = false;
     const observer = new MutationObserver((records) => {
       const next = marker();
@@ -647,7 +655,8 @@ export async function saveOutcome(
       reset: () => {
         changed = false;
       },
-      outcome: () => (changed ? current : undefined),
+      outcome: () => (changed ? visibleStatus() : undefined),
+      fallback: () => (current === 'saving' ? current : visibleStatus()),
       disconnect: () => observer.disconnect(),
     };
   });
@@ -667,7 +676,7 @@ export async function saveOutcome(
     );
     // A persistent failure can stay visible across edits without a mutation.
     const status =
-      outcome ?? (await observation.evaluate((tracker) => tracker.status()));
+      outcome ?? (await observation.evaluate((tracker) => tracker.fallback()));
     return status === 'saved' ? outcome : status;
   } finally {
     await observation.evaluate((tracker) => tracker.disconnect());

@@ -396,6 +396,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'save-unavailable',
       'stale-acknowledgement',
       'late-acknowledgement',
+      'hidden-acknowledgement',
       'draft-only-first-add',
       'false-save-first-add',
       'delayed-undo-save',
@@ -418,8 +419,12 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               const key = 'checklist-' + (mode === 'shared-card-state' ? 'fixture-card' : session);
               const saved = JSON.parse(localStorage.getItem(key) || 'null');
               const bar = frameElement.parentElement.querySelector('[role="status"]');
-              if (mode === 'save-unavailable') bar.dataset.generatedUiSave = 'unavailable';
-              if (mode === 'stale-acknowledgement' && !saved) bar.dataset.generatedUiSave = 'saved';
+              const report = status => {
+                bar.dataset.generatedUiSave = status;
+                bar.textContent = status;
+              };
+              if (mode === 'save-unavailable') report('unavailable');
+              if (mode === 'stale-acknowledgement' && !saved) report('saved');
               let items = saved?.items || [];
               let history = mode === 'cold-history-loss' && !sessionStorage.getItem('checklist-mounted')
                 ? [] : saved?.history || [];
@@ -461,16 +466,17 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               function commit(delay = 0) {
                 render();
                 if (mode === 'save-unavailable') return;
+                if (mode === 'hidden-acknowledgement') bar.hidden = !saved && items.length === 1;
                 const announce = mode !== 'unacknowledged' &&
                   ((mode !== 'stale-acknowledgement' && mode !== 'late-acknowledgement') || saved);
                 const json = JSON.stringify({
                   items: mode === 'progress-loss' ? items.map(item => ({ ...item, done: false })) : items,
                   history: mode === 'history-loss' ? [] : history,
                 });
-                if (announce) bar.dataset.generatedUiSave = 'saving';
+                if (announce) report('saving');
                 setTimeout(() => {
                   localStorage.setItem(key, json);
-                  if (announce) bar.dataset.generatedUiSave = mode === 'save-failed' ? 'failed' : 'saved';
+                  if (announce) report(mode === 'save-failed' ? 'failed' : 'saved');
                 }, delay);
                 if (mode === 'late-acknowledgement' && !saved &&
                     items.some(item => item.text === 'Agenda (edited)')) {
@@ -479,15 +485,15 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                   } else if (pendingRenameReceipt) {
                     // The rename's receipt lands during the final check.
                     pendingRenameReceipt = false;
-                    bar.dataset.generatedUiSave = 'saving';
-                    setTimeout(() => { bar.dataset.generatedUiSave = 'saved'; }, 150);
+                    report('saving');
+                    setTimeout(() => report('saved'), 150);
                   }
                 }
               }
               byId('new-item').onchange = event => {
                 if (mode === 'draft-only-first-add' && !items.length && event.target.value) {
                   localStorage.setItem(key, JSON.stringify({ items, history, draft: event.target.value }));
-                  bar.dataset.generatedUiSave = 'saved';
+                  report('saved');
                 }
               };
               byId('add').onclick = () => {
@@ -498,7 +504,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                 byId('new-item').value = '';
                 if (first && (mode === 'draft-only-first-add' || mode === 'false-save-first-add')) {
                   render();
-                  if (mode === 'false-save-first-add') bar.dataset.generatedUiSave = 'saved';
+                  if (mode === 'false-save-first-add') report('saved');
                 } else commit();
               };
               byId('filter').onchange = applyFilter;
@@ -669,6 +675,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               mode === 'save-unavailable' ||
               mode === 'stale-acknowledgement' ||
               mode === 'late-acknowledgement' ||
+              mode === 'hidden-acknowledgement' ||
               mode === 'draft-only-first-add' ||
               mode === 'false-save-first-add'
               ? 'fail'
