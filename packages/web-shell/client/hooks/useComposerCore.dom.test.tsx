@@ -803,7 +803,9 @@ describe('useComposerCore history and drafts', () => {
       atWorkspaceCwd: '/workspace/b',
       composerWorkspace: {
         client: { workspaceByCwd },
-        actions: { loadMcpStatus: primaryLoadMcpStatus },
+        actions: {
+          loadMcpStatus: primaryLoadMcpStatus,
+        },
       } as unknown as DaemonWorkspaceContextValue,
     });
 

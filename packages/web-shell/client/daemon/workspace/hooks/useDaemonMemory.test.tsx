@@ -16,8 +16,12 @@ const actions = vi.hoisted(() => ({
   readWorkspaceFile: vi.fn(),
   writeMemory: vi.fn(),
 }));
+const workspace = vi.hoisted(() => ({
+  client: { workspaceByCwd: vi.fn() },
+}));
 
 vi.mock('../DaemonWorkspaceProvider.js', () => ({
+  useDaemonWorkspace: () => workspace,
   useDaemonWorkspaceActions: () => actions,
 }));
 vi.mock('../../session/DaemonSessionProvider.js', () => ({
@@ -29,16 +33,20 @@ const { useDaemonMemory } = await import('./useDaemonMemory.js');
 const GLOBAL_PATH = '/home/u/.qwen/QWEN.md';
 const WORKSPACE_PATH = '/w/QWEN.md';
 
-function captureReadMemoryFile() {
-  let read: ReturnType<typeof useDaemonMemory>['readMemoryFile'] | undefined;
+function captureMemory(options: Parameters<typeof useDaemonMemory>[0] = {}) {
+  let memory: ReturnType<typeof useDaemonMemory> | undefined;
   function Probe() {
-    read = useDaemonMemory().readMemoryFile;
+    memory = useDaemonMemory(options);
     return null;
   }
   const root = createRoot(document.createElement('div'));
   act(() => root.render(<Probe />));
   act(() => root.unmount());
-  return read!;
+  return memory!;
+}
+
+function captureReadMemoryFile() {
+  return captureMemory().readMemoryFile;
 }
 
 function statusWith(file: Record<string, unknown>) {
@@ -142,5 +150,39 @@ describe('useDaemonMemory.readMemoryFile', () => {
       truncated: false,
     });
     expect(actions.readWorkspaceFile).toHaveBeenCalledWith(WORKSPACE_PATH);
+  });
+
+  it('routes workspace memory reads and writes through the scoped client', async () => {
+    const readWorkspaceFile = vi
+      .fn()
+      .mockResolvedValue({ content: 'b\n', truncated: false });
+    const writeWorkspaceMemory = vi.fn().mockResolvedValue({ ok: true });
+    workspace.client.workspaceByCwd.mockReturnValue({
+      readWorkspaceFile,
+      writeWorkspaceMemory,
+    });
+
+    const memory = captureMemory({ workspaceCwd: '/w/b' });
+
+    await expect(memory.readMemoryFile(WORKSPACE_PATH)).resolves.toEqual({
+      content: 'b\n',
+      truncated: false,
+    });
+    expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith('/w/b');
+    expect(readWorkspaceFile).toHaveBeenCalledWith(WORKSPACE_PATH);
+    expect(actions.loadMemoryStatus).not.toHaveBeenCalled();
+
+    await memory.writeMemory({
+      scope: 'workspace',
+      mode: 'replace',
+      content: 'updated\n',
+    });
+
+    expect(writeWorkspaceMemory).toHaveBeenCalledWith({
+      scope: 'workspace',
+      mode: 'replace',
+      content: 'updated\n',
+    });
+    expect(actions.writeMemory).not.toHaveBeenCalled();
   });
 });
