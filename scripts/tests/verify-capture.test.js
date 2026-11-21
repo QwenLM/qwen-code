@@ -145,6 +145,68 @@ describe('verify-capture helper', () => {
       expect(denied.stderr).not.toContain('FAKE-SHARP-LOADED');
       expect(denied.stderr).toContain("Cannot find module '@xterm/headless'");
 
+      // Reach loadDependency('sharp') by providing a resolvable @xterm/headless
+      // stub beside the script: default refusal must block cwd's sharp too.
+      const xtermOnlyDir = path.join(dir, 'trusted-with-xterm');
+      const xtermOnlyScript = path.join(xtermOnlyDir, 'verify-capture.mjs');
+      const xtermStubDir = path.join(
+        xtermOnlyDir,
+        'node_modules',
+        '@xterm',
+        'headless',
+      );
+      mkdirSync(xtermStubDir, { recursive: true });
+      copyFileSync(HELPER, xtermOnlyScript);
+      writeFileSync(
+        path.join(xtermStubDir, 'index.js'),
+        'module.exports = { Terminal: class {} };\n',
+      );
+      const deniedSharp = spawnSync(
+        process.execPath,
+        [
+          xtermOnlyScript,
+          '--out',
+          path.join(dir, 'denied-sharp.png'),
+          '--cols',
+          '40',
+        ],
+        {
+          cwd: plantedCwd,
+          encoding: 'utf8',
+          input: `${ESC}[32mPASS${ESC}[0m isolated\n`,
+        },
+      );
+      expect(deniedSharp.status).toBe(1);
+      expect(deniedSharp.stderr).not.toContain('FAKE-SHARP-LOADED');
+      expect(deniedSharp.stderr).toContain("Cannot find module 'sharp'");
+
+      // A transitive MODULE_NOT_FOUND inside a resolved module beside the
+      // script must not trigger a cwd fallback even with --allow-cwd-modules.
+      writeFileSync(
+        path.join(xtermStubDir, 'index.js'),
+        "require('nonexistent-transitive-dep');\n",
+      );
+      const brokenTransitive = spawnSync(
+        process.execPath,
+        [
+          xtermOnlyScript,
+          '--allow-cwd-modules',
+          '--out',
+          path.join(dir, 'broken.png'),
+          '--cols',
+          '40',
+        ],
+        {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          input: `${ESC}[32mPASS${ESC}[0m isolated\n`,
+        },
+      );
+      expect(brokenTransitive.status).toBe(1);
+      expect(brokenTransitive.stderr).toContain(
+        "Cannot find module 'nonexistent-transitive-dep'",
+      );
+
       const deniedRepoCwd = spawnSync(
         process.execPath,
         [

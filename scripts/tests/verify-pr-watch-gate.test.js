@@ -299,10 +299,12 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
     });
   });
 
-  it('leaves state untouched on stop, fix, wait, or non-JSON output', () => {
+  it('leaves state untouched and still emits stop while suppressing fix and wait', () => {
     const root = makeRoot();
+    const stopPayload = JSON.stringify({ action: 'stop', reason: 'merged' });
+    const emitted = [];
     for (const payload of [
-      JSON.stringify({ action: 'stop', reason: 'merged' }),
+      stopPayload,
       JSON.stringify({ action: 'fix', headSha: HEAD }),
       JSON.stringify({ action: 'wait', events: [] }),
       'not json',
@@ -311,8 +313,10 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
         stateRoot: root,
         pr: 123,
         repo: 'QwenLM/qwen-code',
+        emit: (line) => emitted.push(line),
       });
     }
+    expect(emitted).toEqual([stopPayload, 'not json']);
     expect(existsSync(statePath(root, 123))).toBe(false);
   });
 
@@ -400,19 +404,60 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
         events: [{ type: 'head_moved_externally', sha: HEAD }],
       });
 
-      // Script inside its own git repo, cwd elsewhere -> writes in script's repo.
+      // Script inside its own git repo (plus a linked worktree), cwd inside an
+      // unrelated git repo -> every verb resolves to cloneRoot, never cwd.
       const cloneRoot = makeRoot();
       expect(spawnSync('git', ['init', cloneRoot]).status).toBe(0);
       const cloneGate = stageScripts(cloneRoot);
+      expect(spawnSync('git', ['-C', cloneRoot, 'add', '.']).status).toBe(0);
+      expect(
+        spawnSync('git', [
+          '-C',
+          cloneRoot,
+          '-c',
+          'user.email=test@example.com',
+          '-c',
+          'user.name=Test',
+          'commit',
+          '-m',
+          'init',
+        ]).status,
+      ).toBe(0);
+      const linkedWt = makeRoot();
+      rmSync(linkedWt, { recursive: true, force: true });
+      expect(
+        spawnSync('git', [
+          '-C',
+          cloneRoot,
+          'worktree',
+          'add',
+          linkedWt,
+          '-b',
+          'wt-branch',
+        ]).status,
+      ).toBe(0);
+      const linkedGate = join(linkedWt, 'scripts', 'verify-pr-watch-gate.mjs');
+
       const otherCwd = makeRoot();
       expect(spawnSync('git', ['init', otherCwd]).status).toBe(0);
       const cliA = join(otherCwd, 'stub-qwen');
       writeFileSync(cliA, `#!/usr/bin/env bash\nprintf '%s\\n' '${moved}'\n`, {
         mode: 0o755,
       });
+
+      // --check --claim from unrelated cwd still claims in cloneRoot.
+      const claimRes = spawnSync(
+        process.execPath,
+        [linkedGate, '123', '--check', '--claim'],
+        { cwd: otherCwd, encoding: 'utf8' },
+      );
+      expect(claimRes.status).toBe(0);
+      expect(existsSync(ownershipPath(cloneRoot, 123))).toBe(true);
+      expect(existsSync(ownershipPath(otherCwd, 123))).toBe(false);
+
       const resA = spawnSync(
         process.execPath,
-        [cloneGate, '123', '--repo', 'QwenLM/qwen-code', '--cli', cliA],
+        [linkedGate, '123', '--repo', 'QwenLM/qwen-code', '--cli', cliA],
         { cwd: otherCwd, encoding: 'utf8' },
       );
       expect(resA.status).toBe(0);
@@ -422,8 +467,30 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
       ).toEqual([HEAD]);
       expect(existsSync(statePath(otherCwd, 123))).toBe(false);
 
+      // R2-1: --release --reset-cursor from unrelated otherCwd removes claim &
+      // cursor in cloneRoot instead of silently succeeding against otherCwd.
+      const gateFileInClone = join(
+        cloneRoot,
+        '.qwen',
+        'tmp',
+        ownedStateFiles(123)[0],
+      );
+      writeFileSync(gateFileInClone, '{"headSha":"abc1234"}');
+      const resetFromOther = spawnSync(
+        process.execPath,
+        [cloneGate, '123', '--release', '--reset-cursor'],
+        { cwd: otherCwd, encoding: 'utf8' },
+      );
+      expect(resetFromOther.status).toBe(0);
+      expect(resetFromOther.stderr).toContain(
+        'removed probe cursor (last head abc1234)',
+      );
+      expect(existsSync(ownershipPath(cloneRoot, 123))).toBe(false);
+      expect(existsSync(gateFileInClone)).toBe(false);
+      expect(existsSync(ownershipPath(otherCwd, 123))).toBe(false);
+
       // Script outside any git repo (/trusted-scripts layout), cwd inside a
-      // git repo -> never writes shadow state into cwd; warns on stderr.
+      // git repo -> never writes shadow state into cwd; probe warns and --check/--release exit 2.
       const nonGitRoot = makeRoot();
       const isolatedGate = stageScripts(nonGitRoot);
       const cwdGit = makeRoot();
@@ -431,6 +498,21 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
       expect(resolveDeliveryRoot(null, nonGitRoot)).toMatchObject({
         root: null,
       });
+      for (const verbArgs of [
+        ['123', '--check'],
+        ['123', '--check', '--claim'],
+        ['123', '--release'],
+        ['123', '--release', '--reset-cursor'],
+      ]) {
+        const refused = spawnSync(
+          process.execPath,
+          [isolatedGate, ...verbArgs],
+          { cwd: cwdGit, encoding: 'utf8' },
+        );
+        expect(refused.status, verbArgs.join(' ')).toBe(2);
+        expect(refused.stderr).toContain('is not a git worktree');
+        expect(existsSync(ownershipPath(cwdGit, 123))).toBe(false);
+      }
       const cliB = join(nonGitRoot, 'stub-qwen');
       writeFileSync(cliB, `#!/usr/bin/env bash\nprintf '%s\\n' '${moved}'\n`, {
         mode: 0o755,
@@ -445,6 +527,11 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
       expect(resB.stderr).toContain('pre-delivery skipped');
       expect(resB.stderr).toContain('is not a git worktree');
       expect(existsSync(statePath(cwdGit, 123))).toBe(false);
+
+      // Empty --state-root is rejected as usage error.
+      expect(
+        runGateCli(['123', '--check', '--state-root', '']).status,
+      ).not.toBe(0);
     },
   );
 });

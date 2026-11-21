@@ -219,10 +219,16 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   2. `scripts/verify-pr-watch-gate.mjs --release --reset-cursor`（`resetWatchCursor`）
      在删除前读取并汇报探针游标的末次 `headSha`，先删除 `autofix-pr-<n>-gate.json`
      再移除 `verify-pr` 所有权声明（保证 unlink 失败时 claim 留存以便重试），且仅在
-     `verify-pr` 声明存在且不存在 `autofix-pr-<n>-state.json` 时执行，支持干净停
-     止与既有 `verify-pr` watch 的就地迁移，同时禁止误删其他消费者的游标。
+     `verify-pr` 声明存在且不存在 `autofix-pr-<n>-state.json` 时执行（若存在
+     `autofix-pr` 状态文件则回退普通 `--release` 仅释放 `verify-pr` 声明、保留共
+     享游标），支持干净停止与既有 `verify-pr` watch 的就地迁移，同时禁止误删其
+     他消费者的游标；gate 全部动词（`--check`/`--claim`/`--release`/
+     `--release --reset-cursor` 与 pre-delivery）统一从 `SCRIPT_CLONE` 的主 git
+     worktree 解析默认状态根、绝不读取 `process.cwd()`（非 git worktree 下调用
+     `--check`/`--release` 以 exit 2 拒绝）。
   3. `scripts/verify-pr-watch-state.mjs --restart --head <oid> [--from-round <r>] --round <r+1>`
-     （`restartRound`）在单次状态锁内原子替换死轮次的在飞标记并拒绝任何
+     （`restartRound`）在单次状态锁内原子替换死轮次的在飞标记，执行与 `startRound`
+     相同的更低 `seq` deferred 条目迁入 `retiredSeqs` 清扫，并拒绝任何
      `--round <= entry.round` 的回退（同时兼容升级 `round: null` 的旧版标记），
      消除 `--release` 与 `--start` 之间失去记录的窗口（原有的 `--release` 后接
      `--start` 仍保留兼容；watch 仅在 head move 时唤醒，故*最后一个* head 上被杀

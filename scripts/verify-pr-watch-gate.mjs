@@ -157,6 +157,10 @@ export function deliverGateOutput(
           process.stderr.write(
             `verify-pr watch: pre-delivery skipped for ${head} (state belongs to ${res.recordedRepo}${repo ? `, not ${repo}` : ''})\n`,
           );
+        } else if (res?.invalidRepo) {
+          process.stderr.write(
+            `verify-pr watch: pre-delivery skipped for ${head} (invalid --repo ${repo})\n`,
+          );
         } else if (res?.locked) {
           process.stderr.write(
             `verify-pr watch: pre-delivery skipped for ${head} (state lock held)\n`,
@@ -349,8 +353,13 @@ function parseArgs(argv) {
     else if (arg === '--reset-cursor') out.resetCursor = true;
     else if (arg === '--repo') out.repo = argv[++i];
     else if (arg === '--cli') out.cli = argv[++i];
-    else if (arg === '--state-root') out.stateRoot = argv[++i];
-    else if (!arg.startsWith('-') && out.pr === null) out.pr = Number(arg);
+    else if (arg === '--state-root') {
+      const value = argv[++i];
+      if (typeof value !== 'string' || value.trim() === '') {
+        throw new Error('usage: --state-root requires a non-empty path');
+      }
+      out.stateRoot = value;
+    } else if (!arg.startsWith('-') && out.pr === null) out.pr = Number(arg);
   }
   if (!Number.isInteger(out.pr) || out.pr <= 0) {
     throw new Error(
@@ -377,7 +386,15 @@ function refuse(prNumber, conflicts) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  const root = args.stateRoot ? resolve(args.stateRoot) : mainWorktree();
+  const delivery = resolveDeliveryRoot(args.stateRoot);
+
+  if ((args.release || args.check) && !delivery.root) {
+    process.stderr.write(
+      `verify-pr watch: ${delivery.reason}, so the default state root resolves to a throwaway location; run the helper from the trusted clone or pass --state-root <trusted main worktree>\n`,
+    );
+    process.exit(2);
+  }
+  const root = delivery.root;
 
   if (args.release) {
     if (args.resetCursor) {
@@ -385,7 +402,7 @@ function main() {
       if (!res.ok) {
         const detail =
           res.reason === 'autofix-state'
-            ? `PR ${args.pr} has prepared autofix-pr state (${res.conflict}); refusing to reset another consumer's cursor`
+            ? `PR ${args.pr} has prepared autofix-pr state (${res.conflict}); refusing to reset another consumer's cursor (run plain --release to drop only this watch's claim)`
             : res.reason === 'cursor-unlink-failed'
               ? `PR ${args.pr} failed to remove probe cursor (${res.conflict}): ${res.error}`
               : `PR ${args.pr} has a probe cursor (${res.conflict}) with no verify-pr claim; refusing to reset a cursor this watch did not claim (if a prior plain --release orphaned it, confirm no autofix-pr watch is active and remove ${res.conflict} manually)`;
@@ -449,7 +466,6 @@ function main() {
     // failure must not look like a quiet tick.
     process.exit(probe.status ?? 1);
   }
-  const delivery = resolveDeliveryRoot(args.stateRoot);
   deliverGateOutput(probe.stdout ?? '', {
     stateRoot: delivery.root,
     skipReason: delivery.reason,

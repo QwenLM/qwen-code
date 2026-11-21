@@ -3620,6 +3620,201 @@ describe('#17371 recordDelivery and --restart', () => {
       recordDelivery(root, { pr: 1, head: PREV, repo: 'QwenLM/qwen-code' })
         .duplicate,
     ).toBe('not-covered');
+
+    // R2-5: recordDelivery preserves releasedHeads/retiredSeqs seq and retries
+    // so starting A afterwards never retires a newer deferred head B.
+    const hintRoot = makeRoot();
+    mkdirSync(join(hintRoot, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(hintRoot, 2),
+      JSON.stringify({
+        pr: 2,
+        repo: 'QwenLM/qwen-code',
+        verifiedHeads: [],
+        inFlightHeads: [],
+        deferredHeads: [
+          {
+            head: PREV,
+            round: null,
+            artifactDir: null,
+            deferredAt: '2026-11-20T00:00:00.000Z',
+            seq: 2,
+            retries: 0,
+          },
+        ],
+        releasedHeads: [
+          {
+            head: HEAD,
+            seq: 1,
+            retries: 1,
+            releasedAt: '2026-11-20T00:00:00.000Z',
+          },
+        ],
+        seqCounter: 2,
+      }),
+    );
+    const reRecorded = recordDelivery(hintRoot, {
+      pr: 2,
+      head: HEAD,
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(reRecorded.recorded).toBe(true);
+    expect(
+      readState(hintRoot, 2).deferredHeads.map((e) => [
+        e.head,
+        e.seq,
+        e.retries,
+      ]),
+    ).toEqual([
+      [HEAD, 1, 1],
+      [PREV, 2, 0],
+    ]);
+    expect(readState(hintRoot, 2).releasedHeads).toEqual([]);
+    expect(
+      startRound(hintRoot, {
+        pr: 2,
+        head: HEAD,
+        round: 5,
+        artifactDir: null,
+        repo: 'QwenLM/qwen-code',
+      }).duplicate,
+    ).toBeUndefined();
+    expect(readState(hintRoot, 2).deferredHeads.map((e) => e.head)).toEqual([
+      PREV,
+    ]);
+    expect(readState(hintRoot, 2).inFlightHeads[0]).toMatchObject({
+      head: HEAD,
+      seq: 1,
+      retries: 1,
+    });
+
+    // Also preserves retiredSeqs tombstone seq/retries on redelivery.
+    const retiredRoot = makeRoot();
+    mkdirSync(join(retiredRoot, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(retiredRoot, 3),
+      JSON.stringify({
+        pr: 3,
+        repo: 'QwenLM/qwen-code',
+        verifiedHeads: [],
+        inFlightHeads: [],
+        deferredHeads: [
+          {
+            head: PREV,
+            round: null,
+            artifactDir: null,
+            deferredAt: '2026-11-20T00:00:00.000Z',
+            seq: 3,
+            retries: 0,
+          },
+        ],
+        retiredSeqs: { [HEAD]: { seq: 1, retries: 1 } },
+        seqCounter: 3,
+      }),
+    );
+    expect(
+      recordDelivery(retiredRoot, {
+        pr: 3,
+        head: HEAD,
+        repo: 'QwenLM/qwen-code',
+      }).recorded,
+    ).toBe(true);
+    expect(
+      readState(retiredRoot, 3).deferredHeads.map((e) => [
+        e.head,
+        e.seq,
+        e.retries,
+      ]),
+    ).toEqual([
+      [HEAD, 1, 1],
+      [PREV, 3, 0],
+    ]);
+    expect(
+      startRound(retiredRoot, {
+        pr: 3,
+        head: HEAD,
+        round: 6,
+        artifactDir: null,
+        repo: 'QwenLM/qwen-code',
+      }).duplicate,
+    ).toBeUndefined();
+    expect(readState(retiredRoot, 3).deferredHeads.map((e) => e.head)).toEqual([
+      PREV,
+    ]);
+  });
+
+  it('restartRound retires lower-seq deferrals into retiredSeqs identically to release + start', () => {
+    const root = makeRoot();
+    // Exact R2-3 witness path: A (HEAD, seq 1) -> inconclusive (retries 1),
+    // B (PREV, seq 2) starts retiring A, A re-deferred while B is in flight
+    // at seq 1 (retries 1), OLDER deferred at seq 3.
+    expect(
+      startRound(root, {
+        pr: 16867,
+        head: HEAD,
+        round: 1,
+        artifactDir: null,
+        repo: 'o/r',
+      }).duplicate,
+    ).toBeUndefined();
+    completeRound(root, {
+      pr: 16867,
+      head: HEAD,
+      round: 1,
+      verdict: 'inconclusive',
+      artifactDir: null,
+      repo: 'o/r',
+    });
+    expect(
+      startRound(root, {
+        pr: 16867,
+        head: PREV,
+        round: 2,
+        artifactDir: null,
+        repo: 'o/r',
+      }).duplicate,
+    ).toBeUndefined();
+    // Redeliver A (retired -> re-deferred at seq 1, retries 1) and newer C (seq 3).
+    expect(
+      startRound(root, {
+        pr: 16867,
+        head: HEAD,
+        round: 3,
+        artifactDir: null,
+        repo: 'o/r',
+      }).duplicate,
+    ).toBe('in-flight');
+    expect(
+      startRound(root, {
+        pr: 16867,
+        head: OLDER,
+        round: 3,
+        artifactDir: null,
+        repo: 'o/r',
+      }).duplicate,
+    ).toBe('in-flight');
+
+    const restarted = run(root, [
+      '16867',
+      '--restart',
+      '--head',
+      PREV,
+      '--from-round',
+      '2',
+      '--round',
+      '3',
+      '--repo',
+      'o/r',
+    ]);
+    expect(restarted.status).toBe(0);
+    expect(restarted.stdout).not.toContain(HEAD);
+    expect(restarted.stdout).toContain(
+      `deferred heads awaiting a round: ${OLDER}`,
+    );
+
+    const st = readState(root, 16867);
+    expect(st.deferredHeads.map((e) => [e.head, e.seq])).toEqual([[OLDER, 3]]);
+    expect(st.retiredSeqs[HEAD]).toEqual({ seq: 1, retries: 1 });
   });
 
   it('restartRound and CLI --restart atomically replace a dead marker preserving seq, retries, and deferrals', () => {

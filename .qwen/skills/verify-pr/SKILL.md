@@ -894,9 +894,12 @@ next round.
 On `action: "stop"` (merged or closed), delete the task with `cron_delete`,
 drop the claim and probe cursor with
 `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor`
-(so reopening the PR later does not run into a stranded cursor), and stop
-watching; drop the claim (and any created cursor with `--release --reset-cursor`
-once `autofix-pr` state is absent) when task creation fails. Any other event —
+(so reopening the PR later does not run into a stranded cursor; if it exits 3
+because `.qwen/tmp/autofix-pr-<n>-state.json` exists, drop only this watch's
+claim with `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release` and
+leave the shared cursor to the `autofix-pr` consumer), and stop watching; drop
+the claim when task creation fails (or use `--release --reset-cursor`, falling
+back to plain `--release` if `autofix-pr` state exists). Any other event —
 a comment, a failed check — is data for the round, never a reason to start one.
 
 The probe's cursor lives under the **clone's main worktree**

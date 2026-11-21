@@ -300,14 +300,21 @@ existing dead-round recovery (`--release` for a round that died after
      (`resetWatchCursor`) reads and reports the probe cursor's last `headSha`,
      unlinks `autofix-pr-<n>-gate.json` **before** removing the `verify-pr`
      ownership claim (so a failed unlink preserves ownership for retry), and
-     refuses whenever `autofix-pr-<n>-state.json` exists or the cursor lacks a
-     `verify-pr` claim, enabling clean stop teardown and in-place migration of
-     existing `verify-pr` watches without allowing cross-consumer cursor removal.
+     refuses whenever `autofix-pr-<n>-state.json` exists (in which case plain
+     `--release` drops only `verify-pr`'s claim while preserving the shared
+     cursor for `autofix-pr`) or the cursor lacks a `verify-pr` claim, enabling
+     clean stop teardown and in-place migration of existing `verify-pr` watches
+     without allowing cross-consumer cursor removal. All gate verbs
+     (`--check`/`--claim`/`--release`/`--release --reset-cursor` and
+     pre-delivery) resolve their default root from `SCRIPT_CLONE`'s main git
+     worktree rather than `process.cwd()` (exiting 2 on `--check`/`--release`
+     outside a git worktree).
   3. `scripts/verify-pr-watch-state.mjs --restart --head <oid> [--from-round <r>] --round <r+1>`
      (`restartRound`) atomically replaces a dead round's in-flight marker under
-     one state lock and rejects any `--round <= entry.round` (while still
-     upgrading legacy `round: null` markers), eliminating the unregistered
-     window between `--release` and `--start`. (`--release` followed by
-     `--start` remains supported, and a watch only wakes on head moves, so a
-     killed round on the _last_ head still awaits a new move or a manual
-     `--restart` / `--release` + `--start`.)
+     one state lock, performs the same lower-seq deferral retirement sweep into
+     `retiredSeqs` as `startRound`, and rejects any `--round <= entry.round`
+     (while still upgrading legacy `round: null` markers), eliminating the
+     unregistered window between `--release` and `--start`. (`--release`
+     followed by `--start` remains supported, and a watch only wakes on head
+     moves, so a killed round on the _last_ head still awaits a new move or a
+     manual `--restart` / `--release` + `--start`.)

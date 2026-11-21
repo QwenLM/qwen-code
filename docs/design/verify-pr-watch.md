@@ -175,8 +175,8 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   newer round that restarted the same head. Under one-round-per-PR the
   blocking marker may belong to a different head than the one being
   started: recovery releases the head the refusal names. `--restart --head <oid> [--from-round <r>] --round <r+1>`
-  atomically replaces a dead round's in-flight marker under one lock acquisition (rejecting any `--round <= entry.round`) without an unregistered gap. This mirrors the
-  gate's recovery for a dead claim, and `--release --reset-cursor` unlinks the probe cursor before releasing ownership (reporting its last `headSha`) when stopping cleanly or migrating an existing watch.
+  atomically replaces a dead round's in-flight marker under one lock acquisition (retiring lower-seq deferrals into `retiredSeqs` like `--start` and rejecting any `--round <= entry.round`) without an unregistered gap. This mirrors the
+  gate's recovery for a dead claim, and `--release --reset-cursor` unlinks the probe cursor before releasing ownership (reporting its last `headSha`, falling back to plain `--release` if `autofix-pr` state exists) when stopping cleanly or migrating an existing watch; all gate verbs resolve the default root from the script's own clone rather than the caller's cwd (exiting 2 on `--check`/`--release` outside a git worktree).
 
 ## Design decisions
 
