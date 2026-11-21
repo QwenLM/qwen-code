@@ -43,8 +43,10 @@ import urllib.request
 import xml.sax.saxutils
 from pathlib import Path
 
-BUCKET = "dataworks-upload-and-download-inner-pre"
-OSS_HOST = f"{BUCKET}.oss-cn-zhangjiakou.aliyuncs.com"
+BUCKET = os.environ.get("MANAGED_OSS_BUCKET", "qwen-code-ma-release")
+_endpoint = os.environ.get("MANAGED_OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
+_endpoint_host = _endpoint.removeprefix("https://").removeprefix("http://").rstrip("/")
+OSS_HOST = _endpoint_host if _endpoint_host.startswith(f"{BUCKET}.") else f"{BUCKET}.{_endpoint_host}"
 MAVEN_REPO_URL = "https://mvnrepo.alibaba-inc.com/mvn/repository"
 MAVEN_REPO_ID = "alibaba-releases"
 WORKER_REPOSITORY = "hub.docker.alibaba-inc.com/aone-base-global/data-agent-worker"
@@ -176,7 +178,7 @@ def verify_image_record(image_dir, producer, repository, release_id, runtime_pro
 # --- OSS (V1 presigned URLs, stdlib only) -------------------------------------
 
 def oss_signed_request(object_key, access_key, secret, method, extra_headers=None,
-                       security_token=None):
+                       security_token=None, content_type=None):
     """Return (url, headers) signed with the Authorization header approach.
     Query-string presigned PUTs get SignatureDoesNotMatch on this bucket."""
     date = email.utils.formatdate(time.time(), usegmt=True)
@@ -188,7 +190,7 @@ def oss_signed_request(object_key, access_key, secret, method, extra_headers=Non
         canonical_oss = "".join(
             f"{key.lower()}:{value}\n" for key, value in sorted(signed_headers.items())
         )
-    string_to_sign = f"{method}\n\n\n{date}\n{canonical_oss}/{BUCKET}/{object_key}"
+    string_to_sign = f"{method}\n\n{content_type or ''}\n{date}\n{canonical_oss}/{BUCKET}/{object_key}"
     signature = base64.b64encode(
         hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha1).digest()
     ).decode()
@@ -196,6 +198,8 @@ def oss_signed_request(object_key, access_key, secret, method, extra_headers=Non
     headers = dict(signed_headers)
     headers["Date"] = date
     headers["Authorization"] = f"OSS {access_key}:{signature}"
+    if content_type:
+        headers["Content-Type"] = content_type
     return url, headers
 
 
@@ -265,7 +269,8 @@ def oss_put(object_key, path, access_key, secret, security_token=None):
     url, headers = oss_signed_request(
         object_key, access_key, secret, "PUT",
         extra_headers={"x-oss-forbid-overwrite": "true"},
-        security_token=security_token)
+        security_token=security_token,
+        content_type="application/octet-stream")
     request = urllib.request.Request(url, data=path.read_bytes(), method="PUT", headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=600) as response:
