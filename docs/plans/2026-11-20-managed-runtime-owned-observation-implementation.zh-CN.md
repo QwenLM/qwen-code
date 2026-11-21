@@ -124,10 +124,23 @@ mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
 
 **据此证据定下的常量（无需改动）：** `RUN_OUTBOX_BYTES` 8 MiB（≈最大条目的 45×，terminal 闭包有余量）、`BACKGROUND_SEGMENT_BYTES` 128 KiB 配 `BACKGROUND_SEGMENTS_PER_PAGE` 1（每个条目与最坏 terminal 闭包都合请求上限）、`PARTIAL_FLUSH_MS` 250（空闲 flush 开销相对 30 ms/条的提交成本可忽略）。**8 MiB 总上限不能单方面抬高：** 每页 2 段虽使上限翻倍，却把双流被丢尾闭包推到 ~700 KB、超过请求上限，terminal 将永远推不出去。抬高它需要协同改动 `maxPagesPerStream`/`maxManifestBytes`/请求上限——属 maintainer 设计决策（§11 Q3 携此证据保持开放）。Java 侧 pull 等待、staged-bytes 水位线、硬上限以及 wake→load 延迟，需下方 Broker + MySQL + daemon 度量。
 
+### Daemon 启动见证（已落地）
+
+Phase 3b server jar 在真实 daemon 拓扑里端到端启动。配方（全部来自本 checkout）：
+
+1. **构建 exec jar：** `mvn -Dmaven.repo.local=/tmp/p3b-m2 -pl server -am -DskipTests -Dspotbugs.skip=true -Dcheckstyle.skip=true -Dgpg.skip=true package`（在 `packages/managed-agent-server` 下）→ `server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar`（spring-boot repackage，mainClass `ManagedAgentServerApplication`，约 88 MB）。
+2. **打包 CLI：** `npm run build && npm run bundle` → 根 `dist/cli.js`（daemon 为 harness 与 worker spawn 的 `runtime.cliEntry`）。
+3. **Runtime payload：** 一个目录含 `server.jar`（exec jar）+ `manifest.json` `{schemaVersion:1, cliVersion:"0.28.0", target:"darwin-arm64", javaMajor:21, javaSource:"system", serverSha256:<server.jar 的 sha256>}`。`QWEN_MANAGED_LOCAL_RUNTIME_DIR` 指向它即绕过下载（`managed-local-runtime.ts`）；`javaSource:"system"` 用 `JAVA_HOME` 的 Java 21。
+4. **启动：** `JAVA_HOME=<jdk-21> QWEN_MANAGED_LOCAL_RUNTIME_DIR=<payload> node dist/cli.js serve --managed --managed-data-dir <data> --port 4199`（不带 `--open` → headless）。
+
+已验证：公共前门 4199 回 200 并提供 WebShell；harness（`serve --profile hosted-harness`，端口 50889）以 bootId/capabilityDigest/lifecycleV2Profiles 应答 `/capabilities`；Java 控制面启动（Flyway 迁移 schema、**Embedded Runtime Broker 监听 50890**、actuator readiness OK）。关闭干净（向 launcher 发 SIGTERM 即停掉 detached 的 harness + java 子进程；端口全释放）。此启动走默认 `managed-local` profile（内嵌 H2、`runtime-observation` 关）。
+
+**启动见证尚未覆盖：** 挂起循环本身。`managed-local-serve.ts` 硬编码 `SPRING_APPLICATION_JSON`（内嵌存储、无 `runtime-observation` flag）并从环境剥离 `SPRING_*`/`QWEN_MANAGED_AGENT_*` 覆盖，因此不经代码改动无法经生产路径注入 flag 与 MySQL datasource。完整 资格 → 摘除 → 暂存唤醒 → 排空 E2E 因此属**专用 harness**（仿 `HostedHarnessMySqlIT` + `managed-local-serve.ts` 的新 MySQL IT）：以 `--qwen.managed-agent.runtime-observation.enabled=true` + MySQL + 启用 Broker 启动 Spring，拉起 harness + local-process worker，驱动一个模型 stub turn 启动后台 Shell（`is_background`），然后断言：Session 挂起且进程仍在跑、恢复视图 `ready`；暂存行累积；暂存唤醒排空结算且不跑模型 turn。该 harness 是剩余的切片 3 投产门。
+
 ### 剩余故障用例
 
 - **带在途 pull 的 re-attach/drain、挂起期间首条观测、detach→seal 窗口、挂起期间 monitor 策略停止、边界/水位线 wake、挂起资格矩阵、worker 丢失、跨 Broker 重启/副本围栏、删除挂起 Session** — Java 侧已由 H2 上的 `RuntimeStageStoreTest`、`RuntimeObservationPullerTest`、`WakeSealStampTest`、`SessionRecoveryServiceTest`、`HostedCleanupDebtStoreTest`、`RuntimeBrokerServiceTest` 覆盖，并已在真实 MySQL 8.4 上见证（见上）；各自仍需 daemon 级 E2E。
-- **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。
+- **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。daemon 启动见证已如上落地；剩余是启用 flag + MySQL 并驱动循环的专用 harness（见上）。
 - **§7 度量 — Broker/daemon 半** — pull 成本/延迟（每 Broker 的 long-poll 连接数、每次空闲 pull 的 CPU、观测→wake→turn-start 与退出→结算时延）、挂起期间活跃输出下的 staging 行数/字节、静默加载的 drain 突发；这些确定 pull 等待（`pullWaitMs`，现 2,000）、staged-bytes 水位线（4 MiB）与硬上限（16 MiB）（§11 开放问题 1）。worker/applier 半已如上落地。
 
 ## 验证命令
