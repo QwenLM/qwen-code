@@ -134,13 +134,13 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
-    void legacyActorlessSessionStaysReadableByAnActorThePrincipalBoundCannotRepresent() {
+    void legacyActorlessSessionStaysReadableByAFilterCeilingActor() {
         var f = new Fixture();
         f.tx.executeWithoutResult(status -> {
-            // `TenantContextFilter` admits up to 512 code points, while a
-            // principal caps each component at 512 bytes: 512 CJK characters
-            // cannot be represented as one (R7-1). A legacy Session with no
-            // ownership row must stay readable for that actor.
+            // `TenantContextFilter` admits up to 512 code points; R9-1 made
+            // the principal byte bound admit that same ceiling (512 CJK
+            // characters are 1536 bytes). A legacy Session with no ownership
+            // row must stay readable for that actor.
             String legacy = f.service.createSession("tenant", null,
                     "legacy", "qwen-code", null, "shared", Map.of(), List.of())
                     .sessionId();
@@ -619,11 +619,11 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
-    void rawLifecycleAndRenameServeAnActorThePrincipalByteBoundWouldReject() {
+    void rawLifecycleAndRenameServeAnActorAtTheFilterAdmissionCeiling() {
         // R11-2/R11-3: a filter-admitted 1536-byte actor keeps closing and
-        // renaming a genuine legacy row-less Session; the raw arms never
-        // construct a byte-bounded principal, and the stored operation
-        // digest stays the pre-ownership {actorId} shape.
+        // renaming a genuine legacy row-less Session; the raw arms keep the
+        // raw actor, and the stored operation digest stays the
+        // pre-ownership {actorId} shape rather than a principal stamp.
         String longActor = "界".repeat(512);
         var f = new Fixture();
         var digests = new RequestDigests();

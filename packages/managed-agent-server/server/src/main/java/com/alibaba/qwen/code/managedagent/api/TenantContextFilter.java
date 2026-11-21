@@ -111,10 +111,10 @@ public class TenantContextFilter extends OncePerRequestFilter {
         try {
             // WorkspaceActor's requireText enforces the Workspace contract's
             // 512-code-point bound (counting code points, not UTF-16 units),
-            // so a 512-code-point BMP actor (1536 bytes) passes here. The
-            // stricter 512-UTF-8-byte principal bound is enforced where a
-            // principal is actually built (TenantContext.requirePrincipal /
-            // the ownership row), never at this filter.
+            // so a 512-code-point BMP actor (1536 bytes) passes here and a
+            // 512-supplementary-code-point actor (2048 bytes) is the widest
+            // this filter admits. SessionPrincipal's byte bound matches that
+            // ceiling, so a principal is never narrower than this admission.
             new WorkspaceActor(tenantId, actorId);
             return true;
         } catch (IllegalArgumentException

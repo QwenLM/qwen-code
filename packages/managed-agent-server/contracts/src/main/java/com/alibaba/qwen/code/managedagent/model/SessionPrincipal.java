@@ -22,9 +22,12 @@ import java.nio.charset.StandardCharsets;
  */
 public record SessionPrincipal(String tenantId, String userId,
         String actorSubjectId) {
-    // The ownership columns hold 1024 bytes each. Keep headroom for a
-    // future signed encoding while bounding every principal component.
-    private static final int MAX_COMPONENT_BYTES = 512;
+    // One contract with the tenant filter: WorkspaceValues.requireText
+    // admits 512 code points, and their worst case is 2048 UTF-8 bytes
+    // (512 supplementary code points). A narrower principal bound would
+    // admit an actor on every other route and then reject its own Session
+    // creation as invalid_actor. The ownership columns hold 2048 bytes each.
+    private static final int MAX_COMPONENT_BYTES = 2048;
 
     public SessionPrincipal {
         if (tenantId == null || tenantId.isBlank()

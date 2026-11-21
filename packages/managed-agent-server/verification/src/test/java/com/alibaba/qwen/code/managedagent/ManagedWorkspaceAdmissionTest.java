@@ -3096,15 +3096,17 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
-    void boundSessionReadsServeAnActorThePrincipalByteBoundWouldReject() throws Exception {
-        // R7-1: 512 CJK code points (1536 UTF-8 bytes). The tenant filter
-        // admits it, SessionPrincipal.ofUser rejects it; every raw-actor
-        // entry must defer construction to the unbound ownership arms so
-        // this Workspace actor keeps reading its bound Session. Restoring
-        // the eager principalOf at any String overload turns these red
-        // with 400 invalid_actor.
+    void boundSessionReadsServeAnActorAtTheFilterAdmissionCeiling() throws Exception {
+        // R7-1/R9-1: 512 CJK code points (1536 UTF-8 bytes) sit at the
+        // tenant filter's admission ceiling. R9-1 made the principal bound
+        // admit that same ceiling, so every route serves this actor instead
+        // of failing it after admission; the bound still rejects one byte
+        // past the widest ceiling actor (512 supplementary code points).
         String longActor = "界".repeat(512);
-        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser("tenant", longActor))
+        String widestActor = "𝄞".repeat(512);
+        assertThat(com.alibaba.qwen.code.managedagent.model.SessionPrincipal
+                .ofUser("tenant", widestActor).userId()).isEqualTo(widestActor);
+        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser("tenant", widestActor + "a"))
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("invalid_actor"));
         String tenant = "tenant-" + UUID.randomUUID();
@@ -3193,11 +3195,73 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
-    void legacyCancelGateServesAnActorThePrincipalByteBoundWouldReject() {
+    void unboundSessionCreationAdmitsAnActorBeyondTheOldPrincipalByteBound() throws Exception {
+        // R9-1: 171 CJK code points are 513 UTF-8 bytes — past the old
+        // 512-byte principal bound but well inside the tenant filter's
+        // 512-code-point admission, so both creation surfaces must answer
+        // the base's 202 and record the actor instead of 400 invalid_actor.
+        assertUnboundCreateAdmitsActor("界".repeat(171));
+    }
+
+    @Test
+    void unboundSessionCreationAdmitsTheWidestAdmittedActor() throws Exception {
+        // R9-1: 512 supplementary code points are the 2048-byte worst case
+        // the filter can admit. The ownership row and the creation receipt
+        // must both hold the full principal, or a route the filter accepted
+        // would fail inside its own transaction.
+        assertUnboundCreateAdmitsActor("𝄞".repeat(512));
+    }
+
+    private void assertUnboundCreateAdmitsActor(String actor) throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String publicSession = mapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "ceiling-public")
+                                .principal(actor(tenant, actor))
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(mapper.writeValueAsString(Map.of(
+                                        "agent_id", "qwen-code",
+                                        "input", List.of()))))
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString())
+                .path("id").asText();
+        assertOnlyPrincipalRowNamesActor(tenant, publicSession, actor);
+        String webShellSession = mapper.readTree(mvc.perform(
+                        post("/api/agent/web-shell/v1/sessions/create")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .principal(actor(tenant, actor))
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(mapper.writeValueAsString(Map.of(
+                                        "idempotencyKey", "ceiling-web-shell",
+                                        "agentId", "qwen-code",
+                                        "input", List.of()))))
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString())
+                .path("sessionId").asText();
+        assertOnlyPrincipalRowNamesActor(tenant, webShellSession, actor);
+    }
+
+    private void assertOnlyPrincipalRowNamesActor(String tenant,
+            String sessionId, String actor) {
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " ma_session_principal WHERE tenant_id = ? AND"
+                        + " session_id = ?", Integer.class, tenant, sessionId))
+                .isEqualTo(1);
+        var row = com.alibaba.qwen.code.managedagent.persistence
+                .ManagedSessionPrincipal.find(jdbc, tenant, sessionId);
+        assertThat(row).isNotNull();
+        assertThat(row.userId()).isEqualTo(actor);
+        assertThat(row.actorPresent()).isFalse();
+    }
+
+    @Test
+    void legacyCancelGateServesAnActorAtTheFilterAdmissionCeiling() {
         // R7-1 (round 10): the raw-actor cancel gates no longer build a
         // byte-bounded principal before any ownership row exists. On a
         // legacy (row-less) Session the answer is the route's own 404, not
-        // 400 invalid_actor.
+        // 400 invalid_actor, for an actor at the filter's 512-code-point
+        // admission ceiling.
         String longActor = "界".repeat(512);
         String tenant = "tenant-" + UUID.randomUUID();
         String session = store.insertSessionCommand(tenant, "CREATE_SESSION",
@@ -3213,12 +3277,13 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
-    void crossSessionReplayProbeServesAnActorThePrincipalByteBoundWouldReject() {
+    void crossSessionReplayProbeServesAnActorAtTheFilterAdmissionCeiling() {
         // R7-1 (round 10): requireSubmitterRole and
         // requireRecordedSessionGrant gate a tenant-global key reused across
         // Sessions with the raw actor; the recorded Session's ownership
         // probe must not construct a byte-bounded principal first. The
-        // answer is the key conflict, not 400 invalid_actor.
+        // answer is the key conflict, not 400 invalid_actor, for an actor at
+        // the filter's 512-code-point admission ceiling.
         String longActor = "界".repeat(512);
         String tenant = "tenant-" + UUID.randomUUID();
         String requested = store.insertSessionCommand(tenant, "CREATE_SESSION",

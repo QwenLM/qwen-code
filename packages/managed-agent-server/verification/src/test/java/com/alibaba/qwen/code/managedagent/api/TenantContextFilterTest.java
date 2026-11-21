@@ -39,12 +39,12 @@ class TenantContextFilterTest {
 
     @Test
     void acceptsTrustedActorIdsAtTheUnicodeBoundary() throws Exception {
-        // The ownership columns bound UTF-8 bytes: 128 astral code points
-        // are exactly 512 bytes and must pass, like 512 ASCII characters.
-        // The gate itself counts code points as WorkspaceValues.requireText
-        // does: 257-512 astral code points exceed 512 UTF-16 units yet stay
-        // inside the Workspace contract, so the filter must admit them (the
-        // stricter principal byte bound applies where a principal is built).
+        // The gate counts code points as WorkspaceValues.requireText does:
+        // a 512-code-point actor passes, including 257-512 astral code
+        // points that exceed 512 UTF-16 units. The principal byte bound
+        // matches this admission ceiling (512 supplementary code points are
+        // 2048 bytes), so every admitted actor can also be built into a
+        // principal.
         for (String actorId : new String[] {"alice@example.com",
                 "a".repeat(512), "𝄞".repeat(128), "𝄞".repeat(300),
                 "𝄞".repeat(512)}) {
@@ -83,8 +83,8 @@ class TenantContextFilterTest {
                 actor("tenant-b", "actor-a"), actor("tenant-a", "bad\nactor"),
                 // 513 code points exceed the Workspace contract itself
                 // (WorkspaceValues.requireText), so the gate refuses them;
-                // 512 astral code points stay admitted at the filter and are
-                // refused only where a principal is actually built.
+                // 512 astral code points (2048 bytes) are the widest the
+                // filter admits, and the principal bound admits them too.
                 actor("tenant-a", "𝄞".repeat(513)),
                 actor("tenant-a", "a".repeat(513)),
                 actor("tenant-a", " "),

@@ -92,11 +92,11 @@ class ManagedTaskActorBoundaryTest {
 
     @Test
     void boundWorkspaceTasksAdmitAnActorThePrincipalByteBoundWouldReject() {
-        // 171 CJK characters: 171 code points (the filter admits up to 512)
-        // but 513 UTF-8 bytes, past SessionPrincipal's 512-byte component
-        // bound. The bound Workspace path compares the raw actor and must
-        // never construct a principal from it.
-        String longActor = "汉".repeat(171);
+        // 683 CJK characters: 2049 UTF-8 bytes, one byte past
+        // SessionPrincipal's 2048-byte component bound, so constructing a
+        // principal here still fails loudly. The bound Workspace path
+        // compares the raw actor and must never construct one.
+        String longActor = "汉".repeat(683);
         assertThatThrownBy(() -> SessionPrincipal.ofUser("tenant", longActor))
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("invalid_actor"));
@@ -145,7 +145,7 @@ class ManagedTaskActorBoundaryTest {
     }
 
     @Test
-    void unboundTaskCancelAdmitsAnActorThePrincipalByteBoundWouldReject() {
+    void unboundTaskCancelAdmitsAnActorAtTheFilterAdmissionCeiling() {
         // R11-1: the unbound raw cancel arm keeps the raw actor digest; a
         // filter-admitted 1536-byte actor reaches the TASK_CANCEL write
         // instead of 400 invalid_actor mid-flight.

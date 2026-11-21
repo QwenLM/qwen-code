@@ -44,8 +44,9 @@ public record TenantContext(String tenantId, String actorId,
      * actor subject, or null when it carries none. A subject-bearing
      * ownership row can only be matched by this principal, so every later
      * route of that Session must authorize with it. A subject-less request
-     * keeps the raw-actor path: that matches the same actor-absent rows
-     * without re-encoding an actor the principal's byte bound may reject.
+     * keeps the raw-actor path: that matches the same actor-absent rows and
+     * the row-less legacy arm without encoding a principal the row does not
+     * carry.
      */
     public SessionPrincipal subjectPrincipal() {
         return actorSubjectId == null ? null : requirePrincipal();
