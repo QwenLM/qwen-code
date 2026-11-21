@@ -1350,10 +1350,10 @@ describe('Session', () => {
           yield {
             type: core.StreamEventType.CHUNK,
             value: { text: 'working' },
-          } as const;
+          };
           firstChunk();
           await streamGate;
-        })(),
+        })() as unknown as AsyncGenerator<core.StreamEvent>,
       );
 
       const prompt = session.prompt({
@@ -2038,9 +2038,11 @@ describe('Session', () => {
           .mock.calls.map(([arg]) => arg)
           .filter((arg) => {
             const update = (arg as { update?: Record<string, unknown> }).update;
-            const content = update?.content as { text?: string } | undefined;
+            const content = update?.['content'] as
+              | { text?: string }
+              | undefined;
             return (
-              update?.sessionUpdate === 'agent_message_chunk' &&
+              update?.['sessionUpdate'] === 'agent_message_chunk' &&
               typeof content?.text === 'string' &&
               content.text.includes('teammate report')
             );
