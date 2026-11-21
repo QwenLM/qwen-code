@@ -44,13 +44,19 @@ next increment (2f), so this slice is additive and renders nothing on its own.
   `phase` is a getter over a snapshot with no reactive source here, the surface holds
   its own in-flight latch (ref + state) set synchronously on the first submit and
   cleared in `.finally`, and passes
-  `submitDisabled={composerSubmitBlocked || transcriptState === 'loading' || submitInFlight || phase === 'submitting'}`
+  `submitDisabled={composerSubmitBlocked || transcriptState === 'loading' || submitInFlight || admissionLocked || phase === 'submitting'}`
   so a second Enter/click during the POST round-trip cannot dispatch a duplicate send
   even for an attachment-bearing prompt (no optimistic echo to trigger a re-render),
-  while mid-turn sends stay allowed. It reports `unknown` and `rejected` admissions
-  and transport rejections through `onError` (the reported `Error` is built from a
-  localized `chat.*` string, since the host sink displays `error.message`), keeping
-  the draft on every non-accepted path. `onCancel` dispatches `controller.cancel`.
+  while mid-turn sends stay allowed. An `unknown` admission additionally sets an
+  admission payload lock (ref + state) that keeps rejecting every submit path until
+  the user explicitly acknowledges via a banner (`queue.admissionUnknown` copy), since
+  delivery is uncertain and the daemon may already be running the prompt — the draft
+  is kept, never wiped. It reports `unknown` and `rejected` admissions and transport
+  rejections through `onError` (the reported `Error` is built from a localized `chat.*`
+  string with the transport error as `cause`, since the host sink displays
+  `error.message`), keeping the draft on every non-accepted path. The `chat.*` strings
+  carry a catalog-parity test across zh-CN/zh-TW/ru. `onCancel` dispatches
+  `controller.cancel`.
   `isRunning` derives from `phase` (`submitting`/`running`/`cancelling`), so a cancel
   in flight keeps the stop affordance and the streaming indicator until settlement
   evidence arrives.

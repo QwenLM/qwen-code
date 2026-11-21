@@ -36,11 +36,14 @@
   `retryLast`）把 `false` 读作「被拒、保留文本」，故必须拿到 `undefined` 才能保持其同步
   清空。由于控制器的 `phase` 是对快照的 getter、此处无响应式来源，表面自持一个在途 latch
   （ref + state），首次提交同步置位、`.finally` 清除，并传
-  `submitDisabled={composerSubmitBlocked || transcriptState === 'loading' || submitInFlight || phase === 'submitting'}`，
+  `submitDisabled={composerSubmitBlocked || transcriptState === 'loading' || submitInFlight || admissionLocked || phase === 'submitting'}`，
   使 POST 往返期间再按 Enter/点击不会派发重复发送——即便是带附件的 prompt（无乐观回显触发
-  重渲染）——而流式期间的发送仍被允许。对 `unknown`、`rejected` 准入与 transport 拒绝均经
-  `onError` 上报（被上报的 `Error` 由本地化 `chat.*` 字符串构造，因宿主落点显示
-  `error.message`），所有非 accepted 路径都保留草稿。`onCancel` 派发 `controller.cancel`。
+  重渲染）——而流式期间的发送仍被允许。`unknown` 准入还会置一个准入载荷锁（ref + state），
+  持续拒绝一切提交路径，直到用户经横幅（`queue.admissionUnknown` 文案）显式确认——因为送达
+  不确定、daemon 可能已在执行该 prompt；草稿保留、绝不抹掉。对 `unknown`、`rejected` 准入与
+  transport 拒绝均经 `onError` 上报（被上报的 `Error` 由本地化 `chat.*` 字符串构造、原传输
+  错误作为 `cause`，因宿主落点显示 `error.message`），所有非 accepted 路径都保留草稿。
+  `chat.*` 文案带 zh-CN/zh-TW/ru 的目录一致性测试。`onCancel` 派发 `controller.cancel`。
   `isRunning` 由 `phase`（`submitting`/`running`/`cancelling`）派生，故取消在途时停止入口与
   流式指示器保持到落定证据到达。
 - **审批/提问。** 表面渲染第一个 `pending` 审批（跳过被取代项）与第一个待处理提问。

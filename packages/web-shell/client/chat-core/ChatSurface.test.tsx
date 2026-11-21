@@ -418,7 +418,9 @@ describe('ChatSurface', () => {
         target: { sessionId: 's1' },
       })),
     });
-    mountReact(<ChatSurface controller={controller} onError={onError} />);
+    const container = mountReact(
+      <ChatSurface controller={controller} onError={onError} />,
+    );
     const onSubmit = captured.editor?.onSubmit as SubmitHandler;
     const commitAccepted = vi.fn();
     await act(async () => {
@@ -431,6 +433,22 @@ describe('ChatSurface', () => {
     expect((onError.mock.calls[0][0] as Error).message).toBe(
       'localized:chat.promptNotConfirmed',
     );
+    // Delivery is uncertain: the payload stays locked (draft kept, every submit
+    // path rejected) so a resend cannot duplicate a turn the daemon may run.
+    expect(captured.editor?.submitDisabled).toBe(true);
+    await act(async () => {
+      onSubmit('hello', undefined, undefined, vi.fn(), undefined);
+    });
+    expect(controller.submit).toHaveBeenCalledTimes(1);
+    // Only an explicit acknowledgement unlocks the payload.
+    const banner = container.querySelector(
+      '[data-testid="admission-locked-banner"]',
+    );
+    expect(banner).not.toBeNull();
+    await act(async () => {
+      banner?.querySelector('button')?.click();
+    });
+    expect(captured.editor?.submitDisabled).toBe(false);
   });
 
   it('reports a rejected submit admission and keeps the draft', async () => {
@@ -469,6 +487,11 @@ describe('ChatSurface', () => {
     });
     await vi.waitFor(() => expect(onError).toHaveBeenCalled());
     expect(commitAccepted).not.toHaveBeenCalled();
+    // The localized text must be the Error's own message (the host sink displays
+    // error.message), with the raw transport error preserved as the cause.
+    expect((onError.mock.calls[0][0] as Error).message).toBe(
+      'localized:chat.failedToSend',
+    );
   });
 
   it('blocks a repeat send while a submit is in flight', () => {
@@ -508,6 +531,13 @@ describe('ChatSurface', () => {
       resolveSubmit?.({ admission: 'accepted' });
     });
     expect(captured.editor?.submitDisabled).toBe(false);
+    // The latch re-arms after settlement: a later submit must dispatch again.
+    // submitDisabled is state-driven, so only the dispatch count observes the
+    // ref reset in .finally.
+    await act(async () => {
+      onSubmit('again', undefined, undefined, vi.fn(), undefined);
+    });
+    expect(submit).toHaveBeenCalledTimes(2);
   });
 
   it('returns undefined for commit-less submit entrances so they clear synchronously', async () => {

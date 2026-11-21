@@ -487,6 +487,27 @@ describe('web-shell i18n catalog', () => {
     expect(zhPort).not.toBe(enPort);
   });
 
+  it('keeps the chat.* composer error strings localized in every catalog', () => {
+    const en = getTranslator('en');
+    const keys = [
+      'chat.promptNotConfirmed',
+      'chat.promptNotAdmitted',
+      'chat.failedToSend',
+      'chat.approvalNotAccepted',
+      'chat.acknowledgeUnknown',
+    ];
+    // Compare against the EN value, not the raw key: the translator falls back
+    // to EN per key, so a deleted entry (or one pasted with the EN text) would
+    // otherwise silently degrade to English.
+    for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+      const translator = getTranslator(language);
+      for (const key of keys) {
+        expect(translator(key)).not.toBe(key);
+        expect(translator(key)).not.toBe(en(key));
+      }
+    }
+  });
+
   it.each([
     [
       'en',

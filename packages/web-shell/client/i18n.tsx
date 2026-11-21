@@ -1418,6 +1418,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'chat.promptNotAdmitted': 'Prompt not accepted',
   'chat.failedToSend': 'Failed to send message',
   'chat.approvalNotAccepted': 'Approval was not accepted',
+  'chat.acknowledgeUnknown': 'I have checked the session',
   'askUser.shortcuts.previous': '← previous',
   'askUser.shortcuts.optionsSingle': '↑↓ select · Enter submit',
   'askUser.shortcuts.optionsNext': '↑↓ select · Enter next',

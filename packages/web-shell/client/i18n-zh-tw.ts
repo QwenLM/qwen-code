@@ -1314,6 +1314,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'chat.promptNotAdmitted': '提示詞未被接受',
   'chat.failedToSend': '傳送訊息失敗',
   'chat.approvalNotAccepted': '審批未被接受',
+  'chat.acknowledgeUnknown': '我已檢查會話',
   'askUser.shortcuts.previous': '← 上一步',
   'askUser.shortcuts.optionsSingle': '↑↓ 選擇 · Enter 提交',
   'askUser.shortcuts.optionsNext': '↑↓ 選擇 · Enter 下一步',

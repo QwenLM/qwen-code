@@ -98,6 +98,11 @@ export function ChatSurface({
   // the repeat-send guard arms synchronously on the first submit.
   const submitInFlightRef = useRef(false);
   const [submitInFlight, setSubmitInFlight] = useState(false);
+  // An `unknown` admission means delivery is uncertain — the daemon may already
+  // be running the prompt. Lock the payload (keep the draft, reject every submit
+  // path) until the user explicitly acknowledges, mirroring the sibling surfaces.
+  const admissionLockedRef = useRef(false);
+  const [admissionLocked, setAdmissionLocked] = useState(false);
   // A cancel in flight keeps the turn live until settlement evidence arrives.
   const isRunning =
     controller.phase === 'running' ||
@@ -190,6 +195,24 @@ export function ChatSurface({
         </div>
       )}
       {panels}
+      {admissionLocked && (
+        <div
+          className={styles.admissionBanner}
+          role="alert"
+          data-testid="admission-locked-banner"
+        >
+          <span>{t('queue.admissionUnknown')}</span>
+          <button
+            type="button"
+            onClick={() => {
+              admissionLockedRef.current = false;
+              setAdmissionLocked(false);
+            }}
+          >
+            {t('chat.acknowledgeUnknown')}
+          </button>
+        </div>
+      )}
       <div
         className={
           cardActive
@@ -213,15 +236,19 @@ export function ChatSurface({
             composerSubmitBlocked ||
             controller.transcriptState === 'loading' ||
             submitInFlight ||
+            admissionLocked ||
             controller.phase === 'submitting'
           }
           onCancel={() => {
             void controller.cancel();
           }}
           onSubmit={(text, images, files, commitAccepted, metadata) => {
-            // Block a repeat dispatch while a submit is in flight; keep the
-            // literal false so the still-unsent draft is not wiped.
-            if (submitInFlightRef.current) return false;
+            // Block a repeat dispatch while a submit is in flight or the payload
+            // is admission-locked; keep the literal false so the still-unsent
+            // draft is not wiped.
+            if (submitInFlightRef.current || admissionLockedRef.current) {
+              return false;
+            }
             submitInFlightRef.current = true;
             setSubmitInFlight(true);
             void controller
@@ -231,6 +258,10 @@ export function ChatSurface({
                 if (result.admission === 'accepted') {
                   commitAccepted?.();
                 } else if (result.admission === 'unknown') {
+                  // Delivery is uncertain: lock the payload until acknowledged so
+                  // a resend cannot duplicate a turn the daemon may be running.
+                  admissionLockedRef.current = true;
+                  setAdmissionLocked(true);
                   const message = t('chat.promptNotConfirmed');
                   reportError(new Error(message), message);
                 } else {
@@ -238,8 +269,11 @@ export function ChatSurface({
                   reportError(new Error(message), message);
                 }
               })
-              .catch((error: unknown) => {
-                reportError(error, t('chat.failedToSend'));
+              .catch((cause: unknown) => {
+                // The host sink displays error.message, so the localized text
+                // must be the Error's own message, not just the fallback.
+                const message = t('chat.failedToSend');
+                reportError(new Error(message, { cause }), message);
               })
               .finally(() => {
                 submitInFlightRef.current = false;

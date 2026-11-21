@@ -22,6 +22,15 @@
   padding: 0 16px;
 }
 
+.admissionBanner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+}
+
 .composer {
   flex: 0 0 auto;
 }
