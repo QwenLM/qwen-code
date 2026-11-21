@@ -2,7 +2,7 @@
 
 [English](2026-11-17-worktree-retention-snapshots.md) | [简体中文](2026-11-17-worktree-retention-snapshots.zh-CN.md)
 
-- Status: U1–U3 are implemented in this PR; U4/U5 remain tracked in #17237.
+- Status: U1–U3 merged in [#17533](https://github.com/QwenLM/qwen-code/pull/17533) as squash commit [`17217d136a75a3070143cbded6de6b467039368c`](https://github.com/QwenLM/qwen-code/commit/17217d136a75a3070143cbded6de6b467039368c); U4/U5 and P7 remain tracked in [#17237](https://github.com/QwenLM/qwen-code/issues/17237).
 - Builds on: `2026-11-14-web-shell-codex-worktree-parity.md` D7 (snapshots are
   work archives), D3 (dirty carry), and `2026-11-17-worktree-carry-metadata.md`
   (R9-6, the sidecar `carriedEntries` field).
@@ -29,7 +29,8 @@ complete P6 plan, not current archive behavior in this slice.
 
 ## Decomposition
 
-P6 lands as five units on the #17237 branch; each is independently testable.
+P6 has five independently testable units. U1–U3 shipped in #17533; U4/U5
+remain planned in #17237.
 
 ### U1 — Snapshot capture/restore service (core)
 
@@ -271,3 +272,9 @@ older valid-looking archive.
 - P7 configurable worktree root (`worktree.root`) — separate unit, security-
   sensitive containment/shell-guard re-derivation.
 - Managed (server) sessions' own worktree design alignment (follow-up).
+
+## Delivery and verification evidence
+
+The U1–U3 slice shipped through [#17533](https://github.com/QwenLM/qwen-code/pull/17533) as squash commit [`17217d136a75a3070143cbded6de6b467039368c`](https://github.com/QwenLM/qwen-code/commit/17217d136a75a3070143cbded6de6b467039368c). See the [carry-metadata delivery and verification evidence](2026-11-17-worktree-carry-metadata.md#delivery-and-verification-evidence) for the measured runtime matrix, its limitations, the independent review and the squash-commit product CI run.
+
+U4/U5 remain future work in [#17237](https://github.com/QwenLM/qwen-code/issues/17237); this evidence does not make the Goal and overall P6 acceptance criteria current behavior.

@@ -231,11 +231,9 @@ class WorkspaceLifecycleStoreTest {
                 (row, index) -> new String(row.getBytes(1), java.nio.charset.StandardCharsets.UTF_8),
                 "tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8),
                 "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, 'tenant', ?, 'EXTERNAL')",
-                RuntimeAdmissionFences.storageAliasKey("tenant", storage),
-                RuntimeAdmissionFences.storageFenceKey("tenant"),
-                RuntimeAdmissionFences.storageFenceKey(storage), storage);
+        fixture.jdbc.update("INSERT INTO ma_storage (alias_key,"
+                        + " tenant_id, storage_id, storage_kind) VALUES (?, 'tenant', ?, 'EXTERNAL')",
+                RuntimeAdmissionFences.storageAliasKey("tenant", storage), storage);
         fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?",
                 WorkspaceToolProfiles.EXTERNAL_FILES);
         var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(
