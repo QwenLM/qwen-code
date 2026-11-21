@@ -179,19 +179,17 @@ public class ManagedMemoryStore implements MemoryRepository {
                 if (!MemoryModels.identifier(result.memoryId())) {
                     saved = Result.status("unknown");
                 } else {
-                    String key = ManagedSchemaKeys.key(admitted.tenantId(), admitted.storeId(), result.memoryId());
-                    jdbc.update("INSERT INTO ma_memory_entry (entry_key,tenant_id,memory_store_id,memory_id,gmt_create,gmt_modified)"
-                                    + " VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE entry_key=entry_key",
-                            key, admitted.tenantId(), admitted.storeId(), result.memoryId(), clock.millis(), clock.millis());
+                    jdbc.update("INSERT INTO ma_memory_entry (tenant_id,memory_store_id,memory_id,gmt_create,gmt_modified)"
+                                    + " VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE memory_id=memory_id",
+                            admitted.tenantId(), admitted.storeId(), result.memoryId(), clock.millis(), clock.millis());
                     if (!ownsEntry(admitted.tenantId(), admitted.storeId(), result.memoryId())) {
                         saved = Result.status("unknown");
                     }
                 }
             } else if ("deleted".equals(result.status())) {
-                jdbc.update("UPDATE ma_memory_entry SET is_deleted=1,gmt_modified=? WHERE entry_key=?"
-                                + " AND tenant_id=? AND memory_store_id=? AND memory_id=?",
-                        clock.millis(), ManagedSchemaKeys.key(admitted.tenantId(), admitted.storeId(), admitted.query().memoryId()),
-                        admitted.tenantId(), admitted.storeId(), admitted.query().memoryId());
+                jdbc.update("UPDATE ma_memory_entry SET is_deleted=1,gmt_modified=? WHERE"
+                                + " tenant_id=? AND memory_store_id=? AND memory_id=?",
+                        clock.millis(), admitted.tenantId(), admitted.storeId(), admitted.query().memoryId());
             } else if (result.items() != null) {
                 saved = Result.items(result.items().stream()
                         .filter(item -> ownsEntry(admitted.tenantId(), admitted.storeId(), item.memoryId())).toList());
@@ -225,9 +223,9 @@ public class ManagedMemoryStore implements MemoryRepository {
     }
 
     private boolean ownsEntry(String tenant, String store, String id) {
-        return id != null && jdbc.queryForObject("SELECT COUNT(*) FROM ma_memory_entry WHERE entry_key=?"
-                        + " AND tenant_id=? AND memory_store_id=? AND memory_id=? AND is_deleted=0",
-                Integer.class, ManagedSchemaKeys.key(tenant, store, id), tenant, store, id) == 1;
+        return id != null && jdbc.queryForObject("SELECT COUNT(*) FROM ma_memory_entry WHERE"
+                        + " tenant_id=? AND memory_store_id=? AND memory_id=? AND is_deleted=0",
+                Integer.class, tenant, store, id) == 1;
     }
 
     private void save(Admission admitted, Result result) {

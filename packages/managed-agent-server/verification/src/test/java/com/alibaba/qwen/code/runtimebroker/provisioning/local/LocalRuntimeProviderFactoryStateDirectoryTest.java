@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.nio.file.attribute.UserPrincipal;
+import java.nio.file.attribute.UserPrincipalNotFoundException;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -248,6 +249,7 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
     @Test
     void durableExistingNonPrivateDirectoryFailsPreflightAndCreate() throws Exception {
         Path state = Files.createDirectory(directory.resolve("existing-0755"));
+        Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwxr-xr-x"));
         var factory = new LocalRuntimeProviderFactory();
         assertThat(factory.preflight(durableSettings(state)))
                 .filteredOn(check -> check.name().equals("broker-state"))
@@ -373,8 +375,14 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
         // privilege to chown to a foreign principal; skips where denied.
         Path state = Files.createDirectory(directory.resolve("foreign-owned"));
         Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwx------"));
-        UserPrincipal foreign = state.getFileSystem().getUserPrincipalLookupService()
-                .lookupPrincipalByName("nobody");
+        UserPrincipal foreign;
+        try {
+            foreign = state.getFileSystem().getUserPrincipalLookupService()
+                    .lookupPrincipalByName("nobody");
+        } catch (UserPrincipalNotFoundException absent) {
+            foreign = null;
+        }
+        assumeTrue(foreign != null, "nobody is resolvable");
         assumeTrue(!foreign.equals(RuntimeStateFiles.processOwner()), "checker is not nobody");
         try {
             Files.setOwner(state, foreign);
@@ -457,8 +465,14 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
         // and service-account PASS tests, which leave serviceUser blank/set).
         Path state = Files.createDirectory(directory.resolve("unset-service-foreign"));
         Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwx------"));
-        UserPrincipal foreign = state.getFileSystem().getUserPrincipalLookupService()
-                .lookupPrincipalByName("nobody");
+        UserPrincipal foreign;
+        try {
+            foreign = state.getFileSystem().getUserPrincipalLookupService()
+                    .lookupPrincipalByName("nobody");
+        } catch (UserPrincipalNotFoundException absent) {
+            foreign = null;
+        }
+        assumeTrue(foreign != null, "nobody is resolvable");
         assumeTrue(!foreign.equals(RuntimeStateFiles.processOwner()), "checker is not nobody");
         try {
             Files.setOwner(state, foreign);

@@ -7,7 +7,9 @@ Status: execution spec. Increment 1 (tenant guard) merged in #17927. This plan c
 remaining join-connected cluster, which must be converted atomically. Revision
 (2026-11-20): updated with the
 [duplicate business key survey](../design/2026-11-20-managed-identity-varchar-dehash.md#duplicate-business-keys)
-and its decisions.
+and its decisions. Revision (2026-11-21): increment 2 (redundant same-row hash keys,
+[design](../design/2026-11-20-managed-identity-varchar-dehash.md#increment-2-redundant-same-row-hash-keys))
+lands ahead of the cluster; see [Increment 2 execution](#increment-2-execution).
 
 ## Why the cluster is atomic (no green sub-step)
 
@@ -17,10 +19,11 @@ ma_session.creator_actor_key)`), so converting one table breaks joins until all 
 - Budget shrink and fixture alignment are coupled: `VARCHAR(64)` rejects existing long
   fixtures (`ws-<cwd>` workspace ids, 43-char `"tenant-"+UUID`), so DDL budgets and fixture
   changes must land together.
-- No duplicate-key hash can be removed ahead of the conversion. At current VARBINARY widths
-  the raw replacements exceed 3072 bytes (storage alias 4096, Session head 4096, resource
-  4608, `idx_ma_work_pending` ≈3200), and `receipt_key` is minted into public workspace and
-  storage ids.
+- Apart from the same-row redundant keys of increment 2, no duplicate-key hash can be
+  removed ahead of the conversion. At current VARBINARY widths the raw replacements exceed
+  3072 bytes (storage alias 4096, resource 4608, `idx_ma_work_pending` ≈3200), and
+  `receipt_key` is minted into public workspace and storage ids. The Session head key fits
+  only because increment 2 narrows the head tenant to its parent's 512 bytes.
 - Cross-table hash references (`ma_message.body_resource_key`,
   `ma_event_stream.artifact_refs_resource_key`, `ma_resource_ref.resource_key`, …) cannot be
   expanded to local raw columns that do not exist in the referencing table; they need added
@@ -74,6 +77,27 @@ the ripple plus the hash-drop/rebuild/cursor/generated/CHECK/meta-test work belo
   values→String.
 - Loop: whitelist type script (main + verification tests) → `test-compile` → manually fix the listed
   semantic sites → repeat until compile green → broad H2 → double Checkstyle → commit.
+
+## Increment 2 execution
+
+Scope, kept keys and query rules are in the
+[design](../design/2026-11-20-managed-identity-varchar-dehash.md#increment-2-redundant-same-row-hash-keys).
+Execution notes:
+
+- One change: V1 DDL, `ManagedSchemaProjection`, the `ManagedSchemaTest` business keys,
+  every production query and every verification fixture move together. No VARBINARY type
+  changes, so binds keep their types.
+- Production SQL was rewritten per statement, never by keyword deletion. Each removed
+  predicate keeps the raw `(tenant_id, session_id)` or `(tenant_id, harness_session_id)`
+  prefix of the rebuilt index; joins to `ma_session` keep the registration marker.
+- Test SQL was rewritten by a statement-level tool, then audited. Resolving a scope
+  variable to its tenant and Session must use the nearest declaration in scope, including
+  method parameters; a file-wide last definition silently points a fixture at another
+  Session and can turn an assertion vacuous. Fixtures that planted a hash disagreeing with
+  its raw columns (to fake a foreign scope or a colliding head) are rewritten with a
+  genuinely different tenant or Session, since the raw key is now the only key.
+- Bind-count assertions change with the shape (three binds per run in the automation
+  ledger batch, twelve per row in the capture GC enqueue).
 
 ## Execution order
 

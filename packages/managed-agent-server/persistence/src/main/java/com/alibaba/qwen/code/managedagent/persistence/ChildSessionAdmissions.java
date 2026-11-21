@@ -171,15 +171,13 @@ final class ChildSessionAdmissions {
         // is the same key the idempotent admission derives, so the
         // locking read never becomes a cross-tenant table scan under
         // REPEATABLE READ.
-        String fenceScopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId,
-                parentSessionId);
         String fenceRecordKey = ManagedExtensionProjection.recordKey(
                 parentSessionId, "child_run", lineage.parentChildRunId());
         List<String> runState = jdbc.query("SELECT task_state FROM"
                 + " ma_session_record"
-                + " WHERE session_scope_key = ? AND record_key = ?"
+                + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?"
                 + " FOR UPDATE",
-                (result, row) -> result.getString(1), fenceScopeKey,
+                (result, row) -> result.getString(1), tenantId, parentSessionId,
                 fenceRecordKey);
         if (!runState.isEmpty()
                 && ("completed".equals(runState.getFirst())

@@ -273,15 +273,14 @@ public class SurfaceAdmissionAcceptanceTest {
         String session = createSession(tenant, OWNER, true);
         String recordKey = "e".repeat(64);
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
+                        + " VALUES (?, ?, 'ws', ?, 'child_run',"
                         + " 'run-retained', ?, 1, 'resource-retained',"
                         + " 'child_agent', 'running', 'session', 'planned', 1)",
-                ManagedSessionStore.sessionScopeKey(tenant, session),
                 recordKey, tenant, session, "f".repeat(64));
         String key = nextKey();
         java.util.function.Supplier<MockHttpServletRequestBuilder> cancel =
@@ -323,16 +322,15 @@ public class SurfaceAdmissionAcceptanceTest {
     private String insertSettledTask(String tenant, String session) {
         String recordKey = "a".repeat(64);
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create, settled_at)"
-                        + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
+                        + " VALUES (?, ?, 'ws', ?, 'child_run',"
                         + " 'run-settled', ?, 1, 'resource-settled',"
                         + " 'child_agent', 'completed', 'session',"
                         + " 'consumed', 1, 2)",
-                ManagedSessionStore.sessionScopeKey(tenant, session),
                 recordKey, tenant, session, "b".repeat(64));
         // The task view reads a child task's committed body for its child
         // Session link (#13746 F2), so the list probes need one.
@@ -340,15 +338,15 @@ public class SurfaceAdmissionAcceptanceTest {
         byte[] body = "{\"childSessionId\":null}".getBytes(
                 StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key,"
-                        + " session_scope_key, tenant_id, workspace_id,"
+                        + " tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes,"
                         + " publish_command_id, state, gmt_create) VALUES (?,"
-                        + " ?, ?, 'ws', ?, 'resource-settled',"
+                        + " ?, 'ws', ?, 'resource-settled',"
                         + " 'managed-child_run', 1, ?, ?, 'MYSQL_INLINE', ?,"
                         + " 'command', 'REFERENCED', 1)",
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "resource-settled"),
-                scope, tenant, session, body.length,
+                tenant, session, body.length,
                 org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
                 body);
         return "task_" + recordKey;
@@ -2283,10 +2281,9 @@ public class SurfaceAdmissionAcceptanceTest {
             throws Exception {
         String action = "tool_approval_"
                 + UUID.randomUUID().toString().replace("-", "");
-        jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, domain, record_id, revision, tenant_id,"
+        jdbc.update("INSERT INTO ma_session_record (record_kind, record_key, domain, record_id, revision, tenant_id,"
                 + " session_id, action_id, action_version, state, options_json, gmt_create)"
-                + " VALUES ('ACTION', ?, ?, 'action', ?, 1, ?, ?, ?, 1, 'requested', ?, 0)",
-                ManagedSessionStore.sessionScopeKey(tenant, session),
+                + " VALUES ('ACTION', ?, 'action', ?, 1, ?, ?, ?, 1, 'requested', ?, 0)",
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant, session, "action", action),
                 action, tenant, session, action, JSON.writeValueAsString(Map.of("expiresAt",
                         System.currentTimeMillis() + 3_600_000L,

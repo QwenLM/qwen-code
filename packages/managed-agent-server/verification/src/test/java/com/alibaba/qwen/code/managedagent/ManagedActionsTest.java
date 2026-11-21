@@ -391,25 +391,20 @@ class ManagedActionsTest {
                 .andExpect(status().isNotFound()).andExpect(jsonPath("$.error.code").value("session_not_found"));
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void childAggregationDoesNotJoinActionsFromAnotherScope(boolean childRow) throws Exception {
+    @Test
+    void childAggregationDoesNotJoinActionsFromAnotherScope() throws Exception {
         String tenant = tenant();
         String root = session(tenant);
         String child = childSession(tenant, root);
         String other = session(tenant);
         ActionJournal own = action(tenant, root, 100, 9_007_199_254_740_991L);
         ActionJournal nested = action(tenant, child, 200, 9_007_199_254_740_991L);
-        ActionJournal foreign = action(tenant, other, 300, 9_007_199_254_740_991L);
+        action(tenant, other, 300, 9_007_199_254_740_991L);
         for (String session : List.of(root, child, other)) {
             assertThat(jdbc.queryForObject("SELECT session_scope_key FROM ma_session"
                             + " WHERE tenant_id = ? AND session_id = ?", String.class, tenant, session))
                     .isEqualTo(ManagedSessionStore.sessionScopeKey(tenant, session));
         }
-        // Keep the foreign writer's real scope; only corrupt its denormalized Session identity.
-        assertThat(jdbc.update("UPDATE ma_session_record SET session_id = ? WHERE session_scope_key = ?"
-                        + " AND record_kind = 'ACTION' AND action_id = ?", childRow ? child : root,
-                ManagedSessionStore.sessionScopeKey(tenant, other), foreign.id)).isEqualTo(1);
         assertThat(actions.listWithChildren(tenant, root, null, null, null, 10))
                 .extracting(row -> row.sessionId() + ":" + row.action().id())
                 .containsExactly(child + ":" + nested.id, root + ":" + own.id);

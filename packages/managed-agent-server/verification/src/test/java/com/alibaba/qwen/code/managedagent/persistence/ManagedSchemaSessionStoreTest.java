@@ -8,7 +8,6 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -203,9 +202,9 @@ public class ManagedSchemaSessionStoreTest {
         assertThat(
                         jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'MESSAGE'"
-                                        + " AND session_scope_key = ?",
+                                        + " AND tenant_id = ? AND session_id = ?",
                                 Integer.class,
-                                ManagedSessionStore.sessionScopeKey(tenant, session)))
+                                tenant, session))
                 .isEqualTo(1);
     }
 
@@ -284,15 +283,14 @@ public class ManagedSchemaSessionStoreTest {
         materialize();
         String original = messageBody("big");
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                scope, scope, original, tenant, session);
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, gmt_create) VALUES ('JOURNAL', ?, 1, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")", scope, original, tenant, session);
         event("big", "b");
         clock.advance(Duration.ofSeconds(6));
         materialize();
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("REFERENCED");
         tx.executeWithoutResult(status -> {
-            ManagedProjectionResourceCollector.release(jdbc, scope, "JOURNAL", scope);
+            ManagedProjectionResourceCollector.release(jdbc, tenant, session, "JOURNAL", scope);
             jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'JOURNAL' AND owner_key = ?", scope);
             jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
         });
@@ -470,9 +468,9 @@ public class ManagedSchemaSessionStoreTest {
         event("big", "a".repeat(70_000));
         materialize();
         jdbc.update(
-                "UPDATE ma_resource SET session_scope_key = ? WHERE resource_key = (SELECT"
+                "UPDATE ma_resource SET session_id = ? WHERE resource_key = (SELECT"
                     + " body_resource_key FROM ma_message WHERE tenant_id = ? AND item_id = ?)",
-                ManagedSessionStore.sessionScopeKey(tenant, "another-session"),
+                "another-session",
                 tenant,
                 "big");
         assertThatThrownBy(() -> messages())
@@ -582,11 +580,7 @@ public class ManagedSchemaSessionStoreTest {
     void harnessOnlyHeadHasNoPrivateJournalReadAuthority() {
         String token = "a".repeat(32);
         jdbc.update(
-                "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                RuntimeAdmissionFences.harnessDrainKey(
-                        tenant),
-                RuntimeAdmissionFences.harnessDrainKey(
-                        session),
+                "INSERT INTO ma_session_head (tenant_id, harness_session_id, session_id, head_kind, gmt_create, gmt_modified) VALUES (?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 tenant,
                 session,
                 session);
@@ -857,9 +851,9 @@ public class ManagedSchemaSessionStoreTest {
                 switch (corruption) {
                     case "scope" ->
                             super.update(
-                                    "UPDATE ma_resource SET session_scope_key = ?"
+                                    "UPDATE ma_resource SET session_id = ?"
                                             + " WHERE resource_key = ?",
-                                    "0".repeat(64),
+                                    "another-session",
                                     arguments[0]);
                     case "bytes" ->
                             super.update(

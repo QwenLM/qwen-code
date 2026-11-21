@@ -4467,7 +4467,7 @@ Cancellation: **none in v1**. The route does not listen for HTTP client disconne
 
 Capability tag: `session_mod_rows`. Bridge → ACP extMethod `qwen/control/session/mod_row`.
 
-Ask a live session's Mods for a transcript row this client draws, such as a block of the model's reply (`AssistantMessage`). The bridge declares the row sites the Web Shell draws in its `initialize` client capabilities (`_meta["qwen.modRows"]`), so the child runs each session's Mods on the `desktop` surface and offers those sites to their `ui.render` hooks.
+Ask a live session's Mods for a transcript row this client draws, such as a block of the model's reply (`AssistantMessage`) or of its thinking (`Thinking`, whose `props` are `{ "text": "…" }`). The bridge declares the row sites the Web Shell draws in its `initialize` client capabilities (`_meta["qwen.modRows"]`), so the child runs each session's Mods on the `desktop` surface and offers those sites to their `ui.render` hooks.
 
 Request body:
 
