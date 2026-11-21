@@ -144,4 +144,16 @@ Any deferral must retain input, define a maximum freshness delay, account for al
 
 Open decisions before the implementation PR: exact input budget, oversized-turn representation, owner/generation cursor shape and migration, write serialization, and safe ownership of retained input at lifecycle boundaries. Do not present those unresolved details as implemented guarantees.
 
+## 7. Opt-in stable extraction window experiment (#15493)
+
+A sliding last-40 tail cannot reuse a provider prefix: its first bytes move on every append. One default-off experiment addresses that without adopting the persistent-extraction-conversation design proposed in #15493.
+
+- `QWEN_CODE_MEMORY_EXTRACT_STABLE_WINDOW=1` turns it on. It is an environment-only experiment, default off, and is excluded from project `.env` files like the cadence experiment; there is no settings-schema change and no user-visible default change.
+- The extractor input becomes `curated[windowStart..]`, sanitized exactly as today (`slimCompactionInput` then `buildAgentHistory`), with the task prompt at the tail. `windowStart` is pinned per extraction epoch, so consecutive runs send a byte-identical history prefix. The 40-entry tail remains the fallback whenever the flag is off.
+- Window state lives on the project extract cursor in CURATED-history coordinates, next to the RAW `processedOffset`, and is written only while the flag is on: `epoch`, `windowStartCurated`, `coveredCurated`, `windowHeadHash`, and a process/boundary `windowEpochId`. Raw offsets are never used to index curated history.
+- A new epoch seeds its start from the last 40 curated entries, no later than the last covered curated index, so turns that no completed run extracted stay in the input. Epochs bump only on structural invalidation: a session change, a process restart, a history-rewriting boundary (compaction, `/clear`, rewind/branch), a history that shrank below the pinned start, or a rewritten start entry. The window is deliberately unbounded between those events: #15493 leaves growth bounding to the session-compaction policy, and re-slicing to a newer tail for size reasons would reintroduce the sliding window this experiment removes. The covered index advances only after a run made genuine progress.
+- The parent's curated history is materialized once at extraction execution time, never on the per-turn scheduling path.
+
+This is not the persistent extractor conversation from #15493, does not borrow the parent's rendered system prompt, and changes no default. Unit tests pin prefix equality across consecutive runs, the rebase negative controls, no-loss of the unextracted tail, an unchanged flag-off path (including the 40-entry assertion), and readability of a pre-experiment cursor. Paired real-model runs are still required to judge fact-level quality and cache savings; this section claims neither.
+
 Formatting and relative-reference checks validate this documentation only. No build, unit suite, controlled-provider run, real-model baseline, savings estimate, or implementation PR is claimed by this document.
