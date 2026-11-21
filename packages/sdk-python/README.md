@@ -126,6 +126,10 @@ with query_sync(
 `prompt` accepts either a single `str` or an `AsyncIterable[SDKUserMessage]`
 for multi-turn sessions.
 
+The `can_use_tool` callback can be an async function or an object with an async
+`__call__` method. It must accept the three positional arguments supplied by the
+SDK without requiring additional keyword-only arguments.
+
 ## Common Options
 
 ```python

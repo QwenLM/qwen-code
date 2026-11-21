@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
-from inspect import Parameter, Signature, iscoroutinefunction, signature
+from inspect import Signature, iscoroutinefunction, signature
 from typing import (
     Any,
     Literal,
@@ -300,7 +300,7 @@ def _validate_can_use_tool_callable(value: object, error_type: type[Exception]) 
     if not callable(value):
         raise error_type("can_use_tool must be callable")
 
-    if not iscoroutinefunction(value):
+    if not iscoroutinefunction(value) and not iscoroutinefunction(value.__call__):
         raise error_type("can_use_tool must be an async callable")
 
     try:
@@ -326,26 +326,11 @@ def _validate_stderr_callable(value: object, error_type: type[Exception]) -> Non
 
 
 def _supports_argument_count(sig: Signature, count: int) -> bool:
-    params = list(sig.parameters.values())
-    positional_params = [
-        param
-        for param in params
-        if param.kind
-        in (
-            Parameter.POSITIONAL_ONLY,
-            Parameter.POSITIONAL_OR_KEYWORD,
-        )
-    ]
-    required_positional = [
-        param for param in positional_params if param.default is Parameter.empty
-    ]
-    has_var_positional = any(param.kind is Parameter.VAR_POSITIONAL for param in params)
-
-    if len(required_positional) > count:
+    try:
+        sig.bind(*([None] * count))
+    except TypeError:
         return False
-    if has_var_positional:
-        return True
-    return len(positional_params) >= count
+    return True
 
 
 def _as_optional_str_dict(data: Mapping[str, Any], key: str) -> dict[str, str] | None:
