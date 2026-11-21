@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import * as path from 'node:path';
 import {
   parsePDFPageRange,
   isPdftotextAvailable,
@@ -901,7 +902,7 @@ describe('pdf utilities', () => {
       });
       expect(result).toMatchObject({ success: false, tooLarge: true });
       expect(readFileWithinBase64Limit).toHaveBeenLastCalledWith(
-        '/tmp/pdf-render-test/page-1.jpg',
+        path.join('/tmp/pdf-render-test', 'page-1.jpg'),
         4,
         undefined,
       );
@@ -927,7 +928,7 @@ describe('pdf utilities', () => {
         bytesTruncated: true,
       });
       expect(readFileWithinBase64Limit).toHaveBeenLastCalledWith(
-        '/tmp/pdf-render-test/page-2.jpg',
+        path.join('/tmp/pdf-render-test', 'page-2.jpg'),
         0,
         undefined,
       );
