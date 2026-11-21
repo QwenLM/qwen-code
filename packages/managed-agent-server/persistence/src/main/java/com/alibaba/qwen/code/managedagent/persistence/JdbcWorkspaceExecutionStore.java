@@ -32,6 +32,8 @@ import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionSt
 @Repository
 public class JdbcWorkspaceExecutionStore
         implements WorkspaceExecutionStore {
+    private static final int PREDICATE_PLACEMENT_TIMEOUT_SECONDS = 10;
+
     private com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
     @org.springframework.beans.factory.annotation.Autowired
     public void configureWorktreeFiles(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles value) { worktreeFiles = value; }
@@ -215,8 +217,9 @@ public class JdbcWorkspaceExecutionStore
         if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             return isHeld(context, session);
         }
-        return external(context, binding, repository, session.getSession().getScope(), false, (connection, owner, current) ->
-                JdbcExternalWorkspaceOwnership.held(connection, owner, current, session, false));
+        return external(context, binding, repository, session.getSession().getScope(), false, false,
+                PREDICATE_PLACEMENT_TIMEOUT_SECONDS, (connection, owner, current) ->
+                        JdbcExternalWorkspaceOwnership.held(connection, owner, current, session, false));
     }
 
     public void assertHeld(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
@@ -225,12 +228,13 @@ public class JdbcWorkspaceExecutionStore
             assertHeld(context, session);
             return;
         }
-        external(context, binding, repository, session.getSession().getScope(), true, (connection, owner, current) -> {
-            if (!JdbcExternalWorkspaceOwnership.held(connection, owner, current, session, true)) {
-                throw busy();
-            }
-            return null;
-        });
+        external(context, binding, repository, session.getSession().getScope(), true, false,
+                PREDICATE_PLACEMENT_TIMEOUT_SECONDS, (connection, owner, current) -> {
+                    if (!JdbcExternalWorkspaceOwnership.held(connection, owner, current, session, true)) {
+                        throw busy();
+                    }
+                    return null;
+                });
     }
 
     public void release(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
@@ -258,7 +262,7 @@ public class JdbcWorkspaceExecutionStore
 
     public void releaseStopped(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
-        external(context, binding, repository, session.getSession().getScope(), false, true, (connection, owner, current) -> {
+        external(context, binding, repository, session.getSession().getScope(), false, true, 0, (connection, owner, current) -> {
             JdbcExternalWorkspaceOwnership.releaseStopped(connection, owner, current, binding, session);
             return null;
         });
@@ -266,18 +270,18 @@ public class JdbcWorkspaceExecutionStore
 
     private <T> T external(ContextBinding context, RuntimeBindingRecord binding, RuntimeBindingRepository repository,
             com.alibaba.qwen.code.runtimebroker.RuntimeScope scope, boolean acquiring, ExternalWork<T> work) {
-        return external(context, binding, repository, scope, acquiring, false, work);
+        return external(context, binding, repository, scope, acquiring, false, 0, work);
     }
 
     private <T> T external(ContextBinding context, RuntimeBindingRecord binding, RuntimeBindingRepository repository,
             com.alibaba.qwen.code.runtimebroker.RuntimeScope scope, boolean acquiring, boolean claimDriftRetryable,
-            ExternalWork<T> work) {
+            int placementTimeoutSeconds, ExternalWork<T> work) {
         if (!(repository instanceof JdbcRuntimeBindingRepository original) || !original.usesDataSource(jdbc.getDataSource())) {
             throw unavailable();
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
         return transaction.execute(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<T>) connection -> {
-            var owner = JdbcExternalWorkspaceOwnership.lockOwner(connection, binding);
+            var owner = JdbcExternalWorkspaceOwnership.lockOwner(connection, binding, placementTimeoutSeconds);
             var saved = JdbcExternalWorkspaceOwnership.savedContext(connection, binding, acquiring);
             if (context != null && !context.equals(saved)) {
                 throw unavailable();
