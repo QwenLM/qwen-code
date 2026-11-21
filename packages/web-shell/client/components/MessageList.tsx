@@ -56,6 +56,7 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import { isAutomaticTriggerSource } from '../utils/automatic-trigger';
 import { formatTurnDuration } from '../utils/turnDuration';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
@@ -1093,10 +1094,7 @@ function isScheduledTaskMessage(message: {
   role: Message['role'];
   source?: string;
 }): boolean {
-  return (
-    message.role === 'user' &&
-    (message.source === 'cron' || message.source === 'loop')
-  );
+  return message.role === 'user' && isAutomaticTriggerSource(message.source);
 }
 
 // Collapse and timeline turns start at chat prompts and shell prompts; new-chat

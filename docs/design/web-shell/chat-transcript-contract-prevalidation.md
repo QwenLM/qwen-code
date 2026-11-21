@@ -34,7 +34,7 @@ native source
 
 ChatTranscriptModel
   → document/export allowlist projector
-  → ExportTranscriptDocumentV1
+  → ExportTranscriptDocumentV1 | V2
   → WebShellTranscript document mode
   → version-bound HTML
 ```
@@ -43,7 +43,7 @@ ChatTranscriptModel
 
 - Web/Qwen Server 与 Qwen Tauri Desktop 已经使用完整 WebShell，保持现状；
 - VS Code 在 direct-daemon 与 ACP 薄转换两条路径都通过稳定 identity 探针后选择生产路径，只迁移聊天时间线；
-- HTML Export 从 `ChatRecord[]` 复用规范投影得到 `ChatTranscriptModel`，再单向转换为安全的 `ExportTranscriptDocumentV1`；
+- HTML Export 从 `ChatRecord[]` 复用规范投影得到 `ChatTranscriptModel`，再单向转换为安全的 `ExportTranscriptDocumentV1 \| ExportTranscriptDocumentV2`；
 - composer、活动权限响应、会话管理、传输、持久化和宿主副作用始终由宿主持有；
 - 默认 interactive/readonly adapter 的 `rawInput`、`rawOutput` 和现有 Turn Output 语义不得改变；
 - typed `preview`/`resultPreview` 的安全消费只在 document/export 路径启用；
@@ -223,11 +223,11 @@ interface TranscriptAdapterContext {
 
 最终定义三种模式：
 
-| 模式          | 输入                                               | raw 语义                                   | 交互与资源策略                                      |
-| ------------- | -------------------------------------------------- | ------------------------------------------ | --------------------------------------------------- |
-| `interactive` | live runtime blocks                                | 保持现状，以 raw 为完整工具事实来源        | 完整 WebShell 交互                                  |
-| `readonly`    | live/replayed runtime blocks                       | 保持现状，以 raw 为完整工具事实来源        | 无 composer/permission response；宿主 callback 可选 |
-| `document`    | `ExportTranscriptDocumentV1` 的安全 renderer input | 禁止 raw；只消费 typed safe preview/result | 无宿主动作、无虚拟化、无主动远程资源                |
+| 模式          | 输入                                   | raw 语义                                   | 交互与资源策略                                      |
+| ------------- | -------------------------------------- | ------------------------------------------ | --------------------------------------------------- |
+| `interactive` | live runtime blocks                    | 保持现状，以 raw 为完整工具事实来源        | 完整 WebShell 交互                                  |
+| `readonly`    | live/replayed runtime blocks           | 保持现状，以 raw 为完整工具事实来源        | 无 composer/permission response；宿主 callback 可选 |
+| `document`    | schema 1 或 2 的安全 document envelope | 禁止 raw；只消费 typed safe preview/result | 无宿主动作、无虚拟化、无主动远程资源                |
 
 兼容性不变量：
 
@@ -415,7 +415,7 @@ ChatRecord[]
   → projectChatRecordsToDaemonTranscript()
   → ChatTranscriptModel
   → safe document projector
-  → ExportTranscriptDocumentV1
+  → ExportTranscriptDocumentV1 | V2
   → schema/budget validation
   → WebShellTranscript document mode
   → version-bound HTML
@@ -434,6 +434,8 @@ ExportTranscriptDocumentV1 = projectForDocument(ChatTranscriptModel)
 ```
 
 它是版本化文档 DTO，不是第二套运行时 transcript model，也不回流到 live session。
+
+V2 在这个基础投影上增加受限的 user `meta.source: 'cron'`，新版本只通过 document DTO 输出。字段轴 `schemaVersion` 与实现轴 `rendererVersion` 不得混用。reader 接受有效的 V1、V2，但拒绝其它版本、V1 中新增的 `meta`，以及 V2 中非规范的单键 Cron metadata。
 
 ```ts
 interface ExportTranscriptDocumentV1 {
@@ -473,6 +475,8 @@ JSON Schema 以 `additionalProperties: false` 封闭每种 block：
 | `status`/`error`             | text、已知 code/errorKind、安全 source                                                                                            |
 | `prompt_cancelled`           | 安全 reason                                                                                                                       |
 | `debug`                      | V1 默认拒绝；产生 code/count diagnostic                                                                                           |
+
+在 schema version 2 中，且仅在 block 为 `user` 时，额外允许一个受限的 `meta: { source: 'cron' }`。这是离线回放生成的规范化展示路由标签，不是透传的 metadata bag；不含 timestamp、sourceRecordIds 或其它用户提供的元数据。V1 的 `user` block 不包含 `meta`，保持原有封闭字段集合。
 
 以下字段永不直接导出：
 
@@ -569,7 +573,7 @@ document mode 必须：
 - 关闭虚拟化和内部滚动，确保全文查找、选择、复制和打印覆盖全部 blocks；
 - 默认展开 thinking、plan、工具组、并行 agent、sub-agent 及嵌套工具；
 - 关闭 composer、权限响应、retry、branch、session navigation 和宿主 action；
-- 只读取 `ExportTranscriptDocumentV1` 的安全 renderer input；
+- 只读取 schema 1 或 2 的安全 document envelope，同时拒绝其它版本值；
 - Markdown 远程图片不请求网络，危险 HTML/SVG 不执行；
 - Mermaid 限制、超时和 fallback 只在 document mode 启用，不能污染 interactive/readonly 的全局配置或缓存；
 - Mermaid、代码高亮、diff 和 chart 失败时保留可复制源码；
@@ -578,7 +582,7 @@ document mode 必须：
 ### 10.9 CSP 与登记网络
 
 HTML 使用与 CLI build 精确绑定的 renderer。禁止 `latest`、版本范围和运行时远程解析。
-只有已将 renderer asset 发布到 npm 的 CLI 版本才能打开导出；两次发布之间的 source build 按设计 fail closed。
+source build 委托到已发布 renderer 时，按该 renderer 的 schema 上限输出：pre-V2 renderer 默认输出 V1，避免无条件 V2 使所有导出失效。如果自行选择不支持所产出 document 的 renderer，或其身份、SRI 与实际资产不匹配，仍失败关闭。显式的上限 2 必须对应同一实际支持 V2 的 renderer 与 JS/CSS 摘要。
 
 最低安全要求：
 
@@ -607,6 +611,7 @@ HTML 使用与 CLI build 精确绑定的 renderer。禁止 `latest`、版本范�
 - `rendererVersion` 必须是精确 CLI 版本或内容 hash，禁止 `latest`、`~`、`^`、比较范围和 `*`；
 - renderer 明确声明支持的 schema 版本；不兼容时显示只读错误页，不宽松解析；
 - schema 升级保留上一已发布版本的读取和安全 canary 测试，直到对应 CLI 退出支持；
+- automatic-trigger 的 document 投影遵循上述递增：版本 2 的 user block 可增加单键、固定为 `cron` 的 `meta.source`。版本 1 的产生器和文件仍拒绝该字段；HTML writer 根据编译时声明的 renderer schema 上限选择版本；当前本地 renderer 支持 2，pre-V2 委托默认选择 1，只有实际 renderer、身份和 SRI 均支持 2 时才允许显式上限 2。reader 同时接受版本 1 和版本 2，其它版本值仍触发只读错误页。V2 的其余 metadata 排除规则不变。
 - `fixtureVersion` 只描述测试录制格式，不代替 export schema version。
 
 ## 11. Fixture、schema 与 capability matrix
@@ -630,7 +635,7 @@ integration-tests/fixtures/chat-transcript-contract/v1/
     └── manifest.schema.json
 ```
 
-Export schema 的唯一生产副本位于 `packages/cli/src/ui/utils/export/export-transcript-document-v1.schema.json`。integration gate 直接读取该文件；fixture 不再复制第二份容易漂移的 schema。
+V1 schema 的唯一生产副本仍位于 `packages/cli/src/ui/utils/export/export-transcript-document-v1.schema.json`。integration gate 直接读取该文件；fixture 不再复制第二份容易漂移的 schema。该文件不被改写；V2 schema 在导出工厂中从它派生，区分版本标识并仅对既有 `userBlock` 增加受限的 `meta.source`，其余结构与安全策略继承不变。
 
 规则：
 
@@ -875,7 +880,7 @@ Web/Qwen 和 Tauri 不迁移。若 MR2A/MR2B 对共享组件的改动导致默�
 - direct-daemon 与 ACP identity 验证达到本文档门禁；
 - MR2A 的 VS Code `/export html` 使用新 document pipeline，同时 live timeline 保持 legacy；
 - MR2B 已选择并实现一条 VS Code live transcript 路径，其时间线使用 WebShell UI，现有 composer、permission、session 和 host actions 保持边界；
-- HTML Export 使用 canonical projector、`ExportTranscriptDocumentV1`、版本绑定 renderer 和 document mode；
+- HTML Export 使用 canonical projector、schema 1 或 2 的安全 document envelope、版本绑定 renderer 和 document mode；
 - HTML 产品路径与 integration runner 不再维护第二套 renderer；
 - Web/Qwen Server 和 Tauri Desktop 默认行为无回归；
 - security、network、budget、CSP、version、VSIX/CLI packaging 和观察期完成；

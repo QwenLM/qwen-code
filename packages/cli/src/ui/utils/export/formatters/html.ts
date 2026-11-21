@@ -7,15 +7,19 @@
 import type { ExportSessionData } from '../types.js';
 import { randomBytes } from 'node:crypto';
 import {
+  EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION,
   EXPORT_TRANSCRIPT_HTML_TEMPLATE,
   EXPORT_TRANSCRIPT_RENDERER_LIMITS,
   EXPORT_TRANSCRIPT_RENDERER_VERSION,
 } from '@qwen-code/web-templates';
 import {
   assertExportTranscriptDocumentV1,
+  assertExportTranscriptDocumentV2,
   createExportTranscriptDocumentV1,
+  createExportTranscriptDocumentV2,
   EXPORT_TRANSCRIPT_LIMITS_V1,
   type ExportTranscriptDocumentV1,
+  type ExportTranscriptDocumentV2,
 } from '../export-transcript-document.js';
 import { escapeJsonForHtmlScriptData } from '../html-script-data.js';
 
@@ -27,9 +31,13 @@ export function injectDocumentIntoHtmlTemplate(
 }
 
 export function renderExportTranscriptDocumentToHtml(
-  document: ExportTranscriptDocumentV1,
+  document: ExportTranscriptDocumentV1 | ExportTranscriptDocumentV2,
 ): string {
-  assertExportTranscriptDocumentV1(document);
+  if (document.schemaVersion === 1) {
+    assertExportTranscriptDocumentV1(document);
+  } else {
+    assertExportTranscriptDocumentV2(document);
+  }
   if (document.rendererVersion !== EXPORT_TRANSCRIPT_RENDERER_VERSION) {
     throw new Error('Export transcript renderer version mismatch.');
   }
@@ -83,13 +91,13 @@ export function toHtml(
   sessionData: ExportSessionData,
   originalRecords: readonly unknown[],
 ): string {
-  const document = createExportTranscriptDocumentV1(
-    originalRecords,
-    sessionData,
-    {
-      rendererVersion: EXPORT_TRANSCRIPT_RENDERER_VERSION,
-      exportedAt: sessionData.metadata?.exportTime ?? new Date().toISOString(),
-    },
-  );
+  const options = {
+    rendererVersion: EXPORT_TRANSCRIPT_RENDERER_VERSION,
+    exportedAt: sessionData.metadata?.exportTime ?? new Date().toISOString(),
+  };
+  const document =
+    EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION === 1
+      ? createExportTranscriptDocumentV1(originalRecords, sessionData, options)
+      : createExportTranscriptDocumentV2(originalRecords, sessionData, options);
   return renderExportTranscriptDocumentToHtml(document);
 }

@@ -969,6 +969,7 @@ describe('web-shell zh-TW locale', () => {
 
   it('translates the surfaces that would otherwise stay English', () => {
     const tw = getTranslator('zh-TW');
+    const ru = getTranslator('ru');
     const en = getTranslator('en');
     for (const key of [
       'sidebar.gitCloneJobGone',
@@ -987,9 +988,17 @@ describe('web-shell zh-TW locale', () => {
       'managed.artifactLibrary.sessionFallback',
       'managed.artifactLibrary.refresh',
       'managed.artifactLibrary.close',
+      'userMessage.automatic.title',
     ]) {
       expect(tw(key, { path: '/w' })).not.toBe(en(key, { path: '/w' }));
     }
+    expect(getTranslator('zh-CN')('userMessage.automatic.title')).toBe(
+      '自动触发',
+    );
+    expect(ru('userMessage.automatic.title')).toBe(
+      'Автоматическое срабатывание',
+    );
+    expect(tw('userMessage.automatic.title')).toBe('自動觸發');
     expect(tw('sidebar.liveVoicePending')).toBe('語音通話');
     expect(tw('memory.savedIn', { path: '/w' })).toBe('已儲存於 /w');
   });
