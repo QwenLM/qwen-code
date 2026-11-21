@@ -407,8 +407,8 @@ final class JournalHistoryQueries {
         WorkspaceRecoveryReader.validateRef(ref);
         String scope = ManagedSessionStore.sessionScopeKey(head.tenantId(), head.sessionId());
         var resources = jdbc.query("SELECT " + ManagedSchemaProjection.RESOURCE.columns()
-                        + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND resource_id = ?",
-                storeRows.resourceMapper, ManagedSessionStore.resourceKey(scope, ref.path("resourceId").asText()), scope, ref.path("resourceId").asText());
+                        + " FROM ma_resource WHERE resource_key = ? AND resource_id = ?",
+                storeRows.resourceMapper, ManagedSessionStore.resourceKey(scope, ref.path("resourceId").asText()), ref.path("resourceId").asText());
         if (resources.size() != 1) {
             throw JournalStoreRows.journalCorrupt();
         }

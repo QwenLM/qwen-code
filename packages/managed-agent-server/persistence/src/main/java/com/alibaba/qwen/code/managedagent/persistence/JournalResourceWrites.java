@@ -82,13 +82,12 @@ final class JournalResourceWrites {
         JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey, resourceId);
         if (existing == null) {
             jdbc.update(
-                    "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                    "INSERT INTO ma_resource (resource_key, tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                        + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
+                        + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?,"
                         + " ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
                     ManagedSessionStore.resourceKey(scopeKey, resourceId),
-                    scopeKey,
                     tenantId,
                     workspaceId,
                     sessionId,
@@ -165,13 +164,12 @@ final class JournalResourceWrites {
         if (existing == null) {
             try {
                 jdbc.update(
-                        "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                        "INSERT INTO ma_resource (resource_key, tenant_id,"
                             + " workspace_id, session_id, resource_id, kind, schema_version,"
                             + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                            + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                            + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
                             + " ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
                         ManagedSessionStore.resourceKey(scopeKey, request.resourceId()),
-                        scopeKey,
                         tenantId,
                         request.workspaceId(),
                         sessionId,
@@ -264,11 +262,10 @@ final class JournalResourceWrites {
                 }
             }
             jdbc.update(
-                    "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                    "INSERT INTO ma_resource_ref (owner_kind, owner_key,"
                         + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                        + " journal_revision, resource_id, gmt_create) VALUES (?, 'JOURNAL', ?, ?,"
+                        + " journal_revision, resource_id, gmt_create) VALUES ('JOURNAL', ?, ?,"
                         + " ?, ?, ?, ?, ?, ?, ?)",
-                    scopeKey,
                     scopeKey,
                     revision,
                     ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()),
@@ -290,15 +287,15 @@ final class JournalResourceWrites {
         CommitResource resource = input.resource();
         try {
             jdbc.update("INSERT INTO ma_resource"
-                            + " (resource_key, session_scope_key, tenant_id,"
+                            + " (resource_key, tenant_id,"
                             + " workspace_id, session_id, resource_id,"
                             + " kind, schema_version, byte_length, sha256,"
                             + " storage_kind, inline_bytes,"
                             + " publish_command_id, state, gmt_create,"
-                            + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
+                            + " last_verified_at) VALUES (?, ?, ?, ?, ?,"
                             + " ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?,"
                             + " 'REFERENCED', ?, ?)",
-                    ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()), scopeKey, tenantId, request.workspaceId(), sessionId,
+                    ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()), tenantId, request.workspaceId(), sessionId,
                     resource.resourceId(), resource.kind(),
                     resource.schemaVersion(), resource.byteLength(),
                     resource.digest(), input.bytes(), request.commandId(),

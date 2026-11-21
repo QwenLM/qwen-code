@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.RelayRow;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -55,15 +54,14 @@ class ChildResultRelayLockMySqlIT {
 
     private void insert(String run) {
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, ?, 'workspace', ?, 'child_run', ?,"
+                        + " VALUES (?, ?, 'workspace', ?, 'child_run', ?,"
                         + " 'h', 1, ?, 'child_agent', 'pending', 'session',"
                         + " 'accepted', 1)",
-                ManagedSessionStore.sessionScopeKey(TENANT, SESSION),
                 ManagedExtensionProjection.recordKey(SESSION, "child_run",
                         run),
                 TENANT, SESSION, run, "resource-" + run);
@@ -111,10 +109,10 @@ class ChildResultRelayLockMySqlIT {
                 try (PreparedStatement update = connection.prepareStatement(
                         "UPDATE ma_session_record SET delivery_state ="
                                 + " 'consumed' WHERE record_kind = 'DOMAIN'"
-                                + " AND session_scope_key = ? AND record_key = ?")) {
-                    update.setString(1, ManagedSessionStore.sessionScopeKey(
-                            TENANT, SESSION));
-                    update.setString(2, ManagedExtensionProjection.recordKey(
+                                + " AND tenant_id = ? AND session_id = ? AND record_key = ?")) {
+                    update.setString(1, TENANT);
+                    update.setString(2, SESSION);
+                    update.setString(3, ManagedExtensionProjection.recordKey(
                             SESSION, "child_run", "run-keep"));
                     assertThat(update.executeUpdate())
                             .as("the unrelated record still commits")
