@@ -3339,6 +3339,7 @@ jobs:
           fi
 
       - name: 'Run required no-AK integration gate'
+        id: 'no_ak_gate'
         if: "${{ needs.test_build.result == 'success' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         timeout-minutes: 20
         # HOME/USERPROFILE come from the first step's GITHUB_ENV publication
@@ -3395,7 +3396,27 @@ jobs:
             esac
             env "${typecheck_heap[@]}" npm run typecheck:integration
           fi
-          npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/2
+          parity_evidence="${RUNNER_TEMP}/qwen-acp-parity-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-shard-${{ matrix.shard }}"
+          mkdir -p "$parity_evidence"
+          env ACP_PARITY_DUMP="$parity_evidence" npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/2
+
+      - name: 'Upload ACP retry parity evidence'
+        if: "${{ failure() && steps.no_ak_gate.outcome == 'failure' }}"
+        continue-on-error: true
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'acp-retry-parity-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}'
+          path: |
+            ${{ runner.temp }}/qwen-acp-parity-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}/a-retry-that-fails-again/
+            ${{ runner.temp }}/qwen-acp-parity-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}/a-retry-that-fails-again.current.json
+            ${{ runner.temp }}/qwen-acp-parity-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}/a-retry-that-fails-again.shared.json
+            ${{ runner.temp }}/qwen-acp-parity-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}/a-retry-that-fails-again.kernel.json
+          if-no-files-found: 'warn'
+          retention-days: 7
+
+      - name: 'Clean ACP retry parity evidence'
+        if: '${{ always() }}'
+        run: 'rm -rf -- "${RUNNER_TEMP}/qwen-acp-parity-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-shard-${{ matrix.shard }}"'
 
       # Reclaim the run-unique HOME (constructed path, never $HOME) so it
       # does not accumulate in RUNNER_TEMP on this persistent pool.

@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { accessSync, constants, statSync } from 'node:fs';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { runExitCleanup } from './cleanup.js';
+import { writeStderrLineSafe } from './stdioHelpers.js';
 
 /**
  * Exit code used to signal that the CLI should be relaunched.
@@ -59,17 +62,28 @@ export function getRelaunchExecArgv(): string[] {
  * Exits the process with a special code to signal that the parent process should relaunch it.
  */
 export async function relaunchApp(): Promise<void> {
+  prepareFileWatchersForProcessExit();
   await runExitCleanup();
   // Read loosely: some workspaces' @types/node predate process.execve.
   const proc = process as typeof process & {
     execve?: (file: string, args: string[]) => never;
   };
   if (supervisedInProcess && proc.execve) {
-    proc.execve(process.execPath, [
-      process.execPath,
-      ...getRelaunchExecArgv(),
-      ...process.argv.slice(1),
-    ]);
+    try {
+      if (!statSync(process.execPath).isFile()) {
+        throw new Error('CLI launcher is not a regular file');
+      }
+      accessSync(process.execPath, constants.X_OK);
+      proc.execve(process.execPath, [
+        process.execPath,
+        ...getRelaunchExecArgv(),
+        ...process.argv.slice(1),
+      ]);
+    } catch {
+      writeStderrLineSafe(
+        'Failed to restart the CLI in place. Exiting; restart manually if no supervisor is running.',
+      );
+    }
   }
   process.exit(RELAUNCH_EXIT_CODE);
 }

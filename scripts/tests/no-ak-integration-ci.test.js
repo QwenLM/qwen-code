@@ -754,6 +754,89 @@ describe('no-AK integration CI wiring', () => {
     }
   });
 
+  it('retains only owned ACP retry evidence on a failed no-AK gate', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const job = getWorkflowJob(workflow, 'integration_no_ak');
+    const gate = getWorkflowStep(job, 'Run required no-AK integration gate');
+    expect(gate).toContain("id: 'no_ak_gate'");
+    expect(gate).toContain(
+      'parity_evidence="${RUNNER_TEMP}/qwen-acp-parity-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-shard-${{ matrix.shard }}"',
+    );
+    expect(gate).toContain('mkdir -p "$parity_evidence"');
+    expect(gate).toContain(
+      `env ACP_PARITY_DUMP="$parity_evidence" npm run ${NO_AK_SCRIPT} -- --shard=\${{ matrix.shard }}/2`,
+    );
+    expect(gate).not.toContain('\n          ACP_PARITY_DUMP:');
+    const upload = getWorkflowStep(job, 'Upload ACP retry parity evidence');
+    expect(upload).toContain(
+      "failure() && steps.no_ak_gate.outcome == 'failure'",
+    );
+    expect(upload).toContain('continue-on-error: true');
+    expect(upload).toContain(
+      'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+    );
+    expect(upload).toContain('github.run_id');
+    expect(upload).toContain('github.run_attempt');
+    expect(upload).toContain('matrix.shard');
+    const prefix =
+      '${{ runner.temp }}/qwen-acp-parity-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}/';
+    const paths = upload
+      .slice(
+        upload.indexOf('path: |\n') + 'path: |\n'.length,
+        upload.indexOf('\n          if-no-files-found:'),
+      )
+      .trim()
+      .split('\n')
+      .map((line) => line.trim());
+    expect(paths).toEqual([
+      `${prefix}a-retry-that-fails-again/`,
+      ...['current', 'shared', 'kernel'].map(
+        (arm) => `${prefix}a-retry-that-fails-again.${arm}.json`,
+      ),
+    ]);
+    const paritySource = readFileSync(
+      path.join(ROOT, 'integration-tests/cli/acp-agent-loop-parity.test.ts'),
+      'utf8',
+    );
+    expect(paritySource).toContain(
+      'const directory = join(dump, slug, `${arm}-${agent.pid}`);',
+    );
+    expect(paritySource).toContain('join(dump, `${slug}.${arm}.json`)');
+    const slugExpressions = Array.from(
+      paritySource.matchAll(/const slug = (.+);/g),
+      ([, expression]) => expression,
+    );
+    expect(slugExpressions).toEqual([
+      "scenario.name.replace(/[^a-z0-9]+/gi, '-')",
+      "scenario.name.replace(/[^a-z0-9]+/gi, '-')",
+    ]);
+    const scenarioSource = paritySource.slice(
+      paritySource.indexOf('const scenarios: Scenario[] = ['),
+      paritySource.indexOf('it.each(scenarios.map('),
+    );
+    const scenarioSlugs = Array.from(
+      scenarioSource.matchAll(/^ {8}name: '([^']+)'/gm),
+      ([, name]) => name.replace(/[^a-z0-9]+/gi, '-'),
+    );
+    expect(scenarioSlugs).toContain(paths[0].slice(prefix.length, -1));
+    expect(upload).toContain("if-no-files-found: 'warn'");
+    expect(upload).toContain('retention-days: 7');
+    expect(upload).not.toContain('QWEN_HOME');
+    expect(upload).not.toContain('**');
+    const clean = getWorkflowStep(job, 'Clean ACP retry parity evidence');
+    expect(clean).toContain("if: '${{ always() }}'");
+    expect(clean).toContain(
+      'rm -rf -- "${RUNNER_TEMP}/qwen-acp-parity-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-shard-${{ matrix.shard }}"',
+    );
+    expect(job.indexOf(upload)).toBeLessThan(job.indexOf(clean));
+    expect(job.indexOf(clean)).toBeLessThan(
+      job.indexOf("name: 'Clean isolated HOME'"),
+    );
+  });
+
   it('pins PR checkouts to the event head even after the PR ref advances', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),

@@ -124,4 +124,53 @@ describe('useWorktreeSession', () => {
       { timeout: 2000 },
     );
   });
+
+  it('reacts to atomic sidecar replacement', async () => {
+    await writeWorktreeSession(sidecarPath, sample);
+    const config = makeMockConfig(sidecarPath);
+    const { result, unmount } = renderHook(() => useWorktreeSession(config));
+    try {
+      await vi.waitFor(() => expect(result.current?.slug).toBe(sample.slug), {
+        timeout: 1000,
+      });
+      const replacement = {
+        ...sample,
+        slug: 'replacement',
+        worktreeBranch: 'worktree-replacement',
+      };
+      await writeWorktreeSession(sidecarPath, replacement);
+      await vi.waitFor(() => expect(result.current).toEqual(replacement), {
+        timeout: 2000,
+      });
+      expect(JSON.parse(await fs.readFile(sidecarPath, 'utf8'))).toEqual(
+        replacement,
+      );
+    } finally {
+      unmount();
+    }
+  });
+
+  it('reacts to a sidecar recreated after deletion on the same subscription', async () => {
+    await writeWorktreeSession(sidecarPath, sample);
+    const config = makeMockConfig(sidecarPath);
+    const { result, unmount } = renderHook(() => useWorktreeSession(config));
+    try {
+      await vi.waitFor(() => expect(result.current?.slug).toBe(sample.slug), {
+        timeout: 1000,
+      });
+      // exit_worktree unlinks the sidecar, then enter_worktree writes it again
+      // while the same stat subscription is still live.
+      await clearWorktreeSession(sidecarPath);
+      await vi.waitFor(() => expect(result.current).toBeNull(), {
+        timeout: 2000,
+      });
+      const reentered = { ...sample, slug: 'reentered' };
+      await writeWorktreeSession(sidecarPath, reentered);
+      await vi.waitFor(() => expect(result.current).toEqual(reentered), {
+        timeout: 2000,
+      });
+    } finally {
+      unmount();
+    }
+  });
 });

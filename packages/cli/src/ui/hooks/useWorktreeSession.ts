@@ -6,33 +6,17 @@
 
 import { useState, useEffect } from 'react';
 import fs from 'node:fs';
-import fsPromises from 'node:fs/promises';
-import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { WorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { readWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 
 /**
- * Watches the active session's WorktreeSession sidecar file and returns
- * its current contents (or `null` when no active worktree exists).
- *
- * The sidecar lives at `<chatsDir>/<sessionId>.worktree.json`. We watch the
- * directory rather than the file directly because the file may not exist
- * yet when `enter_worktree` hasn't run. Directory watchers also catch
- * rename/delete events that file watchers miss.
- *
- * Known limitation: `fs.watch` holds an inode handle to `chatsDir` at
- * mount time. If the directory is deleted out-of-band (manual cleanup,
- * antivirus quarantine, reset scripts) and then recreated, the watcher
- * does NOT re-attach to the new inode — the Footer indicator stops
- * responding to sidecar changes until the session restarts. In normal
- * use `chatsDir` is stable for the session's lifetime; if rotation
- * becomes a real failure mode, add a polling fallback or listen for
- * `watcher.on('error')` and re-run `setupWatcher`. (PR #4174 review
- * #3256239608.)
+ * Polls the exact session sidecar, including creation and atomic replacement.
+ * Listener-specific cleanup preserves other subscribers to the same path.
  */
 export function useWorktreeSession(config: Config): WorktreeSession | null {
   const [loaded, setLoaded] = useState<{
+    config: Config;
     sessionId: string;
     session: WorktreeSession | null;
   } | null>(null);
@@ -44,50 +28,37 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
       return;
     }
     let cancelled = false;
-
-    const safeLoad = async () => {
-      try {
-        const filePath = config
-          .getSessionService()
-          .getWorktreeSessionPath(sessionId);
-        const ws = await readWorktreeSession(filePath);
-        if (!cancelled) setLoaded({ sessionId, session: ws });
-      } catch {
-        if (!cancelled) setLoaded({ sessionId, session: null });
-      }
-    };
-
-    void safeLoad();
-
     const filePath = config
       .getSessionService()
       .getWorktreeSessionPath(sessionId);
-    const dirPath = path.dirname(filePath);
-    const fileName = path.basename(filePath);
 
-    let watcher: fs.FSWatcher | undefined;
-
-    const setupWatcher = async () => {
+    const safeLoad = async () => {
+      if (cancelled) return;
       try {
-        await fsPromises.mkdir(dirPath, { recursive: true });
-        if (cancelled) return;
-        watcher = fs.watch(dirPath, (_eventType, filename) => {
-          if (filename === null || filename.toString() === fileName) {
-            void safeLoad();
-          }
-        });
+        const ws = await readWorktreeSession(filePath);
+        if (!cancelled) setLoaded({ config, sessionId, session: ws });
       } catch {
-        // Watcher setup is best-effort
+        if (!cancelled) setLoaded({ config, sessionId, session: null });
       }
     };
 
-    void setupWatcher();
+    const listener = () => {
+      void safeLoad();
+    };
+    try {
+      fs.watchFile(filePath, { persistent: false, interval: 500 }, listener);
+    } catch {
+      // Watcher setup is best-effort.
+    }
+    void safeLoad();
 
     return () => {
       cancelled = true;
-      watcher?.close();
+      fs.unwatchFile(filePath, listener);
     };
   }, [config, sessionId]);
 
-  return loaded?.sessionId === sessionId ? loaded.session : null;
+  return loaded?.config === config && loaded.sessionId === sessionId
+    ? loaded.session
+    : null;
 }
