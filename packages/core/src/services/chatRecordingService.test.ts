@@ -32,6 +32,9 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import * as storageUtils from '../utils/sessionStorageUtils.js';
+import { buildCompactionTranscriptHint } from './compaction-transcript-hint.js';
+import { postProcessSummary } from './postCompactAttachments.js';
 import {
   collectSessionTurnState,
   computeInitialTurnFromHistory,
@@ -277,6 +280,62 @@ describe('ChatRecordingService', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe('getExistingTranscriptPath', () => {
+    const transcript =
+      '/test/project/root/.gemini/projects/test-project/chats/test-session-id.jsonl';
+
+    beforeEach(() => {
+      vi.mocked(path.basename).mockImplementation(
+        (file) => file.split('/').at(-1)!,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation((file) =>
+        file.startsWith('/'),
+      );
+    });
+
+    it('returns an existing local file and never creates it', async () => {
+      const legacyRecorder = new ChatRecordingService(
+        mockConfig,
+        undefined,
+        false,
+      );
+      const stat = vi.spyOn(fs, 'lstatSync').mockReturnValue({
+        isFile: () => true,
+        size: 100,
+      } as fs.Stats);
+      const managed = vi
+        .spyOn(storageUtils, 'readManagedExecutionEvidenceSync')
+        .mockReturnValue(false);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBe(transcript);
+      expect(stat).toHaveBeenCalledWith(transcript);
+      managed.mockReturnValue(true);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      managed.mockReturnValue(undefined);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      stat.mockReturnValue({ isFile: () => false, size: 100 } as fs.Stats);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      stat.mockImplementation(() => {
+        throw new Error('ENOENT');
+      });
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(fs.mkdirSync).not.toHaveBeenCalled();
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('does not point a rotated recorder at the new session', async () => {
+      const legacyRecorder = new ChatRecordingService(
+        mockConfig,
+        undefined,
+        false,
+      );
+      legacyRecorder.pinSessionIdentity('test-session-id');
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+      const stat = vi.spyOn(fs, 'lstatSync');
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
+    });
   });
 
   type UserArgs = Parameters<ChatRecordingService['recordUserMessage']>;
@@ -654,6 +713,37 @@ describe('ChatRecordingService', () => {
 
       const record = await flushed();
       expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
+    });
+
+    it('persists the summary without its live transcript pointer', async () => {
+      const path = '/host/session.jsonl';
+      const liveSummary = postProcessSummary(
+        'Task summary',
+        buildCompactionTranscriptHint(path),
+      );
+      svc.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [
+          { role: 'user', parts: [{ text: liveSummary }] },
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          },
+        ],
+      });
+      const record = await flushed();
+      expect(JSON.stringify(record.systemPayload)).not.toContain(path);
+      expect(record.systemPayload).toMatchObject({
+        compressedHistory: [
+          { parts: [{ text: postProcessSummary('Task summary') }] },
+          {},
+        ],
+      });
+      expect(liveSummary).toContain(path);
     });
 
     it('freezes compression snapshot containers against later live-history mutation', async () => {

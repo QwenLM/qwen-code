@@ -37,6 +37,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
+import { buildCompactionTranscriptHint } from './compaction-transcript-hint.js';
 import * as slimmingModule from './compactionInputSlimming.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { estimateContentTokens } from './tokenEstimation.js';
@@ -577,11 +578,15 @@ describe('ChatCompressionService', () => {
       force: true,
       trigger: 'auto', // keep the trailing fc (manual would strip it)
       originalTokenCount: 100_000,
+      getExistingTranscriptPath: async () => '/project/chat.jsonl',
     });
 
     expect(composeSpy).toHaveBeenCalled();
     // Degraded success — not an escape, not a compression failure.
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory?.[0].parts?.[0].text).toContain(
+      '"/project/chat.jsonl"',
+    );
     const last = result.newHistory![result.newHistory!.length - 1];
     expect(last.role).toBe('model');
     expect(last.parts?.some((p) => p.text)).toBe(true); // ack text
@@ -2931,14 +2936,51 @@ describe('ChatCompressionService.compress — summary and retained operation', (
     const result = await compressWith(
       fakeChat(turns('hi', 'hello', 'how are you', 'fine')),
       fakeConfig(),
-      { trigger: 'manual' },
+      {
+        trigger: 'manual',
+        getExistingTranscriptPath: async () => '/project/chat.jsonl',
+      },
     );
 
     expect(result.newHistory).not.toBeNull();
     expect(result.newHistory![0].role).toBe('user');
     const firstPart = result.newHistory![0].parts?.[0] as { text?: string };
     expect(firstPart.text).toContain('SUM_TXT');
+    expect(firstPart.text).toContain('"/project/chat.jsonl"');
+    expect(result.info.newTokenCount).toBeGreaterThan(11_500);
     expect(result.newHistory![1].role).toBe('model');
+  });
+
+  it('does not pass a previous runtime hint to the summarizer', async () => {
+    const stale = buildCompactionTranscriptHint('/stale/chat.jsonl');
+    const previousSummary = postCompactModule.postProcessSummary(
+      'Earlier summary',
+      stale,
+    );
+    const summarize = spySideQuery('SUM_TXT', usage(170_000, 500));
+
+    const result = await compressWith(
+      fakeChat(
+        turns(
+          previousSummary,
+          'Got it. Thanks for the additional context!',
+          'new prompt',
+          'new reply',
+        ),
+      ),
+      fakeConfig(),
+      {
+        trigger: 'manual',
+        getExistingTranscriptPath: async () => '/current/chat.jsonl',
+      },
+    );
+
+    expect(JSON.stringify(summarize.mock.calls)).not.toContain(
+      '/stale/chat.jsonl',
+    );
+    expect(result.newHistory?.[0].parts?.[0].text).toContain(
+      '"/current/chat.jsonl"',
+    );
   });
 });
 
