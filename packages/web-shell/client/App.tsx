@@ -11357,6 +11357,7 @@ export function App({
     if (!root) return;
     if (!compactShell || !viewport) {
       root.style.removeProperty('--web-shell-visual-viewport-inset-bottom');
+      root.removeAttribute('data-visual-viewport-occluded');
       return;
     }
 
@@ -11369,6 +11370,10 @@ export function App({
         '--web-shell-visual-viewport-inset-bottom',
         `${inset}px`,
       );
+      // The compact welcome layout only anchors its group to the bottom of the
+      // reserved box while the keyboard actually occludes the viewport, so the
+      // unoccluded welcome state keeps its vertical centring.
+      root.toggleAttribute('data-visual-viewport-occluded', inset > 0);
     };
     updateInset();
     viewport.addEventListener('resize', updateInset);
@@ -11380,6 +11385,7 @@ export function App({
       viewport.removeEventListener('scroll', updateInset);
       window.removeEventListener('resize', updateInset);
       root.style.removeProperty('--web-shell-visual-viewport-inset-bottom');
+      root.removeAttribute('data-visual-viewport-occluded');
     };
   }, [compactShell]);
   const channelSidebarEnabled =

@@ -87,6 +87,10 @@ async function installTestSoftwareKeyboard(page: Page): Promise<void> {
       open = nextOpen;
       document.querySelector('[data-test-software-keyboard]')?.remove();
       if (open) {
+        // Opaque band standing in for the software keyboard. Its `top` is the
+        // visible-viewport bottom edge and it intercepts every pointer that
+        // still lands under it (#17859), so a composer that has not been
+        // lifted onto the inset is genuinely unreachable in these tests.
         const keyboard = document.createElement('div');
         keyboard.dataset.testSoftwareKeyboard = '';
         Object.assign(keyboard.style, {
@@ -99,23 +103,6 @@ async function installTestSoftwareKeyboard(page: Page): Promise<void> {
           background: '#25272a',
           pointerEvents: 'auto',
         });
-        const accessory = document.createElement('div');
-        accessory.dataset.testKeyboardAccessory = '';
-        accessory.textContent = 'Keyboard accessory';
-        Object.assign(accessory.style, {
-          height: '45px',
-          padding: '12px',
-          boxSizing: 'border-box',
-          background: '#35383c',
-          color: '#ffffff',
-        });
-        // Reproduce iOS's intercepted accessory tap: focus leaves the editor,
-        // the keyboard closes, and no click reaches the composer underneath.
-        accessory.addEventListener('pointerdown', (event) => {
-          event.preventDefault();
-          (document.activeElement as HTMLElement | null)?.blur();
-        });
-        keyboard.append(accessory);
         document.body.append(keyboard);
       }
       emit('resize');
@@ -177,6 +164,33 @@ async function expectUncoveredStableSend(
     }, center),
   ).toBe(true);
   await page.touchscreen.tap(center.x, center.y);
+}
+
+async function measureWelcomeLayout(page: Page) {
+  return page.getByTestId('chat-pane-container').evaluate((pane) => {
+    const measure = (selector: string) => {
+      const element = pane.querySelector(selector);
+      return element ? element.getBoundingClientRect() : null;
+    };
+    const paneRect = pane.getBoundingClientRect();
+    const header = measure('[data-e2e-mobile-welcome-header]');
+    const welcomeFooter = measure('[data-e2e-mobile-welcome-footer]');
+    const composer = measure('[data-web-shell-composer-surface]');
+    const send = measure('[data-web-shell-composer-submit]');
+    if (!header || !welcomeFooter || !composer || !send) {
+      throw new Error('Expected the mobile welcome chrome to render.');
+    }
+    return {
+      paneTop: paneRect.top,
+      paneBottom: paneRect.bottom,
+      headerTop: header.top,
+      headerBottom: header.bottom,
+      welcomeFooterTop: welcomeFooter.top,
+      composerTop: composer.top,
+      composerBottom: composer.bottom,
+      sendBottom: send.bottom,
+    };
+  });
 }
 
 test('simple mobile composer grows and submits Chinese multiline input @smoke', async ({
@@ -806,32 +820,7 @@ test('keeps the custom-footer mobile welcome group inside the pane above a softw
     )
     .toBe(expectedInset);
 
-  const layout = await page
-    .getByTestId('chat-pane-container')
-    .evaluate((pane) => {
-      const measure = (selector: string) => {
-        const element = pane.querySelector(selector);
-        return element ? element.getBoundingClientRect() : null;
-      };
-      const paneRect = pane.getBoundingClientRect();
-      const header = measure('[data-e2e-mobile-welcome-header]');
-      const welcomeFooter = measure('[data-e2e-mobile-welcome-footer]');
-      const composer = measure('[data-web-shell-composer-surface]');
-      const send = measure('[data-web-shell-composer-submit]');
-      if (!header || !welcomeFooter || !composer || !send) {
-        throw new Error('Expected the custom-footer welcome chrome to render.');
-      }
-      return {
-        paneTop: paneRect.top,
-        paneBottom: paneRect.bottom,
-        headerTop: header.top,
-        headerBottom: header.bottom,
-        welcomeFooterTop: welcomeFooter.top,
-        composerTop: composer.top,
-        composerBottom: composer.bottom,
-        sendBottom: send.bottom,
-      };
-    });
+  const layout = await measureWelcomeLayout(page);
 
   const screenshotPath = testInfo.outputPath(
     'custom-footer-welcome-keyboard-open.png',
@@ -860,6 +849,51 @@ test('keeps the custom-footer mobile welcome group inside the pane above a softw
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
   expect(JSON.stringify(daemon.promptRequests()[0]?.body)).toContain(
     'custom footer welcome',
+  );
+});
+
+test('keeps Send above the keyboard when the welcome footer outgrows the reduced pane @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await gotoEmptyMobileWelcomeHarness(page, { customFooter: true });
+  await expectEmptyMobileWelcomeChromeVisible(page);
+
+  // Grow the host welcome footer until header + footer + composer no longer
+  // fit the inset-reduced pane. A centred group would then overflow both ways
+  // and leave Send under the keyboard; anchoring it to the bottom of the
+  // padded content box sends the overflow upward instead.
+  await page
+    .locator('[data-e2e-mobile-welcome-footer]:visible')
+    .evaluate((element) => {
+      (element as HTMLElement).style.minHeight = '360px';
+    });
+
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.tap();
+  await textarea.fill('tall welcome footer');
+  await expect(textarea).toBeFocused();
+  await setTestSoftwareKeyboard(page, true);
+
+  const layout = await measureWelcomeLayout(page);
+  await testInfo.attach('tall-welcome-footer-layout', {
+    body: JSON.stringify(layout, null, 2),
+    contentType: 'application/json',
+  });
+
+  // The group demonstrably overflowed the content box (its top starts above
+  // the pane), yet the composer stays on the reserved inset instead of
+  // following the overflow below the keyboard.
+  expect(layout.headerTop).toBeLessThan(layout.paneTop);
+  expect(layout.composerBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+  expect(layout.sendBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+
+  await expectUncoveredStableSend(page, testInfo, 'tall-welcome-footer');
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expect(JSON.stringify(daemon.promptRequests()[0]?.body)).toContain(
+    'tall welcome footer',
   );
 });
 

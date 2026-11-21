@@ -22,6 +22,8 @@ import type {
   RefObject,
   DragEvent as ReactDragEvent,
   ChangeEvent as ReactChangeEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
 } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { useOptionalComposerWorkspace } from '../hooks/useComposerWorkspace.js';
@@ -2663,6 +2665,30 @@ export const ChatEditor = memo(
     }, [modelControlsDisabled, mobileModelSheet]);
     const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const isMobile = Boolean(core.mobileComposer);
+    // Touch-down blur guard shared by the mobile Send and Stop controls. Do
+    // not dismiss the software keyboard between touch-down and click: the
+    // resulting viewport resize would move the control out from under the same
+    // tap before its click is dispatched (#12462).
+    //
+    // Gate it on the pointer that started the press, not the composer backend:
+    // the history-search panel closes on an *unprevented* window `mousedown`
+    // (useComposerCore's outside handler bails on `defaultPrevented`), so
+    // swallowing a real mouse press would leave the panel open over the
+    // just-sent draft. A finger always emits `touchstart` first — which closes
+    // the panel — before the compatibility `mousedown`, so only touch presses
+    // suppress the blur.
+    const pressWasTouchRef = useRef(false);
+    const touchDownGuard = {
+      onTouchStart: () => {
+        pressWasTouchRef.current = true;
+      },
+      onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => {
+        pressWasTouchRef.current = event.pointerType !== 'mouse';
+      },
+      onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => {
+        if (pressWasTouchRef.current) event.preventDefault();
+      },
+    };
     const [mobileFocused, setMobileFocused] = useState(false);
     const [expandedEditor, setExpandedEditor] = useState(false);
     const expandedSelectionRef = useRef<[number, number]>([0, 0]);
@@ -4199,6 +4225,7 @@ export const ChatEditor = memo(
                   className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
                   disabled={cancelPreparing || !onCancel}
                   data-web-shell-composer-stop
+                  {...touchDownGuard}
                   aria-label={t('composerMobile.stop')}
                   onClick={(event) => {
                     event.stopPropagation();
@@ -4224,15 +4251,7 @@ export const ChatEditor = memo(
                     : core.submitBlocked || (!core.hasContent && !voiceActive)
               }
               data-web-shell-composer-submit
-              // Do not dismiss the software keyboard between touch-down and
-              // click: the resulting viewport resize would move Send out from
-              // under the same tap before its click is dispatched (#12462).
-              // A prevented `mousedown` is also what the history-search panel
-              // treats as a click outside itself, so keep the desktop mouse
-              // semantics intact.
-              onMouseDown={(event) => {
-                if (isMobile) event.preventDefault();
-              }}
+              {...touchDownGuard}
               onClick={(e) => {
                 e.stopPropagation();
                 if (submitLoading) {
