@@ -85,7 +85,7 @@ Attestation v3 就是 envelope 的检查。它把请求与 boot 文档比较，�
 
 新调用还在 gate 中时到达的 `status` 或 `cancel` 会回答 `unknown`，就像调用尚未到达时一样；除非 gate 拒绝，该调用随后照常运行。同样，关闭 worker 会中止正在运行的调用，但不会中止还在 gate 中的调用。
 
-每次调用都以其 Session 的身份运行。它的 shell 看到的 `QWEN_CODE_SESSION_ID`，是由 Runtime 实例 ID 和 Runtime Session ID 的哈希派生出的键（Runtime Session ID 可能包含在文件名中不安全的字符）；`QWEN_CODE_PROJECT_DIR` 是该 Session 实际目录对应的项目目录。core 由路径推导出这个目录：先把路径转成小写（仅在 Windows 上），再把 ASCII 字母和数字以外的每个 UTF-16 码元都替换成 `-`，所以基本多文种平面以外的字符（如 emoji）会变成 `--`。两个目录的路径经过这样处理后相同，就会共用同一个。在 boot v1 下两者保持原值：Runtime 实例 ID，以及 `workspaceCwd` 对应的项目目录。
+每次调用都以其 Session 的身份运行。它的 shell 看到的 `QWEN_CODE_SESSION_ID`，是由 Runtime 实例 ID 和 Runtime Session ID 的哈希派生出的键（Runtime Session ID 可能包含在文件名中不安全的字符）；`QWEN_CODE_PROJECT_DIR` 是该 Session 实际目录对应的项目目录。core 由路径推导出这个目录：先把路径转成小写（仅在 Windows 上），再把 ASCII 字母和数字以外的每个 UTF-16 码元都替换成 `-`，所以基本多文种平面以外的字符（如 emoji）会变成 `--`。两个目录的路径经过这样处理后相同，就会共用同一个；若结果超过 255 字节，则截断到 238 字节并追加 `-` 与项目哈希的前 16 个十六进制字符，所以只有前 238 字节相同的目录才共用同一个。在 boot v1 下两者保持原值：Runtime 实例 ID，以及 `workspaceCwd` 对应的项目目录。
 
 目录在调用进入日志时就已固定。Shell 工具会用它的 workspace 检查 `directory` 参数，而现在这个 workspace 就是实际目录，所以 `directory` 位于其外的调用会以错误结算，不会运行。这是工具自己在调用开始时做的检查，与工具输入中的任何路径一样，它不是边界（见[安全](#安全)）：命令仍然可以切换目录。
 
