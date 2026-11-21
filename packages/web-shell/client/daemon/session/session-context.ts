@@ -49,6 +49,24 @@ export function resolveProviderSessionContext(
   return sessionContext;
 }
 
+/**
+ * The session context a draft inherits from its connection: the pending
+ * pick wins, and a live session always inherits its own context. A
+ * session-less draft does not inherit the leftover workspace context of a
+ * terminated session: it starts in the workspace the picker displays (the
+ * pending selection, else the primary), so the displayed and the created
+ * workspace can never disagree (#16992). Non-workspace contexts (standalone,
+ * Live) name the draft's own mode and are inherited as before.
+ */
+export function resolveDraftSessionContext(
+  pending: DaemonProductSessionContext | undefined,
+  current: DaemonProductSessionContext | undefined,
+  sessionId: string | undefined,
+): DaemonProductSessionContext | undefined {
+  if (pending) return pending;
+  return sessionId || current?.kind !== 'workspace' ? current : undefined;
+}
+
 export function resolveActionSessionContext(
   sessionContext: DaemonProductSessionContext | undefined,
   workspaceCwd: string | undefined,

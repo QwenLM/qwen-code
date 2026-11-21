@@ -198,6 +198,17 @@ export function createSidebarWorkspace(
         available: true,
         pullRequests: [],
       }),
+      // The workspace header actions poll git and the channel catalog;
+      // answer as a non-git, channel-less workspace.
+      workspaceGit: vi.fn().mockResolvedValue({
+        v: 2,
+        workspaceCwd: '',
+        branch: null,
+      }),
+      workspaceChannelTypes: vi.fn().mockResolvedValue([]),
+      workspaceChannels: vi
+        .fn()
+        .mockResolvedValue({ revision: '0', instances: {} }),
     })),
   };
   return {

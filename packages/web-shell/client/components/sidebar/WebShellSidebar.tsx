@@ -647,6 +647,15 @@ interface WebShellSidebarProps {
    * primary). Only meaningful on multi-workspace daemons.
    */
   selectedWorkspaceCwd?: string;
+  /**
+   * The workspace a session-less draft starts in (App resolves it through
+   * resolveDraftSessionContext). The removal reset must key on the draft's
+   * resolved target — not the leftover connection workspace — so a
+   * projectless ("No workspace") draft survives the removal: the reset
+   * rewrites pendingSessionContext to the primary and reverts the explicit
+   * pick.
+   */
+  draftWorkspaceCwd?: string;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   /**
    * Open the working-tree Changes dialog for a workspace. Forwarded to each
@@ -1272,6 +1281,7 @@ export function WebShellSidebar({
   mobileOpen,
   onMobileClose,
   selectedWorkspaceCwd,
+  draftWorkspaceCwd,
   onSelectWorkspace,
   onOpenGitDiff,
   onOpenCommit,
@@ -3173,6 +3183,11 @@ export function WebShellSidebar({
     primaryWorkspaceExpansionId,
   ]);
 
+  // Auto-restore for a cold draft: expand the sidebar, but never write the
+  // connected workspace into the selection — a selection write re-enters
+  // this effect's trigger condition when the composer picker picks the
+  // primary workspace (spelled `undefined`), silently reverting the user's
+  // first pick (#16992).
   useEffect(() => {
     if (currentSessionId || selectedWorkspaceCwd !== undefined) {
       return;
@@ -3194,7 +3209,6 @@ export function WebShellSidebar({
           key: contextKey,
         });
       }
-      onSelectWorkspace?.(connectedWorkspace.cwd);
       return;
     }
     if (!hasWorkspaceExpansionPreference(primaryWorkspaceExpansionId)) {
@@ -3203,7 +3217,6 @@ export function WebShellSidebar({
   }, [
     connection.workspaceCwd,
     currentSessionId,
-    onSelectWorkspace,
     primaryWorkspaceExpansionId,
     selectedWorkspaceCwd,
     workspace.capabilities,
@@ -3649,7 +3662,22 @@ export function WebShellSidebar({
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
       if (!sidebarMountedRef.current) return;
-      if (selectedWorkspaceCwd === removed.cwd) {
+      // Reset the draft to the primary only when the draft's resolved
+      // target is the removed workspace: the selection itself, or — a
+      // session-less draft (a cold draft never writes the selection, the
+      // #16992 fix) whose resolved start workspace is the removed one.
+      // Keying on the resolved target — not the leftover connection
+      // workspace — keeps the other drafts intact: a projectless
+      // ("No workspace") draft has no start workspace and must survive,
+      // and a pick to another workspace must not be reverted, because the
+      // reset rewrites pendingSessionContext and bumps the composer
+      // version (#16992 via the removal path).
+      if (
+        selectedWorkspaceCwd === removed.cwd ||
+        (selectedWorkspaceCwd === undefined &&
+          !connection.sessionId &&
+          draftWorkspaceCwd === removed.cwd)
+      ) {
         onSelectWorkspace?.(undefined);
       }
       sessionCatalogController.invalidateWorkspace(removed.cwd);
@@ -3664,6 +3692,8 @@ export function WebShellSidebar({
       void reloadArchived().catch(() => undefined);
     },
     [
+      connection,
+      draftWorkspaceCwd,
       onSelectWorkspace,
       reload,
       reloadArchived,
