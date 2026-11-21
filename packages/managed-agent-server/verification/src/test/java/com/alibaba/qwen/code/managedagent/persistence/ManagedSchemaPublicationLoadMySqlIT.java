@@ -73,12 +73,12 @@ class ManagedSchemaPublicationLoadMySqlIT {
                 String operationId = "capture-gc-" + ManagedSchemaKeys.key(scope, publication);
                 String operationKey = ManagedSchemaKeys.operationKey(OperationKind.CAPTURE_GC, scope,
                         ManagedSchemaKeys.key(publication), operationId);
-                jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id, session_id,"
                                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                                 + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete)"
-                                + " VALUES (?, ?, ?, 'workspace', ?, ?, ?, 'capture-id', '{}', ?, ?, 'FENCED',"
+                                + " VALUES (?, ?, 'workspace', ?, ?, ?, 'capture-id', '{}', ?, ?, 'FENCED',"
                                 + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE)",
-                        scope, ManagedSchemaKeys.key(TENANT), TENANT, HEALTHY, publication,
+                        scope, TENANT, HEALTHY, publication,
                         ManagedSchemaKeys.key("execution"), ManagedSchemaKeys.key("binding"), ManagedSchemaKeys.key("token"));
                 tx.executeWithoutResult(status -> {
                     ToolPublicationRetentionStore.lockDeletion(jdbc, TENANT, HEALTHY);
@@ -110,12 +110,12 @@ class ManagedSchemaPublicationLoadMySqlIT {
                     for (int index = previous; index < count; index++) {
                         String id = "capture-history-" + index;
                         history.add(new Object[] {ManagedSchemaKeys.operationKey(OperationKind.CAPTURE_GC, scope,
-                                ManagedSchemaKeys.key(id), id), sessionScope, scope, id, TENANT, HEALTHY,
+                                ManagedSchemaKeys.key(id), id), scope, id, TENANT, HEALTHY,
                                 ManagedSchemaKeys.key(id), ManagedSchemaKeys.key(id)});
                     }
-                    jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id,"
+                    jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key, operation_id,"
                             + " operation_kind, tenant_id, session_id, target_kind, target_key, request_digest, request_json,"
-                            + " phase, state, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'CAPTURE_GC', ?, ?,"
+                            + " phase, state, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, 'CAPTURE_GC', ?, ?,"
                             + " 'OUTPUT_CAPTURE', ?, ?, '{}', 'DELETING', 'SUCCEEDED', " + ManagedSchemaTime.NEVER_DUE_MILLIS
                             + ", 0, 0)", history);
                     previous = count;
@@ -200,8 +200,7 @@ class ManagedSchemaPublicationLoadMySqlIT {
                 String protectedId = lowResourceId(scope, "protected");
                 byte[] body = "immutable-body".getBytes(java.nio.charset.StandardCharsets.UTF_8);
                 insertResource(jdbc, scope, protectedId, "REFERENCED", body);
-                jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES (?, 'OPERATION', ?, 1, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                        scope, proofKey, ManagedSchemaKeys.key(scope, protectedId), TENANT, HEALTHY, protectedId);
+                jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES ('OPERATION', ?, 1, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")", proofKey, ManagedSchemaKeys.key(scope, protectedId), TENANT, HEALTHY, protectedId);
                 long smallClaim = 0;
                 long smallPage = 0;
                 int previous = 0;
@@ -353,25 +352,25 @@ class ManagedSchemaPublicationLoadMySqlIT {
             String sessionGc = "session-resources-" + sessionScope;
             String captureGc = "capture-gc-" + ManagedSchemaKeys.key(captureScope, id);
             sessions.add(new Object[] {TENANT, id, ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(id), sessionScope});
-            captures.add(new Object[] {captureScope, ManagedSchemaKeys.key(TENANT), TENANT, id, id,
+            captures.add(new Object[] {captureScope, TENANT, id, id,
                     ManagedSchemaKeys.key("execution", id), id, ManagedSchemaKeys.key("binding"), ManagedSchemaKeys.key("token")});
             operations.add(new Object[] {ManagedSchemaKeys.operationKey(OperationKind.SESSION_RESOURCE_GC,
-                    sessionScope, sessionScope, sessionGc), sessionScope, sessionScope, sessionGc,
+                    sessionScope, sessionScope, sessionGc), sessionScope, sessionGc,
                     "SESSION_RESOURCE_GC", TENANT, id, null, "SESSION", sessionScope, ManagedSchemaKeys.key(sessionGc)});
             operations.add(new Object[] {ManagedSchemaKeys.operationKey(OperationKind.CAPTURE_GC,
-                    captureScope, ManagedSchemaKeys.key(id), captureGc), sessionScope, captureScope, captureGc,
+                    captureScope, ManagedSchemaKeys.key(id), captureGc), captureScope, captureGc,
                     "CAPTURE_GC", TENANT, id, id, "OUTPUT_CAPTURE", ManagedSchemaKeys.key(id), ManagedSchemaKeys.key(captureGc)});
         }
         jdbc.batchUpdate("INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key,"
                 + " session_scope_key, retired_at, retirement_generation, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'CONTROL', ?, ?, ?, 1, 1, 0, 0)", sessions);
-        jdbc.batchUpdate("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        jdbc.batchUpdate("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " capture_bytes, producer_bytes, admission_bytes, retention_state)"
-                + " VALUES (?, ?, ?, 'workspace', ?, ?, ?, ?, '{}', ?, ?, 'FENCED', 1, 1, 1, 'RETIRING')", captures);
-        jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind,"
+                + " VALUES (?, ?, 'workspace', ?, ?, ?, ?, '{}', ?, ?, 'FENCED', 1, 1, 1, 'RETIRING')", captures);
+        jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind,"
                 + " tenant_id, session_id, publication_id, target_kind, target_key, request_digest, request_json, phase, state,"
-                + " available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', 'COLLECTING', 'SUCCEEDED', "
+                + " available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', 'COLLECTING', 'SUCCEEDED', "
                 + ManagedSchemaTime.NEVER_DUE_MILLIS + ", 0, 0)", operations);
     }
 
@@ -396,15 +395,15 @@ class ManagedSchemaPublicationLoadMySqlIT {
 
     private static void insertOperation(ManagedSchemaJdbcTemplate jdbc, String key, String scope, String id, String kind,
             String session, String target, String state, long available) {
-        jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id,"
                         + " session_id, target_kind, target_key, request_digest, request_json, phase, state, available_at, gmt_create, gmt_modified)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, 'SESSION', ?, ?, '{\"version\":1}', 'COLLECTING', ?, ?, 0, 0)",
-                key, scope, scope, id, kind, TENANT, session, target, ManagedSchemaKeys.key(id), state, available);
+                        + " VALUES (?, ?, ?, ?, ?, ?, 'SESSION', ?, ?, '{\"version\":1}', 'COLLECTING', ?, ?, 0, 0)",
+                key, scope, id, kind, TENANT, session, target, ManagedSchemaKeys.key(id), state, available);
     }
 
     private static void insertResource(ManagedSchemaJdbcTemplate jdbc, String scope, String id, String state, byte[] bytes) {
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, ?, ?, ?, 'managed-message-body', 1, ?, ?, 'MYSQL_INLINE', ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                ManagedSchemaKeys.key(scope, id), scope, TENANT, HEALTHY, id, bytes.length, ToolPublicationContract.sha256(bytes),
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, ?, ?, 'managed-message-body', 1, ?, ?, 'MYSQL_INLINE', ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                ManagedSchemaKeys.key(scope, id), TENANT, HEALTHY, id, bytes.length, ToolPublicationContract.sha256(bytes),
                 state.equals("COLLECTED") ? null : bytes, state);
     }
 
@@ -415,13 +414,13 @@ class ManagedSchemaPublicationLoadMySqlIT {
         for (int index = after; index < count; index++) {
             String id = "history-" + index;
             operations.add(new Object[] {ManagedSchemaKeys.operationKey(OperationKind.SESSION_RESOURCE_GC, scope,
-                    ManagedSchemaKeys.key(id), id), scope, scope, id, TENANT, HEALTHY, ManagedSchemaKeys.key(id), ManagedSchemaKeys.key(id)});
-            resources.add(new Object[] {ManagedSchemaKeys.key(scope, id), scope, TENANT, HEALTHY, id, ToolPublicationContract.sha256(bytes)});
+                    ManagedSchemaKeys.key(id), id), scope, id, TENANT, HEALTHY, ManagedSchemaKeys.key(id), ManagedSchemaKeys.key(id)});
+            resources.add(new Object[] {ManagedSchemaKeys.key(scope, id), TENANT, HEALTHY, id, ToolPublicationContract.sha256(bytes)});
         }
-        jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id,"
+        jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id,"
                         + " session_id, target_kind, target_key, request_digest, request_json, phase, state, available_at, gmt_create, gmt_modified)"
-                        + " VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?, ?, '{\"version\":1}', 'COLLECTING', 'SUCCEEDED', "
+                        + " VALUES (?, ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?, ?, '{\"version\":1}', 'COLLECTING', 'SUCCEEDED', "
                         + ManagedSchemaTime.NEVER_DUE_MILLIS + ", 0, 0)", operations);
-        jdbc.batchUpdate("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, gmt_create) VALUES (?, ?, ?, ?, ?, 'managed-message-body', 1, 1, ?, 'MYSQL_INLINE', 'COLLECTED', " + ManagedSchemaTime.SQL_NOW + ")", resources);
+        jdbc.batchUpdate("INSERT INTO ma_resource (resource_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, gmt_create) VALUES (?, ?, ?, ?, 'managed-message-body', 1, 1, ?, 'MYSQL_INLINE', 'COLLECTED', " + ManagedSchemaTime.SQL_NOW + ")", resources);
     }
 }

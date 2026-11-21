@@ -62,10 +62,8 @@ public class CancelEvidence implements AcceptanceEvidence {
             return Optional.of(AcceptanceVerdict.unknown());
         }
         List<Head> heads = jdbc.query("SELECT workspace_id, journal_revision FROM ma_session_head"
-                        + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                        + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
                 (row, index) -> new Head(row.getString(1), row.getLong(2)),
-                ManagedSchemaKeys.key(parked.tenantId()), ManagedSchemaKeys.key(parked.sessionId()),
                 parked.tenantId(), parked.sessionId());
         if (heads.isEmpty() || heads.getFirst().workspaceId() == null) {
             return Optional.of(AcceptanceVerdict.unknown());
