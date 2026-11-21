@@ -14,6 +14,7 @@ import type { ExtensionMutationEvent } from '@qwen-code/qwen-code-core/extension
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { ExtensionRefreshState } from './extension-refresh-state.js';
+import { bootstrapWatchFilter } from './path-comparison.js';
 
 const debugLogger = createDebugLogger('EXTENSION_FILE_WATCHER');
 
@@ -213,8 +214,7 @@ export class ExtensionFileWatcher {
       ignoreInitial: true,
       followSymlinks: false,
       depth: 0,
-      ignored: (filePath: string) =>
-        filePath !== parentDir && path.basename(filePath) !== dirBasename,
+      ignored: bootstrapWatchFilter(parentDir, dirBasename),
     })
       .on('all', (_event: string, changedPath: string) => {
         if (generation !== this.watchGeneration) return;

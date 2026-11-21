@@ -17,6 +17,23 @@ export function isWithinRoot(childPath: string, parentPath: string): boolean {
   );
 }
 
+/**
+ * chokidar `ignored` filter for a bootstrap watcher on `root` that waits for
+ * one entry, `entryName`, to appear directly under it. chokidar passes the
+ * root back in its own spelling (forward slashes on Windows, sometimes a
+ * trailing separator), so the root is compared after `path.resolve`. The
+ * comparison keeps case as given; chokidar keeps the case it was passed.
+ */
+export function bootstrapWatchFilter(
+  root: string,
+  entryName: string,
+): (filePath: string) => boolean {
+  const resolvedRoot = path.resolve(root);
+  return (filePath: string) =>
+    path.resolve(filePath) !== resolvedRoot &&
+    path.basename(filePath) !== entryName;
+}
+
 export function getPathComparisonVariants(rawPath: string): Set<string> {
   const variants = new Set<string>([path.normalize(path.resolve(rawPath))]);
   try {

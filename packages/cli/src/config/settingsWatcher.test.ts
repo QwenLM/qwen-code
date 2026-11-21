@@ -915,6 +915,27 @@ describe('SettingsWatcher', () => {
       w.stopWatching();
     });
 
+    it('bootstrap ignored predicate keeps the watch root however it is spelled', () => {
+      const root = path.resolve('/home/user');
+      const workspaceOnly = makeLoadedSettings({
+        workspaceSettingsActive: false,
+        user: { path: path.join(root, '.qwen', 'settings.json') },
+      });
+      const w = new SettingsWatcher(workspaceOnly);
+      mockExistsSync.mockReturnValue(false);
+
+      w.startWatching();
+
+      const { ignored } = lastWatchOptions();
+      // chokidar hands the root back in its own form: forward slashes on
+      // Windows, or with a trailing separator.
+      expect(ignored!(root.split(path.sep).join('/'))).toBe(false);
+      expect(ignored!(`${root}${path.sep}`)).toBe(false);
+      expect(ignored!(path.join(root, 'Documents'))).toBe(true);
+
+      w.stopWatching();
+    });
+
     it('should promote to a target watcher when .qwen appears', async () => {
       const workspaceOnly = makeLoadedSettings({
         workspaceSettingsActive: false,
