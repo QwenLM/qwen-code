@@ -146,7 +146,7 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
             return new Check("broker-state", Status.FAIL, "not configured",
                     "set the directory");
         }
-        Path directory = Path.of(path).toAbsolutePath();
+        Path directory = Path.of(path).toAbsolutePath().normalize();
         if (Files.isDirectory(directory)) {
             if (!Files.isWritable(directory)) {
                 return new Check("broker-state", Status.FAIL, path + " is not writable",
@@ -181,8 +181,9 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                         "grant write access to the service account");
             }
             return searchable(ancestor)
-                    ? new Check("broker-state", Status.PASS,
-                            path + " (created on the first Runtime spawn)", null)
+                    ? new Check("broker-state", Status.WARN,
+                            path + " (absent; created on the first Runtime spawn)",
+                            "run --check as the Broker's service account to verify creation access")
                     : new Check("broker-state", Status.FAIL,
                             ancestor + " is not searchable",
                             "grant execute access to the service account");
@@ -210,8 +211,9 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                     "grant write access to the service account");
         }
         return searchable(parent)
-                ? new Check("broker-state", Status.PASS,
-                        path + " (created owner-private on the first start)", null)
+                ? new Check("broker-state", Status.WARN,
+                        path + " (absent; created owner-private on the first start)",
+                        "run --check as the Broker's service account to verify creation access")
                 : new Check("broker-state", Status.FAIL,
                         parent + " is not searchable",
                         "grant execute access to the service account");

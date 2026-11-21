@@ -52,15 +52,18 @@ class LocalRuntimeProviderFactoryTest {
     }
 
     @Test
-    void preflightAcceptsAnAbsentStateDirectoryOnlyWhenItsParentAllowsCreation() {
+    void preflightWarnsAboutAnAbsentStateDirectoryOnlyWhenItsParentAllowsCreation() {
         var factory = new LocalRuntimeProviderFactory();
         var ephemeral = settings();
         ephemeral.getRuntimeBroker().setDurableLocalProcess(false);
         assertThat(factory.preflight(ephemeral))
                 .filteredOn(check -> check.name().equals("broker-state"))
                 .singleElement()
-                .satisfies(check -> assertThat(check.status())
-                        .isEqualTo(RuntimeProviderFactory.Status.PASS));
+                .satisfies(check -> {
+                    assertThat(check.status())
+                            .isEqualTo(RuntimeProviderFactory.Status.WARN);
+                    assertThat(check.detail()).contains("created on the first Runtime spawn");
+                });
         assertThat(factory.preflight(settings()))
                 .filteredOn(check -> check.name().equals("broker-state"))
                 .singleElement()
@@ -70,7 +73,7 @@ class LocalRuntimeProviderFactoryTest {
     }
 
     @Test
-    void preflightAcceptsAnAbsentDurableStateDirectoryItsStoreWillCreate()
+    void preflightWarnsAboutAnAbsentDurableStateDirectoryItsStoreWillCreate()
             throws Exception {
         Path root = realTempDirectory("durable-state");
         try {
@@ -82,11 +85,34 @@ class LocalRuntimeProviderFactoryTest {
                     .singleElement()
                     .satisfies(check -> {
                         assertThat(check.status())
-                                .isEqualTo(RuntimeProviderFactory.Status.PASS);
+                                .isEqualTo(RuntimeProviderFactory.Status.WARN);
                         assertThat(check.detail()).contains("owner-private");
                     });
         } finally {
             deleteRecursively(root);
+        }
+    }
+
+    @Test
+    void preflightRejectsAnExistingStateDirectoryThatCannotBeSearched()
+            throws Exception {
+        assumeTrue(permissionBitsAreEnforced(temporary));
+        Path directory = Files.createDirectory(temporary.resolve("state"));
+        var settings = settings();
+        settings.getRuntimeBroker().setStateDirectory(directory.toString());
+        var permissions = Files.getPosixFilePermissions(directory);
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rw-------"));
+        try {
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status())
+                                .isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                        assertThat(check.detail()).contains("is not searchable");
+                    });
+        } finally {
+            Files.setPosixFilePermissions(directory, permissions);
         }
     }
 
@@ -148,7 +174,7 @@ class LocalRuntimeProviderFactoryTest {
 
     @Test
     void preflightRejectsAnEphemeralStateDirectoryWhoseAncestorIsNotWritable() throws Exception {
-        assumeTrue(posix());
+        assumeTrue(permissionBitsAreEnforced(temporary));
         Path ancestor = Files.createDirectory(temporary.resolve("read-only"));
         var permissions = Files.getPosixFilePermissions(ancestor);
         Files.setPosixFilePermissions(ancestor, PosixFilePermissions.fromString("r-xr-xr-x"));
@@ -168,7 +194,7 @@ class LocalRuntimeProviderFactoryTest {
 
     @Test
     void preflightRejectsAnEphemeralStateDirectoryWhoseAncestorIsNotSearchable() throws Exception {
-        assumeTrue(posix());
+        assumeTrue(permissionBitsAreEnforced(temporary));
         Path ancestor = Files.createDirectory(temporary.resolve("unsearchable"));
         var permissions = Files.getPosixFilePermissions(ancestor);
         Files.setPosixFilePermissions(ancestor, PosixFilePermissions.fromString("rw-------"));
@@ -188,6 +214,12 @@ class LocalRuntimeProviderFactoryTest {
 
     private static boolean posix() {
         return FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
+    }
+
+    private static boolean permissionBitsAreEnforced(Path ownedByThisProcess)
+            throws IOException {
+        return posix() && !"0".equals(
+                Files.getAttribute(ownedByThisProcess, "unix:uid").toString());
     }
 
     private static Path realTempDirectory(String prefix) throws IOException {
