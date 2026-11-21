@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from qwen_code_sdk import query
 from qwen_code_sdk.types import CanUseToolContext, PermissionResult, QueryOptions
 
