@@ -446,6 +446,7 @@ export const RU_PART2: Record<
   'chat.failedToSend': 'Не удалось отправить сообщение',
   'chat.approvalNotAccepted': 'Одобрение не принято',
   'chat.acknowledgeUnknown': 'Я проверил сессию',
+  'chat.stopNotConfirmed': 'Запрос на остановку не подтверждён',
   'askUser.shortcuts.previous': '← назад',
   'askUser.shortcuts.optionsSingle': '↑↓ выбрать · Enter отправить',
   'askUser.shortcuts.optionsNext': '↑↓ выбрать · Enter далее',

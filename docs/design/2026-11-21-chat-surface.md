@@ -33,7 +33,11 @@ next increment (2f), so this slice is additive and renders nothing on its own.
 - **The split keeps its per-delta optimization.** The render-ready request is
   extracted only when the content signature changes (the slice-2d ref cache), not
   on every streaming delta; the cheap block-level classifier still builds the
-  signature each render.
+  signature each render. The signature is `id + classification + a cheap payload
+revision` (`updatedAt + title + option ids`, no payload serialization): a
+  re-emitted `permission.request` under the same id can change title/options while
+  id and classification stay put, and the revision term forces a re-extraction so
+  the cached request never goes stale (verify-r3 F1).
 - **Admission is not establishment, in the composer too.** `ChatEditor.onSubmit`
   dispatches `controller.submit` and clears the draft (`commitAccepted`) only on an
   `accepted` admission — never on establishment. It returns the literal `false` to

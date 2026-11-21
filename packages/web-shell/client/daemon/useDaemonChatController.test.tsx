@@ -158,6 +158,38 @@ describe('useDaemonChatController', () => {
     mountReact(<Probe />);
     expect(controller!.pendingQuestions.map((q) => q.id)).toEqual(['q1']);
     expect(controller!.pendingApprovals.map((a) => a.id)).toEqual(['a1']);
+    // The render-ready request payload is pinned, not just the ids: emptying
+    // request.options at the binding must turn this red.
+    expect(
+      controller!.pendingApprovals[0].request.options.map((o) => o.id),
+    ).toEqual(['submit', 'cancel']);
+    expect(
+      (
+        controller!.pendingQuestions[0].request.rawInput as {
+          questions?: unknown;
+        }
+      ).questions,
+    ).toEqual([{ question: 'Q0?' }, { question: 'Q1?' }]);
+  });
+
+  it('refreshes the cached request when a re-emitted payload changes under the same id', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    const before = controller!.pendingApprovals[0].request;
+    expect(before.title).toBe('permission');
+    // The daemon re-emits permission.request for the same requestId with a
+    // changed title and a bumped revision; id and classification are unchanged.
+    harness.pendingPermissions = [
+      {
+        ...permissionBlock('a1'),
+        title: 'Run ls',
+        updatedAt: 2,
+      } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    const after = controller!.pendingApprovals[0].request;
+    expect(after.title).toBe('Run ls');
+    expect(after).not.toBe(before);
   });
 
   it('answers a question by voting its allow_once option with indexed answers', async () => {

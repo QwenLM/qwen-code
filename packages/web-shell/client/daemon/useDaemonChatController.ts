@@ -17,6 +17,7 @@ import { getComposerDraftStorageKey } from '../hooks/useComposerCore.js';
 import {
   extractPendingPermission,
   isAskUserPermissionBlock,
+  pendingPermissionRevision,
 } from '../adapters/transcriptAdapter.js';
 import { isExitPlanApprovalRequest } from '../utils/todos.js';
 import {
@@ -96,19 +97,25 @@ export function useDaemonChatController(): SessionChatController {
   // routed through the approval lane as a bare vote. The provider re-runs its
   // uncached pending selector on every streaming delta, so `pendingPermissions`
   // arrives as a fresh array even when the pending content is unchanged. Key the
-  // split on a content signature (request id + question/approval classification)
-  // cached in a ref, so the array identities — and the derivation effect below —
-  // stay stable across those deltas. The signature is content-derived, not
-  // id-derived: a block's payload can change its classification under the same
-  // request id. Classification uses the cheap block-level predicate rather than
-  // the full payload extraction, so a delta does not re-serialize each payload.
+  // split on a content signature (request id + question/approval classification
+  // + a cheap payload revision) cached in a ref, so the array identities — and
+  // the derivation effect below — stay stable across those deltas. The signature
+  // is content-derived, not id-derived: a re-emitted request under the same id
+  // can change its classification or its title/options, and the revision term
+  // (updatedAt + title + option ids) forces a re-extraction so the cached
+  // render-ready request never goes stale. Classification and the revision use
+  // cheap block-level reads rather than the full payload extraction, so a delta
+  // does not re-serialize each payload.
   const classifiedPending = pendingPermissions.map((permission) => ({
     block: permission,
     id: permission.requestId,
     isQuestion: isAskUserPermissionBlock(permission),
   }));
   const pendingSignature = classifiedPending
-    .map(({ id, isQuestion }) => `${id}:${isQuestion ? 'q' : 'a'}`)
+    .map(
+      ({ block, id, isQuestion }) =>
+        `${id}:${isQuestion ? 'q' : 'a'}:${pendingPermissionRevision(block)}`,
+    )
     .join('|');
   let pendingSplit = pendingSplitRef.current;
   if (!pendingSplit || pendingSplit.signature !== pendingSignature) {

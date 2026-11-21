@@ -8,6 +8,7 @@ import { useRef, useState, type ReactNode } from 'react';
 import type { CommandInfo, TodoItem } from '../adapters/types.js';
 import { TranscriptViewport } from '../components/TranscriptViewport.js';
 import { ToolApproval } from '../components/messages/ToolApproval.js';
+import type { SessionContentGenerator } from '../components/messages/AssistantMessage.js';
 import { AskUserQuestion } from '../components/messages/AskUserQuestion.js';
 import { ChatEditor } from '../components/ChatEditor.js';
 import { useI18n } from '../i18n.js';
@@ -36,6 +37,10 @@ export interface ChatSurfaceProps {
   // Paired with the pagination props: without it a failed older-history page is
   // invisible and every top-scroll re-issues the failing request.
   readonly historyPaginationError?: boolean;
+  // Older-history spinner and capacity notice, forwarded to the transcript so
+  // the switch does not drop them (the contract does not carry these facts yet).
+  readonly loadingOlderHistory?: boolean;
+  readonly historyCapacityReached?: boolean;
   // Approval facts and focus/notification gating are computed by the owning
   // page (plan state, pane focus, background-tab policy), not derivable here.
   readonly planTodos?: readonly TodoItem[];
@@ -43,6 +48,10 @@ export interface ChatSurfaceProps {
   readonly approvalDisabled?: boolean;
   readonly approvalKeyboardActive?: boolean;
   readonly showBrowserNotifications?: boolean;
+  // Page-supplied generator for the exec-command explain action; the contract
+  // has no generator field, so each column's page supplies it (as App/ChatPane
+  // do today, gated on the session_generation feature).
+  readonly generateContent?: SessionContentGenerator;
   // Question-card host customisation: the free-text label and the details escape
   // hatch (the composer is hidden while a card is active).
   readonly askUserFreeTextLabel?: string;
@@ -75,11 +84,14 @@ export function ChatSurface({
   hasOlderHistory,
   onLoadOlderHistory,
   historyPaginationError,
+  loadingOlderHistory,
+  historyCapacityReached,
   planTodos,
   planExecutionMode,
   approvalDisabled,
   approvalKeyboardActive,
   showBrowserNotifications,
+  generateContent,
   askUserFreeTextLabel,
   askUserDetails,
   atWorkspaceCwd,
@@ -132,6 +144,8 @@ export function ChatSurface({
             hasOlderHistory={hasOlderHistory}
             onLoadOlderHistory={loadOlder}
             historyPaginationError={historyPaginationError}
+            loadingOlderHistory={loadingOlderHistory}
+            historyCapacityReached={historyCapacityReached}
           />
         )}
       </div>
@@ -149,6 +163,7 @@ export function ChatSurface({
             showBrowserNotifications={showBrowserNotifications}
             planExecutionMode={planExecutionMode}
             planTodos={planTodos}
+            generateContent={generateContent}
             onConfirm={async (id, optionId) => {
               const result = await controller.respondApproval(id, optionId);
               if (result.admission !== 'accepted') {
@@ -240,7 +255,20 @@ export function ChatSurface({
             controller.phase === 'submitting'
           }
           onCancel={() => {
-            void controller.cancel();
+            // A refused or unknown stop admission must not be silent: the turn
+            // keeps running and the user needs to know the stop did not land.
+            void controller
+              .cancel()
+              .then((result) => {
+                if (result.admission !== 'accepted') {
+                  const message = t('chat.stopNotConfirmed');
+                  reportError(new Error(message), message);
+                }
+              })
+              .catch((cause: unknown) => {
+                const message = t('chat.stopNotConfirmed');
+                reportError(new Error(message, { cause }), message);
+              });
           }}
           onSubmit={(text, images, files, commitAccepted, metadata) => {
             // Block a repeat dispatch while a submit is in flight or the payload

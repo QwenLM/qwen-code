@@ -28,7 +28,10 @@
   `request: PermissionRequest`（共享 `adapters/types` 模型），使表面无需探入
   provider 即可渲染。daemon 绑定在待处理拆分中填充它。
 - **拆分保留每增量优化。** 渲染就绪的 request 仅在内容签名变化时抽取（slice 2d 的
-  ref 缓存），而非每个流式增量；轻量块级分类器仍每次渲染构建签名。
+  ref 缓存），而非每个流式增量；轻量块级分类器仍每次渲染构建签名。签名为
+  `id + 分类 + 廉价载荷 revision`（`updatedAt + title + option ids`，不做载荷序列化）：
+  同一 id 重发的 `permission.request` 可能在 id 与分类不变时改动 title/options，
+  revision 项强制重新抽取，使缓存的 request 不陈旧（verify-r3 F1）。
 - **准入不等于建立，输入框亦然。** `ChatEditor.onSubmit` 派发 `controller.submit`，
   仅在 `accepted` 准入时清空草稿（`commitAccepted`）——绝不在建立时。**仅当存在提交
   回调时**才返回字面量 `false` 以推迟 `useComposerCore` 的同步提交

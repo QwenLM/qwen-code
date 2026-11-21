@@ -196,6 +196,11 @@ describe('ChatSurface', () => {
     // must reject rather than resolve into a latched, inert card.
     await expect(onConfirm('a1', 'submit')).rejects.toThrow();
     expect(onError).toHaveBeenCalled();
+    // The host sink displays error.message, so the localized copy must be the
+    // Error's own message, not an English literal.
+    expect((onError.mock.calls[0][0] as Error).message).toBe(
+      'localized:chat.approvalNotAccepted',
+    );
   });
 
   it('normalizes question answers and reports admission as the confirm boolean', async () => {
@@ -300,6 +305,25 @@ describe('ChatSurface', () => {
     expect(controller.cancel).toHaveBeenCalled();
   });
 
+  it('reports a non-accepted stop admission instead of failing silent', async () => {
+    const onError = vi.fn();
+    const controller = fakeController({
+      cancel: vi.fn(async () => ({
+        admission: 'unknown',
+        target: { sessionId: 's1' },
+      })),
+    });
+    mountReact(<ChatSurface controller={controller} onError={onError} />);
+    const onCancel = captured.editor?.onCancel as () => void;
+    await act(async () => {
+      onCancel();
+    });
+    await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+    expect((onError.mock.calls[0][0] as Error).message).toBe(
+      'localized:chat.stopNotConfirmed',
+    );
+  });
+
   it('keeps the running affordance while submitting, running, or cancelling', () => {
     for (const phase of ['submitting', 'running', 'cancelling'] as const) {
       const controller = fakeController({ phase });
@@ -345,6 +369,7 @@ describe('ChatSurface', () => {
         { id: 'a1', status: 'pending', request: permissionRequest('a1') },
       ],
     });
+    const generateContent = vi.fn();
     mountReact(
       <ChatSurface
         controller={controller}
@@ -353,6 +378,7 @@ describe('ChatSurface', () => {
         approvalDisabled
         approvalKeyboardActive={false}
         showBrowserNotifications
+        generateContent={generateContent}
       />,
     );
     expect(captured.approval?.planTodos).toBe(planTodos);
@@ -360,6 +386,8 @@ describe('ChatSurface', () => {
     expect(captured.approval?.disabled).toBe(true);
     expect(captured.approval?.keyboardActive).toBe(false);
     expect(captured.approval?.showBrowserNotifications).toBe(true);
+    // The exec-command explain action is only reachable with a generator.
+    expect(captured.approval?.generateContent).toBe(generateContent);
     expect(captured.question).toBeUndefined();
   });
 
@@ -481,9 +509,10 @@ describe('ChatSurface', () => {
 
   it('reports a submit transport rejection without wiping the draft', async () => {
     const onError = vi.fn();
+    const boom = new Error('network');
     const controller = fakeController({
       submit: vi.fn(async () => {
-        throw new Error('network');
+        throw boom;
       }),
     });
     mountReact(<ChatSurface controller={controller} onError={onError} />);
@@ -496,9 +525,9 @@ describe('ChatSurface', () => {
     expect(commitAccepted).not.toHaveBeenCalled();
     // The localized text must be the Error's own message (the host sink displays
     // error.message), with the raw transport error preserved as the cause.
-    expect((onError.mock.calls[0][0] as Error).message).toBe(
-      'localized:chat.failedToSend',
-    );
+    const reported = onError.mock.calls[0][0] as Error;
+    expect(reported.message).toBe('localized:chat.failedToSend');
+    expect(reported.cause).toBe(boom);
   });
 
   it('blocks a repeat send while a submit is in flight', () => {
@@ -639,6 +668,19 @@ describe('ChatSurface', () => {
     const controller = fakeController();
     mountReact(<ChatSurface controller={controller} historyPaginationError />);
     expect(captured.transcript?.historyPaginationError).toBe(true);
+  });
+
+  it('forwards the older-history spinner and capacity facts to the transcript', () => {
+    const controller = fakeController();
+    mountReact(
+      <ChatSurface
+        controller={controller}
+        loadingOlderHistory
+        historyCapacityReached
+      />,
+    );
+    expect(captured.transcript?.loadingOlderHistory).toBe(true);
+    expect(captured.transcript?.historyCapacityReached).toBe(true);
   });
 
   it('forwards the composer draft scope for a new chat', () => {

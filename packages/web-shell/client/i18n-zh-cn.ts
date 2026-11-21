@@ -1434,6 +1434,7 @@ export const ZH: Messages = {
   'chat.failedToSend': '发送消息失败',
   'chat.approvalNotAccepted': '审批未被接受',
   'chat.acknowledgeUnknown': '我已检查会话',
+  'chat.stopNotConfirmed': '停止请求未确认',
   'askUser.shortcuts.previous': '← 上一步',
   'askUser.shortcuts.optionsSingle': '↑↓ 选择 · Enter 提交',
   'askUser.shortcuts.optionsNext': '↑↓ 选择 · Enter 下一步',
