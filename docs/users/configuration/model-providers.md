@@ -490,6 +490,43 @@ Things to know about this endpoint:
 - **Nothing to set for `openai/gpt-5-4-nano`.** Its last segment, `gpt-5-4-nano`, is in the lookup, which gives it image input and a window no larger than the 400,000 tokens the catalog reports.
 - **Set `contextWindowSize` and `modalities` for `claude/sonnet-5`.** Its last segment, `sonnet-5`, is not a name the lookup knows (the lookup has `claude-sonnet-5`), so without them the entry gets the generic 200K window and is treated as text-only. The example sets the 1,000,000-token `context_length` and the image input the catalog reports. The default output request stays below the output limit of both models.
 
+### HopBase
+
+[HopBase](https://hop-base.com) is a model API gateway that serves Claude, GPT, Gemini, DeepSeek, Qwen, GLM and other models through an OpenAI-compatible endpoint at `https://api.hop-base.com/v1` and authenticates with an API key sent as a Bearer token, so it works with the `openai` protocol and no extra code. Create a key in the [HopBase console](https://api.hop-base.com); the [API docs](https://hop-base.com/en/docs) describe the endpoint. `GET https://api.hop-base.com/v1/models`, called with the same key, returns the model ids that key can call.
+
+```json
+{
+  "env": {
+    "HOPBASE_API_KEY": "<your HopBase API key>"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "claude-sonnet-5-5",
+        "name": "Claude Sonnet 5.5 (HopBase)",
+        "envKey": "HOPBASE_API_KEY",
+        "baseUrl": "https://api.hop-base.com/v1"
+      },
+      {
+        "id": "deepseek-v4.1-flash",
+        "name": "DeepSeek V4.1 Flash (HopBase)",
+        "envKey": "HOPBASE_API_KEY",
+        "baseUrl": "https://api.hop-base.com/v1",
+        "generationConfig": { "modalities": { "image": true } }
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "claude-sonnet-5-5" }
+}
+```
+
+Things to know about this endpoint:
+
+- **Use the ids from `/v1/models` as written.** Claude ids use hyphens (`claude-sonnet-5-5`), and the list only contains the models the key can call; an id outside it returns an error rather than being routed to another model.
+- **Set `modalities` for `deepseek-v4.1-flash`.** It reads images on HopBase, but the built-in model lookup records it as text-only, so the example sets image input explicitly. `claude-sonnet-5-5` gets image input from the `^claude-` row.
+- **No `contextWindowSize` needed for these two.** HopBase serves both with a 1,000,000-token window, and the bundled model catalog already resolves both to 1M. With the catalog turned off (`QWEN_CODE_MODELS_DEV=off`), `claude-sonnet-5-5` falls back to the 200K `^claude-` row, which only makes compaction start earlier; set `contextWindowSize: 1000000` if you want the full window there. For an id neither the catalog nor the lookup knows, pin `contextWindowSize` to the window listed in HopBase's docs.
+
 ### OpenAI Responses API (`openai-responses`)
 
 Use `openai` with `wireApi: "responses"` to target OpenAI's `/v1/responses` endpoint. When the endpoint returns encrypted reasoning with visible thought text, it replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`. Compatible endpoints that stream `response.reasoning_text.delta` also display their reasoning, but endpoints without `encrypted_content` cannot replay the opaque reasoning state. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.
