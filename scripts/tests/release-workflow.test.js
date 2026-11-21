@@ -4182,6 +4182,12 @@ esac`,
     expect(pushReleaseBranchStep.env.RELEASE_VERSION).toBe(
       '${{ needs.prepare.outputs.release_version }}',
     );
+    // The resume arm verifies the reused commit is a direct child of the
+    // release source commit. Without RELEASE_SHA wired into the step the
+    // provenance check can never pass and every resume is refused.
+    expect(pushReleaseBranchStep.env.RELEASE_SHA).toBe(
+      '${{ needs.prepare.outputs.release_sha }}',
+    );
     expect(pushReleaseBranchStep.run).toContain('push-release-branch');
     const guard = releaseStepScript.indexOf(
       'node .release-workflow/scripts/assert-release-version.mjs --assert-unreleased="${RELEASE_VERSION}" || guard_status=$?',

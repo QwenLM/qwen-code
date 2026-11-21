@@ -187,6 +187,47 @@ case "${step}" in
       # pushed the branch, so the per-package skip never got to run.
       remote_branch="$(git ls-remote --heads origin "refs/heads/${release_branch_name}")"
       if [[ -n "${remote_branch}" ]]; then
+        # The resume arm adopts a remote commit as the release, so it must
+        # know the release source commit to verify provenance. The workflow
+        # always supplies RELEASE_SHA; refuse rather than skip the check.
+        if [[ -z "${RELEASE_SHA:-}" ]]; then
+          echo "::error::RELEASE_SHA is not set; refusing to resume an existing release branch without provenance."
+          exit 1
+        fi
+        # A completed release outranks every other refusal: a re-run of an
+        # already-shipped version is a benign no-op even when the channel
+        # has since moved past it (finalize also pushes CHANGELOG commits
+        # that make the regenerated tree differ).
+        release_published=false
+        release_check_ok=false
+        for attempt in 1 2 3; do
+          gh_output="$(gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>&1)" || true
+          if echo "${gh_output}" | grep -qx 'false'; then
+            release_published=true
+            release_check_ok=true
+            break
+          fi
+          if echo "${gh_output}" | grep -qx 'true' || echo "${gh_output}" | grep -qi 'not found'; then
+            # Draft or absent: the release is not complete; continue probing.
+            release_published=false
+            release_check_ok=true
+            break
+          fi
+          if [[ "${attempt}" -lt 3 ]]; then
+            sleep $(( attempt * 5 ))
+          fi
+        done
+        if [[ "${release_published}" == "true" ]]; then
+          echo "::notice::Release ${RELEASE_TAG} is already published; nothing to resume."
+          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
+        if [[ "${release_check_ok}" == "false" ]]; then
+          echo "::error::Cannot confirm GitHub Release ${RELEASE_TAG} state after 3 attempts; refusing to resume."
+          # Infrastructure failure, not a version refusal: notify_failure
+          # should still fire.
+          exit 1
+        fi
         # A newer version may have shipped on this channel since this run
         # started. Resuming would publish the remaining packages under the
         # old version and regress the dist-tag. Probe with bounded retries
@@ -221,9 +262,9 @@ case "${step}" in
               const s = v.replace(/^v/, '');
               const dash = s.indexOf('-');
               const core = (dash === -1 ? s : s.slice(0, dash)).split('.');
-              if (core.length < 3) return null;
+              if (core.length !== 3) return null;
+              if (!core.every(x => /^[0-9]+$/.test(x))) return null;
               const nums = core.map(x => parseInt(x, 10));
-              if (nums.some(Number.isNaN)) return null;
               return { nums, pre: dash === -1 ? '' : s.slice(dash + 1) };
             };
             const cmpPre = (a, b) => {
@@ -260,9 +301,9 @@ case "${step}" in
                 const s = v.replace(/^v/, '');
                 const dash = s.indexOf('-');
                 const core = (dash === -1 ? s : s.slice(0, dash)).split('.');
-                if (core.length < 3) return null;
+                if (core.length !== 3) return null;
+                if (!core.every(x => /^[0-9]+$/.test(x))) return null;
                 const nums = core.map(x => parseInt(x, 10));
-                if (nums.some(Number.isNaN)) return null;
                 return { nums, pre: dash === -1 ? '' : s.slice(dash + 1) };
               };
               const cmpPre = (a, b) => {
@@ -314,7 +355,10 @@ case "${step}" in
           # Key on the run id, not on `headBranch`: release.yml is triggered by
           # schedule and workflow_dispatch, so every run's headBranch is `main`
           # and a `release/`-prefixed filter can never match a sibling run.
-          concurrent="$(gh run list --workflow release.yml --status in_progress --limit 20 --json databaseId --jq "[.[] | select((.databaseId|tostring) != \"${GITHUB_RUN_ID:-0}\")] | length" 2>/dev/null || echo 0)"
+          if ! concurrent="$(gh run list --workflow release.yml --status in_progress --limit 20 --json databaseId --jq "[.[] | select((.databaseId|tostring) != \"${GITHUB_RUN_ID:-0}\")] | length" 2>/dev/null)" || [[ -z "${concurrent}" ]]; then
+            echo "::error::Cannot confirm whether another release run is in progress; refusing to resume."
+            exit 1
+          fi
           if [[ "${concurrent}" != "0" ]]; then
             echo "::error::Another release run is in progress. Wait for it to finish before resuming."
             echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
@@ -322,50 +366,13 @@ case "${step}" in
           fi
           echo "::endgroup::"
         fi
-        # Skip tree comparison when the release is already complete (tag +
-        # GitHub Release exist): the finalize workflow may have pushed a
-        # CHANGELOG commit that makes the tree differ, but the version is
-        # done and should not be reported as a failure.
-        release_check_ok=false
-        release_published=false
-        for attempt in 1 2 3; do
-          gh_output="$(gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>&1)" || true
-          if echo "${gh_output}" | grep -qx 'false'; then
-            release_check_ok=true
-            release_published=true
-            break
-          elif echo "${gh_output}" | grep -qx 'true'; then
-            release_check_ok=true
-            release_published=false
-            break
-          elif echo "${gh_output}" | grep -qi 'not found\|release not found'; then
-            # Release does not exist yet — normal for a first resume.
-            release_check_ok=true
-            break
-          fi
-          if [[ "${attempt}" -lt 3 ]]; then
-            sleep $(( attempt * 5 ))
-          fi
-        done
-        if [[ "${release_check_ok}" == "false" ]]; then
-          echo "::error::Cannot confirm GitHub Release ${RELEASE_TAG} state after 3 attempts; refusing to resume."
-          # Do NOT set version_refusal here — this is an infrastructure
-          # failure (network/permission), not a version refusal. The
-          # notify_failure job should still fire.
-          exit 1
-        fi
-        if [[ "${release_published}" == "true" ]]; then
-          echo "::notice::Release ${RELEASE_TAG} is already published; nothing to resume."
-          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
-          exit 1
-        fi
         git fetch --no-tags origin "refs/heads/${release_branch_name}"
         release_commit="$(git rev-parse FETCH_HEAD)"
         # Verify the reused commit is a direct child of the release source
         # commit (the version-bump commit created by prepare-release-branch).
-        # This prevents a rogue commit with matching tree but wrong ancestry
-        # from being adopted as the release.
-        if [[ -n "${RELEASE_SHA:-}" ]] && [[ "$(git rev-parse --verify -q "${release_commit}^" 2>/dev/null)" != "${RELEASE_SHA}" ]]; then
+        # A deeper chain or a merge with a matching tree is not this run's
+        # release.
+        if [[ "$(git rev-parse --verify -q "${release_commit}^" 2>/dev/null)" != "${RELEASE_SHA}" ]]; then
           echo "::error::${release_branch_name} tip ${release_commit} is not a direct child of release source ${RELEASE_SHA}. Refusing to resume."
           exit 1
         fi
