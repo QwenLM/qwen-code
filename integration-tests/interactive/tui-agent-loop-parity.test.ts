@@ -27,7 +27,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import {
   fakeToolCall,
@@ -155,6 +155,17 @@ interface Run {
  * tripling its cost in the required gate.
  */
 const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
+
+/**
+ * The helper gate's ceiling. Past it the fake server answers 500 and the
+ * CLI's retry adds a request the strict parity count rejects. The enclosing
+ * waits (TURN_BUDGET) must stay strictly above this ceiling so the gate, not
+ * the harness, is the first deadline a stalled leader reaches.
+ */
+const HELPER_GATE_BUDGET = 90_000;
+
+/** Above the gate, under the SDK's 120 s request timeout (DEFAULT_TIMEOUT). */
+const TURN_BUDGET = HELPER_GATE_BUDGET + 15_000;
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
@@ -796,7 +807,7 @@ describeTui(SUITE, () => {
             (request) => request.transport.closedAt !== undefined,
           ),
         'model requests complete',
-        90_000,
+        TURN_BUDGET,
         () => session!.viewport(),
       );
       await session!.idle(2_000, 90_000);
@@ -895,7 +906,7 @@ describeTui(SUITE, () => {
           (scenario.sideRequests === undefined ||
             sideCount() >= scenario.sideRequests),
         'the session starts its later turns',
-        90_000,
+        TURN_BUDGET,
         () => session!.viewport(),
       );
       await turnEnds(scenario.requests);
@@ -1416,6 +1427,7 @@ describeTui(SUITE, () => {
                     ),
                   ),
               'the leader records its waiting answer',
+              HELPER_GATE_BUDGET,
             );
             return { content: 'HELPER REPORT: it is sunny.' };
           });
@@ -1510,6 +1522,60 @@ describeTui(SUITE, () => {
       (candidate) => candidate.name === 'input queued while a tool runs',
     );
     expect(queued?.volatile).toBe(FOREGROUND_SHELL_VOLATILE);
+  });
+
+  // Both edges of the ceiling: a trim lets a stalled leader expire the gate
+  // into the 500-and-retry the parity count rejects, and no ceiling at all
+  // lets a wedged leader hang the case to its timeout. The literal pin keeps
+  // a mutation of the constant from moving the gate and this test together.
+  it('gives the helper gate the cross-turn budget', async () => {
+    expect(HELPER_GATE_BUDGET).toBe(90_000);
+    expect(TURN_BUDGET).toBeGreaterThan(HELPER_GATE_BUDGET);
+    const scenario = allScenarios.find(
+      (candidate) =>
+        candidate.name === 'a teammate report that starts a teammate turn',
+    )!;
+    const gateScratch = mkdtempSync(join(tmpdir(), 'qwen-helper-gate-'));
+    const transcript = join(gateScratch, 'runtime', 'chats', 'session.jsonl');
+    mkdirSync(join(gateScratch, 'runtime', 'chats'), { recursive: true });
+    writeFileSync(transcript, '{}\n');
+    const previousWaiting = leaderWaiting;
+    leaderWaiting = deferred();
+    leaderWaiting.resolve();
+    const helperReply = () =>
+      Promise.resolve(
+        scenario.reply(
+          [{ role: 'user', content: `${HELPER_TASK} Check the weather.` }],
+          join(gateScratch, 'workspace'),
+          0,
+        ),
+      );
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const reply = helperReply();
+      let settled = false;
+      void reply.then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await vi.advanceTimersByTimeAsync(HELPER_GATE_BUDGET - 1_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(reply).rejects.toThrow(
+        'the leader records its waiting answer',
+      );
+      writeFileSync(
+        transcript,
+        '{"message":{"content":[{"text":"Waiting for the helper."}]}}\n',
+      );
+      await expect(helperReply()).resolves.toEqual({
+        content: 'HELPER REPORT: it is sunny.',
+      });
+    } finally {
+      vi.useRealTimers();
+      leaderWaiting = previousWaiting;
+      rmSync(gateScratch, { recursive: true, force: true });
+    }
   });
 
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {
