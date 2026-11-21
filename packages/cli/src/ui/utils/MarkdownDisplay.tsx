@@ -16,7 +16,7 @@ import { colorizeCode } from './CodeColorizer.js';
 import type { CodeHighlightCache } from './CodeColorizer.js';
 import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
-import { useSettings } from '../contexts/SettingsContext.js';
+import { SettingsContext, useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
@@ -216,7 +216,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   enforceHeightBudget = false,
 }) => {
   const { renderMode } = useRenderMode();
-  const showLineNumbers = useSettings()?.merged.ui?.showLineNumbers ?? true;
+  const showLineNumbers =
+    React.useContext(SettingsContext)?.merged.ui?.showLineNumbers ?? true;
   const copyHint = React.useMemo(() => {
     if (!showSourceCopyHints) return () => undefined;
     return sourceCopyText === undefined
