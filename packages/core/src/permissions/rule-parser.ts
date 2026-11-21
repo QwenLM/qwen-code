@@ -42,12 +42,7 @@ function toPosixPath(p: string): string {
  * on Windows and POSIX.
  */
 function isWindowsAbsolutePath(p: string): boolean {
-  return /^[A-Za-z]:[\\/]/.test(p) || isUncPath(p);
-}
-
-/** A UNC root (`\\server\share`): it starts with two separators of its own. */
-function isUncPath(p: string): boolean {
-  return /^\\\\[^\\]/.test(p);
+  return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\[^\\]/.test(p);
 }
 
 /**
@@ -758,10 +753,11 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
         // slashes: persisting the bare `D:\proj/**` form left every "Always
         // Allow" rule unmatchable and re-prompted for the same directory
         // forever (#17802).
-        // A UNC root (`\\server\share`) keeps both of its own separators:
-        // `///server/share/**` resolves back to `//server/share/**`.
+        // A UNC root (`\\server\share` or `//server/share`) keeps both of
+        // its own separators: `///server/share/**` resolves back to
+        // `//server/share/**`.
         const posixDir = toPosixPath(dirPath);
-        const specifier = isUncPath(dirPath)
+        const specifier = /^\/\/[^/]/.test(posixDir)
           ? `/${posixDir}/**`
           : posixDir.startsWith('/') || isWindowsAbsolutePath(dirPath)
             ? `//${posixDir.replace(/^\/+/, '')}/**`

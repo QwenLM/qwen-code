@@ -3051,6 +3051,8 @@ describe('buildPermissionRules', () => {
     it.each([
       ['a network share', '\\\\server\\share'],
       ['a WSL folder', '\\\\wsl.localhost\\Ubuntu'],
+      ['a forward-slash share', '//server/share'],
+      ['a forward-slash WSL folder', '//wsl.localhost/Ubuntu'],
     ])(
       'Read rule for a UNC directory on %s matches files in it',
       async (_label, root) => {
