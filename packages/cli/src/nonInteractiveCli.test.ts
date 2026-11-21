@@ -11427,6 +11427,118 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'reports a refused turn on the default loop as an error result, not the previous answer (#15325)',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([{ type: LlmEventType.MaxSessionTurns }]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Second question',
+          'prompt-turn-cap-marker',
+        ),
+      ).resolves.toBe(53);
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'max_session_turns',
+            data: expect.objectContaining({
+              maxSessionTurns: expect.any(Number),
+            }),
+          }),
+        ]),
+      );
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        subtype: 'error_max_turns',
+        is_error: true,
+        error: {
+          message: expect.stringContaining('Reached max session turns'),
+        },
+      });
+      // The refused turn made no model request, so there is no answer to
+      // repeat under the error envelope.
+      expect(messages.at(-1)).not.toHaveProperty('result');
+    },
+  );
+
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'reports a refused turn at the session token cap as an error result (%s)',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.SessionTokenLimitExceeded,
+            value: {
+              currentTokens: 120_000,
+              limit: 100_000,
+              message:
+                'Session token limit exceeded: 120000 tokens > 100000 limit.',
+            },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Second question',
+          'prompt-token-cap',
+        ),
+      ).resolves.toBe(1);
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'session_token_limit_exceeded',
+            data: expect.objectContaining({
+              currentTokens: 120_000,
+              limit: 100_000,
+            }),
+          }),
+        ]),
+      );
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        error: { message: expect.stringContaining('Session token limit') },
+      });
+    },
+  );
+
   // Intended difference: headless charges a drain item one turn, while the
   // client counts each of its rounds, and only the shared loop honours the
   // client's limit.
@@ -11507,7 +11619,10 @@ describe('runNonInteractive', () => {
           expect.stringContaining('Reached max session turns'),
         );
       } else {
-        await expect(run).resolves.toBe(0);
+        // The drain turn's refusal used to be dropped, so this run reported
+        // success with the previous answer. It ends as an error now; the exit
+        // code stays the drain arm's (1), not the main turn's 53.
+        await expect(run).resolves.toBe(1);
       }
       expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
       expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);

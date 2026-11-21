@@ -299,16 +299,21 @@ export async function handleCancellationError(
  * failure modes surface as the same generic "increase maxSessionTurns" line
  * even though the fix is a permissions / schema change, not a turns bump.
  */
-export async function handleMaxTurnsExceededError(
-  config: Config,
-): Promise<never> {
+export function buildMaxTurnsExceededMessage(config: Config): string {
   const baseMessage =
     'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.';
   const jsonSchemaActive = config.getJsonSchema?.() !== undefined;
-  const message = jsonSchemaActive
+  return jsonSchemaActive
     ? `${baseMessage}\nNote: --json-schema is active. If the model never called structured_output, verify it isn't denied by permissions.deny / --exclude-tools and that the schema is satisfiable.`
     : baseMessage;
-  const maxTurnsError = new FatalTurnLimitedError(message);
+}
+
+export async function handleMaxTurnsExceededError(
+  config: Config,
+): Promise<never> {
+  const maxTurnsError = new FatalTurnLimitedError(
+    buildMaxTurnsExceededMessage(config),
+  );
 
   if (config.getOutputFormat() === OutputFormat.JSON) {
     const formatter = new JsonFormatter();
