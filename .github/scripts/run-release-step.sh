@@ -184,22 +184,16 @@ case "${step}" in
       # pushed the branch, so the per-package skip never got to run.
       remote_branch="$(git ls-remote --heads origin "refs/heads/${release_branch_name}")"
       if [[ -n "${remote_branch}" ]]; then
-        # Every resume probe below is read-only and runs before the write
-        # credential is exported: the job token reads the public repo, and
-        # the channel guard loads its code from the workflow-pinned checkout
-        # rather than the selected release ref.
-        # The resume arm adopts a remote commit as the release, so it must
-        # know the release source commit to verify provenance. The workflow
-        # always supplies RELEASE_SHA; refuse rather than skip the check.
+        # Read-only probes only, ahead of the write-credential export; the
+        # channel guard's code rides the workflow-pinned checkout.
         if [[ -z "${RELEASE_SHA:-}" ]]; then
           echo "::error::RELEASE_SHA is not set; refusing to resume an existing release branch without provenance."
           exit 1
         fi
         git fetch --no-tags origin "refs/heads/${release_branch_name}"
         release_commit="$(git rev-parse FETCH_HEAD)"
-        # A completed release outranks every other refusal: a re-run of an
-        # already-shipped version is a benign no-op even when finalize has
-        # since advanced the branch or the channel has moved past it.
+        # A completed release outranks every other refusal, including the
+        # finalize CHANGELOG commit that advanced the branch after shipping.
         if release_state="$(gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>&1)"; then
           if [[ "${release_state}" == "false" ]]; then
             echo "::notice::Release ${RELEASE_TAG} is already published; nothing to resume."
@@ -210,10 +204,8 @@ case "${step}" in
           echo "::error::Cannot confirm GitHub Release ${RELEASE_TAG} state: ${release_state}"
           exit 1
         fi
-        # The reused tip is either the release source itself (no version
-        # bump was needed) or a single-parent bump commit directly on it —
-        # the same parentage restore-release enforces. A merge with the
-        # source as first parent is not this run's release either.
+        # Same parentage restore-release enforces: the source itself (no
+        # bump needed) or a single-parent bump commit on it; merges fail.
         if [[ "${release_commit}" != "${RELEASE_SHA}" ]] &&
           [[ "$(git rev-list --parents -n 1 "${release_commit}")" != "${release_commit} ${RELEASE_SHA}" ]]; then
           echo "::error::${release_branch_name} tip ${release_commit} is not the release source ${RELEASE_SHA} or its direct single-parent version commit. Refusing to resume."
@@ -224,26 +216,18 @@ case "${step}" in
           echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
           exit 1
         fi
-        # An existing remote tag anchors the GitHub Release; --target only
-        # applies when gh creates a new tag. A tag pointing at a different
-        # commit would ship npm packages and a Release for two commits.
+        # gh release create ignores --target for an existing tag, so a tag
+        # on another commit would split npm and the Release across commits.
         remote_tag="$(git ls-remote origin "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")"
         if [[ -n "${remote_tag}" ]]; then
-          tag_commit="$(printf '%s\n' "${remote_tag}" | awk '/\^\{\}$/{print $1}')"
-          if [[ -z "${tag_commit}" ]]; then
-            tag_commit="$(printf '%s\n' "${remote_tag}" | awk 'NR==1{print $1}')"
-          fi
+          # Prefer the peeled commit of an annotated tag; else the ref itself.
+          tag_commit="$(printf '%s\n' "${remote_tag}" | awk '/\^\{\}$/{sha=$1} END{if(!sha) sha=$1; print sha}')"
           if [[ "${tag_commit}" != "${release_commit}" ]]; then
             echo "::error::Remote tag ${RELEASE_TAG} points at ${tag_commit}, not the release commit ${release_commit}. Refusing to resume."
             exit 1
           fi
         fi
-        # Read-only channel checks run from the workflow-pinned guard before
-        # the write credential is exported, so neither the comparison nor
-        # the code it executes depends on the selected release ref.
-        # Exit codes match the pre-push guard below: 0 safe, 1 decisive
-        # channel refusal, 2 probe failure (the only retryable one), 4
-        # malformed input.
+        # Same exit-code contract as the pre-push guard below: only 2 retries.
         for attempt in 1 2 3; do
           channel_status=0
           node .release-workflow/scripts/assert-release-version.mjs --assert-channel-resumable --version="${RELEASE_VERSION}" --tag="${NPM_TAG}" || channel_status=$?
@@ -262,10 +246,8 @@ case "${step}" in
         if [[ "${channel_status}" -ne 0 ]]; then
           exit "${channel_status}"
         fi
-        # Reattach the branch name onto the adopted commit: the restored
-        # handoff may hold a local branch of the same name pointing at this
-        # run's stale bump commit, and the rebuild below must build the
-        # commit the published packages will be anchored to.
+        # -C overwrites the restored handoff's stale same-name branch so the
+        # rebuild below builds the adopted commit.
         git switch -C "${release_branch_name}" "${release_commit}"
         echo "reused_commit=true" >> "${GITHUB_OUTPUT}"
         echo "::notice::Reusing ${release_branch_name} at ${release_commit}; published npm versions will be skipped."

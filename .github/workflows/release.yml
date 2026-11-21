@@ -869,9 +869,8 @@ jobs:
       - *checkout_release_workflow_scripts
 
       - name: 'Build Bundle and Prepare Package'
-        # A resume rebuilds from the adopted release commit so the published
-        # package reports the tagged commit; riding this step keeps the
-        # trusted reset/checkout pair between it and the archives build.
+        # A resume rebuilds from the adopted commit through these two steps
+        # so the trusted reset/checkout pair also covers the retry path.
         if: "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}"
         env:
           QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"

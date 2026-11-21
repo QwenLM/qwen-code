@@ -120,27 +120,21 @@ export function runAssertVersionCli(version) {
 }
 
 /**
- * Resume-time guard for a partially published release. `latest` on the CLI
- * cannot speak for the workspace packages: pnpm skips already-published
- * versions but re-points the dist-tag of every package it does publish, so
- * one workspace tag ahead of the resuming version already means resuming
- * would regress that channel. Read every published package's target
- * dist-tag and refuse only when one is strictly newer than the resuming
- * version. Same-date nightlies carry unordered short SHAs, so an equal core
- * with different nightly suffixes cannot prove order and refuses too.
- * Runs from the workflow-pinned checkout before any write credential is
- * exported: its `npm view` calls and the `semver` import must not come from
- * the selected release ref.
+ * Resume-time guard: pnpm re-points the dist-tag of every package it
+ * publishes, so any published package's channel tag ahead of the resuming
+ * version means a regression — the CLI's tag alone cannot speak for the
+ * workspace packages. Same-date nightlies carry unordered short SHAs and
+ * refuse conservatively.
  * Exit codes: 0 safe to resume, 1 decisive channel refusal (the workflow
  * marks version_refusal), 2 probe failure (retried), 4 malformed input.
  */
 export function runAssertChannelResumableCli(version, tag) {
-  const versionFormat =
-    /^\d+\.\d+\.\d+(?:-preview\.\d+|-nightly\.\d{8}\.[0-9a-f]+)?$/;
   if (
     typeof version !== 'string' ||
     typeof tag !== 'string' ||
-    !versionFormat.test(version) ||
+    !/^\d+\.\d+\.\d+(?:-preview\.\d+|-nightly\.\d{8}\.[0-9a-f]+)?$/.test(
+      version,
+    ) ||
     !/^[a-z][a-z0-9-]*$/.test(tag)
   ) {
     console.log(
@@ -163,8 +157,7 @@ export function runAssertChannelResumableCli(version, tag) {
         );
         return 2;
       }
-      // The package has never been published on this registry; publishing
-      // it moves the channel forward, never back.
+      // Never published: publishing it can only move the channel forward.
       continue;
     }
     if (current === '') continue;
@@ -201,17 +194,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const arg = process.argv[2] ?? '';
   let exitCode;
   if (arg === '--assert-channel-resumable') {
-    const values = Object.fromEntries(
-      process.argv.slice(3).map((entry) => {
-        const eqIndex = entry.indexOf('=');
-        return eqIndex === -1
-          ? [entry, '']
-          : [entry.slice(0, eqIndex), entry.slice(eqIndex + 1)];
-      }),
-    );
+    const value = (prefix) =>
+      process.argv
+        .find((entry) => entry.startsWith(prefix))
+        ?.slice(prefix.length);
     exitCode = runAssertChannelResumableCli(
-      values['--version'],
-      values['--tag'],
+      value('--version='),
+      value('--tag='),
     );
   } else {
     const prefix = '--assert-unreleased=';

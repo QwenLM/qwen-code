@@ -99,11 +99,7 @@ function createFixture({
   }
   if (finalize) {
     // Finalize pushes a CHANGELOG commit after the release completes.
-    git(
-      'checkout',
-      '--detach',
-      tipKind === 'merge' ? git('rev-parse', 'HEAD') : original,
-    );
+    git('checkout', '--detach', original);
     writeFileSync(join(checkout, 'CHANGELOG.md'), `v${branchVersion}\n`);
     commit('Finalize');
     git('push', 'origin', 'HEAD:refs/heads/release/v1.2.3');

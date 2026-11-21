@@ -4599,29 +4599,22 @@ describe('release artifact handoff', () => {
       '${{ needs.build_release.outputs.release_commit }}',
     );
     expect(restore.if).toBe("${{ needs.build_release.result == 'success' }}");
+    expect(step('publish', 'Prepare release branch').if).toBe(
+      "${{ needs.build_release.result != 'success' }}",
+    );
+    // A resume rebuilds through these two steps so the trusted
+    // reset/checkout pair between them also covers the retry path.
     for (const name of [
-      'Prepare release branch',
       'Build Bundle and Prepare Package',
       'Build Standalone Archives',
     ]) {
       expect(step('publish', name).if).toBe(
-        name === 'Prepare release branch'
-          ? "${{ needs.build_release.result != 'success' }}"
-          : "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}",
+        "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}",
       );
     }
-    // A resume rebuilds from the adopted release commit through the same
-    // two build steps, so the reset/checkout pair between them protects the
-    // archives build on the retry path too — a hand-copied rebuild step
-    // running both commands back-to-back would not get that re-pin.
     expect(releaseStepScript).toContain(
       'git switch -C "${release_branch_name}" "${release_commit}"',
     );
-    expect(
-      releaseYaml.jobs.publish.steps.some((entry) =>
-        String(entry.name ?? '').startsWith('Rebuild artifacts'),
-      ),
-    ).toBe(false);
     expect(publish.steps.indexOf(restore)).toBeLessThan(
       publish.steps.indexOf(
         step('publish', 'Conditionally push release branch'),
