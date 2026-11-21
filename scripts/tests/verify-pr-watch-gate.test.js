@@ -380,6 +380,10 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
     'pre-records delivered resync head and repo through the gate CLI',
     () => {
       const root = makeRoot();
+      expect(
+        spawnSync('git', ['init', root], { env: makeGitEnv(makeRoot()) })
+          .status,
+      ).toBe(0);
       const cli = join(root, 'stub-qwen');
       const moved = JSON.stringify({
         headSha: HEAD,
@@ -555,19 +559,28 @@ printf '%s\\n' '${moved}'
         expect(refused.stderr).toContain('is not a git worktree');
         expect(existsSync(ownershipPath(cwdGit, 123))).toBe(false);
       }
+      const pwdLogB = join(nonGitRoot, 'probe-pwd.txt');
       const cliB = join(nonGitRoot, 'stub-qwen');
-      writeFileSync(cliB, `#!/usr/bin/env bash\nprintf '%s\\n' '${moved}'\n`, {
-        mode: 0o755,
-      });
+      writeFileSync(
+        cliB,
+        `#!/usr/bin/env bash
+pwd -P > '${pwdLogB}'
+mkdir -p "$(pwd -P)/.qwen/tmp"
+printf '{"headSha":"abc1234"}' > "$(pwd -P)/.qwen/tmp/${gateName}"
+printf '%s\\n' '${moved}'
+`,
+        { mode: 0o755 },
+      );
       const resB = spawnSync(
         process.execPath,
         [isolatedGate, '123', '--repo', 'QwenLM/qwen-code', '--cli', cliB],
         { cwd: cwdGit, encoding: 'utf8' },
       );
-      expect(resB.status).toBe(0);
-      expect(resB.stdout.trim()).toBe(moved);
-      expect(resB.stderr).toContain('pre-delivery skipped');
+      expect(resB.status).toBe(2);
+      expect(resB.stdout).toBe('');
       expect(resB.stderr).toContain('is not a git worktree');
+      expect(existsSync(pwdLogB)).toBe(false);
+      expect(existsSync(join(cwdGit, '.qwen', 'tmp', gateName))).toBe(false);
       expect(existsSync(statePath(cwdGit, 123))).toBe(false);
 
       // R3-2: reject empty, flag-like, or relative --state-root (plus sibling flag usage errors).
@@ -608,6 +621,9 @@ printf '%s\\n' '${moved}'
       });
       const gitEnv = makeGitEnv(makeRoot());
       const stateRoot = makeRoot();
+      expect(
+        spawnSync('git', ['init', stateRoot], { env: gitEnv }).status,
+      ).toBe(0);
       const callerCwd = makeRoot();
       expect(
         spawnSync('git', ['init', callerCwd], { env: gitEnv }).status,
@@ -663,6 +679,9 @@ printf '%s\\n' '${moved}'
       ).toEqual([HEAD]);
 
       const failRoot = makeRoot();
+      expect(spawnSync('git', ['init', failRoot], { env: gitEnv }).status).toBe(
+        0,
+      );
       const failCli = join(callerCwd, 'failing-qwen');
       writeFileSync(
         failCli,
@@ -690,6 +709,45 @@ exit 3
       expect(failed.stderr).toContain('probe boom');
       expect(failed.stdout).toBe('');
       expect(existsSync(statePath(failRoot, 123))).toBe(false);
+
+      // Probe tick refuses non-git --state-root with exit 2 without spawning
+      // the probe, while --check --claim still accepts an explicit directory.
+      const nonGitStateRoot = makeRoot();
+      const ranMarker = join(nonGitStateRoot, 'probe-ran');
+      const markerCli = join(callerCwd, 'marker-qwen');
+      writeFileSync(
+        markerCli,
+        `#!/usr/bin/env bash
+touch '${ranMarker}'
+`,
+        { mode: 0o755 },
+      );
+      const nonGitProbe = spawnSync(
+        process.execPath,
+        [
+          GATE_SCRIPT,
+          '123',
+          '--repo',
+          'QwenLM/qwen-code',
+          '--cli',
+          markerCli,
+          '--state-root',
+          nonGitStateRoot,
+        ],
+        { cwd: callerCwd, encoding: 'utf8' },
+      );
+      expect(nonGitProbe.status).toBe(2);
+      expect(nonGitProbe.stderr).toContain('is not a git worktree');
+      expect(existsSync(ranMarker)).toBe(false);
+      expect(
+        runGateCli([
+          '123',
+          '--check',
+          '--claim',
+          '--state-root',
+          nonGitStateRoot,
+        ]).status,
+      ).toBe(0);
     },
   );
 });

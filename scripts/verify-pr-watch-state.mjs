@@ -506,44 +506,6 @@ const bySeq = (a, b) => (a.seq ?? -1) - (b.seq ?? -1);
 const isNotCovered = (entry) => (entry.retries ?? 0) >= 2;
 
 /**
- * Filters `head` and any lower-seq deferred entries out of `deferredHeads`,
- * recording retired tombstones (`{ seq, retries }`) while leaving higher-seq
- * and seq-less entries intact. Shared by `startRound` and `restartRound`.
- */
-function retireLowerSeqDeferred(existing, head, seq) {
-  const priorDeferred = deferredEntries(existing);
-  const deferredHeads = priorDeferred
-    .filter(
-      (entry) =>
-        !sameCommit(entry.head, head) &&
-        (entry.seq == null || entry.seq > (seq ?? 0)),
-    )
-    .sort(bySeq);
-  // Remember the push-order seq AND retry count of every head this start/restart
-  // retires, so a later redelivery restores its position and a terminal head
-  // stays terminal (R10-34, R11-2). The started head's own tombstone is consumed.
-  const retiredSeqs = {};
-  for (const [h, value] of Object.entries(existing?.retiredSeqs ?? {})) {
-    if (!sameCommit(h, head)) retiredSeqs[h] = value;
-  }
-  if (seq != null) {
-    for (const entry of priorDeferred) {
-      if (
-        !sameCommit(entry.head, head) &&
-        entry.seq != null &&
-        entry.seq <= seq
-      ) {
-        retiredSeqs[entry.head] = {
-          seq: entry.seq,
-          retries: entry.retries ?? 0,
-        };
-      }
-    }
-  }
-  return { deferredHeads, retiredSeqs };
-}
-
-/**
  * Upserts `head` into `deferredHeads`, keeping its original push-order seq
  * and retry count across redeliveries and recovered releases.
  */
@@ -662,11 +624,35 @@ export function startRound(
       : preserved
         ? (preserved.seq ?? null)
         : nextSeq(existing);
-    const { deferredHeads, retiredSeqs } = retireLowerSeqDeferred(
-      existing,
-      head,
-      seq,
-    );
+    const deferredHeads = priorDeferred
+      .filter(
+        (entry) =>
+          !sameCommit(entry.head, head) &&
+          (entry.seq == null || entry.seq > (seq ?? 0)),
+      )
+      .sort(bySeq);
+    // Remember the push-order seq AND retry count of every head this start
+    // retires, so a later redelivery restores its position and a terminal
+    // head stays terminal (R10-34, R11-2). The started head's own tombstone
+    // is consumed.
+    const retiredSeqs = {};
+    for (const [h, value] of Object.entries(existing?.retiredSeqs ?? {})) {
+      if (!sameCommit(h, head)) retiredSeqs[h] = value;
+    }
+    if (seq != null) {
+      for (const entry of priorDeferred) {
+        if (
+          !sameCommit(entry.head, head) &&
+          entry.seq != null &&
+          entry.seq <= seq
+        ) {
+          retiredSeqs[entry.head] = {
+            seq: entry.seq,
+            retries: entry.retries ?? 0,
+          };
+        }
+      }
+    }
     const state = deriveView({
       pr,
       repo: repo ?? existing?.repo ?? null,
@@ -1070,14 +1056,16 @@ export function restartRound(
     const inFlightHeads = flights.map((candidate) =>
       candidate === entry ? updatedEntry : candidate,
     );
-    const { deferredHeads: deferred, retiredSeqs } = retireLowerSeqDeferred(
-      existing,
-      head,
-      entry.seq ?? null,
+    const deferred = deferredEntries(existing).filter(
+      (candidate) => !sameCommit(candidate.head, head),
     );
     const releasedHeads = releasedEntries(existing).filter(
       (candidate) => !sameCommit(candidate.head, head),
     );
+    const retiredSeqs = {};
+    for (const [h, value] of Object.entries(existing?.retiredSeqs ?? {})) {
+      if (!sameCommit(h, head)) retiredSeqs[h] = value;
+    }
     const state = deriveView({
       ...(existing ?? {}),
       pr,

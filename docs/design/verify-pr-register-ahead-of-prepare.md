@@ -291,20 +291,23 @@ existing dead-round recovery (`--release` for a round that died after
   formerly tracked in #17371 are addressed as follows (residual 1 is narrowed
   rather than completely closed):
   1. `scripts/verify-pr-watch-gate.mjs` (`deliverGateOutput` + `resolveDeliveryRoot`
-     → `recordDelivery` in `scripts/verify-pr-watch-state.mjs`) spawns the probe
-     child with `cwd` set to the resolved delivery root (so cursor, claim, and
-     state share the same tree) and pre-records a delivered `resync` `headSha`
-     into `deferredHeads` before writing stdout to wake the model (`startRound`
-     promotes that entry at its preserved `seq`). Because the probe writes its
-     gate cursor before exiting to `deliverGateOutput`, this **narrows** the
-     silent-drop window to the probe-cursor-write → pre-record hop rather than
-     closing it outright (full closure requires writing the marker before the
-     cursor advances). By design, pre-recording is **fail-open** so a transient
-     state failure never suppresses an already-consumed cursor event: when the
-     state lock is held, on a `repo` mismatch, on a corrupt state file, or when
-     an isolated script copy has no git worktree root (it never falls back to
-     `cwd`), the gate logs a warning on stderr and still emits the event
-     unrecorded.
+     → `recordDelivery` in `scripts/verify-pr-watch-state.mjs`) requires a proven
+     git worktree root before spawning the probe child (refusing with exit 2 and
+     never spawning inside caller `cwd` when the default copy has no git
+     worktree root — e.g. `/trusted-scripts` — or when an explicit
+     `--state-root` is not a git worktree), aligns the probe child's `cwd` to
+     that resolved worktree root (so cursor, claim, and state share the same
+     tree), and pre-records a delivered `resync` `headSha` into `deferredHeads`
+     before writing stdout to wake the model (`startRound` promotes that entry
+     at its preserved `seq`). Because the probe writes its gate cursor before
+     exiting to `deliverGateOutput`, this **narrows** the silent-drop window to
+     the probe-cursor-write → pre-record hop rather than closing it outright
+     (full closure requires writing the marker before the cursor advances). By
+     design, `deliverGateOutput` itself stays **fail-open** so a transient state
+     failure never suppresses an already-consumed cursor event: when the state
+     lock is held, on a `repo` mismatch, on a corrupt state file, or when
+     `deliverGateOutput` is invoked with no state root, it logs a warning on
+     stderr and still emits the event unrecorded.
   2. `scripts/verify-pr-watch-gate.mjs --release --reset-cursor`
      (`resetWatchCursor`) reads and reports the probe cursor's last `headSha`,
      unlinks `autofix-pr-<n>-gate.json` **before** removing the `verify-pr`
@@ -316,15 +319,17 @@ existing dead-round recovery (`--release` for a round that died after
      existing `verify-pr` watches without allowing cross-consumer cursor removal.
      All gate verbs (`--check`/`--claim`/`--release`/`--release --reset-cursor`,
      the probe spawn `cwd`, and pre-delivery) resolve their default root from
-     `SCRIPT_CLONE`'s main git worktree rather than `process.cwd()` (exiting 2
-     on `--check`/`--release` outside a git worktree and requiring an absolute
-     `--state-root`).
+     `SCRIPT_CLONE`'s main git worktree rather than `process.cwd()` (requiring an
+     absolute `--state-root`; exiting 2 outside a git worktree on `--check`,
+     `--release`, and probe ticks while `--check`/`--release` continue to accept
+     any explicit directory).
   3. `scripts/verify-pr-watch-state.mjs --restart --head <oid> [--from-round <r>] --round <r+1>`
      (`restartRound`) atomically replaces a dead round's in-flight marker under
-     one state lock, performs the same lower-seq deferral retirement sweep into
-     `retiredSeqs` as `startRound`, and rejects any `--round <= entry.round`
-     (while still upgrading legacy `round: null` markers), eliminating the
-     unregistered window between `--release` and `--start`. (`--release`
-     followed by `--start` remains supported, and a watch only wakes on head
-     moves, so a killed round on the _last_ head still awaits a new move or a
-     manual `--restart` / `--release` + `--start`.)
+     one state lock, preserves other deferred heads (including a force-pushed-back
+     head redelivered at its preserved lower `seq` while the restarted round was
+     in flight) and other `retiredSeqs` tombstones, and rejects any
+     `--round <= entry.round` (while still upgrading legacy `round: null`
+     markers), eliminating the unregistered window between `--release` and
+     `--start`. (`--release` followed by `--start` remains supported, and a watch
+     only wakes on head moves, so a killed round on the _last_ head still
+     awaits a new move or a manual `--restart` / `--release` + `--start`.)

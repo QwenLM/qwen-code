@@ -212,15 +212,17 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   在飞标记，操作者或下一次 head move 可恢复，而非消失。此前由 #17371 跟踪的
   三条残余现按如下边界推进（其中残余 1 为收窄而非彻底关闭）：
   1. `scripts/verify-pr-watch-gate.mjs`（`deliverGateOutput` + `resolveDeliveryRoot`
-     → `scripts/verify-pr-watch-state.mjs` 中的 `recordDelivery`）先将探针子进程
-     的 `cwd` 设到解析出的状态根（保证游标、claim 与状态文件落在同一仓库树），再在
-     向 stdout 输出 `resync` 事件唤醒模型前把 `headSha` 预记入 `deferredHeads`
-     （`startRound` 按保留的 `seq` 将该条目晋升为在飞）。由于探针在子进程退出给
-     `deliverGateOutput` 之前就已经写完游标，该机制只是将静默丢弃窗口**收窄**到
-     "探针写游标 → 门禁预记录"这一跳，并未彻底关闭（彻底关闭需在游标推进前写入标
-     记）。该预登记刻意采用 **fail-open**：若状态锁被占用、`repo` 不匹配、状态文
-     件损坏或孤立脚本不在 git worktree 内（绝不回退写进 `cwd`），闸门会在 stderr
-     记录警告并仍投递该事件，避免因瞬时状态故障吞掉已经被游标消费的事件。
+     → `scripts/verify-pr-watch-state.mjs` 中的 `recordDelivery`）在派发探针子进程前
+     先验证已解析出的状态根确实为 git worktree（否则直接以 exit 2 拒绝，绝不在调用
+     方 `cwd` 下运行探针——涵盖 `/trusted-scripts` 孤立副本与非 git 的显式
+     `--state-root`），将探针子进程的 `cwd` 设到该 worktree 根（保证游标、claim 与
+     状态文件落在同一仓库树），并在向 stdout 输出 `resync` 事件唤醒模型前把 `headSha`
+     预记入 `deferredHeads`（`startRound` 按保留的 `seq` 将该条目晋升为在飞）。由于探
+     针在子进程退出给 `deliverGateOutput` 之前就已经写完游标，该机制只是将静默丢弃
+     窗口**收窄**到"探针写游标 → 门禁预记录"这一跳，并未彻底关闭（彻底关闭需在游标推进
+     前写入标记）。按设计，`deliverGateOutput` 自身刻意保持 **fail-open**：若状态锁被
+     占用、`repo` 不匹配、状态文件损坏或调用未传入状态根，会在 stderr 记录警告并仍投
+     递该事件，避免因瞬时状态故障吞掉已经被游标消费的事件。
   2. `scripts/verify-pr-watch-gate.mjs --release --reset-cursor`（`resetWatchCursor`）
      在删除前读取并汇报探针游标的末次 `headSha`，先删除 `autofix-pr-<n>-gate.json`
      再移除 `verify-pr` 所有权声明（保证 unlink 失败时 claim 留存以便重试），并在
@@ -230,11 +232,13 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
      他消费者的游标；gate 全部动词（`--check`/`--claim`/`--release`/
      `--release --reset-cursor`、探针子进程 `cwd` 与 pre-delivery）统一从
      `SCRIPT_CLONE` 的主 git worktree 解析默认状态根、绝不读取 `process.cwd()`，
-     要求 `--state-root` 为绝对路径，且在非 git worktree 下调用 `--check`/`--release`
-     时以 exit 2 拒绝。
+     要求 `--state-root` 为绝对路径；非 git worktree 下调用 `--check`/`--release` 或
+     运行探针 tick 均以 exit 2 拒绝（显式传入非 git 目录给 `--check`/`--release` 时
+     仍保留接受）。
   3. `scripts/verify-pr-watch-state.mjs --restart --head <oid> [--from-round <r>] --round <r+1>`
-     （`restartRound`）在单次状态锁内原子替换死轮次的在飞标记，执行与 `startRound`
-     相同的更低 `seq` deferred 条目迁入 `retiredSeqs` 清扫，并拒绝任何
+     （`restartRound`）在单次状态锁内原子替换死轮次的在飞标记，完整保留其他
+     deferred 条目（包括在飞期间因 force-push 回退并以原低 `seq` 重新投递的提交）与
+     其他 `retiredSeqs` 墓碑（仅消费被重启 head 自身的条目与墓碑），并拒绝任何
      `--round <= entry.round` 的回退（同时兼容升级 `round: null` 的旧版标记），
      消除 `--release` 与 `--start` 之间失去记录的窗口（原有的 `--release` 后接
      `--start` 仍保留兼容；watch 仅在 head move 时唤醒，故*最后一个* head 上被杀

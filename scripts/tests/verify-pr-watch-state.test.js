@@ -3743,77 +3743,29 @@ describe('#17371 recordDelivery and --restart', () => {
     ]);
   });
 
-  it('restartRound computes retiredSeqs tombstones for lower-seq deferrals with no pre-existing tombstone', () => {
+  it('restartRound preserves a head redelivered at its preserved lower seq after the marker started (force-push back)', () => {
     const root = makeRoot();
-    // Build a clean state where HEAD (seq 1, retries 1) sits in deferredHeads
-    // alongside OLDER (seq 3) while PREV (seq 2, round 3) is in flight and
-    // retiredSeqs is EMPTY before --restart runs (R3-9).
+    // R4-1 exact 5-step witness: HEAD (seq 1) deferred, PREV (seq 2) deferred,
+    // PREV starts round 1 (retiring HEAD), HEAD is redelivered via force-push
+    // back (at preserved seq 1), and --restart on PREV keeps HEAD deferred.
     expect(
-      startRound(root, {
-        pr: 16867,
-        head: HEAD,
-        round: 1,
-        artifactDir: null,
-        repo: 'o/r',
-      }).duplicate,
-    ).toBeUndefined();
-    completeRound(root, {
-      pr: 16867,
-      head: HEAD,
-      round: 1,
-      verdict: 'inconclusive',
-      artifactDir: null,
-      repo: 'o/r',
-    });
+      recordDelivery(root, { pr: 16867, head: HEAD, repo: 'o/r' }).recorded,
+    ).toBe(true);
     expect(
-      startRound(root, {
-        pr: 16867,
-        head: HEAD,
-        round: 2,
-        artifactDir: null,
-        repo: 'o/r',
-      }).duplicate,
-    ).toBeUndefined();
-    expect(
-      releaseRound(root, {
-        pr: 16867,
-        head: HEAD,
-        round: 2,
-        repo: 'o/r',
-      }).released,
+      recordDelivery(root, { pr: 16867, head: PREV, repo: 'o/r' }).recorded,
     ).toBe(true);
     expect(
       startRound(root, {
         pr: 16867,
         head: PREV,
-        round: 3,
+        round: 1,
         artifactDir: null,
         repo: 'o/r',
       }).duplicate,
     ).toBeUndefined();
     expect(
-      recordDelivery(root, {
-        pr: 16867,
-        head: HEAD,
-        repo: 'o/r',
-      }).recorded,
+      recordDelivery(root, { pr: 16867, head: HEAD, repo: 'o/r' }).recorded,
     ).toBe(true);
-    expect(
-      recordDelivery(root, {
-        pr: 16867,
-        head: OLDER,
-        repo: 'o/r',
-      }).recorded,
-    ).toBe(true);
-
-    const beforeRestart = readState(root, 16867);
-    expect(beforeRestart.retiredSeqs ?? {}).toEqual({});
-    expect(
-      beforeRestart.deferredHeads.map((e) => [e.head, e.seq, e.retries]),
-    ).toEqual([
-      [HEAD, 1, 1],
-      [OLDER, 3, 0],
-    ]);
 
     const restarted = run(root, [
       '16867',
@@ -3821,40 +3773,81 @@ describe('#17371 recordDelivery and --restart', () => {
       '--head',
       PREV,
       '--from-round',
-      '3',
+      '1',
       '--round',
-      '4',
+      '2',
       '--repo',
       'o/r',
     ]);
     expect(restarted.status).toBe(0);
-    expect(restarted.stdout).not.toContain(HEAD);
     expect(restarted.stdout).toContain(
-      `deferred heads awaiting a round: ${OLDER}`,
+      `deferred heads awaiting a round: ${HEAD}`,
     );
 
     const st = readState(root, 16867);
-    expect(st.deferredHeads.map((e) => [e.head, e.seq])).toEqual([[OLDER, 3]]);
-    expect(st.retiredSeqs[HEAD]).toEqual({ seq: 1, retries: 1 });
+    expect(st.deferredHeads.map((e) => [e.head, e.seq])).toEqual([[HEAD, 1]]);
+    expect(st.inFlightHeads[0]).toMatchObject({
+      head: PREV,
+      round: 2,
+      seq: 2,
+    });
 
-    // A later redelivery of HEAD consumes the computed tombstone back at seq 1, retries 1.
+    const completed = run(root, [
+      '16867',
+      '--complete',
+      '--head',
+      PREV,
+      '--round',
+      '2',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'r2',
+      '--repo',
+      'o/r',
+    ]);
+    expect(completed.status).toBe(0);
+    expect(completed.stdout).toContain(
+      `deferred heads awaiting a round: ${HEAD}`,
+    );
+
+    // Other retired tombstones and newer higher-seq deferrals also stay intact.
     expect(
-      recordDelivery(root, {
-        pr: 16867,
-        head: HEAD,
-        repo: 'o/r',
-      }).recorded,
+      recordDelivery(root, { pr: 16868, head: HEAD, repo: 'o/r' }).recorded,
     ).toBe(true);
     expect(
-      readState(root, 16867).deferredHeads.map((e) => [
-        e.head,
-        e.seq,
-        e.retries,
-      ]),
-    ).toEqual([
-      [HEAD, 1, 1],
-      [OLDER, 3, 0],
+      recordDelivery(root, { pr: 16868, head: PREV, repo: 'o/r' }).recorded,
+    ).toBe(true);
+    expect(
+      startRound(root, {
+        pr: 16868,
+        head: PREV,
+        round: 1,
+        artifactDir: null,
+        repo: 'o/r',
+      }).duplicate,
+    ).toBeUndefined();
+    expect(
+      recordDelivery(root, { pr: 16868, head: OLDER, repo: 'o/r' }).recorded,
+    ).toBe(true);
+    const restartedOther = run(root, [
+      '16868',
+      '--restart',
+      '--head',
+      PREV,
+      '--from-round',
+      '1',
+      '--round',
+      '2',
+      '--repo',
+      'o/r',
     ]);
+    expect(restartedOther.status).toBe(0);
+    const stOther = readState(root, 16868);
+    expect(stOther.deferredHeads.map((e) => [e.head, e.seq])).toEqual([
+      [OLDER, 3],
+    ]);
+    expect(stOther.retiredSeqs[HEAD]).toEqual({ seq: 1, retries: 0 });
   });
 
   it('restartRound and CLI --restart atomically replace a dead marker preserving seq, retries, and deferrals', () => {

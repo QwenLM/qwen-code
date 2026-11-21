@@ -39,16 +39,19 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
 - Task shape: cron every 2 minutes; gate = `node
 <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli
 <absolute qwen>`; `recurring: true`, `durable: true`, `sessionMode:
-"current"`. The wrapper runs the probe with `cwd` aligned to the resolved
-  delivery root (so cursor, claim, and state share the same tree), forwards only
-  `resync` (head moved) and `stop`, and pre-records a delivered `resync`
-  `headSha` into `deferredHeads` under the watch-state lock before printing
-  output — narrowing the cursor-advance → `--start` silent-drop window to the
-  probe-cursor-write → pre-record hop (failing open on lock/repo/corrupt-state
-  errors or when run from a non-worktree copy outside a clone, never falling back
-  to `cwd`); a comment or a failed check yields `action: "fix"` and is dropped,
-  because the scheduler hands every non-empty gate output to the model and the
-  prompt cannot un-start the turn.
+"current"`. The wrapper verifies a git worktree root before spawning the
+  probe (refusing with exit 2 without spawning when a non-worktree copy runs
+  outside a clone or when `--state-root` is not a git worktree, never falling
+  back to `cwd`), aligns the probe child's `cwd` to that resolved root (so
+  cursor, claim, and state share the same tree), forwards only `resync` (head
+  moved) and `stop`, and pre-records a delivered `resync` `headSha` into
+  `deferredHeads` under the watch-state lock before printing output — narrowing
+  the cursor-advance → `--start` silent-drop window to the probe-cursor-write →
+  pre-record hop (`deliverGateOutput` itself fails open on lock/repo/corrupt-state
+  errors so a transient state failure never suppresses an already-consumed event);
+  a comment or a failed check yields `action: "fix"` and is dropped, because
+  the scheduler hands every non-empty gate output to the model and the prompt
+  cannot un-start the turn.
 - The prompt consumes what the wrapper forwards: `head_moved_externally` → run
   the round for that sha; `stop` (merged/closed) → delete the task and stop.
 - The wrapper's `--check` refuses to install when `.qwen/tmp` already holds
@@ -57,7 +60,7 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   `stop` the first one needs.
 - Dedupe lives in a state file (`.qwen/tmp/verify-pr-watch-<n>.json`), owned
   by `scripts/verify-pr-watch-state.mjs` (`--start` / `--complete` /
-  `--release` / `--restart`) since PR #17185 — rounds no longer hand-write the JSON, whose
+  `--release` since PR #17185, later extended with `--restart`) — rounds no longer hand-write the JSON, whose
   completion write two consecutive rounds on PR #16866 skipped, leaving the
   file two heads stale. The file holds three lists, `verifiedHeads`,
   `inFlightHeads` and `deferredHeads`, each entry carrying its own head,
@@ -178,8 +181,8 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   newer round that restarted the same head. Under one-round-per-PR the
   blocking marker may belong to a different head than the one being
   started: recovery releases the head the refusal names. `--restart --head <oid> [--from-round <r>] --round <r+1>`
-  atomically replaces a dead round's in-flight marker under one lock acquisition (retiring lower-seq deferrals into `retiredSeqs` like `--start` and rejecting any `--round <= entry.round`) without an unregistered gap. This mirrors the
-  gate's recovery for a dead claim, and `--release --reset-cursor` unlinks the probe cursor before releasing ownership — reporting its last `headSha`, and refusing with exit 3 while pointing the caller at plain `--release` when `autofix-pr` state exists — when stopping cleanly or migrating an existing watch; all gate verbs (and probe child `cwd`) resolve the default root from the script's own clone rather than the caller's cwd (requiring an absolute `--state-root` and exiting 2 on `--check`/`--release` outside a git worktree).
+  atomically replaces a dead round's in-flight marker under one lock acquisition (preserving other deferred heads — including a force-pushed-back head redelivered at its preserved lower `seq` — and other `retiredSeqs` tombstones, while rejecting any `--round <= entry.round`) without an unregistered gap. This mirrors the
+  gate's recovery for a dead claim, and `--release --reset-cursor` unlinks the probe cursor before releasing ownership — reporting its last `headSha`, and refusing with exit 3 while pointing the caller at plain `--release` when `autofix-pr` state exists — when stopping cleanly or migrating an existing watch; all gate verbs (and probe child `cwd`) resolve the default root from the script's own clone rather than the caller's cwd (requiring an absolute `--state-root`; exiting 2 outside a git worktree on `--check`/`--release` and on any probe tick without a git worktree root, while explicit `--state-root` continues to accept any directory for `--check`/`--release`).
 
 ## Design decisions
 

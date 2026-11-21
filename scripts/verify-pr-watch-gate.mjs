@@ -490,10 +490,17 @@ function main() {
     );
     process.exit(2);
   }
+  if (!delivery.root || !isGitWorktree(delivery.root)) {
+    const detail = delivery.reason ?? `${delivery.root} is not a git worktree`;
+    process.stderr.write(
+      `verify-pr watch: ${detail}; refusing to run probe without a git worktree root (run the helper from the trusted clone or pass --state-root <trusted main worktree>)\n`,
+    );
+    process.exit(2);
+  }
   const probe = spawnSync(
     args.cli,
     ['autofix-pr', 'snapshot', String(args.pr), '--gate', '--repo', args.repo],
-    { encoding: 'utf8', cwd: delivery.root ?? undefined },
+    { encoding: 'utf8', cwd: delivery.root },
   );
   if (probe.status !== 0) {
     if (probe.stderr) process.stderr.write(probe.stderr);
