@@ -14,7 +14,7 @@ import {
   type ReactNode,
 } from 'react';
 import { notificationExcerpt } from './notification-text';
-import { getTranslator, type WebShellLanguage } from './i18n';
+import { getTranslator, loadLanguage, type WebShellLanguage } from './i18n';
 import {
   createTurnNotificationObserver,
   TurnNotificationContext,
@@ -253,11 +253,15 @@ function StandaloneNotifications({
       (document.visibilityState !== 'visible' || !document.hasFocus());
     if (turn.outcome === 'cancelled' || !canShow()) return;
     const show = async () => {
+      const notificationLanguage = appLanguage ?? language;
+      const localeReady = loadLanguage(notificationLanguage);
       // Hash identities so notification tags and shared storage contain no paths.
       const digest = await crypto.subtle.digest(
         'SHA-256',
         new TextEncoder().encode(turn.key),
       );
+      if (localeReady) await localeReady;
+      if (!canShow()) return;
       const tag = `qwen-code-turn:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
       let attempted = false;
       const deliver = (shared: boolean) => {
@@ -282,7 +286,7 @@ function StandaloneNotifications({
             // Storage restrictions degrade to page-local deduplication and tag replacement.
           }
         }
-        const t = getTranslator(appLanguage ?? language);
+        const t = getTranslator(notificationLanguage);
         const appName = options?.appName?.trim() || 'QwenCode';
         const title = notificationExcerpt(turn.sessionTitle ?? '', 60);
         const prompt = notificationExcerpt(turn.promptText ?? '', 80);

@@ -13,9 +13,10 @@ import {
   mkdirSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  MANAGED_CARD_PROGRESS_LIMIT,
   MANAGED_DINGTALK_PENDING_LIMIT,
   ManagedDingtalkStateStore,
   RECENT_LIMIT,
@@ -24,6 +25,8 @@ import {
 } from './managed-state.js';
 import type { ManagedDingtalkState } from './managed-state.js';
 import {
+  getGlobalQwenDir,
+  getWorkspaceScopeDirName,
   MANAGED_OUTBOUND_LIMIT,
   type ManagedInboundEvent,
 } from '@qwen-code/channel-base';
@@ -268,6 +271,67 @@ describe('validManagedDingtalkState', () => {
       }),
     ).toBe(false);
   });
+
+  it('accepts a state without cards (backward compatibility) and a valid card map', () => {
+    expect(validManagedDingtalkState(baseState())).toBe(true);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: {
+          'd-1': { outTrackId: 'qwen-managed-x', body: 'hello', mode: 'card' },
+          'd-2': { outTrackId: 'qwen-managed-y', body: '', mode: 'text' },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a bad card map', () => {
+    const entry = { outTrackId: 'qwen-managed-x', body: 'b', mode: 'card' };
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: [] as unknown as Record<string, typeof entry>,
+      }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({ ...baseState(), cards: { '': entry } }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: { 'd-1': { ...entry, outTrackId: '' } },
+      }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: { 'd-1': { ...entry, body: 5 as unknown as string } },
+      }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: { 'd-1': { ...entry, mode: 'stream' as 'card' } },
+      }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: { 'd-1': null as unknown as typeof entry },
+      }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: Object.fromEntries(
+          Array.from({ length: MANAGED_CARD_PROGRESS_LIMIT + 1 }, (_, i) => [
+            `d-${i}`,
+            entry,
+          ]),
+        ),
+      }),
+    ).toBe(false);
+  });
 });
 
 describe('ManagedDingtalkStateStore', () => {
@@ -286,18 +350,156 @@ describe('ManagedDingtalkStateStore', () => {
     expect(store().load()).toBeUndefined();
   });
 
-  it('throws on a corrupt (unparseable) file', () => {
+  it('throws on a corrupt (unparseable) file, naming the file and keeping the cause', () => {
     const s = store();
     mkdirSync(s.directory, { recursive: true });
     writeFileSync(s.file, '{not json');
-    expect(() => s.load()).toThrow(/unreadable or invalid/);
+    let caught: unknown;
+    try {
+      s.load();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(s.file);
+    expect((caught as Error).message).toMatch(/is not valid JSON/);
+    expect((caught as Error).cause).toBeInstanceOf(SyntaxError);
   });
 
-  it('throws on a parseable but invalid state', () => {
+  it('throws on a parseable but invalid state, naming the file', () => {
     const s = store();
     mkdirSync(s.directory, { recursive: true });
     writeFileSync(s.file, JSON.stringify({ ...baseState(), generation: 0 }));
-    expect(() => s.load()).toThrow(/unreadable or invalid/);
+    let caught: unknown;
+    try {
+      s.load();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(s.file);
+    expect((caught as Error).message).toMatch(/is invalid/);
+  });
+
+  it('an I/O read failure is distinct from a corrupt state and keeps the cause', () => {
+    const s = store();
+    mkdirSync(s.directory, { recursive: true });
+    // A directory at the ledger path makes readFileSync fail with an I/O error
+    // (EISDIR on POSIX), not a corrupt state; the diagnostic names the file and
+    // keeps the cause so an unreadable ledger is distinguishable from an invalid
+    // sibling under the same entry directory. The errno is platform-specific.
+    mkdirSync(s.file);
+    let caught: unknown;
+    try {
+      s.load();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(s.file);
+    expect((caught as Error).message).toMatch(/could not be read/);
+    expect((caught as Error).cause).toBeInstanceOf(Error);
+  });
+
+  it('reports a stranded legacy ledger on upgrade, without adopting it', () => {
+    const s = store();
+    mkdirSync(s.directory, { recursive: true });
+    // Seed the pre-upgrade single ledger with ASYMMETRIC counts (2 pending,
+    // 3 outbound) so swapping the two count assignments — or the two
+    // interpolations in the adapter's notice — reds this suite (R2-2).
+    const legacy = {
+      ...baseState(),
+      pending: [
+        { eventId: 'dingtalk:m1', event: inbound('m1') },
+        { eventId: 'dingtalk:m2', event: inbound('m2') },
+      ],
+      outbound: [
+        { deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' },
+        { deliveryId: 'd-2', ordinal: 1, messageId: 'm-2' },
+        { deliveryId: 'd-3', ordinal: 2, messageId: 'm-3' },
+      ],
+    };
+    writeFileSync(
+      join(s.directory, 'managed-state.json'),
+      JSON.stringify(legacy),
+    );
+    const stranded = s.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.path).toBe(join(s.directory, 'managed-state.json'));
+    expect(stranded!.pending).toBe(2);
+    expect(stranded!.outbound).toBe(3);
+    expect(stranded!.readable).toBe(true);
+    // The legacy ledger is reported, not adopted: load() still returns undefined
+    // (the identity-keyed file is absent), so no pending replays across identities.
+    expect(s.load()).toBeUndefined();
+    // Once archived (reported), the legacy file is no longer detected, so a
+    // static legacy is not re-announced on every later start (R2-6).
+    const archived = s.archiveStrandedLegacy();
+    expect(archived).toBeDefined();
+    expect(s.strandedLegacyLedger()).toBeUndefined();
+  });
+
+  it('no stranded legacy ledger when none exists', () => {
+    const s = store();
+    expect(s.strandedLegacyLedger()).toBeUndefined();
+  });
+
+  it('still reports a legacy ledger staged after a rollback (keyed ledger exists)', () => {
+    const s = store();
+    mkdirSync(s.directory, { recursive: true });
+    // A keyed ledger already exists (the entry upgraded once)...
+    s.save(baseState());
+    // ...then a rollback to the pre-upgrade build stages fresh legacy claims.
+    writeFileSync(
+      join(s.directory, 'managed-state.json'),
+      JSON.stringify({
+        ...baseState(),
+        pending: [{ eventId: 'dingtalk:rb', event: inbound('rb') }],
+        outbound: [],
+      }),
+    );
+    // Detection must not be gated on the keyed ledger being absent (R2-6):
+    // these acked, unadmitted claims would otherwise vanish with no trace.
+    const stranded = s.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.pending).toBe(1);
+    expect(stranded!.outbound).toBe(0);
+    // Still not adopted: the keyed ledger is untouched by detection.
+    expect(s.load()).toEqual(baseState());
+  });
+
+  it.each([
+    ['{not json', false],
+    ['null', true],
+    ['[]', true],
+  ])(
+    'a corrupt legacy ledger (%s) reports zero counts instead of throwing',
+    (raw, readable) => {
+      const s = store();
+      mkdirSync(s.directory, { recursive: true });
+      writeFileSync(join(s.directory, 'managed-state.json'), raw);
+      // The catch keeps a damaged legacy from turning the upgrade into a hard
+      // startup failure (R2-4): report zero counts, never throw. A read/parse
+      // failure is flagged unreadable so the caller cannot render it as a
+      // quiescent "nothing was lost" (R3-1); a value that parses but carries no
+      // claims stays readable.
+      const stranded = s.strandedLegacyLedger();
+      expect(stranded).toBeDefined();
+      expect(stranded!.pending).toBe(0);
+      expect(stranded!.outbound).toBe(0);
+      expect(stranded!.readable).toBe(readable);
+    },
+  );
+
+  it('an unreadable legacy ledger (directory at the path) is flagged, not empty', () => {
+    const s = store();
+    mkdirSync(s.directory, { recursive: true });
+    // EISDIR: the legacy path is a directory, so the read fails. The record
+    // must be flagged unreadable, not reported as a quiescent empty ledger.
+    mkdirSync(join(s.directory, 'managed-state.json'));
+    const stranded = s.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.readable).toBe(false);
   });
 
   it('keeps the state file 0600 inside a 0700 directory (R4)', () => {
@@ -328,6 +530,86 @@ describe('ManagedDingtalkStateStore', () => {
       expect((thrown as Error).cause).toMatchObject({ code: 'EACCES' });
     } finally {
       chmodSync(s.directory, 0o700);
+    }
+  });
+
+  it('keys the lock directory by name and clientId per workspace scope', () => {
+    const cwd = tempHome();
+    const a = new ManagedDingtalkStateStore('robot', cwd, 'client-1');
+    // Determinism: a fresh store with the same inputs resolves the SAME
+    // directory, or a restart silently loses every un-receipted claim.
+    expect(
+      new ManagedDingtalkStateStore('robot', cwd, 'client-1').directory,
+    ).toBe(a.directory);
+    // The name and clientId are part of the key: a renamed entry or a different
+    // robot app is a different directory (and a different connection lock).
+    expect(
+      new ManagedDingtalkStateStore('other', cwd, 'client-1').directory,
+    ).not.toBe(a.directory);
+    expect(
+      new ManagedDingtalkStateStore('robot', cwd, 'client-2').directory,
+    ).not.toBe(a.directory);
+    // The workspace-scope term is load-bearing: two cwds must not collapse onto
+    // one directory.
+    expect(
+      new ManagedDingtalkStateStore('robot', tempHome(), 'client-1').directory,
+    ).not.toBe(a.directory);
+    // Pin the directory leaf literally (R3-4): a basename-fed expectation is
+    // self-referential and would survive dropping the `dingtalk-` prefix or
+    // narrowing the hash, which would silently orphan an upgrading install's
+    // legacy ledger in the old directory.
+    expect(basename(a.directory)).toMatch(/^dingtalk-[0-9a-f]{16}$/);
+    expect(a.directory).toBe(
+      join(
+        getGlobalQwenDir(),
+        'channels',
+        getWorkspaceScopeDirName(cwd),
+        basename(a.directory),
+      ),
+    );
+  });
+
+  it('keys the ledger file by registration identity beneath the shared entry directory', () => {
+    const cwd = tempHome();
+    const a = new ManagedDingtalkStateStore(
+      'robot',
+      cwd,
+      'client-1',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    const b = new ManagedDingtalkStateStore(
+      'robot',
+      cwd,
+      'client-1',
+      'cp|tenant-b|chan-1|actor|ws|.',
+    );
+    // The connection lock stays per entry: both registrations share ONE
+    // directory (so two instances of the robot app contend for one lock).
+    expect(b.directory).toBe(a.directory);
+    // The ledger is file-deep isolated: a different registration identity keys
+    // a different file, so A's pending is never loaded under B.
+    expect(b.file).not.toBe(a.file);
+    expect(basename(a.file)).toMatch(/^managed-state-[0-9a-f]{16}\.json$/);
+    // Determinism: the same identity resolves the same ledger file.
+    expect(
+      new ManagedDingtalkStateStore(
+        'robot',
+        cwd,
+        'client-1',
+        'cp|tenant-a|chan-1|actor|ws|.',
+      ).file,
+    ).toBe(a.file);
+    // Each ownership field changes the ledger key.
+    for (const identity of [
+      'cp|tenant-a|chan-1|other-actor|ws|.',
+      'cp|tenant-a|chan-1|actor|ws-2|.',
+      'cp|tenant-a|chan-1|actor|ws|sub',
+      'cp|tenant-a|chan-2|actor|ws|.',
+      'other-cp|tenant-a|chan-1|actor|ws|.',
+    ]) {
+      expect(
+        new ManagedDingtalkStateStore('robot', cwd, 'client-1', identity).file,
+      ).not.toBe(a.file);
     }
   });
 });

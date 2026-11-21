@@ -213,6 +213,7 @@ export class HostedWorkspaceBroker {
   }
   private capabilityResolution?: Promise<void>;
   provisionerKind?: string;
+  mcpParkable = false;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -402,6 +403,7 @@ export class HostedWorkspaceBroker {
     if (response['acquired'] !== true)
       throw new Error('Runtime did not acquire the Session.');
     this.readRuntime(response);
+    this.mcpParkable = response['mcpParkable'] === true;
     this.leaseAcquired = true;
   }
 

@@ -60,6 +60,7 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ResponsesHttpError } from '../../utils/responses-http-error.js';
 import { retryContext } from '../../utils/retryContext.js';
 import { filterIsolatedModelOverrides } from '../openaiContentGenerator/provider/utils.js';
+import { markRequestDispatched } from '../loggingContentGenerator/request-dispatch.js';
 import { applyResponsesPromptCaching } from './prompt-caching.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
@@ -719,6 +720,7 @@ export class ResponsesPipeline {
       connectTimeoutMs > 0 && connectTimeoutMs < DISABLED_REQUEST_TIMEOUT_MS;
 
     let response: Response;
+    markRequestDispatched();
     if (timeoutActive) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_resolve, reject) => {

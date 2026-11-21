@@ -207,8 +207,11 @@ class WorkspaceSessionRetentionTest {
         archive(tenant, session, "archive-again");
         request(post(PUBLIC + session + "/unarchive"), tenant, "owner", "unarchive")
                 .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("archived"));
+        // D3: the session was closed on files-v2, so a protocol-2 lifecycle
+        // operation exists and the claim gate names the fence
+        // (workspace_lifecycle_claim_fenced) ahead of the v1 admission-closed code.
         assertThatThrownBy(() -> journal.acquireWriter(tenant, session, "b".repeat(43),
-                new AcquireWriterRequest("ws", "late", 60_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
+                new AcquireWriterRequest("ws", "late", 60_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced"));
         assertThat(count(tenant, session, "session.archived")).isEqualTo(2);
         assertThat(count(tenant, session, "session.unarchived")).isEqualTo(1);
         assertThat(runtime.calls.get(session)).isEqualTo(1);
@@ -305,14 +308,11 @@ class WorkspaceSessionRetentionTest {
         // none. The recorded unarchive below keeps answering through it,
         // while the fresh key meets the same 404 every other read gets.
         String fence = UUID.randomUUID().toString();
-        if (jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE tenant_key = ? AND storage_key = ?",
-                fence, RuntimeAdmissionFences.storageFenceKey(tenant),
-                RuntimeAdmissionFences.storageFenceKey("storage")) == 0) {
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
-                            + " fence_operation_id) VALUES (?, ?, ?, ?, 'storage', ?)",
-                    RuntimeAdmissionFences.storageAliasKey(tenant, "storage"),
-                    RuntimeAdmissionFences.storageFenceKey(tenant),
-                    RuntimeAdmissionFences.storageFenceKey("storage"), tenant, fence);
+        if (jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?",
+                fence, RuntimeAdmissionFences.storageAliasKey(tenant, "storage")) == 0) {
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id,"
+                            + " fence_operation_id) VALUES (?, ?, 'storage', ?)",
+                    RuntimeAdmissionFences.storageAliasKey(tenant, "storage"), tenant, fence);
         }
         // Replay-first, like every other mutation path: the recorded
         // success answers its body with the Session as last visible

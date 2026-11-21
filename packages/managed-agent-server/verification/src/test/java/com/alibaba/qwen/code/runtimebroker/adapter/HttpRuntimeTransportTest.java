@@ -360,6 +360,24 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void mcpReclamationNamesOnlyTheRuntimeSessionAndSurfacesARefusal() throws Exception {
+        var lease = toolLease(server.getAddress().getPort());
+        var session = toolSession();
+        reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "reclaimed", true))));
+        transport.reclaimMcp(lease, session).toCompletableFuture().get(2, TimeUnit.SECONDS);
+        assertEquals(ManagedMcpProtocol.RECLAIM_PATH, capturedPath.get());
+        JsonNode wire = JSON.readTree(captured.get());
+        assertEquals(2, wire.size());
+        assertEquals(1, wire.required("protocolVersion").intValue());
+        assertEquals(session.getRuntimeSessionId(), wire.required("runtimeSessionId").textValue());
+        assertEquals("Bearer " + lease.getToken(), capturedAuthorization.get());
+        reply.set(json(409, JsonCodec.encode(Map.of("code", "managed_mcp_drain_unknown"))));
+        assertThrows(ExecutionException.class,
+                () -> transport.reclaimMcp(lease, session).toCompletableFuture().get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
     void inventoryUsesTheAttestedLeaseAndRejectsPrivateRecipeFields() throws Exception {
         var request = ManagedContextProtocolTest.request();
         var seed = ManagedContextProtocolTest.seed();

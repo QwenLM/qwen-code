@@ -393,6 +393,14 @@ class ManagedSchemaMySqlIT {
                 statement.execute("ALTER TABLE ma_tenant_guard ENGINE=InnoDB");
             }
             ManagedSchema.initialize(source);
+            try (var rs = statement.executeQuery(
+                    "SELECT CHARACTER_MAXIMUM_LENGTH, COLLATION_NAME FROM information_schema.columns"
+                            + " WHERE table_schema = DATABASE() AND table_name = 'ma_tenant_guard'"
+                            + " AND column_name = 'tenant_id'")) {
+                org.junit.jupiter.api.Assertions.assertTrue(rs.next());
+                org.junit.jupiter.api.Assertions.assertEquals(96L, rs.getLong(1));
+                org.junit.jupiter.api.Assertions.assertEquals("utf8mb4_0900_bin", rs.getString(2));
+            }
         }
     }
 
@@ -468,9 +476,9 @@ class ManagedSchemaMySqlIT {
                     connection.prepareStatement(
                             "INSERT INTO"
                                 + " ma_session_head(tenant_id,session_id,workspace_id,tenant_key,"
-                                + "harness_key,harness_session_id,head_kind,storage_version,state,"
+                                + "harness_key,harness_session_id,head_kind,state,"
                                 + "writer_generation,journal_revision,committed_sequence,activation_epoch,gmt_create,gmt_modified)"
-                                + " VALUES(?,?,?,?,?,?,'MANAGED_SESSION',1,'OPEN',"
+                                + " VALUES(?,?,?,?,?,?,'MANAGED_SESSION','OPEN',"
                                 + "0,0,0,0," + ManagedSchemaTime.SQL_NOW + "," + ManagedSchemaTime.SQL_NOW + ")")) {
                 insert.setBytes(1, tenant);
                 insert.setBytes(2, session);
