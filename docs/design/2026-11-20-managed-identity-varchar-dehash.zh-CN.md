@@ -8,6 +8,8 @@
 - 修订（2026-11-20）：对"与同表另一唯一键重复的哈希键"做了后续调研，修正了 `workspace_id`
   预算，补充了回执、operation、Session 哈希列与 read lease 的约束，并对调研提出的三个
   问题作出决定（见[重复业务键](#重复业务键)）。
+- 修订（2026-11-21）：增量 2 在 VARCHAR 转换之前，先删除只复述本行原始列的哈希键（见
+  [增量 2](#增量-2同行冗余哈希键)）。
 - 日期：2026-11-20。源码基线：`origin/main` 的 `7ef9d6decb`。分析在 `f10299764e` 上
   执行；其间 3 个提交不触及任何 `packages/managed-agent-server` 文件，共享 V1 schema
   与 `ManagedSchemaKeys` 在两者间逐字节相同（`git diff` 核实），故全部计数与宽度在
@@ -284,6 +286,60 @@ resource_key`）、`JdbcHostedCleanupDebtStore`（`owner_key > ?`）、
    `tenant_id = ? AND operation_kind = ? AND operation_id = ?`。这样无需统一派生、也不依赖
    未经证明的 id 唯一性，就能精确保持现有约束。kind 清单写在 DDL 里，新增按 tenant 定位的
    kind 时必须同步加入。
+
+## 增量 2：同行冗余哈希键
+
+若一个哈希列只由本行原始列派生、没有其他表在它上面 join、也不生成任何标识，它就是冗余的。
+增量 2 删除这些列，在原始列上按相同列序重建它们的唯一键与索引，并把所有查询改为过滤原始列。
+VARBINARY 类型不变；VARCHAR 转换、跨表引用与上文各项决策仍属于
+[实施计划](../plans/2026-11-20-managed-identity-dehash-cluster-impl.zh-CN.md)描述的原子簇。
+
+| 表                                                           | 删除                               | 替代为                                                           |
+| ------------------------------------------------------------ | ---------------------------------- | ---------------------------------------------------------------- |
+| `ma_session_head`                                            | `tenant_key`、`harness_key`        | `UNIQUE (tenant_id, harness_session_id)`                         |
+| `ma_session_record`、`ma_resource`、`ma_resource_ref`        | `session_scope_key`                | `(tenant_id, session_id)` 前缀                                   |
+| `ma_operation`、`ma_journal_pack`、`ma_client_files_binding` | `session_scope_key`                | `(tenant_id, session_id)` 前缀                                   |
+| `ma_client_files_request`                                    | `session_scope_key`、`request_key` | `UNIQUE (tenant_id, session_id, binding_generation, request_id)` |
+| `ma_side_query`                                              | `session_scope_key`、`query_key`   | `UNIQUE (tenant_id, query_id)`；session 索引改用原始列           |
+| `ma_memory_entry`                                            | `entry_key`                        | `UNIQUE (tenant_id, memory_store_id, memory_id)`                 |
+| `ma_extension_package`、`_settings`、`_operation`            | `scope_key`                        | `(tenant_id, workspace_id, extension_id, …)`                     |
+| `ma_output_capture`                                          | `tenant_key`                       | `idx_ma_capture_tenant (tenant_id, state)`                       |
+
+宽度。有几处原始替代之所以能放下，是因为把子表身份列收窄到了父表宽度 512 字节：
+`ma_session_head.tenant_id` 与 `workspace_id`，`ma_session_record`、`ma_resource`、
+`ma_resource_ref` 的 `session_id`，以及 `ma_operation.tenant_id`。这些列的租户与 Session id
+取自 `ma_session` 与 `ma_workspace`（512 字节）；而 journal writer 是唯一写入 workspace 的
+head 写入方，它本就拒绝超过 128 字节的租户 id 和超过 512 字节的 workspace 与 Session id，
+因此不会丢失任何已接受的值。这取代上表 `ma_session` 一行中关于 Session head 的部分：head 的
+租户收窄到 512 字节后，原始 head 键为 2560 字节。三个非唯一索引使用键前缀：
+`idx_ma_record_identity`、`idx_ma_ref_journal` 与 `idx_ma_delivery_source`
+（`record_id`、`resource_id` 与 `delivery_id` 限 1024 字节，仅 MySQL）；所有唯一键都用完整列。最宽的重建键 `uk_ma_resource_id` 与 `idx_ma_head_workspace`
+正好 3072 字节，InnoDB 接受。
+
+保留（因为不冗余）：
+
+- `ma_session.tenant_key`、`session_key` 与 `session_scope_key` 是发布保留 CONTROL upsert
+  写入的登记标记。所有迁离它们的 join 都改为 join 原始列，并保留
+  `s.session_scope_key IS NOT NULL`，因此该路径从未登记的 Session 仍不会匹配。
+- `ma_output_capture.scope_key` 是 `ma_operation`、`ma_resource` 与 `ma_artifact` 引用的
+  发布 scope 锚点。
+- `resource_key`、`record_key`、`operation_key`、`target_key`、delivery 键、actor 键、storage
+  键以及 runtime request 与 scope 键属于跨表引用、生成的标识或非统一派生（见上文）。
+- `ma_request_receipt.tenant_key`：它在 ingress 键集索引中的原始替代为 3208 字节。
+  `ma_read_lease` 不存原始身份。
+
+查询规则：
+
+- 每个 Session head 写入方都令 `session_id` 等于 `harness_session_id`，因此原来的
+  `tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?` 查找改为
+  `tenant_id = ? AND harness_session_id = ?`：同一唯一行、同一 `FOR UPDATE` 锁。
+- 原先比较哈希列的跨表 join，要么绑定派生值（`l.source_scope_key = ?`），要么经索引路径
+  join 原始列。Session 消息交接 join 需要新增一个索引
+  `idx_ma_delivery_source (delivery_kind, tenant_id, source_session_id, delivery_id)`。
+- Session 退役按重建唯一键的顺序（`query_id`；`binding_generation, request_id`）而非哈希序
+  锁 side query 与 client-files 请求。它是唯一按序锁这些多行的路径，另一处多行锁（按状态锁
+  活跃 side query）保持其索引序，故不引入锁环。
+- 针对已删哈希的碰撞复核随之删除；容量日志仍打印租户哈希，从不打印原始租户 id。
 
 ## 保留的不变量
 

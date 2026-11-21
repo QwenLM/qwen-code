@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.runtimebroker.managedschema;
 /** Explicit columns for Managed SQL readers; independent of live database metadata. */
 public enum ManagedSchemaProjection {
     SIDE_QUERY(
-            "query_key, query_id, tenant_id, session_id, session_scope_key, actor_id, actor_scope_key, "
+            "query_id, tenant_id, session_id, actor_id, actor_scope_key, "
                     + "kind, trigger_kind, question, state, active_slot, source_json, private_history_json, "
                     + "model_config_digest, processing_version, input_resource_id, input_digest, is_input_ready, "
                     + "claim_instance_id, claim_boot_id, claim_generation, claim_token_hash, read_lease_id, "
@@ -35,7 +35,7 @@ public enum ManagedSchemaProjection {
                     + "artifact_refs_resource_key, "
                     + "output_ranges_json, is_projection_pending, gmt_modified"),
     JOURNAL_PACK(
-            "pack_id, session_scope_key, tenant_id, workspace_id, session_id, from_revision, "
+            "pack_id, tenant_id, workspace_id, session_id, from_revision, "
                     + "through_revision, manifest_resource_key, object_key, state, is_put_closed, "
                     + "active_from_revision, byte_length, sha256, builder_id, gmt_create, gmt_modified"),
     MESSAGE(
@@ -43,7 +43,7 @@ public enum ManagedSchemaProjection {
                     + "attributes_json, first_sequence, last_sequence, gmt_create, gmt_modified, revision, "
                     + "parts_json, body_resource_key, execution_key, tool_call_key, policy_version"),
     OPERATION(
-            "operation_key, scope_key, session_scope_key, operation_id, operation_kind, "
+            "operation_key, scope_key, operation_id, operation_kind, "
                     + "tenant_id, session_id, workspace_id, target_kind, target_key, target_revision, "
                     + "target_id, storage_key, physical_key, actor_key, actor_id, idempotency_key, "
                     + "idempotency_digest, request_digest, actor_digest, lifecycle_protocol_version, "
@@ -61,7 +61,7 @@ public enum ManagedSchemaProjection {
                     + "storage_key, physical_key, state, revision, payload_version, payload_json, "
                     + "evidence_resource_key, evidence_sha256, gmt_create, gmt_modified"),
     OUTPUT_CAPTURE(
-            "scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id, "
+            "scope_key, tenant_id, workspace_id, session_id, publication_id, "
                     + "execution_key, capture_id, binding_json, binding_digest, token_hash, state, "
                     + "expires_at, capture_bytes, producer_bytes, admission_bytes, producer_phase, "
                     + "is_quarantined, active_operation_id, finish_operation_id, finish_predecessor_id, "
@@ -84,14 +84,14 @@ public enum ManagedSchemaProjection {
                     + "decision_scope_key, mutation_attempt_sequence, session_status_before, "
                     + "result_operation_key, result_json, gmt_create, gmt_modified"),
     RESOURCE(
-            "resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, "
+            "resource_key, tenant_id, workspace_id, session_id, resource_id, "
                     + "kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, object_key, "
                     + "object_version_id, encryption_key_id, publish_command_id, state, "
                     + "scope_key, publication_id, slot_key, capture_state, capture_object_key, "
                     + "operation_id, quarantine_reason, deletion_operation_key, gmt_create, "
                     + "last_verified_at, retention_until"),
     RESOURCE_REF(
-            "session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, "
+            "owner_kind, owner_key, owner_revision, resource_key, tenant_id, "
                     + "workspace_id, session_id, journal_revision, resource_id, gmt_create, runtime_binding_key"),
     RUNTIME_BINDING(
             "binding_id, request_key, scope_key, tenant_id, workspace_id, workspace_generation, "
@@ -148,7 +148,7 @@ public enum ManagedSchemaProjection {
                     + "latest_checkpoint_resource_id, compacted_through_revision, packed_through_revision, recovery_status, "
                     + "recovery_detail_code, gmt_create, gmt_modified, activation_id, "
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
-                    + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "
+                    + "activation_head_revision, harness_session_id, head_kind, "
                     + "phase, operation_id, claim_generation, claim_lease_until, is_wake_pending, "
                     + "wake_head_revision, wake_retry_at, wake_seal_revision, is_wake_scan_pending, cleanup_head_revision"),
     SESSION_JOURNAL_TX(
@@ -159,7 +159,7 @@ public enum ManagedSchemaProjection {
                     + "latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, "
                     + "record_digest, activation_lease_until, activation_renewal_seq, is_activation_record, gmt_create"),
     SESSION_RECORD(
-            "session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, "
+            "record_key, tenant_id, workspace_id, session_id, domain, "
                     + "record_id, operation_hash, revision, record_resource_id, task_kind, task_state, "
                     + "runtime_state, definition_revision, delivery_target, delivery_state, gmt_create, "
                     + "started_at, settled_at, first_sequence, hook_once_key_hash, hook_occurrence_hash, "
