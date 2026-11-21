@@ -3168,9 +3168,15 @@ describe('thinking rows in the compact summary', () => {
     expect(translateButtons()).toBe(1);
   });
 
-  it.each(['standalone', 'folded'] as const)(
-    'keeps a translation open when a Mod rewrites a %s thought',
-    async (layout) => {
+  it.each([
+    { layout: 'standalone', dismiss: 'Close' },
+    { layout: 'folded', dismiss: 'Close' },
+    { layout: 'standalone', dismiss: 'Escape' },
+    { layout: 'folded', dismiss: 'Escape' },
+    { layout: 'standalone', dismiss: 'Escape before rewrite' },
+  ])(
+    'keeps translation open until $dismiss for a $layout thought',
+    async ({ layout, dismiss }) => {
       const { ThinkingMessage } = await import('./AssistantMessage');
       const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
       const { ModRowsProvider } = await import('./ModAssistantMessage');
@@ -3200,9 +3206,13 @@ describe('thinking rows in the compact summary', () => {
       document.body.appendChild(container);
       const root = createRoot(container);
       mounted.push({ root, container });
-      const content = `Inspect the ${layout} thought.`;
+      const content = `Inspect the ${layout} thought with ${dismiss}.`;
       const translateButton = () =>
         container.querySelector<HTMLButtonElement>('button[title="翻译"]');
+      const closeWithEscape = () =>
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
 
       try {
         act(() =>
@@ -3232,21 +3242,26 @@ describe('thinking rows in the compact summary', () => {
         if (layout === 'folded') {
           act(() => container.querySelector('button')!.click());
         }
-        act(() =>
-          container
-            .querySelector<HTMLButtonElement>(
-              layout === 'folded'
-                ? '[data-testid="compact-thinking-summary"]'
-                : 'button[aria-expanded]',
-            )!
-            .click(),
+        const thoughtSummary = container.querySelector<HTMLButtonElement>(
+          layout === 'folded'
+            ? '[data-testid="compact-thinking-summary"]'
+            : 'button[aria-expanded]',
         );
+        act(() => thoughtSummary!.click());
         expect(ask).toHaveBeenCalledOnce();
         await act(async () => translateButton()!.click());
         expect(document.body.textContent).toContain('正在读取');
         const signal = generateContent.mock.calls[0]?.[1]?.signal;
         expect(signal?.aborted).toBe(false);
 
+        if (dismiss === 'Escape before rewrite') {
+          act(() => closeWithEscape());
+          expect(translateButton()).not.toBeNull();
+          expect(signal?.aborted).toBe(false);
+          await vi.waitFor(() =>
+            expect(document.activeElement).toBe(translateButton()),
+          );
+        }
         await act(async () =>
           rewrite.resolve({
             status: 'answered',
@@ -3254,14 +3269,24 @@ describe('thinking rows in the compact summary', () => {
           }),
         );
         expect(container.textContent).toContain('Mod 改写后的思考');
-        expect(document.body.textContent).toContain('正在读取');
-        expect(signal?.aborted).toBe(false);
-
-        await act(async () => translation.resolve());
-        const closeButton = Array.from(
-          document.body.querySelectorAll('button'),
-        ).find((button) => button.textContent === '关闭');
-        act(() => closeButton!.click());
+        if (dismiss !== 'Escape before rewrite') {
+          expect(document.body.textContent).toContain('正在读取');
+          expect(signal?.aborted).toBe(false);
+          if (dismiss === 'Close') {
+            await act(async () => translation.resolve());
+            const closeButton = Array.from(
+              document.body.querySelectorAll('button'),
+            ).find((button) => button.textContent === '关闭');
+            act(() => closeButton!.click());
+            expect(signal?.aborted).toBe(false);
+          } else {
+            act(() => closeWithEscape());
+          }
+        }
+        await vi.waitFor(() =>
+          expect(document.activeElement).toBe(thoughtSummary),
+        );
+        if (dismiss !== 'Close') expect(signal?.aborted).toBe(true);
         expect(document.body.textContent).not.toContain('正在读取');
         expect(translateButton()).toBeNull();
       } finally {

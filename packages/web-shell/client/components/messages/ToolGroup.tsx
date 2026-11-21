@@ -1950,6 +1950,7 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
   onToggle,
 }: ThoughtLineHeaderProps) {
   const { language, t } = useI18n();
+  const summaryRef = useRef<HTMLButtonElement>(null);
   return (
     <div
       className={`${styles.chatSummaryThoughtHeader}${
@@ -1965,6 +1966,7 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
       }}
     >
       <button
+        ref={summaryRef}
         type="button"
         disabled={documentMode}
         tabIndex={documentMode ? -1 : undefined}
@@ -1996,6 +1998,7 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
             generateContent={generateContent}
             className={styles.chatSummaryThoughtTranslate}
             hideWhenClosed={hideTranslateWhenClosed}
+            fallbackFocusRef={summaryRef}
           />
         )}
       <span
