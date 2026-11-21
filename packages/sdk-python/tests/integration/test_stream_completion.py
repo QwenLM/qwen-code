@@ -5,7 +5,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-
 from qwen_code_sdk import query
 from qwen_code_sdk.protocol import SDKUserMessage
 
