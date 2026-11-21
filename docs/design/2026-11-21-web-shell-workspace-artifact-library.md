@@ -70,6 +70,12 @@ Content paths:
 - Workspace-storage artifacts preview through workspace file reads with
   workspace attribution (`useArtifactWorkspaceTarget.ts`), independent of
   session load.
+- Saved web-preview snapshots carry `storage: 'published'`,
+  `managedId: 'preview-<uuid>'`, and
+  `metadata.artifactType === 'web_preview_snapshot'`; the session panel's
+  detail dispatch keys on that `artifactType`, not on `storage`.
+  `storage: 'managed'` artifacts are metadata-only references rendered from
+  the envelope descriptor; the snapshot content reader rejects them.
 
 ## Goals
 
@@ -80,7 +86,8 @@ Content paths:
 - Browse without loading sessions; progressive results while the scan runs;
   explicit per-session failures.
 - Preview workspace-storage artifacts without a session load; reach cold
-  managed snapshots and sessions through the existing open/unarchive flows.
+  web-preview snapshots and sessions through the existing open/unarchive
+  flows.
 - No new backend routes; no change to session-scoped surfaces or to the
   managed library.
 
@@ -88,8 +95,8 @@ Content paths:
 
 - No deletion, pinning, or view-preference UI. The daemon batch-delete route
   exists; a later slice (the managed library is also read-only).
-- No new content routes or content semantics; cold managed-snapshot preview
-  goes through session jump.
+- No new content routes or content semantics; cold web-preview-snapshot
+  preview goes through session jump.
 - No live subscription: finite snapshot scan plus manual refresh. Live
   updates for the open session stay on the existing session path.
 - No cursor pagination: the daemon library is a full/batch scan, not a keyset
@@ -167,20 +174,30 @@ Content paths:
   reveal or windowing over the sorted projection; a large workspace's full
   result set is retained per generation, but the DOM is not mounted all at
   once.
-- Row action dispatch reuses the session panel's preview paths:
-  workspace-storage artifacts preview/download through the page's own
-  workspace file-read actions resolved by `useArtifactWorkspaceTarget` (no
-  session load); managed snapshots of live sessions use the existing content
-  route; managed snapshots of cold/archived sessions jump to the session
-  first (existing open path, including the archived unarchive flow), then
-  open the artifact; external URLs use the existing safe-link opener.
-  Liveness comes from the shell's existing live-session tracking
-  (`workspace-session-live-state`), never from the envelope's `archiveState`
-  — that is storage location, not attachment, and a cold-but-active session's
-  managed snapshot must jump, not hit the attached-only content route. Where
-  the dispatch logic is embedded in `ArtifactPanel`, extract the minimal
-  shared helper into `artifactUtils.ts` without changing session-panel
-  behavior.
+- Row action dispatch reuses the session panel's preview paths and keys on
+  the same predicates: workspace-storage artifacts preview/download through
+  the page's own workspace file-read actions resolved by
+  `useArtifactWorkspaceTarget` (no session load); saved web-preview snapshots
+  (`metadata.artifactType === 'web_preview_snapshot'`, `storage: 'published'`)
+  of live sessions use the existing content route, and those of cold/archived
+  sessions jump to the session first (existing open path, including the
+  archived unarchive flow), then open the artifact; metadata-only
+  `storage: 'managed'` artifacts render directly from the envelope descriptor
+  — no session load, no content route; external URLs use the existing
+  safe-link opener. Liveness comes from the shell's existing live-session
+  tracking (`workspace-session-live-state`), never from the envelope's
+  `archiveState` — that is storage location, not attachment, and a
+  cold-but-active session's snapshot must jump, not hit the attached-only
+  content route. A content-route `404 session_not_found` (the session
+  unloaded between the live-state poll and the click) falls back to the same
+  jump; `404 artifact_snapshot_unavailable` on a live session surfaces the
+  missing-file error without jumping. The post-jump open is a session-keyed
+  pending request (`{ sessionId, artifactId }`) that opens the tab only after
+  the target session's right-panel restore settles — the restore effect
+  resets panel tabs until hydration commits — and cancels if the user
+  switches sessions mid-load. Where the dispatch logic is embedded in
+  `ArtifactPanel`, extract the minimal shared helper into `artifactUtils.ts`
+  without changing session-panel behavior.
 - States: scanning progress (received/total sessions), empty workspace,
   persistence unavailable (`409 artifact_library_unavailable`), runtime
   unavailable (`503 workspace_runtime_unavailable`), request-level error with
@@ -217,10 +234,10 @@ Content paths:
 - Hide the entry on old daemons rather than build a degraded view: satisfies
   "must not silently return live-only artifacts" without an upgrade-state
   screen for a feature that does not exist there.
-- Jump for cold managed previews instead of a new workspace content route:
-  keeps the slice read-only and avoids new content/trust semantics; loading
-  one session on demand is the existing user flow, unlike loading every
-  session to browse.
+- Jump for cold web-preview-snapshot previews instead of a new workspace
+  content route: keeps the slice read-only and avoids new content/trust
+  semantics; loading one session on demand is the existing user flow, unlike
+  loading every session to browse.
 - Full page rather than a dialog or panel tab: scheduled tasks, PR watches,
   goals, and workflows establish the local shell's feature-page pattern; the
   environment panel and right panel are session-scoped, and workspace
@@ -278,8 +295,10 @@ Content paths:
   progress counting and terminal reconciliation with `complete`'s counters,
   `displayName` fallback; page rows/filter/states (including the `503`
   runtime-unavailable state)/bounded rendering/action dispatch (workspace
-  preview vs live content vs cold jump, with a cold-but-active managed
-  snapshot taking the jump); nav gating.
+  preview vs live snapshot content vs cold jump vs metadata-only managed
+  rendering, with a cold-but-active snapshot taking the jump, content-route
+  `session_not_found` falling back to jump, and the post-jump open surviving
+  the panel-restore reset and canceling on mid-load switch); nav gating.
 - Interleaving witnesses for scan-generation ownership: (negative)
   same-workspace overlapping refresh — scan A emits an older envelope for
   session S, the user refreshes, scan B returns a newer S and `complete(B)`,
@@ -295,8 +314,9 @@ Content paths:
 - E2E (headless against a real daemon; plan under `.qwen/e2e-tests/`): a
   workspace with live, cold, and archived sessions carrying artifacts —
   progressive display without session load (no attach/spawn), archived
-  artifacts visible, workspace-file preview without load, cold managed jump
-  loads then previews, session-label jump including unarchive,
+  artifacts visible, workspace-file preview without load, cold
+  web-preview-snapshot jump loads then previews with the post-jump open
+  surviving the panel-restore reset, session-label jump including unarchive,
   capability-absent hides the entry, persistence-unavailable and corrupt- or
   oversized-transcript (`413 transcript_too_large`) partial failures,
   disconnect-without-complete partial banner.
@@ -309,8 +329,9 @@ Content paths:
 - The page lists artifacts of live, cold, and archived sessions of the current
   workspace newest-first with source-session labels, without loading sessions;
   progress and per-session errors are visible.
-- Workspace-storage artifacts preview without a session load; cold managed
-  artifacts reach preview through session jump; session labels open the
+- Workspace-storage artifacts preview without a session load; cold
+  web-preview snapshots reach preview through session jump and the post-jump
+  open survives the target session's panel restore; session labels open the
   session (archived via the existing unarchive flow).
 - Old daemons hide the entry; no live-only fallback. A stream ending without
   `complete` is shown as partial with retry.

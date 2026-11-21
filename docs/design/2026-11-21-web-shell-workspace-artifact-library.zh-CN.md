@@ -57,6 +57,11 @@ Managed 先例：
   （`withOwnerReadSession`）。
 - workspace 存储的产物经带工作区归属检查的文件读取预览
   （`useArtifactWorkspaceTarget.ts`），与会话加载无关。
+- 保存的网页预览快照携带 `storage: 'published'`、
+  `managedId: 'preview-<uuid>'` 与
+  `metadata.artifactType === 'web_preview_snapshot'`；会话面板的详情分派
+  按该 `artifactType` 判定，不按 `storage`。`storage: 'managed'` 的产物是
+  纯元数据引用，直接由 envelope 描述符渲染；快照内容读取器会拒绝它们。
 
 ## 目标
 
@@ -64,7 +69,7 @@ Managed 先例：
   的产品形态：当前工作区全部运行中、冷、归档会话的产物按最新优先排列，每行
   标注来源会话。
 - 浏览不加载会话；扫描期间渐进出结果；逐会话失败显式可见。
-- workspace 存储的产物免加载预览；冷 managed 快照与会话经既有打开/解归档
+- workspace 存储的产物免加载预览；冷网页预览快照与会话经既有打开/解归档
   流程到达。
 - 不新增后端路由；不改变会话级界面与 managed 产物库。
 
@@ -72,7 +77,7 @@ Managed 先例：
 
 - 不做删除、置顶、视图偏好 UI。daemon 批量删除路由已存在，留待后续切片
   （managed 产物库同样只读）。
-- 不新增内容路由或内容语义；冷 managed 快照预览经会话跳转。
+- 不新增内容路由或内容语义；冷网页预览快照预览经会话跳转。
 - 不做实时订阅：有限快照扫描加手动刷新。打开会话的实时更新仍走既有会话路径。
 - 不做游标分页：daemon 产物库是全量/批量扫描，不是 keyset 分页；渐进 SSE 是
   交付机制。
@@ -136,16 +141,24 @@ Managed 先例：
   过滤器，覆盖产物标题/描述与会话标签。渲染行数有界——在排序投影上增量
   展开或窗口化；大工作区的完整结果集按 generation 保留，但 DOM 不一次性
   全量挂载。
-- 行操作分派复用会话面板的预览路径：workspace 存储的产物经
-  `useArtifactWorkspaceTarget` 解析出的页面自身工作区文件读取 actions
-  预览/下载（不加载会话）；运行中会话的 managed 快照走既有内容路由；
-  冷/归档会话的 managed 快照先跳转到会话（既有打开路径，含归档解归档
-  流程），再打开产物；外部 URL 走既有安全链接 opener。liveness 取自 shell
-  既有的运行中会话跟踪（`workspace-session-live-state`），绝不取自 envelope
-  的 `archiveState`——那是存储位置而非挂载状态，冷但 active 的会话的
-  managed 快照必须跳转，不能打只认挂载会话的内容路由。分派逻辑目前内嵌在
-  `ArtifactPanel` 的部分，抽取最小共享 helper 到 `artifactUtils.ts`，不改变
-  会话面板行为。
+- 行操作分派复用会话面板的预览路径，并用同一套谓词：workspace 存储的产物
+  经 `useArtifactWorkspaceTarget` 解析出的页面自身工作区文件读取 actions
+  预览/下载（不加载会话）；保存的网页预览快照
+  （`metadata.artifactType === 'web_preview_snapshot'`、
+  `storage: 'published'`）运行中会话走既有内容路由，冷/归档会话先跳转到
+  会话（既有打开路径，含归档解归档流程），再打开产物；纯元数据的
+  `storage: 'managed'` 产物直接由 envelope 描述符渲染——不加载会话、不走
+  内容路由；外部 URL 走既有安全链接 opener。liveness 取自 shell 既有的
+  运行中会话跟踪（`workspace-session-live-state`），绝不取自 envelope 的
+  `archiveState`——那是存储位置而非挂载状态，冷但 active 的会话的快照必须
+  跳转，不能打只认挂载会话的内容路由。内容路由回
+  `404 session_not_found`（live-state 轮询与点击之间会话被卸载）时回退到
+  同一次跳转；运行中会话回 `404 artifact_snapshot_unavailable` 则如实报
+  文件缺失，不跳转。跳转后打开是绑定会话的待打开请求
+  （`{ sessionId, artifactId }`），仅在目标会话的右栏恢复收口后才打开
+  tab——恢复副作用在水合提交前会重置面板 tab——用户中途切换会话则取消。
+  分派逻辑目前内嵌在 `ArtifactPanel` 的部分，抽取最小共享 helper 到
+  `artifactUtils.ts`，不改变会话面板行为。
 - 状态：扫描进度（已收到/总会话数）、空工作区、持久化不可用
   （`409 artifact_library_unavailable`）、runtime 不可用
   （`503 workspace_runtime_unavailable`）、请求级错误带重试、逐会话错误摘要
@@ -172,8 +185,9 @@ Managed 先例：
   语义——并由下文的交错测试钉住，使更晚结算的旧请求永远无法确立当前视图。
 - 旧 daemon 隐藏入口而非做降级视图：满足「不能静默只返回 live 产物」，又不必
   为一个不存在的功能做升级状态屏。
-- 冷 managed 预览走跳转而非新增工作区内容路由：保持切片只读，避免新增内容/
-  信任语义；按需加载一条会话是既有用户流程，与为浏览而加载每条会话不同。
+- 冷网页预览快照预览走跳转而非新增工作区内容路由：保持切片只读，避免新增
+  内容/信任语义；按需加载一条会话是既有用户流程，与为浏览而加载每条会话
+  不同。
 - 整页而非对话框或面板 tab：scheduled tasks、PR watches、goals、workflows
   确立了本地 shell 的功能页模式；环境面板与右栏是会话级的，工作区浏览必须
   在没有打开会话时可用。managed 对话框挂在 `ManagedSessionsPage` 内；本地
@@ -219,8 +233,9 @@ Managed 先例：
   SSE 准入拒绝后的 JSON 回退、断连判部分、中止、刷新、排序稳定性、零产物
   进度计数与终态按 `complete` 计数对账、`displayName` 回退；页面
   行/过滤器/状态（含 `503` runtime 不可用态）/有界渲染/操作分派（workspace
-  预览 vs live 内容 vs 冷跳转，冷但 active 的 managed 快照走跳转）；导航
-  门控。
+  预览 vs live 快照内容 vs 冷跳转 vs 纯元数据 managed 渲染，冷但 active 的
+  快照走跳转，内容路由 `session_not_found` 回退跳转，跳转后打开挺过右栏
+  恢复重置并在中途切换时取消）；导航门控。
 - 扫描 generation 所有权的交错见证：（负向）同工作区重叠刷新——扫描 A 先发出
   会话 S 的较旧 envelope，用户刷新，扫描 B 返回更新的 S 与 `complete(B)`，
   随后迟到的 `session(A)` 与 `complete(A)` 从一个 abort 后仍投递排队事件的
@@ -231,8 +246,9 @@ Managed 先例：
   判部分。
 - E2E（headless 对真实 daemon；计划在 `.qwen/e2e-tests/`）：含运行中、冷、
   归档会话且带产物的工作区——渐进显示且不加载会话（无 attach/spawn）、归档
-  产物可见、workspace 文件免加载预览、冷 managed 跳转后加载再预览、会话标签
-  跳转含解归档、能力缺席隐藏入口、持久化不可用与损坏/超大转录
+  产物可见、workspace 文件免加载预览、冷网页预览快照跳转后加载再预览且
+  跳转后打开挺过右栏恢复重置、会话标签跳转含解归档、能力缺席隐藏入口、
+  持久化不可用与损坏/超大转录
   （`413 transcript_too_large`）的部分失败、未收到 `complete` 断连的部分
   横幅。
 - 回归：会话面板、芯片、头部入口、会话列表数量不变；managed 产物库不受影响；
@@ -242,8 +258,9 @@ Managed 先例：
 
 - 页面按最新优先列出当前工作区运行中、冷、归档会话的产物并标注来源会话，
   不加载会话；进度与逐会话错误可见。
-- workspace 存储的产物免加载预览；冷 managed 产物经会话跳转到达预览；会话
-  标签打开会话（归档经既有解归档流程）。
+- workspace 存储的产物免加载预览；冷网页预览快照经会话跳转到达预览，且
+  跳转后打开挺过目标会话的右栏恢复；会话标签打开会话（归档经既有解归档
+  流程）。
 - 旧 daemon 隐藏入口；无 live-only 回退。流未收到 `complete` 即结束时显示为
   部分结果并可重试。
 - 重叠刷新与 A→B→A 工作区往返绝不让被取代的扫描确立行、进度或终态；终态
