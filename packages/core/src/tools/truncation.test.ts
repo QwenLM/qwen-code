@@ -11,6 +11,7 @@ import {
   truncateToolOutput,
   truncateLlmContent,
   isAlreadyTruncated,
+  isPersistedOutputStub,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
   PREVIEW_SIZE_CHARS,
   persistAndTruncateToolResult,
@@ -943,4 +944,84 @@ it('does not emit persisted events for skips and correlates an actual saved file
     writable,
     expect.objectContaining({ prompt_id: 'p', bytes_written: 60000 }),
   );
+});
+
+describe('isPersistedOutputStub', () => {
+  it('recognizes both spill shapes and rejects envelopes without a path', () => {
+    const stub = `<persisted-output>
+Output too large (12 KB). Full output saved to: /tmp/tool-results/a.txt
+</persisted-output>`;
+    const saved = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
+The full output has been saved to: /tmp/tool-results/b.output
+Total characters: 300000; total lines: 5000.`;
+    const unsaved = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
+[Note: Full output could not be saved: session disk budget exhausted]
+Total characters: 300000; total lines: 5000.`;
+    const writeFailed = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
+[Note: Could not save full output to file]
+Total characters: 300000; total lines: 5000.`;
+    // The phrase inside the preview is not the header; a body that merely
+    // quotes it stays clearable.
+    const quoted = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
+The truncated output below shows the beginning and end of the content.
+The full output has been saved to: not a header, just text`;
+
+    expect(isPersistedOutputStub(stub)).toBe(true);
+    expect(isPersistedOutputStub(saved)).toBe(true);
+    expect(isPersistedOutputStub(unsaved)).toBe(false);
+    expect(isPersistedOutputStub(writeFailed)).toBe(false);
+    expect(isPersistedOutputStub(quoted)).toBe(false);
+    expect(isPersistedOutputStub('ordinary tool output')).toBe(false);
+  });
+
+  // The predicate is positional: the saved-path header must be line 2 of the
+  // envelope. Hand-built bodies above cannot catch a producer that stops
+  // emitting it there, so assert against what the producers actually write.
+  it('classifies the output the real producers emit', async () => {
+    const saved = await truncateAndSaveToFile(
+      'the saved spill\n'.repeat(20000),
+      'shell',
+      '/tmp/tool-results',
+      2000,
+      20,
+    );
+    expect(saved.outputFile).toBeDefined();
+    expect(isPersistedOutputStub(saved.content)).toBe(true);
+
+    const unsaved = await persistAndTruncateToolResult(
+      'json',
+      'mcp',
+      JSON.stringify({
+        rows: Array.from({ length: 1000 }, (_, index) => ({ index })),
+      }),
+      {
+        getToolResultBytesWritten: () => MAX_SESSION_BYTES,
+        trackToolResultBytes: vi.fn(),
+      } as unknown as Config,
+    );
+    expect(unsaved.content).toContain('session disk budget exhausted');
+    expect(isPersistedOutputStub(unsaved.content)).toBe(false);
+  });
+
+  // The `<persisted-output>` tag branch of `buildStub` is only reached via a
+  // *successful* persist with an absolute tool-results dir; the note-form
+  // stubs above (budget exhausted, invalid callId) never carry the tag. Pin
+  // the shape the real producer emits so a moved or rewrapped tag turns red.
+  it('classifies a real persisted-output stub from the producer', async () => {
+    const saved = await persistAndTruncateToolResult(
+      'call-1',
+      'shell',
+      'x'.repeat(60_000),
+      {
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
+        storage: {
+          getToolResultsDir: () => path.resolve('/tmp/tool-results'),
+          getProjectTempDir: () => path.resolve('/tmp'),
+        },
+      } as unknown as Config,
+    );
+    expect(saved.content.startsWith('<persisted-output>')).toBe(true);
+    expect(isPersistedOutputStub(saved.content)).toBe(true);
+  });
 });

@@ -279,6 +279,36 @@ describe('microcompactHistory', () => {
 
   const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
 
+  function makePersistedOutputStub(path = '/tmp/tool-results/c1.txt'): string {
+    return `<persisted-output>
+Output too large (3000 KB). Full output saved to: ${path}
+Full output sha256: ${'a'.repeat(64)}
+Total characters: 3145728; total lines: 4000.
+Note: this file may be cleaned up after 24 hours.
+Page in with read_file using the absolute file_path above, offset (zero-based line) and limit (line count).
+
+Preview (up to 2000 chars):
+the first 2000 characters
+</persisted-output>`;
+  }
+
+  // `truncateAndSaveToFile`'s envelope: same saved-path reference, but it
+  // leads with the truncation sentinel instead of the stub tag.
+  function makeTruncationEnvelope(
+    path = '/tmp/tool-results/c2.output',
+  ): string {
+    return `Tool output was too large and has been truncated.
+The full output has been saved to: ${path}
+Total characters: 300000; total lines: 5000.
+Full output sha256: ${'b'.repeat(64)}
+Page in with read_file using the absolute file_path above, offset (zero-based line) and limit (line count). The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
+
+Truncated part of the output:
+the first characters
+... [CONTENT TRUNCATED] ...
+the last characters`;
+  }
+
   it('should return history unchanged when trigger does not fire', () => {
     const history: Content[] = [
       makeUserMessage('hello'),
@@ -930,6 +960,142 @@ describe('microcompactHistory', () => {
     expect(
       result.history.at(-1)!.parts![0]!.functionResponse!.response!['output'],
     ).toBe('Y'.repeat(25_500));
+  });
+
+  it('leaves persisted-output stubs intact even when the size trigger is over threshold', () => {
+    const stub = makePersistedOutputStub();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', stub),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'g'.repeat(5_000)),
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'r'.repeat(5_000)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    // The stub stays over threshold — its saved output is unrecoverable if the
+    // reference is blanked — but the plan must still clear what it can.
+    expect(result.meta).toMatchObject({
+      triggerReason: 'size',
+    });
+    expect(result.meta!.toolsCleared).toBeGreaterThan(0);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(stub);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('counts a persisted-output stub in the size trigger even though it is never cleared', () => {
+    const stub = makePersistedOutputStub();
+    // Only the stub is compactable here, and it is over the threshold on its
+    // own. Reporting it as zero characters would make `totalChars` 0, the
+    // trigger would never fire, and the resident preview would sit outside the
+    // accounting the setting describes.
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', stub),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toMatchObject({ triggerReason: 'size' });
+    expect(result.meta!.toolResultCharsBefore).toBe(stub.length);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(stub);
+  });
+
+  it('does not spend a keepRecent slot on a persisted-output stub', () => {
+    const stub = makePersistedOutputStub();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'o'.repeat(5_000)),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', stub),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 1 },
+      { force: true },
+    );
+
+    // Idle-path clearing protects the most recent result that is actually at
+    // risk. The stub never is, so the slot belongs to the older ordinary
+    // result instead of being wasted on it.
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('o'.repeat(5_000));
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(stub);
+  });
+
+  it('leaves a truncate-and-save envelope intact on the size path too', () => {
+    const envelope = makeTruncationEnvelope();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', envelope),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'g'.repeat(5_000)),
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'r'.repeat(5_000)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    // Same reference-to-the-saved-bytes contract as the stub tag, and the
+    // shape `run_shell_command` produces through `truncateToolOutput`.
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(envelope);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('still clears a bounded envelope that could not save a file', () => {
+    const unsaved = `Tool output was too large and has been truncated.
+[Note: Full output could not be saved: session disk budget exhausted]
+Total characters: 300000; total lines: 5000.
+Full output sha256: ${'c'.repeat(64)}`;
+
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', unsaved),
+      makeToolCall('grep_search'),
+      makeToolResult('grep_search', 'g'.repeat(1_000)),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 1 },
+      { force: true },
+    );
+
+    // No path, so no reference to orphan: this stays clearable, which is what
+    // the PR description already claimed for the no-saved-file sentinel.
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
   });
 
   it('size-compacts bridged tool results using the target tool identity', () => {

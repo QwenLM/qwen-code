@@ -10,6 +10,7 @@ import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames, canonicalToolName } from '../../tools/tool-names.js';
+import { isPersistedOutputStub } from '../../tools/truncation.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
@@ -479,10 +480,18 @@ function getPart(history: Content[], ref: PartRef): Part | undefined {
   return history[ref.contentIndex]?.parts?.[ref.partIndex];
 }
 
-function getToolOutputChars(
+/**
+ * The text output of a tool result this module may clear, and whether it is a
+ * persisted-output stub. `persisted` separates a stub the truncation path
+ * already paid to make small from an ordinary result: only the former is worth
+ * protecting from clearing on the idle path, because no `keepRecent` slot is
+ * reserved for it. Both kinds report their full resident length, so `chars` is
+ * only safe to read as "reclaimable" when `persisted` is false.
+ */
+function getClearableToolOutput(
   part: Part | undefined,
   callIdentityById: ToolCallIdentityById,
-): number {
+): { chars: number; persisted: boolean } {
   const toolName = getResponseToolIdentity(part, callIdentityById)?.name;
   if (
     !part ||
@@ -491,10 +500,25 @@ function getToolOutputChars(
     isErrorResponse(part) ||
     isAlreadyCleared(part)
   ) {
-    return 0;
+    return { chars: 0, persisted: false };
   }
   const output = part.functionResponse?.response?.['output'];
-  return typeof output === 'string' ? output.length : 0;
+  if (typeof output !== 'string') return { chars: 0, persisted: false };
+  // A persisted-output stub has already had its oversized content moved to
+  // a file; the model keeps recovering it by paging that file back in. Clearing
+  // the stub would trade a preview for nothing (it is already preview-sized)
+  // and destroy the only reference to the saved bytes, so it is never
+  // clearable. Truncations without a saved file keep no such reference and
+  // stay clearable. Both producers count: the `<persisted-output>` tag and the
+  // `Tool output was too large...` envelope `run_shell_command` emits.
+  if (isPersistedOutputStub(output)) {
+    // It is not free, though: the preview its producer budgeted stays resident
+    // in the prompt. Counting it as zero would take the largest results out of
+    // the size trigger's total and let the valve go blind to them, so the
+    // resident length is reported here and only the *clearability* differs.
+    return { chars: output.length, persisted: true };
+  }
+  return { chars: output.length, persisted: false };
 }
 
 function normalizePendingContent(
@@ -660,13 +684,18 @@ function planSizeBasedClearing(
   let totalChars = 0;
   let pendingChars = 0;
   for (const ref of tool) {
-    const chars = getToolOutputChars(
+    const { chars, persisted } = getClearableToolOutput(
       getPart(virtualHistory, ref),
       callIdentityById,
     );
     if (chars <= 0) continue;
-    charsByRef.set(refKey(ref), chars);
+    // A persisted-output stub occupies the prompt like any other result, so it
+    // joins the total the trigger reads; it just never joins `charsByRef`,
+    // which is the set the clearing loop can spend.
     totalChars += chars;
+    if (!persisted) {
+      charsByRef.set(refKey(ref), chars);
+    }
     if (ref.contentIndex >= history.length) {
       pendingChars += chars;
     }
@@ -849,8 +878,12 @@ export function microcompactHistory(
     const keepToolRefs = buildKeepRefs(
       tool.filter((ref) => {
         const part = getPart(history, ref);
+        const output = getClearableToolOutput(part, callIdentityById);
+        // A persisted-output stub is never cleared, so spending a keepRecent
+        // slot on it would strand an older ordinary result that the very same
+        // pass then blanks.
         return (
-          getToolOutputChars(part, callIdentityById) > 0 ||
+          (output.chars > 0 && !output.persisted) ||
           (!!part && hasNestedMedia(part))
         );
       }),
@@ -866,15 +899,19 @@ export function microcompactHistory(
     clearRefs = allRefs.filter((r) => {
       if (keepRefs.has(refKey(r))) return false;
       const part = getPart(history, r);
-      // Zero-character non-media tool refs are never clearable (mirrors the
-      // size path's `chars <= 0` skip). They are excluded from keepRecent
-      // candidates above, so without this guard they would be blanked here.
-      if (
-        toolKeys.has(refKey(r)) &&
-        getToolOutputChars(part, callIdentityById) === 0 &&
-        !(part && hasNestedMedia(part))
-      ) {
-        return false;
+      // A persisted-output stub is resident but not reclaimable: clearing it
+      // would destroy the only reference to the saved bytes. Zero-character
+      // non-media tool refs are never clearable either (mirrors the size
+      // path's skip). Both are excluded from keepRecent candidates above, so
+      // without this guard they would be blanked here.
+      if (toolKeys.has(refKey(r)) && !(part && hasNestedMedia(part))) {
+        const { chars, persisted } = getClearableToolOutput(
+          part,
+          callIdentityById,
+        );
+        if (chars === 0 || persisted) {
+          return false;
+        }
       }
       return true;
     });
@@ -947,7 +984,11 @@ export function microcompactHistory(
           part.functionResponse &&
           toolName &&
           COMPACTABLE_TOOLS.has(toolName) &&
-          !isErrorResponse(part)
+          !isErrorResponse(part) &&
+          // Same predicate the plan counted with. The plan only sees refs it
+          // can account for; re-checking here keeps a stub that reached the
+          // clear list some other way from losing its saved-output reference.
+          !getClearableToolOutput(part, callIdentityById).persisted
         ) {
           tokensSaved += estimatePartTokens(part);
           toolsCleared++;

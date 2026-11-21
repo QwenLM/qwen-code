@@ -55,6 +55,42 @@ export const TOOL_OUTPUT_TRUNCATED_PREFIX =
   'Tool output was too large and has been truncated';
 
 /**
+ * Opening tag of the envelope `buildStub` emits when the full output was saved
+ * to a file. It is the only form that carries a path back to the bytes, so
+ * consumers that must not orphan that reference key on it rather than on the
+ * broader truncation sentinel.
+ *
+ * Detection is a `startsWith` test on the literal tag, not a parse, so a tool
+ * result that merely opens with that line — a grep hit on the tag, or a file
+ * read back that itself begins with an envelope — is treated as a stub too.
+ * That tolerance is deliberate: the cost is keeping a clearable result that
+ * need not have been kept, never losing the reference a real stub carries.
+ */
+export const PERSISTED_OUTPUT_STUB_PREFIX = '<persisted-output>';
+
+/**
+ * Whether this tool result already paid to move its bytes to a file, so the
+ * text that remains is the only reference a consumer can page back from.
+ *
+ * Two producers spill: `buildStub` (the `<persisted-output>` envelope) and
+ * `truncateAndSaveToFile`'s `envelope` (the `Tool output was too large...`
+ * one). Both write a saved-path header; only the second one leads with the
+ * truncation sentinel instead of the stub tag, so keying on the tag alone
+ * misses the shell/MCP spill that `run_shell_command` emits most often.
+ * Bounded envelopes that could NOT save (`Full output could not be saved`,
+ * `Could not save full output to file`) carry no path and return false: there
+ * is nothing to orphan, so they stay clearable.
+ */
+export function isPersistedOutputStub(content: string): boolean {
+  if (content.startsWith(PERSISTED_OUTPUT_STUB_PREFIX)) return true;
+  if (!content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) return false;
+  // The header is the envelope's second line; matching the whole body would
+  // also hit the preview, where the truncated content may quote this phrase.
+  const header = content.slice(0, 512).split('\n', 2)[1] ?? '';
+  return /^(?:The )?full output (?:has been )?saved to: /.test(header);
+}
+
+/**
  * Tolerance factor applied by the scheduler's combined (second) pass:
  * metadata appended after truncation is only re-bounded above 2x the
  * applicable budget, so compliant retained content can legitimately
@@ -800,7 +836,7 @@ function buildStub(
   const fullDigest = crypto.createHash('sha256').update(content).digest('hex');
 
   if (isFilePath) {
-    return `<persisted-output>
+    return `${PERSISTED_OUTPUT_STUB_PREFIX}
 Output too large (${sizeKb} KB). Full output saved to: ${filePathOrNote}
 ${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}
 Total characters: ${content.length}; total lines: ${countLines(content)}.
