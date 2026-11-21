@@ -27,6 +27,7 @@ import type {
   DaemonSseConnectReason,
   DaemonTransport,
 } from './DaemonTransport.js';
+import { DaemonTransportClosedError } from './DaemonTransport.js';
 export type { DaemonSseConnectReason } from './DaemonTransport.js';
 import { RestSseTransport } from './RestSseTransport.js';
 import { DaemonCapabilityMissingError } from './types.js';
@@ -977,6 +978,7 @@ export class DaemonClient {
    * REST+SSE behavior with zero breaking changes.
    */
   readonly transport: DaemonTransport;
+  private disposed = false;
   // Lazy singleton so clients that never touch auth pay no allocation cost.
   // Exposed via the readonly `auth` accessor below.
   private _authFlow?: DaemonAuthFlow;
@@ -1067,6 +1069,9 @@ export class DaemonClient {
     perCallTimeoutMs?: number,
     mode: 'transport' | 'rest' = 'transport',
   ): Promise<T> {
+    if (mode === 'rest' && this.disposed) {
+      throw new DaemonTransportClosedError();
+    }
     // When `consume` is provided, the timer must remain
     // armed through the entire callback (body read + parse). The
     // previous `Response`-returning shape cleared the timer the
@@ -2746,6 +2751,7 @@ export class DaemonClient {
     headers: Record<string, string>,
     parse: (body: unknown) => T,
   ): Promise<T> {
+    if (this.disposed) throw new DaemonTransportClosedError();
     if (typeof XMLHttpRequest === 'undefined') {
       throw new Error(
         `${label}: upload progress requires XMLHttpRequest (browser only)`,
@@ -5003,6 +5009,7 @@ export class DaemonClient {
     row: DaemonModRow,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonModRowAnswer> {
+    if (this.disposed) throw new DaemonTransportClosedError();
     const res = await this._fetch(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/mod-row`,
       {
@@ -5043,6 +5050,7 @@ export class DaemonClient {
     question: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): AsyncGenerator<DaemonSessionBtwStreamEvent> {
+    if (this.disposed) throw new DaemonTransportClosedError();
     opts?.signal?.throwIfAborted();
     const requestId = createDaemonRequestId();
     const url = `${this.baseUrl}/session/${urlEncode(sessionId)}/btw/stream`;
@@ -5053,6 +5061,7 @@ export class DaemonClient {
     let lastReconnectError: unknown;
     try {
       while (true) {
+        if (this.disposed) throw new DaemonTransportClosedError();
         opts?.signal?.throwIfAborted();
         if (reconnectDeadline !== undefined && Date.now() >= reconnectDeadline)
           throw lastReconnectError;
@@ -8155,6 +8164,7 @@ export class DaemonClient {
    * on the underlying transport throw `DaemonTransportClosedError`.
    */
   dispose(): void {
+    this.disposed = true;
     this.restoreBudgetGeneration = ++this.capabilitiesGeneration;
     this.capabilitiesRequest = undefined;
     this.capabilityFeatures = undefined;
