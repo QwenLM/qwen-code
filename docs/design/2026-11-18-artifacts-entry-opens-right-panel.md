@@ -3,8 +3,8 @@
 [English](2026-11-18-artifacts-entry-opens-right-panel.md) | [简体中文](2026-11-18-artifacts-entry-opens-right-panel.zh-CN.md)
 
 Status: implemented. Local verification: web-shell typecheck, client vite build,
-and focused unit/DOM tests pass; the full root bundle and the real-browser E2E
-are pending.
+the full root build, focused unit/DOM tests, and headless-browser E2E against a
+live daemon all pass.
 
 ## Problem statement
 

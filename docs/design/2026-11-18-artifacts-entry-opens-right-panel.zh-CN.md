@@ -2,8 +2,8 @@
 
 [English](2026-11-18-artifacts-entry-opens-right-panel.md) | [简体中文](2026-11-18-artifacts-entry-opens-right-panel.zh-CN.md)
 
-状态：已实现。本地验证：web-shell typecheck、客户端 vite 构建与聚焦单测/DOM
-测试均通过；完整根 bundle 与真实浏览器 E2E 待跑。
+状态：已实现。本地验证：web-shell typecheck、客户端 vite 构建、完整根构建、
+聚焦单测/DOM 测试，以及对真实 daemon 的无头浏览器 E2E 均通过。
 
 ## 问题陈述
 
