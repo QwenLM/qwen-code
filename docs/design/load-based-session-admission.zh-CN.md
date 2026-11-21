@@ -1,0 +1,229 @@
+# 基于负荷的会话准入
+
+[English](load-based-session-admission.md) | [简体中文](load-based-session-admission.zh-CN.md)
+
+状态：已实现（implemented）
+
+## 问题
+
+主机已经高负荷时，daemon 仍继续放行新建会话。新建任务——调用方自带
+`sessionId`、子会话、定时任务——强制 `thread` 作用域，每个会话 spawn 一个
+新的 ACP 子进程：一个拥有独立堆的完整 Node 进程。（只有不带 id 的裸
+`single` 作用域 spawn 才复用 workspace 已有的子进程。）因此每次放行都在加深
+饱和。daemon 的单事件循环被饿死，HTTP 路由（包括 cancel 和 status）无法及时
+响应，表现为 daemon 卡死。高负荷下继续新建任务不会快速失败，反而让卡死更
+严重。
+
+今天所有的准入闸门都是计数型的：
+
+- 每 workspace 存活会话上限 `maxSessions`（默认 32，
+  `packages/acp-bridge/src/session-control-plane.ts`）。
+- daemon 全局 `maxTotalSessions`，按 workspace 数量推导
+  （`packages/cli/src/serve/run-qwen-serve.ts`，
+  `deriveDefaultMaxTotalSessions`）；单 workspace 时不设上限。
+- 每会话待处理 prompt 上限（`maxPendingPromptsPerSession`，默认 5）。
+
+计数无法反映机器实际能运行多少：每 workspace 32 个会话可以远超主机容量。
+内存预算模块（`packages/acp-bridge/src/daemon-memory-budget.ts`）明确只是
+描述性的——"Reported, never applied"——并写明真正的策略需要在 spawn 时做
+准入。目前没有任何准入路径读取 load average、事件循环延迟或空闲内存。
+
+## 目标
+
+- 主机饱和或 daemon 自身事件循环被饿死时，以可重试的 `503` 拒绝新建子进程。
+- 过载期间已有会话与控制面（prompt、cancel、detach、status、SSE）保持完全
+  可用。
+- 决策可通过 `GET /daemon/status` 观测。
+- 提供运维侧退出开关。
+
+## 范围边界
+
+- 本次变更的信号只有：主机 load average 与 daemon 事件循环延迟。内存压力与
+  cgroup 感知的 CPU 压力是后续工作。
+- 被拒绝的新建不排队。以 `503 + Retry-After` 快速失败。
+- Managed 并发子进程计数上限（`acp_child_capacity_exhausted`）是正交的计数
+  闸门，保持不变。
+- 不做专门的 Web Shell 横幅或新建按钮禁用。现有通用 notice 路径已会把
+  daemon 的错误消息以 toast 呈现。
+- 发往存活会话的 prompt、cancel、detach、status、SSE 永不设闸。
+
+## 设计
+
+### 负荷监视器
+
+新模块 `packages/cli/src/serve/load-admission.ts` 导出
+`createLoadAdmissionMonitor`。它以 2 秒周期（`LOAD_ADMISSION_SAMPLE_MS =
+2_000`）在一个 `unref()` 的定时器上采样，并缓存一份供准入同步读取的快照：
+
+```ts
+interface LoadAdmissionSnapshot {
+  enabled: boolean;
+  overloaded: boolean;
+  reason: 'cpu_load' | 'event_loop_lag' | null;
+  loadRatio: number; // os.loadavg()[0] / os.availableParallelism()
+  eventLoopLagP99Ms: number; // 窗口内 p99，直方图每 tick 重置
+  sampledAtMs: number;
+}
+```
+
+两个信号，各带进入/退出阈值（滞回）：
+
+| 信号         | 来源                                                               | 进入          | 退出         |
+| ------------ | ------------------------------------------------------------------ | ------------- | ------------ |
+| CPU 负荷     | `os.loadavg()[0] / os.availableParallelism()`                      | ratio ≥ 2.0   | ratio < 1.0  |
+| 事件循环延迟 | `monitorEventLoopDelay({ resolution: 20 })`，每窗口 percentile(99) | p99 ≥ 1000 ms | p99 < 250 ms |
+
+信号只有在翻转条件连续 3 次采样（6 秒）成立后才翻转状态。每个信号各自维护
+持续计数；`overloaded` 是两个信号状态的 OR。`reason` 指出当前过载的信号，
+两者同时过载时 `cpu_load` 优先；快照始终携带两个实测值。延迟直方图为本监视器
+专用且每 tick 重置，读数是窗口内的，与 `run-qwen-serve.ts` 中现有 metrics
+sampler 的模式一致。
+
+监视器接受可选的 `readSignals` 测试接缝（默认真实 `os`/`perf_hooks` 读取）
+与可选的 `sampleMs` 覆盖。`dispose()` 清除定时器并停用直方图。阈值与持续
+次数在本次变更中是导出常量，不是配置。
+
+### 准入集成
+
+`createTotalSessionAdmissionController`
+（`packages/cli/src/serve/total-session-admission.ts`）新增可选
+`loadAdmission?: { snapshot(): LoadAdmissionSnapshot }` 选项。`admit()`
+按序检查：
+
+1. workspace 正在 drain（现有）。
+2. 负荷：若 `snapshot().overloaded`，抛 `SystemOverloadedError`。
+3. 总会话计数（现有）。
+4. 预留在途名额（现有）。
+
+该控制器是唯一的同步接缝，已作为 `freshSessionAdmission` 注入 daemon 构造
+的每个 bridge（`run-qwen-serve.ts` 的主/次 runtime；`server.ts` 独立 app
+工厂的默认 bridge）。bridge 契约不变：准入保持同步，预留/释放语义不动。
+
+闸门覆盖全部四种新建子进程操作——`spawn`、`load`、`resume`、`branch`——
+因为每种都会 spawn 子进程。`skipFreshSessionAdmission` 豁免只属于 branch
+操作的内部 restore：branch 已预留准入，其 restore 不应重复预留。
+worktree-reset 的替换会话走普通 `spawn` 路径，与其它新建一样受闸门约束——
+与现有计数闸门一致；且 spawn 是 reset 流程的第一步，被拒时旧会话状态不受
+影响。
+
+监视器在控制器创建处创建，仅在启用负荷准入时创建，并在 daemon 关闭与
+runtime 重建时 dispose，跟随 metrics sampler 的生命周期。
+
+### 错误契约
+
+在 `packages/acp-bridge/src/bridgeErrors.ts` 新增 `SystemOverloadedError`，
+携带 `reason`、`loadRatio`、`eventLoopLagP99Ms`。消息写明原因与实测值，
+日志与 toast 无需额外查询即可诊断。
+
+- REST（`packages/cli/src/serve/server/error-response.ts`）：`503`，
+  `Retry-After: 15`，body
+  `{ error, code: 'system_overloaded', reason, loadRatio, eventLoopLagP99Ms }`。
+  一条 `warn` daemon 日志，与总准入拒绝的日志对齐。
+- ACP RPC（`packages/cli/src/serve/acp-http/dispatch.ts`）：`errorKind:
+'system_overloaded'`、`httpStatus: 503`、`retryable: true`，附同样的实测
+  字段。
+- SDK：本次不新增错误类；该状态以 `DaemonHttpError` 的 status 与 body 呈现，
+  与其他 503 容量形态一致。
+
+`Retry-After` 取 15 秒而非计数闸门的 5 秒：主机负荷的消退比会话名额的释放
+更慢。
+
+### 配置
+
+`ServeOptions.loadAdmission?: boolean`，默认 `true`。`qwen serve` 的 CLI
+flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）。
+禁用时不创建监视器，准入行为与今天完全一致。
+
+### 状态暴露
+
+`GET /daemon/status` 新增 `loadAdmission` 节，携带快照（`enabled`、
+`overloaded`、`reason`、`loadRatio`、`eventLoopLagP99Ms`、`sampledAtMs`）；
+过载时 issues 列表新增 `system_overloaded`（severity `warning`），与现有
+`total_session_capacity_high` 家族并列。
+
+## 设计决策与理由
+
+- **快速失败，不排队。** 排队会隐藏背压，在恰恰导致卡死的条件下增长 daemon
+  内存，并让客户端无限等待。`503 + Retry-After` 是本代码库既有的容量形态。
+- **一个接缝，所有 runtime。** 在总准入控制器内设闸即可覆盖每个 bridge，
+  不必触碰 bridge 包的准入契约——该契约必须保持同步。逐请求的异步负荷探测
+  会违反契约。
+- **两个信号。** 主机 load average 捕捉整机饱和，包括 daemon 之外进程的
+  压力。事件循环延迟直接捕捉 daemon 被饿死，且在 `os.loadavg()` 恒为零的
+  Windows 上仍然有效。
+- **滞回加 3 次采样去抖。** 一次重 JSON 解析或短暂 spawn 突发不应挡住新建，
+  闸门也不能抖动。6 秒才进入是可接受的，因为本闸门防范的过载以数十秒计
+  发展；退出侧同样去抖，避免负荷瞬间回落就放行一波新建。
+- **`load`/`resume` 与 `spawn` 一样设闸。** 它们同样 spawn 子进程。失控的
+  工作存在于已存活的会话中——那些会话无需准入、始终可 cancel；冷会话没有
+  在跑的工作，拒绝其恢复不损害可控性。
+- **保守默认值，默认启用。** load ratio 2.0 意味着运行队列是核数的两倍；
+  p99 延迟 1 秒意味着 daemon 已明显无响应。健康主机永远不会触闸，因此
+  默认启用的行为变更是安全的；运维可退出。
+
+## 约束与风险
+
+- **Windows：** `os.loadavg()` 返回零，CPU 信号在那里失效；延迟信号仍有效。
+- **cgroup：** load average 是主机-wide，不是容器作用域。带 CPU 配额的容器
+  可能在自身空闲时看到主机高负荷，产生误拒。延迟信号是 daemon 本地的，不受
+  影响；运维可 `--no-load-admission`。cgroup PSI 压力是后续工作。
+- **Linux IO wait：** load average 计入不可中断 IO 等待，IO 密集主机可能在
+  CPU 空闲时触发 CPU 信号。保守阈值与退出开关限定影响。
+- **误报会挡住新建。** 拒绝可见（toast、status issue、daemon 日志）且可逆
+  （退出开关、负荷消退）。闸门绝不触碰已放行的工作。
+- **开销：** 多一个直方图与一个 2 秒定时器，与现有 5 秒 metrics sampler
+  同一模式；可忽略。
+
+## 验证计划
+
+- 单元测试（同目录）：监视器逐信号与组合的进入/退出/去抖矩阵、dispose、
+  零负荷失效；控制器过载拒绝与预留/释放不变量、禁用直通；REST 与 RPC
+  错误映射。
+- E2E 计划：`.qwen/e2e-tests/load-based-session-admission.md`。对全局安装
+  的 `qwen` CLI 做基线 dry-run，展示缺口（负荷下新建仍被放行）。实现后对
+  本地构建分组：真实 CPU burner 负荷 → 新建返回 `503 system_overloaded`，
+  存活会话 prompt/cancel 保持可用，负荷停止后恢复；`--no-load-admission`
+  在同一负荷下放行；status 报告状态。
+- `npm run build && npm run typecheck`，按改动包跑聚焦 vitest。
+
+## 验收标准
+
+- 持续饱和（load ratio ≥ 2.0 或事件循环 p99 ≥ 1000 ms 达 ≥ 6 秒）时，新建
+  会话返回 `503 system_overloaded` 带 `Retry-After`，且不 spawn 子进程。
+- 过载期间，发往存活会话的 prompt、cancel、detach、status、SSE 保持可用。
+- 两个信号都低于退出阈值持续 ≥ 6 秒后，新建重新被放行。
+- `--no-load-admission` 完全禁用闸门；行为与今天一致。
+- `GET /daemon/status` 报告负荷准入状态，过载时报告 `system_overloaded`
+  issue。
+- 健康主机上闸门永不触发；现有准入测试原样通过。
+
+## 开放问题
+
+- 阈值调优（ratio 2.0/1.0、延迟 1000/250 ms、2 秒 × 3 次采样）待真实观测
+  后进行；当前刻意保持常量。
+- 内存压力信号与 cgroup 感知的 CPU 压力：后续。
+- 专门的 Web Shell 过载横幅与基于 status 节的新建按钮禁用：后续。
+
+## 涉及文件
+
+| 文件                                                     | 变更                             |
+| -------------------------------------------------------- | -------------------------------- |
+| `packages/cli/src/serve/load-admission.ts`               | 新监视器（信号、滞回、快照）     |
+| `packages/cli/src/serve/load-admission.test.ts`          | 新单元测试                       |
+| `packages/cli/src/serve/total-session-admission.ts`      | `admit()` 中的可选负荷闸门       |
+| `packages/cli/src/serve/total-session-admission.test.ts` | 过载拒绝测试                     |
+| `packages/acp-bridge/src/bridgeErrors.ts`                | `SystemOverloadedError`          |
+| `packages/cli/src/serve/acp-session-bridge.ts`           | 重导出新错误类                   |
+| `packages/cli/src/serve/server/error-response.ts`        | REST 503 映射                    |
+| `packages/cli/src/serve/acp-http/dispatch.ts`            | RPC 错误映射                     |
+| `packages/cli/src/serve/run-qwen-serve.ts`               | 监视器生命周期、控制器接线、选项 |
+| `packages/cli/src/serve/server.ts`                       | 控制器接线（独立 app 工厂）      |
+| `packages/cli/src/serve/types.ts`                        | `ServeOptions.loadAdmission`     |
+| `packages/cli/src/commands/serve.ts`                     | `--load-admission` flag          |
+| `packages/cli/src/serve/fast-path.ts`                    | fast-path boolean flag 登记      |
+| `packages/cli/src/serve/daemon-status.ts`                | `loadAdmission` 节 + issue       |
+| `packages/cli/src/serve/routes/daemon-status.ts`         | status getter 透传               |
+| `packages/cli/src/serve/server.test.ts`                  | REST 映射测试                    |
+| `packages/cli/src/serve/acp-http/transport.test.ts`      | RPC 映射测试                     |
+| `packages/cli/src/serve/daemon-status.test.ts`           | status 节 / issue 测试           |
+| `packages/cli/src/serve/fast-path.test.ts`               | flag 解析测试                    |
