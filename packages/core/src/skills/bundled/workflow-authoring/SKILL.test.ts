@@ -106,6 +106,11 @@ describe('bundled workflow-authoring skill', () => {
       { dependentSchemas: {} },
       { $dynamicRef: '#' },
       { $recursiveRef: '#' },
+      {
+        $schema: 'https://json-schema.org/draft/2019-09/schema',
+        type: 'object',
+        dependentRequired: { a: ['b'] },
+      },
     ];
     for (const schema of refused) {
       expect(prepareWorkflowSchema(schema).ok).toBe(false);
@@ -149,7 +154,8 @@ describe('bundled workflow-authoring skill', () => {
       'required list longer than `maxProperties` allows',
       'skips a node carrying',
       'property-name keywords',
-      'newer-dialect spellings need a matching `$schema`',
+      'newer-dialect spellings need',
+      'https://json-schema.org/draft/2020-12/schema',
     ]) {
       expect(prose).toContain(anchor);
     }

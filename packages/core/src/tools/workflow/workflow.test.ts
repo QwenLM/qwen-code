@@ -882,7 +882,7 @@ await agent('scan package.json')
   // (29,211); from 29,500 for the provable and undetected schema
   // contradictions now distinguished before dispatch (29,954); from 30,000
   // for the complete refusal and skip rules (30,085), then their dialect
-  // precondition (30,202).
+  // precondition and its exact URI (30,248).
   it('keeps the inline fallback description within its budget', () => {
     const tool = new WorkflowTool({
       ...fakeConfig(),

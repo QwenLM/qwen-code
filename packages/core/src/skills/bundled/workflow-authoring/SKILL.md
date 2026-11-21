@@ -126,9 +126,10 @@ say explicitly what each one should read and whether it may edit files.
   agent() resolve to null without starting the agent. The check reads only a
   node's own property rules and skips a node carrying reference, combinator,
   conditional, dependency, unevaluated-property or property-name keywords;
-  newer-dialect spellings need a matching `$schema`, or strict compilation
-  refuses them before dispatch. Otherwise the agent is dispatched and the
-  failure arrives as failed submissions. Each failed submission hands its
+  newer-dialect spellings need the root `$schema` set to
+  `https://json-schema.org/draft/2020-12/schema`; any other dialect is refused
+  before dispatch. Otherwise the agent is dispatched and
+  the failure arrives as failed submissions. Each failed submission hands its
   error back to the agent, and
   the third failed submission stops it. With no valid result agent() resolves
   to null and the failure states how many submissions failed and the last
