@@ -40,7 +40,7 @@ public class ToolPublicationArtifactReader
         for (var artifact : artifacts) {
             var source = artifact.source();
             var publication = new ToolPublicationDataStore.ScopedPublication(source.sessionKey(), artifact.publicationId());
-            result.put(artifact.descriptor().path("id").asText(), ToolPublicationDataStore.referenced(
+            result.put(artifact.descriptor().path("id").asText(), ToolPublicationRequirements.referenced(
                     rows.get(publication), source.outcomeRef(), source.journalRevision(), source.receiptSequence()));
         }
         return result;

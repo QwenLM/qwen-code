@@ -1,12 +1,22 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.sql.Timestamp;
+import java.util.Map;
 
 final class ToolPublicationRequirements {
-
     private ToolPublicationRequirements() {
+    }
+
+    static boolean referenced(Map<String, Object> row, JsonNode outcomeRef, long revision, long sequence) {
+        return row != null && "REFERENCED".equals(row.get("producer_phase"))
+                && row.get("is_quarantined") instanceof Number mark && mark.intValue() == 0
+                && outcomeRef != null && outcomeRef.path("resourceId").isTextual()
+                && outcomeRef.path("resourceId").asText().equals(row.get("admission_resource_id"))
+                && row.get("receipt_revision") instanceof Number r && r.longValue() == revision
+                && row.get("receipt_sequence") instanceof Number q && q.longValue() == sequence;
     }
 
     static void requireCapacity(long requested, long available) {

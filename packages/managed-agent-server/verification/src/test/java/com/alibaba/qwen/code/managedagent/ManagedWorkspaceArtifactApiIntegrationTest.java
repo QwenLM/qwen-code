@@ -93,7 +93,7 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
             public boolean publishOriginal(String tenant, String workspace, String session) { return true; }
             public boolean publishPreview(String tenant, String workspace, String session) { return true; }
             public boolean readOriginal(String tenant, String actor, String workspace, String session) {
-                return "reader".equals(actor);
+                return "reader".equals(actor) && !"session-2".equals(session);
             }
         };
         mvc = mvc(new ManagedArtifactService(sessions, fixture.results(), fixture.reader(),
@@ -465,16 +465,26 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
     @Test
     void readsAvailabilityOnceAcrossSessionsThatShareAPublicationId() throws Exception {
         String second = seedArtifactSession("session-2", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        String third = seedArtifactSession("session-3", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        String scope = ManagedToolResultStore.identity("s", TENANT, "session-2").substring(2);
+        fixture.jdbc().update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id, session_id,"
+                + " publication_id, producer_phase, admission_resource_id, receipt_revision,"
+                + " receipt_sequence, is_quarantined)"
+                + " SELECT ?, ?, ?, ?, publication_id, producer_phase, admission_resource_id,"
+                + " receipt_revision, receipt_sequence, is_quarantined FROM ma_output_capture WHERE publication_id = ?",
+                scope, TENANT, WORKSPACE, "session-2", stdout.path("publication_id").asText());
         var jdbc = spy(fixture.jdbc());
         ReflectionTestUtils.setField(fixture.publications(), "jdbc", jdbc);
 
         var response = page("reader", body(null, null));
-        assertThat(ids(response)).containsExactlyInAnyOrder(second, stdout.path("id").asText(), stderr.path("id").asText());
+        assertThat(ids(response)).containsExactlyInAnyOrder(second, third,
+                stdout.path("id").asText(), stderr.path("id").asText());
         for (var row : response.required("data")) {
             var artifact = row.required("artifact");
-            boolean available = !second.equals(artifact.required("id").asText());
+            boolean available = !third.equals(artifact.required("id").asText());
             assertThat(artifact.required("availability").asText()).isEqualTo(available ? "available" : "unavailable");
-            assertThat(row.required("access").required("can_read_content").booleanValue()).isEqualTo(available);
+            assertThat(row.required("access").required("can_read_content").booleanValue())
+                    .isEqualTo("session-1".equals(artifact.required("session_id").asText()));
         }
         verify(jdbc).query(ArgumentMatchers.contains("FROM ma_output_capture"),
                 ArgumentMatchers.any(RowMapper.class), ArgumentMatchers.any(Object[].class));

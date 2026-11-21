@@ -2064,17 +2064,17 @@ public final class ToolPublicationDataStore {
 
     void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef, long revision, long sequence) {
         var rows = referencedPublications(Map.of(key, Set.of(publicationId)));
-        require(referenced(rows.get(new ScopedPublication(key, publicationId)),
+        require(ToolPublicationRequirements.referenced(rows.get(new ScopedPublication(key, publicationId)),
                 outcomeRef, revision, sequence), "Publication receipt is unavailable");
     }
 
     Map<ScopedPublication, Map<String, Object>> referencedPublications(Map<JsonNode, Set<String>> groups) {
-        if (groups.isEmpty()) {
-            return Map.of();
-        }
         List<String> predicates = new ArrayList<>();
         List<Object> arguments = new ArrayList<>();
         groups.forEach((key, ids) -> {
+            if (ids.isEmpty()) {
+                return;
+            }
             predicates.add("(scope_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
                     + " AND NOT EXISTS (SELECT 1 FROM ma_session r WHERE r.tenant_key = ?"
                     + " AND r.session_key = ? AND r.retired_at IS NOT NULL) AND publication_id IN ("
@@ -2087,6 +2087,9 @@ public final class ToolPublicationDataStore {
             arguments.add(ToolPublicationRetentionStore.hash(text(key, "sessionId")));
             arguments.addAll(ids);
         });
+        if (predicates.isEmpty()) {
+            return Map.of();
+        }
         var rows = jdbc.query("SELECT scope_key, publication_id, producer_phase, admission_resource_id,"
                 + " receipt_revision, receipt_sequence, CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE " + String.join(" OR ", predicates),
@@ -2096,15 +2099,6 @@ public final class ToolPublicationDataStore {
             result.put(new ScopedPublication((String) row.get("scope_key"), (String) row.get("publication_id")), row);
         }
         return result;
-    }
-
-    static boolean referenced(Map<String, Object> row, JsonNode outcomeRef, long revision, long sequence) {
-        return row != null && "REFERENCED".equals(row.get("producer_phase"))
-                && row.get("is_quarantined") instanceof Number mark && mark.intValue() == 0
-                && outcomeRef != null && outcomeRef.path("resourceId").isTextual()
-                && outcomeRef.path("resourceId").asText().equals(row.get("admission_resource_id"))
-                && row.get("receipt_revision") instanceof Number r && r.longValue() == revision
-                && row.get("receipt_sequence") instanceof Number q && q.longValue() == sequence;
     }
 
     private VerifiedStream verifiedStream(JsonNode key, String publicationId, JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
