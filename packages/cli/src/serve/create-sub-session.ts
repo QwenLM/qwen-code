@@ -47,6 +47,8 @@ import {
 import {
   escapeXml,
   escapeXmlWithinBudget,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
 } from '@qwen-code/qwen-code-core/utils/xml.js';
 import {
   APPROVAL_MODES,
@@ -594,7 +596,7 @@ function buildSentCompletionNotification(
   const modelSessionId = truncateCodePoints(sessionId, 256);
   const modelLabel = truncateUtf16(label, 256);
   const modelTextPrefix = [
-    '<task-notification>',
+    TASK_NOTIFICATION_OPEN,
     `<task-id>${escapeXml(modelSessionId)}</task-id>`,
     `<status>${status}</status>`,
     personMessage === undefined
@@ -607,7 +609,7 @@ function buildSentCompletionNotification(
       : []),
     '<result>',
   ].join('');
-  const modelTextSuffix = '</result></task-notification>';
+  const modelTextSuffix = `</result>${TASK_NOTIFICATION_CLOSE}`;
   const resultBudget = Math.max(
     0,
     MAX_SENT_COMPLETION_MODEL_TEXT_CHARS -
