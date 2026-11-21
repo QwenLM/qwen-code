@@ -41,6 +41,7 @@ import type {
   AgentToolResultEvent,
   AgentApprovalRequestEvent,
 } from '../runtime/agent-events.js';
+import { defangEnvelopeDelimiters } from './envelope-delimiters.js';
 import {
   forwardApproval,
   wrapConfirmWithBadge,
@@ -188,17 +189,11 @@ interface ShutdownResponseReservation {
  */
 const LEADER_ENVELOPE_TAG = 'teammate_message';
 
-/**
- * Matches the opening/closing `<teammate_message …>` delimiter token
- * only — boundary-anchored so lookalikes (`<teammate_messages>`,
- * `<teammate_message_x>`) are left intact. Module-level so the pattern
- * compiles once; safe to share because it is used exclusively with
- * `String.prototype.replace`, which resets the `/g` flag's `lastIndex`.
- */
-const LEADER_ENVELOPE_TAG_RE = new RegExp(
-  `<(\\/?\\s*${LEADER_ENVELOPE_TAG})(?=[\\s>/]|$)`,
-  'gi',
-);
+// The delimiter grammar itself lives in `defangEnvelopeDelimiters`: the ACP
+// peer envelope defangs the same family, and enumerating the accepted
+// spellings (`</x>`, `< / x>`, `<//x>`) in two places let them drift apart —
+// the spaced-slash spellings passed the body-only escaper untouched while the
+// other layer had already learned to defang them.
 
 // ─── TeamManager ────────────────────────────────────────────
 
@@ -1346,11 +1341,12 @@ export class TeamManager {
    * embedded in untrusted teammate text by escaping the opening `<` to
    * `&lt;`, so the teammate cannot break out of its envelope and inject
    * a forged one. Only the `<` that begins the delimiter token is
-   * touched (see {@link LEADER_ENVELOPE_TAG_RE}); every other angle
+   * touched (see {@link defangEnvelopeDelimiters}, which also accepts the
+   * spaced-slash spellings the envelope parsers honour); every other angle
    * bracket — code, comparisons in reports — is left intact.
    */
   private static escapeEnvelopeTags(text: string): string {
-    return text.replace(LEADER_ENVELOPE_TAG_RE, '&lt;$1');
+    return defangEnvelopeDelimiters(text, [LEADER_ENVELOPE_TAG]);
   }
 
   private formatPlanApprovalEnvelope(

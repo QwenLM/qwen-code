@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { defangEnvelopeDelimiters } from '@qwen-code/qwen-code-core/agents/team/envelope-delimiters.js';
+
 /**
  * Defangs every tag that can close or forge the envelopes this body is
  * embedded in: the `<peer-notification>` wrapper here, and the
@@ -23,19 +25,13 @@
  * quotes intact. XML-escaping the whole body would entity-encode that markup
  * and every comparison inside a report, diverging from the TUI, stream-json
  * and task-list paths that deliver the identical string verbatim. So only the
- * envelopes' own delimiters are neutralised here.
+ * envelopes' own delimiters are neutralised here, through the same grammar
+ * `escapeEnvelopeTags` uses — the accepted spellings (`</x>`, `< / x>`,
+ * `<//x>`, `<        /x>`) must not differ between the two layers.
  */
 export function defangPeerNotificationTags(text: string): string {
-  // Only the opening `<` is rewritten, so the tag's own case, spacing and
-  // attributes survive unchanged. The `(?![-\w])` guard keeps a longer tag that
-  // merely shares the prefix (`<peer-notification-extra>`) out of the match.
-  // Whitespace and the optional slash share ONE character class: two adjacent
-  // unbounded repeats re-scan the same run for every backtracking start, which
-  // is quadratic in the report length (a 64 KiB run of spaces after `<` stalls
-  // the host event loop for seconds). Bounding the run instead would stop
-  // defanging `<         /peer-notification>`-shaped tags.
-  return text.replace(
-    /<(?=(?:\/|\s)*(?:peer-notification|task-notification)(?![-\w]))/gi,
-    '&lt;',
-  );
+  return defangEnvelopeDelimiters(text, [
+    'peer-notification',
+    'task-notification',
+  ]);
 }

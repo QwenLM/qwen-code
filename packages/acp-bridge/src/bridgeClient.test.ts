@@ -5840,6 +5840,90 @@ describe('background execution ownership', () => {
     );
   });
 
+  it('binds a session-scoped approval to the last prompt originator after the leader turn settles', async () => {
+    // A teammate approval outlives the leader turn that started the team.
+    // `settleActivePromptState` deletes `activePromptOriginatorClientId` when
+    // that turn ends, and a session-scoped request that read only the live
+    // field reached the mediator with no originator — so `voteDesignated` fell
+    // back to first-responder and ANY attached client could answer an approval
+    // the `designated` policy exists to reserve.
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = {
+      sessionId: 'session',
+      promptActive: false,
+      lastPromptOriginatorClientId: 'client-a',
+      events: { publish },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map<string, unknown>(),
+    };
+    const mediator = new MultiClientPermissionMediator('designated', {
+      emit: () => {},
+      audit: {
+        recordRequested: () => {},
+        recordVoted: () => {},
+        recordForbidden: () => {},
+        recordResolved: () => {},
+        recordTimeout: () => {},
+      },
+      now: () => Date.now(),
+      votersForSession: () => new Set(['client-a', 'client-b']),
+    });
+    const records: Array<Parameters<typeof mediator.request>[0]> = [];
+    const request = mediator.request.bind(mediator);
+    vi.spyOn(mediator, 'request').mockImplementation((record, timeoutMs) => {
+      records.push(record);
+      return request(record, timeoutMs);
+    });
+    const client = new BridgeClient(
+      (() => entry) as never,
+      () => undefined,
+      mediator,
+      0,
+      Infinity,
+    );
+
+    const answer = client.requestPermission({
+      sessionId: 'session',
+      _meta: { permissionScope: 'session' },
+      toolCall: {
+        toolCallId: 'teammate-write',
+        title: 'Write report',
+        kind: 'edit',
+      },
+      options: [
+        { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+      ],
+    });
+
+    const record = records[0]!;
+    expect(record.originatorClientId).toBe('client-a');
+    // The client that did not start the team cannot answer it.
+    expect(
+      mediator.vote({
+        requestId: record.requestId,
+        sessionId: 'session',
+        clientId: 'client-b',
+        optionId: 'proceed_once',
+        receivedAtMs: Date.now(),
+        fromLoopback: false,
+      }),
+    ).toEqual({ kind: 'forbidden', reason: 'designated_mismatch' });
+    // The prompt voter still can.
+    expect(
+      mediator.vote({
+        requestId: record.requestId,
+        sessionId: 'session',
+        clientId: 'client-a',
+        optionId: 'proceed_once',
+        receivedAtMs: Date.now(),
+        fromLoopback: false,
+      }),
+    ).toEqual({ kind: 'resolved', resolvedOptionId: 'proceed_once' });
+    await expect(answer).resolves.toEqual({
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    });
+  });
+
   it('cancels the finished turn’s orphaned approvals but not a live prompt’s', async () => {
     const backgroundTurn = {
       turnId: 'notification-1',

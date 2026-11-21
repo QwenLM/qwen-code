@@ -2238,6 +2238,13 @@ interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   channelWorkflowOrigin?: ChannelWorkflowOrigin;
   continuesTodoStopGuardWorkChain: boolean;
   persisted?: boolean;
+  /**
+   * Set once a no-recorder landing has counted this report as lost. The
+   * sealed-window cold copy also queues the report for the rollback re-drain,
+   * and `dispose()` lands the queue again, so without the mark one lost report
+   * is counted twice.
+   */
+  lossTallied?: boolean;
   turn?: BackgroundNotificationTurn;
   admissionRetries?: number;
   peer?: { sessionId: string; delivery: PeerQueuedDelivery };
@@ -2994,6 +3001,8 @@ export class Session implements SessionContext {
    */
   #peerItemsLandedByFlush = new Set<QueuedBackgroundNotification>();
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
+  /** Releases {@link ChatRecordingService.withholdTurnRecords} on rollback. */
+  private releaseTurnRecordWithholding: (() => void) | undefined;
   private historyMutationActive = false;
   private pendingDeletedApiPromptIds: Set<string> | undefined;
   private closeGateCompletion: Promise<void> | null = null;
@@ -5563,6 +5572,15 @@ export class Session implements SessionContext {
       cancelReason === 'user'
         ? USER_CANCEL_ABORT_REASON
         : SESSION_DISPOSE_ABORT_REASON;
+    if (this.closeAbortReason === SESSION_DISPOSE_ABORT_REASON) {
+      // The close cancels the in-flight turn, and the settlement that follows
+      // would durably end it as `cancelled`. Restart recovery re-opens that
+      // turn from the unanswered prompt, so the cancel stays out of the
+      // transcript; peer reports still land.
+      this.releaseTurnRecordWithholding ??= this.config
+        .getChatRecordingService()
+        ?.withholdTurnRecords();
+    }
 
     let resolveGate!: () => void;
     const completion = new Promise<void>((resolve) => {
@@ -5582,6 +5600,10 @@ export class Session implements SessionContext {
       if (this.disposed) return;
       this.closing = false;
       this.closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
+      // Turn records reach the writer again from here on; an irreversible
+      // close keeps them withheld until the process ends.
+      this.releaseTurnRecordWithholding?.();
+      this.releaseTurnRecordWithholding = undefined;
       // The close was reversible and just got rolled back, so the session is
       // live again: un-seal or every later notification takes the cold-copy
       // branch below, never enters the queue and never reaches the leader or
@@ -5702,10 +5724,19 @@ export class Session implements SessionContext {
    * carrier, so this has to run while the recorder still accepts writes: on
    * the stored-session close path `recorder.close()` precedes `dispose()`, and
    * `appendRecord` is already a no-op by then.
+   *
+   * Only in-session teammate reports (`producer: 'teammate'`) are landed. A
+   * cross-session message shares `kind: 'peer'` but is still owned by the
+   * transport: `enqueuePeerMessage` deliberately writes no completion record,
+   * because the close retracts undrained deliveries through
+   * `takeQueuedPeerDeliveries()` and tells the sender they were never read.
+   * Landing one here would leave a `completed` row for a message the transport
+   * declares undelivered, and a sender retry would duplicate it.
    */
   #landUndrainedPeerNotifications(
     items: readonly QueuedBackgroundNotification[] = this.notificationQueue,
-  ): void {
+  ): ReadonlySet<QueuedBackgroundNotification> {
+    const tallied = new Set<QueuedBackgroundNotification>();
     const recording = this.config.getChatRecordingService();
     if (!recording) {
       // A hidden-workspace session has no recording service, so a report in
@@ -5716,16 +5747,24 @@ export class Session implements SessionContext {
       // `toAdmissibleNotification` so the noun still follows the producer
       // (`teammate report`, not `cross-session message`).
       for (const item of items) {
-        if (item.kind !== 'peer' || item.persisted) continue;
+        if (
+          item.producer !== 'teammate' ||
+          item.persisted ||
+          item.lossTallied
+        ) {
+          continue;
+        }
         debugLogger.warn(
           `Peer report lost: no recording service available for task=${item.taskId}`,
         );
         this.droppedNotifications.record(toAdmissibleNotification(item));
+        item.lossTallied = true;
+        tallied.add(item);
       }
-      return;
+      return tallied;
     }
     for (const item of items) {
-      if (item.kind !== 'peer' || item.persisted) continue;
+      if (item.producer !== 'teammate' || item.persisted) continue;
       // Only cold copies get the task envelope: recovery trims these because
       // the model was never asked anything. Warm copies keep their peer
       // envelope so an unanswered delivered turn remains `interrupted_prompt`.
@@ -5749,6 +5788,7 @@ export class Session implements SessionContext {
       );
       item.persisted = true;
     }
+    return tallied;
   }
 
   /**
@@ -5765,6 +5805,11 @@ export class Session implements SessionContext {
    * flight and drains once more, so everything a teammate wrote before the
    * close is queued here and landed by the loop below. A report written after
    * the quiesce lands through the sealed-window cold copy instead.
+   *
+   * The landing can also end in a tally rather than a record (no recorder,
+   * hidden workspace). That tally is emitted here as the `queue` frame a drain
+   * would have sent: after this hook the session is closing, both drains bail,
+   * and `dispose()` clears the tally.
    */
   async flushPendingPeerNotifications(): Promise<void> {
     await this.config.getTeamManager()?.quiesceLeaderInbox?.();
@@ -5777,6 +5822,21 @@ export class Session implements SessionContext {
       }
     }
     this.#landUndrainedPeerNotifications();
+    // A landing with no recorder (hidden workspace) can only tally the loss,
+    // and `dispose()` clears the tally. Emit here, while the client connection
+    // is still live: the drains that normally take the tally both bail while
+    // `closing`, so during a close this is the summary's only way out.
+    const droppedSummary = this.droppedNotifications.take();
+    if (droppedSummary) {
+      try {
+        await this.#emitDroppedNotificationSummary(droppedSummary);
+      } catch (error) {
+        debugLogger.warn(
+          'Failed to display dropped notification summary:',
+          error,
+        );
+      }
+    }
   }
 
   dispose(): void {
@@ -5806,6 +5866,11 @@ export class Session implements SessionContext {
     this.detachTeamSink = undefined;
     this.teamSinkAbort.abort(SESSION_DISPOSE_ABORT_REASON);
     this.requestLifecycleExecutions.clear();
+    if (!this.releaseTurnRecordWithholding) {
+      this.releaseTurnRecordWithholding = this.config
+        .getChatRecordingService()
+        ?.withholdTurnRecords();
+    }
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
@@ -5814,6 +5879,22 @@ export class Session implements SessionContext {
     this.hardSuspendTodoStopGuard();
     this.#landUndrainedPeerNotifications();
     this.notificationQueue = [];
+    // Same window as the pre-close flush, and the last one: the landing above
+    // can still tally a report it has no recorder for, the drains are dead by
+    // now, and the tally is cleared on the next line. `dispose()` is
+    // synchronous, so the frame is fire-and-forget; the connection still
+    // accepts it.
+    const droppedSummary = this.droppedNotifications.take();
+    if (droppedSummary) {
+      void this.#emitDroppedNotificationSummary(droppedSummary).catch(
+        (error) => {
+          debugLogger.warn(
+            'Failed to display dropped notification summary:',
+            error,
+          );
+        },
+      );
+    }
     this.droppedNotifications.clear();
     this.cronQueue = [];
     for (const turn of this.goalQueue.splice(0)) {
@@ -14834,8 +14915,11 @@ export class Session implements SessionContext {
             ? `Notification queue overflow: dropping related task=${item.taskId} kind=${item.kind} because all queued items are related`
             : `Notification queue overflow: dropping unrelated task=${item.taskId} kind=${item.kind} while automatic work is deferred`,
         );
-        this.#landUndrainedPeerNotifications([item]);
-        this.droppedNotifications.record(toAdmissibleNotification(item));
+        // The no-recorder landing arm already tallied this item; recording it
+        // again would report one lost report as two.
+        if (!this.#landUndrainedPeerNotifications([item]).has(item)) {
+          this.droppedNotifications.record(toAdmissibleNotification(item));
+        }
         return;
       }
       if (admission.action === 'push') break;

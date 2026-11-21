@@ -33712,15 +33712,17 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
-  it('waits for the cancelled turn to settle before landing peer reports', async () => {
-    // `cancelPendingPrompt` only aborts the controller, so a flush gated on it
-    // can run while the delivery loop is still parked with the report already
-    // spliced out of the queue (R2-1). The wait has to be on the turn.
+  it('lands the re-queued report only after the cancelled turn settles', async () => {
+    // `cancelPendingPrompt()` aborts the controller but does not await the
+    // cancelled delivery turn: a turn parked on an admission round trip
+    // re-queues its teammate report when it unwinds. Flushing before that
+    // scans a queue the report has already left, so the flush has to wait for
+    // the settle — bounded, and still run when the wait fails.
+    const innerConfig = makeRestoreInnerConfig();
     let releaseSettle: () => void = () => {};
-    const settled = new Promise<void>((resolve) => {
+    const settleHeld = new Promise<void>((resolve) => {
       releaseSettle = resolve;
     });
-    const innerConfig = makeRestoreInnerConfig();
     const liveSession = {
       getId: vi.fn().mockReturnValue('persisted-1'),
       getConfig: vi.fn().mockReturnValue(innerConfig),
@@ -33728,8 +33730,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
       takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
-      waitForActiveTurnsToSettle: vi.fn().mockReturnValue(settled),
-      flushPendingPeerNotifications: vi.fn(),
+      waitForActiveTurnsToSettle: vi.fn(() => settleHeld),
+      flushPendingPeerNotifications: vi.fn().mockResolvedValue(undefined),
       dispose: vi.fn(),
     };
     const { agent, agentPromise } = await spawnAgent('expected-capability');
@@ -33738,13 +33740,15 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       liveSession,
     );
 
-    const shutdown = agent.beginManagedShutdown();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const shutdown = agent.beginManagedShutdown().writerShutdown;
+    await vi.waitFor(() =>
+      expect(liveSession.waitForActiveTurnsToSettle).toHaveBeenCalledOnce(),
+    );
     expect(liveSession.flushPendingPeerNotifications).not.toHaveBeenCalled();
     expect(innerConfig.closeSessionWriter).not.toHaveBeenCalled();
 
     releaseSettle();
-    await shutdown.writerShutdown;
+    await shutdown;
 
     expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
     expect(

@@ -992,6 +992,15 @@ interface SessionEntry {
    * inline session updates / permission requests can safely inherit this id.
    */
   activePromptOriginatorClientId?: string;
+  /**
+   * The most recent prompt originator this session saw, retained after the
+   * prompt settles (unlike `activePromptOriginatorClientId`). A teammate
+   * approval outlives the leader turn that started the team, and under a
+   * `designated` permission policy it still belongs to that client: without
+   * this, a post-settle approval carries no originator and every attached
+   * client may answer it.
+   */
+  lastPromptOriginatorClientId?: string;
   /** True while a prompt is executing on the FIFO, regardless of whether
    *  an originator clientId is known. Used by the session reaper to avoid
    *  killing sessions mid-prompt. */
@@ -12294,10 +12303,17 @@ export function createSessionControlPlane(
                 activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
                 touchActivity(entry);
+                // Retained past the settle for session-scoped approvals
+                // (R5-4): a teammate approval can outlive the leader turn that
+                // started the team, and it still belongs to the prompt voter.
+                // An anonymous prompt leaves the last known originator in
+                // place — it is still the client a `designated` policy
+                // entitles to answer.
                 if (originatorClientId === undefined) {
                   delete entry.activePromptOriginatorClientId;
                 } else {
                   entry.activePromptOriginatorClientId = originatorClientId;
+                  entry.lastPromptOriginatorClientId = originatorClientId;
                 }
                 try {
                   // Echo the user prompt to the session bus so other SSE-subscribed

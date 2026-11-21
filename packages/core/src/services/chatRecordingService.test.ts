@@ -2235,6 +2235,39 @@ describe('ChatRecordingService', () => {
       expect(after.parentUuid).toBe(turnResult.uuid);
     });
 
+    it('withholds assistant turns and turn results during a close', async () => {
+      const release = svc.withholdTurnRecords();
+      svc.recordAssistantTurn({ model: 'qwen', message: 'partial answer' });
+      svc.recordTurnResult({
+        promptId: 'prompt-1',
+        state: 'cancelled',
+        endedAt: 2_000,
+        cancelReason: 'user',
+      });
+      svc.recordNotification(
+        [{ text: 'dependency completed' }],
+        'Dependency completed',
+        { taskId: 'task-1', status: 'completed', kind: 'agent' },
+      );
+      await svc.flush();
+      expect(
+        writes().filter(
+          (record) =>
+            record.type === 'assistant' || record.subtype === 'turn_result',
+        ),
+      ).toHaveLength(0);
+      expect(
+        writes().filter((record) => record.subtype === 'notification'),
+      ).toHaveLength(1);
+
+      release();
+      svc.recordTurnResult({ ...completed });
+      await svc.flush();
+      expect(
+        writes().filter((record) => record.subtype === 'turn_result'),
+      ).toHaveLength(1);
+    });
+
     it('is best-effort when recording is inactive', () => {
       const inactive = new ChatRecordingService(mockConfig);
       expect(() =>

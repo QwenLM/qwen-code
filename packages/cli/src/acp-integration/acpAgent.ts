@@ -4270,9 +4270,12 @@ class QwenAgent implements Agent {
 
     const configs = new Set<Config>([this.config, ...this.initializingConfigs]);
     // Landing a peer report must wait for the cancel to settle: cancelling a
-    // delivery turn re-queues its report on a later microtask, so flushing
-    // synchronously would iterate a queue that no longer holds it and the
-    // writer close below would then make the re-queued landing a silent no-op.
+    // delivery turn re-queues its report when the turn unwinds, and that is not
+    // a microtask — the turn can be parked on an admission round trip, so
+    // flushing right after `cancelPendingPrompt()` resolves would iterate a
+    // queue that does not hold it yet, and the re-queued report would only be
+    // unshifted back after the flush sealed it and the writer close below made
+    // its landing a silent no-op.
     const peerFlushes: Array<Promise<void>> = [];
     for (const session of this.sessions.values()) {
       try {
@@ -4296,6 +4299,25 @@ class QwenAgent implements Agent {
             );
           })
           .then(async () => {
+            // `cancelPendingPrompt()` aborts the controller; it does not await
+            // the cancelled delivery turn, which re-queues its report as it
+            // unwinds. Bound the settle wait the same way the stored-session
+            // close path does, and run the flush even when it throws or times
+            // out: a bound that swallowed the flush would lose the very report
+            // the cancel preserved.
+            try {
+              await waitForSessionDrain(
+                session.waitForActiveTurnsToSettle(),
+                SESSION_DRAIN_TIMEOUT_MS,
+                'close',
+              );
+            } catch (error) {
+              debugLogger.debug(
+                `Session ${session.getId()} turn settle during managed shutdown failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
             try {
               // `cancelPendingPrompt` only aborts the controller; the delivery
               // loop can still be parked on an admission or a mid-turn drain

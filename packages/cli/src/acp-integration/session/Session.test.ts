@@ -646,6 +646,7 @@ describe('Session', () => {
     readActiveTranscriptChain: ReturnType<typeof vi.fn>;
     recordTurnAttempt: ReturnType<typeof vi.fn>;
     recordTurnResult: ReturnType<typeof vi.fn>;
+    withholdTurnRecords: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
     recordCronPrompt: ReturnType<typeof vi.fn>;
     recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
@@ -1056,6 +1057,7 @@ describe('Session', () => {
       readActiveTranscriptChain: vi.fn().mockResolvedValue([] as ChatRecord[]),
       recordTurnAttempt: vi.fn().mockResolvedValue(undefined),
       recordTurnResult: vi.fn(),
+      withholdTurnRecords: vi.fn().mockReturnValue(vi.fn()),
       recordUserMessage: vi.fn(),
       recordCronPrompt: vi.fn(),
       recordGoalRuntimeMessage: vi.fn(),
@@ -1327,6 +1329,39 @@ describe('Session', () => {
       mockClient,
       mockSettings,
     );
+  });
+
+  describe('turn record withholding', () => {
+    it('withholds a dispose-cancelled turn and releases it on rollback', () => {
+      const releaseRecords = vi.fn();
+      vi.mocked(mockChatRecordingService.withholdTurnRecords).mockReturnValue(
+        releaseRecords,
+      );
+
+      const release = session.beginClose();
+      expect(
+        mockChatRecordingService.withholdTurnRecords,
+      ).toHaveBeenCalledOnce();
+      expect(releaseRecords).not.toHaveBeenCalled();
+
+      release();
+      expect(releaseRecords).toHaveBeenCalledOnce();
+    });
+
+    it('keeps a user cancel in the transcript', () => {
+      const release = session.beginClose('user');
+      expect(
+        mockChatRecordingService.withholdTurnRecords,
+      ).not.toHaveBeenCalled();
+      release();
+    });
+
+    it('withholds when a session is disposed without a close gate', () => {
+      session.dispose();
+      expect(
+        mockChatRecordingService.withholdTurnRecords,
+      ).toHaveBeenCalledOnce();
+    });
   });
 
   describe('Agent Team leader sink', () => {
@@ -1834,10 +1869,114 @@ describe('Session', () => {
       session.dispose();
     });
 
-    it('records a dropped tally when a sealed peer report has no recorder', async () => {
+    it('emits the dropped summary instead of losing a sealed peer report', async () => {
       // A hidden-workspace session has no recording service, so a report that
-      // arrives after the seal used to vanish without trace. The loss is now
-      // at least visible in the dropped summary.
+      // arrives after the seal used to vanish without trace: only a drain
+      // reported the tally, and `dispose()` cleared it first. The loss now
+      // reaches the client as the same `queue` frame a drain would emit.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      session.beginClose();
+
+      await session.flushPendingPeerNotifications();
+      manager.leaderCallback?.('late report', 'late report', ['security']);
+      // Nothing was emitted while the report was merely queued: the seal is
+      // what decides it can no longer be delivered.
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({ kind: 'queue' }),
+            }),
+          }),
+        }),
+      );
+
+      session.dispose();
+
+      // `dispose()` cannot await the frame, but it fires it while the client
+      // connection is live — the clear below is what used to eat the tally.
+      await vi.waitFor(() =>
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionId: 'test-session-id',
+            update: expect.objectContaining({
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: expect.stringContaining('1 teammate report'),
+              },
+              _meta: expect.objectContaining({
+                source: 'background_notification',
+                backgroundTask: { kind: 'queue', status: 'dropped' },
+              }),
+            }),
+          }),
+        ),
+      );
+    });
+
+    it('emits the dropped summary from the pre-close flush while the client is live', async () => {
+      // A report that is already queued when the flush runs cannot be landed
+      // either (no recorder), and after `beginClose` no drain will take the
+      // tally. Emitting from the flush is the only chance to report it; the
+      // dispose path below is fire-and-forget and may race the connection
+      // teardown.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValue(
+        new Error('hold the peer turn open'),
+      );
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      session.beginClose();
+      manager.leaderCallback?.('undrained report', 'undrained report', [
+        'security',
+      ]);
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+
+      await session.flushPendingPeerNotifications();
+
+      // Awaited inside the flush, so the frame is already on the wire.
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: expect.stringContaining('1 teammate report'),
+            },
+            _meta: expect.objectContaining({
+              source: 'background_notification',
+              backgroundTask: { kind: 'queue', status: 'dropped' },
+            }),
+          }),
+        }),
+      );
+      session.dispose();
+    });
+
+    it('counts an overflow-dropped teammate report once without a recorder', async () => {
+      // The no-recorder landing arm already tallies the loss, so the call site
+      // used to tally it again and one lost report rendered as two.
       const manager = makeFakeTeamManager();
       session.dispose();
       vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
@@ -1850,18 +1989,110 @@ describe('Session', () => {
         mockSettings,
       );
       session.beginClose();
+      const internals = session as unknown as {
+        todoStopGuardQueuedPromptPriority: boolean;
+        notificationQueue: Array<{
+          taskId: string;
+          kind: 'agent';
+          status: string;
+          modelText: string;
+          displayText: string;
+          continuesTodoStopGuardWorkChain: boolean;
+        }>;
+      };
+      internals.todoStopGuardQueuedPromptPriority = true;
+      for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+        internals.notificationQueue.push({
+          taskId: `related-${i}`,
+          kind: 'agent',
+          status: 'completed',
+          modelText: 'related result',
+          displayText: 'related result',
+          continuesTodoStopGuardWorkChain: true,
+        });
+      }
+
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      manager.leaderCallback?.('overflowed report', 'overflowed report', [
+        'security',
+      ]);
+      expect(internals.notificationQueue).toHaveLength(
+        MAX_BACKGROUND_NOTIFICATION_QUEUE,
+      );
 
       await session.flushPendingPeerNotifications();
-      manager.leaderCallback?.('late report', 'late report', ['security']);
+      const summary = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([update]) => JSON.stringify(update))
+        .find((text) => text.includes('Dropped 1 background notification'));
+      expect(summary).toContain('1 teammate report');
+      expect(summary).not.toContain('2 teammate reports');
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).not.toHaveBeenCalled();
+      session.dispose();
+    });
 
-      const internals = session as unknown as {
-        droppedNotifications: {
-          take(): { status: string; modelText: string } | undefined;
-        };
-      };
-      const tally = internals.droppedNotifications.take();
-      expect(tally).toBeDefined();
-      expect(tally!.modelText).toContain('teammate report');
+    it('leaves cross-session peer messages to the close retraction', async () => {
+      // `enqueuePeerMessage` records nothing while the message waits: the
+      // transport owns that delivery, and the close retracts what is still
+      // queued and tells the sender it was never read. Landing it in the
+      // pre-close flush instead would write a `completed` cold copy for a
+      // message the transport declares lost, and a sender retry would then
+      // leave a duplicate in the transcript.
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValue(
+        new Error('hold the peer turn open'),
+      );
+      expect(
+        session.enqueuePeerMessage('<peer model />', 'peer display', {
+          msgId: 'peer-cross-session',
+        }),
+      ).toBe(true);
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+
+      session.beginClose();
+      await session.flushPendingPeerNotifications();
+
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).not.toHaveBeenCalled();
+      // Still owned by the transport, so the close can retract it.
+      expect(session.takeQueuedPeerDeliveries()).toEqual([
+        { msgId: 'peer-cross-session' },
+      ]);
+      session.dispose();
+
+      // The no-recorder arm (hidden workspace) can only tally what it cannot
+      // record, and that tally is emitted as a dropped summary. A
+      // cross-session message must not reach it either: the retraction
+      // already told its sender the message was never read, so a summary
+      // claiming a peer report was lost would contradict the transport.
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      expect(
+        session.enqueuePeerMessage('<peer model />', 'peer display', {
+          msgId: 'peer-cross-session-no-recorder',
+        }),
+      ).toBe(true);
+      session.beginClose();
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      await session.flushPendingPeerNotifications();
+
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(([update]) =>
+            JSON.stringify(update).includes('Dropped'),
+          ),
+      ).toBe(false);
+      expect(session.takeQueuedPeerDeliveries()).toEqual([
+        { msgId: 'peer-cross-session-no-recorder' },
+      ]);
       session.dispose();
     });
 
@@ -2004,6 +2235,7 @@ describe('Session', () => {
         status: 'message',
         modelText: 'peer report',
         displayText: 'peer report',
+        producer: 'teammate',
         continuesTodoStopGuardWorkChain: false,
         agent: { agentName: 'reviewer', depth: 1, kind: 'teammate' },
       });
