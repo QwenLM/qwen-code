@@ -867,7 +867,15 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
-  it('keeps the recent window loadable at the shared cap (R2-1)', async () => {
+  // Same mechanism as R3-4 (#17558): this fill drives ~780 fsync-backed state
+  // writes, so disk latency decides the runtime — the sibling fill measured
+  // 1.6 ms, 14 ms and 38 ms per write on one host minutes apart, and the old
+  // flat 30 s ceiling breaks at ~38.5 ms per write (780 x 38 ms is ~29.6 s of
+  // pure writes). No timer or network wait here, so real regressions fail
+  // their assertions immediately (#17699).
+  it('keeps the recent window loadable at the shared cap (R2-1)', async (ctx) => {
+    // Pin the ceiling: a dropped third argument must fail here, not in CI.
+    expect(ctx.task.timeout).toBe(120_000);
     const cwd = tempCwd();
     const first = await connectedAdapter(cwd);
     // Drive one past the recent cap; the writer must slice to the same cap the
@@ -891,7 +899,7 @@ describe('managed DingTalk adapter outbox', () => {
     // Writer and validator share the cap, so the state still loads.
     const second = await connectedAdapter(cwd);
     await second.adapter.disconnect();
-  }, 30_000);
+  }, 120_000);
 
   it('reports a definitive webhook refusal as rejected and never resends', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
@@ -960,7 +968,15 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
-  it('evicts the least-recently-seen webhook, not the first-inserted (R1-20)', async () => {
+  // Same mechanism as R3-4 (#17558): a 256-entry webhook fill plus per-push
+  // persistence drives ~780 fsync-backed writes, so disk latency decides the
+  // runtime — the sibling instrumentation measured up to 38 ms per write, and
+  // the old flat 30 s ceiling breaks at ~38.5 ms per write. No timer or
+  // network wait here, so real regressions fail their assertions immediately
+  // (#17699).
+  it('evicts the least-recently-seen webhook, not the first-inserted (R1-20)', async (ctx) => {
+    // Pin the ceiling: a dropped third argument must fail here, not in CI.
+    expect(ctx.task.timeout).toBe(120_000);
     const { adapter, plane, fake } = await connectedAdapter();
     const hook = (session: string): string =>
       `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
@@ -1018,7 +1034,7 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.tick();
     expect(fake.sent.map((entry) => entry.webhook)).toEqual([hook('w0-new')]);
     await adapter.disconnect();
-  }, 30_000);
+  }, 120_000);
 
   it('drops a deterministically refused orphan receipt without wedging later ones', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
