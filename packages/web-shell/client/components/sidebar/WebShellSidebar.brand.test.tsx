@@ -147,6 +147,7 @@ function expectCanonicalSvgChildren(
 
 function expectCompactDarkMark(): void {
   const mark = builtInMark();
+  expect(mark?.parentElement?.children).toHaveLength(1);
   expect(mark?.namespaceURI).toBe('http://www.w3.org/2000/svg');
   expect(normalizedSvgAttributes(mark)).toEqual([
     ['aria-hidden', 'true'],
@@ -169,6 +170,7 @@ function expectOriginalLightMark(): void {
     'image/svg+xml',
   );
   const mark = builtInMark();
+  expect(mark?.parentElement?.children).toHaveLength(1);
   expect(mark?.namespaceURI).toBe(canonical.documentElement.namespaceURI);
   expect(normalizedSvgAttributes(mark)).toEqual([
     ['aria-hidden', 'true'],
