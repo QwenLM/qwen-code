@@ -27,7 +27,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import {
   fakeToolCall,
@@ -1416,6 +1416,10 @@ describeTui(SUITE, () => {
                     ),
                   ),
               'the leader records its waiting answer',
+              // The leader's turn can stall on a contended runner; the 30s
+              // default would fail the gate, and the 500 the server answers
+              // then earns a retry the strict request count rejects.
+              90_000,
             );
             return { content: 'HELPER REPORT: it is sunny.' };
           });
@@ -1510,6 +1514,52 @@ describeTui(SUITE, () => {
       (candidate) => candidate.name === 'input queued while a tool runs',
     );
     expect(queued?.volatile).toBe(FOREGROUND_SHELL_VOLATILE);
+  });
+
+  // The gate must outlast a stalled leader: once it expires the server
+  // answers 500 and the CLI's retry adds a request the parity count rejects.
+  it('gives the helper gate the cross-turn budget', async () => {
+    const scenario = allScenarios.find(
+      (candidate) =>
+        candidate.name === 'a teammate report that starts a teammate turn',
+    )!;
+    const gateScratch = mkdtempSync(join(tmpdir(), 'qwen-helper-gate-'));
+    const transcript = join(gateScratch, 'runtime', 'chats', 'session.jsonl');
+    mkdirSync(join(gateScratch, 'runtime', 'chats'), { recursive: true });
+    writeFileSync(transcript, '{}\n');
+    const previousWaiting = leaderWaiting;
+    leaderWaiting = deferred();
+    leaderWaiting.resolve();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const reply = Promise.resolve(
+        scenario.reply(
+          [{ role: 'user', content: `${HELPER_TASK} Check the weather.` }],
+          join(gateScratch, 'workspace'),
+          0,
+        ),
+      );
+      let settled = false;
+      void reply.then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      // Past until()'s 30s default the gate must still be waiting.
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(settled).toBe(false);
+      writeFileSync(
+        transcript,
+        '{"message":{"content":[{"text":"Waiting for the helper."}]}}\n',
+      );
+      await vi.advanceTimersByTimeAsync(200);
+      await expect(reply).resolves.toEqual({
+        content: 'HELPER REPORT: it is sunny.',
+      });
+    } finally {
+      vi.useRealTimers();
+      leaderWaiting = previousWaiting;
+      rmSync(gateScratch, { recursive: true, force: true });
+    }
   });
 
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {
