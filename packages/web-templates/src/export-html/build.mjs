@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_200_700;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_203_700;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -210,7 +210,19 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_200_700;
 // A paired local Node 24 build of PR head 27c2ee57 before and after merging
 // main 2421ad2c measures the same 2,138,480 JS and 2,439,280 separate CSS
 // bytes in both trees. This merge keeps the Arabic branch's existing cap.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_201_700;
+//
+// The machine-title provenance work after that measurement (toolFormatting's
+// framing-aware classifier and its emitter/adapter wiring) is transcript
+// reachable and outgrew the cap: CI measures 2,202,708 JS bytes on head
+// b107d7b1d3, identically on the TUI-parity and both Managed-loop lanes, 1,008
+// above the previous 2,201,700 ceiling. A local Node 22.23.2 build of that head
+// measures 2,201,546, and 2,201,617 with this round's framing narrowing (+71);
+// CSS is unchanged at 2,439,556 in both and the forbidden-input guard passes,
+// so the ~1,162-byte spread is the install/Node difference this file already
+// tracks, not new inputs. Re-track against the lane figure: the warning sits
+// 992 above it and the ceiling 1,992 above it, leaving 1,921 above this tree's
+// expected 2,202,779.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_204_700;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

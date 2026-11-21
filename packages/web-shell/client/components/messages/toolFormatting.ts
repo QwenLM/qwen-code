@@ -364,10 +364,10 @@ export function isMachineToolDescription(
   );
   if (!produced.machine || !produced.text) return false;
 
-  // core resolves the parameter (makeRelative) and frames it per tool
-  // ("Writing to …", "Create …"), so the daemon title carries a prefix and a
-  // resolved path this browser's formatter does not reproduce. Match the
-  // payload as a suffix instead of enumerating every producer's framing.
+  // core resolves the parameter (makeRelative) and frames it per tool, so the
+  // daemon title carries a prefix and a resolved path this browser's formatter
+  // does not reproduce. Accept the payload under a producer framing only:
+  // prose that merely ends with the same path is not machine text.
   const shown = collapseDotSegments(description);
   const matches = (candidate: string) => {
     const text = truncateText(candidate, MAX_DESCRIPTION_LENGTH);
@@ -375,7 +375,7 @@ export function isMachineToolDescription(
     return (
       shown === target ||
       description === truncateText(text, 120) ||
-      shown.endsWith(target)
+      MACHINE_PATH_FRAMINGS.some((framing) => shown.endsWith(framing + target))
     );
   };
   if (matches(produced.text)) return true;
@@ -400,6 +400,10 @@ export function isMachineToolDescription(
   const searchTitle = getDaemonSearchDescription(tool, workspaceCwd);
   return searchTitle !== null && matches(searchTitle);
 }
+
+// core's write-file/edit framings for a resolved path. A legacy title is
+// machine text only under one of these, never under arbitrary prose.
+const MACHINE_PATH_FRAMINGS = ['Writing to ', 'Create ', 'No file changes to '];
 
 // Match only a decoration supported by the original arguments or by a
 // replayed file_read preview's 1-based inclusive range.

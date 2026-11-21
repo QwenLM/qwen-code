@@ -267,6 +267,30 @@ describe('tool header description direction', () => {
       tag: 'SPAN',
       dir: 'auto',
     },
+    {
+      toolName: 'edit',
+      title: 'Edit: No file changes to مجلد/ملف.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'No file changes to مجلد/ملف.ts',
+      tag: 'BDI',
+      dir: 'ltr',
+    },
+    {
+      toolName: 'custom_tool',
+      title: 'Explain مجلد/ملف.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'Explain مجلد/ملف.ts',
+      tag: 'SPAN',
+      dir: 'auto',
+    },
+    {
+      toolName: 'write_file',
+      title: 'Please review مجلد/ملف.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'Please review مجلد/ملف.ts',
+      tag: 'SPAN',
+      dir: 'auto',
+    },
   ])(
     'classifies a legacy $toolName title by its payload: $title',
     ({ toolName, title, args, shown, tag, dir }) => {
