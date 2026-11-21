@@ -4642,6 +4642,41 @@ describe('task activity key', () => {
     await flush();
     await flush();
     expect(
+      container.querySelector('[role="tab"][title="Stored review"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
+  it('does not show the artifacts entry for an inactive artifacts tab at zero artifacts', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'review:stored',
+          tabs: [
+            {
+              id: 'artifacts:session-1',
+              kind: 'artifacts',
+              title: 'Artifacts',
+              sessionId: 'session-1',
+            },
+            { id: 'review:stored', kind: 'review', title: 'Stored review' },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    expect(
       container.querySelector('[data-web-shell-artifacts-entry]'),
     ).toBeNull();
   });
@@ -11195,6 +11230,7 @@ describe('artifact panel fullscreen', () => {
         '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
       ),
     ).not.toBeNull();
+    expect(entry).not.toBe(document.activeElement);
 
     // Close with the drawer's own toggle (the header entry is overlaid).
     await act(async () => {
