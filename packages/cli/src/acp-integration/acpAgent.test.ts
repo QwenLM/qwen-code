@@ -1154,6 +1154,7 @@ vi.mock('./session/Session.js', () => {
       availableCommands: [],
       availableSkills: [],
     }),
+    SESSION_DISPOSE_ABORT_REASON: 'qwen:session-dispose',
   };
 });
 vi.mock('../i18n/languageUtils.js', () => ({

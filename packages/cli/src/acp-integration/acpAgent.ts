@@ -335,7 +335,11 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from './extension-skills.js';
-import { Session, registerCreateSubSessionTool } from './session/Session.js';
+import {
+  Session,
+  registerCreateSubSessionTool,
+  SESSION_DISPOSE_ABORT_REASON,
+} from './session/Session.js';
 import { acpModRowSites } from './session/acp-mod-session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
@@ -4290,7 +4294,7 @@ class QwenAgent implements Agent {
       session.cancelMcpAppCalls();
       peerFlushes.push(
         session
-          .cancelPendingPrompt()
+          .cancelPendingPrompt(SESSION_DISPOSE_ABORT_REASON)
           .catch((error) => {
             debugLogger.debug(
               `Session ${session.getId()} cancel during managed shutdown failed: ${
@@ -5159,7 +5163,7 @@ class QwenAgent implements Agent {
         (async () => {
           try {
             session.cancelMcpAppCalls();
-            await session.cancelPendingPrompt();
+            await session.cancelPendingPrompt(SESSION_DISPOSE_ABORT_REASON);
           } catch (err) {
             debugLogger.debug(
               `Session ${sessionId} cancel during close failed: ${

@@ -623,7 +623,7 @@ const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 /** Idempotency keys `appendExternalRecord` remembers (oldest dropped first). */
 const MAX_EXTERNAL_RECORD_KEYS = 1_024;
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
-const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
+export const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const MOD_TURN_ABORT_REASON = 'qwen:mod-turn-abort';
 // Cuts a streaming model response short so queued user input the user asked
 // to send now reaches the model; the turn itself goes on (see
@@ -6320,12 +6320,17 @@ export class Session implements SessionContext {
     this.todoStopGuard.suspend();
     const abortReason =
       this.#classifyPromptCancelAbortReason(requestedAbortReason);
-    if (abortReason === SESSION_DISPOSE_ABORT_REASON) {
+    if (
+      abortReason === SESSION_DISPOSE_ABORT_REASON &&
+      requestedAbortReason === SESSION_DISPOSE_ABORT_REASON
+    ) {
       // A disposal cancel durably ends the turn as `cancelled`, and restart
       // recovery re-opens it from the unanswered prompt, so the cancel stays
-      // out of the transcript. Installing here rather than in `beginClose()`
-      // keeps `session/load` and `session/cd` intact: both take the close gate
-      // as a mutex and let the running turn settle, whose records are real.
+      // out of the transcript. Key the install on the requester, not the
+      // classified reason: `session/cd` and `session/load` hold the close gate
+      // as a mutex while the running turn settles, and a user `session/cancel`
+      // in that window classifies as disposal too — its records are real and
+      // must survive the rollback. Only the close paths ask for disposal.
       this.releaseTurnRecordWithholding ??= this.config
         .getChatRecordingService()
         ?.withholdTurnRecords();
@@ -6335,6 +6340,16 @@ export class Session implements SessionContext {
     }
 
     if (this.pendingPrompt) {
+      if (
+        requestedAbortReason === USER_CANCEL_ABORT_REASON &&
+        abortReason !== USER_CANCEL_ABORT_REASON
+      ) {
+        // A reversible close gate folds the user's cancel into the close's
+        // abort reason. Retain the human intent on this prompt so the
+        // cancelled turn still records as a user cancel instead of vanishing
+        // from the transcript like a disposal cancel.
+        this.userPromptCancellations.set(this.pendingPrompt.signal, Date.now());
+      }
       this.pendingPrompt.abort(abortReason);
       this.pendingPrompt = null;
     }

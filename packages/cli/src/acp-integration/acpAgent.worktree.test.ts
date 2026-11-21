@@ -338,6 +338,7 @@ vi.mock('../config/config.js', () => ({
 vi.mock('./session/Session.js', () => ({
   Session: vi.fn(),
   registerCreateSubSessionTool: vi.fn().mockResolvedValue(undefined),
+  SESSION_DISPOSE_ABORT_REASON: 'qwen:session-dispose',
 }));
 // ---------------------------------------------------------------------------
 // Imports

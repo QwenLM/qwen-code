@@ -21,6 +21,7 @@ import {
   resolveExistingFile,
   resolveHomeLoopResolverRoots,
   Session,
+  SESSION_DISPOSE_ABORT_REASON,
 } from './Session.js';
 import { defangPeerNotificationTags } from './peer-envelope.js';
 import { deferredToolUpdateContext } from './acp-tool-batch.js';
@@ -1362,7 +1363,9 @@ describe('Session', () => {
       });
       await consumed;
       const release = session.beginClose();
-      await session.cancelPendingPrompt();
+      // The close paths request disposal explicitly; a default (user) cancel
+      // inside this gate is the user's and stays recorded (next test).
+      await session.cancelPendingPrompt(SESSION_DISPOSE_ABORT_REASON);
       expect(
         mockChatRecordingService.withholdTurnRecords,
       ).toHaveBeenCalledOnce();
@@ -1372,6 +1375,50 @@ describe('Session', () => {
       await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
       release();
       expect(releaseRecords).toHaveBeenCalledOnce();
+      session.dispose();
+    });
+
+    it('keeps a user cancel inside a reversible close gate recorded', async () => {
+      let firstChunk!: () => void;
+      const consumed = new Promise<void>((resolve) => {
+        firstChunk = resolve;
+      });
+      let releaseStream!: () => void;
+      const streamGate = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'working' },
+          };
+          firstChunk();
+          await streamGate;
+        })() as unknown as AsyncGenerator<core.StreamEvent>,
+      );
+
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await consumed;
+      // session/cd and session/load hold this gate as a mutex while the turn
+      // settles; a session/cancel in that window is the user's, not the
+      // close's, and its records must survive the rollback.
+      const release = session.beginClose();
+      await session.cancelPendingPrompt();
+      expect(
+        mockChatRecordingService.withholdTurnRecords,
+      ).not.toHaveBeenCalled();
+
+      releaseStream();
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+        expect.objectContaining({ state: 'cancelled', cancelReason: 'user' }),
+        expect.any(String),
+      );
+      release();
       session.dispose();
     });
 
