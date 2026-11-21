@@ -348,6 +348,12 @@ export { estimateContextTextTokens } from './services/tokenEstimation.js';
 export {
   resolveSlimmingConfig,
   type ResolvedSlimmingConfig,
+  DEFAULT_MAX_RECENT_FILES,
+  DEFAULT_MAX_RECENT_IMAGES,
+  DEFAULT_SCREENSHOT_TRIGGER_ENABLED,
+  DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
+  DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
+  DEFAULT_IMAGE_TOKEN_ESTIMATE,
 } from './services/compactionInputSlimming.js';
 export { isClearedMediaPlaceholder } from './services/microcompaction/microcompact.js';
 export {
