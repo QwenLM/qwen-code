@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -15,12 +16,14 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The ephemeral provisioner creates its state directory immediately before
  * spawn, not at construction and not on the failure path: a real child that
  * writes a marker relative to its working directory proves the directory
- * existed before {@code ProcessBuilder.start}.
+ * existed before {@code ProcessBuilder.start}. The created directory must be
+ * owner-private, because the worker bootstrap refuses anything else.
  */
 class LocalProcessRuntimeProvisionerStateDirectoryTest {
     @TempDir
@@ -28,6 +31,7 @@ class LocalProcessRuntimeProvisionerStateDirectoryTest {
 
     @Test
     void ephemeralSpawnCreatesTheStateDirectoryBeforeTheChildStarts() throws Exception {
+        LocalProcessRuntimeProvisionerTest.requireNode();
         Path state = directory.resolve("lazy-state");
         // The child writes the marker relative to its working directory and
         // exits without speaking the boot protocol, so the provision fails
@@ -43,6 +47,23 @@ class LocalProcessRuntimeProvisionerStateDirectoryTest {
                     .isInstanceOf(ExecutionException.class);
             assertThat(state).isDirectory();
             assertThat(state.resolve("spawn-marker.txt")).hasContent("ok");
+        }
+    }
+
+    @Test
+    void createdStateDirectoryIsOwnerPrivate() throws Exception {
+        LocalProcessRuntimeProvisionerTest.requireNode();
+        assumeTrue(directory.getFileSystem().supportedFileAttributeViews().contains("posix"),
+                "POSIX permissions required");
+        Path state = directory.resolve("private-state");
+        try (var provisioner = new LocalProcessRuntimeProvisioner(
+                List.of("node", "-e", "require('fs').writeFileSync('spawn-marker.txt','ok')"),
+                state, new HttpRuntimeTransport())) {
+            assertThatThrownBy(() -> provisioner.provision(ManagedContextProtocolTest.request())
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS))
+                    .isInstanceOf(ExecutionException.class);
+            assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(state)))
+                    .isEqualTo("rwx------");
         }
     }
 

@@ -28,6 +28,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -714,7 +715,16 @@ public final class LocalProcessRuntimeProvisioner
         // stays side-effect-free while a deployment that never pre-created
         // the directory can still start a Runtime.
         try {
-            Files.createDirectories(workingDirectory);
+            // The worker bootstrap refuses a state directory that is not
+            // owner-private, so create it rwx------ like the durable store
+            // does; fall back to default attributes where POSIX permissions
+            // are unsupported.
+            if (workingDirectory.getFileSystem().supportedFileAttributeViews().contains("posix")) {
+                Files.createDirectories(workingDirectory, PosixFilePermissions.asFileAttribute(
+                        PosixFilePermissions.fromString("rwx------")));
+            } else {
+                Files.createDirectories(workingDirectory);
+            }
         } catch (IOException error) {
             throw new IllegalStateException(
                     "Runtime Broker state directory is unavailable: " + workingDirectory, error);

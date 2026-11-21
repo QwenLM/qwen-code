@@ -12,6 +12,7 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
@@ -97,7 +98,8 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
     @Override
     public List<Check> preflight(ManagedAgentSettings settings) {
         var broker = settings.getRuntimeBroker();
-        return List.of(directoryCheck("broker-state", broker.getStateDirectory()),
+        return List.of(directoryCheck("broker-state", broker.getStateDirectory(),
+                        broker.isDurableLocalProcess()),
                 executableCheck("node", broker.getNodeExecutable()),
                 readableCheck("worker-entry", broker.getWorkerEntry()));
     }
@@ -117,10 +119,14 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
 
     private static boolean canCreateDirectory(Path directory) {
         Path existing = directory.toAbsolutePath().normalize();
-        while (existing != null && !Files.exists(existing)) {
+        // NOFOLLOW_LINKS: a dangling symlink is not an absent path —
+        // createDirectories can never create through it. Creating a child
+        // needs write and search on the nearest existing ancestor.
+        while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
             existing = existing.getParent();
         }
-        return existing != null && Files.isDirectory(existing) && Files.isWritable(existing);
+        return existing != null && Files.isDirectory(existing)
+                && Files.isWritable(existing) && Files.isExecutable(existing);
     }
 
     private static void requireRecoveryDirectoryOutsideWorkspaces(ManagedAgentSettings.RuntimeBroker broker,
@@ -152,15 +158,28 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                 + " and QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false";
     }
 
-    private static Check directoryCheck(String name, String path) {
+    private static Check directoryCheck(String name, String path, boolean durable) {
         if (StringUtils.isBlank(path)) {
             return new Check(name, Status.FAIL, "not configured",
                     "set the directory");
         }
         Path directory = Path.of(path);
-        if (!Files.exists(directory)) {
-            // The provisioner creates the state directory at first spawn, so
-            // an absent but creatable path no longer refuses the deployment.
+        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            if (durable) {
+                // The durable store creates the directory itself during
+                // create(), single-level: its parent must already exist.
+                Path parent = directory.toAbsolutePath().normalize().getParent();
+                if (parent != null && Files.isDirectory(parent)
+                        && Files.isWritable(parent) && Files.isExecutable(parent)) {
+                    return new Check(name, Status.WARN,
+                            path + " does not exist yet; created during Broker wiring", null);
+                }
+                return new Check(name, Status.FAIL, path + " cannot be created",
+                        "ensure the parent directory " + parent + " exists and is writable");
+            }
+            // The ephemeral provisioner creates the state directory at first
+            // spawn, so an absent but creatable path no longer refuses the
+            // deployment.
             if (canCreateDirectory(directory)) {
                 return new Check(name, Status.WARN,
                         path + " does not exist yet; created at first Runtime spawn", null);
