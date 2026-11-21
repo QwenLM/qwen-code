@@ -103,11 +103,23 @@ mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
 
 仅该聚焦车道需要 `-Dspotbugs.skip=true`：完整 `verify` 生命周期会撞上 `ToolPublicationAdmissionStore.acknowledgementReceiptCatalog` 里**既有**的 SpotBugs `NP_NULL_ON_SOME_PATH`，该文件本 PR 未触碰（最后改动来自已合并的 #17907）。该门在 CI 仍会跑。
 
+### §7 度量 — worker/applier 半（已落地）
+
+`scripts/measure-background-observation.mjs`（`npm run build` 后运行；约 8 分钟，主要是 10,000 条观测的 drain）逐项打印 JSON 报告。采集 lane 跑在内存资源 store 上以把采集开销与 store I/O 隔离；drain 经真实落盘 session authority 提交。本机数值（Apple Silicon、node 24、loopback）：
+
+- **M1 常驻等价性（§7 项 4）。** 6 MiB stdout：worker lane 129–158 MB/s，49 个 manifest revision / 147 资源 / 12.7 KB 终态 manifest；常驻 Harness lane 455–523 MB/s，2 revision / 11 资源 / 1.3 KB manifest。worker lane 纯采集开销约慢 3.5×，但两者都远快于任何真实管道生产者；代价是换来 128 KiB 输出可见性的逐 revision manifest churn。
+- **M2 条目尺寸（§11 Q1/Q3）。** output 条目编码后 178–192 KB（中位 185 KB）；45 条填满 8 MiB outbox。强制停止的 terminal 闭包——被丢 revision 的段/页/manifest 加公告与终态 manifest——实测 **226 KB（5 资源），远低于 512 KiB 请求上限**（约 2.3× 余量）。
+- **M3 背压（§7 项 2，worker 半）。** 45 条停驻条目（~8 MiB）时触发；drain 恢复加完整排空仅 **20 ms**、36 次 staging pull。有界且确认后立即释放。
+- **M4 applier drain 成本（§7 项 3）。** 经真实 authority 提交观测 revision 加通知 input：**1 条 30 ms、100 条 31 ms/条、10,000 条 48 ms/条**（共 476 s，随 journal 增长而退化）。提交 10,000 条观测的 drain-only wake 约 8 分钟静默加载工作；backstop 的扫描上限为突发节流（§8）。
+- **M5 总输出上限（§11 Q3 发现，已证实）。** worker lane 恰好准入 **8 MiB**（64 页 × 1 段 × 128 KiB），随后 `size_limit` break、信封降级为 `unavailable`，最后持久 revision（64）存续。前台 lane 的 512 段页可达 ~32 GiB。
+
+**据此证据定下的常量（无需改动）：** `RUN_OUTBOX_BYTES` 8 MiB（≈最大条目的 45×，terminal 闭包有余量）、`BACKGROUND_SEGMENT_BYTES` 128 KiB 配 `BACKGROUND_SEGMENTS_PER_PAGE` 1（每个条目与最坏 terminal 闭包都合请求上限）、`PARTIAL_FLUSH_MS` 250（空闲 flush 开销相对 30 ms/条的提交成本可忽略）。**8 MiB 总上限不能单方面抬高：** 每页 2 段虽使上限翻倍，却把双流被丢尾闭包推到 ~700 KB、超过请求上限，terminal 将永远推不出去。抬高它需要协同改动 `maxPagesPerStream`/`maxManifestBytes`/请求上限——属 maintainer 设计决策（§11 Q3 携此证据保持开放）。Java 侧 pull 等待、staged-bytes 水位线、硬上限以及 wake→load 延迟，需下方 Broker + MySQL + daemon 度量。
+
 ### 剩余故障用例
 
 - **带在途 pull 的 re-attach/drain、挂起期间首条观测、detach→seal 窗口、挂起期间 monitor 策略停止、边界/水位线 wake、挂起资格矩阵、worker 丢失、跨 Broker 重启/副本围栏、删除挂起 Session** — Java 侧已由 H2 上的 `RuntimeStageStoreTest`、`RuntimeObservationPullerTest`、`WakeSealStampTest`、`SessionRecoveryServiceTest`、`HostedCleanupDebtStoreTest`、`RuntimeBrokerServiceTest` 覆盖；各自仍需 MySQL 8.4 运行与 daemon 级 E2E。
 - **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。
-- **§7 度量** — pull 成本/延迟、活跃输出下的 staging 行数与字节、1/100/10,000 条观测的 drain 成本、常驻等价性；这些确定 pull 等待、staged-bytes 水位线、硬上限与 outbox 预算（§11 开放问题 1 与 3）。已在手的度量发现：每页一个 128 KiB 段时，`maxPagesPerStream`（64）把 worker 自持采集的**总**输出上限定在 8 MiB（超过即 `size_limit` break），而前台 lane 的 512 段页可达 ~32 GiB。§7 须据此定 `segmentsPerPage`/`segmentBytes`——每页 2 段（编码后约 341 KB）仍合请求上限且上限翻倍；manifest 自身 64 KiB 上界无论如何把页列表限在 ~280 项附近。
+- **§7 度量 — Broker/daemon 半** — pull 成本/延迟（每 Broker 的 long-poll 连接数、每次空闲 pull 的 CPU、观测→wake→turn-start 与退出→结算时延）、挂起期间活跃输出下的 staging 行数/字节、静默加载的 drain 突发；这些确定 pull 等待（`pullWaitMs`，现 2,000）、staged-bytes 水位线（4 MiB）与硬上限（16 MiB）（§11 开放问题 1）。worker/applier 半已如上落地。
 
 ## 验证命令
 
