@@ -169,6 +169,7 @@ async function mount({
   let currentComposerInput = composerInput;
   let currentComposerInputVersion = composerInput ? 1 : 0;
   let currentExpanded = expanded;
+  let currentFollowupState = followupState;
   const render = () => {
     root!.render(
       <WebShellPortalRootContext.Provider value={null}>
@@ -187,7 +188,7 @@ async function mount({
             shellModeEnabled={shellModeEnabled}
             persistFileReferences={persistFileReferences}
             attachmentsEnabled={currentAttachmentsEnabled}
-            followupState={followupState}
+            followupState={currentFollowupState}
             onAcceptFollowup={onAcceptFollowup}
           />
         </I18nProvider>
@@ -213,6 +214,9 @@ async function mount({
       nextWorkspaceCwd: string | undefined,
       nextAttachmentsEnabled = currentAttachmentsEnabled,
     ) {
+      if (nextSessionId !== currentSessionId) {
+        currentFollowupState = undefined;
+      }
       currentSessionId = nextSessionId;
       currentWorkspaceCwd = nextWorkspaceCwd;
       currentAttachmentsEnabled = nextAttachmentsEnabled;
@@ -304,6 +308,138 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.mobileComposer).not.toBeNull();
     expect(container!.querySelector('textarea')).not.toBeNull();
     expect(document.querySelector('.cm-editor')).toBeNull();
+  });
+
+  describe('slash command authorization', () => {
+    it('first Send fills an empty slash suggestion without submitting', async () => {
+      mockTouchDevice();
+      const onSubmit = vi.fn();
+      const onAcceptFollowup = vi.fn(() => {
+        act(() => latest!.insertText('/clear'));
+      });
+      await mount({
+        sessionId: 'command-empty',
+        onSubmit,
+        onAcceptFollowup,
+        followupState: {
+          suggestion: '/clear',
+          isVisible: true,
+          shownAt: 0,
+        },
+      });
+
+      await act(async () => latest!.submitText());
+
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onAcceptFollowup).toHaveBeenCalledWith('tab');
+      expect(latest!.mobileComposer!.value).toBe('/clear');
+      await act(async () => latest!.submitText());
+      expect(onSubmit).toHaveBeenCalledOnce();
+      expect(onSubmit.mock.calls[0][0]).toBe('/clear');
+    });
+
+    it('replaces a slash-prefix draft rather than appending the completion', async () => {
+      mockTouchDevice();
+      const onSubmit = vi.fn();
+      const onAcceptFollowup = vi.fn(() => {
+        act(() => latest!.insertText('/clear'));
+      });
+      await mount({
+        sessionId: 'command-prefix',
+        onSubmit,
+        onAcceptFollowup,
+        followupState: {
+          suggestion: '/clear',
+          isVisible: true,
+          shownAt: 0,
+        },
+      });
+      typeText('/cl');
+      const textarea = container!.querySelector('textarea')!;
+      textarea.focus();
+      textarea.setSelectionRange(3, 3);
+
+      await act(async () => latest!.submitText());
+
+      expect(latest!.mobileComposer!.value).toBe('/clear');
+      expect(textarea.value).toBe('/clear');
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onAcceptFollowup).toHaveBeenCalledWith('tab');
+      await act(async () => latest!.submitText());
+      expect(onSubmit).toHaveBeenCalledOnce();
+      expect(onSubmit.mock.calls[0][0]).toBe('/clear');
+    });
+
+    it('does not turn an exactly typed slash command into another accept', async () => {
+      mockTouchDevice();
+      const onSubmit = vi.fn();
+      const onAcceptFollowup = vi.fn();
+      await mount({
+        sessionId: 'command-exact',
+        onSubmit,
+        onAcceptFollowup,
+        followupState: {
+          suggestion: '/clear',
+          isVisible: true,
+          shownAt: 0,
+        },
+      });
+      typeText('/clear');
+
+      await act(async () => latest!.submitText());
+
+      expect(onSubmit).toHaveBeenCalledOnce();
+      expect(onSubmit.mock.calls[0][0]).toBe('/clear');
+      expect(onAcceptFollowup).not.toHaveBeenCalledWith('tab');
+    });
+
+    it('keeps ordinary prose completion on the one-Send fast path', async () => {
+      mockTouchDevice();
+      const onSubmit = vi.fn();
+      await mount({
+        sessionId: 'command-prose',
+        onSubmit,
+        followupState: {
+          suggestion: 'run the tests',
+          isVisible: true,
+          shownAt: 0,
+        },
+      });
+      typeText('run');
+
+      await act(async () => latest!.submitText());
+
+      expect(onSubmit).toHaveBeenCalledOnce();
+      expect(onSubmit.mock.calls[0][0]).toBe('run the tests');
+    });
+
+    it('does not carry a suggested command acceptance across sessions', async () => {
+      mockTouchDevice();
+      const onSubmit = vi.fn();
+      const onAcceptFollowup = vi.fn(() => {
+        act(() => latest!.insertText('/clear'));
+      });
+      const controller = await mount({
+        sessionId: 'command-session-a',
+        onSubmit,
+        onAcceptFollowup,
+        followupState: {
+          suggestion: '/clear',
+          isVisible: true,
+          shownAt: 0,
+        },
+      });
+      await act(async () => latest!.submitText());
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      controller.switchSession('command-session-b', '/workspace/b');
+
+      expect(latest!.mobileComposer!.value).toBe('');
+      expect(onSubmit).not.toHaveBeenCalled();
+      await act(async () => latest!.submitText());
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onAcceptFollowup).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('keeps selected-file metadata through a mobile draft remount', async () => {

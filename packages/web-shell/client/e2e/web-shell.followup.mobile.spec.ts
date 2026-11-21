@@ -11,8 +11,9 @@
 // plain-textarea backend: the suggestion renders as a single tappable chip
 // bar above the input in every variant — its content is its label, and the
 // editing row carries no follow-up-specific key. Tapping the chip fills the
-// textarea without submitting, matching desktop Tab; Send with an empty
-// input keeps submitting the suggestion directly.
+// textarea without submitting, matching desktop Tab. Ordinary prose keeps
+// the direct empty/prefix Send path; a model-completed slash command is first
+// filled for review and requires a second deliberate Send to submit.
 
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import {
@@ -243,6 +244,91 @@ test('@smoke mobile editing row carries no follow-up key while the chip bar acce
   await expect(textarea).toHaveValue(SUGGESTION);
   await expect(textarea).toBeFocused();
   await expect(page.locator(FOLLOWUP_BAR)).toHaveCount(0);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('@smoke mobile slash-suggestion empty Send first fills without submitting', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'simple');
+  await pushSuggestion(daemon, scenario.sessionId, '/help');
+  await expect(page.locator(FOLLOWUP_ACCEPT)).toBeVisible();
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const send = page.locator(COMPOSER_SUBMIT);
+
+  await send.tap();
+
+  await expect(textarea).toHaveValue('/help');
+  await expect(page.getByRole('dialog', { name: 'Help' })).toHaveCount(0);
+  await expect(page.locator(FOLLOWUP_BAR)).toHaveCount(0);
+  expect(daemon.promptRequests()).toHaveLength(0);
+  await send.tap();
+  await expect(page.getByRole('dialog', { name: 'Help' })).toBeVisible();
+});
+
+test('@smoke mobile slash-prefix Send replaces the draft instead of appending', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'simple');
+  await pushSuggestion(daemon, scenario.sessionId, '/help');
+  await expect(page.locator(FOLLOWUP_ACCEPT)).toBeVisible();
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const send = page.locator(COMPOSER_SUBMIT);
+  await textarea.fill('/he');
+  await textarea.focus();
+  await textarea.evaluate((el) => el.setSelectionRange(3, 3));
+
+  await send.tap();
+
+  await expect(textarea).toHaveValue('/help');
+  await expect(page.getByRole('dialog', { name: 'Help' })).toHaveCount(0);
+  expect(daemon.promptRequests()).toHaveLength(0);
+  await send.tap();
+  await expect(page.getByRole('dialog', { name: 'Help' })).toBeVisible();
+});
+
+test('@smoke mobile a fully typed slash command keeps direct Send', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'simple');
+  await pushSuggestion(daemon, scenario.sessionId, '/help');
+  await expect(page.locator(FOLLOWUP_ACCEPT)).toBeVisible();
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('/help');
+
+  await page.locator(COMPOSER_SUBMIT).tap();
+
+  await expect(page.getByRole('dialog', { name: 'Help' })).toBeVisible();
+});
+
+test('@smoke mobile switching sessions clears a pending slash suggestion without submitting', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'simple');
+  await pushSuggestion(daemon, scenario.sessionId, '/help');
+  await expect(page.locator(FOLLOWUP_ACCEPT)).toBeVisible();
+
+  await page.goto('/session/previous-session');
+  await daemon.sse.waitForConnection('previous-session');
+  await daemon.sendEvent(
+    replayCompleteEvent({
+      sessionId: 'previous-session',
+      replayedCount: 0,
+    }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+
+  await expect(page.locator(FOLLOWUP_ACCEPT)).toHaveCount(0);
+  await expect(page.locator(COMPOSER_TEXTAREA)).toHaveValue('');
+  await expect(page.locator(COMPOSER_SUBMIT)).toBeDisabled();
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 

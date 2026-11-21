@@ -28,7 +28,9 @@
 
 接受调用 `onAcceptFollowup('tab')` 且不带 `skipOnAccept`,复用宿主现成的 `onAccept → insertText` 接线:填入 textarea 并请求 focus。焦点时序:composer 外层点击处理先在手势内同步聚焦 textarea;宿主 accept 再经 `queueMicrotask` 延迟插入并在插入后再次请求 focus。真 iOS 上延迟插入的 focus 请求可能落在 tap 手势之外、键盘可能不弹——真 iOS 键盘行为未验证、属范围外。忽略调用 `onDismissFollowup` 并阻止点击冒泡,外层聚焦处理不再执行:未聚焦状态下点忽略后 textarea 保持未聚焦、「收起键盘」控件不出现,保留既有 ignored 遥测。不新增数据通路:daemon sidechannel、controller、insertText 触摸分支均原样复用。
 
-保留快路径:空输入点发送仍整条直发;输入前缀再发送仍补全直发。建议条让第一条路径可发现,但不改变其语义。
+保留普通文本快路径:空输入点发送仍整条直发;输入普通前缀再发送仍补全直发。建议条让第一条路径可发现,但不改变其语义。
+
+模型补全出的斜杠命令采用更窄的触屏契约。如果当前建议给出或补全 `/clear` 这类命令,首次发送通过既有 `onAcceptFollowup` 路径把它填入可编辑草稿并消费建议,**不调用 `onSubmit`**。前缀选区会被替换,所以 `/cl` 得到 `/clear`,而不是 `/cl/clear`。用户检查或编辑后,第二次明确发送才提交。普通文本以及完全匹配的手输命令仍保留单次发送。守卫每次都根据活动建议和当前会话判定,不保存可跨会话转移的命令接受请求;接受和会话切换都会清理旧建议,避免陈旧的命令误落入新会话。桌面 CodeMirror 行为与宿主命令分派保持不变。
 
 ## 约束
 
@@ -40,10 +42,10 @@
 
 ## 验证
 
-- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):27/27 通过——chip 填入不发送、忽略、未聚焦时忽略不拉焦点、空输入直发、打字隐藏、前缀补全、编辑行不带 follow-up 专用键而 chip 接受(default 变体)、chip 可见时 placeholder 保持普通文案(单 surface)、空草稿展开对话框由 placeholder 承载建议、光标上/下/右移动、字素安全右移加斜杠不拆 emoji、上移到折行行尾保持 emoji 完整且与原生等价、150 连续字符软折行草稿上上/下与原生方向键落在同一光标、水平后下移重算列而非回写旧列、50k 草稿右/上按键 <200ms 且不重测全篇、编辑间镜像唯一且清空即弃、下键落到空行并继续、连按上键越过折行边界与原生一致、光标/忽略图标与兄弟 18px 几何一致、短中间行的连续垂直移动保持目标列、长草稿滚回高度上限窗口、→ 接受可见建议、前缀草稿下右键标签/接受同步与完全匹配落到光标移动、字面斜杠插入、CDP 驱动的 IME 组合期间按键让路、390px 同行/240px 自占行且无横向溢出,以及两条 zh-CN 用例钉住本地化 chip 文本、忽略标签与光标键标签并截中文 UI 图。27 例中 25 例带 `@smoke`(仅 CDP-IME 与 50k 计时除外),可移植验收用例在两引擎的 PR 门控 smoke 车道上运行,不再只由定时 browser-regression 覆盖;zh 用例传 `?language=`,由 App 的 `getInitialLanguage` 直接读取;spec 把取证截图写入其 test-results 输出目录。
+- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):**31/31 通过**，包括空草稿/前缀命令的首次填入且不提交、完整手输命令直接发送、普通文本快路径和会话切换后陈旧命令建议失效。首次斜杠命令发送要求 `onSubmit` 为零，第二次用户明确发送后才允许提交;真实 `Help` 对话框证明命令已经进入原有处理路径。临时移除守卫的对照只是验证旧的提前提交行为,不是遗留在提交中的回归——chip 填入不发送、忽略、未聚焦时忽略不拉焦点、空输入直发、打字隐藏、前缀补全、编辑行不带 follow-up 专用键而 chip 接受(default 变体)、chip 可见时 placeholder 保持普通文案(单 surface)、空草稿展开对话框由 placeholder 承载建议、光标上/下/右移动、字素安全右移加斜杠不拆 emoji、上移到折行行尾保持 emoji 完整且与原生等价、150 连续字符软折行草稿上上/下与原生方向键落在同一光标、水平后下移重算列而非回写旧列、50k 草稿右/上按键 <200ms 且不重测全篇、编辑间镜像唯一且清空即弃、下键落到空行并继续、连按上键越过折行边界与原生一致、光标/忽略图标与兄弟 18px 几何一致、短中间行的连续垂直移动保持目标列、长草稿滚回高度上限窗口、→ 接受可见建议、前缀草稿下右键标签/接受同步与完全匹配落到光标移动、字面斜杠插入、CDP 驱动的 IME 组合期间按键让路、390px 同行/240px 自占行且无横向溢出,以及两条 zh-CN 用例钉住本地化 chip 文本、忽略标签与光标键标签并截中文 UI 图。31 例中 29 例带 `@smoke`(仅 CDP-IME 与 50k 计时除外),可移植验收用例在两引擎的 PR 门控 smoke 车道上运行,不再只由定时 browser-regression 覆盖;zh 用例传 `?language=`,由 App 的 `getInitialLanguage` 直接读取;spec 把取证截图写入其 test-results 输出目录。
 - `client/e2e/web-shell.touch-caret-issue-17918.mobile.spec.ts` 覆盖 5 个光标连续性用例，以及字体/word-spacing 变化后的布局 fingerprint、左右边框与原生方向键一致、顶部 padding 的滚动揭示、展开宿主清理与选区复位、反向选区活动端、小数宽度匹配与缓存失效、text-indent 匹配（含原生像素目标列对照）、布局宽度不随绘制缩放而改变、受限滚动视口内连续 Down 到空行时的揭示（保留换行亲和性）、含 15px 原生滚动条轨道的 border-box/content-box 几何匹配、连续空行揭示，另有 Chromium 原生对照证明右键为何仍需有界揭示。18 个中 16 个带 `@smoke`;原生滚动条的两种盒模型对照与 Chromium 原生滚动对照不进入该 grep。
-- 两个 Playwright spec 合计在 mobile-Chromium 下验证 **45/45**:原 27 项基础用例加 18 项光标用例;41 项携带 `@smoke` 进入可移植 smoke 集合,另外 4 项为计时、CDP-IME 与两类原生滚动对照。
-- `ChatEditor.test.tsx` mobile composer actions:单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)、accept/dismiss 接线、忽略不调用外层聚焦、composition 与选区重置接线、编辑键接线与 → 的动态 aria-label(含完全匹配判据);`useComposerCore.test.ts` 钉字素/视觉行光标计算、折行行尾钳制、目标列保持以及正/反向选区活动端;`useComposerCore.mobile.dom.test.tsx` 对真实钩子钉完全匹配接受门、前缀接受、IME 让路、反向选区活动端、展开态选区复位、列保持与用户跳选区重置及水平后重算、滚动揭示;`utils/touchCaret.test.ts` 钉镜像唯一生命周期、小数宽度精度、缓存失效、布局宽度与绘制变换的区分及 text-indent 复制/指纹,`App.css.test.ts` 收集常驻/hover 规则的全部声明值，并钉住 color、background、边框主题 token 在两主题块均声明;六个文件(含 `i18n.test.ts`)515/515 通过。上述布局夹具区分字素列与原生像素目标列,并在字体回退影响原生折行时钉住明确安装的字体族,不宣称任意 generic font 等价。
+- 两个 Playwright spec 合计在 mobile-Chromium 下验证 **49/49**:31 项 follow-up/命令授权用例加 18 项光标用例;其中 **45 项**携带 `@smoke`(29+16),另外 4 项为计时、CDP-IME 与两类原生滚动条对照。
+- `ChatEditor.test.tsx` mobile composer actions:单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)、accept/dismiss 接线、忽略不调用外层聚焦、composition 与选区重置接线、编辑键接线与 → 的动态 aria-label(含完全匹配判据);`useComposerCore.test.ts` 钉字素/视觉行光标计算、折行行尾钳制、目标列保持以及正/反向选区活动端;`useComposerCore.mobile.dom.test.tsx` 对真实钩子钉完全匹配接受门、前缀接受、IME 让路、反向选区活动端、展开态选区复位、列保持与用户跳选区重置及水平后重算、滚动揭示;`utils/touchCaret.test.ts` 钉镜像唯一生命周期、小数宽度精度、缓存失效、布局宽度与绘制变换的区分及 text-indent 复制/指纹,`App.css.test.ts` 收集常驻/hover 规则的全部声明值，并钉住 color、background、边框主题 token 在两主题块均声明;七个文件(含 `i18n.test.ts` 与 `useComposerCore.dom.test.tsx`)**746/746** 通过。新增命令用例覆盖空草稿、前缀替换、完全手输、普通文本及会话切换隔离;桌面提交行为不变。上述布局夹具区分字素列与原生像素目标列,并在字体回退影响原生折行时钉住明确安装的字体族,不宣称任意 generic font 等价。
 - web-shell `tsc --noEmit` 与改动文件 ESLint:干净。
 - 未覆盖:mobile-webkit / iOS 真机(本机缺 WebKit 运行库);软键盘弹起时新增行的高度挤压;iPad 外接键盘 Tab/→ 接受(后置);展开对话框缩放动画中实际手指操作;generic 字体选择与本机原生排版一致性(本机 generic `monospace` 与明确字体族产生了不同的原生折行,新增宽度/缩进夹具固定明确安装的字体族)。
 

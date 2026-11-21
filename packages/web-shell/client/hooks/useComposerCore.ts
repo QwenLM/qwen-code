@@ -3502,6 +3502,19 @@ export function useComposerCore(
         ? getFollowupCompletion(editorText, followup.suggestion)
         : null;
     const sourceText = textOverride ?? followupCompletion ?? editorText;
+    // Slash-command completions stay editable on touch before a deliberate submit.
+    if (
+      view === null &&
+      followupCompletion &&
+      followupCompletion !== editorText &&
+      /^\s*\//.test(followupCompletion)
+    ) {
+      const editor = expandedTextareaRef.current ?? mobileTextareaRef.current;
+      // Accepting a prefix uses the host's insertion semantics.
+      editor?.setSelectionRange(0, editorText.length);
+      onAcceptFollowupRef.current?.('tab');
+      return true;
+    }
     const leadingTrimLength = sourceText.length - sourceText.trimStart().length;
     const rawText = sourceText.trim();
     const normalizedInlineTags =

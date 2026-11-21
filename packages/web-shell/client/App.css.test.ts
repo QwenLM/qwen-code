@@ -123,14 +123,25 @@ describe('Chat layout relayout boundary CSS contracts', () => {
   });
 });
 
-describe('touch follow-up chip background tokens', () => {
-  it('uses theme tokens declared in both theme blocks', () => {
+describe('touch follow-up chip theme tokens', () => {
+  it('uses theme tokens for each color declaration in both themes', () => {
     for (const selector of [
       '.mobileFollowupAccept',
       '.mobileFollowupAccept:not(:disabled):hover',
     ]) {
       const rules = findRules(chatEditorCss, selector);
       expect(rules.length, `${selector} exists`).toBeGreaterThan(0);
+      const declarations = rules.flatMap((decls) => [...decls.entries()]);
+      for (const [property, value] of declarations) {
+        if (
+          !['background', 'color', 'border', 'border-color'].includes(property)
+        ) {
+          continue;
+        }
+        expect(value, `${selector} ${property} uses a theme token`).toMatch(
+          /var\(--chat-editor-[\w-]+/,
+        );
+      }
       const themeTokens = rules
         .flatMap((decls) => [...decls.values()])
         .join(' ')
