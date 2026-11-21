@@ -466,13 +466,19 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
     void readsAvailabilityOnceAcrossSessionsThatShareAPublicationId() throws Exception {
         String second = seedArtifactSession("session-2", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
         String third = seedArtifactSession("session-3", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
-        String scope = ManagedToolResultStore.identity("s", TENANT, "session-2").substring(2);
-        fixture.jdbc().update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id, session_id,"
-                + " publication_id, producer_phase, admission_resource_id, receipt_revision,"
-                + " receipt_sequence, is_quarantined)"
-                + " SELECT ?, ?, ?, ?, publication_id, producer_phase, admission_resource_id,"
-                + " receipt_revision, receipt_sequence, is_quarantined FROM ma_output_capture WHERE publication_id = ?",
-                scope, TENANT, WORKSPACE, "session-2", stdout.path("publication_id").asText());
+        String publicationId = fixture.results().findArtifact(TENANT, "session-1", stdout.path("id").asText())
+                .orElseThrow().publicationId();
+        String scope = DigestUtils.sha256Hex(
+                JSON.createArrayNode().add(TENANT).add(WORKSPACE).add("session-2").toString());
+        fixture.jdbc().update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, admission_resource_id,"
+                + " receipt_revision, receipt_sequence, is_quarantined)"
+                + " SELECT ?, tenant_key, tenant_id, workspace_id, ?, publication_id, execution_key, capture_id,"
+                + " binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes,"
+                + " producer_phase, admission_resource_id, receipt_revision, receipt_sequence, is_quarantined"
+                + " FROM ma_output_capture WHERE publication_id = ?",
+                scope, "session-2", publicationId);
         var jdbc = spy(fixture.jdbc());
         ReflectionTestUtils.setField(fixture.publications(), "jdbc", jdbc);
 
