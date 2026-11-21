@@ -445,6 +445,36 @@ class RuntimeBrokerServiceTest {
         }
     }
 
+    // Phase 3b §4.10: live background work owns the mount. Reclamation must
+    // refuse BEFORE the transport closes any connection, so a suspended
+    // Session's running Shell keeps its stdio servers and its storage.
+    @Test
+    void reclamationRefusesWhileABackgroundExecutionIsLiveWithoutClosingConnections() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            String digest = "sha256:" + "b".repeat(64);
+            fixture.executionRepository.findOrCreate(new ToolExecutionRecord(
+                    "bg-process", "idem-bg-process", saved.getBindingId(), saved.getRuntimeGeneration(),
+                    "holder", "holder", "prompt", "call", digest,
+                    Map.of("sessionId", "holder", "promptId", "prompt", "callId", "call",
+                            "argsDigest", digest, "processOf", "bg", "kind", "shell"),
+                    ToolExecutionRecord.State.PREPARED, null, null,
+                    0L, false, null, null, 0L, 0L, null));
+
+            assertFalse(join(fixture.service.reclaimParkedMcp(saved.getBindingId(),
+                    saved.getRuntimeGeneration(), "holder", () -> true)));
+            assertEquals(0, fixture.transport.reclaimMcpCalls.get());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder").getState());
+            // The ordinary handback refuses for the same live work, so the
+            // mount stays with the run that still needs it.
+            assertEquals("runtime_session_busy", failure(fixture.service.releaseMount(
+                    "holder", "holder", MOUNT_CLAIM, null)).getCode());
+        }
+    }
+
     @Test
     void reclamationSkipsAnOwnerOfAnotherGeneration() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {

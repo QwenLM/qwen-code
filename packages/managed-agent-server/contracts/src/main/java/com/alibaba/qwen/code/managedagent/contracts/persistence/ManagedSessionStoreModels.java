@@ -165,9 +165,17 @@ public final class ManagedSessionStoreModels {
      * A clean suspension's wake projection of the committed prefix at
      * {@code revision}: whether a deliverable wake input remains, and when the
      * earliest one is due (0 when one is due now).
+     *
+     * <p>{@code backgroundHeld} additionally certifies that every unsettled run
+     * and owed cleanup of this prefix is a verified background hold. Only the
+     * writer can run that per-run evidence check, so the control plane reads the
+     * certificate instead of re-deriving it.
      */
     public record WakeStamp(@Min(0) @Max(MAX_SAFE_COUNTER) long revision, boolean pending,
-            @Min(0) @Max(MAX_SAFE_COUNTER) long dueAt) {
+            @Min(0) @Max(MAX_SAFE_COUNTER) long dueAt, boolean backgroundHeld) {
+        public WakeStamp(long revision, boolean pending, long dueAt) {
+            this(revision, pending, dueAt, false);
+        }
     }
 
     public record SealWriterRequest(

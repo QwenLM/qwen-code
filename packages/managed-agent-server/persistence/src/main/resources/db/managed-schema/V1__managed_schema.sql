@@ -223,12 +223,13 @@ CREATE TABLE ma_session_head (
     wake_head_revision BIGINT UNSIGNED COMMENT 'Journal revision through which wake requirements have been evaluated.',
     wake_retry_at BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Earliest wake retry time in Unix epoch milliseconds.',
     wake_seal_revision BIGINT UNSIGNED COMMENT 'Journal revision at which a clean suspension sealed the head and certified its wake projection.',
+    wake_seal_background TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether that seal also certified every unsettled run and cleanup debt as a verified background hold.',
     is_wake_scan_pending TINYINT UNSIGNED GENERATED ALWAYS AS (is_wake_pending = 1 OR wake_head_revision IS NULL OR wake_head_revision <> journal_revision)
         COMMENT 'Generated flag for pending wake work or an outdated wake projection.',
     cleanup_head_revision BIGINT UNSIGNED COMMENT 'Journal revision through which cleanup requirements have been projected.',
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_session_head_id PRIMARY KEY (id),
-    CONSTRAINT ck_ma_session_head_boolean_values CHECK ((is_wake_pending >= 0 AND is_wake_pending <= 1) AND (is_wake_scan_pending >= 0 AND is_wake_scan_pending <= 1))
+    CONSTRAINT ck_ma_session_head_boolean_values CHECK ((is_wake_pending >= 0 AND is_wake_pending <= 1) AND (is_wake_scan_pending >= 0 AND is_wake_scan_pending <= 1) AND (wake_seal_background >= 0 AND wake_seal_background <= 1))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Private Session journal ownership and recovery head, or Harness-only admission control.';
 
 CREATE INDEX idx_ma_head_workspace ON ma_session_head (tenant_key, workspace_id, harness_key);
