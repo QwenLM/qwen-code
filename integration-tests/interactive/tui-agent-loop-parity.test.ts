@@ -156,6 +156,12 @@ interface Run {
  */
 const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
 
+/**
+ * The helper gate's ceiling. Past it the fake server answers 500 and the
+ * CLI's retry adds a request the strict parity count rejects.
+ */
+const HELPER_GATE_BUDGET = 90_000;
+
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
 /**
@@ -1416,10 +1422,7 @@ describeTui(SUITE, () => {
                     ),
                   ),
               'the leader records its waiting answer',
-              // The leader's turn can stall on a contended runner; the 30s
-              // default would fail the gate, and the 500 the server answers
-              // then earns a retry the strict request count rejects.
-              90_000,
+              HELPER_GATE_BUDGET,
             );
             return { content: 'HELPER REPORT: it is sunny.' };
           });
@@ -1516,9 +1519,12 @@ describeTui(SUITE, () => {
     expect(queued?.volatile).toBe(FOREGROUND_SHELL_VOLATILE);
   });
 
-  // The gate must outlast a stalled leader: once it expires the server
-  // answers 500 and the CLI's retry adds a request the parity count rejects.
+  // Both edges of the ceiling: a trim lets a stalled leader expire the gate
+  // into the 500-and-retry the parity count rejects, and no ceiling at all
+  // lets a wedged leader hang the case to its timeout. The literal pin keeps
+  // a mutation of the constant from moving the gate and this test together.
   it('gives the helper gate the cross-turn budget', async () => {
+    expect(HELPER_GATE_BUDGET).toBe(90_000);
     const scenario = allScenarios.find(
       (candidate) =>
         candidate.name === 'a teammate report that starts a teammate turn',
@@ -1530,29 +1536,33 @@ describeTui(SUITE, () => {
     const previousWaiting = leaderWaiting;
     leaderWaiting = deferred();
     leaderWaiting.resolve();
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
-    try {
-      const reply = Promise.resolve(
+    const helperReply = () =>
+      Promise.resolve(
         scenario.reply(
           [{ role: 'user', content: `${HELPER_TASK} Check the weather.` }],
           join(gateScratch, 'workspace'),
           0,
         ),
       );
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const reply = helperReply();
       let settled = false;
       void reply.then(
         () => (settled = true),
         () => (settled = true),
       );
-      // Past until()'s 30s default the gate must still be waiting.
-      await vi.advanceTimersByTimeAsync(31_000);
+      await vi.advanceTimersByTimeAsync(HELPER_GATE_BUDGET - 1_000);
       expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(reply).rejects.toThrow(
+        'the leader records its waiting answer',
+      );
       writeFileSync(
         transcript,
         '{"message":{"content":[{"text":"Waiting for the helper."}]}}\n',
       );
-      await vi.advanceTimersByTimeAsync(200);
-      await expect(reply).resolves.toEqual({
+      await expect(helperReply()).resolves.toEqual({
         content: 'HELPER REPORT: it is sunny.',
       });
     } finally {
