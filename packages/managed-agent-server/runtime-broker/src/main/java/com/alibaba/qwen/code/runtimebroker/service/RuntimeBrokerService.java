@@ -124,6 +124,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     private final RuntimeSessionRelease sessionRelease;
     private final RuntimeDrainCoordinator drainCoordinator;
     private final RuntimeHoldInventory holdInventory;
+    private final RuntimeObservationCoordinator observationCoordinator;
 
     /**
      * H4b: the live physical Runtime binding of a Harness Session — how
@@ -296,6 +297,24 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 executionRepository, provisioner, transport, bindingProvisioning, executionRecovery,
                 executionDispatcher, sessionRelease, this.brokerOwnerId, this.operationLeaseDuration,
                 clock, closed, this::newBindingRenewal);
+        this.observationCoordinator = new RuntimeObservationCoordinator(sessionResolver, bindingRegistry,
+                bindingProvisioning, bindingRepository, sessionRepository, provisioner, transport,
+                executionRecovery, this.brokerOwnerId, clock, closed);
+        this.executionRecovery.setAdoptedSessionLookup(observationCoordinator::requireOrAdoptReadySession);
+    }
+
+    public void configureStageStore(com.alibaba.qwen.code.runtimebroker.RuntimeStageStore stageStore) {
+        observationCoordinator.configureStageStore(stageStore, null, null, -1, -1L);
+    }
+
+    public void configureStageStore(com.alibaba.qwen.code.runtimebroker.RuntimeStageStore stageStore,
+            Duration claimLease, Duration scanInterval, int longPollWaitMs, long attachedCooldownMs) {
+        observationCoordinator.configureStageStore(
+                stageStore, claimLease, scanInterval, longPollWaitMs, attachedCooldownMs);
+    }
+
+    public CompletionStage<Void> runObservationScanOnce() {
+        return observationCoordinator.runScanOnce();
     }
 
     private BindingRenewal newBindingRenewal(RuntimeBindingRecord claimed) {
@@ -594,13 +613,20 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         } finally {
             context.unlock();
         }
-        CompletionStage<Boolean> reclaimed = !parked.getAsBoolean()
+        // Background work owns the mount until it ends: refuse BEFORE the
+        // transport closes any connection, so a live run keeps its stdio
+        // servers and its storage. The pull settles an ended run's row, so
+        // reclamation no longer needs its own settlement sweep — an active row
+        // here is exactly the work that must extend the park.
+        boolean backgroundLive = executionRepository.hasActiveByRuntimeSession(
+                context.binding().getBindingId(), context.binding().getGeneration(),
+                context.session().getRuntimeSessionId());
+        CompletionStage<Boolean> reclaimed = !parked.getAsBoolean() || backgroundLive
                 ? CompletableFuture.completedFuture(false)
                 : safeStage(() -> transport.reclaimMcp(context.lease(), context.session())).thenCompose(ignored ->
                         !parked.getAsBoolean() ? CompletableFuture.completedFuture(false)
-                                : executionRecovery.settleUnprovenBackgroundRows(context, false)
-                                        .thenCompose(settled -> executionRecovery.releaseMountAfterSweep(context, claim,
-                                                context.session().getRuntimeSessionId())));
+                                : executionRecovery.releaseMountAfterSweep(context, claim,
+                                        context.session().getRuntimeSessionId()));
         return reclaimed.whenComplete((released, error) -> {
             context.lock();
             try {
@@ -765,7 +791,10 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 && !ManagedMonitorProtocol.isOperation(immutable)) {
             ProviderRuntimeProtocol.control(immutable, harnessSessionId, runtimeSessionId);
         }
-        return bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
+        CompletionStage<SessionContext> targetSession = ManagedMonitorProtocol.isOperation(immutable)
+                ? observationCoordinator.requireOrAdoptReadySession(harnessSessionId, runtimeSessionId)
+                : bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId);
+        return targetSession
                 .thenCompose(context -> {
                     if (ManagedMcpProtocol.isOperation(immutable)) {
                         ManagedMcpProtocol.validateSession(context.session(), immutable);
@@ -1196,25 +1225,30 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     }
 
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
-            String runtimeSessionId, Map<String, Object> publisher) {
-        requireOpen(closed);
-        Map<String, Object> descriptor = immutableMap(publisher, "publisher");
-        return mapStoreFailure(safeStage(() -> bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
-                .thenCompose(context -> {
-                    context.lock();
-                    try {
-                        bindingRegistry.requireReadySessionRecord(context);
-                        context.beginControl();
-                    } finally {
-                        context.unlock();
-                    }
-                    return safeStage(() -> {
-                        bindingRegistry.requireUsableLease(context);
-                        return transport.installPublisher(context.lease(), context.session(), descriptor);
-                    }).thenApply(ignored -> Map.<String, Object>of("installed", true,
-                            "bindingGeneration", Long.toString(context.binding().getGeneration())))
-                            .whenComplete((ignored, error) -> context.endControl());
-                })));
+            String runtimeSessionId, Map<String, Object> publisher, Long writerGeneration) {
+        return mapStoreFailure(safeStage(() -> observationCoordinator.installPublisher(
+                harnessSessionId, runtimeSessionId, publisher, writerGeneration)));
+    }
+
+    @Override
+    public CompletionStage<Void> detachPublisher(String harnessSessionId,
+            String runtimeSessionId, Long writerGeneration, Map<String, Long> appliedThrough) {
+        return mapStoreFailure(safeStage(() -> observationCoordinator.detachPublisher(
+                harnessSessionId, runtimeSessionId, writerGeneration, appliedThrough)));
+    }
+
+    @Override
+    public CompletionStage<List<Map<String, Object>>> listStagedDeliveries(
+            String harnessSessionId, String writerId, long writerGeneration) {
+        return mapStoreFailure(safeStage(() -> observationCoordinator.listStagedDeliveries(
+                harnessSessionId, writerId, writerGeneration)));
+    }
+
+    @Override
+    public CompletionStage<Void> acknowledgeStagedDeliveries(String harnessSessionId,
+            String writerId, long writerGeneration, String executionCallId, long throughSeq) {
+        return mapStoreFailure(safeStage(() -> observationCoordinator.acknowledgeStagedDeliveries(
+                harnessSessionId, writerId, writerGeneration, executionCallId, throughSeq)));
     }
 
     private CompletionStage<Map<String, Object>> acknowledgeLocalExecution(String harnessSessionId,
@@ -1787,6 +1821,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         bindingRegistry.cancelPendingOperations();
         executionDispatcher.cancelPendingOperations();
         executionReconciler.cancelPendingOperations();
+        observationCoordinator.close();
         scheduler.shutdownNow();
         renewalScheduler.shutdownNow();
         provisioner.close();

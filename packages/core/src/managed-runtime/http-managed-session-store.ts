@@ -192,6 +192,8 @@ export interface HttpManagedSessionStores {
   supportsExecutionDiagnostics(): boolean;
   /** Whether the control plane delivers a suspended Session's wake inputs. */
   supportsWakeDispatch(): boolean;
+  /** Whether this control plane lets a background Session suspend behind the pull. */
+  supportsRuntimeObservation(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -436,6 +438,7 @@ export function createHttpManagedSessionStores(
     supportsModelDiagnostics: () => client.supportsModelDiagnostics(),
     supportsExecutionDiagnostics: () => client.supportsExecutionDiagnostics(),
     supportsWakeDispatch: () => client.supportsWakeDispatch(),
+    supportsRuntimeObservation: () => client.supportsRuntimeObservation(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -974,6 +977,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 interface WriterGrant {
   readonly activationLeaseRenewal: boolean;
   readonly wakeDispatch: boolean;
+  readonly runtimeObservation: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
@@ -1042,6 +1046,10 @@ class ManagedSessionStoreHttpClient {
   }
   supportsWakeDispatch(): boolean {
     return this.grant?.wakeDispatch === true;
+  }
+
+  supportsRuntimeObservation(): boolean {
+    return this.grant?.runtimeObservation === true;
   }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
@@ -3117,6 +3125,7 @@ class ManagedSessionStoreHttpClient {
         ...this.requireGrant(),
         leaseUntil: renewed.leaseUntil,
         wakeDispatch: renewed.wakeDispatch,
+        runtimeObservation: renewed.runtimeObservation,
       };
       this.scheduleRenewal();
     })();
@@ -3760,6 +3769,7 @@ function parseWriterGrant(value: unknown): WriterGrant {
   return {
     activationLeaseRenewal: record['activationLeaseRenewal'] === true,
     wakeDispatch: record['wakeDispatch'] === true,
+    runtimeObservation: record['runtimeObservation'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),
@@ -4006,6 +4016,10 @@ function isReferenceContainer(kind: string): boolean {
       'managed-hook-message-chunks',
       MANAGED_MESSAGE_CHUNKS_KIND,
       'managed-tool-outcome-chunks',
+      // Phase 3b: a draining Harness commits a manifest it never staged in
+      // memory, so the closure must walk its pages server-side exactly like
+      // the resident staged arm does, or the pages stay unreferenced.
+      MANAGED_TOOL_RESULT_KINDS.manifest,
     ].includes(kind)
   );
 }
