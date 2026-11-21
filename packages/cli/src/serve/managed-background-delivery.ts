@@ -161,6 +161,8 @@ export class BackgroundDeliveryRun {
   private descriptor: ShellPublisherDescriptor | undefined;
   private writerGeneration = 0;
   private pushing: Promise<void> | undefined;
+  private stopping = false;
+  private tailDropped = false;
   private terminalEmitted = false;
   private terminalReceipt: ToolResultAcknowledgement | undefined;
   private readonly receiptWaiters: Array<
@@ -238,18 +240,43 @@ export class BackgroundDeliveryRun {
     return true;
   }
 
+  /** A forced stop (§4.4): release the write queue parked on the byte
+   * budget so the stop's finish and finalize never wait on a process
+   * blocked on its own output pipes. The reserved terminal slot stays
+   * open; whether the unqueued tail is dropped is decided per entry by
+   * `waitForRoom`, only while the outbox is actually full. */
+  requestStop(): void {
+    this.stopping = true;
+    for (const waiter of this.roomWaiters.splice(0)) waiter();
+  }
+
   /** Resolves once the outbox has room for `size` more bytes. The capture's
    * write queue awaits this, so a full outbox pauses the process through its
-   * own pipe backpressure — bounded and visible, never a silent loss. */
-  private async waitForRoom(size: number): Promise<void> {
+   * own pipe backpressure — bounded and visible, never a silent loss.
+   * Returns false when the entry must be dropped: a closed run, or a
+   * forced stop whose full outbox drops the unqueued tail. The first such
+   * drop latches `tailDropped`, so the tail is one contiguous suffix — a
+   * later entry can never resume past a dropped one and break the
+   * sequence contiguity the consumer enforces. */
+  private async waitForRoom(size: number): Promise<boolean> {
     while (
       !this.closed &&
+      !this.stopping &&
       this.outboxBytes + size > RUN_OUTBOX_BYTES &&
       this.outbox.length > 0
     ) {
       this.onBackpressure?.(true);
       await new Promise<void>((resolve) => this.roomWaiters.push(resolve));
     }
+    if (this.closed || this.tailDropped) return false;
+    if (
+      this.outboxBytes + size <= RUN_OUTBOX_BYTES ||
+      this.outbox.length === 0
+    ) {
+      return true;
+    }
+    this.tailDropped = true;
+    return false;
   }
 
   private enqueue(entry: ManagedDeliveryEntry): void {
@@ -268,22 +295,32 @@ export class BackgroundDeliveryRun {
     return this.nextSeq++;
   }
 
+  /** Returns whether the entry was enqueued; a dropped entry consumes no
+   * deliverySeq, so the next enqueued entry stays contiguous. */
   async enqueueOutput(
     manifestRef: ManagedSessionDurableRef,
     manifestRevision: number,
     resources: ManagedDeliveryResource[],
-  ): Promise<void> {
-    const entry: ManagedDeliveryEntry = {
-      deliverySeq: this.nextDeliverySeq(),
+  ): Promise<boolean> {
+    const body = {
       executionCallId: this.executionCallId,
       bindingGeneration: this.bindingGeneration,
-      kind: 'output',
+      kind: 'output' as const,
       manifestRef,
       manifestRevision,
       resources,
     };
-    await this.waitForRoom(entryBytes(entry));
-    this.enqueue(entry);
+    // Size with the sequence the entry would draw now; the budget is a
+    // soft bound, so a digit gained while parked never matters.
+    if (
+      !(await this.waitForRoom(
+        entryBytes({ ...body, deliverySeq: this.nextSeq }),
+      ))
+    ) {
+      return false;
+    }
+    this.enqueue({ ...body, deliverySeq: this.nextDeliverySeq() });
+    return true;
   }
 
   async enqueueObservation(
@@ -296,19 +333,25 @@ export class BackgroundDeliveryRun {
       admissionRef: ManagedSessionDurableRef;
     } | null,
     resources: ManagedDeliveryResource[],
-  ): Promise<void> {
-    const entry: ManagedDeliveryEntry = {
-      deliverySeq: this.nextDeliverySeq(),
+  ): Promise<boolean> {
+    const body = {
       executionCallId: this.executionCallId,
       bindingGeneration: this.bindingGeneration,
-      kind: 'observation',
+      kind: 'observation' as const,
       sequence,
       lines,
       notification,
       resources,
     };
-    await this.waitForRoom(entryBytes(entry));
-    this.enqueue(entry);
+    if (
+      !(await this.waitForRoom(
+        entryBytes({ ...body, deliverySeq: this.nextSeq }),
+      ))
+    ) {
+      return false;
+    }
+    this.enqueue({ ...body, deliverySeq: this.nextDeliverySeq() });
+    return true;
   }
 
   /** The reserved terminal slot: a forced stop always gets through. */
@@ -657,11 +700,20 @@ export class WorkerBackgroundCaptureSink implements ManagedShellCaptureSink {
 
   private async onRevision(ref: ManagedSessionDurableRef): Promise<void> {
     const resources = this.resources.since(this.lastResourceMarker);
-    this.lastResourceMarker = this.resources.watermark;
+    const marker = this.resources.watermark;
     const manifest = JSON.parse(
       (await this.resources.read(ref)).toString('utf8'),
     ) as { revision: number };
-    await this.run.enqueueOutput(ref, manifest.revision, resources);
+    if (await this.run.enqueueOutput(ref, manifest.revision, resources)) {
+      this.lastResourceMarker = marker;
+    } else {
+      // A dropped revision means the stop found the outbox full: freeze
+      // the capture so the buffered tail is dropped and the final revision
+      // declares the gap (§4.4). The marker stays put so the terminal
+      // entry carries the dropped revision's resources — the manifest it
+      // settles must never name bytes the applier did not receive.
+      this.capture.cancelCapture();
+    }
   }
 
   setStarted(pid: number): void {
@@ -678,6 +730,7 @@ export class WorkerBackgroundCaptureSink implements ManagedShellCaptureSink {
 
   setStopRequested(): void {
     this.stopRequested = true;
+    this.run.requestStop();
   }
 
   failCapture(): void {
@@ -876,13 +929,17 @@ export class WorkerMonitorPolicy {
       Buffer.from('{}', 'utf8'),
     );
     const resources = this.sink.resources.since(this.lastResourceMarker);
-    this.lastResourceMarker = this.sink.resources.watermark;
-    await this.run.enqueueObservation(
-      this.sequence,
-      lines,
-      { inputId, turnId: inputId, contentRef, admissionRef },
-      resources,
-    );
+    const marker = this.sink.resources.watermark;
+    if (
+      await this.run.enqueueObservation(
+        this.sequence,
+        lines,
+        { inputId, turnId: inputId, contentRef, admissionRef },
+        resources,
+      )
+    ) {
+      this.lastResourceMarker = marker;
+    }
     this.onNotification?.();
     this.armIdle();
     if (this.sequence >= this.params.maxEvents) {

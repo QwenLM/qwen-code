@@ -109,7 +109,11 @@ function stream(id: StreamId, segmentBytes: number): StreamState {
 }
 
 interface BrokenCapture {
-  readonly reason: 'quota_exhausted' | 'size_limit' | 'storage_failed';
+  readonly reason:
+    | 'quota_exhausted'
+    | 'size_limit'
+    | 'storage_failed'
+    | 'cancelled';
 }
 
 export class LocalShellStreamCapture implements ShellRawCaptureSink {
@@ -152,6 +156,13 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
   /** The caller's explicit broken mark, matching the foreground sink API. */
   failCapture(): void {
     this.fail(new Error('Capture transport failed.'));
+  }
+
+  /** The forced-stop broken mark: the unqueued tail is dropped, and the
+   * final revision declares the gap with the stop reason rather than
+   * admitting bytes the stop never delivered. */
+  cancelCapture(): void {
+    this.fail(new Error('cancelled'));
   }
 
   setProcessResult(result: {
@@ -244,7 +255,9 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
           ? 'size_limit'
           : cause instanceof Error && cause.message === 'quota_exhausted'
             ? 'quota_exhausted'
-            : 'storage_failed',
+            : cause instanceof Error && cause.message === 'cancelled'
+              ? 'cancelled'
+              : 'storage_failed',
     };
     // The latch is silent forever, but the manifest must stop advertising
     // a healthy open capture the moment the stream goes blind: mark every
