@@ -16,6 +16,7 @@ import {
 import {
   assertVersionUnreleased,
   runAssertVersionCli,
+  runAssertChannelResumableCli,
 } from '../assert-release-version.mjs';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -1407,5 +1408,120 @@ describe('assertVersionUnreleased', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(runAssertVersionCli('1.2.3')).toBe(0);
     expect(logSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('runAssertChannelResumableCli', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const tagsAll = (value) => (command) => {
+    if (command.includes('npm view')) return `${value}\n`;
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  it('resumes when every published package is at or behind the version', () => {
+    // The v0.28.2 shape: the CLI publishes last, so a partial release left
+    // latest on the previous version; resuming moves it forward.
+    vi.mocked(execSync).mockImplementation(tagsAll('1.2.2'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(0);
+    expect(logSpy).not.toHaveBeenCalled();
+    for (const pkg of PUBLISHED_PACKAGES) {
+      expect(execSync).toHaveBeenCalledWith(`npm view ${pkg} dist-tags.latest`);
+    }
+  });
+
+  it('refuses when any workspace package is ahead even if the CLI is behind', () => {
+    // Two partial releases: 1.2.3 shipped only A, then 1.2.4 shipped A and B
+    // before both died ahead of the CLI. pnpm would skip A but re-point B's
+    // tag back to 1.2.3 — the CLI's own tag cannot speak for B.
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command === `npm view ${PUBLISHED_PACKAGES[1]} dist-tags.latest`) {
+        return '1.2.4\n';
+      }
+      if (command.includes('npm view')) return '1.2.2\n';
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(1);
+    expect(logSpy).toHaveBeenCalledWith(
+      `::error::npm latest for ${PUBLISHED_PACKAGES[1]} is 1.2.4, past 1.2.3. Resuming would regress the dist-tag.`,
+    );
+  });
+
+  it('treats a never-published package (E404) as safe to publish', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command === `npm view ${PUBLISHED_PACKAGES[1]} dist-tags.latest`) {
+        throw new Error('npm error code E404');
+      }
+      if (command.includes('npm view')) return '1.2.3\n';
+      throw new Error(`unexpected command: ${command}`);
+    });
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(0);
+  });
+
+  it('fails closed with the retryable exit when a probe errors', () => {
+    vi.mocked(execSync).mockImplementation(() => {
+      throw new Error('npm error code ECONNRESET');
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(2);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('::error::Failed to verify'),
+    );
+  });
+
+  it('refuses a garbage channel value instead of treating it as absent', () => {
+    vi.mocked(execSync).mockImplementation(tagsAll('not-a-version'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(1);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Cannot compare npm latest'),
+    );
+  });
+
+  it('orders preview channels by semver precedence', () => {
+    vi.mocked(execSync).mockImplementation(tagsAll('1.2.3-preview.10'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.2.3-preview.2', 'preview')).toBe(1);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('is 1.2.3-preview.10, past 1.2.3-preview.2'),
+    );
+    vi.mocked(execSync).mockImplementation(tagsAll('1.2.3-preview.2'));
+    expect(runAssertChannelResumableCli('1.2.3-preview.10', 'preview')).toBe(0);
+  });
+
+  it('resumes an equal nightly but refuses a different same-day nightly', () => {
+    // Same-date nightlies end in unordered short SHAs: semver cannot prove
+    // which published first, so an unequal suffix refuses conservatively.
+    vi.mocked(execSync).mockImplementation(
+      tagsAll('1.2.3-nightly.20261121.abc1234'),
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(
+      runAssertChannelResumableCli('1.2.3-nightly.20261121.abc1234', 'nightly'),
+    ).toBe(0);
+    expect(
+      runAssertChannelResumableCli('1.2.3-nightly.20261121.fedcba9', 'nightly'),
+    ).toBe(1);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('short SHAs cannot prove publish order'),
+    );
+  });
+
+  it('exits 4 on malformed version or tag input', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('', 'latest')).toBe(4);
+    expect(runAssertChannelResumableCli('1.2.3', 'latest; rm')).toBe(4);
+    expect(logSpy).toHaveBeenCalledWith(
+      '::error::assert-channel-resumable requires a release version and a plain dist-tag, e.g. --version=1.2.3 --tag=latest',
+    );
+    expect(execSync).not.toHaveBeenCalled();
   });
 });

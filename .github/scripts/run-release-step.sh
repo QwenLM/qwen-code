@@ -125,6 +125,14 @@ case "${step}" in
     git config core.hooksPath .husky
 
     release_branch_name="release/${RELEASE_TAG}"
+    if [[ "${REUSED_COMMIT:-}" == "true" ]]; then
+      # A resume left HEAD detached at the adopted release commit and the
+      # restored handoff may hold a local branch of the same name pointing
+      # at this run's stale bump commit; recreate it from the adopted one.
+      git switch -C "${release_branch_name}"
+      echo "BRANCH_NAME=${release_branch_name}" >> "${GITHUB_OUTPUT}"
+      exit 0
+    fi
     git switch -c "${release_branch_name}"
     echo "BRANCH_NAME=${release_branch_name}" >> "${GITHUB_OUTPUT}"
     npm run release:version "${RELEASE_VERSION}"
@@ -173,9 +181,6 @@ case "${step}" in
     release_branch_name="${BRANCH_NAME:?}"
     commit_release_version
     if [[ "${IS_DRY_RUN}" == "false" ]]; then
-      # Keep the write credential unavailable until the push step needs it.
-      export GH_TOKEN="${CI_BOT_PAT}"
-      gh auth setup-git
       # A release branch left behind by an earlier attempt means this version
       # may be partially published. Resume it instead of force-pushing over
       # it: when the regenerated tree matches the branch tip, reuse that
@@ -187,6 +192,10 @@ case "${step}" in
       # pushed the branch, so the per-package skip never got to run.
       remote_branch="$(git ls-remote --heads origin "refs/heads/${release_branch_name}")"
       if [[ -n "${remote_branch}" ]]; then
+        # Every resume probe below is read-only and runs before the write
+        # credential is exported: the job token reads the public repo, and
+        # the channel guard loads its code from the workflow-pinned checkout
+        # rather than the selected release ref.
         # The resume arm adopts a remote commit as the release, so it must
         # know the release source commit to verify provenance. The workflow
         # always supplies RELEASE_SHA; refuse rather than skip the check.
@@ -194,9 +203,11 @@ case "${step}" in
           echo "::error::RELEASE_SHA is not set; refusing to resume an existing release branch without provenance."
           exit 1
         fi
+        git fetch --no-tags origin "refs/heads/${release_branch_name}"
+        release_commit="$(git rev-parse FETCH_HEAD)"
         # A completed release outranks every other refusal: a re-run of an
-        # already-shipped version is a benign no-op even when the channel
-        # has since moved past it.
+        # already-shipped version is a benign no-op even when finalize has
+        # since advanced the branch or the channel has moved past it.
         if release_state="$(gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>&1)"; then
           if [[ "${release_state}" == "false" ]]; then
             echo "::notice::Release ${RELEASE_TAG} is already published; nothing to resume."
@@ -207,38 +218,13 @@ case "${step}" in
           echo "::error::Cannot confirm GitHub Release ${RELEASE_TAG} state: ${release_state}"
           exit 1
         fi
-        # A newer version on this channel makes resuming a dist-tag regression.
-        if ! current_tag="$(npm view @qwen-code/qwen-code "dist-tags.${NPM_TAG}" 2>/dev/null)"; then
-          echo "::error::Cannot confirm npm dist-tag ${NPM_TAG}; refusing to resume."
-          exit 1
-        fi
-        if [[ -n "${current_tag}" ]]; then
-          compare_result=0
-          CURRENT_TAG="${current_tag}" RELEASE_VERSION_VAR="${RELEASE_VERSION}" node -e '
-            const semver = require("semver");
-            const current = semver.valid(process.env.CURRENT_TAG);
-            const target = semver.valid(process.env.RELEASE_VERSION_VAR);
-            process.exit(!current || !target ? 2 : semver.gt(current, target) ? 1 : 0);
-          ' || compare_result=$?
-          if [[ "${compare_result}" -eq 1 ]]; then
-            echo "::error::npm ${NPM_TAG} is ${current_tag}, past ${RELEASE_VERSION}. Resuming would regress the dist-tag."
-            echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
-          if [[ "${compare_result}" -ne 0 ]]; then
-            echo "::error::Cannot compare npm ${NPM_TAG} (${current_tag}) with ${RELEASE_VERSION}; refusing to resume."
-            echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
-        fi
-        git fetch --no-tags origin "refs/heads/${release_branch_name}"
-        release_commit="$(git rev-parse FETCH_HEAD)"
-        # Verify the reused commit is a direct child of the release source
-        # commit (the version-bump commit created by prepare-release-branch).
-        # A deeper chain or a merge with a matching tree is not this run's
-        # release.
-        if [[ "$(git rev-parse --verify -q "${release_commit}^" 2>/dev/null)" != "${RELEASE_SHA}" ]]; then
-          echo "::error::${release_branch_name} tip ${release_commit} is not a direct child of release source ${RELEASE_SHA}. Refusing to resume."
+        # The reused tip is either the release source itself (no version
+        # bump was needed) or a single-parent bump commit directly on it —
+        # the same parentage restore-release enforces. A merge with the
+        # source as first parent is not this run's release either.
+        if [[ "${release_commit}" != "${RELEASE_SHA}" ]] &&
+          [[ "$(git rev-list --parents -n 1 "${release_commit}")" != "${release_commit} ${RELEASE_SHA}" ]]; then
+          echo "::error::${release_branch_name} tip ${release_commit} is not the release source ${RELEASE_SHA} or its direct single-parent version commit. Refusing to resume."
           exit 1
         fi
         if [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "${release_commit}^{tree}")" ]]; then
@@ -246,11 +232,52 @@ case "${step}" in
           echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
           exit 1
         fi
+        # An existing remote tag anchors the GitHub Release; --target only
+        # applies when gh creates a new tag. A tag pointing at a different
+        # commit would ship npm packages and a Release for two commits.
+        remote_tag="$(git ls-remote origin "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")"
+        if [[ -n "${remote_tag}" ]]; then
+          tag_commit="$(printf '%s\n' "${remote_tag}" | awk '/\^\{\}$/{print $1}')"
+          if [[ -z "${tag_commit}" ]]; then
+            tag_commit="$(printf '%s\n' "${remote_tag}" | awk 'NR==1{print $1}')"
+          fi
+          if [[ "${tag_commit}" != "${release_commit}" ]]; then
+            echo "::error::Remote tag ${RELEASE_TAG} points at ${tag_commit}, not the release commit ${release_commit}. Refusing to resume."
+            exit 1
+          fi
+        fi
+        # Read-only channel checks run from the workflow-pinned guard before
+        # the write credential is exported, so neither the comparison nor
+        # the code it executes depends on the selected release ref.
+        # Exit codes match the pre-push guard below: 0 safe, 1 decisive
+        # channel refusal, 2 probe failure (the only retryable one), 4
+        # malformed input.
+        for attempt in 1 2 3; do
+          channel_status=0
+          node .release-workflow/scripts/assert-release-version.mjs --assert-channel-resumable --version="${RELEASE_VERSION}" --tag="${NPM_TAG}" || channel_status=$?
+          if [[ "${channel_status}" -ne 2 ]]; then
+            break
+          fi
+          if [[ "${attempt}" -lt 3 ]]; then
+            echo "Resume channel probe failed (exit 2); retrying in $(( attempt * 15 ))s (attempt ${attempt} of 3)..."
+            sleep $(( attempt * 15 ))
+          fi
+        done
+        if [[ "${channel_status}" -eq 1 ]]; then
+          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
+        if [[ "${channel_status}" -ne 0 ]]; then
+          exit "${channel_status}"
+        fi
         git switch --detach "${release_commit}"
         echo "reused_commit=true" >> "${GITHUB_OUTPUT}"
         echo "::notice::Reusing ${release_branch_name} at ${release_commit}; published npm versions will be skipped."
         exit 0
       fi
+      # Keep the write credential unavailable until the push step needs it.
+      export GH_TOKEN="${CI_BOT_PAT}"
+      gh auth setup-git
       # Guard exit codes: 0 unreleased, 2 probe failure (the only retryable
       # one), 3 already shipped, 4 malformed version. Anything but 2 breaks
       # out on the first attempt so a decisive refusal is not logged three

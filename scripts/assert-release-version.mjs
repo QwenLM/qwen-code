@@ -7,6 +7,7 @@
  */
 
 import { execSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { RELEASE_WORKSPACES } from './release-packages.mjs';
 
@@ -118,11 +119,105 @@ export function runAssertVersionCli(version) {
   return 0;
 }
 
+/**
+ * Resume-time guard for a partially published release. `latest` on the CLI
+ * cannot speak for the workspace packages: pnpm skips already-published
+ * versions but re-points the dist-tag of every package it does publish, so
+ * one workspace tag ahead of the resuming version already means resuming
+ * would regress that channel. Read every published package's target
+ * dist-tag and refuse only when one is strictly newer than the resuming
+ * version. Same-date nightlies carry unordered short SHAs, so an equal core
+ * with different nightly suffixes cannot prove order and refuses too.
+ * Runs from the workflow-pinned checkout before any write credential is
+ * exported: its `npm view` calls and the `semver` import must not come from
+ * the selected release ref.
+ * Exit codes: 0 safe to resume, 1 decisive channel refusal (the workflow
+ * marks version_refusal), 2 probe failure (retried), 4 malformed input.
+ */
+export function runAssertChannelResumableCli(version, tag) {
+  const versionFormat =
+    /^\d+\.\d+\.\d+(?:-preview\.\d+|-nightly\.\d{8}\.[0-9a-f]+)?$/;
+  if (
+    typeof version !== 'string' ||
+    typeof tag !== 'string' ||
+    !versionFormat.test(version) ||
+    !/^[a-z][a-z0-9-]*$/.test(tag)
+  ) {
+    console.log(
+      '::error::assert-channel-resumable requires a release version and a plain dist-tag, e.g. --version=1.2.3 --tag=latest',
+    );
+    return 4;
+  }
+  const semver = createRequire(import.meta.url)('semver');
+  const target = semver.parse(version);
+  const nightly = /^(\d+\.\d+\.\d+-nightly\.\d{8})\.([0-9a-f]+)$/;
+  const targetNightly = nightly.exec(version);
+  for (const pkg of PUBLISHED_PACKAGES) {
+    let current;
+    try {
+      current = execSync(`npm view ${pkg} dist-tags.${tag}`).toString().trim();
+    } catch (error) {
+      if (!error.message?.includes('E404')) {
+        console.log(
+          `::error::Failed to verify ${pkg} dist-tags.${tag} on npm: ${error.message}`,
+        );
+        return 2;
+      }
+      // The package has never been published on this registry; publishing
+      // it moves the channel forward, never back.
+      continue;
+    }
+    if (current === '') continue;
+    const parsed = semver.parse(current);
+    if (!parsed) {
+      console.log(
+        `::error::Cannot compare npm ${tag} for ${pkg} (${current}) with ${version}; refusing to resume.`,
+      );
+      return 1;
+    }
+    if (semver.gt(parsed, target)) {
+      console.log(
+        `::error::npm ${tag} for ${pkg} is ${current}, past ${version}. Resuming would regress the dist-tag.`,
+      );
+      return 1;
+    }
+    const currentNightly = nightly.exec(current);
+    if (
+      targetNightly &&
+      currentNightly &&
+      currentNightly[1] === targetNightly[1] &&
+      currentNightly[2] !== targetNightly[2]
+    ) {
+      console.log(
+        `::error::npm ${tag} for ${pkg} is ${current}, a different same-day nightly than ${version}; short SHAs cannot prove publish order. Refusing to resume.`,
+      );
+      return 1;
+    }
+  }
+  return 0;
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const prefix = '--assert-unreleased=';
   const arg = process.argv[2] ?? '';
-  const exitCode = runAssertVersionCli(
-    arg.startsWith(prefix) ? arg.slice(prefix.length) : '',
-  );
+  let exitCode;
+  if (arg === '--assert-channel-resumable') {
+    const values = Object.fromEntries(
+      process.argv.slice(3).map((entry) => {
+        const eqIndex = entry.indexOf('=');
+        return eqIndex === -1
+          ? [entry, '']
+          : [entry.slice(0, eqIndex), entry.slice(eqIndex + 1)];
+      }),
+    );
+    exitCode = runAssertChannelResumableCli(
+      values['--version'],
+      values['--tag'],
+    );
+  } else {
+    const prefix = '--assert-unreleased=';
+    exitCode = runAssertVersionCli(
+      arg.startsWith(prefix) ? arg.slice(prefix.length) : '',
+    );
+  }
   if (exitCode !== 0) process.exit(exitCode);
 }

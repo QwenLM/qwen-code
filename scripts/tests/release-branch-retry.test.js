@@ -6,6 +6,7 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -17,7 +18,6 @@ import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const script = resolve('.github/scripts/run-release-step.sh');
-const nodeModules = resolve(dirname(script), '../../node_modules');
 const directories = [];
 afterEach(() =>
   directories
@@ -30,7 +30,8 @@ function createFixture({
   localVersion = branchVersion,
   finalize = false,
   releasePublished = false,
-  npmLatest = '1.2.2',
+  channelStatus = 0,
+  tipKind = 'bump',
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'release-branch-retry-'));
   directories.push(directory);
@@ -38,6 +39,7 @@ function createFixture({
   const remote = join(directory, 'remote.git');
   const bin = join(directory, 'bin');
   const output = join(directory, 'output');
+  const workflowScripts = join(checkout, '.release-workflow/scripts');
   mkdirSync(checkout);
   mkdirSync(bin);
   const git = (...args) => {
@@ -76,31 +78,52 @@ function createFixture({
   }
   commit('Release');
   const source = git('rev-parse', 'HEAD');
-  writeFileSync(
-    join(checkout, 'package.json'),
-    `{"version":"${branchVersion}"}\n`,
-  );
-  commit('Bump');
-  const original = git('rev-parse', 'HEAD');
+  let original = source;
+  if (tipKind !== 'source') {
+    writeFileSync(
+      join(checkout, 'package.json'),
+      `{"version":"${branchVersion}"}\n`,
+    );
+    commit('Bump');
+    original = git('rev-parse', 'HEAD');
+  }
   git('init', '--bare', remote);
   git('remote', 'add', 'origin', remote);
-  git('push', 'origin', 'HEAD:refs/heads/release/v1.2.3');
+  git('push', 'origin', `${original}:refs/heads/release/v1.2.3`);
+  if (tipKind === 'merge') {
+    // A same-tree merge whose first parent is the release source must not
+    // pass the parentage check just because rev-parse HEAD^ matches it.
+    git('checkout', '--detach', source);
+    git('merge', '--no-ff', '-m', 'Merge same tree', original);
+    git('push', 'origin', 'HEAD:refs/heads/release/v1.2.3');
+  }
   if (finalize) {
     // Finalize pushes a CHANGELOG commit after the release completes.
+    git(
+      'checkout',
+      '--detach',
+      tipKind === 'merge' ? git('rev-parse', 'HEAD') : original,
+    );
     writeFileSync(join(checkout, 'CHANGELOG.md'), `v${branchVersion}\n`);
     commit('Finalize');
     git('push', 'origin', 'HEAD:refs/heads/release/v1.2.3');
   }
-  git('reset', '--hard', source);
+  git('checkout', '--detach', source);
+  if (tipKind !== 'source') {
+    writeFileSync(
+      join(checkout, 'package.json'),
+      `{"version":"${localVersion}"}\n`,
+    );
+    commit('Bump retry');
+  }
+  // The resume guard runs from the workflow-pinned checkout beside the
+  // release tree, so the stub must stay untracked: a committed copy would
+  // change HEAD's tree and diverge from the pushed branch.
+  mkdirSync(workflowScripts, { recursive: true });
   writeFileSync(
-    join(checkout, 'package.json'),
-    `{"version":"${localVersion}"}\n`,
+    join(workflowScripts, 'assert-release-version.mjs'),
+    `process.exit(${channelStatus});\n`,
   );
-  commit('Bump retry');
-
-  writeFileSync(join(bin, 'npm'), `#!/bin/sh\necho "${npmLatest}"\n`, {
-    mode: 0o755,
-  });
   writeFileSync(
     join(bin, 'gh'),
     '#!/bin/sh\n' +
@@ -119,6 +142,7 @@ function createFixture({
   return {
     git,
     original,
+    source,
     output,
     run: () =>
       spawnSync('bash', [script, 'push-release-branch'], {
@@ -127,11 +151,10 @@ function createFixture({
         env: {
           ...process.env,
           PATH: `${bin}:${process.env.PATH}`,
-          NODE_PATH: nodeModules,
           HUSKY: '0',
           BRANCH_NAME: 'release/v1.2.3',
           RELEASE_TAG: 'v1.2.3',
-          RELEASE_VERSION: '1.2.3',
+          RELEASE_VERSION: branchVersion,
           RELEASE_SHA: source,
           NPM_TAG: 'latest',
           IS_DRY_RUN: 'false',
@@ -166,11 +189,12 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
   );
 
   it('refuses to resume when npm latest has moved past the release version', () => {
-    const fixture = createFixture({ npmLatest: '1.2.4' });
+    const fixture = createFixture({ channelStatus: 1 });
     const result = fixture.run();
     expect(result.status, result.stderr).toBe(1);
-    expect(result.stdout).toContain('npm latest is 1.2.4');
-    expect(result.stdout).toContain('regress the dist-tag');
+    expect(readFileSync(fixture.output, 'utf8')).toContain(
+      'version_refusal=true',
+    );
     expect(
       fixture.git('ls-remote', 'origin', 'refs/heads/release/v1.2.3'),
     ).toBe(`${fixture.original}\trefs/heads/release/v1.2.3`);
@@ -180,7 +204,7 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
     const fixture = createFixture({
       finalize: true,
       releasePublished: true,
-      npmLatest: '1.2.4',
+      channelStatus: 1,
     });
     const result = fixture.run();
     expect(result.status, result.stderr).toBe(1);
@@ -189,4 +213,50 @@ describe.skipIf(process.platform === 'win32')('release branch retry', () => {
       'version_refusal=true',
     );
   });
+
+  it('resumes when the source commit itself is the release tip (no version bump)', () => {
+    const fixture = createFixture({ tipKind: 'source' });
+    const result = fixture.run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(fixture.git('rev-parse', 'HEAD')).toBe(fixture.source);
+    expect(readFileSync(fixture.output, 'utf8')).toContain(
+      'reused_commit=true',
+    );
+  });
+
+  it('refuses a same-tree merge whose first parent is the release source', () => {
+    const fixture = createFixture({ tipKind: 'merge' });
+    const result = fixture.run();
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stdout).toContain('not the release source');
+    expect(result.stdout).toContain('Refusing to resume');
+  });
+
+  it('refuses to resume when the remote tag points at a different commit', () => {
+    const fixture = createFixture();
+    fixture.git('push', 'origin', `${fixture.source}:refs/tags/v1.2.3`);
+    const result = fixture.run();
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stdout).toContain('Remote tag v1.2.3 points at');
+    expect(result.stdout).toContain('Refusing to resume');
+  });
+
+  it('resumes when the remote tag already points at the release commit', () => {
+    const fixture = createFixture();
+    fixture.git('push', 'origin', `${fixture.original}:refs/tags/v1.2.3`);
+    const result = fixture.run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(fixture.git('rev-parse', 'HEAD')).toBe(fixture.original);
+  });
+
+  it('fails closed without version_refusal when the channel probe cannot be confirmed', () => {
+    const fixture = createFixture({ channelStatus: 2 });
+    const result = fixture.run();
+    expect(result.status, result.stderr).toBe(2);
+    expect(result.stdout).toContain('Resume channel probe failed');
+    // A probe failure must not mark version_refusal: the workflow then
+    // reports a real failure instead of silently swallowing the run.
+    expect(existsSync(fixture.output)).toBe(false);
+    expect(fixture.git('rev-parse', 'HEAD')).not.toBe(fixture.original);
+  }, 70000);
 });

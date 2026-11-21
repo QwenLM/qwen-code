@@ -4182,11 +4182,28 @@ esac`,
     expect(pushReleaseBranchStep.env.RELEASE_VERSION).toBe(
       '${{ needs.prepare.outputs.release_version }}',
     );
-    // The resume arm verifies the reused commit is a direct child of the
-    // release source commit. Without RELEASE_SHA wired into the step the
-    // provenance check can never pass and every resume is refused.
+    // The resume arm verifies the reused commit is the release source or
+    // its direct single-parent version commit. Without RELEASE_SHA wired
+    // into the step the provenance check can never pass and every resume
+    // is refused.
     expect(pushReleaseBranchStep.env.RELEASE_SHA).toBe(
       '${{ needs.prepare.outputs.release_sha }}',
+    );
+    // The resume-time channel guard must ride the same workflow-pinned
+    // script (its semver import and npm probes cannot come from the
+    // selected release ref), run before the write credential is exported,
+    // and turn its decisive exit 1 into the version_refusal marker.
+    const resumeGuardCall =
+      'node .release-workflow/scripts/assert-release-version.mjs --assert-channel-resumable --version="${RELEASE_VERSION}" --tag="${NPM_TAG}"';
+    const resumeGuard = releaseStepScript.indexOf(resumeGuardCall);
+    expect(resumeGuard).toBeGreaterThan(
+      releaseStepScript.indexOf('if [[ "${IS_DRY_RUN}" == "false" ]]'),
+    );
+    expect(resumeGuard).toBeLessThan(
+      releaseStepScript.indexOf('export GH_TOKEN="${CI_BOT_PAT}"'),
+    );
+    expect(releaseStepScript).toMatch(
+      /node \.release-workflow\/scripts\/assert-release-version\.mjs --assert-channel-resumable --version="\$\{RELEASE_VERSION\}" --tag="\$\{NPM_TAG\}" \|\| channel_status=\$\?[\s\S]*?if \[\[ "\$\{channel_status\}" -eq 1 \]\]; then\n {10}echo "version_refusal=true" >> "\$\{GITHUB_OUTPUT\}"\n {10}exit 1\n {8}fi/,
     );
     expect(pushReleaseBranchStep.run).toContain('push-release-branch');
     const guard = releaseStepScript.indexOf(
@@ -4588,9 +4605,21 @@ describe('release artifact handoff', () => {
       'Build Standalone Archives',
     ]) {
       expect(step('publish', name).if).toBe(
-        "${{ needs.build_release.result != 'success' }}",
+        "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}",
       );
     }
+    // A resume rebuilds from the adopted release commit through the same
+    // two build steps, so the reset/checkout pair between them protects the
+    // archives build on the retry path too — a hand-copied rebuild step
+    // running both commands back-to-back would not get that re-pin.
+    expect(step('publish', 'Prepare release branch').env.REUSED_COMMIT).toBe(
+      '${{ steps.push_release_branch.outputs.reused_commit }}',
+    );
+    expect(
+      releaseYaml.jobs.publish.steps.some((entry) =>
+        String(entry.name ?? '').startsWith('Rebuild artifacts'),
+      ),
+    ).toBe(false);
     expect(publish.steps.indexOf(restore)).toBeLessThan(
       publish.steps.indexOf(
         step('publish', 'Conditionally push release branch'),
