@@ -114,23 +114,31 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
     private static void requireRecoveryDirectoryOutsideWorkspaces(ManagedAgentSettings.RuntimeBroker broker,
             Path directory) {
         try {
-            Path candidate = Files.exists(directory) ? directory.toRealPath()
-                    : directory.getParent().toRealPath().resolve(directory.getFileName());
-            if (candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
+            if (recoveryDirectoryUnderWorkspaceRoot(broker, directory)) {
                 throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
-            }
-            if (!broker.getWorkspaceCreationRoot().isBlank()
-                    && candidate.startsWith(Path.of(broker.getWorkspaceCreationRoot()).toRealPath())) {
-                throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
-            }
-            for (var mount : broker.getWorkspaceMounts()) {
-                if (candidate.startsWith(Path.of(mount.root()).toRealPath())) {
-                    throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
-                }
             }
         } catch (IOException error) {
             throw new IllegalStateException("Runtime recovery directory could not be verified", error);
         }
+    }
+
+    private static boolean recoveryDirectoryUnderWorkspaceRoot(ManagedAgentSettings.RuntimeBroker broker,
+            Path directory) throws IOException {
+        Path candidate = Files.exists(directory) ? directory.toRealPath()
+                : directory.getParent().toRealPath().resolve(directory.getFileName());
+        if (candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
+            return true;
+        }
+        if (!broker.getWorkspaceCreationRoot().isBlank()
+                && candidate.startsWith(Path.of(broker.getWorkspaceCreationRoot()).toRealPath())) {
+            return true;
+        }
+        for (var mount : broker.getWorkspaceMounts()) {
+            if (candidate.startsWith(Path.of(mount.root()).toRealPath())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String recoveryDirectoryOutsideRootsMessage() {
@@ -147,6 +155,21 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                     "set the directory");
         }
         Path directory = Path.of(path).toAbsolutePath().normalize();
+        if (broker.isDurableLocalProcess()) {
+            // `create()` refuses a durable state directory under any Workspace
+            // root, so --check must not PASS or WARN a configuration whose
+            // first start cannot succeed. An unresolvable path is reported by
+            // the component checks below.
+            try {
+                if (recoveryDirectoryUnderWorkspaceRoot(broker, directory)) {
+                    return new Check("broker-state", Status.FAIL,
+                            path + " is inside a Workspace root",
+                            recoveryDirectoryOutsideRootsMessage());
+                }
+            } catch (IOException ignored) {
+                // resolution failure: the absent/existing checks name the cause
+            }
+        }
         if (Files.isDirectory(directory)) {
             if (!Files.isWritable(directory)) {
                 return new Check("broker-state", Status.FAIL, path + " is not writable",
@@ -203,7 +226,14 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
         if (parent == null || !Files.isDirectory(parent)) {
             return new Check("broker-state", Status.FAIL,
                     (parent == null ? path : parent.toString()) + " is not a directory",
-                    "create the parent directory");
+                    "replace it with a directory");
+        }
+        if (!Files.isReadable(parent)) {
+            // `LocalRuntimeStore.syncDirectory` opens the parent for reading
+            // right after it creates the state directory.
+            return new Check("broker-state", Status.FAIL,
+                    parent + " is not readable",
+                    "grant read access to the service account");
         }
         if (!Files.isWritable(parent)) {
             return new Check("broker-state", Status.FAIL,

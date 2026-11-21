@@ -52,7 +52,8 @@ class LocalRuntimeProviderFactoryTest {
     }
 
     @Test
-    void preflightWarnsAboutAnAbsentStateDirectoryOnlyWhenItsParentAllowsCreation() {
+    void preflightWarnsAboutAnAbsentStateDirectoryOnlyWhenItsParentAllowsCreation()
+            throws Exception {
         var factory = new LocalRuntimeProviderFactory();
         var ephemeral = settings();
         ephemeral.getRuntimeBroker().setDurableLocalProcess(false);
@@ -64,12 +65,170 @@ class LocalRuntimeProviderFactoryTest {
                             .isEqualTo(RuntimeProviderFactory.Status.WARN);
                     assertThat(check.detail()).contains("created on the first Runtime spawn");
                 });
-        assertThat(factory.preflight(settings()))
-                .filteredOn(check -> check.name().equals("broker-state"))
-                .singleElement()
-                .satisfies(check -> assertThat(check.status())
-                        .isEqualTo(RuntimeProviderFactory.Status.FAIL));
+        Path root = realTempDirectory("durable-absent-parent");
+        try {
+            var durable = settings();
+            durable.getRuntimeBroker()
+                    .setStateDirectory(root.resolve("missing").resolve("state").toString());
+            assertThat(factory.preflight(durable))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status())
+                                .isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                        assertThat(check.detail()).contains("missing");
+                    });
+        } finally {
+            deleteRecursively(root);
+        }
         assertThat(temporary.resolve("not-created")).doesNotExist();
+    }
+
+    @Test
+    void preflightPassesAnExistingWritableStateDirectory() throws Exception {
+        Path root = realTempDirectory("durable-pass");
+        try {
+            Path directory = Files.createDirectory(root.resolve("state"));
+            var settings = settings();
+            settings.getRuntimeBroker().setStateDirectory(directory.toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status())
+                                .isEqualTo(RuntimeProviderFactory.Status.PASS);
+                        assertThat(check.detail()).isEqualTo(directory.toString());
+                    });
+        } finally {
+            deleteRecursively(root);
+        }
+    }
+
+    @Test
+    void preflightRejectsADurableStateDirectoryInsideAWorkspaceRoot()
+            throws Exception {
+        Path root = realTempDirectory("durable-workspace");
+        try {
+            var settings = settings();
+            settings.getRuntimeBroker().setWorkspaceCwd(root.toString());
+            settings.getRuntimeBroker()
+                    .setStateDirectory(root.resolve("state").toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status())
+                                .isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                        assertThat(check.remediation())
+                                .contains("outside every configured Workspace");
+                    });
+            Files.createDirectory(root.resolve("existing"));
+            settings.getRuntimeBroker()
+                    .setStateDirectory(root.resolve("existing").toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> assertThat(check.status())
+                            .isEqualTo(RuntimeProviderFactory.Status.FAIL));
+        } finally {
+            deleteRecursively(root);
+        }
+    }
+
+    @Test
+    void preflightRejectsADurableStateDirectoryBlockedByAFile() throws Exception {
+        Path root = realTempDirectory("durable-file");
+        try {
+            Path blocker = Files.createFile(root.resolve("blocker"));
+            var settings = settings();
+            settings.getRuntimeBroker()
+                    .setStateDirectory(blocker.resolve("state").toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status())
+                                .isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                        assertThat(check.detail()).contains("is not a directory");
+                        assertThat(check.detail()).contains(blocker.toString());
+                        assertThat(check.remediation())
+                                .isEqualTo("replace it with a directory");
+                    });
+        } finally {
+            deleteRecursively(root);
+        }
+    }
+
+    @Test
+    void preflightRejectsADurableStateDirectoryWhoseParentIsNotWritable() throws Exception {
+        assumeTrue(permissionBitsAreEnforced(temporary));
+        Path root = realTempDirectory("durable-read-only");
+        Path parent = Files.createDirectory(root.resolve("parent"));
+        var permissions = Files.getPosixFilePermissions(parent);
+        Files.setPosixFilePermissions(parent, PosixFilePermissions.fromString("r-xr-xr-x"));
+        try {
+            var settings = settings();
+            settings.getRuntimeBroker().setStateDirectory(parent.resolve("state").toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status())
+                                .isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                        assertThat(check.detail()).contains("is not writable");
+                    });
+        } finally {
+            Files.setPosixFilePermissions(parent, permissions);
+            deleteRecursively(root);
+        }
+    }
+
+    @Test
+    void preflightRejectsADurableStateDirectoryWhoseParentIsNotSearchable() throws Exception {
+        assumeTrue(permissionBitsAreEnforced(temporary));
+        Path root = realTempDirectory("durable-unsearchable");
+        Path parent = Files.createDirectory(root.resolve("parent"));
+        var permissions = Files.getPosixFilePermissions(parent);
+        Files.setPosixFilePermissions(parent, PosixFilePermissions.fromString("rw-------"));
+        try {
+            var settings = settings();
+            settings.getRuntimeBroker().setStateDirectory(parent.resolve("state").toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status())
+                                .isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                        assertThat(check.detail()).contains("is not searchable");
+                    });
+        } finally {
+            Files.setPosixFilePermissions(parent, permissions);
+            deleteRecursively(root);
+        }
+    }
+
+    @Test
+    void preflightRejectsADurableStateDirectoryWhoseParentIsNotReadable() throws Exception {
+        assumeTrue(permissionBitsAreEnforced(temporary));
+        Path root = realTempDirectory("durable-unreadable");
+        Path parent = Files.createDirectory(root.resolve("parent"));
+        var permissions = Files.getPosixFilePermissions(parent);
+        Files.setPosixFilePermissions(parent, PosixFilePermissions.fromString("-wx------"));
+        try {
+            var settings = settings();
+            settings.getRuntimeBroker().setStateDirectory(parent.resolve("state").toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status())
+                                .isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                        assertThat(check.detail()).contains("is not readable");
+                    });
+        } finally {
+            Files.setPosixFilePermissions(parent, permissions);
+            deleteRecursively(root);
+        }
     }
 
     @Test
