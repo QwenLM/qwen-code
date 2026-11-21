@@ -51,6 +51,10 @@ describe.skipIf(process.platform === 'win32')(
     let child: WorkerProcess;
     let children: WorkerProcess[];
     let hold: string | undefined;
+    let initializations: Array<{
+      permissions?: { allow?: readonly string[]; ask?: readonly string[]; deny?: readonly string[] };
+      approvalMode?: string;
+    }>;
     let messages: Array<{ id: string; request: ExecutionWorkerRequest }>;
     let cancellations: string[];
     const signal = new AbortController().signal;
@@ -105,6 +109,7 @@ describe.skipIf(process.platform === 'win32')(
       await mkdir(bundle);
       await writeFile(join(bundle, 'execution-worker.js'), '');
       hold = undefined;
+      initializations = [];
       messages = [];
       cancellations = [];
       children = [];
@@ -120,6 +125,10 @@ describe.skipIf(process.platform === 'win32')(
           const message = JSON.parse(data.toString());
           if ('cancel' in message) {
             cancellations.push(message.cancel);
+            return;
+          }
+          if ('initialize' in message) {
+            initializations.push(message.initialize);
             return;
           }
           messages.push(message);
@@ -229,11 +238,14 @@ describe.skipIf(process.platform === 'win32')(
       'uses security metadata for both worker UID mappings: %j',
       async (info, rootless) => {
         await environment.dispose();
+        initializations = [];
         runtime.execFile.mockClear();
         onExec((args, callback) => {
           callback(null, args[0] === 'info' ? JSON.stringify(info) : '{}', '');
         });
         environment = await createEnvironment();
+        expect(initializations).toHaveLength(1);
+        expect(initializations[0]).toMatchObject({ approvalMode: 'auto' });
         await prepareInstall();
         const creates = createCalls();
         expect(creates).toHaveLength(2);

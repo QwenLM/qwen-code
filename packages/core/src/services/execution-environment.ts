@@ -172,6 +172,13 @@ export interface ExecutionWorkerOptions {
   workspace: string;
   outputDirectory?: string;
   sessionId: string;
+  approvalMode?: ReturnType<Config['getApprovalMode']>;
+  /** Permission rules resolved by the host and enforced inside the worker. */
+  permissions?: {
+    allow?: readonly string[];
+    ask?: readonly string[];
+    deny?: readonly string[];
+  };
   truncateToolOutputLines: number;
   truncateToolOutputThreshold?: number;
   fileReadCacheDisabled: boolean;
@@ -184,7 +191,10 @@ export interface ExecutionWorkerOptions {
 
 export type ExecutionWorkerMessage =
   | { id: string; request: ExecutionWorkerRequest }
-  | { cancel: string };
+  | { cancel: string }
+  | {
+      initialize: Pick<ExecutionWorkerOptions, 'permissions' | 'approvalMode'>;
+    };
 
 export type ExecutionWorkerReply =
   | { id: string; result: unknown }

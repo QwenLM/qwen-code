@@ -426,7 +426,7 @@ describe('container execution boundary', () => {
       expect(args.slice(-3)).toEqual([
         'trusted-image',
         '/opt/qwen-executor/execution-worker.js',
-        JSON.stringify(worker),
+        JSON.stringify({ ...worker, permissions: undefined }),
       ]);
     },
   );
