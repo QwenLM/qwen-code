@@ -735,6 +735,54 @@ describe('modelConfigResolver', () => {
     });
   });
 
+  describe('capabilities.vision declares image input at session level', () => {
+    // The per-request path (BaseLlmClient.resolveForModel) merges
+    // capabilities.vision into modalities; session resolution must agree, or
+    // the vision-bridge gate transcribes images for a model the user declared
+    // vision-capable but the built-in catalog does not know.
+    const visionProvider = (
+      generationConfig?: ModelGenerationConfig,
+      vision = true,
+    ) => ({
+      id: 'custom-vlm',
+      name: 'Custom VLM',
+      envKey: 'MY_KEY',
+      baseUrl: 'https://api.example.com',
+      capabilities: { vision },
+      ...(generationConfig === undefined ? {} : { generationConfig }),
+    });
+
+    it('grants image input to a catalog-unknown model declared vision-capable', () => {
+      const result = resolve({
+        modelProvider: visionProvider(),
+        env: PROVIDER_ENV,
+      });
+
+      expect(result.config.modalities?.image).toBe(true);
+      expect(result.sources['modalities'].kind).toBe('modelProviders');
+      expect(result.sources['modalities'].detail).toBe('capabilities.vision');
+    });
+
+    it('keeps other explicit modalities while merging image', () => {
+      const result = resolve({
+        modelProvider: visionProvider({ modalities: { video: true } }),
+        env: PROVIDER_ENV,
+      });
+
+      expect(result.config.modalities).toEqual({ video: true, image: true });
+    });
+
+    it('leaves modalities untouched without the vision capability', () => {
+      const result = resolve({
+        modelProvider: visionProvider(undefined, false),
+        env: PROVIDER_ENV,
+      });
+
+      expect(result.config.modalities).toEqual({});
+      expect(result.sources['modalities'].kind).toBe('computed');
+    });
+  });
+
   describe('[Regression] env-var-only path must apply model context defaults', () => {
     it('env-var-only path: contextWindowSize auto-detected for claude-opus-4-6', () => {
       const result = envOnly('claude-opus-4-6');

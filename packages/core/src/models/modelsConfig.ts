@@ -1038,6 +1038,25 @@ export class ModelsConfig {
         detail: 'auto-detected from model',
       };
     }
+
+    // capabilities.vision declares image input support; mirror
+    // BaseLlmClient.resolveForModel and modelConfigResolver so session-level
+    // consumers agree with the per-request path after a model switch.
+    if (
+      model.capabilities.vision &&
+      this._generationConfig.modalities?.image !== true
+    ) {
+      this._generationConfig.modalities = {
+        ...this._generationConfig.modalities,
+        image: true,
+      };
+      this.generationConfigSources['modalities'] = {
+        kind: 'modelProviders',
+        authType: model.authType,
+        modelId: model.id,
+        detail: 'capabilities.vision',
+      };
+    }
   }
 
   /**
