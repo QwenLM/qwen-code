@@ -4049,7 +4049,13 @@ esac`,
       try {
         const probe = join(dir, 'child-env');
         const stub = join(dir, 'pinned-runtime');
-        writeFileSync(stub, '#!/bin/sh\nenv > "$STAMP_PROBE_OUT"\n');
+        // Names only: the release lane's job env carries secrets the runner
+        // does not mask, and a worker killed at the step cap never reaches
+        // the cleanup below, so no value may touch disk at all.
+        writeFileSync(
+          stub,
+          '#!/bin/sh\nenv | cut -d= -f1 > "$STAMP_PROBE_OUT"\n',
+        );
         chmodSync(stub, 0o755);
         // Both entrances: --ci hands the driver to the pinned runtime, a bare
         // invocation runs the identity probes in its own process. A scrub
@@ -4077,13 +4083,8 @@ esac`,
             existsSync(probe),
             `the stub never ran: ${mode} (status=${result.status} signal=${result.signal} error=${result.error?.code})\n${result.stderr ?? ''}`,
           ).toBe(true);
-          // Key names only. The dump holds every variable the child carries,
-          // and the release lane's job env sets secrets the runner does not
-          // mask, so rendering it on failure would publish them to a public
-          // CI log.
           const leaked = readFileSync(probe, 'utf8')
             .split('\n')
-            .map((line) => line.slice(0, line.indexOf('=')))
             .filter((key) => SESSION_STAMPS.includes(key));
           expect(leaked, `child env carries session stamps: ${mode}`).toEqual(
             [],
@@ -4156,7 +4157,7 @@ esac`,
     };
     declares(
       'scripts/tests/test-setup.ts',
-      /for \(const key of \[([^\]]*)\]\)\s*delete process\.env\[key\];/g,
+      /for \(const key of \[([^\]]*)\]\)\s*\{?\s*delete process\.env\[key\];/g,
     );
     declares(
       'scripts/test-standalone-runtimes.mjs',
