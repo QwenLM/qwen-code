@@ -489,7 +489,7 @@ export function containerNonceErrors(boundaryText, gateText, roundDir) {
     if (found) return [];
     if (bounded) {
       return [
-        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume or echo the nonce into an early log; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume so the scan reaches the marker within the bound (the walk is unsorted, so an \'early\' log is not read first); if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
       ];
     }
   }

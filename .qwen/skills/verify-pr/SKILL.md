@@ -560,8 +560,12 @@ authority to certify the round.
    whitespace-delimited token after it, so any other spelling (a bare nonce,
    `verify nonce=<value>`, a separate nonce file) is refused. This ties the
    `mode:"container"` declaration to execution inside this container — a
-   battery run on the host cannot read the container-local nonce, and the
-   record's hash does not reveal it. If the battery cannot run in this
+   battery run on the host cannot produce the matching `container-nonce:` line
+   without the container-local plaintext (the shared mount does not carry it),
+   and the record's hash does not reveal it. The scan is bounded (64 MiB of
+   non-`evidence/` logs / 20000 entries in total): a round whose marker lies
+   beyond the bound is refused, so keep the non-evidence log volume under it.
+   If the battery cannot run in this
    container (e.g. a Java-heavy
    round whose image carries no JDK), do NOT declare `mode:"container"`:
    declare `mode:"waived"` with the maintainer's approval instead.
@@ -786,9 +790,11 @@ equality and states no ordering — the registered head can never prepare:
 `--release --head <headSha> --round <r> --repo <owner>/<repo>` it and do not
 restart it — the live head is delivered by the next fire (the gate cursor
 tracks the live head), or is already in the deferred list the release prints,
-which you then start. The started head is its own round — repeat its head and
-round in `--complete`, not the released head's. Do not `git checkout` the named
-head under the old marker.
+which you then start — except a head the list names under the terminal "not
+covered after repeated inconclusive rounds" group, which needs a new head move
+(the exit-3 contract below). The started head is its own round — repeat its
+head and round in `--complete`, not the released head's. Do not `git checkout`
+the named head under the old marker.
 The helper runs from the trusted clone — the state root defaults to its
 main worktree, never the round's PR clone. The default resolves from the
 script's own location, so a copy outside the trusted clone — the container

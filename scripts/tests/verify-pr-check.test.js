@@ -2650,9 +2650,15 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
       join(dir, 'harness.log'),
       'x'.repeat(65 * 1024 * 1024) + `\ncontainer-nonce: ${NONCE}\n`,
     );
-    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
-      /hit its resource bound/,
-    );
+    const refusal = containerNonceErrors(boundary, gateWith(), dir).join('\n');
+    expect(refusal).toMatch(/hit its resource bound/);
+    // B2 (#17371 round-7): pin the exact constants the bound is documented at,
+    // so a silent TOTAL_BUDGET / MAX_ENTRIES change reds this, not just the phrase.
+    expect(refusal).toMatch(/64 MiB total \/ 20000 entries/);
+    // B1 (#17371 round-7): the remedy must not imply log order controls the
+    // unsorted walk — the "early log" advice is retracted.
+    expect(refusal).toMatch(/unsorted/);
+    expect(refusal).not.toMatch(/echo the nonce into an early log/);
   });
 
   // R4-4: directories count against the entry cap, so a planted forest of empty
@@ -2687,6 +2693,35 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
       `container-nonce: ${NONCE}\n`,
     );
     expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // B3 (#17371 round-7): the entry cap is aggregate across the whole walk, not
+  // reset per directory — a forest split under nested parents still trips it.
+  // A per-directory reset would keep each parent under the cap and ship green.
+  it('counts entries against the cap across nested directories', () => {
+    const dir = dirWithLog(null);
+    for (let i = 0; i < 200; i++) {
+      const sub = join(dir, `p${i}`);
+      mkdirSync(sub);
+      for (let j = 0; j < 101; j++) mkdirSync(join(sub, `d${j}`));
+    }
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /hit its resource bound/,
+    );
+  });
+
+  // D17-10 (#17371): the walk uses withFileTypes and never follows a symlink —
+  // a symlinked directory carrying a nonce log is not recursed, so the marker
+  // is not found through it (fail-closed, not a followed alias).
+  it('does not follow a symlinked log directory', () => {
+    const dir = dirWithLog(null);
+    const real = mkdtempSync(join(tmpdir(), 'verify-pr-nonce-real-'));
+    tmpDirs.push(real);
+    writeFileSync(join(real, 'run.log'), `container-nonce: ${NONCE}\n`);
+    symlinkSync(real, join(dir, 'logs'));
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /carry no container-nonce line/,
+    );
   });
 
   it('refuses a plaintext-only legacy record with no nonceSha256', () => {

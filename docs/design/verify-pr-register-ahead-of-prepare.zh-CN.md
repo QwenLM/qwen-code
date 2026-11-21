@@ -179,7 +179,8 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
 
 ## 范围边界
 
-- 仅注册顺序与 `--start` 参数要求。watch-gate 所有权/游标、去重/defer/release
+- 仅注册顺序、`--start` 参数要求，以及 prepare 成功后的 head 比对（维护者 P1，
+  第 14 轮）。watch-gate 所有权/游标、去重/defer/release
   语义、信任边界检查（R17-1，已由 #17375 闭合）均不变。
 - below-Critical 延后项（D17-4…14、R5-2、第 7/8 轮 deferred）仍由 #17371 跟踪；
   本改动不触碰。
@@ -198,5 +199,7 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   `--release` 与重启成对，两命令之间被杀会使 head 失去记录——瞬时路径通过对完好
   标记重试 prepare、不 release 来避免此窗口，但死轮恢复仍带该窗口。watch 只在
   head move 时醒来，故*最后一个* head 上被杀的轮仍等待新 move，或手动
-  `--release --head <H> [--round <r>] --repo <owner>/<repo>` **后再重启**
-  （`--start … --round <r+1>`）——单独 release 会让 head 失去记录。
+  `--release --head <H> --round <r> --repo <owner>/<repo>` **后再重启**
+  （`--start … --round <r+1>`）——单独 release 会让 head 失去记录。`<r>` 是死轮
+  编号，从状态文件在飞条目读出并传入（仅遗留无 round 标记可省略），使重试的
+  release 不会删掉较新轮次的活标记。

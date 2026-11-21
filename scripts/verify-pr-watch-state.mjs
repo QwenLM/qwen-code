@@ -880,6 +880,10 @@ export function releaseRound(stateRoot, { pr, head, round, repo }) {
           retries: entry.retries ?? 0,
         },
       ],
+      // Every writer emits seqCounter so the read guard's "*Heads list implies
+      // seqCounter" invariant holds for the released body too — a legacy
+      // pre-list state has none to inherit via ...existing.
+      seqCounter: existing?.seqCounter ?? 0,
     });
     writeState(stateRoot, pr, state);
     return {

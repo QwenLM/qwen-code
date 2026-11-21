@@ -240,7 +240,6 @@ export function detectIsolation(env = process.env, exists = existsSync) {
     isolated: signals.length > 0,
     signals,
     observed,
-    sandboxRuntime: sandboxRuntime ? sandbox : null,
     seatbelt: sandbox === SEATBELT,
   };
 }
@@ -917,7 +916,9 @@ export function requireBoundary(artifactDir = null, options = {}) {
   let home = options.home;
   if (home === undefined) {
     try {
-      home = homedir();
+      // The homedir seam lets a witness exercise the throw path itself, not
+      // only the post-catch home:null value (D17-4 / #17371 round-7).
+      home = (options.homedir ?? homedir)();
     } catch {
       home = null;
     }

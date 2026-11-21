@@ -252,7 +252,8 @@ existing dead-round recovery (`--release` for a round that died after
 
 ## Scope boundaries
 
-- Only the registration ordering and the `--start` argument requirement. The
+- Only the registration ordering, the `--start` argument requirement, and the
+  post-prepare-success head comparison (maintainer P1, round 14). The
   watch-gate ownership/cursor, the dedup/defer/release semantics, and the
   trust-boundary checks (R17-1, closed by #17375) are unchanged.
 - The below-Critical deferred items (D17-4…14, R5-2, round-7/8 deferred) stay
@@ -280,6 +281,8 @@ existing dead-round recovery (`--release` for a round that died after
   without releasing, but a dead round's recovery still carries that window. A
   watch only wakes on head moves, so a killed round on the
   _last_ head still awaits a new move, or a manual
-  `--release --head <H> [--round <r>] --repo <owner>/<repo>` **followed by a
+  `--release --head <H> --round <r> --repo <owner>/<repo>` **followed by a
   restart** (`--start … --round <r+1>`) — a release alone leaves the head
-  unregistered.
+  unregistered. `<r>` is the dead round's number, read from the state file's
+  in-flight entry and passed (omit it only for a legacy marker that records no
+  round), so a retried release cannot delete a newer round's live marker.
