@@ -183,12 +183,11 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
 // A frozen-install build of a clean detached worktree at main 82a0f3031f71
 // measures 2,151,147 bytes of renderer JS on Node 22.22.2, 171 above the
 // previous ceiling. CI's Build unit-test tree (Linux, Node 22.x) measures
-// 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
-// 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
-// above the local measurement. The initial automatic-trigger presentation
-// measured 2,151,571 JS bytes; round this ceiling up to 2,152,000. With the
-// final source predicates and host-renderer compatibility closure it measures
-// 2,151,698 JS bytes, leaving 302 bytes above local output.
+// 2,149,864 bytes. The forbidden-input guard passes. The warning retains a
+// 713-byte margin above CI. The initial automatic-trigger presentation measured
+// 2,151,571 JS bytes; round this ceiling up to 2,152,000. With the final source
+// predicates and host-renderer compatibility closure it measures 2,151,698 JS
+// bytes, leaving 302 bytes above local output and 2,136 bytes above CI.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_152_000;
 
 // Modules that must not be reachable from the document entry, checked against

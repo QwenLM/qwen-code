@@ -728,6 +728,37 @@ describe('UserMessage', () => {
     expect(container.querySelector('textarea')?.value).toBe(content);
   });
 
+  it('preserves annotation chips and attachment previews beyond disclosure', () => {
+    const content = '@README.md Review this\nsecond line';
+    const onAttachmentPreview = vi.fn();
+    const container = render(
+      <UserMessage
+        content={content}
+        source="cron"
+        inputAnnotations={[
+          referenceAnnotation(content, '@README.md', {
+            id: 'readme',
+            kind: 'file',
+            label: '@README.md',
+            value: 'README.md',
+          }),
+        ]}
+        onAttachmentPreview={onAttachmentPreview}
+      />,
+    );
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    act(() => toggle?.click());
+    const chip = findByTitle(container, '@README.md');
+    expect(chip).not.toBeNull();
+    act(() => (chip as HTMLElement).click());
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'README.md',
+      workspacePath: 'README.md',
+    });
+  });
+
   it.each([true, false])(
     'uses document expansion=%s for automatic input without controls',
     (documentExpanded) => {
@@ -741,6 +772,10 @@ describe('UserMessage', () => {
           </TranscriptDocumentExpandedProvider>
         </TranscriptRenderModeProvider>,
       );
+      expect(
+        container.querySelector('[data-web-shell-automatic-trigger-summary]')
+          ?.textContent,
+      ).toBe('full exported loop input with a second line');
       expect(
         container.querySelector(
           '[data-web-shell-automatic-trigger-instructions]',
