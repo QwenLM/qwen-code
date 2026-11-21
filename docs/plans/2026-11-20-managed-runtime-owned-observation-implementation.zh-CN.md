@@ -135,12 +135,17 @@ Phase 3b server jar 在真实 daemon 拓扑里端到端启动。配方（全部�
 
 已验证：公共前门 4199 回 200 并提供 WebShell；harness（`serve --profile hosted-harness`，端口 50889）以 bootId/capabilityDigest/lifecycleV2Profiles 应答 `/capabilities`；Java 控制面启动（Flyway 迁移 schema、**Embedded Runtime Broker 监听 50890**、actuator readiness OK）。关闭干净（向 launcher 发 SIGTERM 即停掉 detached 的 harness + java 子进程；端口全释放）。此启动走默认 `managed-local` profile（内嵌 H2、`runtime-observation` 关）。
 
-**启动见证尚未覆盖：** 挂起循环本身。`managed-local-serve.ts` 硬编码 `SPRING_APPLICATION_JSON`（内嵌存储、无 `runtime-observation` flag）并从环境剥离 `SPRING_*`/`QWEN_MANAGED_AGENT_*` 覆盖，因此不经代码改动无法经生产路径注入 flag 与 MySQL datasource。完整 资格 → 摘除 → 暂存唤醒 → 排空 E2E 因此属**专用 harness**（仿 `HostedHarnessMySqlIT` + `managed-local-serve.ts` 的新 MySQL IT）：以 `--qwen.managed-agent.runtime-observation.enabled=true` + MySQL + 启用 Broker 启动 Spring，拉起 harness + local-process worker，驱动一个模型 stub turn 启动后台 Shell（`is_background`），然后断言：Session 挂起且进程仍在跑、恢复视图 `ready`；暂存行累积；暂存唤醒排空结算且不跑模型 turn。该 harness 是剩余的切片 3 投产门。
+**启动见证尚未覆盖：** 挂起循环本身。两个发现界定它能在哪里跑：
+
+- **平台门（决定性）。** managed serve 用的 durable local-process provisioner（`QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=true`）是 **Linux-only**——`LocalRuntimeStore` 在非 Linux 抛 "Durable local-process mode requires Linux"，后台 Shell 还额外要求 delegated Linux cgroup v2 root（`RuntimeBrokerServiceTest` 断言此准入拒绝）。因此带真实后台进程的完整 资格 → 摘除 → 暂存唤醒 → 排空 循环**不能在 macOS 跑**；属 CI `hosted-harness-mysql` 车道（Linux）或 Linux 主机。上面的 macOS 启动见证只验证了控制面 + harness + Embedded Broker；真实进程采集/投递机制由 macOS 兼容的 `managed-background-delivery.process.test.ts`（直接 spawn、无 cgroup provisioner）另行覆盖。
+- **配置门。** `managed-local-serve.ts` 硬编码 `SPRING_APPLICATION_JSON`（内嵌存储、无 `runtime-observation` flag）并从环境剥离 `SPRING_*`/`QWEN_MANAGED_AGENT_*` 覆盖，因此不经代码改动无法经生产路径注入 flag 与 MySQL datasource。
+
+完整 E2E 因此属**专用 Linux harness**（仿 `HostedHarnessMySqlIT` + `managed-local-serve.ts` 的新 MySQL IT）：以 `--qwen.managed-agent.runtime-observation.enabled=true` + MySQL + 启用 Broker 启动 Spring，拉起 harness + durable local-process worker，设 `QWEN_E2E_IDLE_SUSPEND_MS`（`hosted-harness-session.ts` 里缩短空闲阈值的测试钩子），驱动一个模型 stub turn 启动后台 Shell（`is_background`），然后断言：Session 挂起且进程仍在跑、恢复视图 `ready`；暂存行累积；暂存唤醒排空结算且不跑模型 turn。该 harness 是剩余的切片 3 投产门，且必须在 Linux 跑。
 
 ### 剩余故障用例
 
 - **带在途 pull 的 re-attach/drain、挂起期间首条观测、detach→seal 窗口、挂起期间 monitor 策略停止、边界/水位线 wake、挂起资格矩阵、worker 丢失、跨 Broker 重启/副本围栏、删除挂起 Session** — Java 侧已由 H2 上的 `RuntimeStageStoreTest`、`RuntimeObservationPullerTest`、`WakeSealStampTest`、`SessionRecoveryServiceTest`、`HostedCleanupDebtStoreTest`、`RuntimeBrokerServiceTest` 覆盖，并已在真实 MySQL 8.4 上见证（见上）；各自仍需 daemon 级 E2E。
-- **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。daemon 启动见证已如上落地；剩余是启用 flag + MySQL 并驱动循环的专用 harness（见上）。
+- **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。daemon 启动见证已如上落地；剩余是启用 flag + MySQL 并驱动循环的专用 **Linux** harness（见上——durable local-process provisioner 是 Linux-only，故跑在 CI hosted 车道而非 macOS）。
 - **§7 度量 — Broker/daemon 半** — pull 成本/延迟（每 Broker 的 long-poll 连接数、每次空闲 pull 的 CPU、观测→wake→turn-start 与退出→结算时延）、挂起期间活跃输出下的 staging 行数/字节、静默加载的 drain 突发；这些确定 pull 等待（`pullWaitMs`，现 2,000）、staged-bytes 水位线（4 MiB）与硬上限（16 MiB）（§11 开放问题 1）。worker/applier 半已如上落地。
 
 ## 验证命令
