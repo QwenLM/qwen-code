@@ -674,6 +674,7 @@ describe('release workflow', () => {
             ...process.env,
             PUBLISH_AUDIO_CAPTURE: 'true',
             PUBLISH_EXTERNAL_CONTEXT_MEM0: 'true',
+            PUBLISH_CHANNEL_MSTEAMS: 'true',
           },
         },
       );
@@ -761,9 +762,27 @@ describe('release workflow', () => {
     { dryRun: 'false', optional: 'true', failure: '0', cliPublished: '0' },
     { dryRun: 'true', optional: 'true', failure: '0', cliPublished: '0' },
     { dryRun: 'false', optional: 'true', failure: '7', cliPublished: '1' },
+    // The flags diverged before the Teams bootstrap: audio-capture is
+    // ungated on QwenLM while Teams stays behind its bootstrap variable.
+    // Rows where they disagree in both directions pin each gate to its own
+    // variable.
+    {
+      dryRun: 'false',
+      optional: 'false',
+      msteams: 'true',
+      failure: '0',
+      cliPublished: '1',
+    },
+    {
+      dryRun: 'false',
+      optional: 'true',
+      msteams: 'false',
+      failure: '0',
+      cliPublished: '0',
+    },
   ])(
     'publishes the selected workspaces and CLI safely: %j',
-    ({ dryRun, optional, failure, cliPublished }) => {
+    ({ dryRun, optional, msteams = optional, failure, cliPublished }) => {
       const directory = mkdtempSync(join(tmpdir(), 'release-publish-'));
       const bin = join(directory, 'bin');
       const publishLog = join(directory, 'published');
@@ -801,6 +820,7 @@ describe('release workflow', () => {
               NPM_TAG: 'preview',
               PUBLISH_AUDIO_CAPTURE: optional,
               PUBLISH_EXTERNAL_CONTEXT_MEM0: optional,
+              PUBLISH_CHANNEL_MSTEAMS: msteams,
               PUBLISH_FAILURE: failure,
               CLI_PUBLISHED: cliPublished,
               PUBLISH_LOG: publishLog,
@@ -827,11 +847,12 @@ describe('release workflow', () => {
         expect(selected).toEqual(
           RELEASE_WORKSPACES.filter(
             (name) =>
-              optional === 'true' ||
-              ![
-                '@qwen-code/audio-capture',
-                '@qwen-code/external-context-mem0',
-              ].includes(name),
+              (optional === 'true' ||
+                ![
+                  '@qwen-code/audio-capture',
+                  '@qwen-code/external-context-mem0',
+                ].includes(name)) &&
+              (msteams === 'true' || name !== '@qwen-code/channel-msteams'),
           ),
         );
         expect(publishCalls[0][1]).toContain('pnpm -r publish');
@@ -4043,6 +4064,22 @@ esac`,
     // running this workflow would publish @qwen-code/audio-capture.
     expect(publishStep.env.PUBLISH_AUDIO_CAPTURE).toContain(
       "github.repository == 'QwenLM/qwen-code'",
+    );
+  });
+
+  it('publishes the Teams channel only after trusted publishing bootstrap', () => {
+    // #15620 put @qwen-code/channel-msteams into the release selection, and no
+    // released tag contains that commit, so v0.28.1 was its first publish. npm
+    // needs a package to exist before trusted publishing can be bound to it,
+    // so the ungated first publish failed the whole publish job (#17936).
+    const publishStep = releaseYaml.jobs.publish.steps.find(
+      (step) => step.name === 'Publish npm packages',
+    );
+    // Whole-value equality, not two substring checks: those also pass on
+    // `||`, which publishes the unbootstrapped package on QwenLM whenever the
+    // variable is unset and lets a fork publish it from its own variable.
+    expect(publishStep.env.PUBLISH_CHANNEL_MSTEAMS).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED == 'true' }}",
     );
   });
 

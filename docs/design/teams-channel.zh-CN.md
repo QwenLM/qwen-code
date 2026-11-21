@@ -107,6 +107,12 @@ workspace 声明与 lockfile。协议代码只存在于该包，依赖 ChannelAg
 版本发布同步更新扩展清单、当前精确 channel-base peer 和开发依赖，同时保留明确支持
 的旧版 peer。发布不能安装第二份 base，也不能排除本次发布的 base 版本。
 
+npm 要求包先存在，才能为其配置 trusted publishing，因此 publish 步骤由仓库变量
+`NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED` 控制，直到维护者完成一次性的公开
+bootstrap 发布，并在 `production-release` 环境中把该包绑定到 `release.yml`
+工作流。缺少这道门禁时，首个携带该包的发布会让整个 publish job 失败，v0.28.1
+即是如此。bootstrap 应发布首个真正包含该包的 Qwen 版本，不要另造一条版本线。
+
 ## 验证
 
 自动化覆盖 SDK 拒绝认证、tenant/bot 校验、mention、规范 conversation、

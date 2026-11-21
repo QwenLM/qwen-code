@@ -42,6 +42,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       process.env.PUBLISH_EXTERNAL_CONTEXT_MEM0 !== 'true'
     )
       continue;
+    if (
+      name === '@qwen-code/channel-msteams' &&
+      process.env.PUBLISH_CHANNEL_MSTEAMS !== 'true'
+    )
+      continue;
     console.log(name);
   }
 }
