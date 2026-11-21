@@ -103,10 +103,10 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
                         "The Workspace extension catalog is limited to 256 extensions.");
             }
             long revision = nextPackageRevision(tenant, workspace, id);
-            jdbc.update("INSERT INTO ma_extension_package (package_key, scope_key, tenant_id, workspace_id, extension_id,"
+            jdbc.update("INSERT INTO ma_extension_package (scope_key, tenant_id, workspace_id, extension_id,"
                             + " package_revision, package_digest, manifest_json, source_json, standalone_skill_json, is_catalog_listed, byte_length, state, gmt_create)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'PREPARING', " + ManagedSchemaTime.SQL_NOW + ")",
-                    packageKey(tenant, workspace, id, revision), scope(tenant, workspace), tenant, workspace, id, revision,
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'PREPARING', " + ManagedSchemaTime.SQL_NOW + ")",
+                    scope(tenant, workspace), tenant, workspace, id, revision,
                     digest, encodedManifest, source == null ? null : encode(source), skill == null ? null : encode(skill), !sessionDefault);
             insertOperation(tenant, actor, workspace, operationId, id, "publish", revision, digest, requestDigest, "pending");
             return new Operation(operationId, id, "publish", "pending", revision, digest);
@@ -148,10 +148,11 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
     }
 
     public Package publication(String tenant, String workspace, Operation operation) {
-        var rows = jdbc.query("SELECT manifest_json, byte_length, source_json FROM ma_extension_package WHERE package_key = ? AND package_digest = ?",
+        var rows = jdbc.query("SELECT manifest_json, byte_length, source_json FROM ma_extension_package"
+                        + " WHERE scope_key = ? AND extension_id = ? AND package_revision = ? AND package_digest = ?",
                 (row, index) -> new Package(new Pin(operation.extensionId(), operation.revision(), operation.packageDigest(), null),
                         decode(row.getString(1), Manifest.class), row.getLong(2), decodeSource(row.getString(3))),
-                packageKey(tenant, workspace, operation.extensionId(), operation.revision()), operation.packageDigest());
+                scope(tenant, workspace), operation.extensionId(), operation.revision(), operation.packageDigest());
         if (rows.size() != 1) {
             throw missing();
         }
@@ -181,8 +182,9 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
             String digest, String operationId, long length, Operation operation, Access access) {
         return transaction.execute(status -> {
             lockWorkspace(tenant, actor, workspace, access);
-            jdbc.update("UPDATE ma_extension_package SET state = 'PUBLISHED', byte_length = ? WHERE package_key = ?",
-                    length, packageKey(tenant, workspace, id, operation.revision()));
+            jdbc.update("UPDATE ma_extension_package SET state = 'PUBLISHED', byte_length = ?"
+                            + " WHERE scope_key = ? AND extension_id = ? AND package_revision = ?",
+                    length, scope(tenant, workspace), id, operation.revision());
             jdbc.update("UPDATE ma_extension_operation SET state = 'settled' WHERE operation_key = ?",
                     operationKey(tenant, workspace, operationId));
             return new Operation(operationId, id, "publish", "settled", operation.revision(), digest);
@@ -213,10 +215,10 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
             }
             long revision = current + 1;
             ProtectedSecret protectedValues = secrets.protect(settingsContext(tenant, workspace, extensionId, revision), plaintext);
-            jdbc.update("INSERT INTO ma_extension_settings (settings_key, scope_key, tenant_id, workspace_id, extension_id,"
+            jdbc.update("INSERT INTO ma_extension_settings (scope_key, tenant_id, workspace_id, extension_id,"
                             + " settings_revision, encryption_key_id, encrypted_values, configured_keys_json, gmt_create)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                    settingsKey(tenant, workspace, extensionId, revision), scope(tenant, workspace), tenant, workspace,
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                    scope(tenant, workspace), tenant, workspace,
                     extensionId, revision, protectedValues.getKeyId(), protectedValues.getCiphertext(),
                     encode(new ArrayList<>(new TreeMap<>(command.values()).keySet())));
             insertOperation(tenant, actor, workspace, operationId, extensionId, "settings", revision, null,
@@ -247,8 +249,9 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
     }
 
     public Map<String, String> settingsValues(String tenant, String workspace, String extensionId, long revision) {
-        var rows = jdbc.query("SELECT encryption_key_id, encrypted_values FROM ma_extension_settings WHERE settings_key = ?",
-                (row, index) -> new ProtectedSecret(row.getString(1), row.getString(2)), settingsKey(tenant, workspace, extensionId, revision));
+        var rows = jdbc.query("SELECT encryption_key_id, encrypted_values FROM ma_extension_settings"
+                        + " WHERE scope_key = ? AND extension_id = ? AND settings_revision = ?",
+                (row, index) -> new ProtectedSecret(row.getString(1), row.getString(2)), scope(tenant, workspace), extensionId, revision);
         if (rows.size() != 1) {
             throw missing();
         }
@@ -340,10 +343,6 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
 
     private static String operationKey(String tenant, String workspace, String id) { return ManagedSchemaKeys.key(tenant, workspace, id); }
 
-    private static String packageKey(String tenant, String workspace, String id, long revision) {
-        return ManagedSchemaKeys.key(tenant, workspace, id, Long.toString(revision));
-    }
-
     private static String settingsKey(String tenant, String workspace, String id, long revision) {
         return ManagedSchemaKeys.key("extension-settings", tenant, workspace, id, Long.toString(revision));
     }
@@ -379,10 +378,10 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
                 || pin.settingsRevision() != null && (pin.settingsRevision() < 1 || pin.settingsRevision() > 9_007_199_254_740_991L)) {
             throw invalid();
         }
-        var rows = jdbc.query("SELECT manifest_json, byte_length, source_json FROM ma_extension_package WHERE package_key = ?"
-                        + " AND package_digest = ? AND state = 'PUBLISHED'",
+        var rows = jdbc.query("SELECT manifest_json, byte_length, source_json FROM ma_extension_package"
+                        + " WHERE scope_key = ? AND extension_id = ? AND package_revision = ? AND package_digest = ? AND state = 'PUBLISHED'",
                 (row, index) -> new Package(pin, decode(row.getString(1), Manifest.class), row.getLong(2), decodeSource(row.getString(3))),
-                packageKey(tenant, workspace, pin.extensionId(), pin.packageRevision()), pin.packageDigest());
+                scope(tenant, workspace), pin.extensionId(), pin.packageRevision(), pin.packageDigest());
         if (rows.size() != 1) {
             throw missing();
         }
@@ -390,10 +389,11 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
     }
 
     public StandaloneSkill standaloneSkill(String tenant, String workspace, Pin pin) {
-        var rows = jdbc.query("SELECT standalone_skill_json FROM ma_extension_package WHERE package_key = ?"
+        var rows = jdbc.query("SELECT standalone_skill_json FROM ma_extension_package"
+                        + " WHERE scope_key = ? AND extension_id = ? AND package_revision = ?"
                         + " AND package_digest = ? AND state = 'PUBLISHED' AND standalone_skill_json IS NOT NULL",
                 (row, index) -> decode(row.getString(1), StandaloneSkill.class),
-                packageKey(tenant, workspace, pin.extensionId(), pin.packageRevision()), pin.packageDigest());
+                scope(tenant, workspace), pin.extensionId(), pin.packageRevision(), pin.packageDigest());
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -431,7 +431,8 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
     }
 
     public boolean hasSettings(String tenant, String workspace, Pin pin) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_settings WHERE settings_key = ?",
-                Long.class, settingsKey(tenant, workspace, pin.extensionId(), pin.settingsRevision())) == 1;
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_settings"
+                        + " WHERE scope_key = ? AND extension_id = ? AND settings_revision = ?",
+                Long.class, scope(tenant, workspace), pin.extensionId(), pin.settingsRevision()) == 1;
     }
 }

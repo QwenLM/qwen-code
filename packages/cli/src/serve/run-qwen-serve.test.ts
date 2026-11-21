@@ -22517,7 +22517,7 @@ describe('runQwenServe channel worker supervisor', () => {
         'channel worker stderr: adapter failed with <redacted>',
       );
       expect(logContent).toContain(
-        'channel worker exited (state=exited, pid=1234, code=1, signal=null, error=ipc failed, restartCount=2, nextRestartAt=2026-07-01T01:00:05.000Z, staleHeartbeatAt=2026-07-01T01:00:00.000Z)',
+        'channel worker exited (state=exited, childPid=1234, code=1, signal=null, error=ipc failed, restartCount=2, nextRestartAt=2026-07-01T01:00:05.000Z, staleHeartbeatAt=2026-07-01T01:00:00.000Z)',
       );
       expect(logContent).not.toContain('secret-token');
     } finally {
