@@ -984,6 +984,8 @@ describe('ThinkingMessage Mod rows', () => {
     { afterReplay: 'Read the file.', collapsed: true, hasAsker: true },
     { afterReplay: 'Check the queue.', collapsed: false, hasAsker: true },
     { afterReplay: 'Check the queue.', collapsed: false, hasAsker: false },
+    { afterReplay: 'Check the queue.', collapsed: true, hasAsker: true },
+    { afterReplay: 'Check the queue.', collapsed: true, hasAsker: false },
   ])(
     'restores Translate for a reused thought row ($afterReplay, collapsed: $collapsed, asker: $hasAsker)',
     async ({ afterReplay, collapsed, hasAsker }) => {

@@ -7,6 +7,10 @@
 import { Markdown } from './Markdown';
 import type { ThinkingBodyProps } from './ThinkingBody';
 
+export function useThinkingBodyRewrite() {
+  return [false, undefined] as const;
+}
+
 export function ThinkingBody({ content, isStreaming }: ThinkingBodyProps) {
   return (
     <Markdown content={content} source="thinking" isStreaming={isStreaming} />

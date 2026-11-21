@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { SelectionCopyMenu } from './SelectionCopyMenu';
-import { ThinkingBody } from './ThinkingBody';
+import { ThinkingBody, useThinkingBodyRewrite } from './ThinkingBody';
 import { TurnSources } from '../sources/TurnSources';
 import {
   useWebShellCustomization,
@@ -485,6 +485,7 @@ interface ThinkingSummaryHeaderProps {
    */
   translateContent?: string;
   showTranslateButton: boolean;
+  hideTranslateWhenClosed: boolean;
   generateContent?: SessionContentGenerator;
   onToggle: () => void;
 }
@@ -502,6 +503,7 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
   authorName,
   translateContent,
   showTranslateButton,
+  hideTranslateWhenClosed,
   generateContent,
   onToggle,
 }: ThinkingSummaryHeaderProps) {
@@ -557,6 +559,7 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
             content={translateContent}
             generateContent={generateContent}
             className={styles.translateButton}
+            hideWhenClosed={hideTranslateWhenClosed}
           />
         )}
       <span
@@ -585,8 +588,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   const documentMode = transcriptRenderMode === 'document';
   const documentExpanded = useTranscriptDocumentExpanded();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
-  const [rewrittenSource, setRewrittenSource] = useState<string>();
-  const rewritten = !fromSubagent && rewrittenSource === content;
+  const [rewritten, onRewrittenChange] = useThinkingBodyRewrite(content);
   const showThinking = documentMode ? documentExpanded : thinkingExpanded;
   const thinkingActive = isStreaming === true;
   const startTimeRef = useRef(timestamp ?? Date.now());
@@ -659,9 +661,9 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                 !documentMode &&
                 (language === 'zh-CN' || language === 'zh-TW') &&
                 !thinkingActive &&
-                !rewritten &&
                 generateContent !== undefined
               }
+              hideTranslateWhenClosed={!fromSubagent && rewritten}
               generateContent={generateContent}
               onToggle={handleToggle}
             />
@@ -673,7 +675,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                       content={content}
                       isStreaming={isStreaming}
                       fromSubagent={fromSubagent}
-                      onRewrittenChange={setRewrittenSource}
+                      onRewrittenChange={onRewrittenChange}
                     />
                   </div>
                 </div>
@@ -691,6 +693,7 @@ interface ThinkingTranslateButtonProps {
   generateContent?: SessionContentGenerator;
   className?: string;
   mode?: 'translate' | 'explain-shell';
+  hideWhenClosed?: boolean;
 }
 
 export function ThinkingTranslateButton({
@@ -698,6 +701,7 @@ export function ThinkingTranslateButton({
   generateContent,
   className,
   mode = 'translate',
+  hideWhenClosed,
 }: ThinkingTranslateButtonProps) {
   const { language, t } = useI18n();
   const [translationOpen, setTranslationOpen] = useState(false);
@@ -800,6 +804,8 @@ export function ThinkingTranslateButton({
     setTranslationLoading(false);
     setTranslationOpen(false);
   }, []);
+
+  if (hideWhenClosed && !translationOpen) return null;
 
   return (
     <Popover open={translationOpen} onOpenChange={handleTranslationOpenChange}>

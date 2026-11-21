@@ -48,14 +48,17 @@ export function ModRowsProvider({
     () => (asker ? modReplyRows(messages) : undefined),
     [asker, messages],
   );
+  // The renderer identity scopes remembered rewrites to this connection.
+  const thinkingRenderer = useMemo(
+    () => (asker ? { Body: ModThinkingBody } : undefined),
+    [asker],
+  );
   return (
     <FirstOfReplyContext.Provider value={rows}>
       <AssistantMessageComponentContext.Provider
         value={asker ? ModAssistantMessage : undefined}
       >
-        <ThinkingBodyComponentContext.Provider
-          value={asker ? ModThinkingBody : undefined}
-        >
+        <ThinkingBodyComponentContext.Provider value={thinkingRenderer}>
           {children}
         </ThinkingBodyComponentContext.Provider>
       </AssistantMessageComponentContext.Provider>

@@ -41,7 +41,7 @@ Mod 能在 ACP 会话中运行之后，Web Shell 会话会加载工作区的 Mod
 
 ### 能力与 surface
 
-daemon 的 bridge 在 ACP `initialize` 的客户端能力中写明它的 Web Shell 绘制哪些行站点：`_meta["qwen.modRows"]: ["AssistantMessage"]`。客户端绘制行站点时，子进程让该客户端每个会话的 Mod 在 `desktop` surface 上运行，并提供其中自己能作答的站点。Zed 和 VS Code companion 不发送这项能力，它们的会话保持原样。surface 在加载时读取，所以它属于 daemon，而不是当时打开的某个页面：经 daemon 由其他客户端驱动的会话也报告 `desktop`。daemon 在 `/capabilities` 中通告 `session_mod_rows`，Web Shell 只在此时发起请求。desktop 上 `isInteractive` 为 true，因为 Web Shell 的 prompt 前有人。
+daemon 的 bridge 在 ACP `initialize` 的客户端能力中声明 Web Shell 绘制的行站点。本阶段声明的是 `_meta["qwen.modRows"]: ["AssistantMessage"]`。[思考行设计](2026-11-20-mod-thinking-rows-in-web-shell.zh-CN.md)在列表中加入了 `Thinking`。客户端绘制行站点时，子进程让该客户端每个会话的 Mod 在 `desktop` surface 上运行，并提供其中自己能作答的站点。Zed 和 VS Code companion 不发送这项能力，它们的会话保持原样。surface 在加载时读取，所以它属于 daemon，而不是当时打开的某个页面：经 daemon 由其他客户端驱动的会话也报告 `desktop`。daemon 在 `/capabilities` 中通告 `session_mod_rows`，Web Shell 只在此时发起请求。desktop 上 `isInteractive` 为 true，因为 Web Shell 的 prompt 前有人。
 
 Mod 宿主把"是不是 ACP 会话"和 surface 分开，所以 desktop 会话仍遵循 ACP 宿主的规则：不触发 prompt 和工具中间件，日志经 ACP 通知发出，上下文数字取自会话自己的 chat。
 

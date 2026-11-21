@@ -46,7 +46,7 @@ import { findWorkflowTaskForTool } from '../../utils/workflowTasks';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { WorkflowExecutionView } from './WorkflowExecutionView';
 import { Markdown } from './Markdown';
-import { ThinkingBody } from './ThinkingBody';
+import { ThinkingBody, useThinkingBodyRewrite } from './ThinkingBody';
 import { openSessionLink } from './session-link';
 import { ThinkingDoneIcon, ThinkingTranslateButton } from './AssistantMessage';
 import {
@@ -1935,6 +1935,7 @@ interface ThoughtLineHeaderProps {
    * header's memo boundary.
    */
   translateContent?: string;
+  hideTranslateWhenClosed: boolean;
   generateContent?: SessionContentGenerator;
   onToggle: () => void;
 }
@@ -1944,6 +1945,7 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
   expanded,
   documentMode,
   translateContent,
+  hideTranslateWhenClosed,
   generateContent,
   onToggle,
 }: ThoughtLineHeaderProps) {
@@ -1993,6 +1995,7 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
             content={translateContent}
             generateContent={generateContent}
             className={styles.chatSummaryThoughtTranslate}
+            hideWhenClosed={hideTranslateWhenClosed}
           />
         )}
       <span
@@ -2024,8 +2027,7 @@ const ThoughtLine = memo(function ThoughtLine({
   const documentMode = transcriptRenderMode === 'document';
   const documentExpanded = useTranscriptDocumentExpanded();
   const [expanded, setExpanded] = useState(false);
-  const [rewrittenSource, setRewrittenSource] = useState<string>();
-  const rewritten = !fromSubagent && rewrittenSource === content;
+  const [rewritten, onRewrittenChange] = useThinkingBodyRewrite(content);
   const showContent = documentMode ? documentExpanded : expanded;
   const handleToggle = useCallback(() => {
     if (!documentMode) setExpanded((value) => !value);
@@ -2036,9 +2038,8 @@ const ThoughtLine = memo(function ThoughtLine({
         isStreaming={isStreaming}
         expanded={showContent}
         documentMode={documentMode}
-        translateContent={
-          documentMode || isStreaming || rewritten ? undefined : content
-        }
+        translateContent={documentMode || isStreaming ? undefined : content}
+        hideTranslateWhenClosed={!fromSubagent && rewritten}
         generateContent={generateContent}
         onToggle={handleToggle}
       />
@@ -2048,7 +2049,7 @@ const ThoughtLine = memo(function ThoughtLine({
             content={content}
             isStreaming={isStreaming}
             fromSubagent={fromSubagent}
-            onRewrittenChange={setRewrittenSource}
+            onRewrittenChange={onRewrittenChange}
           />
         </div>
       )}

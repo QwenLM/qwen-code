@@ -6,8 +6,9 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
-  useEffect,
+  useState,
   type ComponentType,
 } from 'react';
 import { Markdown } from './Markdown';
@@ -22,17 +23,32 @@ export interface ThinkingBodyProps {
 }
 
 export const ThinkingBodyComponentContext = createContext<
-  ComponentType<ThinkingBodyProps> | undefined
+  { Body: ComponentType<ThinkingBodyProps> } | undefined
 >(undefined);
+
+export function useThinkingBodyRewrite(content: string) {
+  const renderer = useContext(ThinkingBodyComponentContext);
+  const [rewrite, setRewrite] = useState<{
+    renderer: NonNullable<typeof renderer>;
+    source: string;
+  }>();
+  const onRewrittenChange = useCallback(
+    (source: string | undefined) => {
+      setRewrite(
+        renderer && source !== undefined ? { renderer, source } : undefined,
+      );
+    },
+    [renderer],
+  );
+  const rewritten =
+    rewrite?.renderer === renderer && rewrite?.source === content;
+  return [rewritten, onRewrittenChange] as const;
+}
 
 /** The body an expanded thought shows. */
 export function ThinkingBody(props: ThinkingBodyProps) {
-  const Component = useContext(ThinkingBodyComponentContext);
-  const { onRewrittenChange } = props;
-  useEffect(() => {
-    if (!Component) onRewrittenChange?.(undefined);
-  }, [Component, onRewrittenChange]);
-  if (Component) return <Component {...props} />;
+  const renderer = useContext(ThinkingBodyComponentContext);
+  if (renderer) return <renderer.Body {...props} />;
   return (
     <Markdown
       content={props.content}

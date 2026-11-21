@@ -55,7 +55,7 @@ The page offers the thoughts of the session's own model. A subagent's thought dr
 
 ### What keeps the original
 
-The page draws the rewrite only in the expanded body. The stored thought and the collapsed line keep the model's original. The built-in translate button beside a thought translates the original, which repeats the work of a translating Mod, so the page hides the button once it has drawn a Mod's rewrite of the thought. If replay gives the row different text or the expanded body returns to the original, the button is available again. A thought whose hooks left it as it is keeps the button, and so does a subagent's thought.
+The page draws the rewrite only in the expanded body. The stored thought and the collapsed line keep the model's original. The built-in translate button beside a thought translates the original, which repeats the work of a translating Mod, so the page hides the button once it has drawn a Mod's rewrite of the thought. An open translation stays available until the user closes it. If the Mod connection changes, replay gives the row different text, or the expanded body returns to the original, the button is available again. A thought whose hooks left it as it is keeps the button, and so does a subagent's thought.
 
 ### The export
 
