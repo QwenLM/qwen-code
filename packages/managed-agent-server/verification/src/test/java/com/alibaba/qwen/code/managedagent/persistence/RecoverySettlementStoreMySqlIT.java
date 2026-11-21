@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.transaction.TransactionDefinition;
 
 import javax.sql.DataSource;
@@ -27,6 +29,42 @@ class RecoverySettlementStoreMySqlIT extends RecoverySettlementStoreTest {
         if (database != null) {
             database.close();
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"cancel", "fail", "recovery-blocked"})
+    void removingThePreReadWouldChangeAnOldSnapshotOwnerDecision(String route) {
+        jdbc.update("UPDATE ma_turn SET harness_event_epoch = NULL, is_submission_attempted = FALSE"
+                + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?", TENANT, sessionId, turnId);
+        transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        transactions.executeWithoutResult(status -> {
+            assertThat(turn().dispatchOwner()).isEqualTo(OWNER);
+            CompletableFuture.runAsync(() -> transactions.executeWithoutResult(other -> {
+                store.releaseTurnLease(TENANT, sessionId, turnId, OWNER);
+                assertThat(store.claimTurn(TENANT, sessionId, turnId, "replacement", java.time.Duration.ofMinutes(1))).isPresent();
+            })).orTimeout(10, TimeUnit.SECONDS).join();
+            assertThat(turn().dispatchOwner()).isEqualTo(OWNER);
+            switch (route) {
+                case "cancel" -> store.cancelBeforeAdmission(TENANT, sessionId, turnId, "replacement");
+                case "fail" -> store.failTurn(TENANT, sessionId, turnId, "replacement", "failure", "failure");
+                case "recovery-blocked" -> assertThat(store.failRecoveryBlockedTurn(TENANT, sessionId, turnId, "replacement", "failure")).isFalse();
+                default -> throw new IllegalArgumentException(route);
+            }
+            assertNoFailureEvent();
+            assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND turn_id = ? FOR UPDATE",
+                    String.class, TENANT, sessionId, turnId)).isEqualTo("RUNNING");
+            // The proposed UPDATE-first decision sees the committed owner, unlike requireTurn's snapshot.
+            String predicates = route.equals("cancel")
+                    ? " AND harness_event_epoch IS NULL AND is_submission_attempted = FALSE"
+                    : " AND status IN ('ACCEPTED', 'RUNNING'" + (route.equals("fail") ? ", 'CANCELLING')" : ")");
+            assertThat(jdbc.update("UPDATE ma_turn SET status = ? WHERE tenant_id = ? AND session_id = ? AND turn_id = ?"
+                    + " AND dispatch_owner = ? AND dispatch_lease_until >= ?" + predicates,
+                    route.equals("cancel") ? "CANCELLED" : "FAILED", TENANT, sessionId, turnId, "replacement", System.currentTimeMillis()))
+                    .as("candidate would accept a call that the baseline refuses").isEqualTo(1);
+            status.setRollbackOnly();
+        });
+        assertThat(turn().status()).isEqualTo("RUNNING");
+        assertThat(turn().dispatchOwner()).isEqualTo("replacement");
     }
 
     @Test

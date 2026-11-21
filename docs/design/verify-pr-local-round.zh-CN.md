@@ -24,15 +24,16 @@
 
 新增三个独立脚本，并让 skill 在流程需要的位置指向它们，而不是放在文末。
 
-- `scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>` 负责解析坐标：用 lane 相同的字段列表抓取快照、校验两个 OID 在本克隆中存在、拒绝不是 PR head 干净检出的树、创建带 `evidence/` 子目录的产物目录，并报告当前进程能观测到的隔离信号。它不据此设闸：解析元数据需要 `gh`，而 `gh` 与边界互斥，因此这条路径总是在宿主上运行。闸门是 `--require-isolation`，用于在边界内、轮次执行任何东西之前运行。
-- `scripts/verify-pr-check.mjs <dir>` 把发布侧的规则套到本地产物目录：必需文件、四个判定词、为正且自洽的断言三元组、以及不允许带失败断言的 `merge-ready`。报告形态与证据命名只作为警告，因为纯文档轮次没有截图，检查器也无法知道是否跑过 harness。
+- `scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>` 负责解析坐标：用 lane 相同的字段列表抓取快照、校验两个 OID 在本克隆中存在、拒绝不是 PR head 干净检出的树、创建带 `evidence/` 子目录的产物目录，像 lane 一样为 PR 的评审线程和仍有效的 change request 拍快照（尽力而为：抓取失败就不留文件，轮次把它读作未知），并报告当前进程能观测到的隔离信号。它不据此设闸：解析元数据需要 `gh`，而 `gh` 与边界互斥，因此这条路径总是在宿主上运行。闸门是 `--require-isolation`，用于在边界内、轮次执行任何东西之前运行。
+- `scripts/verify-pr-check.mjs <dir>` 把发布侧的规则套到本地产物目录：必需文件、四个判定词、为正且自洽的断言三元组、以及不允许带失败断言的 `merge-ready`。报告形态与证据命名只作为警告，因为纯文档轮次没有截图，检查器也无法知道是否跑过 harness。带 `--context <snapshot>` 时期望 head 来自该宿主持有的文件，而不是产物里可写的 `context.json`；不可用快照是硬性 exit 1 而非警告：产物目录可被轮次刚执行的 PR 代码写入。信任拒绝是根感知的（文件系统信任根——`/` 或 Windows 盘符根——包含一切路径，作为用法错误拒绝），拒绝位于 PR 可写树内的 context，也拒绝保留第二名字的硬链接。由于「路径在树外 + 单链接」仍不证明文件是宿主所写，`--context-sha256 <digest>` 绑定内容：`prepare` 打印其宿主侧所写快照的 sha256，skill 把摘要持于克隆之外并传入，检查器拒绝字节不匹配。不带摘要时，检查器披露来源仅依赖路径/链接检查。
 - `scripts/verify-pr-guard.mjs` 接管发布前守卫的两个半程。`--pr <n> --repo <owner>/<repo> --snapshot <file>` 抓取 head、PR 状态以及三个评论列表（带 `--paginate`），只有每次调用都成功才写文件。`--compare --start <a> --now <b>` 列出本轮 dirty 的全部原因并退出 1。
 
-检查器在产物契约要求轮次写出的产物上新增三条规则。产物契约里三者都要点名：产物清单没要求的文件，轮次就不会产出，而对一个不存在的文件做检查是静默的。
+检查器在产物契约要求轮次写出的产物上新增四条规则。产物契约里四者都要点名：产物清单没要求的文件，轮次就不会产出，而对一个不存在的文件做检查是静默的。
 
 - `assertions.json` 在 `fail` 非零时带 `failures: [{ id, attribution }]`，每条失败断言一项，归因为 `pr`、`harness` 或 `environment`。若 `findings`/`blocked` 的账本里没有任何一条归因为 `pr`，报错；账本长度与 `fail` 不一致，同样报错。有失败但没有账本只报警告，因此旧产物仍能通过。
 - `mutations.json` 可以声明 `coverageClaim: "per-commit"`，并给出来自 `git log --no-merges <previous>..<head> --not <target>` 的 `productionCommits` 与 `rows[].commit`。列出的提交没有对应行时报错，并点名这些提交；列表为空同样报错——对空集合做的声明恒真。
 - `assertions.json` 可以带 `gates: [{ suite, pass, fail, skipped? }]`，轮次作为定向门禁运行的每个已有测试套件一项。这些计数不进 `pass`/`fail`/`total`——后者只统计本轮自己写的检查，每次套件运行算其中一条；发布端把门禁合计单独印成一行。列表格式不对报错。断言超过 1000 条却没有记录任何门禁结果只报警告：最近 18 份 CI 产物里这样的 4 轮都把整个 workspace 的测试套件算了进去。
+- `boundary.json` 声明不可信 PR 代码跑在哪里：`mode: "container"` 加非空 `detail`，`mode: "vm"` 用于经 attestation 的 VM，或 `mode: "waived"` 用于宿主轮次——后两者写明批准维护者（`by`）、批准评论的永久链接（`approval`）与 `reason`（VM 还记录 `attestation`）。与上面三条不同，文件仅仅缺失在权威检查处就是错误：隔离规则在 PR #16866 的两个本地轮次于宿主无门禁无豁免跑完整电池之前只是文字。唯一的例外是 CI 入口路径（设置了 `$QWEN_VERIFY_CONTEXT`）——内层轮次自己不写声明，因此缺席（或 container 声明缺门禁记录）在轮次自检里只是警告；运营方稍后写入两者（CI 车道由发布作业写，容器配方由 step 7 的宿主块写）。该宿主块运行检查器时未设置该变量，所以那里的缺席仍是错误。container 声明还必须有 `boundary-gate.json` 支撑——那是 `verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir>` 通过时写下的记录，佐证声明背后的门禁运行；waiver 的 `approval` 必须是读者能打开的 GitHub 评论永久链接，而非自由文本，且维护者是唯一作者——轮次绝不自己发布所引用的评论。当宿主持有的 `--context` 快照带有仓库 slug 与 PR 号（prepare 写入 slug）时，永久链接必须引用该轮自己的 PR；产物目录自己的 `context.json` 绝不提供这些坐标，因为它可被 PR 写入。CI 发布作业在运行检查器前自写 CI 车道的声明与 `ci-lane` 门禁记录，因此轮次自己的副本决定不了检查，base 钉住的旧 skill 也仍能通过。产物树可被 PR 写入，`--publish-lane` 是 argv 声明而非经过鉴权的身份，所以门禁记录佐证的是「运营方跳过了门禁」（事故的形状），而非「PR 代码伪造记录」；发布方持有的 CI 路径才是权威路径。
 
 每个已准备的产物目录保存带完整坐标的 `context.json`——`repo`、`pr`、`baseRefOid` 与 `headRefOid`——本地轮次因此从一个文件读出两个 OID，而不是从 `HEAD` 推导。prepare 只在当前树是 `headRefOid` 的干净检出时才写它：轮次复用这棵树作为 A/B 的 head 侧，所以 HEAD 不对会退出 3 并点名要跑的 `git checkout`，树脏会退出 3 并要求维护者自己提交或 stash——脚本绝不代为 stash，且拒绝时不创建任何产物目录。检查器优先使用该轮快照，并注明实际使用的来源。旧目录回退到按 PR 共享的快照；该轮快照不可读或无效时只报警告，不会改用后续轮次的共享提交号。
 
@@ -42,7 +43,7 @@
 
 `_— <model> via Qwen Code /verify-pr (v<cli-version>; skill <skill-hash>)_`
 
-- model 是本轮运行所用的身份，CLI 版本取 `qwen --version`，skill 版本取 `git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md` 的前 12 个字符。用内容哈希而不是提交号：lane 的树只有 depth-2，`.qwen` 又是 `git archive` 来的，没有任何历史可达；而内容哈希恰好指名本轮实际加载的那份指令——在工作站上还包括未提交的修改。`--no-filters` 是因为 prepare 把 `.git` 留给了 node 所有，否则一个被种下的 clean filter 就能决定被哈希的内容——甚至以 root 身份执行。
+- model 是本轮运行所用的身份，CLI 版本取 `qwen --version`，skill 版本取 `git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md` 的前 12 个字符。用内容哈希而不是提交号：skill 从 base 归档而来，base 不断前进时只要内容不变，哈希就不变；而且内容哈希恰好指名本轮实际加载的那份指令——在工作站上还包括未提交的修改。`--no-filters` 是因为 prepare 把 `.git` 留给了 node 所有，否则一个被种下的 clean filter 就能决定被哈希的内容——甚至以 root 身份执行。
 - 在 lane 里，三个值都是 run step 的 workflow 自有输出——配置的模型、runner 上的 CLI、重新钉住的 skill 文件——绝不从 agent 可写的产物树里读。它们在基线重新钉住之后、agent 启动之前采集：工作区父目录始终归 node 所有，因此 agent 运行期间 PR 代码可以整个替换 `.qwen` 目录（mv + mkdir）而不必碰里面 root 所有的文件，agent 之后再取哈希就可能指名本轮根本没加载过的指令。一条元测试钉住这个顺序，而不只是字符串。发布侧只在正文确实带有报告、且三个值都到达时才盖页脚；否则评论保留通用的 `— _Qwen Code · sandboxed verification_` 签名，各类弱通知（取消 / 基础设施故障 / 跳过 / 结果不可用 / 产物下载成功但没有报告）同样保留它：它们报告的是 lane，不是某一轮。
 - 本地轮次从 `$QWEN_CODE_MODEL_IDENTITY`（为空则 `$QWEN_CODE_MODEL`）解析模型，两者都取不到时省略页脚——空身份比没有更糟，而且工作站轮次绝不冒用 lane 的 `sandboxed verification` 签名。
 - `report.md` 本身不带页脚：两条发布路径都在发评论时追加，写进报告里的页脚会出现两次。
@@ -96,6 +97,11 @@
 - 模型、CLI 版本、skill 哈希三者都解析成功时，发布的报告评论以署名页脚收尾；否则以通用签名收尾；弱通知——包括产物下载成功但没有报告——一律保留通用签名。lane 在基线重新钉住之后、agent 启动之前采集三个值，该顺序有元测试钉住。skill 与发布侧携带同一页脚模板并有元测试钉住，`report.md` 本身不带页脚。
 - 所有脚本都不执行 PR 代码。
 - 对于自带轮次快照的报告，在不同产物目录中准备后续轮次不会改变检查所用的提交号。可发布的轮次快照不包含 PR 标题或正文。
+
+## 相关设计
+
+- 容器边界与它的宿主机模型代理：
+  [verify-pr-local-model-proxy.zh-CN.md](verify-pr-local-model-proxy.zh-CN.md)。
 
 ## 未决问题
 

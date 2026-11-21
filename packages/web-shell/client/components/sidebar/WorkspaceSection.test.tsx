@@ -129,6 +129,8 @@ function renderSection(
     client: DaemonClient;
     reloadToken: number;
     expanded: boolean;
+    temporarilyCollapsed: boolean;
+    expansionRequest: { scope: string; expanded: boolean };
     sourceType: string;
     channelGroupingEnabled: boolean;
     organizationEnabled: boolean;
@@ -149,6 +151,7 @@ function renderSection(
     editingSessionId: string;
     searchQuery: string;
     gitBranchWanted: boolean;
+    untitledSessionLabel: string;
     renderSession: (
       session: DaemonSessionSummary,
       options?: {
@@ -170,11 +173,14 @@ function renderSection(
           client={overrides.client ?? makeClient()}
           reloadToken={overrides.reloadToken ?? 0}
           expanded={overrides.expanded}
+          temporarilyCollapsed={overrides.temporarilyCollapsed}
+          expansionRequest={overrides.expansionRequest}
           untrustedLabel="Untrusted"
           readOnlyLabel="Read-only"
           trustToOpenLabel="Trust to open"
           noSessionsLabel="No sessions"
           loadErrorLabel="Load failed"
+          untitledSessionLabel={overrides.untitledSessionLabel}
           organizationEnabled={overrides.organizationEnabled ?? false}
           sessionCatalogRequestsEnabled={
             overrides.sessionCatalogRequestsEnabled
@@ -316,6 +322,41 @@ describe('WorkspaceSection label', () => {
 
     expect(container.textContent).toContain('Payments API');
     expect(container.textContent).not.toContain('project');
+  });
+
+  it('labels a nameless session instead of showing its id', async () => {
+    const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({
+      sessions: [
+        {
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+          displayName: '',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        } as DaemonSessionSummary,
+      ],
+    });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+      untitledSessionLabel: 'Untitled session',
+    });
+    await flush();
+
+    const row = container.querySelector<HTMLElement>('[role="note"]');
+    if (!row) throw new Error('read-only row was not rendered');
+    expect(row.textContent).toBe('Untitled session');
+    expect(row.textContent).not.toContain('550e8400');
+    // The visible text drops the id; the accessible name keeps it so two
+    // untitled read-only rows are not announced identically.
+    expect(row.getAttribute('aria-label')).toContain('550e8400');
   });
 
   it('shows read-only session details from row hover', async () => {
@@ -1039,7 +1080,7 @@ describe('WorkspaceSection session loading', () => {
     expect(note?.getAttribute('aria-label')).toContain('Trust to open');
   });
 
-  it('shows five sessions and resets Show all after the workspace closes', async () => {
+  it('shows five sessions and resets the expansion after the workspace closes', async () => {
     const sessions = Array.from({ length: 6 }, (_, index) => ({
       sessionId: `session-${index + 1}`,
       displayName: `Session ${index + 1}`,
@@ -1059,10 +1100,30 @@ describe('WorkspaceSection session loading', () => {
     expect(container.textContent).toContain('Session 5');
     expect(container.textContent).not.toContain('Session 6');
 
-    const showAll = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'Show all',
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Show 1 more',
     );
-    act(() => showAll?.click());
+    act(() => showMore?.click());
+    expect(container.textContent).toContain('Session 6');
+
+    renderSection({ client, expanded: true, temporarilyCollapsed: true });
+    await flush();
+    expect(
+      container
+        .querySelector('button[aria-expanded]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
+    expect(
+      container.querySelector<HTMLElement>('[class*="sessions"]')?.style
+        .display,
+    ).toBe('none');
+    expect(container.textContent).toContain('Session 6');
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(
+      container.querySelector<HTMLElement>('[class*="sessions"]')?.style
+        .display,
+    ).not.toBe('none');
     expect(container.textContent).toContain('Session 6');
 
     renderSection({ client, expanded: false });
@@ -1070,6 +1131,112 @@ describe('WorkspaceSection session loading', () => {
     renderSection({ client, expanded: true });
     await flush();
     expect(container.textContent).not.toContain('Session 6');
+  });
+
+  it('expands the flat preview ten sessions at a time', async () => {
+    const sessions = Array.from({ length: 16 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Session ${index + 1}`,
+      workspaceCwd: trustedWorkspace.cwd,
+    }));
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const expandButton = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
+
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(container.textContent).toContain('Session 5');
+    expect(container.textContent).not.toContain('Session 6');
+    expect(expandButton()?.textContent).toBe('Show 10 more');
+    act(() => expandButton()?.click());
+    expect(container.textContent).toContain('Session 15');
+    expect(container.textContent).not.toContain('Session 16');
+    expect(expandButton()?.textContent).toBe('Show 1 more');
+    act(() => expandButton()?.click());
+    expect(container.textContent).toContain('Session 16');
+    expect(expandButton()).toBeUndefined();
+  });
+
+  it('resets the flat preview when the source type changes', async () => {
+    const sessions = Array.from({ length: 16 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Session ${index + 1}`,
+      workspaceCwd: trustedWorkspace.cwd,
+    }));
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const expandButton = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
+
+    renderSection({ client, expanded: true, sourceType: 'default' });
+    await flush();
+    act(() => expandButton()?.click());
+    expect(container.textContent).toContain('Session 15');
+    expect(container.textContent).not.toContain('Session 16');
+
+    renderSection({ client, expanded: true, sourceType: 'channel' });
+    await flush();
+    expect(container.textContent).toContain('Session 5');
+    expect(container.textContent).not.toContain('Session 6');
+    expect(expandButton()?.textContent).toBe('Show 10 more');
+  });
+
+  it('resets the flat preview on a bulk expansion request', async () => {
+    const sessions = Array.from({ length: 16 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Session ${index + 1}`,
+      workspaceCwd: trustedWorkspace.cwd,
+    }));
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const expandButton = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
+
+    // Uncontrolled (no `expanded` prop) so the bulk request is not short-
+    // circuited; the request expands the section.
+    renderSection({
+      client,
+      sourceType: 'default',
+      expansionRequest: { scope: 'test-scope', expanded: true },
+    });
+    await flush();
+    expect(container.textContent).toContain('Session 5');
+    act(() => expandButton()?.click());
+    expect(container.textContent).toContain('Session 15');
+
+    // A fresh request object re-runs the bulk effect while `expanded` stays
+    // true, isolating its reset from the collapse/source reset.
+    renderSection({
+      client,
+      sourceType: 'default',
+      expansionRequest: { scope: 'test-scope', expanded: true },
+    });
+    await flush();
+    expect(container.textContent).toContain('Session 5');
+    expect(container.textContent).not.toContain('Session 6');
+    expect(expandButton()?.textContent).toBe('Show 10 more');
   });
 
   it('keeps the edited row mounted when a refresh reorders it past the preview', async () => {
@@ -2798,6 +2965,62 @@ describe('WorkspaceSection session tree', () => {
     await flush();
 
     expect(container.textContent).not.toContain('Derived session');
-    expect(container.textContent).not.toContain('Show all');
+    expect(container.textContent).not.toMatch(/Show \d+ more/);
+  });
+
+  it('keeps the expanded bound when renaming a visible tree row', async () => {
+    // A collapsed parent carrying 100 children sits ahead of 100 roots: 201
+    // raw sessions render as 101 rows. The 15th rendered row (s-13) has raw
+    // index 114, so a raw-array bound would mount the whole tree on rename.
+    const collapsedParent = {
+      sessionId: 'p',
+      displayName: 'Collapsed parent',
+      sourceType: 'default',
+      updatedAt: '2026-02-01T00:00:00.000Z',
+    } as DaemonSessionSummary;
+    const children = Array.from({ length: 100 }, (_, index) => ({
+      sessionId: `c-${index}`,
+      displayName: `Child ${index}`,
+      parentSessionId: 'p',
+      sourceType: 'default',
+      updatedAt: '2026-01-15T00:00:00.000Z',
+    })) as DaemonSessionSummary[];
+    const roots = Array.from({ length: 100 }, (_, index) => ({
+      sessionId: `s-${index}`,
+      displayName: `Root ${index}`,
+      sourceType: 'default',
+      updatedAt: '2026-01-10T00:00:00.000Z',
+    })) as DaemonSessionSummary[];
+    const client = treeClient([collapsedParent, ...children, ...roots]);
+    const rows = () => container.querySelectorAll('[data-session-id]');
+    const expandButton = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
+
+    renderSection({
+      client,
+      expanded: true,
+      sourceType: 'default',
+      renderSession: treeRow,
+    });
+    await flush();
+    expect(rows()).toHaveLength(5);
+    act(() => expandButton()?.click());
+    expect(rows()).toHaveLength(15);
+    expect(container.querySelector('[data-session-id="s-13"]')).not.toBeNull();
+
+    // Open a rename on the visible 15th row; the bound must hold in row space.
+    renderSection({
+      client,
+      expanded: true,
+      sourceType: 'default',
+      renderSession: treeRow,
+      editingSessionId: 's-13',
+    });
+    await flush();
+    expect(rows()).toHaveLength(15);
+    expect(container.querySelector('[data-session-id="s-13"]')).not.toBeNull();
+    expect(expandButton()).toBeDefined();
   });
 });

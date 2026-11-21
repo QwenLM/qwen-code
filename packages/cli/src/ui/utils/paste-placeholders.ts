@@ -12,19 +12,86 @@ export function expandPendingPastePlaceholders(
   if (pendingPastes.size === 0) {
     return value;
   }
-  const placeholders = Array.from(pendingPastes.keys()).sort(
-    (a, b) => b.length - a.length,
-  );
-  const escapedPlaceholders = placeholders.map((placeholderValue) =>
-    placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-  );
-  const placeholderRegex = new RegExp(escapedPlaceholders.join('|'), 'g');
   return value.replace(
-    placeholderRegex,
+    placeholderPattern(pendingPastes),
     (matchedPlaceholder) =>
       pendingPastes.get(matchedPlaceholder) ?? matchedPlaceholder,
   );
 }
+
+/** Matches any of the placeholders, the longest first. */
+function placeholderPattern(pastes: ReadonlyMap<string, string>): RegExp {
+  const escapedPlaceholders = Array.from(pastes.keys())
+    .sort((a, b) => b.length - a.length)
+    .map((placeholderValue) =>
+      placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+    );
+  return new RegExp(escapedPlaceholders.join('|'), 'g');
+}
+
+/**
+ * Collapse each paste whose text appears whole in `text` back to its
+ * placeholder, so text rewritten around a paste keeps the paste collapsed. A
+ * text pasted more than once collapses only when it appears as many times as
+ * it was pasted, each occurrence back to its placeholder in paste order.
+ */
+export function collapsePastes(
+  text: string,
+  pastes: ReadonlyMap<string, string> | undefined,
+): { text: string; pasteExpansions: Map<string, string> } {
+  const pasteExpansions = new Map<string, string>();
+  const byBody = new Map<string, string[]>();
+  for (const [placeholder, body] of pastes ?? []) {
+    if (!body) continue;
+    byBody.set(body, [...(byBody.get(body) ?? []), placeholder]);
+  }
+  let collapsed = text;
+  const longestFirst = Array.from(byBody).sort(
+    (a, b) => b[0].length - a[0].length,
+  );
+  for (const [body, placeholders] of longestFirst) {
+    const parts = collapsed.split(body);
+    if (parts.length - 1 !== placeholders.length) continue;
+    collapsed = parts.reduce(
+      (joined, part, i) => joined + placeholders[i - 1] + part,
+    );
+    for (const placeholder of placeholders) {
+      pasteExpansions.set(placeholder, body);
+    }
+  }
+  return { text: collapsed, pasteExpansions };
+}
+
+/**
+ * A `prompt.submit` hook hears typed text with its pastes expanded. Its
+ * rewrite collapses back to placeholders so the pastes are framed again on
+ * the way to the model; when a paste did not come back whole — edited inside,
+ * removed or repeated — there is no telling where it lies in the rewrite, so
+ * the result is undefined and the rewrite is not sent unframed.
+ */
+export function collapseRewrite(
+  typed: string,
+  rewritten: string,
+  pastes: ReadonlyMap<string, string> | undefined,
+): { text: string; pasteExpansions?: Map<string, string> } | undefined {
+  // Only the pastes whose placeholders are in the typed text were heard; a
+  // discarded paste can linger in the map without one.
+  const present = new Set(
+    pastes?.size ? typed.match(placeholderPattern(pastes)) : [],
+  );
+  const sent = new Map(
+    Array.from(pastes ?? []).filter(
+      ([placeholder, body]) => body && present.has(placeholder),
+    ),
+  );
+  if (sent.size === 0) return { text: rewritten };
+  const collapsed = collapsePastes(rewritten, sent);
+  return collapsed.pasteExpansions.size === sent.size ? collapsed : undefined;
+}
+
+/** The line that refuses a rewrite which did not keep every paste whole. */
+export const REWRITE_CHANGED_PASTE =
+  'A prompt.submit hook changed pasted text in this prompt, so it was not sent. A hook keeps a paste out by dropping the prompt.';
 
 export function restorePasteDraft(
   text: string,

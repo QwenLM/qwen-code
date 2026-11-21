@@ -427,6 +427,75 @@
   -webkit-line-clamp: 2;
 }
 
+:global(
+  [data-web-shell-toolbar-popover][data-web-shell-mode-popover]:not(
+      [data-web-shell-compact-overlay]
+    )
+) {
+  box-sizing: border-box;
+  width: min(400px, var(--radix-popover-content-available-width));
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover]) {
+  padding: 6px;
+  font-size: 13px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownList {
+  gap: 1px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownRich
+  .dropdownItem {
+  grid-template-columns: 20px minmax(0, 1fr) 18px;
+  gap: 8px;
+  padding: 5px 7px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItem {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemContent {
+  gap: 1px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemLabel {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDesc {
+  font-size: 13px;
+  line-height: 16px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemIcon
+  svg {
+  width: 16px;
+  height: 16px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemIcon,
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemLabel,
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemDesc {
+  color: var(--destructive);
+}
+
 :global([data-web-shell-reasoning-popover]) {
   overflow-x: hidden;
   overflow-y: auto;
@@ -435,6 +504,33 @@
 :global([data-web-shell-model-submenu]) {
   z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
   min-width: min(280px, var(--radix-popover-content-available-width));
+}
+
+:global([data-web-shell-model-sheet]) .dropdownItemLabel {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The sheet is portaled out of .editorShell, so the mobile composer's 44px
+   overrides never reach its controls. The section row keeps its own taller
+   floor. The sheet also stands in for the popover in narrow desktop windows,
+   where a mouse needs none of this, so the floor is keyed on the pointer. */
+@media (hover: none) and (pointer: coarse) {
+  :global([data-web-shell-model-sheet]) .dropdownItem:not(.sheetSectionRow),
+  :global([data-web-shell-model-sheet]) .reasoningThinkingRow,
+  :global([data-web-shell-model-sheet]) .reasoningEffortRow,
+  :global([data-web-shell-model-sheet]) [data-web-shell-model-sheet-done],
+  :global([data-web-shell-model-sheet]) .dropdownSearchRow > button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* The Thinking row is not itself a control: its switch is. Growing the row
+     alone would add dead space, so the switch's own hit rect grows with it. */
+  :global([data-web-shell-model-sheet])
+    [data-web-shell-thinking-toggle]::after {
+    inset-block: -13px;
+  }
 }
 
 .slashPanel {
@@ -517,7 +613,7 @@
   width: 100%;
   min-width: 0;
   grid-template-columns:
-    minmax(0, 220px)
+    minmax(0, max-content)
     minmax(0, 1fr);
   column-gap: 8px;
   align-items: baseline;
@@ -601,7 +697,7 @@
   font-size: 14px;
   font-weight: 400;
   line-height: 22px;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .slashDetailText {
@@ -637,7 +733,7 @@
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
-  text-align: right;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1718,7 +1814,6 @@
 
 .dropdownItemActive {
   color: var(--foreground);
-  background: var(--accent);
 }
 
 .dropdownItemIcon,
@@ -1744,6 +1839,19 @@
   min-width: 0;
   flex-direction: column;
   gap: 2px;
+}
+
+.dropdownItem.modelPickerRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  gap: 10px;
+  align-items: center;
+}
+
+.modelPickerContent {
+  min-width: 0;
+  width: 100%;
+  white-space: normal;
 }
 
 .dropdownItemLabel {
@@ -1791,6 +1899,33 @@
   border-top: 1px solid var(--border);
 }
 
+.sheetSectionRow {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.sheetSectionValue {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  color: var(--muted-foreground);
+  text-align: right;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.sheetSectionValue svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
 .reasoningOptions {
   display: flex;
   flex-direction: column;
@@ -1826,6 +1961,23 @@
 
 .reasoningEffortRow:hover:not(:disabled) {
   background: var(--accent);
+}
+
+.dropdownItemActive,
+.dropdownItemActive:hover,
+.reasoningEffortRowActive,
+.reasoningEffortRowActive:hover:not(:disabled) {
+  font-weight: 500;
+  background: color-mix(in oklab, var(--accent), var(--foreground) 6%);
+}
+
+.dropdownItemActive .dropdownItemLabel {
+  font-weight: 500;
+}
+
+.reasoningEffortRowActive:disabled {
+  font-weight: inherit;
+  background: transparent;
 }
 
 .reasoningEffortRow:disabled {
@@ -1870,6 +2022,20 @@
 .toolBtn:not(:disabled):not([data-disabled]):hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+/* The trigger names the active mode, so Full Access stays dangerous after it
+   is selected, not only inside the picker. Hover tiles the generic rule above
+   on specificity and would otherwise drop the warning color. */
+.toolBtn.modeToolBtnDanger,
+.toolBtn.modeToolBtnDanger .toolBtnText {
+  color: var(--destructive);
+}
+
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover,
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover
+  .toolBtnText {
+  color: var(--destructive);
 }
 
 .planControl {
@@ -1988,16 +2154,6 @@
     forced-color-adjust: none;
     background: ButtonText;
   }
-}
-
-.addMenuPlanIcon {
-  display: inline-flex;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted-foreground);
 }
 
 .workspaceSelectTrigger {

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { realpathSync } from 'node:fs';
+import { isSubpath } from '../utils/paths.js';
 import {
   IDE_MAX_OPEN_FILES,
   IDE_MAX_SELECTED_TEXT_LENGTH,
@@ -14,6 +16,7 @@ type IdeContextSubscriber = (ideContext?: IdeContext) => void;
 
 export class IdeContextStore {
   private ideContextState?: IdeContext;
+  private workspaceRoots?: readonly string[];
   private readonly subscribers = new Set<IdeContextSubscriber>();
 
   /**
@@ -29,7 +32,8 @@ export class IdeContextStore {
    * Sets the IDE context and notifies all registered subscribers of the change.
    * @param newIdeContext The new IDE context from the IDE.
    */
-  set(newIdeContext: IdeContext): void {
+  set(newIdeContext: IdeContext, workspaceRoots?: readonly string[]): void {
+    this.workspaceRoots = workspaceRoots;
     const { workspaceState } = newIdeContext;
     if (!workspaceState) {
       this.ideContextState = newIdeContext;
@@ -87,6 +91,7 @@ export class IdeContextStore {
    */
   clear(): void {
     this.ideContextState = undefined;
+    this.workspaceRoots = undefined;
     this.notifySubscribers();
   }
 
@@ -96,6 +101,46 @@ export class IdeContextStore {
    */
   get(): IdeContext | undefined {
     return this.ideContextState;
+  }
+
+  getWorkspaceTrust(workspaceDir: string): boolean | undefined {
+    return this.getWorkspaceTrustScope(workspaceDir)?.isTrusted;
+  }
+
+  /**
+   * The IDE's trust decision for `workspaceDir`, with the IDE workspace root
+   * it comes from: the deepest root containing the directory. `root` is
+   * absent when the IDE named no roots and the directory is the process cwd.
+   */
+  getWorkspaceTrustScope(
+    workspaceDir: string,
+  ): { isTrusted: boolean; root?: string } | undefined {
+    const isTrusted = this.get()?.workspaceState?.isTrusted;
+    if (isTrusted === undefined) return undefined;
+    if (!this.workspaceRoots && workspaceDir === process.cwd()) {
+      return { isTrusted };
+    }
+    try {
+      const realpath = realpathSync.native ?? realpathSync;
+      const canonicalDir = realpath(workspaceDir);
+      if (!this.workspaceRoots) {
+        return canonicalDir === realpath(process.cwd())
+          ? { isTrusted }
+          : undefined;
+      }
+      let root: string | undefined;
+      for (const candidate of this.workspaceRoots) {
+        if (
+          isSubpath(candidate, canonicalDir) &&
+          (root === undefined || candidate.length > root.length)
+        ) {
+          root = candidate;
+        }
+      }
+      return root === undefined ? undefined : { isTrusted, root };
+    } catch {
+      return undefined;
+    }
   }
 
   /**

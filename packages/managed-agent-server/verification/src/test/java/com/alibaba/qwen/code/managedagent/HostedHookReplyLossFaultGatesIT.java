@@ -4,8 +4,8 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.persistence.FaultingExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.persistence.StoreFaultGate;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -60,6 +60,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -211,13 +212,9 @@ class HostedHookReplyLossFaultGatesIT {
                 + "; process.env.QWEN_MANAGED_HOOK_CGROUP_ROOT=" + json.writeValueAsString(hookRoot.toString())
                 + "; process.argv[1]=" + json.writeValueAsString(cli.toString())
                 + "; await import(" + json.writeValueAsString(cli.toUri().toString()) + ");\n");
-        try (var control = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
-                var hosted = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
-                var runtime = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
-            port = control.getLocalPort();
-            harnessPort = hosted.getLocalPort();
-            brokerPort = runtime.getLocalPort();
-        }
+        port = reservePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
@@ -318,8 +315,8 @@ class HostedHookReplyLossFaultGatesIT {
         JsonNode ref = hookExecution(session).path("resultRef");
         assertThat(ref.isNull()).as("hook result ref").isFalse();
         String body = jdbc.queryForObject("SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
-                + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                String.class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                String.class, tenant, session,
                 ref.path("resourceId").asText(), tenant, session);
         return json.readTree(body);
     }
@@ -1045,9 +1042,9 @@ class HostedHookReplyLossFaultGatesIT {
     static class StoreFaultConfiguration {
         @Bean
         @Primary
-        ManagedExtensionRecordStore faultingExtensionRecordStore(
+        JdbcManagedExtensionRecordStore faultingExtensionRecordStore(
                 JdbcTemplate jdbc, AgentStateStore sessions,
-                ManagedTaskEventStore taskEvents) {
+                JdbcManagedTaskEventStore taskEvents) {
             return new FaultingExtensionRecordStore(jdbc, sessions, taskEvents,
                     StoreFaultGate.INSTANCE);
         }

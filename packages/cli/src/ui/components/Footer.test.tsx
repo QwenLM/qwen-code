@@ -189,6 +189,7 @@ const createBackgroundTaskState = (
   selectedIndex: 0,
   dialogMode: 'closed',
   dialogOpen: false,
+  autoOpened: false,
   pillFocused: false,
   livePanelFocused: false,
   livePanelSelectedIndex: 0,

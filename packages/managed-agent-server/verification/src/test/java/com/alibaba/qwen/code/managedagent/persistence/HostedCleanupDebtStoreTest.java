@@ -33,7 +33,7 @@ class HostedCleanupDebtStoreTest {
     private static final String WORKSPACE = "workspace-cleanup-debt";
 
     @Autowired
-    private HostedCleanupDebtStore store;
+    private JdbcHostedCleanupDebtStore store;
 
     @Autowired
     private JdbcTemplate jdbc;
@@ -146,18 +146,17 @@ class HostedCleanupDebtStoreTest {
         byte[] body = bytes == null ? descriptor(tenant, workspace, session, prompt) : bytes;
         String resourceId = "cleanup-" + UUID.randomUUID();
         String resourceKey = UUID.randomUUID().toString().replace("-", "");
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 'hosted-turn-cleanup', 1, ?, ?,"
+                        + " VALUES (?, ?, ?, ?, ?, 'hosted-turn-cleanup', 1, ?, ?,"
                         + " ?, ?, 'REFERENCED', ?)",
-                resourceKey, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), tenant,
+                resourceKey, tenant,
                 workspace, session, resourceId, body.length, "d", storageKind, body, gmtCreate);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key,"
                         + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
                         + " journal_revision, resource_id, gmt_create, runtime_binding_key)"
-                        + " VALUES (?, 'HOSTED_CLEANUP', ?, 1, ?, ?, ?, ?, 1, ?, ?, ?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                        + " VALUES ('HOSTED_CLEANUP', ?, 1, ?, ?, ?, ?, 1, ?, ?, ?)",
                 ManagedSchemaKeys.key("hosted-cleanup", prompt), resourceKey, tenant, workspace,
                 session, resourceId, gmtCreate, "binding-" + UUID.randomUUID());
     }

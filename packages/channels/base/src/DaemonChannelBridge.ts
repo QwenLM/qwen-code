@@ -4,11 +4,14 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  BACKGROUND_WORKFLOW_APPROVAL_META_KEY,
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   ChannelPromptCancelledError,
   parseBackgroundResponseContext,
   resolvePromptImages,
@@ -209,7 +212,7 @@ function channelImageName(mimeType: string, index = 0): string | undefined {
 function decodeChannelImage(
   data: string,
   oversizedReason: string,
-): { bytes: Buffer } | { skip: string } {
+): { bytes: Buffer<ArrayBuffer> } | { skip: string } {
   // Valid base64 decodes to at most this many bytes, so an oversized image
   // is rejected on length alone instead of allocating a buffer the size
   // check would discard. Padding is subtracted only when the input length
@@ -666,6 +669,9 @@ export class DaemonChannelBridge
 
     const chunks: string[] = [];
     let slashCommandOutput = '';
+    // A turn notice rides the reply, so it keeps its own buffer that response
+    // boundaries never clear.
+    let turnNotice = '';
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) {
         chunks.push(chunk);
@@ -674,6 +680,11 @@ export class DaemonChannelBridge
     const onSlashCommandOutput = (sid: string, chunk: string) => {
       if (sid === sessionId) {
         slashCommandOutput = chunk;
+      }
+    };
+    const onTurnNotice = (sid: string, notice: string) => {
+      if (sid === sessionId) {
+        turnNotice = notice;
       }
     };
     const clearChunks = (sid: string) => {
@@ -689,6 +700,7 @@ export class DaemonChannelBridge
     };
     this.on('textChunk', onChunk);
     this.on('slashCommandOutput', onSlashCommandOutput);
+    this.on('turnNotice', onTurnNotice);
     this.on('responseBoundary', clearChunks);
     this.on('sessionDied', onSessionDied);
     const turnBarrier = this.createTurnBarrier(sessionId);
@@ -816,6 +828,9 @@ export class DaemonChannelBridge
             prompt,
             _meta: {
               [CHANNEL_PROMPT_META_KEY]: true,
+              ...(options?.workflowOrigin
+                ? { [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: options.workflowOrigin }
+                : {}),
               ...(options?.outputMode === 'per_task'
                 ? { [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task' }
                 : {}),
@@ -858,8 +873,9 @@ export class DaemonChannelBridge
       if (taskOutput) {
         options?.onTaskResult?.({ partial: taskOutput.partial === true });
       }
+      const body = taskOutput?.text || chunks.join('') || slashCommandOutput;
       const textResult =
-        taskOutput?.text || chunks.join('') || slashCommandOutput;
+        turnNotice && body ? `${turnNotice}\n\n${body}` : turnNotice || body;
       this.emit('promptComplete', {
         sessionId,
         text: textResult,
@@ -870,6 +886,7 @@ export class DaemonChannelBridge
       this.clearTurnBarrier(sessionId);
       this.off('textChunk', onChunk);
       this.off('slashCommandOutput', onSlashCommandOutput);
+      this.off('turnNotice', onTurnNotice);
       this.off('responseBoundary', clearChunks);
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
@@ -1222,6 +1239,11 @@ export class DaemonChannelBridge
           break;
         }
         if (text) {
+          if (meta?.[CHANNEL_TURN_NOTICE_META_KEY] === true) {
+            // Keep notices outside the text buffer cleared by tool boundaries.
+            this.emit('turnNotice', sessionId, text);
+            break;
+          }
           this.emit(
             meta?.['source'] === 'slash_command'
               ? 'slashCommandOutput'
@@ -1253,6 +1275,12 @@ export class DaemonChannelBridge
         const toolCallId = getString(update['toolCallId']);
         const explicitKind = getString(update['kind']);
         const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+        if (
+          type === 'tool_call_update' &&
+          meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] === true
+        ) {
+          break;
+        }
         if (
           !explicitKind &&
           toolCallId &&
@@ -1343,7 +1371,9 @@ export class DaemonChannelBridge
     }
     const requestId = data['requestId'];
     this.requestToSession.set(requestId, sessionId);
-    this.emitResponseBoundary(sessionId);
+    if (data.toolCall._meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] !== true) {
+      this.emitResponseBoundary(sessionId);
+    }
     this.emit('permissionRequest', {
       requestId,
       sessionId,

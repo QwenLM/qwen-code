@@ -4,14 +4,15 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
@@ -49,7 +50,7 @@ import static org.mockito.Mockito.when;
  * protocol 0 and the parked v1 fence row is never rebound.
  */
 class SessionLifecycleServiceResumeTest {
-    private WorkspaceLifecycleStore lifecycle;
+    private JdbcWorkspaceLifecycleStore lifecycle;
     private static final String TENANT = "lifecycle-resume";
     private final AtomicLong now = new AtomicLong(1_000);
     private JdbcTemplate jdbc;
@@ -69,6 +70,9 @@ class SessionLifecycleServiceResumeTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: this witnesses the v1 resume pin, so the Session rides
+        // external-files (ordinary files is v2 now).
+        externalFiles(sessionId);
         // The first close runs v1 and fails terminally: the Session parks in
         // CLOSING and the fence row keeps the claim released.
         String firstOperation = store.beginWorkspaceLifecycle(TENANT,
@@ -136,6 +140,9 @@ class SessionLifecycleServiceResumeTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: this witnesses the v1 resume pin, so the Session rides
+        // external-files (ordinary files is v2 now).
+        externalFiles(sessionId);
         // The first delete runs v1 against the ACTIVE Session and fails
         // terminally: the Session parks in DELETING and the fence row keeps
         // the claim released.
@@ -206,6 +213,9 @@ class SessionLifecycleServiceResumeTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: this witnesses the v1 resume pin, so the Session rides
+        // external-files (ordinary files is v2 now).
+        externalFiles(sessionId);
         // The first close runs v1, persists its effects receipt — the fence
         // moves to DRAINING — and only then fails terminally.
         String firstOperation = store.beginWorkspaceLifecycle(TENANT,
@@ -277,6 +287,13 @@ class SessionLifecycleServiceResumeTest {
                 .orElseThrow().state()).isEqualTo("COMPLETED");
     }
 
+    // D3: ordinary files moved to lifecycle v2; external-files keeps v1, so
+    // the failed-v1-resume witnesses ride it.
+    private void externalFiles(String sessionId) {
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, TENANT, sessionId);
+    }
+
     // A store with the Workspace-files deployment flag on, plus the
     // registry and access rows a bound Session's admission resolves.
     private ManagedAgentStore workspaceStore() {
@@ -316,7 +333,7 @@ class SessionLifecycleServiceResumeTest {
             ObjectProvider<RuntimeBindingRepository> bindings = mock(ObjectProvider.class);
             when(bindings.getIfAvailable()).thenReturn(new JdbcRuntimeBindingRepository(dataSource,
                     new AesGcmSecretProtector("test", new byte[32])));
-            lifecycle = new WorkspaceLifecycleStore(jdbc, new ObjectMapper(), bindings);
+            lifecycle = new JdbcWorkspaceLifecycleStore(jdbc, new ObjectMapper(), bindings);
         }
         return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), new Clock() {
             @Override
@@ -333,6 +350,6 @@ class SessionLifecycleServiceResumeTest {
             public Instant instant() {
                 return Instant.ofEpochMilli(now.get());
             }
-        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
+        }, ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
     }
 }

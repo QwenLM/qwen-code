@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import type { ManagedPackageContributions } from '@qwen-code/qwen-code-core/extension/managed-package.js';
+import { parseManagedMcpRecipe } from '@qwen-code/qwen-code-core/extension/managed-mcp-recipe.js';
 import {
   HookEventName,
   HooksConfigSource,
@@ -65,33 +66,21 @@ export function stageManagedExtensionManifests(input: {
         .map((setting) => [setting.envVar, environment[setting.envVar]!]),
     );
     for (const [name, raw] of Object.entries(contributions.mcpServers)) {
-      const recipe = object(raw);
-      if (
-        Object.keys(recipe).some(
-          (key) =>
-            ![
-              'command',
-              'args',
-              'env',
-              'timeout',
-              'url',
-              'httpUrl',
-              'headers',
-              'type',
-            ].includes(key),
-        )
-      )
-        throw new Error('Unsupported extension MCP recipe field.');
+      const recipe = parseManagedMcpRecipe(raw) as unknown as Record<
+        string,
+        unknown
+      >;
       const transport =
         recipe['command'] !== undefined
           ? 'stdio'
           : recipe['type'] === 'sse'
             ? 'sse'
             : 'streamable-http';
+      const serverId = `${pkg.pin.extensionId}:${name}`;
       const definition: ManagedMcpDefinition = {
         tenantId: input.tenantId,
         workspaceId: input.workspaceId,
-        serverId: `${pkg.pin.extensionId}:${name}`,
+        serverId,
         serverRevision: revision,
         definitionDigest: digest({
           pin: pkg.pin,

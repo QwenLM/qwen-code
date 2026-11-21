@@ -24,6 +24,8 @@ export enum AppEvent {
    * re-evaluate mid-session instead of only at startup. See issue #4615.
    */
   McpPendingApprovalChanged = 'mcp-pending-approval-changed',
+  /** A `/hooks` reload left the workspace's project hooks awaiting approval. */
+  ProjectHooksPendingApprovalChanged = 'project-hooks-pending-approval-changed',
   LspStatusChanged = 'lsp-status-changed',
   ExtensionContentChanged = 'extension-content-changed',
   ExtensionRefreshNeeded = 'extension-refresh-needed',

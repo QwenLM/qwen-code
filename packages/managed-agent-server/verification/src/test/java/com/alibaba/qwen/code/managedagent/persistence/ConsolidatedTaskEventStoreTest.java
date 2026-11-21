@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,7 +14,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ConsolidatedTaskEventStoreTest {
     private ConsolidatedStoreFixture fixture;
     private JdbcTemplate jdbc;
-    private ManagedTaskEventStore events;
+    private JdbcManagedTaskEventStore events;
 
     @BeforeEach
     void initialize() {
@@ -21,7 +22,7 @@ class ConsolidatedTaskEventStoreTest {
         var source = fixture.source();
         ManagedSchema.initialize(source);
         jdbc = new JdbcTemplate(source);
-        events = new ManagedTaskEventStore(jdbc);
+        events = new JdbcManagedTaskEventStore(jdbc);
         jdbc.update("INSERT INTO ma_session (tenant_id,session_id,session_kind,workspace_id,gmt_create,gmt_modified)"
                 + " VALUES ('tenant','session','CONTROL','workspace',0,0)");
     }
@@ -36,14 +37,14 @@ class ConsolidatedTaskEventStoreTest {
     @Test
     void opaqueCursorBindsTenantSessionAndTaskWithoutDelimiterAmbiguity() {
         String task = "任务:child:1";
-        String cursor = com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor("tenant", "session", task, 14);
-        assertThat(com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.decodeCursor("tenant", "session", task, cursor)).isEqualTo(14);
-        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.decodeCursor("another", "session", task, cursor)).isInstanceOf(ManagedAgentException.class);
-        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.decodeCursor("tenant", "another", task, cursor)).isInstanceOf(ManagedAgentException.class);
-        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.decodeCursor("tenant", "session", task + " ", cursor)).isInstanceOf(ManagedAgentException.class);
-        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.decodeCursor("tenant", "session", task, "x".repeat(129))).isInstanceOf(ManagedAgentException.class);
+        String cursor = ManagedTaskEventStore.encodeCursor("tenant", "session", task, 14);
+        assertThat(ManagedTaskEventStore.decodeCursor("tenant", "session", task, cursor)).isEqualTo(14);
+        assertThatThrownBy(() -> ManagedTaskEventStore.decodeCursor("another", "session", task, cursor)).isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> ManagedTaskEventStore.decodeCursor("tenant", "another", task, cursor)).isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> ManagedTaskEventStore.decodeCursor("tenant", "session", task + " ", cursor)).isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> ManagedTaskEventStore.decodeCursor("tenant", "session", task, "x".repeat(129))).isInstanceOf(ManagedAgentException.class);
         String old = java.util.Base64.getUrlEncoder().encodeToString("tev1:task:14".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
-        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.decodeCursor("tenant", "session", "task", old)).isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> ManagedTaskEventStore.decodeCursor("tenant", "session", "task", old)).isInstanceOf(ManagedAgentException.class);
     }
 
     @Test
@@ -53,7 +54,7 @@ class ConsolidatedTaskEventStoreTest {
         jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,last_sequence,gmt_modified)"
                 + " VALUES ('tenant','session','SESSION','',1,0)");
         jdbc.update("INSERT INTO ma_public_event (tenant_id,session_id,stream_kind,stream_id,sequence_id,event_id,"
-                + "event_type,data_json,terminal,gmt_create) VALUES ('tenant','session','SESSION','',1,'session-event',"
+                + "event_type,data_json,is_terminal,gmt_create) VALUES ('tenant','session','SESSION','',1,'session-event',"
                 + "'session.updated','{}',FALSE,1)");
         assertThat(events.expireThrough("tenant", "session", "task", 2)).isEqualTo(2);
         assertThat(events.read("tenant", "session", "task", 0, 100).events()).isEmpty();
@@ -84,7 +85,7 @@ class ConsolidatedTaskEventStoreTest {
     @Test
     void derivedFeedBackpressureDoesNotMarkItsOwningDomainTransactionRollbackOnly() {
         events.appendOutput("tenant", "session", "task", "unarchived", false, null, null, null, null, 1);
-        for (int i = 1; i < ManagedTaskEventStore.BACKLOG_BOUND; i++) {
+        for (int i = 1; i < JdbcManagedTaskEventStore.BACKLOG_BOUND; i++) {
             events.appendStateChange("tenant", "session", "task", "running", "ready", i + 1);
         }
         new org.springframework.transaction.support.TransactionTemplate(
@@ -96,7 +97,7 @@ class ConsolidatedTaskEventStoreTest {
                 });
         assertThat(jdbc.queryForObject("SELECT title FROM ma_session WHERE tenant_id=? AND session_id=?", String.class,
                 "tenant", "session")).isEqualTo("committed-domain");
-        assertThat(events.positions("tenant", "session", "task").lastSequence()).isEqualTo(ManagedTaskEventStore.BACKLOG_BOUND);
+        assertThat(events.positions("tenant", "session", "task").lastSequence()).isEqualTo(JdbcManagedTaskEventStore.BACKLOG_BOUND);
     }
 
     @Test

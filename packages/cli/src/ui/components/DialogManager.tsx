@@ -10,6 +10,7 @@ import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
 import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
 import { MCPServerApprovalDialog } from './mcp/MCPServerApprovalDialog.js';
+import { ProjectHooksApprovalDialog } from './hooks/ProjectHooksApprovalDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
 import { ProviderUpdatePrompt } from './ProviderUpdatePrompt.js';
@@ -103,6 +104,7 @@ export const DialogManager = ({
         branch={uiState.activeWorktree.branch}
         worktreePath={uiState.activeWorktree.path}
         originalHeadCommit={uiState.activeWorktree.originalHeadCommit}
+        worktreeBase={uiState.activeWorktree.worktreeBase}
         onKeep={() => void uiActions.handleWorktreeExit('keep')}
         onRemove={() => void uiActions.handleWorktreeExit('remove')}
         onCancel={() => void uiActions.handleWorktreeExit('cancel')}
@@ -148,6 +150,16 @@ export const DialogManager = ({
       />
     );
   }
+  if (uiState.isProjectHooksApprovalDialogOpen && uiState.pendingProjectHooks) {
+    return (
+      <ProjectHooksApprovalDialog
+        lines={uiState.pendingProjectHooks.lines}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={listDialogHeight}
+        onSelect={uiActions.handleProjectHooksApprovalSelect}
+      />
+    );
+  }
   if (uiState.shellConfirmationRequest) {
     return (
       <ShellConfirmationDialog
@@ -170,6 +182,7 @@ export const DialogManager = ({
       <ConsentPrompt
         prompt={uiState.confirmationRequest.prompt}
         onConfirm={uiState.confirmationRequest.onConfirm}
+        dismissOnEscape
         terminalWidth={terminalWidth}
         availableTerminalHeight={constrainedDialogHeight}
       />
@@ -427,7 +440,7 @@ export const DialogManager = ({
   if (uiState.auth.isAuthDialogOpen || uiState.auth.authError) {
     return (
       <Box flexDirection="column">
-        <AuthDialog availableTerminalHeight={listDialogHeight} />
+        <AuthDialog />
       </Box>
     );
   }

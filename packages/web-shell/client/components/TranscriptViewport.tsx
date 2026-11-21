@@ -28,6 +28,7 @@ import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
 import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
+import { ModReplyRowsProvider } from './messages/ModAssistantMessage';
 
 interface ReadingAnchor {
   source: string;
@@ -75,10 +76,14 @@ export function followRangeFromRows(
   return { start, end, current: current ?? firstVisible! };
 }
 
+export interface TranscriptViewportProps extends MessageListProps {
+  approvalOverlayActive?: boolean;
+}
+
 export const TranscriptViewport = forwardRef<
   MessageListHandle,
-  MessageListProps
->(function TranscriptViewport(props, ref) {
+  TranscriptViewportProps
+>(function TranscriptViewport({ approvalOverlayActive, ...props }, ref) {
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
@@ -457,10 +462,11 @@ export const TranscriptViewport = forwardRef<
       load(edge);
   };
 
+  // Approval centers global navigation against the outer chat wrap instead.
   return (
     <div
       ref={root}
-      className={`${styles.root} relative flex min-h-0 flex-1`}
+      className={`${styles.root} ${globalNavigation && (approvalOverlayActive ?? props.pendingApproval) ? 'static' : 'relative'} flex min-h-0 flex-1`}
       data-history-viewport={historical ? 'historical' : 'live'}
     >
       {!props.hideSessionTimeline &&
@@ -539,61 +545,64 @@ export const TranscriptViewport = forwardRef<
           <TurnCallsProvider
             onOpen={openTurnCalls ? openViewportTurnCalls : undefined}
           >
-            <MessageList
-              {...props}
-              key={viewport.viewKey}
-              ref={list}
-              messages={viewport.messages}
-              deletion={historical ? undefined : deletion}
-              mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
-              timelineAction={
-                globalNavigation || !navigationVisible
-                  ? undefined
-                  : props.timelineAction
-              }
-              hideSessionTimeline={
-                historical || globalNavigation || props.hideSessionTimeline
-              }
-              {...(viewport.historical
-                ? {
-                    frozenViewport: true,
-                    hasOlderHistory: false,
-                    onLoadOlderHistory: undefined,
-                    historyCapacityReached: false,
-                    historyPaginationError: false,
-                    loadingOlderHistory: false,
-                    onCanScrollToBottomChange: undefined,
-                    firstTurnMetrics: undefined,
-                    sessionKey: viewport.viewKey,
-                    pendingApproval: null,
-                    loadingTranscript: false,
-                    catchingUp: false,
-                    isResponding: false,
-                    transcriptActivity: undefined,
-                    onReloadTranscript: undefined,
-                    transcriptReloadPaused: true,
-                    onEditUserMessage: undefined,
-                    onSubmitUserMessageEdit: undefined,
-                    onShowContextDetail: undefined,
-                    onOpenMemoryFile: undefined,
-                    onBranchSession: undefined,
-                    onRetryClick: undefined,
-                    onRetryFailedPrompt: undefined,
-                    showRetryHint: false,
-                    failedPromptMessageId: undefined,
-                    tailContent: undefined,
-                    welcomeHeader: undefined,
-                    activeTurnStartedAt: undefined,
-                    turnFileChanges: undefined,
-                    sourceEntries: undefined,
-                    sourceSessionId: undefined,
-                    onSourceOpen: undefined,
-                    turnArtifacts: undefined,
-                    turnScheduledTasks: undefined,
-                    generateContent: undefined,
-                  }
-                : {})}
-            />
+            <ModReplyRowsProvider messages={viewport.messages}>
+              <MessageList
+                {...props}
+                key={viewport.viewKey}
+                ref={list}
+                messages={viewport.messages}
+                hookStatisticsSessionId={props.sourceSessionId}
+                deletion={historical ? undefined : deletion}
+                mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
+                timelineAction={
+                  globalNavigation || !navigationVisible
+                    ? undefined
+                    : props.timelineAction
+                }
+                hideSessionTimeline={
+                  historical || globalNavigation || props.hideSessionTimeline
+                }
+                {...(viewport.historical
+                  ? {
+                      frozenViewport: true,
+                      hasOlderHistory: false,
+                      onLoadOlderHistory: undefined,
+                      historyCapacityReached: false,
+                      historyPaginationError: false,
+                      loadingOlderHistory: false,
+                      onCanScrollToBottomChange: undefined,
+                      firstTurnMetrics: undefined,
+                      sessionKey: viewport.viewKey,
+                      pendingApproval: null,
+                      loadingTranscript: false,
+                      catchingUp: false,
+                      isResponding: false,
+                      transcriptActivity: undefined,
+                      onReloadTranscript: undefined,
+                      transcriptReloadPaused: true,
+                      onEditUserMessage: undefined,
+                      onSubmitUserMessageEdit: undefined,
+                      onShowContextDetail: undefined,
+                      onOpenMemoryFile: undefined,
+                      onBranchSession: undefined,
+                      onRetryClick: undefined,
+                      onRetryFailedPrompt: undefined,
+                      showRetryHint: false,
+                      failedPromptMessageId: undefined,
+                      tailContent: undefined,
+                      welcomeHeader: undefined,
+                      activeTurnStartedAt: undefined,
+                      turnFileChanges: undefined,
+                      sourceEntries: undefined,
+                      sourceSessionId: undefined,
+                      onSourceOpen: undefined,
+                      turnArtifacts: undefined,
+                      turnScheduledTasks: undefined,
+                      generateContent: undefined,
+                    }
+                  : {})}
+              />
+            </ModReplyRowsProvider>
           </TurnCallsProvider>
           {deletion && !historical && (
             <MessageDeletionToolbar controls={deletion} />

@@ -6,7 +6,10 @@
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { readHostedFileHistory } from './hosted-file-history.js';
 import { isDurableBlockedVerdict } from './hosted-runtime-recovery.js';
-import { hasHostedCleanupDebt } from './hosted-turn-cleanup.js';
+import {
+  hasBlockingHostedCleanupDebt,
+  type HostedCleanupHold,
+} from './hosted-turn-cleanup.js';
 
 export interface HostedRecoveryStatus {
   state:
@@ -29,6 +32,7 @@ export interface HostedRecoverySession {
   blocked: boolean;
   recoveryReason?: string;
   cleanupBlocked?: boolean;
+  cleanupHolds?: ReadonlyMap<string, HostedCleanupHold>;
   fileHistoryOwed?: string;
   runtimeLeaseOwedByTerminalRoute?: boolean;
   mcpBusy?: boolean;
@@ -137,11 +141,16 @@ export async function inspectHostedRecovery(
     if (history?.pendingTurn || session.fileHistoryOwed)
       return status('cleanup_pending', 'file_history_pending');
     if (
-      hasHostedCleanupDebt(session.managed) ||
+      (await hasBlockingHostedCleanupDebt(
+        session.managed,
+        session.cleanupHolds,
+      )) ||
       session.runtimeLeaseOwedByTerminalRoute ||
       session.cleanupBlocked
     )
       return status('cleanup_pending', 'runtime_cleanup_pending');
+    if (authority.committedSequence !== sequence)
+      return status('awaiting_evidence', 'evidence_changed');
     if (session.hooks?.hasPendingOperations || session.mcp?.recoveryBlocked)
       return status('operator_required', 'unsupported_extension_recovery');
     if (session.blocked || authority.writesStopped)

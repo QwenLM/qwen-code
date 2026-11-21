@@ -1,13 +1,15 @@
 package com.alibaba.qwen.code.managedagent.harness.contracts;
 
-public record HarnessCapabilities(int currentProtocolVersion, java.util.List<Integer> supportedProtocolVersions, String bootId, String instanceId, String capabilityDigest, int lifecycleProtocolVersion, java.util.List<String> features, int titleProtocolVersion, java.util.List<String> lifecycleV2Profiles) {
+import java.util.List;
+
+public record HarnessCapabilities(int currentProtocolVersion, List<Integer> supportedProtocolVersions, String bootId, String instanceId, String capabilityDigest, int lifecycleProtocolVersion, List<String> features, int titleProtocolVersion, List<String> lifecycleV2Profiles) {
     public int getCurrentProtocolVersion() { return currentProtocolVersion; }
-    public java.util.List<Integer> getSupportedProtocolVersions() { return supportedProtocolVersions; }
+    public List<Integer> getSupportedProtocolVersions() { return supportedProtocolVersions; }
     public String getBootId() { return bootId; }
     public String getInstanceId() { return instanceId; }
     public String getCapabilityDigest() { return capabilityDigest; }
     public int getLifecycleProtocolVersion() { return lifecycleProtocolVersion; }
-    public java.util.List<String> getFeatures() { return features; }
+    public List<String> getFeatures() { return features; }
     public int getTitleProtocolVersion() { return titleProtocolVersion; }
-    public java.util.List<String> getLifecycleV2Profiles() { return lifecycleV2Profiles; }
+    public List<String> getLifecycleV2Profiles() { return lifecycleV2Profiles; }
 }

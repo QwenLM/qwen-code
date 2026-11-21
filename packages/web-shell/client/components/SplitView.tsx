@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from '../utils/random-uuid.js';
 import {
   useCallback,
   useEffect,
@@ -124,6 +125,8 @@ export interface SplitViewProps {
    * each render would re-fire the reporting effect and loop.
    */
   onPanesChange?: (sessionIds: string[]) => void;
+  /** Report the resolved owners of mounted panes for the app-level poller. */
+  onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
   onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Report panes surfacing approvals, including hidden panes. Keep stable while
@@ -187,6 +190,7 @@ export function SplitView({
   sessionIds,
   showSessionDetails = true,
   onPanesChange,
+  onPaneWorkspacesChange,
   onAssistantTurnSettled,
   onPendingPanesChange,
   onExit,
@@ -421,11 +425,7 @@ export function SplitView({
   // A per-tab/per-mount nonce: two browser tabs opening the same split must not
   // register the same daemon client id, or suppressOwnUserEcho would treat one
   // tab's prompt as the other's own echo and drop it from the transcript.
-  const [instanceId] = useState(() =>
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2),
-  );
+  const [instanceId] = useState(() => randomUUID());
 
   const paneIdsRef = useRef(paneIds);
   paneIdsRef.current = paneIds;
@@ -555,6 +555,17 @@ export function SplitView({
     }
     return map;
   }, [allSessions, seedSessionId, connection.workspaceCwd, paneIds]);
+
+  useEffect(() => {
+    if (!onPaneWorkspacesChange) return;
+    const cwds = new Set<string>();
+    for (const id of paneIds) {
+      const cwd = workspaceCwdById.get(id) ?? workspaceCwd;
+      if (cwd) cwds.add(cwd);
+    }
+    onPaneWorkspacesChange([...cwds]);
+  }, [onPaneWorkspacesChange, paneIds, workspaceCwd, workspaceCwdById]);
+  useEffect(() => () => onPaneWorkspacesChange?.([]), [onPaneWorkspacesChange]);
 
   const addPane = useCallback(
     (sessionId: string) => {
@@ -1022,11 +1033,8 @@ export function SplitView({
                     <ChatPane
                       showResponseTokensPerSecond={showResponseTokensPerSecond}
                       title={titleById.get(sessionId)}
-                      sessionSummary={
-                        showSessionDetails
-                          ? sessionById.get(sessionId)
-                          : undefined
-                      }
+                      sessionSummary={sessionById.get(sessionId)}
+                      showSessionDetails={showSessionDetails}
                       isActive={activeId === sessionId}
                       onApprovalChange={handleApprovalChange}
                       workspaceCwd={paneWorkspaceCwd}

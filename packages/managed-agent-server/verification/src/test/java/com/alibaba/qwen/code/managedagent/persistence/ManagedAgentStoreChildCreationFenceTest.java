@@ -48,7 +48,7 @@ class ManagedAgentStoreChildCreationFenceTest {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
-                Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                Clock.systemUTC(), ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
@@ -81,15 +81,14 @@ class ManagedAgentStoreChildCreationFenceTest {
         // that key proves it evaluates the run's own row and not a
         // physically-near but unrelated record.
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_kind, session_scope_key, record_key, tenant_id,"
+                        + " (record_kind, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES ('DOMAIN', ?, ?, 'tenant', 'workspace', ?,"
+                        + " VALUES ('DOMAIN', ?, 'tenant', 'workspace', ?,"
                         + " 'child_run', ?, 'h', 1, ?, 'child_agent', ?,"
                         + " 'session', ?, 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", parent),
                 ManagedExtensionProjection.recordKey(parent, "child_run",
                         childRunId),
                 parent, childRunId, "resource-" + childRunId, taskState,

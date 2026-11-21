@@ -34,6 +34,11 @@ These commands help you save, restore, and summarize work progress.
 | `/export`        | Export session history to file                                           | `/export html`, `/export md`, `/export json`, `/export jsonl` |
 | `/rename`        | Rename or tag the current session                                        | `/rename My Feature` or `/tag`                                |
 | `/commit`        | Create a git commit with an AI-drafted message                           | `/commit` or `/commit only stage the parser changes`          |
+| `/pr`            | Bind a GitHub pull request to this session                               | `/pr 123`, `/pr #123`, or `/pr <PR URL>`                      |
+
+> [!note]
+>
+> `/pr` with a bare number resolves the PR in the session's target-directory repository, which may not be where your work happened — the success message prints the resolved URL so you can check it. A full PR URL names its own repository. There is no unbind command. To fix a bare-number bind, re-run `/pr` with the full URL of the PR you meant — when the intended PR carries the same number, that replaces the wrong entry in place; otherwise the wrong entry stays until you bind enough further PRs to push it past the session's 10-binding cap, or edit the session's PR sidecar file.
 
 > [!note]
 >
@@ -105,7 +110,7 @@ Commands for managing AI tools and models.
 | `/model`              | Switch model used in current session                                                             | `/model`, `/model <model-id>` (switch immediately)                                                        |
 | `/model --fast`       | Set a lighter model for prompt suggestions                                                       | `/model --fast qwen3-coder-flash`                                                                         |
 | `/model --voice`      | Set the model used for voice transcription                                                       | `/model --voice <model-id>`                                                                               |
-| `/model --vision`     | Set the vision-bridge model used to transcribe images for a text-only main model                 | `/model --vision <model-id>`                                                                              |
+| `/model --vision`     | Set the vision-bridge model used to transcribe images for a text-only main model, or its timeout | `/model --vision <model-id>`, `/model --vision --timeout 60` (seconds; also `60s`, `90000ms`)             |
 | `/model --compaction` | Set the model used for chat compression                                                          | `/model --compaction <model-id>`, `/model --compaction clear`                                             |
 | `/model --image`      | Set an image-generation-capable model for the built-in image generation tool                     | `/model --image <model-id>`                                                                               |
 | `/effort`             | Set reasoning effort for thinking-capable models                                                 | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
@@ -140,7 +145,7 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the user/system-scoped `tools.lspEnabled` setting, its `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` env pair, or the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` and `tools.lspEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
 
 > [!note]
 >
@@ -166,10 +171,10 @@ See [Code Review](./code-review.md) for full `/review` documentation, and [Autof
 
 The `/btw` command allows you to ask quick side questions without interrupting or affecting the main conversation flow.
 
-| Command                | Description                           |
-| ---------------------- | ------------------------------------- |
-| `/btw <your question>` | Ask a quick side question             |
-| `?btw <your question>` | Alternative syntax for side questions |
+| Command                | Description                                                                                    |
+| ---------------------- | ---------------------------------------------------------------------------------------------- |
+| `/btw <your question>` | Ask a side question.                                                                           |
+| `?btw <your question>` | Ask a side question in OpenTUI. In Ink, this sends a regular message to the main conversation. |
 
 **How It Works:**
 
@@ -468,6 +473,8 @@ Commands for obtaining information and performing system settings.
 | `/settings`      | Open settings editor                                                                                                           | `/settings`                                                                         |
 | `/config`        | Get or set any setting by dot-path key (writes to user settings)                                                               | `/config` (list all), `/config <key>`, `/config <key>=<value>`                      |
 | `/auth`          | Change authentication method                                                                                                   | `/auth`, `/connect`, `/login`                                                       |
+| `/logout`        | Sign out of the active Qwen Subscription account (available with Qwen Subscription login)                                      | `/logout`                                                                           |
+| `/upgrade`       | Open Qwen subscription plans (available with Qwen Subscription login)                                                          | `/upgrade`                                                                          |
 | `/doctor`        | Run installation and environment diagnostics                                                                                   | `/doctor`, `/doctor memory`                                                         |
 | → `memory`       | Show current process memory diagnostics                                                                                        | `/doctor memory [--json] [--sample] [--snapshot]`                                   |
 | → `cpu-profile`  | Record a CPU profile for Chrome DevTools analysis                                                                              | `/doctor cpu-profile [--duration <seconds>]`                                        |
@@ -608,6 +615,8 @@ Use {{args}} for parameter injection.
 | ---------------- | --------------------------------------- | --------------------- | ------------------------ |
 | Raw Injection    | `prompt = "Fix: {{args}}"`              | `/fix "Button issue"` | `Fix: "Button issue"`    |
 | In Shell Command | `prompt = "Search: !{grep {{args}} .}"` | `/search "hello"`     | Execute `grep "hello" .` |
+
+Argument text is inserted literally: dollar sequences such as `$$` and `$&` keep their characters, and placeholder names inside the arguments are not expanded again. Arguments inside `!{...}` still receive shell escaping before permission checks and execution.
 
 #### 2. Default Parameter Processing
 
@@ -1077,11 +1086,29 @@ you have open. Several of them share one process and one inbox, so a
 sender has to name the session it means — every Qwen Code session does
 that automatically.
 
-Messages sent _to_ one are refused rather than held. Holding is a
-question put to a person, and nobody is watching a held-message list on a
-driven session's behalf; a sender is told at once instead of
-waiting out an expiry. Where a held message should surface for those
-sessions is not settled yet.
+It can receive messages from sessions in the same review class and from
+trusted controllers when the inbound policy is unset. It shows an
+accepted message and hands it to the model as a turn of its own once
+the session is idle. A message the rules would hold is
+refused instead, because nobody is watching a held-message list on a
+driven session's behalf, and the sender is told at once rather than
+waiting out an expiry. An explicit `hold` setting is answered the same
+way. Where a held message should surface for these sessions is not
+settled yet.
+
+The shared ACP inbox accepts peer and controller credentials. The
+own-process credential described above is available to single-session
+terminal inboxes.
+
+After you stop a turn, messages that the gate would otherwise accept
+receive `queue-full` until you send another prompt. Inbound policy and
+rate limits still apply. Senders can retry after the next prompt.
+
+When the session closes or `/clear` switches its conversation, the host
+sends `expired` for messages still waiting in the old queue. Messages
+appear in the transcript when a turn takes them. A message whose turn
+was cancelled before the model saw it is not corrected. That gap exists
+in a terminal session too.
 
 A session registers unless its own settings turn
 `agents.crossSessionMessaging` off, or it was started with `--bare` or

@@ -57,9 +57,11 @@ cancellation/reconciliation yields committed settlement; a blocked checkout alon
 cannot prove failure. The UI exposes that block and preserves cancellation.
 Retry answers the same identity rather than allocating a new one.
 
-Ordinary Sessions retain the existing shared execution model. Preparation and
-cleanup exclusively maintain the whole physical storage and may wait for other
-executions. Reuse the existing safe Git runner and layout checks, but not child
+Ordinary Sessions retain the existing shared execution model. Main worktree
+preparation can share storage with ordinary Runtime members and uploads;
+maintenance operations still exclude one another. Cleanup retains the
+whole-storage idle requirement; see the [concurrency design](2026-11-05-managed-remaining-lock-optimization.md).
+Reuse the existing safe Git runner and layout checks, but not child
 worktree recreation, forced discard or merge semantics.
 
 ## Recovery and cleanup

@@ -9,9 +9,23 @@ import os from 'node:os';
 import type { Terminal } from '@xterm/headless';
 import { loadPty, type PtyLoadResult } from '../utils/getPty.js';
 import { collectPtyProcessTree } from '../utils/pty-process-tree.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
+import {
+  DEFAULT_WRITE_QUEUE_BYTES,
+  getPtyBudgetStats,
+  processPtyBudget,
+} from '../utils/bun-pty.js';
+import {
+  createDebugLogger,
+  isDebugLogFileEnabled,
+} from '../utils/debugLogger.js';
 import { loadXtermHeadless } from '../utils/load-xterm-headless.js';
+import {
+  getPtyInputQueueBytes,
+  PTY_INPUT_QUEUE_FIELDS,
+  type PtyInputQueueBytes,
+  type PtyInputQueueInternals,
+} from './pty-input-queue.js';
 import {
   disposeConoutWorker,
   noteConPtyHostReleased,
@@ -70,8 +84,16 @@ export type WebTerminalWriteResult = 'written' | 'backpressure' | 'unavailable';
 /** Upper bound on replayed scrollback per PTY session (roughly 4 MB). */
 const MAX_BUFFER_CHUNKS = 4000;
 const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
-const MAX_UNACKNOWLEDGED_INPUT_BYTES = 256 * 1024;
+const MAX_BUFFERED_INPUT_BYTES = 256 * 1024;
+const MAX_INPUT_FRAME_BYTES = 1024 * 1024;
 export const MAX_CONCURRENT_WEB_TERMINALS = 8;
+/**
+ * The end evidence for a terminal the PTY backend ended by failure. The
+ * backend has already torn the process tree down, so the terminal is
+ * definitively gone; this registry-defined code lets the hold settle instead
+ * of wedging on an unprovable end. It is not a claimed process exit status.
+ */
+export const WEB_TERMINAL_FAILURE_EXIT_CODE = 1;
 /** Reclaim a PTY session after this long with no connected listener. */
 const IDLE_RECLAIM_MS = 15 * 60 * 1000;
 
@@ -80,7 +102,8 @@ interface PtySession {
   workspaceCwd: string;
   buffer: string[];
   bufferBytes: number;
-  unacknowledgedInputBytes: number;
+  measureBufferedInputBytes(): PtyInputQueueBytes;
+  maxInputQueueBytes?: number;
   exited: boolean;
   exitCode?: number;
   /** Set once the PTY backend terminated this session on a resource limit. */
@@ -103,7 +126,9 @@ interface PtySession {
   ptyResourcesReleased: boolean;
 }
 
-interface SpawnedWebTerminalPty extends WebTerminalPty {
+interface SpawnedWebTerminalPty extends WebTerminalPty, PtyInputQueueInternals {
+  write(data: string | Buffer): void;
+  _isReady?: boolean;
   onData(callback: (data: string) => void): { dispose(): void } | undefined;
   onExit(
     callback: (e: { exitCode: number; signal?: number }) => void,
@@ -229,6 +254,15 @@ export class WebTerminalRegistry {
   private readonly sessions = new Map<string, PtySession>();
   private readonly creating = new Map<string, string>();
   private readonly cancelledCreations = new Set<string>();
+  // Terminals this registry released while live. A released terminal and a
+  // failed spawn both leave no session, but only the former has a proven
+  // release receipt; the distinction keeps a failed spawn from being reported
+  // as a clean exit.
+  private readonly released = new Set<string>();
+  // Creations that ended without a session and were not released (a failed
+  // load/spawn). They carry a failure end receipt so the hold settles instead
+  // of answering unknown forever — but never the clean release code.
+  private readonly failedCreations = new Set<string>();
   private disposed = false;
 
   private readonly nextId = (() => {
@@ -257,6 +291,13 @@ export class WebTerminalRegistry {
       return { error: 'Web terminal limit reached', retryable: true };
     }
     this.creating.set(terminalId, options.workspaceCwd);
+    // A new lifecycle revokes any stale release receipt for this id: the Web
+    // Shell reuses one terminal id across panel reopenings, so an id released
+    // once must not keep certifying a later failed re-spawn as a proven exit.
+    // Clear only at creation admission — control() still needs the receipt of
+    // an already-released terminal until it consumes it.
+    this.released.delete(terminalId);
+    this.failedCreations.delete(terminalId);
     let ptyLoad: PtyLoadResult;
     try {
       ptyLoad = await loadPty();
@@ -358,10 +399,6 @@ export class WebTerminalRegistry {
         earlyOutput.push(data);
         return;
       }
-      session.unacknowledgedInputBytes = Math.max(
-        0,
-        session.unacknowledgedInputBytes - Buffer.byteLength(data),
-      );
       if (queryTerminal) {
         try {
           queryTerminal.write(data);
@@ -428,6 +465,9 @@ export class WebTerminalRegistry {
     };
     let dataDisposable: { dispose(): void } | undefined;
     let exitDisposable: { dispose(): void } | undefined;
+    let deferredInputBytes = 0;
+    let warnedInputQueue = false;
+    let warnedInputQueueOnStderr = false;
     let errorDisposable: { dispose(): void } | undefined;
     const spawnPty = (useBundled: boolean) =>
       ptyImpl.module.spawn(file, args, {
@@ -486,7 +526,11 @@ export class WebTerminalRegistry {
       });
       proc = {
         pid: spawned.pid,
-        write: (data) => spawned.write(data),
+        write: (data) => {
+          const deferred = spawned._isReady === false;
+          spawned.write(Buffer.from(data));
+          if (deferred) deferredInputBytes += Buffer.byteLength(data);
+        },
         resize: (cols, rows) => spawned.resize(cols, rows),
         kill: () => {
           spawned.kill();
@@ -495,7 +539,7 @@ export class WebTerminalRegistry {
           // `_isReady` is false, so note the close only when kill() really ran.
           // release() then disposes the worker a deferred kill left behind,
           // without double-closing a pseudo-console kill() already closed.
-          if ((spawned as { _isReady?: boolean })._isReady !== false) {
+          if (spawned._isReady !== false) {
             noteConPtyHostReleased(spawned);
           }
         },
@@ -519,7 +563,7 @@ export class WebTerminalRegistry {
           // node-pty never releases on a natural exit, and this branch frees
           // it. Same outcome releaseConPtyHost would have had on that arm,
           // reached for a different reason.
-          if ((spawned as { _isReady?: boolean })._isReady === false) {
+          if (spawned._isReady === false) {
             disposeConoutWorker(spawned);
             return;
           }
@@ -554,7 +598,25 @@ export class WebTerminalRegistry {
       workspaceCwd: options.workspaceCwd,
       buffer: [],
       bufferBytes: 0,
-      unacknowledgedInputBytes: 0,
+      maxInputQueueBytes:
+        ptyImpl.name === 'qwen-bun-pty' ? DEFAULT_WRITE_QUEUE_BYTES : undefined,
+      measureBufferedInputBytes: () => {
+        if (spawned._isReady === false) return deferredInputBytes;
+        deferredInputBytes = 0;
+        const bytes = getPtyInputQueueBytes(spawned);
+        if (bytes === undefined && !warnedInputQueue) {
+          const message = `Web terminal ${JSON.stringify(terminalId)}: cannot inspect ${ptyImpl.name} input queue; expected ${PTY_INPUT_QUEUE_FIELDS.join(', ')}. Input admission is unavailable.`;
+          if (isDebugLogFileEnabled() && debugLogger.isEnabled()) {
+            warnedInputQueue = true;
+            debugLogger.warn(message);
+          } else if (!warnedInputQueueOnStderr) {
+            // The default serve daemon has no bound debug-log session.
+            warnedInputQueueOnStderr = true;
+            process.stderr.write(message + '\n');
+          }
+        }
+        return bytes;
+      },
       exited: false,
       outputListeners: new Set(),
       exitListeners: new Set(),
@@ -617,6 +679,14 @@ export class WebTerminalRegistry {
     };
   }
 
+  /**
+   * Whether a terminal is mid-creation: admitted by the caller but not yet
+   * registered. A missing snapshot during this window is not a proven exit.
+   */
+  isCreating(terminalId: string): boolean {
+    return this.creating.has(terminalId);
+  }
+
   /** Read buffered output and exit state when a browser tab reconnects. */
   readSnapshot(terminalId: string): WebTerminalSnapshot | undefined {
     const session = this.sessions.get(terminalId);
@@ -633,21 +703,87 @@ export class WebTerminalRegistry {
     };
   }
 
+  /**
+   * Read only the lifecycle state, without materializing the scrollback.
+   * Admission and maintenance polls need just these booleans; joining the
+   * whole replay buffer for them is O(scrollback) per call.
+   */
+  readState(
+    terminalId: string,
+  ): { exited: boolean; failed: boolean; exitCode?: number } | undefined {
+    const session = this.sessions.get(terminalId);
+    if (!session) return undefined;
+    if (session.failure) {
+      return {
+        exited: false,
+        failed: true,
+        exitCode: WEB_TERMINAL_FAILURE_EXIT_CODE,
+      };
+    }
+    return {
+      exited: session.exited,
+      failed: false,
+      ...(session.exitCode !== undefined ? { exitCode: session.exitCode } : {}),
+    };
+  }
+
+  /**
+   * Whether this registry released the terminal while it was live. A released
+   * terminal has a proven release receipt; a failed spawn leaves no session
+   * but was never released, so it must not be reported as a clean exit.
+   */
+  isReleased(terminalId: string): boolean {
+    return this.released.has(terminalId);
+  }
+
+  /** Whether a creation ended without a session and was not released (a failed
+   * load/spawn). It carries a failure end, never the clean release code. */
+  isFailedCreation(terminalId: string): boolean {
+    return this.failedCreations.has(terminalId);
+  }
+
   write(terminalId: string, data: string): WebTerminalWriteResult {
     const session = this.sessions.get(terminalId);
     if (!session || session.exited || session.failure) return 'unavailable';
     const bytes = Buffer.byteLength(data);
     const isRecoveryControl =
       data.length === 1 && '\x03\x04\x1a\x1c'.includes(data);
+    if (!isRecoveryControl && bytes > MAX_INPUT_FRAME_BYTES) {
+      return 'backpressure';
+    }
+    // Ordinary input leaves one native queue for other PTYs; recovery controls
+    // may use that reserve without exceeding the backend process limit.
     if (
-      !isRecoveryControl &&
-      session.unacknowledgedInputBytes + bytes > MAX_UNACKNOWLEDGED_INPUT_BYTES
+      session.maxInputQueueBytes !== undefined &&
+      getPtyBudgetStats().writeQueueBytes + bytes >
+        processPtyBudget.totalWriteQueueBytes -
+          (isRecoveryControl ? 0 : DEFAULT_WRITE_QUEUE_BYTES)
     ) {
       return 'backpressure';
     }
+    if (!isRecoveryControl || session.maxInputQueueBytes !== undefined) {
+      const bufferedBytes = session.measureBufferedInputBytes();
+      if (
+        session.maxInputQueueBytes !== undefined &&
+        (bytes > session.maxInputQueueBytes ||
+          (typeof bufferedBytes === 'number' &&
+            bufferedBytes + bytes > session.maxInputQueueBytes))
+      ) {
+        return 'backpressure';
+      }
+      if (!isRecoveryControl) {
+        if (bufferedBytes === undefined) return 'unavailable';
+        if (
+          bufferedBytes === 'saturated' ||
+          (bufferedBytes !== 0 &&
+            bufferedBytes + bytes > MAX_BUFFERED_INPUT_BYTES)
+        ) {
+          return 'backpressure';
+        }
+      }
+    }
     try {
       session.pty.write(data);
-      if (!isRecoveryControl) session.unacknowledgedInputBytes += bytes;
       return 'written';
     } catch {
       return 'unavailable';
@@ -689,6 +825,7 @@ export class WebTerminalRegistry {
     }
     this.clearReclaim(session);
     this.sessions.delete(terminalId);
+    this.released.add(terminalId);
     if (!session.exited && !session.failure) {
       for (const listener of session.exitListeners) {
         listener({ exitCode: 143, signal: 15 });
@@ -731,6 +868,17 @@ export class WebTerminalRegistry {
   }
 
   private finishCreating(terminalId: string): void {
+    // A creation that ends without a session must leave a provable end receipt
+    // so the hold settles instead of answering unknown forever: a cancelled
+    // creation was released (clean release code), a failed load/spawn is a
+    // failure end. A successful creation already has its session, so no receipt.
+    if (!this.sessions.has(terminalId)) {
+      if (this.cancelledCreations.has(terminalId)) {
+        this.released.add(terminalId);
+      } else {
+        this.failedCreations.add(terminalId);
+      }
+    }
     this.creating.delete(terminalId);
     this.cancelledCreations.delete(terminalId);
   }

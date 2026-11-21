@@ -61,6 +61,11 @@ export type ScheduleFn = (
   request: ToolCallRequestInfo | ToolCallRequestInfo[],
   signal: AbortSignal,
   modelOverride?: string,
+  /**
+   * Receives this batch's completed calls in place of the hook's
+   * `onComplete`, for a caller that awaits the batch.
+   */
+  onBatchComplete?: (tools: InteractiveToolCall[]) => Promise<void>,
 ) => void;
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
@@ -182,9 +187,22 @@ export function useReactToolScheduler(
     [],
   );
 
+  // The batches whose caller takes their completion, by call id.
+  const batchCompletionsRef = useRef(
+    new Map<string, (tools: InteractiveToolCall[]) => Promise<void>>(),
+  );
   const allToolCallsCompleteHandler = useCallback(
     async (completedToolCalls: InteractiveToolCall[]) => {
-      await onCompleteRef.current(completedToolCalls);
+      const completions = batchCompletionsRef.current;
+      const onBatchComplete = completedToolCalls
+        .map(({ request }) => completions.get(request.callId))
+        .find((completion) => completion !== undefined);
+      for (const { request } of completedToolCalls) {
+        if (completions.get(request.callId) === onBatchComplete) {
+          completions.delete(request.callId);
+        }
+      }
+      await (onBatchComplete ?? onCompleteRef.current)(completedToolCalls);
     },
     [],
   );
@@ -268,18 +286,44 @@ export function useReactToolScheduler(
       request: ToolCallRequestInfo | ToolCallRequestInfo[],
       signal: AbortSignal,
       modelOverride?: string,
+      onBatchComplete?: (tools: InteractiveToolCall[]) => Promise<void>,
     ) => {
       const owner = captureHookExecutionOwner(config);
       const sessionSignal =
         getInteractiveModSession(config)?.captureToolSignal();
       if (sessionSignal) signal = AbortSignal.any([signal, sessionSignal]);
       const requests = Array.isArray(request) ? request : [request];
+      if (onBatchComplete) {
+        for (const { callId } of requests) {
+          batchCompletionsRef.current.set(callId, onBatchComplete);
+        }
+      }
+      // A batch that ends without completing still releases its callback,
+      // with no calls, so its caller stops waiting and a later batch that
+      // reuses a call id is not routed to it.
+      const abandonBatchCompletion = () => {
+        if (!onBatchComplete) return;
+        let owned = false;
+        for (const { callId } of requests) {
+          if (batchCompletionsRef.current.get(callId) === onBatchComplete) {
+            batchCompletionsRef.current.delete(callId);
+            owned = true;
+          }
+        }
+        if (!owned) return;
+        void onBatchComplete([]).catch((error: unknown) => {
+          debugLogger.error('Tool batch release failed:', error);
+        });
+      };
       const isQueuedCancellation = (error: unknown) =>
         signal.aborted &&
         error instanceof Error &&
         error.message === 'Tool call cancelled while in queue.';
       const completeAsCancelled = async () => {
-        if (sessionSignal?.aborted) return;
+        if (sessionSignal?.aborted) {
+          abandonBatchCompletion();
+          return;
+        }
         const reason =
           '[Operation Cancelled] Reason: Tool call cancelled before execution.';
         const cancelledCalls: CompletedToolCall[] = requests.map(
@@ -325,6 +369,7 @@ export function useReactToolScheduler(
             });
             return;
           }
+          abandonBatchCompletion();
           if (signal.aborted) return;
           debugLogger.error(
             `Tool scheduling failed: ${
@@ -338,7 +383,10 @@ export function useReactToolScheduler(
       // name the batch it failed to complete.
       void (async () => {
         const completeAsSchedulingError = async (error: unknown) => {
-          if (sessionSignal?.aborted) return;
+          if (sessionSignal?.aborted) {
+            abandonBatchCompletion();
+            return;
+          }
           debugLogger.error(
             `Full-turn tool scheduling failed: ${
               error instanceof Error ? error.message : String(error)

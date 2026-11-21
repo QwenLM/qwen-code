@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -85,10 +85,10 @@ class ManagedSessionStoreIntegrationTest {
     private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     @Autowired
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedExtensionRecordStore records;
 
     @Autowired
-    private ManagedSessionStore sessionStore;
+    private JdbcManagedSessionStore sessionStore;
 
     @Test
     void nativeJournalSnapshotRoutesPublishReadAndPageWithinWriterScope() throws Exception {
@@ -384,7 +384,6 @@ class ManagedSessionStoreIntegrationTest {
                         .put("expectedJournalRevision", stage.equals("create") ? 0 : 1).put("expectedCommittedSequence", 0);
                 MvcResult result = mvc.perform(post(base + "/transactions:commit-v2").header(TenantContextFilter.HEADER, TENANT)
                         .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
-                        .header("X-Qwen-Managed-Max-Readable-Storage-Version", "2")
                         .contentType(MediaType.APPLICATION_JSON).content(commit.toString())).andReturn();
                 assertThat(result.getResponse().getStatus()).as(result.getResponse().getContentAsString()).isEqualTo(200);
             }
@@ -418,10 +417,9 @@ class ManagedSessionStoreIntegrationTest {
     }
 
     @Test
-    void promotesAtomicallyAndRefusesOlderHttpReadersIncludingReplay() throws Exception {
+    void nonActivityCommitReplaysAndRestoresWithoutTheDiagnosticsFlag() throws Exception {
         String session = "g3-reader-" + UUID.randomUUID();
         String base = "/internal/managed-session-store/v1/sessions/" + session;
-        String ceiling = "X-Qwen-Managed-Max-Readable-Storage-Version";
         var writer = writerRequest(WRITER_A);
         mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
@@ -433,57 +431,18 @@ class ManagedSessionStoreIntegrationTest {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
         ObjectNode commit = genesisRequest("{\"subtype\":\"session_execution_engine\"}\n{\"subtype\":\"managed_session_header_v1\"}\n", bytes);
         ((ObjectNode) commit.withArray("resources").get(0)).put("kind", "hosted-turn-cleanup");
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE session_id = ?", Boolean.class, session)).isFalse();
+        mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(commit.toString())).andExpect(status().isOk());
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE session_id = ?", Boolean.class, session)).isFalse();
         mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(commit.toString()))
-                .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?", Integer.class, session)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_id = ?", Integer.class, session)).isZero();
-        mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
-                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).header(ceiling, "2")
-                .contentType(MediaType.APPLICATION_JSON).content(commit.toString())).andExpect(status().isOk());
-        for (String header : List.of("", "1")) {
-            for (String path : List.of("/restore", "/transactions", "/resources/resource-context")) {
-                var read = get(base + path).header(TenantContextFilter.HEADER, TENANT)
-                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE);
-                if (!header.isEmpty()) {
-                    read.header(ceiling, header);
-                }
-                mvc.perform(read).andExpect(status().isConflict())
-                        .andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
-            }
-            var replay = post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
-                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
-                    .contentType(MediaType.APPLICATION_JSON).content(commit.toString());
-            if (!header.isEmpty()) {
-                replay.header(ceiling, header);
-            }
-            mvc.perform(replay).andExpect(status().isConflict())
-                    .andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
-            var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session);
-            var acquire = post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
-                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
-                    .contentType(MediaType.APPLICATION_JSON).content(writer.toString());
-            if (!header.isEmpty()) {
-                acquire.header(ceiling, header);
-            }
-            mvc.perform(acquire).andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
-            var renewBody = objectMapper.createObjectNode().put("workspaceId", WORKSPACE).put("writerId", WRITER_A).put("writerGeneration", 1).put("leaseMillis", 60_000);
-            var renew = post(base + "/writers:renew").header(TenantContextFilter.HEADER, TENANT)
-                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).contentType(MediaType.APPLICATION_JSON).content(renewBody.toString());
-            if (!header.isEmpty()) {
-                renew.header(ceiling, header);
-            }
-            mvc.perform(renew).andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
-            assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session)).isEqualTo(before);
-        }
-        mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
-                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).header(ceiling, "2")
-                .contentType(MediaType.APPLICATION_JSON).content(commit.toString()))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.replayed").value(true));
         mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
-                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).header(ceiling, "2")
-                .param("workspaceId", WORKSPACE)).andExpect(status().isOk()).andExpect(jsonPath("$.storageVersion").value(2));
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .param("workspaceId", WORKSPACE)).andExpect(status().isOk()).andExpect(jsonPath("$.activityDiagnostics").value(false));
     }
 
     @Test

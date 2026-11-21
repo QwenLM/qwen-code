@@ -17,8 +17,10 @@ import {
   MOD_MAX_BYTES,
   type ModCommand,
   type ModLog,
+  type ModModelHost,
   type ModPromptSubmit,
   type ModPromptSubmitted,
+  type ModQueuedPrompt,
   type ModSessionFacts,
   type ModTurnComplete,
   type ModTurnStart,
@@ -34,6 +36,8 @@ import {
   LlmEventType,
   type ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core/core/turn.js';
+import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import {
   getRuntimeContentGenerator,
@@ -42,7 +46,12 @@ import {
 } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
-import { ModSession, type ModTerminalHost } from './mod-session.js';
+import {
+  MOD_PROMPT_TURN_LIMIT,
+  ModSession,
+  type ModAcpHost,
+  type ModTerminalHost,
+} from './mod-session.js';
 import { CommandService } from '../services/CommandService.js';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
@@ -65,7 +74,7 @@ describe('Mod session ownership', () => {
   const tempDirs: string[] = [];
   const setup = (
     overrides: Record<string, unknown> = {},
-    terminal?: ModTerminalHost,
+    terminal?: ModTerminalHost | ModAcpHost,
   ) => {
     const extension = {
       id: 'id',
@@ -182,6 +191,35 @@ describe('Mod session ownership', () => {
     await session.toolCall(repeat)!({ tool: 'write_file' }, next, signal);
     expect(next).toHaveBeenCalledTimes(2);
     expect(repeat).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts old session.end model calls during a session switch', async () => {
+    const generateText = vi.fn().mockResolvedValue({ text: 'current answer' });
+    const { session, runtime, config } = setup({
+      getModel: () => 'current-model',
+      getContentGeneratorConfig: () => ({ authType: 'openai' }),
+      getAllConfiguredModels: () => [],
+      getBaseLlmClient: () => ({ generateText }),
+    });
+    const signal = new AbortController().signal;
+    await session.initialize(signal);
+    const runModel = mocks.create.mock.calls[0][12] as ModModelHost;
+    const input = { model: 'sonnet', prompt: 'test request' };
+    let ending: Awaited<ReturnType<ModModelHost>> | undefined;
+    runtime.end.mockImplementationOnce(async () => {
+      ending = await runModel(input, signal);
+    });
+
+    config.getSessionId.mockReturnValue('session-2');
+    await session.syncSession('clear');
+    expect(ending).toMatchObject({ isAnswered: false, reason: 'aborted' });
+    expect(generateText).not.toHaveBeenCalled();
+
+    await expect(runModel(input, signal)).resolves.toMatchObject({
+      isAnswered: true,
+      text: 'current answer',
+    });
+    expect(generateText).toHaveBeenCalledOnce();
   });
 
   it('serializes roots and refuses a queued call after group invalidation', async () => {
@@ -301,6 +339,90 @@ describe('Mod session ownership', () => {
     expect(mocks.create).not.toHaveBeenCalled();
   });
 
+  it('loads in an ACP session for the ACP host only, raising no prompts or tool events', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write');
+    const log = vi.fn();
+    const acp = { getExperimentalZedIntegration: () => true };
+    const { session, adapter } = setup(acp, { surface: null, log });
+    await session.initialize(new AbortController().signal);
+    session.flushLogs();
+    const args = mocks.create.mock.calls[0]!;
+    // surface, prompts, queuePrompt and tools.
+    expect([args[5], args[10], args[11], args[14]]).toEqual([
+      null,
+      false,
+      undefined,
+      false,
+    ]);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({ to: 'transcript', text: 'startup log' }),
+      'hello-mod',
+      'session-1',
+    );
+    expect(adapter.emitSystemMessage).not.toHaveBeenCalled();
+    expect(stderr).not.toHaveBeenCalled();
+    stderr.mockRestore();
+
+    // The ACP host outside ACP mode loads nothing.
+    mocks.create.mockClear();
+    const outside = setup({}, { surface: null, log }).session;
+    await outside.initialize(new AbortController().signal);
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it('lets each open Mod session listen to telemetry without a leak warning', async () => {
+    const before = uiTelemetryService.getMaxListeners();
+    const { session } = setup();
+    expect(uiTelemetryService.getMaxListeners()).toBe(before + 1);
+    await session.close();
+    expect(uiTelemetryService.getMaxListeners()).toBe(before);
+  });
+
+  it("reads an ACP session's context without changing telemetry", async () => {
+    let catalog = '';
+    const chat = new LlmChat(
+      { getAutoMemoryContext: () => catalog } as Config,
+      {},
+      [{ role: 'user', parts: [getAutoMemorySnapshot([], 'catalog')!] }],
+      undefined,
+      uiTelemetryService,
+    );
+    chat.seedResumeTokenCounts(250, 0);
+    const { session } = setup(
+      {
+        getExperimentalZedIntegration: () => true,
+        getContentGeneratorConfig: () => ({ contextWindowSize: 1000 }),
+        getProjectRoot: () => '/workspace',
+        getModel: () => 'fixture',
+        getLlmClient: () => ({
+          isInitialized: () => true,
+          getChat: () => chat,
+        }),
+      },
+      { surface: null, log: vi.fn() },
+    );
+    // Another session in the process answered last.
+    uiTelemetryService.setLastPromptTokenCount(900);
+    await session.initialize(new AbortController().signal);
+    const facts = mocks.create.mock.calls[0]![7] as () => ModSessionFacts;
+    expect(facts().usage.context).toEqual({
+      tokens: 250,
+      window: 1000,
+      percent: 25,
+    });
+
+    // Reading the newly visible catalog from the telemetry listener used to
+    // invalidate the counts and synchronously enter the same listener again.
+    catalog = 'catalog';
+    uiTelemetryService.setLastPromptTokenCount(900);
+    expect(facts().usage.context).toEqual({
+      tokens: 0,
+      window: 1000,
+      percent: 0,
+    });
+    expect(uiTelemetryService.getLastPromptTokenCount()).toBe(900);
+  });
+
   it('initializes once, buffers logs behind init, and uses the command signal', async () => {
     const { session, adapter, runtime } = setup();
     const signal = new AbortController().signal;
@@ -369,8 +491,22 @@ describe('Mod session ownership', () => {
       presentation,
     );
     expect(mocks.create.mock.calls[0][5]).toBe('terminal');
-    // The terminals raise no prompt.submit yet.
+    // A terminal that does not say it raises prompt.submit skips its hooks.
     expect(mocks.create.mock.calls[0][10]).toBe(false);
+  });
+
+  it('loads prompt.submit hooks for a terminal that raises the event', async () => {
+    const { session } = setup(
+      { isInteractive: () => true },
+      {
+        surface: 'terminal',
+        log: vi.fn(),
+        presentation: () => ({ isFullscreen: false, columns: 80 }),
+        prompts: () => true,
+      },
+    );
+    await session.initialize(new AbortController().signal);
+    expect(mocks.create.mock.calls[0][10]).toBe(true);
   });
 
   it.each([false, true])(
@@ -694,6 +830,213 @@ describe('Mod session ownership', () => {
     await loaded.session.initialize(new AbortController().signal);
     return loaded;
   };
+
+  describe('prompts a Mod submits', () => {
+    const queueOf = (index = 0) =>
+      mocks.create.mock.calls[index][11] as
+        | ((prompt: ModQueuedPrompt) => string | undefined)
+        | undefined;
+    const prompt = (text: string): ModQueuedPrompt => ({
+      plugin: 'lint',
+      text,
+    });
+
+    it('queues them for the session to run once idle, in order', async () => {
+      const { session } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      expect(session.hasSubmittedPrompts).toBe(false);
+      expect(queue(prompt('one'))).toBeUndefined();
+      expect(queue({ ...prompt('two'), context: ['c'], asUser: true })).toBe(
+        undefined,
+      );
+      expect(session.hasSubmittedPrompts).toBe(true);
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('one'));
+      expect(session.takeSubmittedPrompt()).toEqual({
+        ...prompt('two'),
+        context: ['c'],
+        asUser: true,
+      });
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      expect(session.hasSubmittedPrompts).toBe(false);
+    });
+
+    it(`refuses past ${MOD_PROMPT_TURN_LIMIT} turns until the person sends a prompt`, async () => {
+      const { session, adapter } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      // Queued and started prompts count alike.
+      for (let i = 0; i < MOD_PROMPT_TURN_LIMIT; i++) {
+        expect(queue(prompt(`p${i}`))).toBeUndefined();
+        if (i % 2) session.takeSubmittedPrompt();
+      }
+      const refused = queue(prompt('one more'));
+      // The guide and the design doc promise 8.
+      expect(MOD_PROMPT_TURN_LIMIT).toBe(8);
+      expect(refused).toBe(
+        'the Mods have started 8 turns since the last prompt from the person',
+      );
+      expect(adapter.emitSystemMessage).toHaveBeenCalledWith(
+        'ui_log',
+        expect.objectContaining({
+          plugin: 'lint',
+          text: `$.prompt.submit refused: ${refused}`,
+        }),
+      );
+      while (session.takeSubmittedPrompt());
+      expect(queue(prompt('still'))).toBe(refused);
+      session.notePersonPrompt();
+      expect(queue(prompt('again'))).toBeUndefined();
+    });
+
+    it('drops a prompt queued for a session that has ended, or once it closes', async () => {
+      const { session, config } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      queue(prompt('old'));
+      config.getSessionId.mockReturnValue('session-2');
+      expect(session.hasSubmittedPrompts).toBe(false);
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      config.getSessionId.mockReturnValue('session-1');
+      expect(queue(prompt('new'))).toBeUndefined();
+      await session.close();
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      expect(queue(prompt('late'))).toBe('the session is ending');
+    });
+
+    it('refuses a prompt while /clear ends the session, and starts the next one clean', async () => {
+      const { session, config, runtime } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`p${index}`))).toBeUndefined();
+      session.takeSubmittedPrompt();
+      // The config moves to the next session before the old one ends.
+      config.getSessionId.mockReturnValue('session-2');
+      let atEnd: string | undefined;
+      runtime.end.mockImplementation(async () => {
+        atEnd = queue(prompt('at end'));
+      });
+      await session.syncSession('clear');
+      expect(runtime.end).toHaveBeenCalled();
+      expect(atEnd).toBe('the session is ending');
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      // Neither the old session's queue nor its turns count against this one.
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`n${index}`))).toBeUndefined();
+      expect(session.takeSubmittedPrompt()?.text).toBe('n0');
+    });
+
+    it('drops what has not started when a run discards it, freeing the limit', async () => {
+      const { session } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`p${index}`))).toBeUndefined();
+      session.discardSubmittedPrompts();
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      expect(queue(prompt('after'))).toBeUndefined();
+      expect(session.takeSubmittedPrompt()?.text).toBe('after');
+    });
+
+    it('refuses the Mods’ prompts after the person stops a turn, until they send one', async () => {
+      const { session, config } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      expect(queue(prompt('queued'))).toBeUndefined();
+      const taken = session.takeSubmittedPrompt()!;
+      expect(queue(prompt('waiting'))).toBeUndefined();
+      session.stopSubmittedPrompts();
+      expect(session.hasSubmittedPrompts).toBe(false);
+      // What a stopped turn's hooks submit, awaited or not, does not run.
+      expect(queue(prompt('from turn.complete'))).toBe(
+        'the person stopped a turn and has not sent a prompt since',
+      );
+      session.returnSubmittedPrompt(taken);
+      expect(session.takeSubmittedPrompt()).toBeUndefined();
+      session.notePersonPrompt();
+      expect(queue(prompt('after'))).toBeUndefined();
+      expect(session.takeSubmittedPrompt()?.text).toBe('after');
+      // A new session starts unstopped.
+      session.stopSubmittedPrompts();
+      config.getSessionId.mockReturnValue('session-2');
+      await session.syncSession('clear');
+      expect(queue(prompt('fresh'))).toBeUndefined();
+    });
+
+    const terminal = (runsPrompts?: boolean, promptQueued = vi.fn()) =>
+      setup(
+        { isInteractive: () => true },
+        {
+          surface: 'terminal',
+          log: vi.fn(),
+          presentation: () => ({ isFullscreen: false, columns: 80 }),
+          prompts: () => true,
+          ...(runsPrompts === undefined
+            ? {}
+            : { runsPrompts: () => runsPrompts }),
+          promptQueued,
+        },
+      );
+
+    it('offers a terminal a queue only once it runs the prompts', async () => {
+      for (const runs of [undefined, false]) {
+        mocks.create.mockClear();
+        const { session } = terminal(runs);
+        await session.initialize(new AbortController().signal);
+        expect(queueOf()).toBeUndefined();
+      }
+      mocks.create.mockClear();
+      const promptQueued = vi.fn();
+      const { session } = terminal(true, promptQueued);
+      await session.initialize(new AbortController().signal);
+      expect(queueOf()!(prompt('one'))).toBeUndefined();
+      // The terminal hears each prompt queued, to run it once idle.
+      expect(promptQueued).toHaveBeenCalledTimes(1);
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('one'));
+    });
+
+    it('puts back a prompt whose turn could not start, uncounted', async () => {
+      const { session, config } = setup();
+      await session.initialize(new AbortController().signal);
+      const queue = queueOf()!;
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT - 1; index++)
+        queue(prompt(`p${index}`));
+      const first = session.takeSubmittedPrompt()!;
+      queue(prompt('last'));
+      expect(queue(prompt('over'))).toBeDefined();
+      session.returnSubmittedPrompt(first);
+      // A prompt is put back once.
+      session.returnSubmittedPrompt(first);
+      expect(queue(prompt('over'))).toBeDefined();
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('p0'));
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('p1'));
+      // A session that ended since takes nothing back.
+      const taken = session.takeSubmittedPrompt()!;
+      config.getSessionId.mockReturnValue('session-2');
+      session.returnSubmittedPrompt(taken);
+      config.getSessionId.mockReturnValue('session-1');
+      expect(session.takeSubmittedPrompt()).toEqual(prompt('p3'));
+      // Put back, it counts as queued, not as started too.
+      session.discardSubmittedPrompts();
+      session.notePersonPrompt();
+      queue(prompt('again'));
+      session.returnSubmittedPrompt(session.takeSubmittedPrompt()!);
+      session.discardSubmittedPrompts();
+      for (let index = 0; index < MOD_PROMPT_TURN_LIMIT; index++)
+        expect(queue(prompt(`n${index}`))).toBeUndefined();
+    });
+  });
+
+  it('says whether a loaded Mod hooks prompt.submit', async () => {
+    const quiet = setup();
+    await quiet.session.initialize(new AbortController().signal);
+    expect(quiet.session.hearsPrompts).toBe(false);
+    const { session } = await loadPrompts();
+    expect(session.hearsPrompts).toBe(true);
+    await session.close();
+    expect(session.hearsPrompts).toBe(false);
+  });
 
   it('passes a prompt through when no hook hears prompt.submit', async () => {
     const { session, runtime } = setup();

@@ -32,6 +32,7 @@ import {
   makeWaitFor,
 } from '../helpers/gated-skill-fixture.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
+import { approveProjectHooks } from '../project-hook-approval.js';
 
 const HOOK_SCRIPT = 'context-hook.mjs';
 const HITS_LOG = 'hook-hits.jsonl';
@@ -183,6 +184,29 @@ describe('tool hook additionalContext delivery', () => {
     expect(count(result, marker('PreToolUse', 'call_allow'))).toBe(1);
   });
 
+  it('headless: withholds project hooks while the trust feature is disabled', async () => {
+    const server = await setup(
+      'hook context headless feature off',
+      'read_file',
+      'note.txt',
+      'call_feature_off',
+    );
+    // The gate must see the feature OFF in the USER scope: a workspace
+    // `security.folderTrust` is stripped by WORKSPACE_RESTRICTED_SETTINGS,
+    // so writing it via setup() would leave the rig's user-scope `true`
+    // in charge and the test would pass on the pre-change code too.
+    writeFileSync(
+      join(rig.testDir!, '.qwen-home', 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: false } } }),
+    );
+    await rig.run('read the note', ...fakeModelLaunchArgs(server));
+
+    expect(hookHits()).toEqual([]);
+    const result = toolResultFor(server, 'call_feature_off');
+    expect(result).toContain('hello from note');
+    expect(count(result, marker('PreToolUse', 'call_feature_off'))).toBe(0);
+  });
+
   it('headless: delivers PreToolUse context with a denied result', async () => {
     const server = await setup(
       'hook context headless deny',
@@ -254,6 +278,63 @@ describe('tool hook additionalContext delivery', () => {
     ).toBe(1);
   });
 
+  it('interactive: withholds project hooks in an untrusted folder and says why', async () => {
+    const server = await setup(
+      'hook context interactive untrusted',
+      'read_file',
+      'note.txt',
+      'call_untrusted',
+    );
+    // Every other fixture runs pre-trusted, so drop the rig's trust grant to
+    // reach the withheld branch the gate exists for.
+    writeFileSync(
+      join(rig.testDir!, '.qwen-home', 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    writeFileSync(
+      join(rig.testDir!, '.qwen-home', 'trustedFolders.json'),
+      JSON.stringify({}),
+    );
+    const { ptyProcess } = rig.runInteractive(...fakeModelLaunchArgs(server));
+    let output = '';
+    ptyProcess.onData((data) => {
+      output += data;
+    });
+    const waitFor = makeWaitFor(rig, () => output);
+    // The pane wraps the warning, so match on a fragment inside one line.
+    await waitFor('the folder-trust dialog', () =>
+      output.includes('Do you trust this folder?'),
+    );
+    // The third option declines trust; esc alone leaves the dialog open.
+    ptyProcess.write('\u001b[B');
+    ptyProcess.write('\u001b[B');
+    ptyProcess.write('\r');
+    await waitFor('the composer after declining trust', () =>
+      output.includes('Type your message'),
+    );
+    await waitFor('the withheld-hooks warning', () =>
+      output.includes('Project hooks in .qwen/settings.json were not loaded'),
+    );
+
+    const prompt = 'read the note';
+    ptyProcess.write(prompt);
+    await waitFor('the prompt to echo', () => output.includes(prompt));
+    ptyProcess.write('\r');
+    await waitFor('the follow-up model request', () =>
+      server.requests.some(
+        (request) =>
+          request.body['stream'] === true &&
+          JSON.stringify(request.body['messages']).includes('"role":"tool"'),
+      ),
+    );
+    await exitInteractive(ptyProcess, waitFor, () => output);
+
+    expect(hookHits()).toEqual([]);
+    const result = toolResultFor(server, 'call_untrusted');
+    expect(result).toContain('hello from note');
+    expect(count(result, marker('PreToolUse', 'call_untrusted'))).toBe(0);
+  }, 360_000);
+
   it('interactive: delivers the first PreToolUse ask context once after approval', async () => {
     const server = await setup(
       'hook context interactive ask',
@@ -304,6 +385,14 @@ describe('tool hook additionalContext delivery', () => {
     // The agent keeps writing under QWEN_HOME briefly after it exits, so keep
     // it out of rig.testDir, whose teardown would otherwise race those writes.
     const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+    // Both authorities: enable the trust feature (the inherited rig trust
+    // store grants this directory) and record the approval an interactive
+    // user would give, so the ACP child loads the fixture's project hooks.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    approveProjectHooks(qwenHome, rig.testDir!);
     const child = spawn(
       'node',
       [

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -242,11 +243,11 @@ final class HostedProviderMediaProbe implements AutoCloseable {
         String storageId = "storage-" + sessions.indexOf(session);
         String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage"
                 + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?", String.class,
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
+                RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
                 tenant, storageId);
         assertThat(physical).isNotBlank();
         var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, session_state,"
-                + " execution_storage_key, execution_exclusive FROM ma_runtime_session"
+                + " execution_storage_key, is_rewind_pending FROM ma_runtime_session"
                 + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
                 tenant, harness, runtimeId);
         boolean released = phase.equals("released") || phase.equals("restarted");
@@ -254,7 +255,7 @@ final class HostedProviderMediaProbe implements AutoCloseable {
         assertThat(member.get("runtime_generation")).as("original runtime generation").isEqualTo(row.get("runtime_generation"));
         assertThat(member.get("execution_storage_key")).as("physical execution membership")
                 .isEqualTo(released ? null : physical);
-        assertThat(member.get("execution_exclusive")).as("shared execution membership").isEqualTo(false);
+        assertThat(member.get("is_rewind_pending")).as("shared execution membership").isEqualTo(false);
         assertThat(member.get("session_state")).isEqualTo(released ? "RELEASED" : "READY");
         if (phase.equals("restarted")) {
             assertThat(restarted).isNotNull();

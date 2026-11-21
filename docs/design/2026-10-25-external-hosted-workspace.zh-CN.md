@@ -2,7 +2,23 @@
 
 [English](2026-10-25-external-hosted-workspace.md) | [简体中文](2026-10-25-external-hosted-workspace.zh-CN.md)
 
-状态：**step 3a（供给前置层）已实现，产品能力仍未实现**。接续阶段一 `docs/design/2026-10-23-external-runtime-provider.md`（external-scratch，已认可的契约）和已实测完成的 Aone 适配器链路。本阶段不削弱阶段一的任何性质：在首次远程调用前持久化确定的逻辑 handle、丢响应后禁止替换、不提供 release‑to‑kill、Broker 独立 attest、provider 按 `provisionRequestId` 幂等。
+状态：**A / step 3a / B0 / B1 / B2 已为精确的公开 external-files 档案实现；指定的文件/default 审批/安全关闭 E2E 已通过。C 的 worker profile/capture 路由与控制面 publication producer 已完成本地实现并完成部分本地验证（§15）；Broker 派发/关闭接线与控制面 profile 选择在后续一半落地，因此该通道尚不能端到端选中。#15512 尚未完成。** §14 记录 files 里程碑及剩余门禁；§15 记录切片 C 的已实现边界及其对 §6 的偏差。接续[阶段一](2026-10-23-external-runtime-provider.zh-CN.md)（`external-scratch`，已认可的契约）和此前的 Aone 操作方适配器演练；该演练不是本里程碑的证据。本阶段不削弱阶段一的任何性质：在首次远程调用前持久化确定的逻辑 handle、丢响应后禁止替换、不提供 release-to-kill、Broker 独立 attest、provider 按 `provisionRequestId` 幂等。
+
+**阅读顺序：**A 修订与 §§12–13 保留各切片当时的范围，不再表示当前一律拒绝准入。§§1–11 保留第二阶段的完整目标与提案；有差异时以 §§12–15 的已实现契约为准。尤其是新 boot 文档与 nonce/marker 变更仍是提案、不代表已交付：§15 说明切片 C 为何刻意保留已发布的 boot 契约。
+
+## 修订：有界切片 A（2026-10-27）
+
+本独立增量使用 main 已有的外部存储登记，不依赖 #15654，也不复制其 registry/provisioner。`POST /internal/managed-workspaces/v1/workspace:materialize-external` 为已有 `REGISTERED`、`EXTERNAL` 别名建立元数据。其闭合、16 KiB 上限的 JSON 请求体仅接受 `registeredAliasId`、`displayName`、`ownerActorId`、`idempotencyKey` 及可选且仅用于追踪的 `requestId`。`registeredAliasId` 就是登记的 `tenantWorkspaceId`，不是路径或登记回执 ID。
+
+现有精确 loopback 监听地址、本地/对端地址校验与 Broker bearer 凭证认证操作方委派授权的权限。经过验证的 `ownerActorId` 是**被授权人**，不是已认证调用者，也不是租户成员身份凭证。操作方必须选择正确的租户和被授权人；经验证的租户头限定登记查询、Workspace、授权和回执键的范围。公共签名及可信 actor 过滤器保持不变。仅提供租户头不能调用此路由。
+
+新事务获取租户 placement-domain 锁，核对已存登记与 owner 的租户、别名身份/键、完整 provider/physical 身份、revision 和 mount root，并拒绝已有 Workspace、Runtime binding、holder 或 maintenance。登记 JSON 仍是权威：aliasPath 使用现有登记值规则验证，并不检测任意带外数据库篡改。操作仅原子创建 `ma_workspace`（`workspaceId = storageId = tenantWorkspaceId`、generation 1、`ACTIVE`、`ROOT`、固定 `WorkspaceExecutionProfile.CONFIG_REF`/`POLICY_REF`、不设默认）、一条 `OWNER` 授权和已完成的 `EXTERNAL_WORKSPACE` 回执。存储及其 `UNVERIFIED` owner 不变。不执行中心文件系统、存储分配、provider HTTP 或 worker 操作。
+
+完全相同的重试返回原回执，即便授权已撤销、名称已改或 Workspace 已移除；不会恢复授权、名称或 active 状态。回执仅记录创建结果，不代表实时状态或执行权限。同一租户/幂等键下变更别名、显示名或被授权人会冲突。在仅有 A 的检查点，被授权人可读取发现结果，但 EXTERNAL 存储的 `canCreateSession` 和 WebShell `canSelectDirectory` 均为 false，批量 readable grant 也一致。当时空输入和带 prompt 的 Session 创建被现有 storage-kind 护栏拒绝。A 不激活 resolver、transport、execution 或工具档案；§14 为精确的 files 档案取代了这一准入限制。
+
+独立回执 namespace 要求扩展现有枚举与 V1 CHECK。遵循发布前 fresh-catalog 策略：源码可以独立回退，但**不**承诺旧二进制能打开变更后的 catalog。任务/开发 catalog 应重建；不增加 V2 migration，不提升 schema version。
+
+A 的验证包括 operator/tenant/闭合请求测试、精确回执重放与不复活测试、已存元组和忙碌 owner 拒绝、诚实的公共/WebShell 发现结果和真实 Session-service 拒绝，以及 MySQL 同键/异键并发测试。这些测试不是外部 Hosted 执行能力的证据。在该检查点，完整工具、drain/ACK 安全、恢复及公共 worker E2E 均留待后续增量；此后的有界进展见 §14。下文较早的执行提案必须先与已发布 boot/publication 契约对齐再实现；A 不实现也不认可第二套线上协议。
 
 ## 1. 本阶段存在的原因
 
@@ -25,7 +41,7 @@
 | Provider HTTP 补充      | `provision`, `observe`             | 追加 `storage:provision`、`storage:observe`、publication/capture（§5/§7） |
 | Workspace 状态机        | —                                  | 与 LOCAL/SSH_LOCAL 同状态机，ownership 新增 `EXTERNAL` kind               |
 
-部署侧通过 `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-workspace` 显式开启，且相应 Workspace files/shell 同时被配置打开。阶段一的 scratch 档案与 `validateExternalRuntime` 校验保持不变。
+当前档案通过 `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-workspace`、`workspaceFilesEnabled=true` 及 §14 的闭合配置/协商门禁选择。Shell 必须保持关闭。上表描述更完整的目标，不是当前准入工具集；`external-scratch` 仍拒绝 Workspace 特性。
 
 ## 3. 身份与持久化契约（延续阶段一）
 
@@ -88,7 +104,9 @@
 
 ## 6. Worker 准入：容器内 boot‑v2（CLI 变更）
 
-今天容器模式会拒绝 boot‑v2。本阶段在 CLI 增加 `managed-runtime-boot/2` 的容器准入（一份新的闭合文档，不是既有 boot‑v2 键集的扩展），并配置**存储侧的偏执校验**：
+> **切片 C 的偏差（方案 A）。**下面的 §6 仍是提案，切片 C 刻意**不**实现它：外部前台 Shell 档案跑在**已发布的** `managed-context/1` boot 文档及其现有 `storage` 成员上，不做任何改动。新的 `managed-runtime-boot/2` 文档、`storageRef`、`mountNonce`、仅控制面可写的 marker 以及 device/inode receipt 都留到后续切片。代价在 §15 里如实写清：本切片沿用已发布的 boot 绑定证明，**没有**加上针对「旧 boot 文档重放到重新materialize 过的目录树」的 marker/nonce 防御。§15 说明这缺了什么、以及现在仍靠什么护栏兜住。
+
+原提案以容器模式拒绝 boot-v2 为前提，提议新增 `ManagedRuntimeWorkerBoot` v2 容器准入并进行**存储侧校验**。这不是已实现的 boot 契约（见 §12）：
 
 - 本阶段引入一份**新的闭合 boot 文档** `managed-runtime-boot/2`，而不是往既有的 `ManagedContextBoot` boot‑v2 键集里加字段。那份文档由精确键列表校验解析（`readClosed` 会拒绝排序后键列表不等于预期十六项的文档），往里加成员会让所有已发布的 boot‑v2 文档、以及包着它们的 CSI v3–v6 信封全部解析失败。新文档有自己的版本号和自己的闭合键列表，既有 boot‑v2 解析完全不变 —— 这才是"对已发布 worker 惰性"的含义。
 - 新文档携带一个 **provider 中立**的存储成员 `externalStorage: {kind: "external", storageRef, mountNonce, aliasPath, mountRoot}`，其中 `aliasPath` 与 `mountRoot` 是这个对象内部的成员，不是新文档的第二个顶层 mount 根。成员名为 `externalStorage` 而非 `storage`：已发布的 `ManagedCsiBoot.storage` 已经承载 `physicalKey`、`registrationRevision`、`driver` 等 provider 专属字段，同名会让同一个信封家族里出现两套不兼容的定义。`storageRef` 是注册 `ExternalStorageIdentity` 的 canonical‑JSON sha256（沿用 §3 摘要规则），`mountNonce` 是控制面下发的不透明值 —— 因此**本文件**既不出现 `physicalKey` 也不出现 provider ID，阶段一"不要把 provider 专属字段塞进闭合 boot 文档"的规则对它成立；CSI 文档自带的 provider 字段不受影响。revision 漂移已包含在 `storageRef` 里，重新注册只会改变 worker 唯一能看到的那一个存储标识。
@@ -114,7 +132,9 @@ worker 是闭合 boot 路径里的可信代码：这些校验用来拒绝缺失�
 - Broker 与本地读取完全一样的形状走 `publication:read`；未知 channel 或过期 lease 直接 closed 错误，绝不退化成"没 capture"。
 - `stopDrained`（§8）会把每个 channel 最终 receipt 写入结尾区；close 只有在所有 channel drain 到 end‑of‑stream 时才允许结束。
 
-本期只支持前台 shell；后台 shell（`is_background`）留作下一步，有它自己的证据制度。
+前台 shell 与 `monitor` 仍是目标，不是 §14 文件里程碑的能力。后台 shell（`is_background`）留作后续阶段，有它自己的证据制度。
+
+§15 实现了本节的前台那一半，并纠正其中一个细节：Broker 不是「一边读 worker、一边顺手写控制面 publication」的读者，它就是这份 publication 的 **producer**；这两个角色需要的凭据不同——worker 对控制面**一份凭据都没有**。见 §15。
 
 ## 8. 精确 worker 的 `stopDrained` 与存储归属护栏
 
@@ -127,6 +147,8 @@ worker 是闭合 boot 路径里的可信代码：这些校验用来拒绝缺失�
 - sandbox 过期/GONE **不是** drain 证明；worker 崩溃**不是** drain 证明；本 profile 继续沿用阶段一规则，`release` 仍是无操作（真正的 kill 授权只属于 storage 的 owner‑fenced stop 路径）。
 
 远程监督进程会把每个任务生命周期的 receipt 写到 worker 的私有 publication 目录中（所有敏感都不写入任何 release 载荷），因此 adapter 重启也能靠**重读 receipts**来重新断言 drain 状态，而不是靠信任崩溃事实。
+
+§15 为前台 Shell 档案实现了这道护栏，并补上 files 档案不需要的那道门：只要有 Shell 还在飞，close 就在读取上述三种回答**之前**先拒绝——未结算的执行根本不可能已经产出它的最终 receipt。
 
 ## 9. 操作方适配器（Aone，私有库）步进
 
@@ -162,8 +184,8 @@ worker 是闭合 boot 路径里的可信代码：这些校验用来拒绝缺失�
 
 ## 12. 已实现的 step 3a：供给前置层
 
-step 3 的第一片以 Broker/适配器前置层的形式落地，而不是产品能力。它新增
-`external-workspace` provisioner kind，但用户侧还无法触达：
+本节记录 B0–B2 之前的历史 step-3a 检查点。当时以 Broker/适配器前置层的形式新增
+`external-workspace` provisioner kind，尚不是用户可触达的产品能力；下述准入限制已由 §14 取代：
 
 - **kind 与传输。** `ExternalWorkspaceProvisioner` 继承已上线的 `external-scratch`
   provisioner：放置、持久 handle、按 `provisionRequestId` 幂等、启动恢复、attest 与
@@ -175,13 +197,12 @@ step 3 的第一片以 Broker/适配器前置层的形式落地，而不是产�
   并以永久错误码拒绝（`external_storage_registration_not_found`、
   `external_storage_registration_mismatch`、`external_storage_continuity_denied`）。
   provider 身份、physical key、revision、alias 路径与 mount root 一律与注册记录比对，
-  绝不与请求或 provider 回包比对。查询使用注册记录的主键（与写入路径插入的 alias key 相同），
-  按 owner 行的主键关联该行，且只接受 `REGISTERED` 状态；`RETIRING` 或 `RETIRED`
-  均视为未注册。revision 不得超过 2^53-1，这是协议两端均能精确表示的最大整数。
-  `storageRef` 是注册身份元组（providerId、physicalKey、registrationRevision）的 canonical-JSON SHA-256；
-  revision 变化会让既有 handle 不可采纳，而不是悄悄重绑。无法完整读取查询结果时，返回可重试的
-  `runtime_external_unavailable`，使 Broker 保持该 placement 可采纳；已经读出的行若自身信息
-  不一致，则永久拒绝。
+  绝不与请求或 provider 回包比对。查询使用登记主键（与写入路径的 alias key 一致），
+  按 owner 主键联表，只接受 `REGISTERED` 行；`RETIRING`/`RETIRED` 按无登记处理。
+  revision 上限为 2^53-1，确保线上两侧精确表示。`storageRef` 是注册身份元组的
+  canonical-JSON SHA-256；revision 变化使既有 handle 不可采纳，绝不悄悄重绑。
+  查询未能完整读取时可重试（`runtime_external_unavailable`），Broker 保留放置的
+  可采纳性；已读完但记录自身不一致时永久拒绝。
 - **boot 文档不变。** Broker 铸造已上线的 `managed-context/1` 文档，并追加已被 worker
   准入的 `storage` 成员（`kind/physicalKey/aliasPath/mountRoot/registrationRevision`），
   在 `session` 隔离与 Workspace capability digest 下由现有 worker 接受。因此本片
@@ -192,17 +213,133 @@ step 3 的第一片以 Broker/适配器前置层的形式落地，而不是产�
   `storage: {storageRef, mountRoot, continuity}`：`confirms` 采纳，`unknown` 保留归属
   但失去就绪证据，`denies` 永久拒绝，缺省证据保持阶段一语义（本片不授权任何写入）。
 
-本片**不做**：Hosted 工具档案与 EXTERNAL 执行准入（§5）、前台 shell publication 消费
-（§7）、`stopDrained`（§8）与关闭门禁。因此 `supportsDrainedStop()` 保持 `false`，
-放在该 profile 上的 Session 无法关闭；配置校验对两种 external kind 仍要求所有 managed
-Workspace 特性关闭。于是本 provisioner 是**可配置，但暂时放不下任何 Session，且每次放置
-都 fail-closed**：它通过配置显式开启，preflight 会给出一条前置警告说明这一点，只有组件
-测试与契约测试会驱动一次放置。
+step 3a **不做**：Hosted 工具档案与 EXTERNAL 执行准入（§5）、前台 shell publication
+消费（§7）、`stopDrained`（§8）与关闭门禁。在该检查点，`supportsDrainedStop()` 为
+`false`，放在该 profile 上的 Session 无法关闭，配置拒绝两种 external kind 的所有
+managed Workspace 特性。当时 provisioner **可配置，但放不下任何 Session，且每次放置
+都 fail-closed**：preflight 明确报告此前置限制，只有组件与契约测试驱动放置。这不是 §14
+的当前行为。
 
-**#15512 并未完成。** 文件工具执行（`read_file`/`write_file`/`edit`/`glob`）、前台
-shell、审批、capture 以及可验证的 close/drain 仍未实现；在这些落地并验证之前，该
-profile 不可用于 Hosted 工具。
+**历史 step-3a 结论：**当时 #15512 未完成，文件执行、前台 shell、审批、capture 与
+可验证的 close/drain 均未实现。此后文件工具、default 审批和指定的安全关闭 E2E 已落地
+（§14），但完整目标验收与部署就绪判断仍未通过。
 
 相对 §6 的已知偏离（留给后续片）：不新建 `managed-runtime-boot/2` 文档、不反转
 mount root 归属、不返回 `rootDevice`/`rootInode` receipt。这些属于 worker 契约变更，
 而 `storage` 契约已经是公开的 adapter 面；仓库内没有生产者并不等于外部没有消费者。
+
+## 13. B0 修订：惰性的同源原生 drain
+
+本节记录仅有 B0 的检查点：当时提供 drain 原语，不提供 Hosted 准入或完整关闭编排。下述惰性边界是历史记录；B1/B2 在 §14 接通该原语。以下 B0 决定取代 §§3、6、8 中关于独立 ingress 和 drain 证明的提议；§12 保留此前 step 3a 的范围记录。
+
+- **同一个已保存 origin，既有路由。** external boot 将既有 publication 对象和 executor 注册到 worker 主应用，并将其路由加入 owned-route 门禁。原独立 publication listener 和 ready 通告保持兼容；两个 listener 共享退役与 channel 状态。Express 注册时转义 `publication:*` 路径中的字面量冒号，避免将其视为参数而匹配另一种操作；线上路径不变。Broker 使用持久化的 `RuntimeLease.endpoint` 独立 attest context，随后向 `/internal/managed-runtime/v2/publication:stop-drained` 发起 POST，请求体严格为 `{"protocolVersion":2,"channel":"all"}`。不引入第二个 endpoint，也不推算端口。
+- **I/O 前校验原始身份。** provisioner 复用基类校验，检查已保存 request、seed、凭据和 canonical storage-bound handle，核对当前注册元组与已保留 endpoint，并要求 `external-workspace`、managed context、session 隔离和精确的 Workspace capability digest。原始信息缺失或冲突不产生 receipt；adapter 重启后使用完整的已保存身份，不分配资源，也不调用 provider observe。传输层在 attest 前拒绝重定向和被替换的解析 origin。stop 发送 Bearer、lease ID/epoch、`X-Qwen-Managed-Storage-Revision`、`X-Qwen-Managed-Runtime-Incarnation`、JSON 和 `Cache-Control: no-store`；boot 头的值在 attest 前固定。publication 不返回 response-incarnation 头，stop 也不要求该头。stop 信封限 64 KiB，超时或取消会关闭活动 HTTP 请求。
+- **有限证据，不读取证明内容。** 仅接受 HTTP 200、JSON/no-store 和精确的 `{protocolVersion:2,state:'drained',proof,receipts}`。严格解析拒绝重复键、尾随 token、畸形 UTF-8 和非整数数值 token。proof 恰有 `resourceId/kind/schemaVersion/byteLength/digest`：符合生产者形状的 UUID、`external-publication`、整数 `1`、不超过 64 MiB 的正整数长度，以及原始小写 64 个十六进制字符的 SHA-256 摘要。每个 receipt 须携带 channelId 及同形状 manifest 引用。unknown 或 undrained 状态不产生 receipt；undrained 回包的非空 channels 保持可重试。畸形 receipt 或回包不产生 receipt。Broker 在 attest 后信任经过认证的 worker 声明；它**不**读取或计算私有 proof 字节的哈希，不声称 attest 与 stop 原子执行，也不抵抗被攻陷的可信 ingress 后方的恶意克隆。同源路由必须到达原 worker。
+- **退役不等于进程退出。** 成功 drain 会封闭 managed writer 准入并退役执行资源；HTTP 进程可以继续存活。原生 receipt 使用既有 binding/generation/provision-request/handle/time 五字段构造器，`stoppedAt` 为 Broker 观察时间，不携带 extension mode 或 scope。binding state 与 operation claim 的授权由 Broker 调用链负责，provisioner 不重复建立这些判据；原语要求 drain 请求和经过校验的原始身份。
+- **B0 单独检查点尚未激活（已由 §14 取代）。** 当时按 binding 的 `supportsDrainedStop(binding)` 可以识别有效原始绑定，但无参 `supportsDrainedStop()` 为 false，SQL 支撑的 `WorkspaceExecutionStore.canStopDrained` 门禁拒绝 EXTERNAL。ACK 重放、先持久化 receipt 再释放 owner 的编排，以及 EXTERNAL 执行归属均属后续工作。当时没有启用任何公开工具、Hosted profile 或准入开关，`release` 为空操作，#15512 未完成。
+
+聚焦机制检查覆盖：listener 共享状态与字面量路由；原始请求头以及没有 response-incarnation 回显时的成功；身份/注册拒绝；严格畸形解析与回包上限；重定向 sink 不收到请求；活动连接的取消/超时；以及从已保存身份重启且不分配资源。这些 B0 检查本身不能证明公开 Hosted 执行、SQL owner 释放或真实 provider 的端到端关闭。§14 补充指定的 public-files 证据，不代表真实 provider 或完整目标验收。
+
+## 14. 公开 external-files 里程碑：A / B0 / B1 / B2
+
+### 已实现边界
+
+A 建立元数据/授权；step 3a 提供已登记的放置；B0 提供原 worker 原生 drain；B1 接通生命周期关闭与 SQL 归属；B2 开启公开文件工具/default 审批。精确档案为 `hosted-workspace-external-files/1`，仅含 `read_file`、`write_file`、`edit` 和 `glob`。门禁通过后，公开发现与 Session 创建现在允许该档案，不再一律拒绝 EXTERNAL 放置。
+
+准入要求选择 `external-workspace` kind、`workspaceFilesEnabled=true`、启用 Harness/session store/Broker、有效的外部 provider 配置、session 隔离且不开 create-warm，以及协商得到的特性 token `hosted-workspace-external-files/1`、生命周期协议 `1` 和 Workspace close 支持。登记、provider 与根绑定仍须匹配。配置满足条件不等于协商就绪或 worker 证明。指定 E2E 使用 `default` 审批，不认证所有审批模式。
+
+选项保持闭合：不支持 shell、`monitor`、capture、skills、hooks/extensions、MCP、child agents/workspaces/snapshots、plan mode、rewind 或输入附件。本地 mounts/import、SSH 与 verified/operator/trusted-local-reboot recovery 开关必须保持关闭。这不是完整 Hosted 工具档案。见[配置](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java)、[准入](../../packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/repository/ManagedWorkspaceRegistry.java)与[闭合 Harness 选项](../../packages/cli/src/serve/hosted-workspace-profiles.ts)。
+
+### 关闭与归属
+
+生命周期协议 `1` 可以合法持久化 `storeSynthesized=true`、空 `effects`：在此无 hooks 档案下，store 根据空闲 journal 和经过验证的已提交 `definitionRef` 构造 receipt。这**不是** Harness wire-settle 回包，也**不是**原生 drain 证明。关闭链另行 detach Harness、确认没有 live journal writer，再经 B0 停写原 binding/generation/handle，之后才释放物理归属。
+
+SQL 物理 holder 跨工具完成与 Runtime member/mount 释放继续保留，不是每次工具调用的锁。member execution claim 可以释放/重取，但不能因此释放该 holder。只有原 generation 的 stopped-release 校验及持久化 drain receipt 才允许清除其 runtime holder 字段。存储元数据与授权继续保留。退役无需终止 worker 进程，provider `release` 仍为空操作。见[生命周期编排](../../packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/SessionLifecycleCoordinator.java)、[journal receipt](../../packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/repository/WorkspaceLifecycleStore.java)与[SQL 归属](../../packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/persistence/JdbcExternalWorkspaceOwnership.java)。
+
+### 已观察验收与来源
+
+remote191 上指定的公开 files/close E2E（`ExternalPublicFilesE2E`，随第 5 步全量 E2E PR 提交，不在本分支）完整执行，**1 项测试、0 失败、0 错误、0 跳过**，包括最终 summary 与 cleanup。链路使用真实 Spring 公共 API、独立 MySQL 8.4.13、构建后的 Hosted Harness、external Runtime worker、文件系统与 journal；allocator 和 OpenAI 模型是本地受控夹具，**不是云 provider 或真实模型验收**。
+
+已观察：鉴权/幂等登记与物化、仅 owner 可发现、四个真实工具按 write → read → edit → glob 执行、两次 Action 审批、五次模型请求与一次分配、decoy 根未改动、终态公共事件、Items/工具详情及同 Session 历史资源校验。关闭达到 Session `CLOSED` / binding `RELEASED`，清除 holder runtime 字段，保留元数据/授权/历史且无 live writer。原生 drain receipt 持久化，main/legacy stop 端点一致；鉴权后的 late write 返回 `409` 且未创建文件；晚到公共输入和幂等关闭均未新增副作用或分配。原 worker 一直存活到 cleanup。
+
+保留证据包中的 47 个 runtime 源码哈希均匹配检查点 `dd5c2d2fb2e2665dd593b27fffa50e2cf4dc510d`，执行前后 artifact manifest 一致；复制的 Core commit 元数据另行披露。这以源码/产物来源证明指定场景，**不代表检查点所有测试或最新完整 CI 均已认证**。此前失败尝试继续保留，不会被本次通过抹去。
+
+### 验收检查点之后的改动
+
+以上验收包是检查点 `dd5c2d2fb2e2665dd593b27fffa50e2cf4dc510d` 的历史证据；#15685 以 `0f7b8c006d77527a3a4555caf8d8ec41e998ffca` 合入。后续修复将 Agent pin 校验移到 Workspace 解析之前，并允许合法认领的 LOST binding 在停止证明提交前保持该状态。此后的评审修复还调整了登记记录的错误处理与执行资格检查。这些改动**不在上述已记录的端到端运行内**。聚焦回归测试是单独的证据，不代表在最新 head 重跑过公开 files/close 验收。
+
+### 剩余目标与门禁
+
+**C 已部分实现并完成部分本地验证：**worker 侧外部 Shell profile 与 capture 路由、控制面 publication producer 及其 HTTP 传输层已有本地实现（§15）。Broker 的派发/取消/对账/关闭接线与控制面 Session profile 选择属于后续一半（[17357 B/2]，#17474）；在它落地前，控制面无法选中该档案，这也是它尚无运行时开关的原因。本地验证覆盖经真实 HTTP 的 worker capture 协议，以及 producer 基于真实控制面存储在 H2 上的 publication 写入；具体清单见 §15 末尾「本地已验证」。`monitor` 与后台 Shell **没有**实现；`monitor` 在最初 §1 目标中，仍是目标，不能悄悄删除。真正的 `LOST` 恢复、Broker/adapter 进程重启恢复、真实并发归属/恢复场景及真实 provider 验收，仍是未完成工作，不能由本次运行宣布完成或验证通过。完整 CI/fault 套件、人工评审及验收/部署门禁仍待通过。UI 验证仍待完成；本文不声称查看器或截图已成功。本次只完成用户影响与目标差距的文档对照，不关闭 #15512 或第二阶段完整目标。
+
+## 15. 切片 C：外部前台 Shell（`hosted-workspace-external-shell/1`）
+
+状态：**worker profile/capture 路由与控制面 publication producer 已实现，由本节末尾「本地已验证」列出的本地证据支撑。本 PR 直接以 `main` 为 base，按 main 过滤的 CI 与 managed-agent 门禁都会运行。下文描述的 Broker 派发/关闭围栏与控制面 profile 选择属于后续一半（#17474）；在它落地前，控制面无法选中该档案。**下面写的是两半合起来的代码形态，加上那里明确列出的本地测试观察。
+
+### 边界
+
+新增一个独立档案 `hosted-workspace-external-shell/1`，声明 `read_file`、`write_file`、`edit`、`glob`，以及**仅前台**的 `run_shell_command`。它绝不是 `hosted-workspace-external-files/1` 的重新解释：那个档案继续拒绝所有 Shell 调用，两者靠各自的 capability digest 区分。
+
+它的 capability 是自己的：`sha256("managed-workspace-execution/1;external-shell/1")`，与 terminal capability 一样从规范字符串派生，两侧钉同一个 hex。两个外部档案目前都铸造 resource-handle 版本 **1**；Shell 通道靠 capability digest 区分，绑定与每次 attest 都精确比对它。独立的 handle 版本（`EXTERNAL_SHELL_HANDLE_VERSION = 2`）已为后续一半声明，但目前没有任何代码生成或接受它。
+
+准入要求：选中的 kind 是 `external-workspace`、session 隔离、持久化的已登记外部存储（临时 sandbox 目录直接拒绝——它拿不出 drain 证明）、显式预留 `captureBytes`，以及协商到位的 feature token。该通道目前没有运行时开关：Harness 无条件声明该档案，而端到端仍不可达——控制面要等后续一半（#17474）注册后才能选中它。`QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED` 是本地 `hosted-workspace-shell/1` 的开关，不控制该档案。
+
+本档案上仍然关闭的能力：后台 Shell（`is_background`）、`monitor`、`web_fetch`、skills、hooks/extensions、MCP、子 agent/workspace/snapshot、teams、messages、session commands、plan mode、rewind、memory、automations、channels。Harness 在 Session 准入处拒绝，Broker 在每次 dispatch 再拒一次，worker 自己的前台 ledger 门第三次拒绝。这三道拒绝刻意相互独立：任何一道单独成立就能让这个 placement 保持诚实。
+
+`READY` 仍是 Broker 本地谓词——`state == RUNNING`、continuity 为 `confirms`，**并且** publication readiness 探针能在精确的 lease、storage revision 与 incarnation 下探通 worker 自己的 publication 协议。wire 上依旧只有 `RUNNING`/`STARTING`/`UNKNOWN`/`GONE`。探针刻意命名一个不可能存在的 channel，所以 worker 自己的「通道已关闭」拒绝才是肯定回答；传输失败或身份不符属于**缺少证据**，绝不等于「worker 已经没了」。continuity 为 `denies` 是永久拒绝；`unknown` 保留归属、丢掉 readiness；`GONE` 既不 adopt 也不 replace；provider 的 `release` 仍是无操作。
+
+### Broker 就是这份 publication 的 producer
+
+这是 §7 默认了但没写明的形状，也正是「这份 grant 永远不下发到该 worker」的原因。
+
+外部 worker 自己保留 capture store——它就是私有目录上一个完整的 `LocalShellResultCapture`——并通过 `publication:begin`、`publication:read`、`publication:renew`、`publication:stop-drained` 暴露它。它对控制面**没有任何凭据**。所以 producer 这个角色由 Broker 承担：
+
+1. **dispatch 之前**，`publication:begin` 打开 worker channel 并返回 channel id。这个 channel 的生命周期由 grant 自己的 horizon 界定；binding 已经 reserve 过，所以 `captureId` 是定下来的，由 worker 采纳，而不是 worker 自己造一个。这个 horizon 取自校验 dispatch grant 的**同一次加锁读**，绝不再做一次无锁读。
+2. Shell 在 worker 上运行，worker 在本地结算自己的 capture 与最终 manifest。
+3. **拿到结果之后、执行结算之前**，Broker 读取 worker 的块，以 producer 身份写进原 publication：一块对应一个控制面 segment，逐 stream seal，然后重建 manifest 及其 pages，再 `finish`。
+4. 只有做完这些，才去 ack worker 的序列，**包括每个 stream 那个空的 EOF 序列**。
+5. 只有全部 ack 完成的 channel，`stop-drained` 才会回答 `drained`。
+
+第 3 步必须先于结算，因为 producer 通道要求 binding 存活、未在 drain，且执行未结算；结算之后再重试就永远发不出这些字节了。任何一步失败都会让 channel 停在未 ack 状态，于是 close 继续拒绝，而不是把字节从未到达的存储释放掉。Harness 侧的结果 session、receipt 链和 `ToolPublicationDataStore` 都没有改——证明这次重建忠实的，是控制面自己的 `validateFinished`：它逐字段把 manifest identity 与已 reserve 的 binding 比对。
+
+本通道依赖的三个契约细节，都很容易搞错：
+
+- **`captureId` 是已 reserve 的 binding 的 token**，不是 worker 自选的 UUID。控制面逐字比对每一份 finished manifest，而它必须满足 `[a-z0-9_-]{1,128}`。manifest 的 `invocationDigest` 同理，是 binding 自己那个**带 `sha256:` 前缀**的 wire digest；把前缀剥掉会让每一份 finished capture 都被拒。
+- **EOF 是独立的空序列。**`acknowledgedSequence` 可以等于正在读的序列（最后一个就是这么 ack 的），但不能超过它；所以如果 EOF 与某个数据块共用一个序列，它就永远无法被 ack，每次 drain 都会报 `undrained`。
+- **channel 的 horizon 可续期，被 capture 的输入不可变。**grant 的 horizon 是 `min(writer lease, activation)`，由 Harness 持续续期，而前台 Shell 可以跑到 600s——远长于一个 lease。所以每次 dispatch 续期都会重新校验 grant，并把它当前的 horizon 通过 `publication:renew` 推给 worker，这个 horizon 只会前移不会后退。如果 channel 被冻结在开启时的 horizon，命令跑到一半就会关闭，drain 永远无法完成；续期被拒不等于丢 claim，因为 drain 会重新读这个 channel，真的关了就如实拒绝。`publication:begin` 的幂等只按被 capture 的输入判定，所以恢复后的 dispatch 可以带上它自己当前的 horizon。
+
+这里有两条不同的界，其中 binding 预留的那条更紧。publication 为整个执行预留了 `captureBytes`，控制面 store 会拒绝超出它的第一段——这才是本通道真正拥有的预算。segment 与 page 数量是叠加在它之上的结构上限：每页 1024 段、每个 stream 64 页。超出任何一条界的 capture 都会拒绝 drain，而不是悄悄截断，随后 close 也继续拒绝。
+
+### 关闭与恢复
+
+§8 的护栏现在还会在三种回答之前先跑一遍：没有 drain receipt 时，「Shell 仍在飞」「binding 处于 `LOST`」「已证实的 absence」都会让 close 拒绝——未结算的执行不可能已经产出最终 receipt，而 sandbox 过期和 worker 崩溃都不证明被 capture 的字节已经到达。恢复原 worker 是唯一出口。恢复后的 dispatch 会重新跑一次 `begin`，它按执行幂等，所以拿到的是同一个 channel，仍然能在结算前把字节搬走。
+
+drain 失败会让执行停在 `UNKNOWN`，而在本通道上，这个状态不允许用 worker 的 status 去结算。worker 自己那份 settled envelope 指向的是它**本地**的 manifest，把它吸收进来就等于结算了一个字节从未到达控制面的结果，并让 close 把存储释放掉。所以只要原 publication 还没 finished，reconcile 就拒绝；只有已 finished 的 publication（也就是 drain 自己的产出），或者一次完成了 drain 的恢复 dispatch，才可以结算这个执行。
+
+这条规则必须在本通道**每一条**能结算的路径上都成立，而不只是 reconcile：
+
+- **结算带的是已发布的 envelope，不是 worker 那份。**drain 完成之后，执行用控制面自己的 `/finished` 结果结算——也就是按真正搬过去的字节重建出来的 manifest。worker 那份 envelope 指向它私有的 manifest ref，而 Harness 会把结算结果与 `/finished` 逐字节比对，所以结算 worker 那份会让每一次成功的调用都被拒。
+- **cancel 只做物理取消，不结算。**cancel 一定会到达 worker，但只要 publication 还没 finished，它的回答就不能用来结算本通道——被取消的进程在 abort 之前仍可能已经写出过输出。记录保留自己的 claim，由 dispatcher 的搬运来收尾，和没被取消的调用完全一样。如果 drain 在 cancel 与它的回答之间完成了，结算用耐久信封而不是 worker 的那份，理由同上。
+- **worker 证明"没启动过"时不需要 drain 证明。**不带 capture 的 `not_started` 回答是唯一的例外，cancel 和 reconciliation 两条路都一样。没有进程跑过，就没有通道存着字节，也永远不会有 finished 的 publication；把这个答案也拦下来，记录就彻底没有出路了——dispatch 拒绝 `UNKNOWN` 行，close 又拒绝未结算的行。**已启动**的调用永远不豁免，无论 capture 是什么状态，只有 drain 自己 finished 的 publication 才能证明那些字节到达了。reconciliation 这条路是从它用来结算的同一次 status 回答里读出这一点的，所以豁免不会多打一次 worker。
+- **publication 已 finished 时不需要 worker 就能结算。**如果 drain 已经完成、只是结算没落盘，reconciliation 直接用那份耐久信封结算，不再向 worker 要 status。这条路恰恰是在原始 worker 可能已经消失时才走的，而 worker 的回答也只能给出它自己本地的 manifest。
+- **已经开始、但 capture 不完整的调用选择拒绝，而不是结算。**`finish` 只接受完整的 capture，所以任何重试都发不出这些字节。把它结算掉，会让 worker 永远报 `capture_incomplete`，而那条已结算的记录又让 close 走到一个它永远证明不了的 stop；拒绝则让执行保持可恢复。
+- **drain 已经 finished 的恢复 dispatch 不再搬一次。**在 `FINISHED` 通道上重新发布只会被拒，所以那份持久 envelope 已经就是结果，直接把结算落下去即可。
+
+worker 的 status 同时也是本通道长命令唯一的结果来路：它自己不发布任何东西，所以一个跑得比 execute 请求超时更久的前台 Shell，是通过结果轮询回来的，之后和其他结果一样被搬运。
+
+### 方案 A 的代价
+
+保留已发布的 boot 契约，意味着切片 C 沿用已发布的绑定证明，**没有**加上 §6 的 `storageRef`/`mountNonce` marker 防御来抵挡「旧 boot 文档重放到重新 materialize 过的目录树」。现在仍能兜住这种情况的护栏与 files 里程碑一致：从持久化登记记录读出的完整 `ExternalStorageIdentity` 三元组（provider id、physical key、registration revision）、精确的 handle 版本、每次 publication 交换前 Broker 的独立 attest，以及 SQL 物理持有者。补上 marker 缺口是后续工作，本切片不声称已完成。
+
+### 未做的部分
+
+后台 Shell 与 `monitor` 不在本切片内，它们仍是 #15512 的目标，不是被悄悄删掉的需求。§6 的 boot-v2 文档、marker 与 nonce 没有实现。
+
+已完成的本地验证：
+
+- capture 协议的 worker 那一半**对真实 worker 进程、走真 HTTP**，并通过真实带 attest 的 transport 驱动：`begin` 按 execution 幂等、每个块都被读取并确认直到它自己那个空 EOF、空 stderr 同样由 EOF 界定、多块 capture 不丢不乱序（含跨块边界的多字节字符）、`renew` 只把 horizon 往前推并让通道活过原 lease、经传输层封闭体校验的 drained stop 在 EOF 未确认时拒绝、`pending` 绝不被当成空块也不推进游标、外来 lease 或过期 incarnation 根本到不了 capture。
+- producer 端到端**基于 H2 上的真实控制面 publication 存储**，完整预留链先提交：worker capture 变成已完成、可回读的 publication，重建的 manifest 由 store 自己的 `validateFinished` 证明忠实；多块 capture 逐段发布；续期后的 grant 延长同一 channel；失败退出码作为结果自身的 outcome 发布；不完整 capture 在搬运任何块之前被拒；超出预留字节的 capture 拒绝而不是发布短流；worker 消失或外来 lease 绝不会完成 publication。
+
+上文描述的 dispatch/cancel/reconciliation 围栏与关闭/恢复分支属于后续一半（#17474），由那边验证，不在本 PR 的套件内。
+
+仍未运行：SpotBugs、MySQL 上的真实并发归属，以及完整的 `mysql-integration` 与 Hosted/fault profile（这些由 CI 负责）。worker 替身实现的是已发布 worker 的通道规则，但它**不是**那个已发布的 worker：两半还没有在同一棵进程树里对跑过。真实 provider 验收、UI 验证、人工评审与部署门禁全部待定。本节记录的是实现边界与上述证据，不是完整验收。

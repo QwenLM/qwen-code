@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ChildWorkspaceStoreTest {
     private JdbcTemplate jdbc;
-    private ChildWorkspaceStore store;
+    private JdbcChildWorkspaceStore store;
 
     @BeforeEach
     void setup() {
@@ -30,7 +30,7 @@ class ChildWorkspaceStoreTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
-        store = new ChildWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
+        store = new JdbcChildWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES ('tenant', 'workspace', 1, 'storage', 'Project', ?, ?, 'ACTIVE')",
                 WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -41,14 +41,14 @@ class ChildWorkspaceStoreTest {
     void admitsAndReplaysLocalChildWorkspaces(String kind) {
         alias("storage", kind);
         var first = store.admit("tenant", "parent", "run", binding("storage"), 1);
-        assertThat(first.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
+        assertThat(first.state()).isEqualTo(JdbcChildWorkspaceStore.PREPARING);
         assertThat(store.admit("tenant", "parent", "run", binding("storage"), 2)).isEqualTo(first);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace WHERE workspace_kind = 'CHILD_GIT'", Integer.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'CHILD_WORKSPACE'", Integer.class)).isEqualTo(1);
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"SSH_LOCAL", "CSI"})
+    @ValueSource(strings = {"SSH_LOCAL", "EXTERNAL"})
     void refusesNonLocalStorageBeforeWritingAChildWorkspaceOrOperation(String kind) {
         alias("storage", kind);
         assertThatThrownBy(() -> store.admit("tenant", "parent", "run", binding("storage"), 1))
@@ -73,15 +73,14 @@ class ChildWorkspaceStoreTest {
     }
 
     private void alias(String id, String kind) {
-        String alias = JdbcRuntimeBindingRepository.storageAliasKey("tenant", id);
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, ?, ?, ?)",
-                alias, JdbcRuntimeBindingRepository.storageFenceKey("tenant"),
-                JdbcRuntimeBindingRepository.storageFenceKey(id), "tenant".getBytes(StandardCharsets.UTF_8),
+        String alias = RuntimeAdmissionFences.storageAliasKey("tenant", id);
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, ?)",
+                alias, "tenant".getBytes(StandardCharsets.UTF_8),
                 id.getBytes(StandardCharsets.UTF_8), kind);
         if ("LOCAL".equals(kind)) {
             String physical = ManagedSchemaKeys.key("local-test", id);
-            jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state, mount_revision)"
-                    + " VALUES (?, ?, 'LOCAL', 'READY', 1)", physical, physical);
+            jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, mount_state, mount_revision)"
+                    + " VALUES (?, 'LOCAL', 'READY', 1)", physical);
             jdbc.update("UPDATE ma_storage SET physical_key = ?, registration_state = 'REGISTERED', registration_revision = 1,"
                     + " registration_json = '{}', mount_revision = 1 WHERE alias_key = ?", physical, alias);
         }

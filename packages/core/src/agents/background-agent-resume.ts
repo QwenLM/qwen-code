@@ -884,6 +884,8 @@ export class BackgroundAgentResumeService {
       registry.register({
         ...existing,
         status: 'running',
+        // The replacement runtime uses the session's current workspace.
+        workspacePinned: false,
         abortController: bgAbortController,
         endTime: undefined,
         result: undefined,
@@ -1170,6 +1172,7 @@ export class BackgroundAgentResumeService {
         subagentType: target.agentName,
         isBackgrounded: true,
         status: 'running',
+        workspacePinned: false,
         abortController: bgAbortController,
         endTime: undefined,
         result: undefined,

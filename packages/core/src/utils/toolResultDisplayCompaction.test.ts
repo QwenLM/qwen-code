@@ -680,3 +680,100 @@ describe('compactString limit', () => {
     expect(compactStringForHistory('short', 1000)).toBe('short');
   });
 });
+
+// Transcript records may carry leaner displays than the live producer emits
+// (blocked spawns have no task prompt, older versions recorded fewer fields).
+// Compaction reads these shapes on replay, so it must pass missing and
+// malformed fields through instead of throwing (#16171).
+describe('partial transcript displays', () => {
+  const compactFor = {
+    recording: compactToolResultDisplayForRecording,
+    history: compactToolResultDisplayForHistory,
+  };
+
+  it.each(['recording', 'history'] as const)(
+    'tolerates a task_execution display without task fields (%s)',
+    (purpose) => {
+      const display = {
+        type: 'task_execution',
+        subagentName: 'general-purpose',
+        status: 'failed',
+        result: 'done',
+      };
+      expect(
+        compactFor[purpose](display as unknown as ToolResultDisplay),
+      ).toEqual(display);
+    },
+  );
+
+  it.each(['recording', 'history'] as const)(
+    'still compacts the present fields of a partial task_execution (%s)',
+    (purpose) => {
+      const display = {
+        type: 'task_execution',
+        status: 'completed',
+        result: 'r'.repeat(DISPLAY_MAX + 1_000),
+        toolCalls: [null, { description: 'd'.repeat(AGENT_FIELD_MAX + 1) }],
+      };
+      const compacted = compactFor[purpose](
+        display as unknown as ToolResultDisplay,
+      ) as unknown as {
+        result: string;
+        toolCalls: Array<null | { description: string }>;
+      };
+      expect(compacted.result.length).toBeLessThanOrEqual(DISPLAY_MAX);
+      expect(compacted.toolCalls[0]).toBeNull();
+      expect(compacted.toolCalls[1]!.description.length).toBeLessThanOrEqual(
+        AGENT_FIELD_MAX,
+      );
+    },
+  );
+
+  it.each(['recording', 'history'] as const)(
+    'tolerates missing lists and malformed entries (%s)',
+    (purpose) => {
+      const displays = [
+        { type: 'todo_list' },
+        { type: 'todo_list', todos: [null, { content: 42 }] },
+        { type: 'findings_list' },
+        { type: 'findings_list', findings: [null, { summary: 's' }] },
+        { type: 'task_list' },
+        { type: 'task_list', tasks: [null, { subject: 42 }] },
+        { type: 'plan_summary' },
+        { type: 'team_result' },
+        { type: 'mcp_tool_progress' },
+        { type: 'mcp_app', html: '<p>hi</p>' },
+        { type: 'ansi_output', ansiOutput: [null, [null, { text: 42 }]] },
+      ];
+      for (const display of displays) {
+        expect(() =>
+          compactFor[purpose](display as unknown as ToolResultDisplay),
+        ).not.toThrow();
+      }
+    },
+  );
+
+  it.each(['recording', 'history'] as const)(
+    'keeps ansi compaction working when some lines are malformed (%s)',
+    (purpose) => {
+      const display = {
+        type: 'ansi_output',
+        ansiOutput: [
+          ...ansiLines(ANSI_LINES_MAX + 10),
+          null,
+          [null, { text: 42 }],
+        ],
+      };
+      const compacted = compactFor[purpose](
+        display as unknown as ToolResultDisplay,
+      ) as unknown as { ansiOutput: unknown[] };
+      expect(compacted.ansiOutput.length).toBeLessThanOrEqual(ANSI_LINES_MAX);
+      // The malformed tail survives the line-budget trim untouched.
+      expect(compacted.ansiOutput[compacted.ansiOutput.length - 1]).toEqual([
+        null,
+        { text: 42 },
+      ]);
+      expect(compacted.ansiOutput[compacted.ansiOutput.length - 2]).toBeNull();
+    },
+  );
+});

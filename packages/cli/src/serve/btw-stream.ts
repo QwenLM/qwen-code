@@ -103,6 +103,14 @@ class BtwStreamRequest {
             requestId: this.snapshot.requestId,
             answer,
           });
+        } else if (event.type === 'reset') {
+          answer = '';
+          bytes = 0;
+          this.update({
+            type: 'answer',
+            requestId: this.snapshot.requestId,
+            answer,
+          });
         } else if (event.type === 'done') {
           this.update({
             type: 'done',
@@ -184,6 +192,41 @@ export class BtwStreamRequests {
     );
   }
 
+  /**
+   * The terminal outcomes of `open`, decidable without creating anything:
+   * a duplicate requestId with a different question (409) and an unknown
+   * resume (410). Callers that gate admission before `open` run this FIRST
+   * so saturation cannot replace a terminal refusal with a retryable 503
+   * (issue #17554 review R1-5). `open` re-runs it; both are synchronous, so
+   * the decision cannot drift between the two calls.
+   */
+  precheck(
+    bridge: AcpSessionBridge,
+    sessionId: string,
+    clientId: string | undefined,
+    requestId: string,
+    question: string,
+    resume: boolean,
+  ): void {
+    const existing = this.runtimes
+      .get(bridge)
+      ?.get(this.key(sessionId, clientId, requestId));
+    if (
+      existing &&
+      existing.question !== undefined &&
+      existing.question !== question
+    ) {
+      throw new BtwStreamError(
+        409,
+        'btw_request_conflict',
+        'This request ID belongs to a different question',
+      );
+    }
+    if (resume && !existing) {
+      throw new BtwStreamError(410, 'btw_expired', 'Side question has expired');
+    }
+  }
+
   open(
     bridge: AcpSessionBridge,
     sessionId: string,
@@ -192,22 +235,11 @@ export class BtwStreamRequests {
     question: string,
     resume: boolean,
   ): BtwStreamRequest {
+    this.precheck(bridge, sessionId, clientId, requestId, question, resume);
     const requests = this.requests(bridge);
     const key = this.key(sessionId, clientId, requestId);
     const existing = requests.get(key);
-    if (existing) {
-      if (existing.question !== undefined && existing.question !== question) {
-        throw new BtwStreamError(
-          409,
-          'btw_request_conflict',
-          'This request ID belongs to a different question',
-        );
-      }
-      return existing;
-    }
-    if (resume) {
-      throw new BtwStreamError(410, 'btw_expired', 'Side question has expired');
-    }
+    if (existing) return existing;
     const request = this.create(requests, key, question, requestId);
     void request.run(bridge, sessionId, clientId);
     return request;

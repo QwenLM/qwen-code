@@ -184,7 +184,10 @@ function bootIdOf(procStart: string | null | undefined): string | null {
  * nothing about the writer; an identity this side cannot read is likewise no
  * evidence, and a legacy record carries none at all.
  */
-function isLocalIdentity(info: ServiceInfo): boolean {
+export function isLocalIdentity(info: {
+  procStart?: string | null;
+  pidNs?: number | null;
+}): boolean {
   if (info.pidNs !== undefined && info.pidNs !== readPidNamespaceId()) {
     return false;
   }
@@ -345,7 +348,12 @@ function writeInfoExclusive(info: ServiceInfo): void {
     }
 
     if (existing && isSameProcess(existing.pid, existing.procStart)) {
-      throw err; // A live record this side wrote: a genuine concurrent startup.
+      // A live record this side wrote: a genuine concurrent startup. Carry the
+      // holder out of the locked check so a caller retrying the exclusive
+      // create can distinguish a real holder from the transient starting race.
+      throw Object.assign(err as NodeJS.ErrnoException, {
+        channelServiceHolder: existing,
+      });
     }
 
     // A dead or invalid local record is transient: sweep it and retry the
@@ -355,7 +363,7 @@ function writeInfoExclusive(info: ServiceInfo): void {
   }
 }
 
-function readPidfileProcessToken(pid: number): string | null {
+export function readPidfileProcessToken(pid: number): string | null {
   let procStart = readProcStartToken(pid);
   if (process.platform !== 'linux' || procStart !== null) return procStart;
 
@@ -368,7 +376,7 @@ function readPidfileProcessToken(pid: number): string | null {
   );
 }
 
-function readPidfileNamespaceId(): number | null {
+export function readPidfileNamespaceId(): number | null {
   let pidNs = readPidNamespaceId();
   if (process.platform !== 'linux' || pidNs !== null) return pidNs;
 

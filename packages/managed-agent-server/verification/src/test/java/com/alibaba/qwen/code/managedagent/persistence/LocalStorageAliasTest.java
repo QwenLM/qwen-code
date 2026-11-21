@@ -4,12 +4,14 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -85,7 +87,7 @@ class LocalStorageAliasTest {
         String physical = LocalStorageOwners.key(jdbc, "tenant", "storage");
         assertThat(LocalStorageOwners.key(jdbc, "other-tenant", "other-storage")).isEqualTo(physical);
         var owner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
-        String aliasKey = JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage");
+        String aliasKey = RuntimeAdmissionFences.storageAliasKey("tenant", "storage");
         assertThat(jdbc.queryForObject("SELECT gmt_create FROM ma_storage WHERE alias_key = ?",
                 Long.class, aliasKey)).isPositive();
         String registrationOperation = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse(jdbc.queryForObject(
@@ -103,11 +105,11 @@ class LocalStorageAliasTest {
         byte[] marker = Files.readAllBytes(root.resolve(".qwen-managed-storage.json"));
         assertThat(owner.get("tenant_id")).isEqualTo("tenant");
         assertThat(owner.get("storage_id")).isEqualTo("storage");
-        assertThat(owner.get("physical_key")).isEqualTo(physical);
+        assertThat(owner.get("storage_key")).isEqualTo(physical);
         guard.verify(binding("tenant", "storage"));
         guard.verify(binding("other-tenant", "other-storage"));
         jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?", UUID.randomUUID().toString(),
-                JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage"));
+                RuntimeAdmissionFences.storageAliasKey("tenant", "storage"));
         assertThatThrownBy(() -> guard.verify(binding("tenant", "storage"))).isInstanceOf(RuntimeBrokerException.class);
         guard.verify(binding("other-tenant", "other-storage"));
         assertThat(Files.readAllBytes(root.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
@@ -136,12 +138,12 @@ class LocalStorageAliasTest {
     void maintenanceAliasesAreExclusiveAndOldStepCannotReleaseTheSuccessor() {
         var first = binding("tenant", "storage");
         var second = binding("other-tenant", "other-storage");
-        var children = new ChildWorkspaceStore(jdbc, manager);
+        var children = new JdbcChildWorkspaceStore(jdbc, manager);
         var firstRow = children.admit("tenant", "parent", "run", first, System.currentTimeMillis());
         var secondRow = children.admit("other-tenant", "parent", "run", second, System.currentTimeMillis());
         var firstClaim = children.claim(firstRow, "first-worker", System.currentTimeMillis(), 60_000);
         var secondClaim = children.claim(secondRow, "second-worker", System.currentTimeMillis(), 60_000);
-        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager));
+        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager));
         String step = authority.holdForMaintenance(first, firstRow.childWorkspaceId(), firstClaim.claimGeneration());
         assertThatThrownBy(() -> authority.holdForMaintenance(second, secondRow.childWorkspaceId(), secondClaim.claimGeneration()))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_busy"));
@@ -187,9 +189,10 @@ class LocalStorageAliasTest {
     @Test
     void driftedPhysicalMappingAndCopiedMarkersCannotAuthorizeAnAlias() throws Exception {
         String physical = LocalStorageOwners.key(jdbc, "tenant", "storage");
-        jdbc.update("UPDATE ma_storage_owner SET physical_key = ? WHERE storage_key = ?", "f".repeat(64), physical);
+        String other = RuntimeAdmissionFences.storageAliasKey("other-tenant", "other-storage");
+        jdbc.update("UPDATE ma_storage SET physical_key = ? WHERE alias_key = ?", "f".repeat(64), other);
         assertThatThrownBy(() -> guard.verify(binding("other-tenant", "other-storage"))).isInstanceOf(RuntimeBrokerException.class);
-        jdbc.update("UPDATE ma_storage_owner SET physical_key = ? WHERE storage_key = ?", physical, physical);
+        jdbc.update("UPDATE ma_storage SET physical_key = ? WHERE alias_key = ?", physical, other);
         Path replacement = Files.createDirectory(temporary.resolve("replacement")).toRealPath();
         Files.copy(root.resolve(".qwen-managed-storage.json"), replacement.resolve(".qwen-managed-storage.json"));
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("third", "copy", replacement.toString())));
@@ -258,7 +261,7 @@ class LocalStorageAliasTest {
     @Test
     void physicalFenceRefusesNewChildWorkOnEveryAlias() {
         guard.fence("tenant", "storage", 1, UUID.randomUUID().toString());
-        var children = new ChildWorkspaceStore(jdbc, manager);
+        var children = new JdbcChildWorkspaceStore(jdbc, manager);
         assertThatThrownBy(() -> children.admit("other-tenant", "parent", "run", binding("other-tenant", "other-storage"), System.currentTimeMillis()))
                 .isInstanceOf(RuntimeBrokerException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'CHILD_WORKSPACE'", Integer.class)).isZero();
@@ -286,8 +289,8 @@ class LocalStorageAliasTest {
             ToolPublicationRetentionStore.retire(jdbc, tenant, session, UUID.randomUUID().toString());
         });
         var before = jdbc.queryForMap("SELECT writer_generation, journal_revision, committed_sequence, activation_epoch, last_commit_digest"
-                + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session));
+                + " FROM ma_session_head WHERE tenant_id = ? AND harness_session_id = ?",
+                tenant, session);
         assertUncovered(() -> guard.fence("tenant", "storage", 1, UUID.randomUUID().toString()));
         var config = new ManagedAgentProperties();
         config.getToolPublication().setGcEnabled(true);
@@ -296,12 +299,12 @@ class LocalStorageAliasTest {
         for (int page = 0; page < 20 && collector.runOnce(); page++) {
             // collector.runOnce() in the condition does the work; the body stays empty.
         }
-        assertThat(jdbc.queryForObject("SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT is_resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isTrue();
         assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'", String.class)).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isZero();
         assertThat(jdbc.queryForMap("SELECT writer_generation, journal_revision, committed_sequence, activation_epoch, last_commit_digest"
-                + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session))).isEqualTo(before);
+                + " FROM ma_session_head WHERE tenant_id = ? AND harness_session_id = ?",
+                tenant, session)).isEqualTo(before);
         guard.fence("tenant", "storage", 1, UUID.randomUUID().toString());
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isEqualTo(1);
     }
@@ -322,19 +325,19 @@ class LocalStorageAliasTest {
 
     @Test
     void anOrphanedChildWorkspaceStillBlocksOtherAliasHandover() {
-        var child = new ChildWorkspaceStore(jdbc, manager).admit("other-tenant", "retired-parent", "unclosed",
+        var child = new JdbcChildWorkspaceStore(jdbc, manager).admit("other-tenant", "retired-parent", "unclosed",
                 binding("other-tenant", "other-storage"), 1);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isZero();
-        for (String state : List.of(ChildWorkspaceStore.PREPARING, ChildWorkspaceStore.READY, ChildWorkspaceStore.MERGING,
-                ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED, ChildWorkspaceStore.DISCARDING,
-                ChildWorkspaceStore.CONFLICTED, ChildWorkspaceStore.BLOCKED, ChildWorkspaceStore.FAILED)) {
+        for (String state : List.of(JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.READY, JdbcChildWorkspaceStore.MERGING,
+                JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED, JdbcChildWorkspaceStore.DISCARDING,
+                JdbcChildWorkspaceStore.CONFLICTED, JdbcChildWorkspaceStore.BLOCKED, JdbcChildWorkspaceStore.FAILED)) {
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ? WHERE operation_key = ?", state, state,
                     WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, "other-tenant", child.childWorkspaceId()));
             jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", state, "other-tenant", child.childWorkspaceId());
             assertUncovered(() -> guard.fence("tenant", "storage", 1, UUID.randomUUID().toString()));
             assertThat(jdbc.queryForObject("SELECT mount_state FROM ma_storage_owner", String.class)).isEqualTo("READY");
         }
-        for (String state : List.of(ChildWorkspaceStore.MERGED, ChildWorkspaceStore.DISCARDED)) {
+        for (String state : List.of(JdbcChildWorkspaceStore.MERGED, JdbcChildWorkspaceStore.DISCARDED)) {
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ? WHERE operation_key = ?", state, state,
                     WorkspaceOperations.key(WorkspaceOperations.Kind.CHILD_WORKSPACE, "other-tenant", child.childWorkspaceId()));
             jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", state, "other-tenant", child.childWorkspaceId());
@@ -361,7 +364,7 @@ class LocalStorageAliasTest {
     private void session(String tenant, String storage, String session) {
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, workspace_storage_id, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, 1, 1)", tenant, session, storage,
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session));
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant), com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(session), ManagedSessionStore.sessionScopeKey(tenant, session));
     }
 
     private static void assertUncovered(Runnable action) {

@@ -17,10 +17,11 @@ An occupied destination returns a conflict and is never overwritten. Folder
 uploads, automatic directory creation, CSI, and an object-storage service are
 outside this change.
 
-Uploads require no outstanding execution-storage members. Ordinary settled
-Turns release these members; a persistent MCP Runtime may still retain one and
-therefore return `workspace_busy`. This change does not weaken that ownership
-boundary to treat an apparently idle Session as proof of a stopped tool process.
+Uploads share directory membership with ordinary tools and other uploads, as
+described in [shared Workspace uploads](2026-11-03-managed-shared-workspace-uploads.md).
+Rewind, directory recovery, migration and physical collection retain their
+exclusion. A pending upload remains a member until its original process is
+reconciled; an apparently idle Session does not prove a stopped file process.
 
 ## Ownership and API
 
@@ -42,12 +43,12 @@ generated client types, surface registry and capability parity advance together.
 ## Durable admission and recovery
 
 A short SQL transaction admits a `WORKSPACE_UPLOAD` operation in the existing
-operation ledger and takes the physical storage owner hold. It freezes the
+operation ledger and increments the physical storage owner's shared member count. It freezes the
 actor, request digest, ContextBinding, storage identity and original bootstrap
-target; binary bytes are not stored in SQL. Existing tool acquisition, storage
-fencing and retirement must respect this hold. No subprocess or SSH exchange
+target; binary bytes are not stored in SQL. Ordinary tools and uploads may join;
+rewind, storage fencing and retirement must respect this membership. No subprocess or SSH exchange
 runs inside a SQL transaction. A completed or definitively failed command
-releases only its own hold; a timeout, lost response or control-plane restart
+releases only its own membership; a timeout, lost response or control-plane restart
 keeps it until the original command is reconciled.
 
 The runtime keeps an owner-private receipt under its configured state directory,
@@ -108,6 +109,9 @@ file; uncertain outcomes reconcile by the original upload ID.
   surface gates, plus focused Java checks within the module's shared ten-minute
   local verification budget. SQL/concurrency cases need real MySQL evidence;
   unrun SSH, CSI, Linux or real-provider paths remain explicit acceptance gaps.
+
+The following results describe the original upload implementation, before shared
+upload membership. Current acceptance is tracked by the shared-upload design.
 
 Implemented across the control plane, bundled CLI and WebShell. Local
 verification passed root build/typecheck/bundle, focused TypeScript and Java

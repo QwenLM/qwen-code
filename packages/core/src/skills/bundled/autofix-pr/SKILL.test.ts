@@ -213,7 +213,7 @@ describe('bundled autofix-pr skill', () => {
     );
     // A round of a watch whose fix is still running says so and ends.
     expect(body).toContain(
-      "a fix agent is working in the PR's worktree → nothing was read or written",
+      "For `fix_in_flight` (a fix agent is working in the PR's worktree) nothing was read or written",
     );
     // Work in the user's own copy of the head branch keeps a start from
     // racing the user's push to that branch.
@@ -311,6 +311,81 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('A task whose watch another session still runs');
     expect(body).toContain('delete no task of that PR');
     expect(body).toContain("whose gate names the watch's session");
+  });
+
+  it('answers every step the helpers can name, each with what that step does', () => {
+    const { body } = loadSkill();
+    const section = body.slice(
+      body.indexOf('## Refusals'),
+      body.indexOf('## Arguments'),
+    );
+    // The steps and codes as the helpers define them: read from their source,
+    // as core does not import the CLI.
+    const source = fs.readFileSync(
+      path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        '../../../../../cli/src/commands/autofix-pr/refusal.ts',
+      ),
+      'utf8',
+    );
+    const steps = [
+      ...(/export type RefusalNext =([^;]+);/.exec(source)?.[1] ?? '').matchAll(
+        /'([a-z_]+)'/g,
+      ),
+    ].map(([, step]) => step);
+    const codes = [
+      ...(
+        /export const REFUSAL_CODES = \[([\s\S]*?)\] as const/.exec(
+          source,
+        )?.[1] ?? ''
+      ).matchAll(/^\s*'([a-z_]+)',/gm),
+    ].map(([, code]) => code);
+    expect(steps).toContain('retry');
+    expect(codes).toContain('busy');
+    const bullet = (step: string) =>
+      section.split('\n').find((line) => line.startsWith(`- \`${step}\` → `));
+    for (const step of steps) {
+      expect(bullet(step), `no bullet for ${step}`).toBeDefined();
+    }
+    // What each step does, so two bodies cannot trade places unnoticed.
+    const does: Record<string, string> = {
+      retry: 'run the same call again',
+      stop: 'Section "Stop"',
+      end_task: 'delete (`cron_delete`) this task',
+      take_over: 'Start step 3',
+      discard: 'run `sync <n> --discard` in its place',
+      foreground: 'call in the foreground',
+      rerun: 'Round step 3',
+      needs_human: 'are `needs_human`',
+      fix_plan: 'run `reply` again',
+      report: 'report the message',
+    };
+    expect(Object.keys(does).sort()).toEqual([...steps].sort());
+    for (const [step, phrase] of Object.entries(does)) {
+      expect(bullet(step)).toContain(phrase);
+    }
+    // The codes whose line the section gives apart.
+    for (const code of [
+      'busy',
+      'partial',
+      'not_prepared',
+      'task_replaced',
+      'watch_stopped',
+      'watched_elsewhere',
+      'fix_in_flight',
+    ]) {
+      expect(codes).toContain(code);
+      expect(section).toContain(`\`${code}\``);
+    }
+    // `prepare` gives `pr_closed` the step `report` (a start has no watch to
+    // stop): a resume, which has one, keys on the code instead.
+    expect(body).toContain(
+      'A refusal with `refused: "pr_closed"` (the PR is merged or closed) → Section "Stop" for this PR',
+    );
+    // Nothing matches a refusal by its wording any more.
+    expect(body).not.toContain('another autofix-pr helper is working');
+    expect(body).not.toContain('fails saying');
+    expect(body).not.toContain('refusal saying');
   });
 
   it("forbids the fix agent's brief every write to GitHub, which only the main session makes", () => {

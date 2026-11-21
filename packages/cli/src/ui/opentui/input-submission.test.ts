@@ -3,8 +3,12 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
-import { expect, it } from 'vitest';
-import { restoreInputSubmissions } from './input-submission.js';
+import { expect, it, vi } from 'vitest';
+import {
+  restoreInputSubmissions,
+  returnToComposer,
+  type OpenTuiComposerSlot,
+} from './input-submission.js';
 
 const clipboardFramingOracle = [
   "Each block delimited by <clipboard-paste> markers in this message was pasted from the system clipboard, and it was too large to display in the editor, so the user may not have read it. Text outside those markers is the user's own typed input.",
@@ -67,3 +71,18 @@ it.each(['', ' NOT EXACT'])(
     });
   },
 );
+
+it('returns a prompt to the mounted composer, or keeps it until one mounts', () => {
+  const restoreSubmission = vi.fn();
+  const slot: OpenTuiComposerSlot = { current: null };
+  returnToComposer(slot, { text: 'first' });
+  returnToComposer(slot, { text: 'second' });
+  // The later prompt goes ahead, as a mounted composer would put it.
+  expect(slot.returned).toMatchObject({ text: 'second\nfirst' });
+
+  slot.returned = undefined;
+  slot.current = { getText: () => '', setText: vi.fn(), restoreSubmission };
+  returnToComposer(slot, { text: 'third' });
+  expect(restoreSubmission).toHaveBeenCalledExactlyOnceWith({ text: 'third' });
+  expect(slot.returned).toBeUndefined();
+});

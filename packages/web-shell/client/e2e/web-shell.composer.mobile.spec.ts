@@ -105,11 +105,15 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
   await expect(drawer.locator('[data-web-shell-model-button]')).toHaveCount(0);
   await expect(drawer.locator('[data-web-shell-mode-button]')).toHaveCount(0);
   expect(
-    await drawer
-      .getByRole('button')
-      .evaluateAll((buttons) =>
-        buttons.map((button) => button.textContent?.trim()).filter(Boolean),
-      ),
+    await drawer.getByRole('button').evaluateAll((buttons) =>
+      buttons
+        .filter((button) => button.textContent?.trim())
+        .map(
+          (button) =>
+            button.getAttribute('aria-label') ?? button.textContent?.trim(),
+        )
+        .filter(Boolean),
+    ),
   ).toEqual([
     'Photos',
     'Take photo',
@@ -120,6 +124,11 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
     'MCP',
     'Skills',
   ]);
+  await expect(
+    drawer
+      .getByTestId('composer-add-menu-reference-file')
+      .getByText('Reference file', { exact: true }),
+  ).toBeVisible();
   await drawer.getByRole('button', { name: /^close$/i }).tap();
   await composer.locator('[data-web-shell-composer-expand]').tap();
   await expect(composer).toHaveAttribute(
@@ -130,12 +139,238 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
   await expect(model).toBeVisible();
   await expect(composer.locator('[data-web-shell-mode-button]')).toBeVisible();
   await model.tap();
-  const picker = page.locator('[data-web-shell-toolbar-popover]');
+  const picker = page.locator('[data-web-shell-model-sheet]');
   await expect(picker).toBeVisible();
+  await expect
+    .poll(() =>
+      picker.evaluate((element) => element.contains(document.activeElement)),
+    )
+    .toBe(true);
+  await expect(picker.locator('input[type="search"]')).not.toBeFocused();
+  const modelLabel = picker
+    .locator('[data-model-id] [class*="dropdownItemLabel"]')
+    .first();
+  await expect(modelLabel).toHaveCSS('white-space', 'normal');
+  const labelWidth = await modelLabel.evaluate((element) => ({
+    client: element.clientWidth,
+    scroll: element.scrollWidth,
+  }));
+  expect(labelWidth.scroll).toBeLessThanOrEqual(labelWidth.client + 1);
   await picker
     .getByRole('button', { name: 'Qwen Test Alt', exact: true })
     .tap();
   await expect.poll(() => daemon.modelRequests().length).toBe(1);
+  await expect(picker).toBeVisible();
+  await picker.getByRole('button', { name: 'Done', exact: true }).tap();
+  await expect(picker).toBeHidden();
+  await expect(model).toBeFocused();
+  await composer.getByTestId('composer-add-menu-trigger').tap();
+  await expect(drawer).toBeVisible();
+  const rows = drawer.locator('[data-vaul-no-drag] button');
+  const layout = await rows.evaluateAll((buttons) =>
+    buttons.map((button) => ({
+      minHeight: getComputedStyle(button).minHeight,
+      hasIcon: Boolean(
+        button.querySelector(':scope > span[aria-hidden="true"]'),
+      ),
+    })),
+  );
+  expect(layout.length).toBeGreaterThan(8);
+  expect(layout.every((row) => row.minHeight === '52px' && row.hasIcon)).toBe(
+    true,
+  );
+});
+
+test('keeps the unavailable-model authorize action reachable inside the mobile sheet @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const params = new URLSearchParams({
+    sessionId: scenario.sessionId,
+    theme: 'dark',
+    sidebar: 'false',
+    unavailableModels: '1',
+    unavailableMount: '1',
+  });
+  await page.goto(`/e2e/settings-harness.html?${params}`);
+  await completeReplay(page, daemon, scenario.sessionId);
+  await page.locator('[data-web-shell-model-button]').tap();
+  const sheet = page.locator('[data-web-shell-model-sheet]');
+  await expect(sheet).toBeVisible();
+  const modelSection = sheet.locator('[data-web-shell-model-submenu-trigger]');
+  if (await modelSection.count()) await modelSection.tap();
+  const disabled = sheet.locator(
+    '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
+  );
+  await expect(disabled).toBeVisible();
+  await expect(disabled).toBeInViewport({ ratio: 1 });
+  await disabled.tap({ force: true });
+  const hint = page.locator('[data-web-shell-unavailable-model-tooltip]');
+  const authorize = hint.getByRole('button', { name: 'Authorize' });
+  await expect(authorize).toBeVisible();
+  await hint.evaluate(async (element) => {
+    await Promise.all(
+      element
+        .getAnimations({ subtree: true })
+        .map((animation) => animation.finished.catch(() => undefined)),
+    );
+  });
+  const box = (await authorize.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+  await page.screenshot({
+    path: testInfo.outputPath('unavailable-authorize-mobile.png'),
+  });
+  await authorize.evaluate((button) => {
+    button.addEventListener('click', () => {
+      document.documentElement.dataset.authorizeClicked = 'true';
+    });
+  });
+  await authorize.tap();
+  await expect(page.locator('html')).toHaveAttribute(
+    'data-authorize-clicked',
+    'true',
+  );
+  await expect(sheet).toBeVisible();
+});
+
+test('model sheet rows and search field stay touch-sized, including on a tablet @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  scenario.capabilities.features.push('workspace_model_reload');
+  scenario.state.configOptions = [
+    {
+      id: 'reasoning_effort',
+      name: 'Reasoning effort',
+      type: 'select',
+      currentValue: 'high',
+      options: [
+        { value: 'none', name: 'Thinking off' },
+        { value: 'low', name: 'Low' },
+        { value: 'high', name: 'High' },
+      ],
+      _meta: { 'qwenCode/reasoning': { defaultEffort: 'high' } },
+    },
+  ];
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  await page.locator('[data-web-shell-model-button]').tap();
+  const sheet = page.locator('[data-web-shell-model-sheet]');
+  await expect(sheet).toBeVisible();
+
+  const heightsOf = (locator: ReturnType<typeof page.locator>) =>
+    locator.evaluateAll((nodes) =>
+      nodes.map((node) => node.getBoundingClientRect().height),
+    );
+
+  const effortRows = sheet.locator('[data-web-shell-effort]');
+  await expect(effortRows.first()).toBeVisible();
+  const effortHeights = await heightsOf(effortRows);
+  expect(effortHeights.length).toBeGreaterThan(0);
+  for (const height of effortHeights) {
+    expect(height).toBeGreaterThanOrEqual(44);
+  }
+
+  // The Thinking row is a plain div; the switch inside it is the control, so
+  // its own hit rect has to reach 44px. Tap 11px above the track — outside the
+  // primitive's 8px pad, inside the sheet's 13px one — and require a toggle.
+  // The drawer slides up from below the fold. Coordinate-based taps must wait
+  // for it to arrive, or they land on whatever scrolled past that point.
+  await expect
+    .poll(async () => {
+      const first = (await sheet.boundingBox())!.y;
+      await page.waitForTimeout(120);
+      return (await sheet.boundingBox())!.y === first;
+    })
+    .toBe(true);
+
+  const thinking = sheet.locator('[data-web-shell-thinking-toggle]');
+  await expect(thinking).toBeVisible();
+  // The reasoning controls arrive asynchronously and the switch is disabled
+  // until they do. Anchor on the fixture's settled value (high) rather than
+  // on whatever the switch happens to read mid-hydration.
+  await expect(sheet.locator('[data-web-shell-effort="high"]')).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  await expect(thinking).toBeEnabled();
+  await expect(thinking).toHaveAttribute('data-state', 'checked');
+  const pad = await thinking.evaluate((node) =>
+    parseFloat(getComputedStyle(node, '::after').insetBlockStart),
+  );
+  const track = (await thinking.boundingBox())!;
+  // The hit rect, not the pad constant: a smaller switch track must not
+  // shrink the target below 44px while the pad still reads 13.
+  expect(track.height + 2 * Math.abs(pad)).toBeGreaterThanOrEqual(44);
+  const thinkingRow = sheet.locator('[data-web-shell-thinking-row]');
+  expect((await thinkingRow.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  const hit = await page.evaluate(
+    ([x, y]) => {
+      const el = document.elementFromPoint(x as number, y as number);
+      return el?.closest('[data-web-shell-thinking-toggle]')
+        ? 'switch'
+        : (el?.outerHTML.slice(0, 160) ?? 'none');
+    },
+    [track.x + track.width / 2, track.y - 11],
+  );
+  expect(hit).toBe('switch');
+  await page.touchscreen.tap(track.x + track.width / 2, track.y - 11);
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  // The toggle's own payload, not an effort row's: turning Thinking off sends
+  // 'none'. An effort row would have sent 'low' or 'high'.
+  expect(daemon.configOptionRequests()[0]!.body).toEqual({
+    configId: 'reasoning_effort',
+    value: 'none',
+    persist: true,
+  });
+
+  const done = sheet.locator('[data-web-shell-model-sheet-done]');
+  await expect(done).toBeVisible();
+  const doneBox = (await done.boundingBox())!;
+  expect(doneBox.height).toBeGreaterThanOrEqual(44);
+
+  const section = sheet.locator('[data-web-shell-model-submenu-trigger]');
+  // The section row carries its own taller floor; the row rule must not
+  // shrink it.
+  expect((await section.boundingBox())!.height).toBeGreaterThanOrEqual(48);
+  await section.tap();
+  const rows = sheet.locator('[data-model-id]');
+  await expect(rows.first()).toBeVisible();
+  const rowHeights = await heightsOf(rows);
+  expect(rowHeights.length).toBeGreaterThan(0);
+  for (const height of rowHeights) {
+    expect(height).toBeGreaterThanOrEqual(44);
+  }
+
+  const search = sheet.locator('input[type="search"]');
+  await expect(search).toBeVisible();
+  // Measured at the phone width too: a later 'md:h-11' would keep the tablet
+  // assertion green while putting the phone back at 32px.
+  expect((await search.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  const refresh = sheet.getByRole('button', {
+    name: 'Refresh models',
+    exact: true,
+  });
+  await expect(refresh).toBeVisible();
+  const refreshBox = (await refresh.boundingBox())!;
+  expect(refreshBox.width).toBeGreaterThanOrEqual(44);
+  expect(refreshBox.height).toBeGreaterThanOrEqual(44);
+
+  // A landscape tablet still matches the coarse-pointer half of the sheet
+  // query, but now also matches the Input's md: breakpoint.
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await expect(search).toBeVisible();
+  const fontSize = await search.evaluate((node) =>
+    parseFloat(getComputedStyle(node).fontSize),
+  );
+  expect(fontSize).toBeGreaterThanOrEqual(16);
+  expect((await search.boundingBox())!.height).toBeGreaterThanOrEqual(44);
 });
 
 test('simple mobile composer switches directly to advanced mode without losing its draft or attachments @smoke', async ({
@@ -474,7 +709,7 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
     path: 'client/e2e/test-results/responsive-sidebar-drawer.png',
     fullPage: true,
   });
-  await page.getByRole('button', { name: 'Collapse' }).tap();
+  await page.getByRole('button', { name: 'Collapse', exact: true }).tap();
   await expect(drawer).toBeHidden();
   await expect
     .poll(() =>
@@ -493,7 +728,7 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
       sidebar.evaluate((element) => element.getBoundingClientRect().width),
     )
     .toBeCloseTo(420, 0);
-  await page.getByRole('button', { name: 'Collapse' }).click();
+  await page.getByRole('button', { name: 'Collapse', exact: true }).click();
   await expect(drawer).toBeHidden();
 
   await page.setViewportSize({ width: 1000, height: 915 });

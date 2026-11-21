@@ -47,17 +47,20 @@ class ManagedAgentStoreWiringTest {
                 .withBean("managedAgentObjectMapper", ObjectMapper.class, ObjectMapper::new)
                 .withBean("managedAgentClock", Clock.class, Clock::systemUTC)
                 .withBean(CommittedEventPublisher.class, () -> events -> {})
-                .withBean(ManagedWorkspaceRegistry.class, () -> mock(ManagedWorkspaceRegistry.class))
+                .withBean(JdbcManagedWorkspaceRegistry.class, () -> mock(JdbcManagedWorkspaceRegistry.class))
                 .withBean(ManagedAgentSettings.class, ManagedAgentProperties::new)
                 .withBean(HarnessRules.class, () -> mock(HarnessRules.class));
         if (!"worktreeFiles".equals(missing)) {
             runner = runner.withBean(WorktreeFiles.class, () -> mock(WorktreeFiles.class));
         }
         if (!"creationSkills".equals(missing)) {
-            runner = runner.withBean(ManagedSessionSkills.class, () -> mock(ManagedSessionSkills.class));
+            runner = runner.withBean(JdbcManagedSessionSkills.class, () -> mock(JdbcManagedSessionSkills.class));
         }
         if (!"extensionPackages".equals(missing)) {
             runner = runner.withBean(ExtensionPackages.class, () -> mock(ExtensionPackages.class));
+        }
+        if (!"modelConfigs".equals(missing)) {
+            runner = runner.withBean(ManagedSessionModelConfigs.class, () -> mock(ManagedSessionModelConfigs.class));
         }
         return runner;
     }
@@ -70,12 +73,14 @@ class ManagedAgentStoreWiringTest {
             assertThat(AopUtils.isAopProxy(store)).isTrue();
             Object target = AopTestUtils.getUltimateTargetObject(store);
             assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "creationSkills"))
-                    .isSameAs(context.getBean(ManagedSessionSkills.class));
+                    .isSameAs(context.getBean(JdbcManagedSessionSkills.class));
             assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "worktreeFiles"))
                     .isSameAs(context.getBean(WorktreeFiles.class));
             assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "extensionPackages"))
                     .isSameAs(context.getBean(ExtensionPackages.class));
-            for (String name : List.of("lifecycle", "definitions", "sessionWorktrees", "journalEventTransport")) {
+            assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "modelConfigs"))
+                    .isSameAs(context.getBean(ManagedSessionModelConfigs.class));
+            for (String name : List.of("lifecycle", "definitions", "sessionWorktrees")) {
                 assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, name)).as(name).isNull();
             }
             assertThat(AopUtils.isAopProxy(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "configRecords"))).isTrue();
@@ -83,14 +88,15 @@ class ManagedAgentStoreWiringTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"worktreeFiles", "creationSkills", "extensionPackages"})
+    @ValueSource(strings = {"worktreeFiles", "creationSkills", "extensionPackages", "modelConfigs"})
     void missingRequiredCollaboratorsStillFailSpringStartup(String missing) {
         runner(missing).run(context -> {
             assertThat(context).hasFailed();
             assertThat(context.getStartupFailure()).hasStackTraceContaining("No qualifying bean of type");
             String type = switch (missing) {
                 case "worktreeFiles" -> WorktreeFiles.class.getName();
-                case "creationSkills" -> ManagedSessionSkills.class.getName();
+                case "creationSkills" -> JdbcManagedSessionSkills.class.getName();
+                case "modelConfigs" -> ManagedSessionModelConfigs.class.getName();
                 default -> ExtensionPackages.class.getName();
             };
             assertThat(context.getStartupFailure()).hasStackTraceContaining(type);
@@ -107,7 +113,7 @@ class ManagedAgentStoreWiringTest {
             assertThat(context.getBeanFactory().containsSingleton("recordStore")).isFalse();
             Object resolved = records.getTargetSource().getTarget();
             assertThat(context.getBeanFactory().containsSingleton("recordStore")).isTrue();
-            assertThat(resolved).isSameAs(context.getBean(ManagedExtensionRecordStore.class));
+            assertThat(resolved).isSameAs(context.getBean(JdbcManagedExtensionRecordStore.class));
             assertThat(ReflectionTestUtils.getField(resolved, "sessions")).isSameAs(store);
             assertThat(AopUtils.isAopProxy(store)).isTrue();
         });
@@ -116,10 +122,10 @@ class ManagedAgentStoreWiringTest {
     @Test
     void dependencyReferencesAreFinalAndHaveNoPostConstructionInjection() throws Exception {
         var store = new ManagedAgentStore(new JdbcTemplate(mock(DataSource.class)), new ObjectMapper(),
-                Clock.systemUTC(), events -> {}, mock(ManagedWorkspaceRegistry.class),
+                Clock.systemUTC(), events -> {}, mock(JdbcManagedWorkspaceRegistry.class),
                 new ManagedAgentProperties(), mock(HarnessRules.class));
         for (String name : List.of("worktreeFiles", "creationSkills", "extensionPackages", "lifecycle",
-                "definitions", "sessionWorktrees", "journalEventTransport", "configRecords")) {
+                "definitions", "sessionWorktrees", "configRecords", "modelConfigs")) {
             for (Object owner : com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreOwners(store, name)) {
                 var field = owner.getClass().getDeclaredField(name);
                 assertThat(Modifier.isFinal(field.getModifiers())).as(name).isTrue();
@@ -149,8 +155,8 @@ class ManagedAgentStoreWiringTest {
     static class RecordConfiguration {
         @Bean
         @Lazy
-        ManagedExtensionRecordStore recordStore(JdbcTemplate jdbc, AgentStateStore sessions) {
-            return new ManagedExtensionRecordStore(jdbc, sessions, new ManagedTaskEventStore(jdbc));
+        JdbcManagedExtensionRecordStore recordStore(JdbcTemplate jdbc, AgentStateStore sessions) {
+            return new JdbcManagedExtensionRecordStore(jdbc, sessions, new JdbcManagedTaskEventStore(jdbc));
         }
     }
 }

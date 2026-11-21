@@ -80,6 +80,17 @@ public final class WorkspaceOperatorRecoveryStore {
                         saved.getRequest().getScope().getTenantId());
                 return null;
             });
+            // Publication lanes read a session-class binding below its Session
+            // root without placement, so every move out of READY holds that
+            // root; it precedes the storage rows, which Sessions lock after
+            // their root (design 2026-11-04-managed-publication-placement).
+            if ("session".equals(saved.getRequest().getScope().getIsolationClass())
+                    && saved.getRequest().getIsolationKey() != null) {
+                jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
+                        saved.getRequest().getScope().getTenantId(), saved.getRequest().getIsolationKey());
+            }
+            LocalStorageOwners.key(jdbc, saved.getRequest().getScope().getTenantId(),
+                    saved.getRequest().getStorageId());
             List<Boolean> valid = jdbc.query("SELECT binding_state, record_version,"
                     + " resource_handle_version, provision_request_id, runtime_lease_id,"
                     + " runtime_epoch, storage_id, tenant_id, stop_evidence_json"
@@ -132,7 +143,7 @@ public final class WorkspaceOperatorRecoveryStore {
                             "blocked_execution_call_id", blockedCapture.callId(), "operator_id", operator,
                             "reason", reason, "prepared_at", Instant.now().toString()));
             if (jdbc.update("UPDATE ma_runtime_binding SET binding_state = ?,"
-                    + " drain_requested = TRUE, operation_owner = NULL, operation_lease_until = NULL,"
+                    + " is_drain_requested = TRUE, operation_owner = NULL, operation_lease_until = NULL,"
                     + " operation_generation = operation_generation + 1, record_version = record_version + 1"
                     + " WHERE binding_id = ? AND runtime_generation = ? AND record_version = ?",
                     saved.getState() == RuntimeBindingRecord.State.LOST ? "LOST" : "OPERATOR_RECOVERY",
@@ -286,12 +297,12 @@ public final class WorkspaceOperatorRecoveryStore {
         String storageKey = LocalStorageOwners.key(jdbc, binding.getRequest().getScope().getTenantId(), binding.getRequest().getStorageId());
         var owners = jdbc.queryForList("SELECT storage_key FROM ma_storage_owner"
                 + " WHERE storage_key = ? AND storage_kind = 'LOCAL'"
-                + " AND holder_key IS NULL AND maintenance_id IS NULL" + (locked ? " FOR UPDATE" : ""),
+                + (locked ? " FOR UPDATE" : ""),
                 String.class, storageKey);
         var members = jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session"
                 + " WHERE execution_storage_key = ? AND binding_id = ? AND runtime_generation = ?"
                 + (locked ? " FOR UPDATE" : ""), String.class, storageKey, bindingId, generation);
-        if (owners.size() != 1 || members.size() != 1) {
+        if (owners.size() != 1 || members.size() != 1 || !StorageOwnerMembership.membersAllowed(jdbc, storageKey)) {
             throw blocked();
         }
         String sessionId = members.getFirst();

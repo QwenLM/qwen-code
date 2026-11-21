@@ -28,7 +28,10 @@ import {
 } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
-import { computeSessionStats } from '../utils/computeStats.js';
+import {
+  computeGenerationRates,
+  computeSessionStats,
+} from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
 import {
   getStatusColor,
@@ -170,20 +173,8 @@ export function OpenTuiStatsDialog(props: {
   const cacheRate = totalInput > 0 ? (totalCached / totalInput) * 100 : 0;
   const generation = metrics.generation;
   const lastGeneration = generation?.last;
-  const lastTps =
-    lastGeneration && lastGeneration.generationDurationMs > 0
-      ? lastGeneration.outputTokens /
-        (lastGeneration.generationDurationMs / 1000)
-      : undefined;
-  const averageTtft =
-    generation && generation.timedRequests > 0
-      ? generation.totalTtftMs / generation.timedRequests
-      : undefined;
-  const sessionTps =
-    generation && generation.totalGenerationDurationMs > 0
-      ? generation.totalThroughputOutputTokens /
-        (generation.totalGenerationDurationMs / 1000)
-      : undefined;
+  const { lastTps, averageTtft, sessionTps } =
+    computeGenerationRates(generation);
 
   const successColor = getStatusColor(computed.successRate, {
     green: TOOL_SUCCESS_RATE_HIGH,
@@ -216,6 +207,11 @@ export function OpenTuiStatsDialog(props: {
           return (
             <box key={t.name} marginLeft={t.name === 'session' ? 0 : 1}>
               <text
+                id={
+                  active
+                    ? 'screen-reader-selected-tab'
+                    : 'screen-reader-unselected-tab'
+                }
                 fg={active ? '#1e1e2e' : C.text}
                 bg={active ? C.accent : undefined}
               >
@@ -339,7 +335,7 @@ export function OpenTuiStatsDialog(props: {
                   {formatDuration(lastGeneration.generationDurationMs)}
                 </text>
               </Row>
-              <Row label="Output Tokens:">
+              <Row label="Output (incl. Reasoning):">
                 <text fg={C.text}>
                   {lastGeneration.outputTokens.toLocaleString()}
                 </text>

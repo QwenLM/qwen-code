@@ -37,7 +37,7 @@ class ManagedExtensionRecordVerdictReconcileTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Autowired
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedExtensionRecordStore records;
 
     @Autowired
     @Qualifier("managedJdbcTemplate")
@@ -46,15 +46,14 @@ class ManagedExtensionRecordVerdictReconcileTest {
     private String plantRunRow() {
         String sessionId = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, record_kind, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, ?, 'workspace', ?, 'DOMAIN', 'child_run',"
+                        + " VALUES (?, ?, 'workspace', ?, 'DOMAIN', 'child_run',"
                         + " 'run-1', 'h', 1, 'res-x', 'child_agent',"
                         + " 'running', 'session', 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
                 ManagedExtensionProjection.recordKey(sessionId, "child_run",
                         "run-1"), TENANT, sessionId);
         return sessionId;

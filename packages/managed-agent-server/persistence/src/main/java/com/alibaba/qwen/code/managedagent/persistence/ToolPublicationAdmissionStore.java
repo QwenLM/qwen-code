@@ -4,10 +4,10 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -36,12 +36,12 @@ public final class ToolPublicationAdmissionStore {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
-    private final ManagedSessionStore sessions;
+    private final JdbcManagedSessionStore sessions;
     private final ToolPublicationDataStore data;
     private final DataSource transactionSource;
 
     public ToolPublicationAdmissionStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
-            ManagedSessionStore sessions, ToolPublicationDataStore data) {
+            JdbcManagedSessionStore sessions, ToolPublicationDataStore data) {
         this.jdbc = Objects.requireNonNull(jdbc);
         this.transactions = new TransactionTemplate(Objects.requireNonNull(manager));
         this.sessions = Objects.requireNonNull(sessions);
@@ -129,11 +129,11 @@ public final class ToolPublicationAdmissionStore {
         String suffix = locked ? " FOR UPDATE" : "";
         var publication = jdbc.query("SELECT scope_key, publication_id, tenant_id, workspace_id, session_id, producer_phase,"
                 + " admission_resource_id, receipt_sequence, receipt_revision,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope(key), id).getFirst();
         require(scope(key).equals(publication.get("scope_key")) && id.equals(publication.get("publication_id"))
                 && "REFERENCED".equals(publication.get("producer_phase"))
-                && ((Number) publication.get("quarantined")).intValue() == 0
+                && ((Number) publication.get("is_quarantined")).intValue() == 0
                 && text(key, "tenantId").equals(publication.get("tenant_id"))
                 && text(key, "workspaceId").equals(publication.get("workspace_id"))
                 && text(key, "sessionId").equals(publication.get("session_id"))
@@ -141,11 +141,8 @@ public final class ToolPublicationAdmissionStore {
                 "Original referenced publication conflicts");
         long revision = positiveCounter(publication.get("receipt_revision"));
         long sequence = positiveCounter(publication.get("receipt_sequence"));
-        var head = jdbc.query("SELECT journal_revision, committed_sequence, storage_version FROM ma_session_head"
-                + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), ManagedSchemaKeys.key(text(key, "tenantId")), ManagedSchemaKeys.key(text(key, "sessionId")), text(key, "tenantId"), text(key, "sessionId")).getFirst();
-        require(((Number) head.get("storage_version")).intValue() >= 1
-                && ((Number) head.get("storage_version")).intValue() <= com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED,
-                "Managed Session storage version is unsupported");
+        var head = jdbc.query("SELECT journal_revision, committed_sequence FROM ma_session_head"
+                + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_id = ? AND harness_session_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), text(key, "tenantId"), text(key, "sessionId")).getFirst();
         require(positiveCounter(head.get("journal_revision")) >= revision
                 && positiveCounter(head.get("committed_sequence")) >= sequence,
                 "Original receipt exceeds the committed Session head");
@@ -171,8 +168,16 @@ public final class ToolPublicationAdmissionStore {
                 && positiveCounter(journal.get("activation_epoch")) == binding.path("activationEpoch").longValue()
                 && "identity".equals(journal.get("record_encoding")), "Original receipt transaction conflicts");
         Object raw = journal.remove("record_bytes");
+        if (raw == null) {
+            JdbcJournalPacks packs = sessions.journalPacks();
+            raw = packs == null ? null : packs.resolveBytes(text(key, "tenantId"),
+                    text(key, "sessionId"), revision, (String) journal.get("record_digest"),
+                    ((Number) journal.get("byte_length")).longValue());
+        }
         require(raw instanceof byte[], "Original receipt bytes are missing");
-        byte[] bytes = (byte[]) raw;
+        // Analyzer-visible null assertion for SpotBugs; require() above already
+        // throws ContractViolationException on null, so this never fires.
+        byte[] bytes = (byte[]) Objects.requireNonNull(raw, "Original receipt bytes are missing");
         require(bytes.length > 0 && bytes.length <= ManagedSessionStoreModels.MAX_TRANSACTION_BYTES
                 && bytes.length == positiveCounter(journal.get("byte_length"))
                 && ToolPublicationContract.sha256(bytes).equals(journal.get("record_digest")),
@@ -215,11 +220,12 @@ public final class ToolPublicationAdmissionStore {
         var resources = result.putArray("resources");
         for (JsonNode ref : List.of(outcomeRef, manifest)) {
             String resourceId = text(ref, "resourceId");
-            String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
+            String sessionScope = ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
             var resource = jdbc.query("SELECT tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
                     + " byte_length, sha256, storage_kind, inline_bytes, object_key, object_version_id, encryption_key_id,"
                     + " publish_command_id, state FROM ma_resource"
-                    + " WHERE session_scope_key = ? AND resource_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), sessionScope, resourceId).getFirst();
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                    text(key, "tenantId"), text(key, "sessionId"), resourceId).getFirst();
             require(text(key, "tenantId").equals(resource.get("tenant_id"))
                     && text(key, "workspaceId").equals(resource.get("workspace_id"))
                     && text(key, "sessionId").equals(resource.get("session_id"))
@@ -253,9 +259,10 @@ public final class ToolPublicationAdmissionStore {
                         "Original external admission resource conflicts");
             }
             var reference = jdbc.query("SELECT tenant_id, workspace_id, session_id, resource_id, journal_revision"
-                    + " FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'JOURNAL' AND owner_key = ?"
+                    + " FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'JOURNAL' AND owner_key = ?"
                     + " AND owner_revision = ? AND resource_id = ? AND journal_revision = ?" + suffix,
-                    (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), sessionScope, sessionScope, revision, resourceId, revision).getFirst();
+                    (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), text(key, "tenantId"), text(key, "sessionId"),
+                    sessionScope, revision, resourceId, revision).getFirst();
             require(text(key, "tenantId").equals(reference.get("tenant_id"))
                     && text(key, "workspaceId").equals(reference.get("workspace_id"))
                     && text(key, "sessionId").equals(reference.get("session_id"))
@@ -337,7 +344,9 @@ public final class ToolPublicationAdmissionStore {
                 && ("FINISHED".equals(candidate.get("producer_phase"))
                 || "REFERENCED".equals(candidate.get("producer_phase"))),
                 "Admission root is not verified");
-        data.lockStagedPlacement(key, publicationId);
+        // A lifecycle-authority commit takes placement in checkLifecycleWriter,
+        // so its lane keeps placement first (design 2026-11-04-managed-publication-placement).
+        data.lockStagedPlacement(key, publicationId, authority != null);
         String resourceId = (String) candidate.get("resource_id");
         byte[] admissionBytes = data.readResource(key, publicationId, resourceId);
         JsonNode outcome = ToolPublicationContract.readJson(admissionBytes);
@@ -367,14 +376,22 @@ public final class ToolPublicationAdmissionStore {
                     "Original manifest resource conflicts");
         }
         return transactions.execute(status -> {
-            data.lockPublicationPlacement(key, publicationId);
-            sessions.lockCsiOriginal(text(key, "tenantId"), text(key, "sessionId"));
+            boolean placement = data.lockPublicationPlacement(key, publicationId, authority != null);
             data.lockOriginalSettledResult(key, publicationId, finished);
-            lockTenant(key);
+            // An ordinary receipt without lifecycle authority skips the tenant
+            // publication guard: the journal commit below takes none, and the
+            // lane locks root, head, publication row, as collection does. A
+            // lifecycle-authority commit (which takes the guard in
+            // checkLifecycleWriter) keeps it (design
+            // 2026-11-04-managed-publication-tenant-guards, C2).
+            boolean guard = authority != null;
+            if (guard) {
+                lockTenant(key);
+            }
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                    text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken);
+                    text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken, placement, guard);
             Map<String, Object> publication = jdbc.query("SELECT producer_phase, binding_json, binding_digest,"
-                    + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined, admission_resource_id,"
+                    + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined, admission_resource_id,"
                     + " receipt_sequence, receipt_revision, finish_digest, terminal_resource_id"
                     + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
                     + " AND workspace_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId,
@@ -382,7 +399,7 @@ public final class ToolPublicationAdmissionStore {
             ToolPublicationStore.requireLockedBinding(publication, finished.path("binding"));
             require(resourceId.equals(publication.get("admission_resource_id"))
                     && candidate.get("terminal_resource_id").equals(publication.get("terminal_resource_id"))
-                    && ((Number) publication.get("quarantined")).intValue() == 0,
+                    && ((Number) publication.get("is_quarantined")).intValue() == 0,
                     "Admission root changed");
             var object = jdbc.query("SELECT capture_state AS state, sha256, byte_length, capture_object_key AS object_key"
                     + " FROM ma_resource WHERE scope_key = ? AND publication_id = ?"
@@ -410,7 +427,7 @@ public final class ToolPublicationAdmissionStore {
             }
             var receipt = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
                     writerToken, request, authority);
-            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", producer_phase = 'REFERENCED', admission_held_bytes = admission_used_bytes, receipt_sequence = ?, receipt_revision = ?, accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
+            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", producer_phase = 'REFERENCED', admission_held_bytes = admission_used_bytes, receipt_sequence = ?, receipt_revision = ?, is_accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
                     request.lastSequence(), receipt.journalRevision(),
                     "committed".equals(outcome.path("decision").asText())
                             && "complete".equals(outcome.path("envelope").path("capture").path("captureStatus").asText()),
@@ -435,6 +452,9 @@ public final class ToolPublicationAdmissionStore {
                         && resource.bytesBase64() == null),
                 "Receipt does not reference its original admission resource");
         byte[] records = Base64.getDecoder().decode(request.recordBytesBase64());
+        // A cleanup commit takes placement in JournalCommit, after this lane's
+        // Session root when the lane skips placement; a receipt never carries one.
+        require(!HostedCleanupReferences.containsCleanup(records), "Receipt cannot carry hosted cleanup");
         JsonNode receiptEvent = null;
         for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {
             JsonNode record = ToolPublicationContract.readJson(line.getBytes(StandardCharsets.UTF_8));
@@ -476,13 +496,12 @@ public final class ToolPublicationAdmissionStore {
 
     private void referenceCapturedResource(JsonNode key, CommitTransactionRequest request,
             JsonNode ref, byte[] bytes, String objectKey, String kind) {
-        String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
         String resourceId = text(ref, "resourceId");
         var rows = jdbc.query("SELECT state, kind, byte_length, sha256, capture_state, publish_command_id"
-                        + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?"
-                        + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? FOR UPDATE",
-                (row, index) -> ManagedSchemaRows.read(row), scopeKey, resourceId,
-                text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"));
+                        + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
+                        + " AND workspace_id = ? FOR UPDATE",
+                (row, index) -> ManagedSchemaRows.read(row), text(key, "tenantId"), text(key, "sessionId"), resourceId,
+                text(key, "workspaceId"));
         require(rows.size() == 1, "Captured receipt resource is missing");
         var row = rows.getFirst();
         require(kind.equals(row.get("kind")) && kind.equals(text(ref, "kind"))
@@ -498,9 +517,9 @@ public final class ToolPublicationAdmissionStore {
         require("PUBLISHED".equals(row.get("state")), "Receipt resource cannot be referenced");
         boolean inline = bytes.length <= ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
         require(inline || objectKey != null, "Large receipt resource has no object");
-        int changed = jdbc.update("UPDATE ma_resource SET storage_kind = ?, inline_bytes = ?, object_key = ?, publish_command_id = ?, state = 'REFERENCED', last_verified_at = " + ManagedSchemaTime.SQL_NOW + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'PUBLISHED' AND capture_state = 'VERIFIED'",
+        int changed = jdbc.update("UPDATE ma_resource SET storage_kind = ?, inline_bytes = ?, object_key = ?, publish_command_id = ?, state = 'REFERENCED', last_verified_at = " + ManagedSchemaTime.SQL_NOW + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND state = 'PUBLISHED' AND capture_state = 'VERIFIED'",
                 inline ? "MYSQL_INLINE" : "TOOL_PUBLICATION", inline ? bytes : null,
-                inline ? null : objectKey, request.commandId(), scopeKey, resourceId);
+                inline ? null : objectKey, request.commandId(), text(key, "tenantId"), text(key, "sessionId"), resourceId);
         require(changed == 1, "Receipt resource changed during publication");
     }
 
@@ -509,9 +528,19 @@ public final class ToolPublicationAdmissionStore {
         long revision = ((Number) publication.get("receipt_revision")).longValue();
         long sequence = ((Number) publication.get("receipt_sequence")).longValue();
         require(revision > 0 && sequence > 0, "Original receipt pointer is invalid");
-        byte[] records = jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
-                + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
-                byte[].class, text(key, "tenantId"), text(key, "sessionId"), revision);
+        var journalRows = jdbc.query("SELECT record_bytes, record_digest, byte_length FROM"
+                + " ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
+                (row, index) -> ManagedSchemaRows.read(row),
+                text(key, "tenantId"), text(key, "sessionId"), revision);
+        require(journalRows.size() == 1, "Original receipt is missing");
+        byte[] records = (byte[]) journalRows.getFirst().get("record_bytes");
+        if (records == null) {
+            JdbcJournalPacks packs = sessions.journalPacks();
+            records = packs == null ? null : packs.resolveBytes(text(key, "tenantId"),
+                    text(key, "sessionId"), revision,
+                    (String) journalRows.getFirst().get("record_digest"),
+                    ((Number) journalRows.getFirst().get("byte_length")).longValue());
+        }
         require(records != null, "Original receipt is missing");
         JsonNode event = null;
         for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {
@@ -540,11 +569,9 @@ public final class ToolPublicationAdmissionStore {
 
     private void lockTenant(JsonNode key) {
         // This lane's publication-guard acquisition, bounded with the shared
-        // named-failure mapping (#13800). For a CSI-pinned Session,
-        // lockCsiOriginal above already took the same row with the same
-        // bound, and this re-lock returns at once.
-        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
-                text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // named-failure mapping (#13800).
+        JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
+                text(key, "tenantId"), JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
     private static String scope(JsonNode key) {

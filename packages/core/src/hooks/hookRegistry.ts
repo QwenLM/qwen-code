@@ -308,7 +308,7 @@ export class HookRegistry {
       this.processHooksConfiguration(userHooks, HooksConfigSource.User);
     }
 
-    // Load project hooks (only in trusted folders)
+    // Load project hooks (only in explicitly trusted folders)
     // The config.getProjectHooks() already checks trust status internally
     const projectHooks = this.config.getProjectHooks();
     if (projectHooks) {

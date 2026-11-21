@@ -5,9 +5,10 @@ import com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
+import com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.provisioning.WorkspaceFileProcess;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
@@ -42,7 +43,7 @@ class WorkspaceFileStoreTest {
     JdbcTemplate jdbc;
     WorkspaceFileStore files;
     WorkspaceStorageGuard guard;
-    ManagedWorkspaceRegistry registry;
+    JdbcManagedWorkspaceRegistry registry;
     SshWorkspaceService ssh;
     ManagedAgentProperties properties;
     String workspace;
@@ -62,7 +63,7 @@ class WorkspaceFileStoreTest {
         properties.getRuntimeBroker().setWorkspaceCreationRoot(Files.createDirectory(temp.resolve("created")).toRealPath().toString());
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
         var manager = new DataSourceTransactionManager(source);
-        registry = new ManagedWorkspaceRegistry(jdbc);
+        registry = new JdbcManagedWorkspaceRegistry(jdbc);
         guard = new WorkspaceStorageGuard(jdbc, manager, properties,
                 path -> new StorageIdentityReader.Identity(path.toString(), "test-host", "1", "2", "2026-10-15T00:00:00.123456789Z"));
         var mapper = new ObjectMapper();
@@ -88,8 +89,21 @@ class WorkspaceFileStoreTest {
                 + " workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref, owner_actor_key)"
                 + " SELECT tenant_id, ?, ?, 0, 0, workspace_id, workspace_generation, storage_id, 'src', ?, 7, config_ref, policy_ref, ?"
                 + " FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?", id, "agent", binding.getContextConfigRef(),
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"), "tenant", workspace);
+                ManagedWorkspaceRegistry.actorKey("tenant", "actor"), "tenant", workspace);
         return new WorkspaceFileStore.Locator(id, null, null);
+    }
+
+    @Test
+    void personalSessionLocatorDoesNotChangeSharedWorkspaceFileAccess() {
+        var locator = session("personal");
+        jdbc.update("UPDATE ma_session SET owner_only=1 WHERE tenant_id=? AND session_id=?", "tenant", "personal");
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,workspace_id,actor_id,role) VALUES (?,?,?,'OPERATOR')",
+                "tenant", workspace, ManagedWorkspaceRegistry.actorKey("tenant", "other"));
+        assertThat(files.scope("tenant", "actor", locator).binding().getCwdRelative()).isEqualTo("src");
+        assertThat(files.scope("tenant", "other", workspace, ".").binding().getWorkspaceId()).isEqualTo(workspace);
+        assertThatThrownBy(() -> files.scope("tenant", "other", locator))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("session_not_found"));
     }
 
     @Test
@@ -102,7 +116,7 @@ class WorkspaceFileStoreTest {
         registry.configureSsh(properties);
         jdbc.update("UPDATE ma_storage SET storage_kind = 'SSH_LOCAL', registration_json = ?", "{\"nodeId\":\"mac\"}");
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OPERATOR')",
-                "tenant", workspace, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "unlisted"));
+                "tenant", workspace, ManagedWorkspaceRegistry.actorKey("tenant", "unlisted"));
         var allowed = files.scope("tenant", "actor", locator);
         assertThat(allowed.binding().getCwdRelative()).isEqualTo("src");
         assertThat(allowed.binding().getContextRevision()).isEqualTo(7);
@@ -143,7 +157,7 @@ class WorkspaceFileStoreTest {
             assertThatThrownBy(() -> files.query("tenant", "actor", locator, ".", "", first.scopeRevision()))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_file_scope_changed"));
             jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
-                    "tenant", workspace, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                    "tenant", workspace, ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
             assertThatThrownBy(() -> files.query("tenant", "actor", locator, ".", "", null))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("session_not_found"));
         }
@@ -153,7 +167,7 @@ class WorkspaceFileStoreTest {
     void anotherWorkspaceOperatorCanReadSessionFilesUntilTheSessionIsDeleted() {
         var locator = session("session");
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OPERATOR')",
-                "tenant", workspace, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "operator"));
+                "tenant", workspace, ManagedWorkspaceRegistry.actorKey("tenant", "operator"));
         try (var process = mockStatic(WorkspaceFileProcess.class)) {
             process.when(() -> WorkspaceFileProcess.read(anyString(), anyString(), any())).thenReturn(result());
             assertThat(files.query("tenant", "operator", locator, ".", "", null).entries()).isNotEmpty();
@@ -168,8 +182,8 @@ class WorkspaceFileStoreTest {
     @Test
     void unreadySessionCannotReachTheFileProcess() {
         var locator = session("session");
-        try (var worktrees = mockStatic(SessionWorktreeStore.class); var process = mockStatic(WorkspaceFileProcess.class)) {
-            worktrees.when(() -> SessionWorktreeStore.requireReady(any(WorktreeFiles.class), eq(jdbc), eq("tenant"), eq("session")))
+        try (var worktrees = mockStatic(JdbcSessionWorktreeStore.class); var process = mockStatic(WorkspaceFileProcess.class)) {
+            worktrees.when(() -> JdbcSessionWorktreeStore.requireReady(any(WorktreeFiles.class), eq(jdbc), eq("tenant"), eq("session")))
                     .thenThrow(new ManagedAgentException(409, "worktree_not_ready", "Not ready"));
             assertThatThrownBy(() -> files.query("tenant", "actor", locator, ".", "", null))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("worktree_not_ready"));
@@ -186,9 +200,9 @@ class WorkspaceFileStoreTest {
         Files.createDirectories(root.resolve(cwd));
         var identity = Files.readAttributes(root.resolve(".qwen-managed-worktrees/owned"), "unix:dev,ino");
         jdbc.update("UPDATE ma_session SET cwd_relative = ? WHERE session_id = ?", cwd, "session");
-        try (var worktrees = mockStatic(SessionWorktreeStore.class); var process = mockStatic(WorkspaceFileProcess.class)) {
-            worktrees.when(() -> SessionWorktreeStore.descriptor(any(WorktreeFiles.class), eq(jdbc), eq("tenant"), eq("session")))
-                    .thenReturn(new SessionWorktreeStore.Descriptor("owned", "session", workspace, "ready", "branch", "a".repeat(40), cwd, "op", 2, null));
+        try (var worktrees = mockStatic(JdbcSessionWorktreeStore.class); var process = mockStatic(WorkspaceFileProcess.class)) {
+            worktrees.when(() -> JdbcSessionWorktreeStore.descriptor(any(WorktreeFiles.class), eq(jdbc), eq("tenant"), eq("session")))
+                    .thenReturn(new JdbcSessionWorktreeStore.Descriptor("owned", "session", workspace, "ready", "branch", "a".repeat(40), cwd, "op", 2, null));
             process.when(() -> WorkspaceFileProcess.read(anyString(), anyString(), any())).thenAnswer(call -> {
                 Map<String, Object> request = call.getArgument(2);
                 Map<?, ?> proof = (Map<?, ?>) request.get("sessionFileScope");
@@ -201,8 +215,8 @@ class WorkspaceFileStoreTest {
                 return result();
             });
             String revision = files.query("tenant", "actor", locator, ".", "", null).scopeRevision();
-            worktrees.when(() -> SessionWorktreeStore.descriptor(any(WorktreeFiles.class), eq(jdbc), eq("tenant"), eq("session")))
-                    .thenReturn(new SessionWorktreeStore.Descriptor("owned", "session", workspace, "ready", "branch", "a".repeat(40), cwd, "op", 3, null));
+            worktrees.when(() -> JdbcSessionWorktreeStore.descriptor(any(WorktreeFiles.class), eq(jdbc), eq("tenant"), eq("session")))
+                    .thenReturn(new JdbcSessionWorktreeStore.Descriptor("owned", "session", workspace, "ready", "branch", "a".repeat(40), cwd, "op", 3, null));
             assertThatThrownBy(() -> files.query("tenant", "actor", locator, ".", "", revision))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_file_scope_changed"));
         }

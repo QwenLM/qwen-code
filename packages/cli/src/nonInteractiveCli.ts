@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { t } from './i18n/index.js';
 import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -16,6 +17,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import type { SendMessageOptions } from '@qwen-code/qwen-code-core/core/client.js';
 import type { CompletedToolCall } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import type { WorkflowRunHandle } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
@@ -36,6 +38,8 @@ import type {
   UserPromptAdmission,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration } from './ui/utils/formatters.js';
+import { waitForPendingMemoryTasks } from './nonInteractive/memory-tasks.js';
+import { cancelAndSettleWorkflowRuns } from './nonInteractive/workflow-shutdown.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -106,6 +110,9 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { ModSession, type ModTurn } from './services/mod-session.js';
+import { frameModPrompt } from './services/mod-prompt-frame.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
+import { logAgentLoopEntry } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -152,6 +159,13 @@ const restoredBackgroundAgentSessions = new WeakMap<Config, Set<string>>();
  * slow agent can't block exit indefinitely.
  */
 const STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500;
+
+/**
+ * The memory-wait window for a one-shot run whose caller supplied no stop
+ * signal (the `llm.tsx` shape). Mirrors the stream-JSON session's
+ * `EOF_MEMORY_WAIT_TIMEOUT_MS`; each drain arms its own window.
+ */
+const ONE_SHOT_MEMORY_WAIT_TIMEOUT_MS = 5_000;
 
 function isHeadlessLoopSentinel(prompt: string): boolean {
   return (
@@ -375,6 +389,19 @@ function emitLoopDetectedMessage(
   return message;
 }
 
+/** Emits a slash command's reply as an assistant message. */
+function emitNonInteractiveAssistantText(
+  adapter: JsonOutputAdapterInterface,
+  message: string,
+): void {
+  adapter.startAssistantMessage();
+  adapter.processEvent({
+    type: LlmEventType.Content,
+    value: message,
+  } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
+  adapter.finalizeAssistantMessage();
+}
+
 /**
  * Emits a final message for slash command results.
  * Note: systemMessage should already be emitted before calling this function.
@@ -391,12 +418,7 @@ async function emitNonInteractiveFinalMessage(params: {
 
   // JSON output mode: emit assistant message and result
   // (systemMessage should already be emitted by caller)
-  adapter.startAssistantMessage();
-  adapter.processEvent({
-    type: LlmEventType.Content,
-    value: message,
-  } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
-  adapter.finalizeAssistantMessage();
+  emitNonInteractiveAssistantText(adapter, message);
 
   const metrics = uiTelemetryService.getMetrics();
   const usage = computeUsageFromMetrics(metrics);
@@ -450,6 +472,8 @@ export interface RunNonInteractiveOptions {
   captureMonitorNotifications?: boolean;
   captureMonitorRegistrations?: boolean;
   onResultEmitted?: () => void;
+  /** Stop memory waiting at the session EOF deadline without cancelling a turn. */
+  memoryWaitStopSignal?: AbortSignal;
   /**
    * Emit a terminal result and return from this turn when its controller is
    * aborted with {@link TurnInterruptedError}, instead of exiting the process.
@@ -605,17 +629,58 @@ export async function runNonInteractive(
       })();
       return chatRecordingSettlement;
     };
+    // A one-shot run has no session EOF moment. Failure and cancellation
+    // terminals still get a bounded window per drain: without one, a failed
+    // `qwen -p` run with an extraction in flight stays alive after its error
+    // envelope is already on the wire. The success terminal instead waits
+    // for the memory writes the same turn started, bounded only by the run's
+    // own abort — the base behavior, so a success path never introduces a
+    // wait deadline the base did not have.
+    const drainPendingMemoryTasks = (
+      successTerminal: boolean = false,
+    ): Promise<void> => {
+      const client = config.getLlmClient();
+      if (options.memoryWaitStopSignal) {
+        return waitForPendingMemoryTasks(
+          client,
+          abortController.signal,
+          options.memoryWaitStopSignal,
+        );
+      }
+      if (successTerminal) {
+        return waitForPendingMemoryTasks(client, abortController.signal);
+      }
+      const oneShotMemoryWindow = new AbortController();
+      const oneShotMemoryWindowTimer = setTimeout(
+        () => oneShotMemoryWindow.abort(),
+        ONE_SHOT_MEMORY_WAIT_TIMEOUT_MS,
+      );
+      return waitForPendingMemoryTasks(
+        client,
+        abortController.signal,
+        oneShotMemoryWindow.signal,
+      ).finally(() => clearTimeout(oneShotMemoryWindowTimer));
+    };
+    let resultEmitted = false;
     const emitResult = async (
       result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],
     ): Promise<void> => {
-      await settleBeforeTerminalOutput();
-      // Fire the callback only after a successful emit. The continue caller
-      // (session.ts) uses it to mark the result as delivered and swallow any
-      // later error; if emitResult itself throws, the flag must stay unset so
-      // the error still surfaces instead of losing both result and error.
-      adapter.emitResult(result);
-      options.onResultEmitted?.();
-      await modSession?.flushOutput();
+      try {
+        await settleBeforeTerminalOutput();
+        // Fire the callback only after a successful emit. The continue caller
+        // (session.ts) uses it to mark the result as delivered and swallow any
+        // later error; if emitResult itself throws, the flag must stay unset so
+        // the error still surfaces instead of losing both result and error.
+        adapter.emitResult(result);
+        resultEmitted = true;
+        options.onResultEmitted?.();
+        await modSession?.flushOutput();
+      } finally {
+        // Write the result first, but keep the invocation alive for memory
+        // writes — unbounded on a success terminal, as in the base; an
+        // error terminal keeps the bounded failure window below.
+        await drainPendingMemoryTasks(!result.isError);
+      }
     };
 
     // Get readonly values once at the start
@@ -698,11 +763,7 @@ export async function runNonInteractive(
       limitedTurnCount++;
       const maxSessionTurns = config.getMaxSessionTurns();
       if (maxSessionTurns >= 0 && limitedTurnCount > maxSessionTurns) {
-        await failClosedActiveGoalTurn(
-          'Headless Goal stopped after the session turn limit',
-        );
-        await settleBeforeTerminalOutput();
-        await handleMaxTurnsExceededError(config);
+        await exitForSessionTurnLimit();
       }
     };
     let goalHostUnbind: (() => void) | undefined;
@@ -887,8 +948,28 @@ export async function runNonInteractive(
      * preserved. Both branches call into `process.exit(...)` so the
      * `unreachable` throw is only present to keep the type-checker honest.
      */
+    let abortExitCommitted = false;
+    const markAbortExitCommitted = (): void => {
+      abortExitCommitted = true;
+    };
+    const cancelWorkflowRuns = () =>
+      cancelAndSettleWorkflowRuns(config.getWorkflowRunRegistry());
+    const exitForSessionTurnLimit = async (): Promise<never> => {
+      await failClosedActiveGoalTurn(
+        'Headless Goal stopped after the session turn limit',
+      );
+      await cancelWorkflowRuns();
+      await settleBeforeTerminalOutput();
+      return handleMaxTurnsExceededError(config);
+    };
     const routeAbort = async (): Promise<never> => {
       const exceeded = budgetEnforcer.getExceeded();
+      const reason: unknown = abortController.signal.reason;
+      const recoverable =
+        !exceeded &&
+        reason instanceof TurnInterruptedError &&
+        (options.recoverableCancellation === true ||
+          reason instanceof ModTurnAbortedError);
       endActiveInteraction(exceeded ? 'error' : 'cancelled', {
         ...(exceeded
           ? {
@@ -897,15 +978,22 @@ export async function runNonInteractive(
             }
           : {}),
       });
-      await failClosedActiveGoalTurn(
-        exceeded?.message ?? 'Headless Goal execution was cancelled',
-        exceeded
-          ? goalPauseReasonForRunBudget(exceeded.kind)
-          : GOAL_PAUSE_REASON_USER_INTERRUPT,
-      );
+      await Promise.all([
+        recoverable ? undefined : cancelWorkflowRuns(),
+        failClosedActiveGoalTurn(
+          exceeded?.message ?? 'Headless Goal execution was cancelled',
+          exceeded
+            ? goalPauseReasonForRunBudget(exceeded.kind)
+            : GOAL_PAUSE_REASON_USER_INTERRUPT,
+        ),
+      ]);
       await settleBeforeTerminalOutput();
       if (exceeded) {
-        await handleBudgetExceededError(config, exceeded);
+        await handleBudgetExceededError(
+          config,
+          exceeded,
+          markAbortExitCommitted,
+        );
         // Explicit unreachable — `handleBudgetExceededError` is `never`
         // in production (it calls `process.exit`). If a test stubs
         // `process.exit` or a future refactor makes the handler
@@ -914,15 +1002,8 @@ export async function runNonInteractive(
         // (vs. a useless literal "unreachable").
         throw new Error(exceeded.message);
       }
-      const reason: unknown = abortController.signal.reason;
-      if (
-        reason instanceof TurnInterruptedError &&
-        (options.recoverableCancellation === true ||
-          reason instanceof ModTurnAbortedError)
-      ) {
-        throw reason;
-      }
-      await handleCancellationError(config);
+      if (recoverable) throw reason;
+      await handleCancellationError(config, markAbortExitCommitted);
       throw new Error('Operation cancelled.');
     };
 
@@ -930,8 +1011,11 @@ export async function runNonInteractive(
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      // A prompt a Mod submitted, which runs as a turn of its own.
+      modPrompt?: ModQueuedPrompt;
       todoWorkChainId?: string;
       monitorId?: string;
+      workflowHandle?: WorkflowRunHandle;
       sdkNotification?: {
         task_id: string;
         tool_use_id?: string;
@@ -944,6 +1028,21 @@ export async function runNonInteractive(
       };
     }
     const localQueue: LocalQueueItem[] = [];
+    // The Mods' own prompts wait for the session to be idle, as the queue's
+    // other items do.
+    const pullModPrompts = () => {
+      for (
+        let prompt = modSession?.takeSubmittedPrompt();
+        prompt;
+        prompt = modSession?.takeSubmittedPrompt()
+      )
+        localQueue.push({
+          displayText: prompt.text,
+          modelText: frameModPrompt(prompt),
+          sendMessageType: SendMessageType.UserQuery,
+          modPrompt: prompt,
+        });
+    };
     const sdkOnlyMonitorQueue: LocalQueueItem[] = [];
     const isCancelledMonitorEvent = (item: LocalQueueItem) =>
       Boolean(
@@ -958,6 +1057,12 @@ export async function runNonInteractive(
       if (item.sdkNotification) {
         adapter.emitSystemMessage('task_notification', item.sdkNotification);
       }
+    };
+    // The client did not send a Mod's prompt, so it learns of it as it does of
+    // a notification: the text as a user message, then who submitted it.
+    const emitModPromptToSdk = (prompt: ModQueuedPrompt) => {
+      adapter.emitUserMessage([{ text: prompt.text }]);
+      adapter.emitSystemMessage('mod_prompt', { mod: prompt.plugin });
     };
     const flushQueuedNotificationsToSdk = (queue: LocalQueueItem[]) => {
       while (queue.length > 0) {
@@ -1204,6 +1309,12 @@ export async function runNonInteractive(
       let prompt = input;
       let rewrittenText: string | undefined;
       let promptContext: string[] | undefined;
+      // A slash command answered with a message while a Mod's prompt waits:
+      // the run starts no turn of its own and goes on to run that prompt.
+      let commandReplied = false;
+      // The worktree notice a command's reply could not carry; the first
+      // request the run sends takes it instead.
+      let deferredReminder: string | undefined;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
@@ -1260,6 +1371,14 @@ export async function runNonInteractive(
       }
 
       if (!initialPartList) {
+        // The person's own message, a slash command too, lets the Mods'
+        // prompts start turns again.
+        if (
+          !options.fromTool &&
+          (options.sendMessageType ?? SendMessageType.UserQuery) ===
+            SendMessageType.UserQuery
+        )
+          modSession?.notePersonPrompt();
         let slashHandled = false;
         if (isSlashCommand(input)) {
           const slashCommandResult = await handleSlashCommand(
@@ -1293,6 +1412,13 @@ export async function runNonInteractive(
             case 'submit_prompt':
               // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
               initialPartList = slashCommandResult.content;
+              // Stacked-skill overflow is a warning: the prompt still runs, so
+              // the run keeps its exit code and stderr carries the notice.
+              if (slashCommandResult.stackedSkillOverflow) {
+                process.stderr.write(
+                  `${slashCommandResult.stackedSkillOverflow}\n`,
+                );
+              }
               // Re-validate provider identity rather than trust the producer:
               // any slash command can set `modelOverride`, so the consumer
               // enforces that it names a model on the active provider before
@@ -1377,6 +1503,26 @@ export async function runNonInteractive(
               break;
             }
             case 'message': {
+              // A Mod command that submitted a prompt hands the work on to
+              // the model: its reply is shown, and the prompt's turn starts
+              // once the run is idle, as after a turn.
+              if (
+                slashCommandResult.messageType !== 'error' &&
+                modSession?.hasSubmittedPrompts
+              ) {
+                // Text output prints only the run's last answer, which is
+                // the Mod turn's, so the reply is written as it comes.
+                if (outputFormat === OutputFormat.TEXT)
+                  process.stdout.write(`${slashCommandResult.content}\n`);
+                else
+                  emitNonInteractiveAssistantText(
+                    adapter,
+                    slashCommandResult.content,
+                  );
+                commandReplied = true;
+                slashHandled = true;
+                break;
+              }
               // systemMessage already emitted above
               await emitNonInteractiveFinalMessage({
                 message: slashCommandResult.content,
@@ -1500,11 +1646,17 @@ export async function runNonInteractive(
       // Continuation turns must not prepend reminder text: a ToolResult
       // payload's functionResponse parts have to stay at the HEAD of the
       // user message or Anthropic-compatible backends reject the pairing.
+      // A command's reply sends the model nothing, so its notice waits for
+      // the first request the run sends.
+      const remind = (text: string) => {
+        if (commandReplied) deferredReminder = text;
+        else initialPartList = withReminder(initialPartList ?? [], text);
+      };
       const startupNotice = options.continueInterrupted
         ? null
         : config.consumePendingStartupWorktreeNotice();
       if (startupNotice) {
-        initialPartList = withReminder(initialPartList, startupNotice);
+        remind(startupNotice);
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
@@ -1519,10 +1671,7 @@ export async function runNonInteractive(
             sessionId,
           );
           if (restored.contextMessage) {
-            initialPartList = withReminder(
-              initialPartList,
-              restored.contextMessage,
-            );
+            remind(restored.contextMessage);
             // Surface the notice in the JSON stream so SDK consumers
             // can react to it (logging, UI hints, etc.).
             adapter.emitSystemMessage('worktree_restored', {
@@ -1618,7 +1767,11 @@ export async function runNonInteractive(
         continueSendType ??
         options.sendMessageType ??
         SendMessageType.UserQuery;
-      if (!activeGoalTurn && initialSendType === SendMessageType.UserQuery) {
+      if (
+        !activeGoalTurn &&
+        !commandReplied &&
+        initialSendType === SendMessageType.UserQuery
+      ) {
         try {
           const runtime = await config.getGoalRuntimeReady();
           observeGoalRuntime(runtime);
@@ -1688,6 +1841,22 @@ export async function runNonInteractive(
           subagent_type: entry.subagentType,
         });
       });
+
+      const workflowRegistry = config.getWorkflowRunRegistry();
+      workflowRegistry.setCompletionCallback((displayText, modelText, meta) => {
+        localQueue.push({
+          displayText,
+          modelText,
+          sendMessageType: SendMessageType.Notification,
+          todoWorkChainId: meta.todoWorkChainId,
+          workflowHandle: workflowRegistry.getHandle(meta.runId),
+        });
+      });
+      // The model may act on a resume hint immediately. Wait for that runner
+      // to release the ID, while still letting other prompts run.
+      const isReadyForModel = ({ workflowHandle }: LocalQueueItem): boolean =>
+        !workflowHandle ||
+        workflowRegistry.getHandle(workflowHandle.runId) !== workflowHandle;
 
       const monitorRegistry = config.getMonitorRegistry();
       if (options.captureMonitorNotifications !== false) {
@@ -1812,6 +1981,7 @@ export async function runNonInteractive(
           GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
         );
         registry.abortAll();
+        await cancelWorkflowRuns();
         // `abortAll()` marks each task `cancelled` synchronously, but
         // the matching `task_notification` is emitted later by the
         // task's natural handler. Hold back briefly (capped at
@@ -1855,11 +2025,18 @@ export async function runNonInteractive(
           'Headless Goal stopped after loop detection',
         );
         registry.abortAll();
+        await cancelWorkflowRuns();
         flushQueuedNotificationsToSdk(localQueue);
         finalizeOneShotMonitors();
 
         if (outputFormat === OutputFormat.TEXT) {
           await settleBeforeTerminalOutput();
+          try {
+            await drainPendingMemoryTasks();
+          } catch {
+            // Keep the marker for the loop error already written to stderr.
+            throw new AlreadyReportedError(loopDetectedMessage);
+          }
           return 1;
         }
 
@@ -2592,7 +2769,9 @@ export async function runNonInteractive(
       // the shared agent loop. Each `sharedAgentLoop` branch below replaces
       // the current code next to it, which stays unchanged while the setting
       // exists.
-      const sharedAgentLoop = config.isUnifiedAgentLoopEnabled?.() === true;
+      const sharedAgentLoop =
+        config.isUnifiedAgentLoopEnabled?.('headless') === true;
+      logAgentLoopEntry(config, 'headless');
       type SharedLoopScope = {
         maxRounds?: number;
         runtimeView?: RuntimeContentGeneratorView;
@@ -2661,17 +2840,21 @@ export async function runNonInteractive(
               let call: CompletedToolCall | undefined;
               const response = await executeToolCall(config, request, signal, {
                 recordToolResult: false,
+                isFinished: hooks.isFinished,
                 modToolCall: modSession?.toolCall(() =>
                   budgetEnforcer.tickToolCall(),
                 ),
-                onToolResultFullTurnModel,
+                onToolResultFullTurnModel: (model) =>
+                  !hooks.isFinished?.() && onToolResultFullTurnModel(model),
                 outputUpdateHandler: hooks.output,
                 onAllToolCallsComplete: async (calls) => {
                   call = calls[0];
                 },
                 runtimeView: scope.runtimeView,
                 ...(toolCallUpdateCallback && {
-                  onToolCallsUpdate: toolCallUpdateCallback,
+                  onToolCallsUpdate: (calls) => {
+                    if (!hooks.isFinished?.()) toolCallUpdateCallback(calls);
+                  },
                 }),
               });
               settled.push({
@@ -2686,6 +2869,7 @@ export async function runNonInteractive(
         return runAgentLoop({
           client: llmClient,
           config,
+          useEventBus: config.isEventBusAgentLoopEnabled?.('headless') === true,
           signal: abortController.signal,
           ...(activeGoalTurn && {
             toolSignal: AbortSignal.any([
@@ -2707,6 +2891,9 @@ export async function runNonInteractive(
           },
           ...(modSession?.hasToolHooks && { executor: modExecutor }),
           runtimeView: scope.runtimeView,
+          // Record the results of the calls a cancelled batch started, as the
+          // current loop does; the abort then ends the run.
+          keepCancelledResults: 'launched',
           host: {
             onRoundStart: (round) => {
               roundStartedAt = Date.now();
@@ -2763,6 +2950,7 @@ export async function runNonInteractive(
                 const errorText = parseAndFormatApiError(
                   event.value.error,
                   config.getContentGeneratorConfig()?.authType,
+                  outputFormat === OutputFormat.TEXT ? t : undefined,
                 );
                 if (outputFormat === OutputFormat.TEXT) {
                   process.stderr.write(`${errorText}\n`);
@@ -2874,6 +3062,13 @@ export async function runNonInteractive(
       };
 
       let currentPromptId = prompt_id;
+      // A teammate turn mints its own prompt id (registered as a background
+      // interaction so the ledger excludes it). Track whether the active turn
+      // is a teammate turn so its ToolResult continuations keep that id, while
+      // a later foreground turn restores the base id — otherwise the registered
+      // teammate id would drop every later foreground send from the ledger for
+      // the rest of the run (R8-F2).
+      let teammateTurnActive = false;
       while (true) {
         // Drain pending teammate messages into the conversation.
         // sendMessageStream only reads currentMessages[0].parts,
@@ -2907,9 +3102,14 @@ export async function runNonInteractive(
         }
         hasUnsentToolResponse = false;
 
-        turnCount++;
+        // A command's reply is not a turn: the run goes straight on to the
+        // end of a turn, where the Mods' prompts start.
+        const replyOnly = commandReplied;
+        commandReplied = false;
+        if (!replyOnly) turnCount++;
         const goalTurn = activeGoalTurn;
-        await enforceSessionTurnLimit(goalTurn?.origin === 'runtime');
+        if (!replyOnly)
+          await enforceSessionTurnLimit(goalTurn?.origin === 'runtime');
 
         let sendType: SendMessageType;
         if (goalTurn && isFirstGoalSegment) {
@@ -2929,10 +3129,19 @@ export async function runNonInteractive(
         } else {
           sendType = SendMessageType.ToolResult;
         }
-        if (isTeammateTurn) {
+        if (isTeammateTurn && sendType === SendMessageType.Teammate) {
           selectActiveInteraction(currentPromptId);
           endActiveInteraction('ok');
           currentPromptId = `${prompt_id}/teammate/${turnCount}`;
+          teammateTurnActive = true;
+        } else if (!teammateTurnActive) {
+          // Foreground turn (or a continuation of one): restore the base id so
+          // a prior teammate turn's registered id does not exclude this send.
+          // A foreground Goal first segment that coincides with a teammate
+          // batch keeps the base id too — it is a Goal/UserQuery send, not a
+          // Teammate send, so it must not wear (or rotate the ledger key to)
+          // the teammate id (R14 deferred).
+          currentPromptId = prompt_id;
         }
         selectActiveInteraction(
           currentPromptId,
@@ -3022,9 +3231,21 @@ export async function runNonInteractive(
                 },
               }
             : {}),
+          // A runtime Goal run keeps the foreground turn's prompt_id for
+          // identity but opens its own ledger turn, so a fallback the
+          // foreground turn exhausted is re-probed for the Goal run. The key
+          // is stable across the run's segments (goalTurn.turnKey), so sticky
+          // marks still persist within the run, as continuations do.
+          ...(goalTurn &&
+            goalTurn.origin === 'runtime' && {
+              ledgerTurnKey: `${prompt_id}/goal/${goalTurn.turnKey}`,
+            }),
         };
         let shouldFinalizeTurn: boolean;
-        if (sharedAgentLoop) {
+        if (replyOnly) {
+          isFirstTurn = false;
+          shouldFinalizeTurn = true;
+        } else if (sharedAgentLoop) {
           const result = await runOnSharedLoop(
             {
               parts: currentMessages[0]?.parts || [],
@@ -3075,11 +3296,7 @@ export async function runNonInteractive(
               return await routeAbort();
             case 'max_session_turns':
               // The client counts turns across the whole session (#15325).
-              await failClosedActiveGoalTurn(
-                'Headless Goal stopped after the session turn limit',
-              );
-              await settleBeforeTerminalOutput();
-              return handleMaxTurnsExceededError(config);
+              return await exitForSessionTurnLimit();
             case 'next_round':
               currentMessages = [{ role: 'user', parts: result.parts ?? [] }];
               hasUnsentToolResponse = true;
@@ -3097,6 +3314,7 @@ export async function runNonInteractive(
               endActiveInteraction('ok');
               const nextGoalTurn = queuedGoalTurns.shift();
               if (nextGoalTurn) {
+                teammateTurnActive = false;
                 activeGoalTurn = nextGoalTurn;
                 markGoalTurnDelivered(nextGoalTurn);
                 isFirstGoalSegment = true;
@@ -3183,6 +3401,7 @@ export async function runNonInteractive(
               const errorText = parseAndFormatApiError(
                 event.value.error,
                 config.getContentGeneratorConfig()?.authType,
+                outputFormat === OutputFormat.TEXT ? t : undefined,
               );
               if (outputFormat === OutputFormat.TEXT) {
                 process.stderr.write(`${errorText}\n`);
@@ -3271,6 +3490,7 @@ export async function runNonInteractive(
               endActiveInteraction('ok');
               const nextGoalTurn = queuedGoalTurns.shift();
               if (nextGoalTurn) {
+                teammateTurnActive = false;
                 activeGoalTurn = nextGoalTurn;
                 markGoalTurnDelivered(nextGoalTurn);
                 isFirstGoalSegment = true;
@@ -3295,6 +3515,9 @@ export async function runNonInteractive(
           }
         }
         if (shouldFinalizeTurn) {
+          // The turn ended; a subsequent foreground turn must not inherit a
+          // teammate turn's registered prompt id (R8-F2).
+          teammateTurnActive = false;
           await modTurn?.complete();
           if (activeGoalTurn) {
             const completedGoalTurn = activeGoalTurn;
@@ -3403,26 +3626,24 @@ export async function runNonInteractive(
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.
-          const drainBatch = async () => {
-            if (localQueue.length === 0) return;
-
-            // Batch-drain: take contiguous same-type items from the front
-            // of the queue. Cron prompts run individually — each needs its
-            // own slash/shell/@ preprocessing and approval cycle.
-            const targetType = localQueue[0]!.sendMessageType;
-            let splitIdx = targetType === SendMessageType.Cron ? 1 : 0;
-            if (splitIdx === 0) {
+          const drainBatch = async (start: number) => {
+            // Batch contiguous ready items of the same type. Cron prompts
+            // run individually for their own preprocessing and approvals.
+            const first = localQueue[start]!;
+            const targetType = first.sendMessageType;
+            let end = start + 1;
+            if (targetType !== SendMessageType.Cron && !first.modPrompt) {
               while (
-                splitIdx < localQueue.length &&
-                localQueue[splitIdx]!.sendMessageType === targetType &&
-                localQueue[splitIdx]!.todoWorkChainId ===
-                  localQueue[0]!.todoWorkChainId
+                end < localQueue.length &&
+                localQueue[end]!.sendMessageType === targetType &&
+                localQueue[end]!.todoWorkChainId === first.todoWorkChainId &&
+                isReadyForModel(localQueue[end]!)
               ) {
-                splitIdx++;
+                end++;
               }
             }
             const batch = localQueue
-              .splice(0, splitIdx)
+              .splice(start, end - start)
               .filter((item) => !isCancelledMonitorEvent(item));
 
             if (batch.length === 0) return;
@@ -3430,6 +3651,7 @@ export async function runNonInteractive(
             for (const queueItem of batch) {
               emitNotificationToSdk(queueItem);
             }
+            if (batch[0]?.modPrompt) emitModPromptToSdk(batch[0].modPrompt);
 
             const item = {
               displayText: batch.map((i) => i.displayText).join('; '),
@@ -3437,28 +3659,65 @@ export async function runNonInteractive(
               sendMessageType: targetType,
               todoWorkChainId: batch[0]?.todoWorkChainId,
             };
+            const modPrompt = batch[0]?.modPrompt;
 
             turnCount++;
             await enforceSessionTurnLimit(false);
 
-            let itemMessages: Content[] = [
-              { role: 'user', parts: [{ text: item.modelText }] },
-            ];
+            const itemParts = deferredReminder
+              ? (withReminder(
+                  [{ text: item.modelText }],
+                  deferredReminder,
+                ) as Part[])
+              : [{ text: item.modelText }];
+            deferredReminder = undefined;
+            let itemMessages: Content[] = [{ role: 'user', parts: itemParts }];
             let itemIsFirstTurn = true;
             let itemModelOverride: string | undefined;
             const itemPromptId = `${prompt_id}/automatic/${turnCount}`;
+            // A Mod's prompt is a prompt like a typed one: UserPromptSubmit
+            // hears it, and the Mods hear its turn.
+            let itemTurn: ModTurn | undefined;
+            const firstOptions: SendMessageOptions = modPrompt
+              ? {
+                  type: SendMessageType.UserQuery,
+                  modelOverride: itemModelOverride,
+                  submittedPrompt: modPrompt.text,
+                  submittedByMod: modPrompt.plugin,
+                  ...(modPrompt.asUser && { submittedAsUser: true }),
+                  // Recall looks for what the Mod asked, not the frame.
+                  memoryRecallQuery: modPrompt.text,
+                  ...(modPrompt.context?.length && {
+                    promptContext: modPrompt.context,
+                  }),
+                  ...(modSession && {
+                    onPromptAdmitted: () => {
+                      itemTurn = modTurn = modSession.startTurn(
+                        modPrompt.text,
+                        abortController.signal,
+                        () => {
+                          if (abortController.signal.aborted) return false;
+                          abortController.abort(new ModTurnAbortedError());
+                          return true;
+                        },
+                        itemPromptId,
+                      );
+                    },
+                  }),
+                }
+              : {
+                  type: item.sendMessageType,
+                  modelOverride: itemModelOverride,
+                  notificationDisplayText: item.displayText,
+                  todoWorkChainId: item.todoWorkChainId,
+                };
 
             if (sharedAgentLoop) {
               const result = await runOnSharedLoop(
                 {
                   parts: itemMessages[0]?.parts || [],
                   promptId: itemPromptId,
-                  options: {
-                    type: item.sendMessageType,
-                    modelOverride: itemModelOverride,
-                    notificationDisplayText: item.displayText,
-                    todoWorkChainId: item.todoWorkChainId,
-                  },
+                  options: firstOptions,
                 },
                 {
                   setModelOverride: (override) => {
@@ -3486,6 +3745,7 @@ export async function runNonInteractive(
                     flushQueuedNotificationsToSdk(localQueue);
                     finalizeOneShotMonitors();
                   },
+                  onEvent: (event) => itemTurn?.saw(event),
                   tracksPreview: false,
                 },
               );
@@ -3498,12 +3758,15 @@ export async function runNonInteractive(
               } else if (result.reason === 'cancelled') {
                 await routeAbort();
               } else if (result.reason === 'max_session_turns') {
-                await failClosedActiveGoalTurn(
-                  'Headless Goal stopped after the session turn limit',
-                );
-                await settleBeforeTerminalOutput();
-                await handleMaxTurnsExceededError(config);
+                await exitForSessionTurnLimit();
               }
+              // A duplicate provider call raises no LoopDetected event, so the
+              // turn ends as an error here, as it does on the legacy loop.
+              await itemTurn?.complete(
+                result.reason === 'duplicate_provider_call'
+                  ? 'error'
+                  : undefined,
+              );
               return;
             }
 
@@ -3515,16 +3778,12 @@ export async function runNonInteractive(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
                 itemPromptId,
-                {
-                  type: itemIsFirstTurn
-                    ? item.sendMessageType
-                    : SendMessageType.ToolResult,
-                  modelOverride: itemModelOverride,
-                  ...(itemIsFirstTurn && {
-                    notificationDisplayText: item.displayText,
-                    todoWorkChainId: item.todoWorkChainId,
-                  }),
-                },
+                itemIsFirstTurn
+                  ? { ...firstOptions, modelOverride: itemModelOverride }
+                  : {
+                      type: SendMessageType.ToolResult,
+                      modelOverride: itemModelOverride,
+                    },
               );
               itemIsFirstTurn = false;
 
@@ -3553,6 +3812,7 @@ export async function runNonInteractive(
                   await routeAbort();
                 }
                 discardAbandonedAttempt(event, itemToolCallRequests);
+                itemTurn?.saw(event);
                 adapter.processEvent(event);
                 if (
                   event.type === LlmEventType.HookSystemMessage &&
@@ -3578,6 +3838,7 @@ export async function runNonInteractive(
                   const errorText = parseAndFormatApiError(
                     event.value.error,
                     config.getContentGeneratorConfig()?.authType,
+                    outputFormat === OutputFormat.TEXT ? t : undefined,
                   );
                   if (outputFormat === OutputFormat.TEXT) {
                     process.stderr.write(`${errorText}\n`);
@@ -3640,6 +3901,7 @@ export async function runNonInteractive(
                 break;
               }
             }
+            await itemTurn?.complete();
           };
 
           // Single-flight drain: concurrent callers wait for the running drain so
@@ -3653,13 +3915,15 @@ export async function runNonInteractive(
           const drainLocalQueue = (): Promise<void> => {
             if (drainPromise) return drainPromise;
             const p = (async () => {
-              while (localQueue.length > 0) {
+              while ((pullModPrompts(), localQueue.length > 0)) {
                 if (loopDetected) return;
                 // Stop draining once a queued item's structured_output
                 // call captured the terminal contract — no point running
                 // more queued prompts that can't influence the result.
                 if (structuredSubmission !== undefined) return;
-                await drainBatch();
+                const start = localQueue.findIndex(isReadyForModel);
+                if (start < 0) return;
+                await drainBatch(start);
               }
             })();
             drainPromise = p;
@@ -3789,10 +4053,7 @@ export async function runNonInteractive(
             });
           }
 
-          // Wait for running background agents to complete before emitting the final
-          // result. On SIGINT/SIGTERM, abort them and route through
-          // handleCancellationError — otherwise the success emitResult below would
-          // silently convert a cancellation into a completion.
+          // Wait for background work before emitting the final result.
           while (true) {
             if (abortController.signal.aborted) {
               registry.abortAll();
@@ -3820,17 +4081,24 @@ export async function runNonInteractive(
             // paired with one. Monitors are different: they intentionally
             // continue in the background, so final result emission is not
             // gated on monitor lifetime.
-            if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
+            // A workflow that reported completion can still be writing its
+            // snapshot and removing its checkpoint.
+            if (
+              !registry.hasUnfinalizedTasks() &&
+              !workflowRegistry.hasRunningEntries() &&
+              !workflowRegistry
+                .list()
+                .some(
+                  ({ runId, status }) =>
+                    (status === 'completed' || status === 'failed') &&
+                    workflowRegistry.getHandle(runId),
+                ) &&
+              localQueue.length === 0
+            )
               break;
             await new Promise((r) => setTimeout(r, 100));
           }
 
-          const memoryTaskPromises = config
-            .getLlmClient()
-            .consumePendingMemoryTaskPromises();
-          if (memoryTaskPromises.length > 0) {
-            await Promise.allSettled(memoryTaskPromises);
-          }
           finalizeOneShotMonitors();
 
           const metrics = uiTelemetryService.getMetrics();
@@ -3985,15 +4253,15 @@ export async function runNonInteractive(
       // This path must settle independently because skipAdapterEmit bypasses
       // emitResult(), which normally performs the settle step.
       await settleBeforeTerminalOutput();
-      if (!skipAdapterEmit) {
-        // Wrap in try/catch: emitResult eventually hits stdout.write, which
-        // can throw on EPIPE / ERR_STREAM_WRITE_AFTER_END when a piped
-        // consumer closes early (`qwen -p ... | head -n 1` is the common
-        // case). Letting that throw bubble out skips `handleBudgetExceededError`
-        // / `handleError` below, dropping the documented exit code 55
-        // contract — precisely when stdout is in trouble. Best-effort emit
-        // and continue to the exit handler.
-        try {
+      try {
+        if (!skipAdapterEmit && !resultEmitted) {
+          // Wrap in try/catch: emitResult eventually hits stdout.write, which
+          // can throw on EPIPE / ERR_STREAM_WRITE_AFTER_END when a piped
+          // consumer closes early (`qwen -p ... | head -n 1` is the common
+          // case). Letting that throw bubble out skips `handleBudgetExceededError`
+          // / `handleError` below, dropping the documented exit code 55
+          // contract — precisely when stdout is in trouble. Best-effort emit
+          // and continue to the exit handler.
           await emitResult({
             isError: true,
             durationMs: Date.now() - startTime,
@@ -4003,7 +4271,11 @@ export async function runNonInteractive(
             usage,
             stats,
           });
-        } catch (emitErr) {
+        } else {
+          await drainPendingMemoryTasks();
+        }
+      } catch (emitErr) {
+        if (!abortController.signal.aborted) {
           debugLogger.error(
             `Failed to emit terminal result envelope: ${
               emitErr instanceof Error ? emitErr.message : String(emitErr)
@@ -4011,16 +4283,36 @@ export async function runNonInteractive(
           );
         }
       }
-      if (budgetExceeded) {
-        // Always exit AFTER emitResult so STREAM_JSON / JSON consumers
-        // see a terminal result envelope before the process dies.
-        await handleBudgetExceededError(config, budgetExceeded);
+      // Preserve terminal output without entering exit cleanup a second time.
+      if (abortExitCommitted) throw error;
+      // Abort or budget expiry can arrive during the memory wait, after the
+      // result was written. Re-read the reason without emitting another result.
+      if (abortController.signal.aborted) {
+        try {
+          await routeAbort();
+        } catch (abortError) {
+          if (
+            abortError instanceof TurnInterruptedError &&
+            abortError === abortController.signal.reason &&
+            (options.recoverableCancellation === true ||
+              abortError instanceof ModTurnAbortedError)
+          ) {
+            return 130;
+          }
+          throw abortError;
+        }
       }
-      if (recoverableCancellation) {
-        return 130;
-      }
-      await handleError(error, config);
+      await cancelWorkflowRuns();
+      await handleError(
+        error,
+        config,
+        undefined,
+        outputFormat === OutputFormat.TEXT ? t : undefined,
+      );
     } finally {
+      // A prompt a Mod submitted that this run did not start does not wait
+      // for the next one, which a stream-json session runs on the same Mods.
+      modSession?.discardSubmittedPrompts();
       if (ownsModSession) await modSession?.close();
       await modSession?.flushOutput();
       await failClosedActiveGoalTurn(
@@ -4056,6 +4348,7 @@ export async function runNonInteractive(
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);
       reg.setRegisterCallback(undefined);
+      config.getWorkflowRunRegistry().setCompletionCallback(undefined);
       const monReg = config.getMonitorRegistry();
       // In one-shot (non-Session) runs, abort all running monitors so their
       // piped stdio refs don't keep the Node event loop alive after the result

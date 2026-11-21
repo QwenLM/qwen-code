@@ -77,6 +77,7 @@ import java.util.regex.Pattern;
 import java.util.stream.LongStream;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
@@ -1178,10 +1179,9 @@ class HostedSessionRelayFaultGatesIT {
     /** The receipt's reply document on the lead, via its replyRef. */
     private JsonNode receiptReply(String lead, String member) {
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT CAST(res.inline_bytes AS CHAR) AS body,"
-                        + " r.session_scope_key AS scope FROM"
+                "SELECT CAST(res.inline_bytes AS CHAR) AS body FROM"
                         + " ma_session_record r JOIN ma_resource res ON"
-                        + " res.session_scope_key = r.session_scope_key"
+                        + " res.tenant_id = r.tenant_id AND res.session_id = r.session_id"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'session_command'"
@@ -1193,12 +1193,11 @@ class HostedSessionRelayFaultGatesIT {
         JsonNode receipt = body(rows.get(0));
         String replyRef = receipt.required("replyRef")
                 .required("resourceId").asText();
-        String scope = rows.get(0).get("scope").toString();
         List<Map<String, Object>> resources = jdbc.queryForList(
                 "SELECT CAST(inline_bytes AS CHAR) AS body"
                         + " FROM ma_resource WHERE tenant_id = ? AND"
-                        + " session_scope_key = ? AND resource_id = ?",
-                tenant, scope, replyRef);
+                        + " session_id = ? AND resource_id = ?",
+                tenant, lead, replyRef);
         assertThat(resources).as("replyRef resource").hasSize(1);
         return body(resources.get(0));
     }
@@ -1244,7 +1243,7 @@ class HostedSessionRelayFaultGatesIT {
         List<Map<String, Object>> records = jdbc.queryForList(
                 "SELECT CAST(res.inline_bytes AS CHAR) AS body FROM"
                         + " ma_session_record r JOIN ma_resource res ON"
-                        + " res.session_scope_key = r.session_scope_key"
+                        + " res.tenant_id = r.tenant_id AND res.session_id = r.session_id"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = ? ORDER BY r.record_id,"
@@ -1289,7 +1288,7 @@ class HostedSessionRelayFaultGatesIT {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT CAST(res.inline_bytes AS CHAR) AS body FROM"
                         + " ma_session_record r JOIN ma_resource res ON"
-                        + " res.session_scope_key = r.session_scope_key"
+                        + " res.tenant_id = r.tenant_id AND res.session_id = r.session_id"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'child_run' AND r.record_id = ?"
@@ -1337,7 +1336,7 @@ class HostedSessionRelayFaultGatesIT {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT CAST(res.inline_bytes AS CHAR) AS body FROM"
                         + " ma_session_record r JOIN ma_resource res ON"
-                        + " res.session_scope_key = r.session_scope_key"
+                        + " res.tenant_id = r.tenant_id AND res.session_id = r.session_id"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'child_run' AND r.record_id = ?"
@@ -1490,7 +1489,7 @@ class HostedSessionRelayFaultGatesIT {
                         + " CAST(turn_id AS CHAR) AS turn_id,"
                         + " CAST(item_id AS CHAR) AS item_id,"
                         + " CAST(content_part_id AS CHAR) AS content_part_id,"
-                        + " event_type, gmt_create, data_json, terminal"
+                        + " event_type, gmt_create, data_json, is_terminal"
                         + " FROM ma_public_event WHERE tenant_id = ? AND"
                         + " session_id = ? AND stream_kind = 'SESSION' AND"
                         + " stream_id = X'' ORDER BY sequence_id",
@@ -1516,7 +1515,7 @@ class HostedSessionRelayFaultGatesIT {
         fields.put("type", row.get("event_type"));
         fields.put("created_at", web ? created : created / 1000);
         fields.put("data", json.readTree(row.get("data_json").toString()));
-        Object terminal = row.get("terminal");
+        Object terminal = row.get("is_terminal");
         fields.put("terminal", terminal instanceof Boolean flag ? flag
                 : ((Number) terminal).intValue() != 0);
         ObjectNode node = json.createObjectNode();
@@ -1535,7 +1534,7 @@ class HostedSessionRelayFaultGatesIT {
                                 "SELECT COUNT(*) FROM ma_public_event"
                                         + " WHERE tenant_id = ? AND"
                                         + " session_id = ? AND turn_id = ?"
-                                        + " AND terminal",
+                                        + " AND is_terminal",
                                 Integer.class, tenant, session, turn))
                                 .isEqualTo(1));
     }
@@ -1979,7 +1978,8 @@ class HostedSessionRelayFaultGatesIT {
         publicProxy = HostedSessionRelayForwardingProxy.start("public",
                 casesRoot.resolve("public-proxy.log"));
         // Reserve the Harness port while the other fixture listeners bind.
-        try (ServerSocket reservation = new ServerSocket(0)) {
+        try (ServerSocket reservation = new ServerSocket(reservePort(), 1,
+                java.net.InetAddress.getByName("127.0.0.1"))) {
             harnessPort = reservation.getLocalPort();
             startSpring(cli, node, caseCount, letter);
             port = spring.getWebServer().getPort();

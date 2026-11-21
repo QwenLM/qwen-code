@@ -2825,6 +2825,156 @@ describe('DELETE /workspaces/:workspace', () => {
   });
 });
 
+describe('workspace order', () => {
+  function setup(overrides?: Partial<WorkspaceManagementRouteDeps>) {
+    const registry = createMockRegistry([
+      makeRuntime('/work/primary', { primary: true }),
+      makeRuntime('/work/second', { trusted: false }),
+    ]);
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        workspaceOrder: ['/work/second', '/work/primary'],
+      }),
+      setWorkspaceOrder: vi.fn().mockResolvedValue(undefined),
+    };
+    const fixture = createApp({
+      workspaceRegistry: registry,
+      workspaceRegistrationStore:
+        store as unknown as WorkspaceRegistrationStore,
+      ...overrides,
+    });
+    return { ...fixture, registry, store };
+  }
+
+  it('reads and writes process-global presentation order without changing runtimes', async () => {
+    const { app, registry, store } = setup();
+    expect((await request(app).get('/workspace-order')).body).toEqual({
+      cwds: ['/work/second', '/work/primary'],
+    });
+    const response = await request(app)
+      .post('/workspace-order')
+      .send({ cwds: ['/work/primary', '/work/second'] });
+    expect(response.status).toBe(200);
+    expect(response.body.cwds).toEqual(['/work/primary', '/work/second']);
+    expect(store.setWorkspaceOrder).toHaveBeenCalledWith(response.body.cwds);
+    expect(
+      registry.listManaged().map((runtime) => runtime.workspaceCwd),
+    ).toEqual(['/work/primary', '/work/second']);
+    expect(registry.add).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid and unknown paths without touching persistence', async () => {
+    const { app, store } = setup();
+    for (const [cwds, code] of [
+      [null, 'invalid_workspace_order'],
+      [['relative'], 'invalid_workspace_order'],
+      [['/work/primary', '/work/primary'], 'invalid_workspace_order'],
+      [['/work/unknown'], 'workspace_mismatch'],
+    ] as const) {
+      const response = await request(app)
+        .post('/workspace-order')
+        .send({ cwds });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe(code);
+    }
+    expect(store.setWorkspaceOrder).not.toHaveBeenCalled();
+  });
+
+  it('omits stored paths that are no longer registered so a read can be written back', async () => {
+    const { app, store } = setup();
+    store.read.mockResolvedValueOnce({
+      workspaceOrder: ['/work/gone', '/work/primary'],
+    });
+    const read = await request(app).get('/workspace-order');
+    expect(read.body).toEqual({ cwds: ['/work/primary'] });
+    const write = await request(app).post('/workspace-order').send(read.body);
+    expect(write.status).toBe(200);
+    expect(write.body.cwds).toEqual(['/work/primary']);
+    expect(store.setWorkspaceOrder).toHaveBeenCalledWith(['/work/primary']);
+  });
+
+  it('runs the strict mutation gate before touching persistence', async () => {
+    const mutate = vi.fn((options?: { strict?: boolean }) =>
+      options?.strict
+        ? (_req: Request, res: Response, _next: () => void) => {
+            res
+              .status(401)
+              .json({ error: 'Unauthorized', code: 'token_required' });
+          }
+        : (_req: Request, _res: Response, next: () => void) => next(),
+    );
+    const { app, store } = setup({ mutate });
+    const response = await request(app)
+      .post('/workspace-order')
+      .send({ cwds: [] });
+    expect(response.status).toBe(401);
+    expect(mutate).toHaveBeenCalledWith({ strict: true });
+    expect(store.setWorkspaceOrder).not.toHaveBeenCalled();
+  });
+
+  it('reports unavailable persistence and logs storage errors', async () => {
+    const { app: unavailable } = createApp();
+    expect((await request(unavailable).get('/workspace-order')).status).toBe(
+      501,
+    );
+    expect(
+      (await request(unavailable).post('/workspace-order').send({ cwds: [] }))
+        .status,
+    ).toBe(501);
+    vi.mocked(writeStderrLine).mockClear();
+    const { app, store } = setup();
+    store.read.mockRejectedValueOnce(new Error('disk unavailable'));
+    expect((await request(app).get('/workspace-order')).status).toBe(500);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: failed to read workspace order: disk unavailable',
+    );
+    store.setWorkspaceOrder.mockRejectedValueOnce(new Error('disk full'));
+    expect(
+      (await request(app).post('/workspace-order').send({ cwds: [] })).status,
+    ).toBe(500);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: failed to persist workspace order: disk full',
+    );
+    store.setWorkspaceOrder.mockRejectedValueOnce(
+      new WorkspaceRegistrationStoreCommittedError('lock release failed'),
+    );
+    expect(
+      (await request(app).post('/workspace-order').send({ cwds: [] })).status,
+    ).toBe(200);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: lock release failed',
+    );
+  });
+
+  it('waits for pending writes on shutdown and rejects later writes', async () => {
+    const { app, store, handle } = setup();
+    let complete!: () => void;
+    store.setWorkspaceOrder.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const pending = request(app)
+      .post('/workspace-order')
+      .send({ cwds: [] })
+      .then((response) => response);
+    await vi.waitFor(() => expect(store.setWorkspaceOrder).toHaveBeenCalled());
+    let sealed = false;
+    const seal = handle.sealAndWait().then(() => {
+      sealed = true;
+    });
+    await Promise.resolve();
+    expect(sealed).toBe(false);
+    expect(
+      (await request(app).post('/workspace-order').send({ cwds: [] })).status,
+    ).toBe(503);
+    complete();
+    expect((await pending).status).toBe(200);
+    await seal;
+  });
+});
+
 describe('persistent workspace registrations', () => {
   it('returns 501 for registration management without a store', async () => {
     const { app } = createApp();

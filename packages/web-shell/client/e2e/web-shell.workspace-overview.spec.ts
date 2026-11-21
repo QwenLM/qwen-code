@@ -160,7 +160,11 @@ async function gotoSession(
   );
 }
 
-/** Facet names requested for one workspace, in request order. */
+/**
+ * Facet names requested for one workspace, in request order. `hooks` stays
+ * out: the project-hooks approval card probes it once per mount, which is not
+ * sidebar overview traffic and would break the exact facet counts below.
+ */
 function overviewRequests(
   daemon: MockDaemonController,
   workspaceCwd: string,
@@ -171,7 +175,7 @@ function overviewRequests(
       (request) =>
         request.method === 'GET' &&
         request.path.startsWith(prefix) &&
-        /\/(mcp|skills|extensions|channels|memory|hooks)$/.test(request.path),
+        /\/(mcp|skills|extensions|channels|memory)$/.test(request.path),
     )
     .map((request) => request.path.slice(prefix.length));
 }
