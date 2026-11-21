@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   collectRecordableWorkspaceFiles,
+  pathHasSkippedArtifactDirectoryAncestor,
   pathHasSkippedDirectoryComponent,
 } from './workspace-artifact-directory.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
@@ -74,6 +75,29 @@ describe('collectRecordableWorkspaceFiles', () => {
     expect(collected.skippedUnrecordable).toBe(1);
   });
 
+  it('passes the workspace-root-relative path to the recordable predicate', async () => {
+    const root = await workspace();
+    await mkdir(path.join(root, 'nested'), { recursive: true });
+    await writeFile(path.join(root, 'nested', 'keep.txt'), 'ok');
+    await writeFile(path.join(root, 'nested', 'hidden.txt'), 'bad');
+
+    const seen: string[] = [];
+    const collected = await collectRecordableWorkspaceFiles(
+      path.join(root, 'nested'),
+      'nested',
+      root,
+      (workspaceRelativePath) => {
+        seen.push(workspaceRelativePath);
+        return workspaceRelativePath !== 'nested/hidden.txt';
+      },
+    );
+    // The predicate receives the workspace-root-relative form for every
+    // child, so callers can judge the path the panel sees.
+    expect(collected.files).toEqual(['nested/keep.txt']);
+    expect(collected.skippedUnrecordable).toBe(1);
+    expect(seen.sort()).toEqual(['nested/hidden.txt', 'nested/keep.txt']);
+  });
+
   it('does not treat a worktree-prefixed subdirectory as skipped', () => {
     expect(
       pathHasSkippedDirectoryComponent('.qwen/worktrees/my-feature/reports'),
@@ -84,6 +108,32 @@ describe('collectRecordableWorkspaceFiles', () => {
       ),
     ).toBe(true);
     expect(pathHasSkippedDirectoryComponent('.qwen/skills')).toBe(true);
+  });
+
+  it('flags a file under a skip-list ancestor, not a file named like one', () => {
+    // Issue #17453 contract paths (worktree-stripped forms).
+    expect(pathHasSkippedArtifactDirectoryAncestor('.qwen/tmp/shot.png')).toBe(
+      true,
+    );
+    expect(pathHasSkippedArtifactDirectoryAncestor('__pycache__/mod.pyc')).toBe(
+      true,
+    );
+    expect(pathHasSkippedArtifactDirectoryAncestor('dist/bundle.js')).toBe(
+      true,
+    );
+    expect(
+      pathHasSkippedArtifactDirectoryAncestor('node_modules/pkg/index.js'),
+    ).toBe(true);
+    // The file's own name does not count.
+    expect(pathHasSkippedArtifactDirectoryAncestor('dist')).toBe(false);
+    expect(pathHasSkippedArtifactDirectoryAncestor('.qwen')).toBe(false);
+    expect(pathHasSkippedArtifactDirectoryAncestor('notes/.draft.md')).toBe(
+      false,
+    );
+    // A dot directory outside the skip list is not a skipped directory.
+    expect(
+      pathHasSkippedArtifactDirectoryAncestor('.github/workflows/ci.yml'),
+    ).toBe(false);
   });
 
   it('records a regular file named after a skipped directory', async () => {
