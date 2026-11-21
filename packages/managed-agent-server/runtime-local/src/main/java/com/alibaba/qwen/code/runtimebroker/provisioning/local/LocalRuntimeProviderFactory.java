@@ -91,7 +91,7 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
     @Override
     public List<Check> preflight(ManagedAgentSettings settings) {
         var broker = settings.getRuntimeBroker();
-        return List.of(directoryCheck("broker-state", broker.getStateDirectory()),
+        return List.of(stateDirectoryCheck(broker),
                 executableCheck("node", broker.getNodeExecutable()),
                 readableCheck("worker-entry", broker.getWorkerEntry()));
     }
@@ -138,21 +138,35 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                 + " and QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false";
     }
 
-    private static Check directoryCheck(String name, String path) {
+    private static Check stateDirectoryCheck(ManagedAgentSettings.RuntimeBroker broker) {
+        String path = broker.getStateDirectory();
         if (StringUtils.isBlank(path)) {
-            return new Check(name, Status.FAIL, "not configured",
+            return new Check("broker-state", Status.FAIL, "not configured",
                     "set the directory");
         }
         Path directory = Path.of(path);
-        if (!Files.isDirectory(directory)) {
-            return new Check(name, Status.FAIL,
-                    path + " is not a directory", "create it");
+        if (Files.isDirectory(directory)) {
+            return Files.isWritable(directory)
+                    ? new Check("broker-state", Status.PASS, path, null)
+                    : new Check("broker-state", Status.FAIL, path + " is not writable",
+                            "grant write access to the service account");
         }
-        if (!Files.isWritable(directory)) {
-            return new Check(name, Status.FAIL, path + " is not writable",
-                    "grant write access to the service account");
+        if (!broker.isDurableLocalProcess()) {
+            // The ephemeral spawn creates the directory, so an idle broker is
+            // healthy with it absent; only an ancestor that prevents creation
+            // is a hard failure.
+            Path ancestor = directory.toAbsolutePath();
+            while (ancestor != null && !Files.exists(ancestor)) {
+                ancestor = ancestor.getParent();
+            }
+            return ancestor != null && Files.isDirectory(ancestor) && Files.isWritable(ancestor)
+                    ? new Check("broker-state", Status.PASS,
+                            path + " (created on the first Runtime spawn)", null)
+                    : new Check("broker-state", Status.FAIL, path + " cannot be created",
+                            "make its nearest existing parent a writable directory");
         }
-        return new Check(name, Status.PASS, path, null);
+        return new Check("broker-state", Status.FAIL,
+                path + " is not a directory", "create it");
     }
 
     private static Check executableCheck(String name, String path) {

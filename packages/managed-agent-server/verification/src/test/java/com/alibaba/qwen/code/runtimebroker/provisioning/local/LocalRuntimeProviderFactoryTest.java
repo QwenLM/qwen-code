@@ -2,9 +2,11 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.local;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
+import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -41,6 +43,37 @@ class LocalRuntimeProviderFactoryTest {
         assertThatThrownBy(() -> new LocalRuntimeProviderFactory().validate(settings))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("Extension cache must be absolute");
         assertThat(temporary.resolve("not-created")).doesNotExist();
+    }
+
+    @Test
+    void preflightAcceptsAnAbsentStateDirectoryOnlyForTheEphemeralRuntime() {
+        var factory = new LocalRuntimeProviderFactory();
+        var ephemeral = settings();
+        ephemeral.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThat(factory.preflight(ephemeral))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> assertThat(check.status())
+                        .isEqualTo(RuntimeProviderFactory.Status.PASS));
+        assertThat(factory.preflight(settings()))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> assertThat(check.status())
+                        .isEqualTo(RuntimeProviderFactory.Status.FAIL));
+        assertThat(temporary.resolve("not-created")).doesNotExist();
+    }
+
+    @Test
+    void preflightRejectsAnEphemeralStateDirectoryBlockedByAFile() throws Exception {
+        Path blocker = Files.createFile(temporary.resolve("blocker"));
+        var ephemeral = settings();
+        ephemeral.getRuntimeBroker().setDurableLocalProcess(false);
+        ephemeral.getRuntimeBroker().setStateDirectory(blocker.resolve("state").toString());
+        assertThat(new LocalRuntimeProviderFactory().preflight(ephemeral))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> assertThat(check.status())
+                        .isEqualTo(RuntimeProviderFactory.Status.FAIL));
     }
 
     private ManagedAgentProperties settings() {
