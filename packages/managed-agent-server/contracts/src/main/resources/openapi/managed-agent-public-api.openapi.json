@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.121.0",
+    "version": "1.124.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
@@ -3517,6 +3517,92 @@
         }
       }
     },
+    "/api/agent/web-shell/v1/workspaces/artifacts/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "queryWebShellWorkspaceArtifacts",
+        "x-qwen-implementation-status": "implemented",
+        "x-qwen-admission-rule": "workspace_artifact",
+        "summary": "List a Workspace's artifacts across its Sessions",
+        "description": "Authorized artifact metadata page across the Sessions bound to the Workspace, newest projection first by the global artifact row id. Admission precedes validation: a trusted actor (401 actor_required without one) holding a READER grant on the Workspace (404 workspace_not_found below it, including unknown Workspaces); deployment artifact reads off answer 404 artifact_not_found. Rows exclude CONTROL, DELETED and DELETING Sessions, other actors' owner-only Sessions, legacy unbound Sessions, and publications whose source Workspace differs from the Session's current binding; archived Sessions stay visible. The opaque cursor binds tenant, actor and Workspace and freezes the first page's row-id watermark: rows projected later do not shift or duplicate later pages. Unavailable artifacts remain listed with availability=unavailable and can_read_content=false; a lost Workspace grant re-checked on unavailable rows answers 404 workspace_not_found. Byte reads use the unchanged Session-scoped content route. No Session load, unarchive, or primary fallback.",
+        "responses": {
+          "200": {
+            "description": "Authorized workspace artifact metadata page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellArtifactPage"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Trusted actor required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Unknown or unreadable Workspace, or artifact reads disabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "description": "Resource temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellWorkspaceArtifactQueryRequest"
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/agents/sessions/{sessionId}/items/{itemId}/tool-result": {
       "parameters": [
         {
@@ -5134,7 +5220,7 @@
         "tags": ["Public Sessions"],
         "operationId": "recheckSessionRecovery",
         "x-qwen-implementation-status": "implemented",
-        "description": "Recheck only the latest original Turn under the existing cancellation/cleanup authorization. Repeated requests coalesce and may only advance existing cancellation/reconciliation or retry settled cleanup; they never resubmit input, replay effects, reset retry budgets or change claim generations. A stale Turn returns recovery_target_changed and ineligible work returns recovery_recheck_unavailable. 202 means requested, not cancelled or ready. For a terminal Java Turn whose Harness attachment is cold or whose status cannot be read, this POST may attempt a narrow cleanup-only load. It must verify the original prompt has a durable native terminal, covered continuation checkpoint or lawful initial state, and no pending input before retrying only its existing cleanup. It never resumes models, tools, MCP or Hooks, clears a permanent journal block, or treats a historical SQL failure as native settlement.",
+        "description": "Recheck only the latest original Turn under the existing cancellation/cleanup authorization. Repeated requests coalesce and may only advance existing cancellation/reconciliation or retry settled cleanup; they never resubmit input, replay effects, reset retry budgets or change claim generations. A stale Turn returns recovery_target_changed and ineligible work returns recovery_recheck_unavailable. A cleanup recheck that no Hosted Harness can serve returns 503 recovery_runtime_unavailable; a typed terminal decline returns 409 hosted_turn_recovery_declined, and retrying cannot change a decline. 202 means requested, not cancelled or ready. For a terminal Java Turn whose Harness attachment is cold or whose status cannot be read, this POST may attempt a narrow cleanup-only load. It must verify the original prompt has a durable native terminal, covered continuation checkpoint or lawful initial state, and no pending input before retrying only its existing cleanup. It never resumes models, tools, MCP or Hooks, clears a permanent journal block, or treats a historical SQL failure as native settlement.",
         "responses": {
           "202": {
             "description": "Current recovery evidence; recheck admission is not settlement.",
@@ -5236,7 +5322,7 @@
         "tags": ["WebShell"],
         "operationId": "recheckWebShellSessionRecovery",
         "x-qwen-implementation-status": "implemented",
-        "description": "Recheck only the latest original Turn under the existing cancellation/cleanup authorization. Repeated requests coalesce and may only advance existing cancellation/reconciliation or retry settled cleanup; they never resubmit input, replay effects, reset retry budgets or change claim generations. A stale Turn returns recovery_target_changed and ineligible work returns recovery_recheck_unavailable. 202 means requested, not cancelled or ready. For a terminal Java Turn whose Harness attachment is cold or whose status cannot be read, this POST may attempt a narrow cleanup-only load. It must verify the original prompt has a durable native terminal, covered continuation checkpoint or lawful initial state, and no pending input before retrying only its existing cleanup. It never resumes models, tools, MCP or Hooks, clears a permanent journal block, or treats a historical SQL failure as native settlement.",
+        "description": "Recheck only the latest original Turn under the existing cancellation/cleanup authorization. Repeated requests coalesce and may only advance existing cancellation/reconciliation or retry settled cleanup; they never resubmit input, replay effects, reset retry budgets or change claim generations. A stale Turn returns recovery_target_changed and ineligible work returns recovery_recheck_unavailable. A cleanup recheck that no Hosted Harness can serve returns 503 recovery_runtime_unavailable; a typed terminal decline returns 409 hosted_turn_recovery_declined, and retrying cannot change a decline. 202 means requested, not cancelled or ready. For a terminal Java Turn whose Harness attachment is cold or whose status cannot be read, this POST may attempt a narrow cleanup-only load. It must verify the original prompt has a durable native terminal, covered continuation checkpoint or lawful initial state, and no pending input before retrying only its existing cleanup. It never resumes models, tools, MCP or Hooks, clears a permanent journal block, or treats a historical SQL failure as native settlement.",
         "responses": {
           "202": {
             "description": "Current recovery evidence; recheck admission is not settlement.",
@@ -12417,7 +12503,7 @@
           },
           "inputAttachments": {
             "type": "boolean",
-            "description": "Optional deployment capability; missing means false."
+            "description": "True when the Harness supports input-attachments/1 and the visible Session admits attachment input: a Workspace-bound Session requires the fresh Workspace Turn admission (files opt-in, current OPERATOR access and the original binding's frozen execution facts), while an unbound Session requires ACTIVE status and must not be a public child. An active Turn does not itself make this false; the composer separately disables sending while a Turn runs. Missing means false."
           },
           "rename": {
             "type": "boolean",
@@ -13135,6 +13221,10 @@
               "localDirectoryImport": {
                 "type": "boolean",
                 "description": "Trusted single-user local deployment can browse and import existing host directories without a pre-registered Workspace. Missing or false means unsupported."
+              },
+              "workspaceArtifactLibrary": {
+                "type": "boolean",
+                "description": "Supports the workspace-wide artifact query across bound Sessions. Missing or false means unsupported; current actor and Workspace read-grant checks still apply."
               }
             },
             "x-qwen-implementation-status": "partial"
@@ -16111,6 +16201,27 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128
+          },
+          "cursor": {
+            "type": ["string", "null"],
+            "maxLength": 2048
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 20
+          }
+        }
+      },
+      "WebShellWorkspaceArtifactQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["workspaceId"],
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "minLength": 1
           },
           "cursor": {
             "type": ["string", "null"],
@@ -19609,6 +19720,19 @@
             "maxItems": 32,
             "items": {
               "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+            }
+          },
+          "degradedComponents": {
+            "type": "object",
+            "maxProperties": 32,
+            "additionalProperties": {
+              "type": "array",
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": ["mcp", "hooks"]
+              }
             }
           },
           "operation": {

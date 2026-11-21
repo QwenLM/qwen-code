@@ -2291,6 +2291,84 @@ export interface DaemonSessionLiveStateBatchResult {
   >;
 }
 
+/** One session whose newest prompt did not settle. */
+export interface DaemonRestartRecoveryItem {
+  sessionId: string;
+  /** ISO timestamp of the newest prompt-ledger record in the scan tail. */
+  lastActivityAt: string;
+  /** `in_flight`, a terminal code such as `daemon_shutdown`, or `interrupted`. */
+  interruption: string;
+}
+
+export interface DaemonRestartRecoveryBatchRequest {
+  workspaces: string[];
+  /**
+   * Scan window in milliseconds. The daemon defaults to 24 hours and caps at
+   * 30 days.
+   */
+  sinceMs?: number;
+}
+
+export interface DaemonWorkspaceRestartRecoverySnapshot {
+  workspace: string;
+  workspaceId: string;
+  cwd: string;
+  v: 1;
+  items: DaemonRestartRecoveryItem[];
+  truncated: boolean;
+}
+
+export interface DaemonWorkspaceRestartRecoveryError {
+  workspace: string;
+  workspaceId?: string;
+  cwd?: string;
+  error: { code: string; message: string; status: number };
+}
+
+export interface DaemonRestartRecoveryBatchResult {
+  workspaces: Array<
+    DaemonWorkspaceRestartRecoverySnapshot | DaemonWorkspaceRestartRecoveryError
+  >;
+}
+
+export interface DaemonRestartRecoverySessionRef {
+  workspace: string;
+  sessionId: string;
+}
+
+export interface DaemonRestartRecoveryContinueRequest {
+  sessions: DaemonRestartRecoverySessionRef[];
+  /** Required to continue an `interrupted_turn` in a batch. */
+  confirmToolTurn?: boolean;
+}
+
+export type DaemonRestartRecoveryContinueStatus =
+  | 'accepted'
+  | 'not_continuable'
+  | 'confirmation_required'
+  | 'rejected'
+  | 'error';
+
+export interface DaemonRestartRecoveryContinueResult {
+  workspace: string;
+  sessionId: string;
+  status: DaemonRestartRecoveryContinueStatus;
+  kind?:
+    | 'clean'
+    | 'interrupted_prompt'
+    | 'interrupted_turn'
+    | 'degraded_history';
+  interruption?: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  code?: string;
+  promptId?: string;
+  lastEventId?: number;
+  eventEpoch?: string;
+}
+
+export interface DaemonRestartRecoveryContinueBatchResult {
+  results: DaemonRestartRecoveryContinueResult[];
+}
+
 export interface DaemonWorkspaceSessionInfo {
   active: number;
   archived: number;
@@ -3826,6 +3904,12 @@ export interface DaemonWorkflowPhaseVisit {
   endedAt?: number;
 }
 
+/** A phase the script declares in `meta.phases`, reached or not. */
+export interface DaemonWorkflowPlannedPhase {
+  title: string;
+  detail?: string;
+}
+
 export type DaemonWorkflowDispatchStatus =
   | 'queued'
   | 'running'
@@ -3986,6 +4070,13 @@ export interface DaemonSessionWorkflowTaskStatus {
   isBackgrounded: boolean;
   currentPhase: string | null;
   phaseVisits: DaemonWorkflowPhaseVisit[];
+  /**
+   * The phases the script declares in `meta.phases`, in order. Present from
+   * the start of the run, so a client can show phases the script has not
+   * reached yet; absent when the script declares none, and on daemons that
+   * predate the field.
+   */
+  plannedPhases?: DaemonWorkflowPlannedPhase[];
   dispatches: DaemonWorkflowDispatchStatusEntry[];
   agentsDispatched: number;
   agentsCompleted: number;
@@ -5064,6 +5155,28 @@ export interface DaemonSessionRecapResult {
   sessionId: string;
   recap: string | null;
 }
+
+/**
+ * A transcript row a client draws, for the session's Mods to rewrite:
+ * `component` names the site, and `props` are the ones the row draws with
+ * (for `AssistantMessage`: `{ text, isFirstOfReply }`).
+ */
+export interface DaemonModRow {
+  component: string;
+  props: Record<string, unknown>;
+}
+
+/**
+ * A session's answer for one row. `unhooked`: no hook hears the site in this
+ * session, so ask it no more. `unanswered`: the hooks did not answer in time
+ * or the session moved on; ask again later. `answered`: draw `props` where
+ * the hooks rewrote the row, and the row's own props otherwise.
+ * Pre-flight `caps.features.session_mod_rows` before asking.
+ */
+export type DaemonModRowAnswer =
+  | { status: 'unhooked' }
+  | { status: 'unanswered' }
+  | { status: 'answered'; props?: Record<string, unknown> };
 
 export type DaemonSessionBtwStreamEvent =
   | { v: 1; type: 'answer' | 'done'; requestId: string; answer: string }

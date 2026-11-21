@@ -207,6 +207,11 @@ export function OpenTuiStatsDialog(props: {
           return (
             <box key={t.name} marginLeft={t.name === 'session' ? 0 : 1}>
               <text
+                id={
+                  active
+                    ? 'screen-reader-selected-tab'
+                    : 'screen-reader-unselected-tab'
+                }
                 fg={active ? '#1e1e2e' : C.text}
                 bg={active ? C.accent : undefined}
               >

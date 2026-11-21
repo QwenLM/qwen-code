@@ -10551,8 +10551,10 @@ describe('AppContainer State Management', () => {
 
       // Seed 4, not the record count 3: the next pre-increment mint is
       // then `${sessionId}########4`, above every id the transcript wears.
+      // The visible Prompts statistic seeds from the user-turn count (3), not
+      // the mint seed (S1).
       await vi.waitFor(() => {
-        expect(seedPromptCount).toHaveBeenCalledWith(4);
+        expect(seedPromptCount).toHaveBeenCalledWith(4, 3);
       });
     });
 
