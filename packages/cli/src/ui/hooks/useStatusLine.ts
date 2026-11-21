@@ -20,8 +20,10 @@ import {
   DEFAULT_STATUS_LINE_PRESET_CONFIG,
   normalizeStatusLinePresetConfig,
   type StatusLinePresetConfig,
+  type StatusLinePresetData,
   type StatusLinePresetItemId,
 } from '../statusLinePresets.js';
+import { theme } from '../semantic-colors.js';
 
 /**
  * Structured JSON input passed to the status line command via stdin.
@@ -240,6 +242,7 @@ export type StatusLineState = Pick<
   | 'activeWorktree'
   | 'streamingState'
   | 'statusLineConfigOverride'
+  | 'statusLinePreviewConfig'
   | 'statusLineSettingsVersion'
 >;
 
@@ -270,11 +273,12 @@ export function useStatusLineState(
   const settingsStatusLineConfig = getStatusLineConfig(settings);
   const statusLineConfigOverride = uiState.statusLineConfigOverride;
   const statusLineConfig =
-    statusLineConfigOverride &&
+    uiState.statusLinePreviewConfig ??
+    (statusLineConfigOverride &&
     settingsStatusLineConfig &&
     statusLineConfigOverride.type === settingsStatusLineConfig.type
       ? statusLineConfigOverride
-      : settingsStatusLineConfig;
+      : settingsStatusLineConfig);
   const statusLineCommand =
     !config.getShellExecutionSandbox?.() && statusLineConfig?.type === 'command'
       ? statusLineConfig.command
@@ -292,6 +296,7 @@ export function useStatusLineState(
       : undefined;
 
   const [output, setOutput] = useState<string[]>([]);
+  const [presetData, setPresetData] = useState<StatusLinePresetData>();
   const [pullRequestNumber, setPullRequestNumber] = useState<
     string | undefined
   >(undefined);
@@ -501,7 +506,7 @@ export function useStatusLineState(
         totalLinesRemoved: m.files.totalLinesRemoved,
         streamingState: ui.streamingState,
       });
-      setOutput(buildStatusLinePresetLines(preset, data));
+      setPresetData(data);
       return;
     }
 
@@ -797,8 +802,14 @@ export function useStatusLineState(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const lines = statusLinePreset
+    ? presetData
+      ? buildStatusLinePresetLines(statusLinePreset, presetData, theme)
+      : []
+    : output;
+
   return {
-    lines: output,
+    lines,
     commandSourced: statusLineConfig?.type === 'command',
     useThemeColors: statusLinePreset?.useThemeColors === true,
     respectUserColors:
@@ -809,7 +820,7 @@ export function useStatusLineState(
       uiState.sessionStats.lastPromptTokenCount >
         (config.getContentGeneratorConfig()?.contextWindowSize ?? Infinity),
       keepAutomaticContextIndicator ||
-        output.some(
+        lines.some(
           (line) =>
             wrapAnsi(line, Math.max(1, availableWidth ?? terminalWidth - 4), {
               trim: false,

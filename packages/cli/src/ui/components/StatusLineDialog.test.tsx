@@ -12,9 +12,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { LoadedSettings, SettingScope } from '../../config/settings.js';
-import type { UIState } from '../contexts/UIStateContext.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
-import { MessageType, StreamingState } from '../types.js';
+import { MessageType } from '../types.js';
 import { STATUS_LINE_PRESET_ITEMS } from '../statusLinePresets.js';
 import { StatusLineDialog } from './StatusLineDialog.js';
 
@@ -57,20 +56,6 @@ const config = {
   }),
 } as Config;
 
-const uiState = {
-  currentModel: 'qwen3-code-plus',
-  branchName: 'feature/pr-4087-statusline',
-  streamingState: StreamingState.Idle,
-  sessionStats: {
-    sessionId: 'session-123',
-    lastPromptTokenCount: 250,
-    metrics: {
-      models: {},
-      files: { totalLinesAdded: 12, totalLinesRemoved: 3 },
-    },
-  },
-} as UIState;
-
 type DialogProps = ComponentProps<typeof StatusLineDialog>;
 
 function dialog(overrides: Partial<DialogProps> = {}) {
@@ -79,7 +64,6 @@ function dialog(overrides: Partial<DialogProps> = {}) {
       <StatusLineDialog
         settings={createSettings()}
         config={config}
-        uiState={uiState}
         addItem={vi.fn()}
         onClose={vi.fn()}
         availableTerminalHeight={18}
@@ -100,7 +84,7 @@ function renderDialog(overrides: Partial<DialogProps> = {}, columns?: number) {
 }
 
 describe('StatusLineDialog', () => {
-  it('renders a searchable preset picker with preview', () => {
+  it('renders a searchable preset picker without an internal preview', () => {
     const { lastFrame } = renderDialog({ availableTerminalHeight: 25 });
 
     expect(lastFrame()).toContain('Configure Status Line');
@@ -126,8 +110,67 @@ describe('StatusLineDialog', () => {
     expect(frame.indexOf('context-remaining')).toBeLessThan(
       frame.indexOf('current-dir'),
     );
-    expect(lastFrame()).toContain('Preview');
-    expect(lastFrame()).toContain('Qwen3 Code Plus high');
+    expect(lastFrame()).not.toContain('Preview');
+    expect(lastFrame()).not.toContain('Qwen3 Code Plus high');
+  });
+
+  it('publishes draft changes without saving and clears the preview on unmount', async () => {
+    const settings = createSettings();
+    const setValue = vi.spyOn(settings, 'setValue');
+    const onPreviewChange = vi.fn();
+    const onClose = vi.fn();
+    const { stdin, unmount } = renderDialog({
+      settings,
+      onPreviewChange,
+      onClose,
+    });
+    await vi.waitFor(() =>
+      expect(onPreviewChange).toHaveBeenCalledWith({
+        type: 'preset',
+        useThemeColors: true,
+        items: [
+          'project-name',
+          'git-branch',
+          'model-with-reasoning',
+          'context-used',
+        ],
+      }),
+    );
+    act(() => stdin.write(' '));
+    await vi.waitFor(() =>
+      expect(onPreviewChange).toHaveBeenLastCalledWith({
+        type: 'preset',
+        useThemeColors: false,
+        items: [
+          'project-name',
+          'git-branch',
+          'model-with-reasoning',
+          'context-used',
+        ],
+      }),
+    );
+    act(() => stdin.write('\u001b'));
+    await vi.waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(setValue).not.toHaveBeenCalled();
+    unmount();
+    expect(onPreviewChange).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it('keeps compact-picker search usable within twelve rows', async () => {
+    const { lastFrame, stdin, unmount } = renderDialog(
+      {
+        availableTerminalHeight: 12,
+      },
+      80,
+    );
+    act(() => stdin.write('context'));
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Type to search');
+      expect(lastFrame()).toContain('context-remaining');
+      expect(lastFrame()).not.toContain('model-only');
+    });
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(12);
+    unmount();
   });
 
   it('persists selected presets on enter', async () => {
@@ -189,7 +232,8 @@ describe('StatusLineDialog', () => {
 
   it('keeps preset priority order after an item is toggled off and on', async () => {
     const settings = createSettings();
-    const { stdin, lastFrame } = renderDialog({ settings });
+    const onPreviewChange = vi.fn();
+    const { stdin } = renderDialog({ settings, onPreviewChange });
 
     const press = async (input: string) => {
       act(() => {
@@ -204,9 +248,16 @@ describe('StatusLineDialog', () => {
     await press(' ');
     await press(' ');
 
-    expect(lastFrame()).toContain(
-      '\u279c project · git:(feature/pr-4087-statusline) · Qwen3 Code Plus high · 1.0k Context 25% used',
-    );
+    expect(onPreviewChange).toHaveBeenLastCalledWith({
+      type: 'preset',
+      useThemeColors: true,
+      items: [
+        'project-name',
+        'git-branch',
+        'model-with-reasoning',
+        'context-used',
+      ],
+    });
 
     await press('\r');
 
@@ -346,6 +397,9 @@ describe('StatusLineDialog', () => {
   it.each([
     [16, true],
     [15, false],
+    [14, false],
+    [13, false],
+    [12, false],
   ] as const)(
     'uses the expected layout at the %i-row boundary',
     (availableTerminalHeight, hasFullLayout) => {
@@ -356,6 +410,12 @@ describe('StatusLineDialog', () => {
         availableTerminalHeight,
       );
       expect(frame.includes('Configure Status Line')).toBe(hasFullLayout);
+      expect(frame).toContain('project-name');
+      expect(frame).toContain('git-branch');
+      if (!hasFullLayout) {
+        expect(frame).toContain('model-with-reasoning');
+        expect(frame).toContain('model-only');
+      }
     },
   );
 
@@ -393,7 +453,7 @@ describe('StatusLineDialog', () => {
     expect(lastFrame()).toContain('session-id');
     expect(lastFrame()).not.toContain('project-name');
 
-    rerender(renderAt(15));
+    rerender(renderAt(6));
     expect(lastFrame()).not.toContain('Type to search');
     expect(lastFrame()).toContain('project-name');
 
@@ -404,7 +464,7 @@ describe('StatusLineDialog', () => {
   });
 
   it('closes on escape in the compact layout', async () => {
-    // Below the full-layout threshold, query input and backspace are gated
+    // Below the search-layout threshold, query input and backspace are gated
     // off and MultiSelect has no escape handling of its own — the
     // fall-through to onClose() is the dialog's only dismissal path.
     const onClose = vi.fn();
@@ -434,22 +494,20 @@ describe('StatusLineDialog', () => {
     }
   });
 
-  it('truncates the empty-preview fallback at narrow widths', () => {
-    // With nothing selected the preview renders a 48-cell fallback text;
-    // at 50 columns (46-cell content area) it must truncate, not wrap.
+  it('keeps the empty picker within its budget without an internal preview', () => {
     const settings = createSettings();
     settings.user.settings.ui = {
       statusLine: { type: 'preset', useThemeColors: false, items: [] },
     };
     settings.recomputeMerged();
-    const narrowUiState = { ...uiState, mainAreaWidth: 50 };
     const { lastFrame, unmount } = renderDialog(
-      { settings, uiState: narrowUiState, availableTerminalHeight: 20 },
+      { settings, availableTerminalHeight: 20 },
       50,
     );
     try {
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('Select at least one item');
+      expect(frame).not.toContain('Select at least one item');
+      expect(frame).not.toContain('Preview');
       expect(frame.split('\n').length).toBeLessThanOrEqual(20);
     } finally {
       unmount();

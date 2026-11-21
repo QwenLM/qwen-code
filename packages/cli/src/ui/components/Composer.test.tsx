@@ -232,6 +232,18 @@ const renderComposer = (
 
 describe('Composer', () => {
   describe('Footer Display', () => {
+    it('keeps input and footer visible but input unfocused for the status line picker', () => {
+      const { lastFrame } = renderComposer(
+        createMockUIState({
+          isInputActive: false,
+          isStatusLineDialogOpen: true,
+          isConfigInitialized: true,
+        }),
+      );
+      expect(lastFrame()).toContain('InputPrompt');
+      expect(lastFrame()).toContain('Footer');
+      expect(vi.mocked(InputPrompt).mock.calls.at(-1)?.[0].focus).toBe(false);
+    });
     it('renders Footer by default', () => {
       const uiState = createMockUIState();
 

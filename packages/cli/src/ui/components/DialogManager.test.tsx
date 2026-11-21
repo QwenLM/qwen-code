@@ -4,16 +4,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config, OutputStyleDefinition } from '@qwen-code/qwen-code-core';
 import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core';
 import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { DialogManager } from './DialogManager.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
+import { STATUS_LINE_COMPOSER_ROWS } from '../status-line-model.js';
+import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 import {
   UIActionsContext,
   type UIActions,
 } from '../contexts/UIActionsContext.js';
+
+const statusLineDialogProps = vi.hoisted(() => vi.fn());
+vi.mock('./StatusLineDialog.js', () => ({
+  StatusLineDialog: (props: unknown) => {
+    statusLineDialogProps(props);
+    return null;
+  },
+}));
 
 const CUSTOM_STYLE: OutputStyleDefinition = {
   name: 'Reviewer',
@@ -51,6 +61,45 @@ const renderDialogManager = (
   renderWithProviders(dialogTree(uiState), { config: config as Config });
 
 describe('DialogManager', () => {
+  beforeEach(() => statusLineDialogProps.mockClear());
+  it.each([true, false])(
+    'reserves composer and footer rows for the status line picker (constrained: %s)',
+    (constrainHeight) => {
+      const terminalHeight = 25;
+      const staticExtraHeight = 3;
+      renderDialogManager(
+        createUIState({
+          constrainHeight,
+          terminalHeight,
+          staticExtraHeight,
+          isStatusLineDialogOpen: true,
+        }),
+        {},
+      );
+      expect(statusLineDialogProps).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          availableTerminalHeight:
+            getDialogMaxHeight(terminalHeight, staticExtraHeight) -
+            (constrainHeight ? STATUS_LINE_COMPOSER_ROWS : 0),
+        }),
+      );
+    },
+  );
+
+  it('keeps at least one picker row when the composer fills the terminal', () => {
+    renderDialogManager(
+      createUIState({
+        terminalHeight: 5,
+        constrainHeight: true,
+        isStatusLineDialogOpen: true,
+      }),
+      {},
+    );
+    expect(statusLineDialogProps).toHaveBeenLastCalledWith(
+      expect.objectContaining({ availableTerminalHeight: 1 }),
+    );
+  });
+
   it.each([14, 24, 40])(
     'keeps the full provider menu at %i rows',
     (terminalHeight) => {
