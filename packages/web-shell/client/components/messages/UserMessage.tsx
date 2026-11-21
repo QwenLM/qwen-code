@@ -231,7 +231,9 @@ function AutomaticTriggerMessage({
             {t('userMessage.automatic.title')}
           </span>
           <span
-            className={styles.scheduledTaskName}
+            className={`${styles.scheduledTaskName}${
+              hasDetails ? '' : ` ${styles.automaticEchoSummary}`
+            }`}
             data-web-shell-automatic-trigger-summary
             title={summary}
           >
@@ -421,12 +423,33 @@ export const UserMessage = memo(function UserMessage({
     isAutomaticTriggerSource(source)
       ? source
       : undefined;
-  const expansionGenerationKey = `${source}:${images?.length ?? 0}:${editing}:${content}`;
-  const previousExpansionGeneration = useRef(expansionGenerationKey);
-  const newExpansionGeneration =
-    previousExpansionGeneration.current !== expansionGenerationKey;
-  previousExpansionGeneration.current = expansionGenerationKey;
-  const interactiveDetailsExpanded = newExpansionGeneration ? false : expanded;
+  const expansionGeneration = {
+    source,
+    content,
+    imageCount: images?.length ?? 0,
+    fileCount: files?.length ?? 0,
+    editing,
+  };
+  const [detailsGeneration, setDetailsGeneration] =
+    useState(expansionGeneration);
+  if (
+    detailsGeneration.source !== source ||
+    detailsGeneration.content !== content ||
+    detailsGeneration.imageCount !== expansionGeneration.imageCount ||
+    detailsGeneration.fileCount !== expansionGeneration.fileCount ||
+    detailsGeneration.editing !== editing
+  ) {
+    // React compares this render against committed state, so an abandoned render cannot leak its generation into the current presentation.
+    setDetailsGeneration(expansionGeneration);
+    setExpanded(false);
+  }
+  const interactiveDetailsExpanded =
+    detailsGeneration.source === source &&
+    detailsGeneration.content === content &&
+    detailsGeneration.imageCount === expansionGeneration.imageCount &&
+    detailsGeneration.fileCount === expansionGeneration.fileCount &&
+    detailsGeneration.editing === editing &&
+    expanded;
   const automaticInstructionsExpanded =
     !automaticTriggerSource ||
     (!isDetailFreeAutomaticEcho(content) &&
@@ -531,12 +554,13 @@ export const UserMessage = memo(function UserMessage({
 
   useLayoutEffect(() => {
     setExpanded(false);
-    measureOverflow();
+    if (!automaticTriggerSource) measureOverflow();
     // `editing` is a dep so leaving the editor re-measures the re-shown
     // content: it is `hidden` while editing, which reads as zero height.
   }, [
     content,
     images?.length,
+    files?.length,
     editing,
     automaticTriggerSource,
     measureOverflow,
@@ -544,11 +568,23 @@ export const UserMessage = memo(function UserMessage({
 
   useEffect(() => {
     const el = contentRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
+    if (
+      !el ||
+      automaticTriggerSource ||
+      typeof ResizeObserver === 'undefined'
+    ) {
+      return;
+    }
     const observer = new ResizeObserver(measureOverflow);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [measureOverflow]);
+  }, [
+    content,
+    files?.length,
+    editing,
+    automaticTriggerSource,
+    measureOverflow,
+  ]);
 
   return (
     <div className={styles.chatMessageRow} data-web-shell-user-row>

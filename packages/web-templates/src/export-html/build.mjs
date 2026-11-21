@@ -184,11 +184,10 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
 // measures 2,151,147 bytes of renderer JS on Node 22.22.2, 171 above the
 // previous ceiling. CI's Build unit-test tree (Linux, Node 22.x) measures
 // 2,149,864 bytes. The forbidden-input guard passes. The warning retains a
-// 713-byte margin above CI. The initial automatic-trigger presentation measured
-// 2,151,571 JS bytes; round this ceiling up to 2,152,000. With the final source
-// predicates and host-renderer compatibility closure it measures 2,151,778 JS
-// bytes, leaving 222 bytes above local output and 2,136 bytes above CI.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_152_000;
+// 713-byte margin above CI. Generation-safe presentation and readable short
+// echoes add real document-export work: the final source measures 2,152,156 JS
+// bytes. Round up to 2,152,400, leaving 244 bytes of margin.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_152_400;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

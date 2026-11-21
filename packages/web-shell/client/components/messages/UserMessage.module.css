@@ -231,6 +231,11 @@
   white-space: nowrap;
 }
 
+.automaticEchoSummary {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .sendFailure {
   display: flex;
   align-items: center;

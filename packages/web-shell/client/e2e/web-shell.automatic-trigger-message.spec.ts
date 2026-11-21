@@ -243,6 +243,63 @@ test('preserves an unknown tasks-from source label @smoke', async ({
   ).toHaveText(content);
 });
 
+test('keeps complete runtime echoes readable on a narrow phone @smoke', async ({
+  page,
+}, testInfo) => {
+  const labels = [
+    'Autonomous loop tick',
+    'Loop tick — tasks from project loop.md',
+    'Loop tick — tasks from home loop.md',
+    'Loop tick — loop.md temporarily unavailable',
+  ];
+  await page.setViewportSize({ width: 320, height: 760 });
+  await openFixture(
+    page,
+    String(testInfo.project.use.baseURL),
+    labels.flatMap((label, index) => [
+      sourcedUserTextEvent(
+        label,
+        index % 2 === 0 ? 'cron' : 'loop',
+        index * 3 + 1,
+      ),
+      assistantTextEvent(`Acknowledged ${label}.`, { id: index * 3 + 2 }),
+      turnCompleteEvent(`echo-${index}`, { id: index * 3 + 3 }),
+    ]),
+  );
+  const summaries = page.locator('[data-web-shell-automatic-trigger-summary]');
+  await expect(summaries).toHaveCount(4);
+  expect(await summaries.allTextContents()).toEqual(labels);
+  for (let index = 0; index < labels.length; index += 1) {
+    const summary = summaries.nth(index);
+    expect(
+      await summary.evaluate((element) => getComputedStyle(element).whiteSpace),
+      'wrapped echo text must not be ellipsized',
+    ).toBe('normal');
+    expect(
+      await summary.evaluate((element) => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const textRect = range.getBoundingClientRect();
+        const box = element.getBoundingClientRect();
+        return (
+          textRect.bottom <= box.bottom + 1 &&
+          element.scrollWidth <= element.clientWidth &&
+          document.documentElement.scrollWidth <= window.innerWidth
+        );
+      }),
+    ).toBe(true);
+  }
+  await expect(
+    page.locator('[data-web-shell-automatic-trigger-instructions]'),
+  ).toHaveCount(0);
+  const image = testInfo.outputPath('automatic-echo-mobile-320.png');
+  await page.screenshot({ path: image, animations: 'disabled' });
+  await testInfo.attach('automatic-echo-mobile-320', {
+    path: image,
+    contentType: 'image/png',
+  });
+});
+
 test('canceling automatic-input edit restores the compact card @smoke', async ({
   page,
 }, testInfo) => {

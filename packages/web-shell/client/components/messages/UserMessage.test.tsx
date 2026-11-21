@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, type ReactNode } from 'react';
+import {
+  act,
+  startTransition,
+  StrictMode,
+  Suspense,
+  type ReactNode,
+} from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   createDaemonTranscriptState,
@@ -84,6 +90,20 @@ function findByTitle(container: HTMLElement, title: string): Element | null {
       (element) => element.getAttribute('title') === title,
     ) ?? null
   );
+}
+
+function SuspendingContent({
+  promise,
+  onSuspend,
+}: {
+  promise?: Promise<void>;
+  onSuspend?: () => void;
+}) {
+  if (promise) {
+    onSuspend?.();
+    throw promise;
+  }
+  return null;
 }
 
 describe('UserMessage', () => {
@@ -803,16 +823,16 @@ describe('UserMessage', () => {
         <UserMessage content={content} source={source} />
       </I18nProvider>
     );
-    act(() => root.render(view()));
+    act(() => root.render(<StrictMode>{view()}</StrictMode>));
     const genericToggle = [
       ...container.querySelectorAll<HTMLButtonElement>('button'),
     ].find((button) => button.textContent === 'Show more');
     act(() => genericToggle?.click());
     expect(container.textContent).toContain('Collapse');
-    expect(parse).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledTimes(2);
     parse.mockClear();
 
-    act(() => root.render(view('cron')));
+    act(() => root.render(<StrictMode>{view('cron')}</StrictMode>));
     const automaticToggle = container.querySelector<HTMLButtonElement>(
       '[data-web-shell-automatic-trigger-message] button',
     );
@@ -836,16 +856,24 @@ describe('UserMessage', () => {
         <UserMessage content={content} source="cron" />
       </I18nProvider>
     );
-    act(() => root.render(view('First automatic instruction')));
+    act(() =>
+      root.render(
+        <StrictMode>{view('First automatic instruction')}</StrictMode>,
+      ),
+    );
     const toggle = container.querySelector<HTMLButtonElement>(
       '[data-web-shell-automatic-trigger-message] button',
     );
     expect(toggle).not.toBeNull();
     act(() => toggle?.click());
-    expect(parse).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledTimes(2);
     parse.mockClear();
 
-    act(() => root.render(view('Second automatic instruction')));
+    act(() =>
+      root.render(
+        <StrictMode>{view('Second automatic instruction')}</StrictMode>,
+      ),
+    );
     const nextToggle = container.querySelector<HTMLButtonElement>(
       '[data-web-shell-automatic-trigger-message] button',
     );
@@ -860,6 +888,143 @@ describe('UserMessage', () => {
       ),
     ).toBeNull();
     expect(parse).not.toHaveBeenCalled();
+  });
+
+  it('keeps committed expanded details after an abandoned update', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    let attempted = 0;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = (content: string, promise?: Promise<void>) => (
+      <StrictMode>
+        <I18nProvider language="en">
+          <Suspense fallback={<p>pending-boundary</p>}>
+            <UserMessage content={content} source="cron" />
+            <SuspendingContent
+              promise={promise}
+              onSuspend={() => {
+                attempted += 1;
+              }}
+            />
+          </Suspense>
+        </I18nProvider>
+      </StrictMode>
+    );
+    act(() => root.render(view('alpha')));
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe('alpha');
+    expect(parse).toHaveBeenCalledTimes(2);
+    parse.mockClear();
+
+    try {
+      await act(async () => {
+        startTransition(() => root.render(view('beta', blocked)));
+        await Promise.resolve();
+      });
+      await vi.waitFor(() => {
+        expect(attempted).toBeGreaterThan(0);
+      });
+      act(() => root.render(view('alpha')));
+      const instructions = container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      );
+      expect(instructions?.textContent).toBe('alpha');
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => release());
+    }
+  });
+
+  it('collapses a files attachment update before parsing it again', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const view = (
+      files: { name: string; mimeType: string; text: string }[],
+    ) => (
+      <UserMessage
+        content="Instructions with attachments"
+        source="cron"
+        files={files}
+      />
+    );
+    const attachments = [
+      { name: 'one.txt', mimeType: 'text/plain', text: 'one' },
+    ];
+    act(() => root.render(view(attachments)));
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+    expect(parse).toHaveBeenCalledTimes(1);
+    parse.mockClear();
+
+    act(() =>
+      root.render(
+        view([
+          ...attachments,
+          { name: 'two.txt', mimeType: 'text/plain', text: 'two' },
+        ]),
+      ),
+    );
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      ),
+    ).toBeNull();
+    expect(parse).not.toHaveBeenCalled();
+    act(() => toggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe('Instructions with attachments');
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not measure automatic cards or subscribe ResizeObserver', () => {
+    const height = vi
+      .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
+      .mockReturnValue(500);
+    const observer = vi.fn(() => ({ observe: vi.fn(), disconnect: vi.fn() }));
+    vi.stubGlobal('ResizeObserver', observer);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const view = (source?: string) => (
+      <I18nProvider language="en">
+        <UserMessage content="Long message\nwith details" source={source} />
+      </I18nProvider>
+    );
+    act(() => root.render(view('cron')));
+    expect(height).not.toHaveBeenCalled();
+    expect(observer).not.toHaveBeenCalled();
+
+    act(() => root.render(view(undefined)));
+    expect(height).toHaveBeenCalled();
+    expect(observer).toHaveBeenCalled();
+    const toggle = [
+      ...container.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Show more');
+    expect(toggle).toBeDefined();
   });
 
   it('keeps readonly automatic instructions behind a disclosure', () => {

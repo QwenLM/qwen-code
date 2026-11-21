@@ -12,16 +12,28 @@ const ECHOES = [
 ];
 
 describe('automatic-trigger guards', () => {
-  it('shares the exact source vocabulary', () => {
-    expect(['cron', 'loop'].every(isAutomaticTriggerSource)).toBe(true);
-    expect(
-      [undefined, 'goal_runtime', 'user'].every(isAutomaticTriggerSource),
-    ).toBe(false);
+  it('accepts both scheduled source names', () => {
+    expect(isAutomaticTriggerSource('cron')).toBe(true);
+    expect(isAutomaticTriggerSource('loop')).toBe(true);
   });
+
+  it.each([undefined, 'goal_runtime', 'user'])(
+    'rejects the non-automatic source %s',
+    (source) => {
+      expect(isAutomaticTriggerSource(source)).toBe(false);
+    },
+  );
 
   it.each(ECHOES)('recognizes only the complete runtime echo %s', (content) => {
     expect(isDetailFreeAutomaticEcho(content)).toBe(true);
   });
+
+  it.each(ECHOES.map((echo) => ` \n${echo}\t`))(
+    'recognizes the complete echo with surrounding whitespace %s',
+    (content) => {
+      expect(isDetailFreeAutomaticEcho(content)).toBe(true);
+    },
+  );
 
   it.each([
     ...ECHOES.map((echo) => `${echo}\nFINAL-MARKER`),
