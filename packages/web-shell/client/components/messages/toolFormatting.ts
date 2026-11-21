@@ -371,13 +371,23 @@ export function isMachineToolDescription(
   const name = tool.toolName.toLowerCase();
   if (name === 'read_file' || name === 'readfile' || name === 'read') {
     const suffix = readFileTitleSuffix(tool.args);
-    if (suffix && matches(`${produced.text} ${suffix}`)) return true;
+    const decorate = (path: string) => (suffix ? `${path} ${suffix}` : path);
+    const path = shortenReadFilePath(produced.text);
+    if (matches(decorate(produced.text)) || matches(decorate(path)))
+      return true;
+    // A Windows-relative daemon title keeps its native separators.
+    if (
+      String(tool.args?.file_path ?? '').includes('\\') &&
+      matches(decorate(path.replaceAll('/', '\\')))
+    ) {
+      return true;
+    }
   }
 
-  // Legacy grep titles have no provenance flag. Recognize the daemon's
+  // Legacy search titles have no provenance flag. Recognize the daemon's
   // pattern and filter framing without reimplementing its path formatting.
-  const grepTitle = getDaemonGrepDescription(tool, workspaceCwd);
-  return grepTitle !== null && matches(grepTitle);
+  const searchTitle = getDaemonSearchDescription(tool, workspaceCwd);
+  return searchTitle !== null && matches(searchTitle);
 }
 
 // Match only a decoration supported by the original arguments or by a
@@ -402,14 +412,31 @@ function readFileTitleSuffix(args: ACPToolCall['args']): string {
   return '';
 }
 
-function getDaemonGrepDescription(
+// Mirror core's 80-character ReadFile path budget without importing Node
+// path utilities into the browser. Keep the first and as many trailing
+// segments as fit, or keep exactly 38 characters from each end.
+function shortenReadFilePath(path: string): string {
+  if (path.length <= 80) return path;
+  const first = path.indexOf('/');
+  const prefix = path.slice(0, first) + '/.../';
+  const last = path.indexOf(
+    '/',
+    Math.max(first + 1, path.length + prefix.length - 81),
+  );
+  return first >= 0 && last >= 0
+    ? prefix + path.slice(last + 1)
+    : `${path.slice(0, 38)}...${path.slice(-38)}`;
+}
+
+function getDaemonSearchDescription(
   tool: ACPToolCall,
   workspaceCwd?: string,
 ): string | null {
   const name = tool.toolName.toLowerCase();
-  if (name !== 'grep' && name !== 'grep_search') return null;
+  const grep = name === 'grep' || name === 'grep_search';
   const args = tool.args;
-  const pattern = args?.pattern ?? args?.query;
+  if (!grep && (name !== 'glob' || !args?.path)) return null;
+  const pattern = args?.pattern ?? (grep ? args?.query : undefined);
   if (typeof pattern !== 'string' || !pattern) return null;
 
   const title = getDescriptionFromTitle(tool, workspaceCwd);
@@ -417,7 +444,7 @@ function getDaemonGrepDescription(
 
   const prefix = formatDescriptionPaths(`'${pattern}'`, workspaceCwd);
   const filter =
-    typeof args?.glob === 'string' && args.glob
+    grep && typeof args?.glob === 'string' && args.glob
       ? ' ' + formatDescriptionPaths(`(filter: '${args.glob}')`, workspaceCwd)
       : '';
   // RipGrep can omit an unset path; the JS grep implementation uses ".".
@@ -427,7 +454,7 @@ function getDaemonGrepDescription(
 
   // core's formatDisplayPath renders the path (relative, home-elided or
   // middle-compressed) and the browser cannot reproduce it. The verbatim
-  // pattern and filter framing already exclude prose, so accept any rendering.
+  // pattern/filter and explicit-description guard identify the wire framing.
   const path = title.slice(pathPrefix.length, title.length - filter.length);
   return path ? title : null;
 }

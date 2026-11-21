@@ -428,6 +428,99 @@ describe('tool header description direction', () => {
     },
   );
 
+  it.each([
+    {
+      file: 'مجلد/' + 'directory/'.repeat(8) + 'ملف.ts',
+      title: 'مجلد/.../' + 'directory/'.repeat(6) + 'ملف.ts',
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      file: 'مجلد/' + 'ا'.repeat(90) + '.ts',
+      title: 'مجلد/' + 'ا'.repeat(33) + '...' + 'ا'.repeat(35) + '.ts',
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      file: 'مجلد/' + 'directory/'.repeat(8) + 'ملف.ts',
+      title: 'مجلد/.../unrelated/ملف.ts',
+      dir: 'auto',
+      tag: 'SPAN',
+    },
+  ])(
+    'preserves direction for middle-elided ReadFile title $title',
+    ({ file, title, dir, tag }) => {
+      const description = `${title} (lines 1-50)`;
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'read_file',
+          title: `ReadFile: ${description}`,
+          args: { file_path: `/workspace/${file}`, offset: 0, limit: 50 },
+        }),
+        { workspaceCwd: '/workspace' },
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.textContent).toBe(description);
+      expect(arg?.tagName).toBe(tag);
+      expect(arg?.getAttribute('dir')).toBe(dir);
+    },
+  );
+
+  it.each([
+    { description: "'نمط/*.ts' in مجلد", dir: 'ltr', tag: 'BDI' },
+    { description: 'اعثر على الملفات', dir: 'auto', tag: 'SPAN' },
+    { description: "'other/*.ts' in مجلد", dir: 'auto', tag: 'SPAN' },
+    {
+      description: "'نمط/*.ts' in the text you provided",
+      explicit: "'نمط/*.ts' in the text you provided",
+      dir: 'auto',
+      tag: 'SPAN',
+    },
+  ])(
+    'preserves direction for daemon Glob title $description',
+    ({ description, explicit, dir, tag }) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'glob',
+          title: `Glob: ${description}`,
+          args: {
+            pattern: 'نمط/*.ts',
+            path: './مجلد',
+            ...(explicit ? { description: explicit } : {}),
+          },
+        }),
+        { workspaceCwd: '/workspace' },
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.textContent).toBe(description);
+      expect(arg?.tagName).toBe(tag);
+      expect(arg?.getAttribute('dir')).toBe(dir);
+    },
+  );
+
+  it('isolates a middle-elided Windows ReadFile title without changing it', () => {
+    const file = 'مجلد\\' + 'directory\\'.repeat(8) + 'ملف.ts';
+    const title =
+      'مجلد\\...\\' + 'directory\\'.repeat(6) + 'ملف.ts (lines 1-50)';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'read_file',
+        title: `ReadFile: ${title}`,
+        args: { file_path: `C:\\workspace\\${file}`, offset: 0, limit: 50 },
+      }),
+      { workspaceCwd: 'C:\\workspace' },
+      {},
+      'ar',
+    );
+    expect(
+      container.querySelector('bdi[class*="lineArg"][dir="ltr"]')?.textContent,
+    ).toBe(title);
+  });
+
   it('isolates a replayed ReadFile title using only the exported preview', () => {
     const title = 'مجلد/a.ts (lines 1-50)';
     const container = renderToolLine(
@@ -632,6 +725,27 @@ describe('tool result row direction', () => {
 });
 
 describe('expanded tool text direction', () => {
+  it.each([
+    { toolName: 'ask_user_question', text: 'Answers: {"mode":"safe"}' },
+    { toolName: 'skill', text: 'نطاق المراجعة: src/components' },
+  ])(
+    'renders expanded $toolName output auto-direction',
+    ({ toolName, text }) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName,
+          content: [{ type: 'content', content: { type: 'text', text } }],
+        }),
+        { forceExpanded: true },
+        {},
+        'ar',
+      );
+      const output = container.querySelector('pre[class*="expandedOutput"]');
+      expect(output?.textContent).toBe(text);
+      expect(output?.getAttribute('dir')).toBe('auto');
+    },
+  );
+
   it('renders an over-limit Arabic document auto-direction, like its shorter self', () => {
     const line = 'هذا سطر من مستند عربي.';
     const read = (lines: number) =>

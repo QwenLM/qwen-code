@@ -712,7 +712,11 @@ export function shouldAutoExpand(tool: ACPToolCall): boolean {
 
 function ExpandedAskUserQuestionOutput({ tool }: { tool: ACPToolCall }) {
   const text = extractText(tool) || '';
-  return <pre className={styles.expandedOutput}>{text}</pre>;
+  return (
+    <pre className={styles.expandedOutput} dir="auto">
+      {text}
+    </pre>
+  );
 }
 
 function ExpandedSkillOutput({ tool }: { tool: ACPToolCall }) {
@@ -722,7 +726,11 @@ function ExpandedSkillOutput({ tool }: { tool: ACPToolCall }) {
       ? tool.args.args.trim()
       : (tool.title ?? ''));
 
-  return <pre className={styles.expandedOutput}>{content}</pre>;
+  return (
+    <pre className={styles.expandedOutput} dir="auto">
+      {content}
+    </pre>
+  );
 }
 
 function getFirstToolContentText(tool: ACPToolCall): string {
