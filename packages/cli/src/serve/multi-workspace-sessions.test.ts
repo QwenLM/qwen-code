@@ -2052,6 +2052,37 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('maps a cross-directory checkpoint rewind refusal to 409, not 500', async () => {
+    // The ACP child refuses a file rewind whose timeline holds checkpoints
+    // captured in another working directory as RequestError(-32602) with
+    // data.errorKind='cross_directory_checkpoint'. The bridge rethrows it
+    // verbatim (only session_busy / invalid_rewind_target are reclassified),
+    // so the HTTP layer must map the carried kind itself.
+    const { app } = makeHarness({
+      serveOptions: { token: 'secret' },
+      secondaryRewindImpl: async () => {
+        throw Object.assign(
+          new Error(
+            'Cannot rewind files: the session timeline contains checkpoints captured in a different working directory (/elsewhere)',
+          ),
+          { code: -32602, data: { errorKind: 'cross_directory_checkpoint' } },
+        );
+      },
+    });
+
+    const response = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/rewind')
+      .set('Host', host())
+      .set('Authorization', 'Bearer secret')
+      .send({ promptId: 'cross-directory' });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('cross_directory_checkpoint');
+    expect(response.body.errorKind).toBe('cross_directory_checkpoint');
+    expect(response.body.retryable).toBeUndefined();
+    expect(response.headers['retry-after']).toBeUndefined();
+  });
+
   it('dispatches secondary events, permissions, pending prompts, and close', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness();
 

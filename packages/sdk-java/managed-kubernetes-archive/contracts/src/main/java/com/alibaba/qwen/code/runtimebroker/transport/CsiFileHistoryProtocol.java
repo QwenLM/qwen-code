@@ -115,10 +115,15 @@ public final class CsiFileHistoryProtocol {
         var names = new HashSet<String>();
         var prompts = new HashSet<String>();
         for (JsonNode snapshot : state.path("snapshots")) {
-            closed(snapshot, Set.of("promptId", "timestamp", "trackedFileBackups"));
+            closed(snapshot, snapshot.has("cwd")
+                    ? Set.of("promptId", "timestamp", "trackedFileBackups", "cwd")
+                    : Set.of("promptId", "timestamp", "trackedFileBackups"));
             String prompt = id(snapshot, "promptId");
             require(prompt.length() <= 128 && prompts.add(prompt) && snapshot.path("trackedFileBackups").isObject());
             timestamp(text(snapshot, "timestamp"));
+            if (snapshot.has("cwd")) {
+                posixSnapshotOrigin(text(snapshot, "cwd"));
+            }
             snapshot.path("trackedFileBackups").fields().forEachRemaining(entry -> {
                 path(entry.getKey());
                 paths.add(entry.getKey());
@@ -148,6 +153,15 @@ public final class CsiFileHistoryProtocol {
 
     private static void path(String path) {
         require(!".".equals(path) && WorkspaceRelativePath.normalize(path).equals(path));
+    }
+
+    /** CSI origins use canonical POSIX syntax, regardless of the reader host. */
+    private static void posixSnapshotOrigin(String value) {
+        require(value.startsWith("/") && value.indexOf('\0') < 0 && !value.contains("//")
+                && value.codePoints().noneMatch(c -> c < 32 || c == 127));
+        for (String segment : value.split("/")) {
+            require(!".".equals(segment) && !"..".equals(segment));
+        }
     }
 
     private static void leaf(String value) {

@@ -20,7 +20,12 @@ import {
 } from './transcript-records.js';
 
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
+import type { MAX_SNAPSHOTS } from '../services/file-history-limits.js';
 import { removeFileHistorySnapshots } from './file-history-snapshots.js';
+
+// Also check the raw retained slice; Session separately preflights its actual
+// hydrated local input. Keep utils a runtime leaf and type-check the limit.
+const SESSION_HISTORY_LIMIT: typeof MAX_SNAPSHOTS = 100;
 
 export interface MessageGroup {
   id: string;
@@ -483,7 +488,27 @@ export function deleteTranscriptMessageGroups(
     }
     return parent;
   };
-  const active = prepareTranscriptRecords(records).records;
+  const active = prepareTranscriptRecords(records)
+    .records as readonly ChatRecord[];
+  const activePromptIds = new Map(
+    active.map((record) => [record.uuid, record.promptId]),
+  );
+  // Session reads aggregated records. Raw fragments must not silently expand
+  // the prompt removal set beyond the identities that caller can preflight.
+  if (
+    records.some(
+      (record) =>
+        removed.has(record.uuid) &&
+        typeof record.promptId === 'string' &&
+        record.promptId.length > 0 &&
+        record.promptId !== activePromptIds.get(record.uuid),
+    )
+  ) {
+    throw new MessageGroupDeletionError(
+      'invalid_history',
+      'Cannot safely resolve prompt ownership in conflicting transcript fragments',
+    );
+  }
   let compressionFollows = false;
   for (let index = active.length - 1; index >= 0; index--) {
     const record = active[index] as ChatRecord;
@@ -516,10 +541,24 @@ export function deleteTranscriptMessageGroups(
     for (const snapshot of payload.snapshots)
       fileHistory.set(snapshot.promptId, snapshot);
   }
+  let retainedSnapshots: SerializedFileHistorySnapshot[];
+  try {
+    const snapshots = [...fileHistory.values()];
+    if (snapshots.length > SESSION_HISTORY_LIMIT) {
+      removeFileHistorySnapshots(
+        snapshots.slice(-SESSION_HISTORY_LIMIT),
+        removedPromptIds,
+      );
+    }
+    retainedSnapshots = removeFileHistorySnapshots(snapshots, removedPromptIds);
+  } catch {
+    throw new MessageGroupDeletionError(
+      'invalid_history',
+      'Deleting these message groups would discard file history recovery evidence, change backup version reservations, or lose a checkpoint whose capture directory cannot be proven; refusing to keep file restoration safe',
+    );
+  }
   const survivingSnapshots = new Map(
-    removeFileHistorySnapshots([...fileHistory.values()], removedPromptIds).map(
-      (snapshot) => [snapshot.promptId, snapshot],
-    ),
+    retainedSnapshots.map((snapshot) => [snapshot.promptId, snapshot]),
   );
   const rewritten = records
     .filter((record) => !removed.has(record.uuid))

@@ -4,11 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Config } from '../config/config.js';
+import type { SessionWriterLease } from '../services/session-writer-lease.js';
 import { computeInitialTurnFromHistory } from '../services/session-turn-state.js';
 import type { Content } from '@google/genai';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { SessionFileHistoryAccumulator } from '../services/session-file-history-state.js';
+import {
+  deserializeSnapshots,
+  serializeSnapshot,
+  MAX_SNAPSHOTS,
+  FileHistoryService,
+  type SerializedFileHistorySnapshot,
+} from '../services/fileHistoryService.js';
+import {
+  deletionDropsRequiredEndpoint,
+  removeFileHistorySnapshots,
+} from './file-history-snapshots.js';
 import { CompressionStatus } from '../core/turn.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import { buildApiHistoryFromConversation } from '../services/session-api-history.js';
@@ -18,6 +34,7 @@ import {
   selectActiveSideArtifactRecordUuids,
 } from './transcript-records.js';
 import {
+  MessageGroupDeletionError,
   deleteTranscriptMessageGroups,
   getTranscriptMessageGroups,
   messageGroupsSnapshot,
@@ -73,6 +90,31 @@ function snapshot(id: string, parent: string | null, text: string): ChatRecord {
 }
 
 describe('message group deletion', () => {
+  it.each([
+    ['api-first', 'api-other', true],
+    [undefined, 'api-other', true],
+    ['api-first', undefined, false],
+    ['api-first', 'api-first', false],
+  ] as const)(
+    'cross-checks selected raw fragment prompt identities (%s, %s)',
+    (firstId, laterId, refuses) => {
+      const records = [
+        record('selected', null, 'user', { promptId: firstId }),
+        record('selected', null, 'user', { promptId: laterId }),
+        user('kept', 'selected'),
+      ];
+      const before = JSON.stringify(records);
+      const remove = () =>
+        deleteTranscriptMessageGroups(records, ['selected'], anchor);
+      if (refuses) {
+        expect(remove).toThrow(MessageGroupDeletionError);
+      } else {
+        expect(remove().result.removedApiPromptIds).toEqual(['api-first']);
+      }
+      expect(JSON.stringify(records)).toBe(before);
+    },
+  );
+
   it('deletes nonconsecutive complete turns and repairs only removed edges', () => {
     const records = [
       user('u1', null),
@@ -483,7 +525,17 @@ describe('message group deletion', () => {
       user(id, [null, 'fa', 'fb'][index]!),
       record(`f${id}`, id, 'system', {
         subtype: 'file_history_snapshot',
-        systemPayload: { snapshots: [snapshot(`api-${id}`, index + 1)] },
+        // The surviving latest endpoint already retains the earlier baseline.
+        systemPayload: {
+          snapshots: [
+            {
+              ...snapshot(`api-${id}`, index + 1),
+              ...(id === 'c'
+                ? { diffAfterBackups: snapshot('api-a', 1).trackedFileBackups }
+                : {}),
+            },
+          ],
+        },
       }),
     ]);
     const deleted = deleteTranscriptMessageGroups(
@@ -500,19 +552,1052 @@ describe('message group deletion', () => {
     expect(restored.finish()?.[0]?.diffAfterBackups?.['a.txt']?.version).toBe(
       2,
     );
-    const again = deleteTranscriptMessageGroups(deleted, ['c'], {
-      ...anchor,
-      uuid: 'anchor2',
-    }).records;
-    const restoredAgain = new SessionFileHistoryAccumulator();
-    for (const entry of again) restoredAgain.add(entry);
-    expect(restoredAgain.finish()?.map((entry) => entry.promptId)).toEqual([
-      'api-a',
-    ]);
-    expect(
-      restoredAgain.finish()?.[0]?.diffAfterBackups?.['a.txt']?.version,
-    ).toBe(2);
+    // The second deletion would lose v3 and change next-capture reuse.
+    const before = JSON.stringify(deleted);
+    expect(() =>
+      deleteTranscriptMessageGroups(deleted, ['c'], {
+        ...anchor,
+        uuid: 'anchor2',
+      }),
+    ).toThrow(MessageGroupDeletionError);
+    expect(JSON.stringify(deleted)).toBe(before);
   });
+
+  // R1-3: a legacy survivor (no recorded cwd) whose next checkpoint is
+  // cwd-labeled cannot prove the fold is same-root, so the deletion helper
+  // drops the fold and the survivor silently loses its only diff endpoint —
+  // a later rewind then restores nothing for those files without even a
+  // filesFailed entry. The deletion must be refused before anything is
+  // rewritten instead.
+  it('refuses a deletion that would drop a required recovery endpoint of a legacy survivor', () => {
+    const snapshot = (
+      promptId: string,
+      version: number,
+      cwd?: string,
+    ): SerializedFileHistorySnapshot => ({
+      promptId,
+      timestamp: '2026-10-15T00:00:00Z',
+      trackedFileBackups: {
+        'a.txt': {
+          backupFileName: `a@v${version}`,
+          version,
+          backupTime: '2026-10-15T00:00:00Z',
+        },
+      },
+      ...(cwd === undefined ? {} : { cwd }),
+    });
+    const turn = (
+      id: string,
+      parent: string | null,
+      snap: ReturnType<typeof snapshot>,
+    ) => [
+      user(id, parent),
+      record(`f${id}`, id, 'system', {
+        subtype: 'file_history_snapshot',
+        systemPayload: { snapshots: [snap] },
+      }),
+    ];
+    // Same real root, but only the second turn's checkpoint carries the cwd
+    // label: exactly the upgraded-mixed-history shape.
+    const history = [
+      ...turn('a', null, snapshot('api-a', 1)),
+      ...turn('b', 'fa', snapshot('api-b', 2, '/project')),
+    ];
+
+    let caught: unknown;
+    try {
+      deleteTranscriptMessageGroups(history, ['b'], anchor);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(MessageGroupDeletionError);
+    expect((caught as MessageGroupDeletionError).code).toBe('invalid_history');
+    expect((caught as MessageGroupDeletionError).message).toMatch(
+      /capture directory/,
+    );
+
+    // Contrast: when the survivor itself is labeled with the same root, the
+    // fold keeps the endpoint and the same deletion stays allowed.
+    const labeled = [
+      ...turn('a2', null, snapshot('api-a2', 1, '/project')),
+      ...turn('b2', 'fa2', snapshot('api-b2', 2, '/project')),
+      ...turn('c2', 'fb2', {
+        ...snapshot('api-c2', 2, '/project'),
+        diffAfterBackups: snapshot('api-a2', 1, '/project').trackedFileBackups,
+      }),
+    ];
+    const keptLabeled = deleteTranscriptMessageGroups(
+      labeled,
+      ['b2'],
+      anchor,
+    ).records;
+    const survived = keptLabeled.flatMap((entry) =>
+      entry.subtype === 'file_history_snapshot'
+        ? (entry.systemPayload as { snapshots: unknown[] }).snapshots
+        : [],
+    );
+    expect(survived).toEqual([
+      expect.objectContaining({
+        promptId: 'api-a2',
+        diffAfterBackups: snapshot('api-b2', 2, '/project').trackedFileBackups,
+      }),
+      expect.objectContaining({ promptId: 'api-c2' }),
+    ]);
+  });
+
+  // R15 matrix A: deletion refusal and fold permission are two independent
+  // decisions. `deletionDropsRequiredEndpoint` answers only whether deleting
+  // the endpoint must be refused (a confirmed capture whose fold cannot prove
+  // a shared root); whether the records may fold into the survivor is a
+  // separate same-root question. Failed records cannot execute, but their
+  // version reservations are still protected by shared deletion admission.
+  describe('endpoint deletion vs fold permission matrix (R15)', () => {
+    const failedRecord = (key: string, version = 1) => ({
+      [key]: {
+        backupFileName: null,
+        version,
+        failed: true,
+        backupTime: '2026-11-17T00:00:00Z',
+      },
+    });
+    const confirmedRecord = (key: string, version = 1) => ({
+      [key]: {
+        backupFileName: `f@v${version}`,
+        version,
+        backupTime: '2026-11-17T00:00:00Z',
+      },
+    });
+    const snapshot = (
+      promptId: string,
+      cwd: string | undefined,
+      trackedFileBackups: SerializedFileHistorySnapshot['trackedFileBackups'] = {},
+      diffAfterBackups?: SerializedFileHistorySnapshot['diffAfterBackups'],
+    ): SerializedFileHistorySnapshot => ({
+      promptId,
+      cwd,
+      timestamp: '2026-11-17T00:00:00Z',
+      trackedFileBackups,
+      ...(diffAfterBackups ? { diffAfterBackups } : {}),
+    });
+    const history = (
+      survivor: SerializedFileHistorySnapshot,
+      deleted: SerializedFileHistorySnapshot,
+    ) => [
+      user('a', null),
+      record('fa', 'a', 'system', {
+        subtype: 'file_history_snapshot',
+        systemPayload: { snapshots: [survivor] },
+      }),
+      user('b', 'fa'),
+      record('fb', 'b', 'system', {
+        subtype: 'file_history_snapshot',
+        systemPayload: { snapshots: [deleted] },
+      }),
+    ];
+    const survivingSnapshots = (records: ChatRecord[]) =>
+      records.flatMap((entry) =>
+        entry.subtype === 'file_history_snapshot'
+          ? (
+              entry.systemPayload as {
+                snapshots: SerializedFileHistorySnapshot[];
+              }
+            ).snapshots
+          : [],
+      );
+    /** Deletes turn b and returns the persisted survivor snapshots. */
+    const deleteLastTurn = (
+      survivor: SerializedFileHistorySnapshot,
+      deleted: SerializedFileHistorySnapshot,
+    ) =>
+      deleteTranscriptMessageGroups(history(survivor, deleted), ['b'], anchor)
+        .records;
+    /** The survivor kept its captured state and gained no diff endpoint. */
+    const noFold = (records: ChatRecord[]) => {
+      const [kept] = survivingSnapshots(records);
+      expect(kept).not.toHaveProperty('diffAfterBackups');
+      expect(kept.trackedFileBackups).toEqual({});
+    };
+    /** The survivor folded the deleted endpoint's records verbatim. */
+    const folded = (
+      records: ChatRecord[],
+      expected: SerializedFileHistorySnapshot['trackedFileBackups'],
+    ) => {
+      const [kept] = survivingSnapshots(records);
+      expect(kept.diffAfterBackups).toEqual(expected);
+    };
+    const refused = (
+      survivor: SerializedFileHistorySnapshot,
+      deleted: SerializedFileHistorySnapshot,
+    ) => {
+      let caught: unknown;
+      try {
+        deleteLastTurn(survivor, deleted);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(MessageGroupDeletionError);
+      expect((caught as MessageGroupDeletionError).code).toBe(
+        'invalid_history',
+      );
+    };
+
+    // A1: nothing captured at all — deletion succeeds, nothing to graft.
+    it('A1 empty cross-root endpoint deletes without grafting', () => {
+      noFold(deleteLastTurn(snapshot('api-a', '/A'), snapshot('api-b', '/B')));
+    });
+
+    // A2: same-root failed markers keep their diagnostic value.
+    it('A2 same-root failed-only endpoint folds its failure markers', () => {
+      folded(
+        deleteLastTurn(
+          snapshot('api-a', '/A'),
+          snapshot('api-b', '/A', failedRecord('d.txt')),
+        ),
+        failedRecord('d.txt'),
+      );
+    });
+
+    // A3: do not graft a foreign failure into a local identity, or discard
+    // its reservation merely because it carries no executable baseline.
+    it('A3 foreign failed-only reservation loss refuses', () => {
+      refused(
+        snapshot('api-a', '/A'),
+        snapshot('api-b', '/B', failedRecord('d.txt')),
+      );
+    });
+
+    // A4: missing provenance must not be silently changed into a label.
+    it('A4 unlabeled failed-only relabelling refuses', () => {
+      refused(
+        snapshot('api-a', '/A'),
+        snapshot('api-b', undefined, failedRecord('d.txt')),
+      );
+    });
+
+    // A5: an unlabeled survivor cannot prove a shared root either.
+    it('A5 labeled failed-only reservation loss into legacy refuses', () => {
+      refused(
+        snapshot('api-a', undefined),
+        snapshot('api-b', '/B', failedRecord('d.txt')),
+      );
+    });
+
+    // A6: a file-backed tail can change the next capture's reuse decision.
+    it('A6 same-root file-backed tail deletion refuses changed reuse', () => {
+      refused(
+        snapshot('api-a', '/A'),
+        snapshot('api-b', '/A', confirmedRecord('f.txt')),
+      );
+    });
+
+    // A7 (kept from R13): confirmed foreign data must refuse the deletion.
+    it('A7 foreign confirmed endpoint refuses the deletion', () => {
+      refused(
+        snapshot('api-a', '/A'),
+        snapshot('api-b', '/B', confirmedRecord('f.txt')),
+      );
+    });
+
+    // A8: an unlabeled survivor cannot prove the root of confirmed data.
+    it('A8 confirmed endpoint into an unlabeled survivor refuses', () => {
+      refused(
+        snapshot('api-a', undefined),
+        snapshot('api-b', '/B', confirmedRecord('f.txt')),
+      );
+    });
+
+    // A9: confirmed legacy data also cannot be silently relabelled.
+    it('A9 unlabeled confirmed relabelling refuses', () => {
+      refused(
+        snapshot('api-a', '/A'),
+        snapshot('api-b', undefined, confirmedRecord('f.txt')),
+      );
+    });
+
+    // A10: an existing endpoint for another file does not cover this loss.
+    it('A10 disjoint survivor E does not authorize foreign evidence loss', () => {
+      refused(
+        snapshot('api-a', '/A', {}, confirmedRecord('own.txt')),
+        snapshot('api-b', '/B', confirmedRecord('f.txt')),
+      );
+    });
+
+    // A11: Win32 roots without a drive letter never prove a shared root.
+    it('A11 unknown-drive confirmed endpoint refuses the deletion', () => {
+      refused(
+        snapshot('api-a', '\\A'),
+        snapshot('api-b', '\\B', confirmedRecord('f.txt')),
+      );
+    });
+
+    // A12: the Win32 unknown-drive form of A3.
+    it('A12 unknown-drive failed-only reservation loss refuses', () => {
+      refused(
+        snapshot('api-a', '\\A'),
+        snapshot('api-b', '\\B', failedRecord('d.txt')),
+      );
+    });
+
+    // A13: one confirmed record anywhere makes the endpoint required.
+    it('A13 mixed confirmed+failed foreign endpoint refuses the deletion', () => {
+      refused(
+        snapshot('api-a', '/A'),
+        snapshot('api-b', '/B', {
+          ...confirmedRecord('ok.txt'),
+          ...failedRecord('bad.txt'),
+        }),
+      );
+    });
+
+    // A14: failure markers do not make a changed file-backed tail harmless.
+    it('A14 mixed file-backed tail deletion refuses changed reuse', () => {
+      const mixed = {
+        ...confirmedRecord('ok.txt'),
+        ...failedRecord('bad.txt'),
+      };
+      refused(snapshot('api-a', '/A'), snapshot('api-b', '/A', mixed));
+    });
+
+    // A15: a deleted endpoint whose LABEL spells a refused Win32 capture
+    // root must neither fold nor silently lose its reservations.
+    // `areSnapshotOriginsEqual` normalizes the refused root onto the
+    // survivor's ordinary root (`C:\w\C:f\..` → `C:\w`), so origin
+    // equality alone cannot authorize the transfer. Refuse before deletion
+    // instead of making those records executable or discarding them.
+    it.each([
+      ['dot-canceled', 'C:\\w\\C:f\\..'],
+      ['forward-slash', 'C:/w/C:f/..'],
+      ['lower-drive', 'c:\\w\\d:x\\..'],
+    ])(
+      'A15 refuses deleting a %s refused-root endpoint (%s)',
+      (_kind, root) => {
+        refused(
+          snapshot('api-a', 'C:\\w'),
+          snapshot('api-b', root, confirmedRecord('victim')),
+        );
+      },
+    );
+
+    // A16: both sides spell the same refused root — still no grafting.
+    it('A16 same refused-root confirmed deletion refuses', () => {
+      refused(
+        snapshot('api-a', 'C:\\w\\C:f\\..'),
+        snapshot('api-b', 'C:\\w\\C:f\\..', confirmedRecord('victim')),
+      );
+    });
+
+    // A17 (control): namespace labels never normalize onto the ordinary
+    // root, so their confirmed endpoints keep refusing the deletion.
+    it('A17 namespace-root endpoint keeps refusing the deletion', () => {
+      refused(
+        snapshot('api-a', 'C:\\w'),
+        snapshot('api-b', '\\\\?\\C:\\w', confirmedRecord('f.txt')),
+      );
+    });
+  });
+
+  describe('bounded deletion admission', () => {
+    const backup = (version = 1, failed = false) => ({
+      backupFileName: null,
+      version,
+      backupTime: '2026-11-18T00:00:00.000Z',
+      ...(failed ? { failed: true } : {}),
+    });
+    const checkpoint = (
+      id: string,
+      tracked: SerializedFileHistorySnapshot['trackedFileBackups'] = {},
+      endpoint?: SerializedFileHistorySnapshot['diffAfterBackups'],
+      cwd = '/work',
+    ): SerializedFileHistorySnapshot => ({
+      promptId: `api-${id}`,
+      cwd,
+      timestamp: '2026-11-18T00:00:00.000Z',
+      trackedFileBackups: tracked,
+      ...(endpoint ? { diffAfterBackups: endpoint } : {}),
+    });
+    const transcript = (snapshots: SerializedFileHistorySnapshot[]) =>
+      snapshots.flatMap((snap, index) => [
+        user(snap.promptId.slice(4), index === 0 ? null : `f${index - 1}`),
+        record(`f${index}`, snap.promptId.slice(4), 'system', {
+          subtype: 'file_history_snapshot',
+          systemPayload: { snapshots: [snap] },
+        }),
+      ]);
+    const readSnapshots = (records: ChatRecord[]) =>
+      records.flatMap((entry) =>
+        entry.subtype === 'file_history_snapshot'
+          ? (
+              entry.systemPayload as {
+                snapshots: SerializedFileHistorySnapshot[];
+              }
+            ).snapshots
+          : [],
+      );
+
+    it.each(['sequential', 'batch'] as const)(
+      'DI-1 refuses evidence loss with disjoint survivor E (%s)',
+      async (schedule) => {
+        const cwd = await mkdtemp(join(tmpdir(), 'bounded-delete-'));
+        try {
+          const live = new FileHistoryService('bounded-deletion', true, cwd);
+          await live.makeSnapshot('api-a');
+          await live.makeSnapshot('api-b');
+          await live.trackEdit(join(cwd, 'f'));
+          await writeFile(join(cwd, 'f'), 'CREATED F');
+          await live.makeSnapshot('api-c');
+          await live.trackEdit(join(cwd, 'g'));
+          await writeFile(join(cwd, 'g'), 'CREATED G');
+          let records = transcript(live.getSnapshots().map(serializeSnapshot));
+          if (schedule === 'sequential') {
+            records = deleteTranscriptMessageGroups(
+              records,
+              ['b'],
+              anchor,
+            ).records;
+            records = JSON.parse(JSON.stringify(records));
+            expect(
+              readSnapshots(records)[0]!.diffAfterBackups?.['f'],
+            ).toBeDefined();
+          }
+          const before = JSON.stringify(records);
+          expect(() =>
+            deleteTranscriptMessageGroups(
+              records,
+              schedule === 'batch' ? ['b', 'c'] : ['c'],
+              anchor,
+            ),
+          ).toThrow(MessageGroupDeletionError);
+          expect(JSON.stringify(records)).toBe(before);
+          await expect(readFile(join(cwd, 'f'), 'utf8')).resolves.toBe(
+            'CREATED F',
+          );
+          await expect(readFile(join(cwd, 'g'), 'utf8')).resolves.toBe(
+            'CREATED G',
+          );
+          const reloaded = new FileHistoryService(
+            'bounded-deletion',
+            true,
+            cwd,
+          );
+          reloaded.restoreFromSnapshots(
+            deserializeSnapshots(readSnapshots(records)),
+          );
+          const result = await reloaded.rewind('api-a', false);
+          expect(result.filesFailed).toEqual([]);
+          expect(result.filesChanged.sort()).toEqual([
+            join(cwd, 'f'),
+            join(cwd, 'g'),
+          ]);
+          for (const name of ['f', 'g'])
+            await expect(readFile(join(cwd, name))).rejects.toMatchObject({
+              code: 'ENOENT',
+            });
+        } finally {
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.each(['survivor', 'deleted', 'both'] as const)(
+      'DI-2 refuses confirmed loss with a %s refused root',
+      (role) => {
+        const refused = 'C:\\w\\C:f\\..';
+        const state = [
+          checkpoint(
+            'a',
+            {},
+            undefined,
+            role === 'deleted' ? 'C:\\w' : refused,
+          ),
+          checkpoint(
+            'b',
+            { f: backup() },
+            undefined,
+            role === 'survivor' ? 'C:\\w' : refused,
+          ),
+        ];
+        const records = transcript(state);
+        const before = JSON.stringify(records);
+        expect(() =>
+          deleteTranscriptMessageGroups(records, ['b'], anchor),
+        ).toThrow(MessageGroupDeletionError);
+        expect(() =>
+          removeFileHistorySnapshots(state, new Set(['api-b'])),
+        ).toThrow();
+        expect(JSON.stringify(records)).toBe(before);
+      },
+    );
+
+    it.each(['tracked', 'diff'] as const)(
+      'DI-3 refuses loss of an all-null v7 reservation in %s',
+      (location) => {
+        const ordinary = { f: backup(3), g: backup() };
+        const state = [
+          checkpoint('a', ordinary, ordinary),
+          checkpoint(
+            'b',
+            location === 'tracked' ? { f: backup(7) } : {},
+            location === 'diff' ? { f: backup(7) } : {},
+          ),
+          checkpoint('c', ordinary, ordinary),
+        ];
+        const before = JSON.stringify(state);
+        expect(() =>
+          removeFileHistorySnapshots(state, new Set(['api-b'])),
+        ).toThrow();
+        expect(() =>
+          deleteTranscriptMessageGroups(transcript(state), ['b'], anchor),
+        ).toThrow(MessageGroupDeletionError);
+        expect(JSON.stringify(state)).toBe(before);
+      },
+    );
+
+    it.each([
+      ['/work', '/work/'],
+      ['C:\\work', 'c:/work/'],
+      ['\\\\host\\share\\work', '\\\\host\\share\\work\\'],
+    ])('accepts equivalent admitted roots %s and %s', (left, right) => {
+      const data = { f: backup() };
+      const state = [
+        checkpoint('a', {}, undefined, left),
+        checkpoint('b', data, undefined, right),
+        checkpoint('c', data, undefined, left),
+      ];
+      const kept = removeFileHistorySnapshots(state, new Set(['api-b']));
+      expect(kept[0]!.diffAfterBackups).toEqual(data);
+    });
+
+    it.each([
+      [undefined, undefined],
+      ['/A', '/B'],
+      [undefined, '/A'],
+      ['/A', undefined],
+      ['C:\\w\\C:f\\..', 'C:\\w'],
+      ['C:\\w', '\\\\?\\C:\\w'],
+      ['C:\\w\\C:f\\..', 'C:\\w\\C:f\\..'],
+    ])('accepts empty history deletion across %s and %s', (left, right) => {
+      const state = [
+        { ...checkpoint('a'), cwd: left },
+        { ...checkpoint('b'), cwd: right },
+      ];
+      expect(
+        removeFileHistorySnapshots(state, new Set(['api-b'])),
+      ).toHaveLength(1);
+    });
+
+    it.each(['tracked', 'diff'] as const)(
+      'retains failed-only version reservations from %s',
+      (location) => {
+        const data = { f: backup(3) };
+        const state = [
+          checkpoint('a', data, data),
+          checkpoint(
+            'b',
+            location === 'tracked' ? { f: backup(7, true) } : {},
+            location === 'diff' ? { f: backup(7, true) } : {},
+          ),
+          checkpoint('c', data, data),
+        ];
+        expect(() =>
+          removeFileHistorySnapshots(state, new Set(['api-b'])),
+        ).toThrow(/recovery evidence/);
+      },
+    );
+
+    it.each([false, true])(
+      'retains safe failed-only legacy/local folds (legacy=%s)',
+      (legacy) => {
+        const state = [
+          checkpoint('a'),
+          checkpoint('b', { f: backup(1, true) }),
+        ].map((entry) => (legacy ? { ...entry, cwd: undefined } : entry));
+        expect(
+          removeFileHistorySnapshots(state, new Set(['api-b']))[0]!
+            .diffAfterBackups,
+        ).toEqual({ f: backup(1, true) });
+      },
+    );
+
+    it('refuses a change from next-capture reuse to publication even at the same maximum', () => {
+      const file = { ...backup(3), backupFileName: '0123456789abcdef@v3' };
+      const state = [
+        checkpoint('a', {}, { f: file }),
+        checkpoint('b', { f: file }),
+      ];
+      const before = JSON.stringify(state);
+      expect(() =>
+        removeFileHistorySnapshots(state, new Set(['api-b'])),
+      ).toThrow(/recovery evidence/);
+      expect(JSON.stringify(state)).toBe(before);
+    });
+
+    it('refuses exposing an evicted failed baseline in the retained window', () => {
+      const state = Array.from({ length: MAX_SNAPSHOTS + 1 }, (_, index) =>
+        checkpoint(String(index), {
+          f: backup(index === 0 ? 1 : 2, index === 0),
+        }),
+      );
+      expect(() =>
+        removeFileHistorySnapshots(state, new Set([state.at(-1)!.promptId])),
+      ).toThrow(/recovery evidence/);
+      const redundant = state.map((entry) => ({
+        ...entry,
+        trackedFileBackups: { f: backup(2) },
+      }));
+      expect(
+        removeFileHistorySnapshots(
+          redundant,
+          new Set([redundant.at(-1)!.promptId]),
+        ),
+      ).toHaveLength(MAX_SNAPSHOTS);
+    });
+
+    it('refuses ambiguous first-version history even when every record remains', () => {
+      const other = { ...backup(), backupTime: '2026-11-18T00:00:01.000Z' };
+      const state = [
+        checkpoint('a', { f: backup() }),
+        checkpoint('b', { f: other }),
+        checkpoint('c', { f: backup() }, { f: other }),
+      ];
+      expect(() =>
+        removeFileHistorySnapshots(state, new Set(['api-a'])),
+      ).toThrow(/ambiguous first-version/);
+    });
+
+    it.each([['a'], ['b'], ['c'], ['a', 'c'], ['a', 'b', 'c']])(
+      'accepts empty first/middle/last/nonconsecutive/all deletion (%s)',
+      (...removed) => {
+        const state = ['a', 'b', 'c'].map((id) => checkpoint(id));
+        expect(
+          removeFileHistorySnapshots(
+            state,
+            new Set(removed.map((id) => `api-${id}`)),
+          ),
+        ).toHaveLength(3 - removed.length);
+      },
+    );
+
+    it('refuses deleting all nonempty checkpoints', () => {
+      expect(() =>
+        removeFileHistorySnapshots(
+          [checkpoint('a', { f: backup() })],
+          new Set(['api-a']),
+        ),
+      ).toThrow(/recovery evidence/);
+    });
+
+    it('refuses extending a reservation lifetime even when today’s maximum is unchanged', () => {
+      const file = { ...backup(3), backupFileName: '0123456789abcdef@v3' };
+      const state = [
+        checkpoint('a', { f: backup(7) }),
+        checkpoint('b', { f: file }),
+        checkpoint('c', { f: file }),
+      ];
+      const before = JSON.stringify(state);
+      expect(() =>
+        removeFileHistorySnapshots(state, new Set(['api-b'])),
+      ).toThrow(/recovery evidence/);
+      expect(JSON.stringify(state)).toBe(before);
+    });
+
+    it('refuses conflicting raw aliases without laundering them through a fold', () => {
+      const state = [
+        checkpoint('a'),
+        checkpoint('b', {
+          f: backup(2),
+          '/work/f': { ...backup(3) },
+        }),
+        checkpoint('c'),
+      ];
+      const before = JSON.stringify(state);
+      expect(() =>
+        removeFileHistorySnapshots(state, new Set(['api-b'])),
+      ).toThrow(/conflicting/);
+      expect(JSON.stringify(state)).toBe(before);
+    });
+
+    it('keeps candidate order when combining T and E for the same root', () => {
+      const state = [
+        checkpoint('a'),
+        checkpoint('b', { f: backup() }, { g: backup() }),
+        checkpoint('c'),
+      ];
+      const kept = removeFileHistorySnapshots(state, new Set(['api-b']));
+      expect(Object.keys(kept[0]!.diffAfterBackups!)).toEqual(['f', 'g']);
+    });
+
+    it('refuses a full-transcript fold that its retained Session caller cannot install', () => {
+      const state = Array.from({ length: MAX_SNAPSHOTS + 1 }, (_, index) =>
+        checkpoint(String(index), index === 1 ? { f: backup() } : {}),
+      );
+      // The full timeline can fold into checkpoint 0, but Session holds only
+      // the last MAX snapshots and has no such predecessor after persistence.
+      expect(
+        removeFileHistorySnapshots(state, new Set(['api-1']))[0]!
+          .diffAfterBackups,
+      ).toEqual({ f: backup() });
+      expect(() =>
+        removeFileHistorySnapshots(
+          state.slice(-MAX_SNAPSHOTS),
+          new Set(['api-1']),
+        ),
+      ).toThrow(/recovery evidence/);
+      const records = transcript(state);
+      const before = JSON.stringify(records);
+      expect(() =>
+        deleteTranscriptMessageGroups(records, ['1'], anchor),
+      ).toThrow(MessageGroupDeletionError);
+      expect(JSON.stringify(records)).toBe(before);
+    });
+
+    it('accepts empty and redundant ordinary middle deletion', () => {
+      const cases: Array<SerializedFileHistorySnapshot['trackedFileBackups']> =
+        [{}, { f: backup() }];
+      for (const tracked of cases) {
+        const state = [
+          checkpoint('a', tracked),
+          checkpoint('b', tracked),
+          checkpoint('c', tracked),
+        ];
+        expect(
+          removeFileHistorySnapshots(state, new Set(['api-b'])),
+        ).toHaveLength(2);
+        expect(
+          deleteTranscriptMessageGroups(transcript(state), ['b'], anchor).result
+            .deletedGroupIds,
+        ).toEqual(['b']);
+      }
+    });
+  });
+
+  describe('transitive endpoint retention', () => {
+    const backup = (version = 1, failed = false) => ({
+      backupFileName: null,
+      version,
+      backupTime: '2026-11-17T00:00:00.000Z',
+      ...(failed ? { failed: true } : {}),
+    });
+    const checkpoint = (
+      promptId: string,
+      cwd: string | undefined,
+      trackedFileBackups: SerializedFileHistorySnapshot['trackedFileBackups'] = {},
+      diffAfterBackups?: SerializedFileHistorySnapshot['diffAfterBackups'],
+    ): SerializedFileHistorySnapshot => ({
+      promptId,
+      cwd,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      trackedFileBackups,
+      ...(diffAfterBackups ? { diffAfterBackups } : {}),
+    });
+    const transcript = (snapshots: SerializedFileHistorySnapshot[]) =>
+      snapshots.flatMap((snap, index) => [
+        user(snap.promptId.slice(4), index === 0 ? null : `f${index - 1}`),
+        record(`f${index}`, snap.promptId.slice(4), 'system', {
+          subtype: 'file_history_snapshot',
+          systemPayload: { snapshots: [snap] },
+        }),
+      ]);
+    const checkpoints = (records: ChatRecord[]) =>
+      records.flatMap((entry) =>
+        entry.subtype === 'file_history_snapshot'
+          ? (
+              entry.systemPayload as {
+                snapshots: SerializedFileHistorySnapshot[];
+              }
+            ).snapshots
+          : [],
+      );
+
+    // Storage × deletion schedule × representation. Null means the target
+    // did not exist before the edit; both schedules must still delete it
+    // after a serialized reload, rather than forget its only baseline.
+    it.each(
+      (['tracked', 'diff', 'both'] as const).flatMap((location) =>
+        (['together', 'sequential'] as const).map((schedule) => ({
+          location,
+          schedule,
+        })),
+      ),
+    )(
+      'retains $location endpoints when deleted $schedule',
+      async ({ location, schedule }) => {
+        const cwd = await mkdtemp(join(tmpdir(), 'history-fold-'));
+        try {
+          const entries = { 'later.txt': backup() };
+          const snapshots = [
+            checkpoint('api-a', cwd),
+            checkpoint('api-b', cwd),
+            checkpoint(
+              'api-c',
+              cwd,
+              location === 'diff' ? {} : entries,
+              location === 'tracked'
+                ? undefined
+                : { 'after.txt': backup(), ...entries },
+            ),
+          ];
+          let records = transcript(snapshots);
+          if (schedule === 'sequential') {
+            records = deleteTranscriptMessageGroups(
+              records,
+              ['c'],
+              record('anchor-c', null),
+            ).records;
+            records = deleteTranscriptMessageGroups(
+              records,
+              ['b'],
+              anchor,
+            ).records;
+          } else {
+            records = deleteTranscriptMessageGroups(
+              records,
+              ['b', 'c'],
+              anchor,
+            ).records;
+          }
+          const kept = checkpoints(records);
+          const expected =
+            location === 'tracked'
+              ? entries
+              : { 'after.txt': backup(), ...entries };
+          expect(kept).toHaveLength(1);
+          expect(kept[0]!.diffAfterBackups).toEqual(expected);
+          // The standalone in-memory consumer must produce the same records
+          // for both Date-valued and serialized representations.
+          for (const input of [snapshots, deserializeSnapshots(snapshots)]) {
+            const result = removeFileHistorySnapshots<(typeof input)[number]>(
+              input,
+              new Set(['api-b', 'api-c']),
+            );
+            expect(
+              Object.keys(result[0]!.diffAfterBackups ?? {}).sort(),
+            ).toEqual(Object.keys(expected).sort());
+          }
+          const service = new FileHistoryService('fold-reload', true, cwd);
+          service.restoreFromSnapshots(
+            deserializeSnapshots(JSON.parse(JSON.stringify(kept))),
+          );
+          for (const name of Object.keys(expected))
+            await writeFile(join(cwd, name), 'created after baseline');
+          const restored = await service.rewind('api-a');
+          expect(restored.filesFailed).toEqual([]);
+          expect(restored.filesChanged.sort()).toEqual(
+            Object.keys(expected)
+              .map((name) => join(cwd, name))
+              .sort(),
+          );
+          for (const name of Object.keys(expected))
+            await expect(readFile(join(cwd, name))).rejects.toMatchObject({
+              code: 'ENOENT',
+            });
+        } finally {
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.each(['tracked', 'diff'] as const)(
+      'refuses a required cross-root %s endpoint behind an empty deleted checkpoint',
+      (location) => {
+        const entries = { 'later.txt': backup() };
+        const snapshots = [
+          checkpoint('api-a', '/A'),
+          checkpoint('api-b', '/A'),
+          checkpoint(
+            'api-c',
+            '/B',
+            location === 'tracked' ? entries : {},
+            location === 'diff' ? entries : undefined,
+          ),
+        ];
+        const records = transcript(snapshots);
+        const before = JSON.stringify(records);
+        expect(() =>
+          deleteTranscriptMessageGroups(records, ['b', 'c'], anchor),
+        ).toThrow(/capture directory/);
+        expect(JSON.stringify(records)).toBe(before);
+        expect(
+          deletionDropsRequiredEndpoint(snapshots[0]!, snapshots[2]!),
+        ).toBe(true);
+      },
+    );
+
+    // Root permission × capture state × endpoint location, mirrored:
+    // ordinary pairs fold; a refused label on EITHER side never grafts.
+    it.each(
+      [
+        'ordinary',
+        'survivor-refused',
+        'deleted-refused',
+        'both-refused',
+        'legacy',
+      ].flatMap((roots) =>
+        ['tracked', 'diff'].flatMap((location) =>
+          [false, true].map((failed) => ({ roots, location, failed })),
+        ),
+      ),
+    )(
+      'admits $roots / $location / failed=$failed',
+      ({ roots, location, failed }) => {
+        const left =
+          roots === 'survivor-refused' || roots === 'both-refused'
+            ? 'C:\\w\\C:f\\..'
+            : 'C:\\w';
+        const right =
+          roots === 'deleted-refused' || roots === 'both-refused'
+            ? 'C:\\w\\C:f\\..'
+            : roots === 'legacy'
+              ? undefined
+              : 'C:\\w';
+        const entries = { f: backup(1, failed) };
+        const input = transcript([
+          checkpoint('api-a', left),
+          checkpoint(
+            'api-b',
+            right,
+            location === 'tracked' ? entries : {},
+            location === 'diff' ? entries : undefined,
+          ),
+        ]);
+        const before = JSON.stringify(input);
+        if (roots === 'ordinary') {
+          const records = deleteTranscriptMessageGroups(
+            input,
+            ['b'],
+            anchor,
+          ).records;
+          expect(checkpoints(records)[0]!.diffAfterBackups).toEqual(entries);
+        } else {
+          expect(() =>
+            deleteTranscriptMessageGroups(input, ['b'], anchor),
+          ).toThrow(MessageGroupDeletionError);
+        }
+        expect(JSON.stringify(input)).toBe(before);
+      },
+    );
+
+    it('refuses overlapping endpoint loss instead of dropping later reservations', () => {
+      const first = backup(1);
+      const later = backup(2);
+      // Keeping f-v1 would suppress f-v2's reservation; do not claim that
+      // retaining the earliest baseline makes that loss harmless.
+      const input = [
+        checkpoint('api-a', '/A'),
+        checkpoint('api-b', '/A', { f: first }, { f: later, g: first }),
+        checkpoint('api-c', '/A', { f: later, h: first }),
+      ];
+      const before = JSON.stringify(input);
+      expect(() =>
+        removeFileHistorySnapshots(input, new Set(['api-b', 'api-c'])),
+      ).toThrow(/recovery evidence/);
+      expect(JSON.stringify(input)).toBe(before);
+    });
+  });
+
+  it.each([false, true])(
+    'R11 refuses cross-grammar endpoint deletion with a Win32 reader (reverse=%s)',
+    async (reverse) => {
+      vi.resetModules();
+      vi.doMock('node:path', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:path')>();
+        return {
+          ...actual,
+          ...actual.win32,
+          resolve: (...args: string[]) =>
+            actual.win32.resolve('C:\\reader', ...args),
+        };
+      });
+      try {
+        const {
+          deleteTranscriptMessageGroups: remove,
+          MessageGroupDeletionError: DeletionError,
+        } = await import('./message-group-deletion.js');
+        const roots = reverse
+          ? ['/workspace', 'C:\\workspace']
+          : ['C:\\workspace', '/workspace'];
+        const history = ['a', 'b'].flatMap((id, i) => [
+          user(id, i === 0 ? null : 'fa'),
+          record(`f${id}`, id, 'system', {
+            subtype: 'file_history_snapshot',
+            systemPayload: {
+              snapshots: [
+                {
+                  promptId: `api-${id}`,
+                  cwd: roots[i],
+                  timestamp: '2026-10-15T00:00:00Z',
+                  trackedFileBackups: {
+                    f: {
+                      backupFileName: null,
+                      version: 1,
+                      backupTime: '2026-10-15T00:00:00Z',
+                    },
+                  },
+                },
+              ],
+            },
+          }),
+        ]);
+        const before = JSON.stringify(history);
+        let caught: unknown;
+        try {
+          remove(history, ['b'], anchor);
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(DeletionError);
+        expect((caught as MessageGroupDeletionError).code).toBe(
+          'invalid_history',
+        );
+        expect(JSON.stringify(history)).toBe(before);
+
+        const { ChatRecordingService } = await import(
+          '../services/chatRecordingService.js'
+        );
+        const directory = await mkdtemp(join(tmpdir(), 'r11-deletion-'));
+        const transcriptPath = join(directory, 'session.jsonl');
+        const config = {
+          getSessionId: () => 'session',
+          getResumedSessionData: () => undefined,
+          getProjectRoot: () => directory,
+          getCliVersion: () => 'test',
+        } as unknown as Config;
+        const lease = {
+          sessionId: 'session',
+          ownerId: 'test-owner',
+          assertOwnedAndUnchanged: vi.fn(async () => {}),
+          readTranscript: vi.fn(async () => readFile(transcriptPath, 'utf8')),
+          replaceTranscript: vi.fn(async (updated: string) =>
+            writeFile(transcriptPath, updated),
+          ),
+          release: vi.fn(async () => {}),
+        } as unknown as SessionWriterLease;
+        const recorder = new ChatRecordingService(config, undefined, true);
+        recorder.activate(lease);
+        try {
+          const bytes =
+            history.map((entry) => JSON.stringify(entry)).join('\n') + '\n';
+          await writeFile(transcriptPath, bytes);
+          const groups = await recorder.getMessageGroups();
+          expect(groups.groups.map((group) => group.id)).toEqual(['a', 'b']);
+          await expect(
+            recorder.deleteMessageGroups({
+              snapshot: groups.snapshot,
+              groupIds: ['b'],
+            }),
+          ).rejects.toMatchObject({ code: 'invalid_history' });
+          expect(lease.replaceTranscript).not.toHaveBeenCalled();
+          expect(await readFile(transcriptPath, 'utf8')).toBe(bytes);
+          expect((await recorder.getMessageGroups()).groups).toHaveLength(2);
+        } finally {
+          await recorder.close();
+          await rm(directory, { recursive: true, force: true });
+        }
+      } finally {
+        vi.doUnmock('node:path');
+        vi.resetModules();
+      }
+    },
+  );
 
   it('accepts complete fragments and deletes every selected physical fragment', () => {
     const question = user('u', null);

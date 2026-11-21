@@ -12,6 +12,10 @@ import {
   createTranscriptExecutionLifecycleUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
+import {
+  getTranscriptMessageGroups,
+  MessageGroupDeletionError,
+} from '@qwen-code/qwen-code-core/utils/message-group-deletion.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
@@ -5850,6 +5854,54 @@ export class Session implements SessionContext {
 
     const daemonPromptId = this.getRewindDaemonPromptId(promptId);
 
+    const rewindFiles = opts?.rewindFiles !== false;
+    const survivingSnapshots = rewindFiles
+      ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
+      : snapshotsBeforeRewind.slice(0, targetTurnIndex);
+    if (rewindFiles) {
+      // Only the surviving checkpoints will be applied by the file restore.
+      // Refuse a foreign survivor before anything is truncated so the
+      // conversation and snapshot timeline stay intact; discarded later
+      // checkpoints must not block a safe restore of the surviving slice.
+      const foreignCwds = this.config
+        .getFileHistoryService()
+        .getForeignSnapshotCwds(survivingSnapshots);
+      if (foreignCwds.length > 0) {
+        throw new RequestError(
+          -32602,
+          `Cannot rewind files: the session timeline contains checkpoints captured in a different working directory (${foreignCwds.join(', ')}) and cannot restore them from the current working directory`,
+          { errorKind: 'cross_directory_checkpoint' },
+        );
+      }
+      // The discarded suffix can hold the only baseline for files the
+      // restore still targets — e.g. a foreign-root checkpoint that first
+      // tracked a path under the surviving root or an external absolute
+      // path before the file existed (a confirmed null first-version
+      // record). Dropping it would leave a later-created file in place
+      // while the restore reports an empty success, so refuse before any
+      // truncation. Captures the surviving slice can itself select a
+      // baseline for are redundant and do not block; records under a
+      // discarded checkpoint's own root are safe to drop with it unless
+      // the path also falls under the current root (nested or filesystem
+      // roots overlap), in which case this session can still restore it.
+      const discardedSnapshots = snapshotsBeforeRewind.slice(
+        targetTurnIndex + 1,
+      );
+      const unrestorableCaptures = this.config
+        .getFileHistoryService()
+        .getUnrestorableDiscardedCaptures(
+          discardedSnapshots,
+          survivingSnapshots,
+        );
+      if (unrestorableCaptures.length > 0) {
+        throw new RequestError(
+          -32602,
+          `Cannot rewind files: the checkpoints that would be discarded hold the only restore record for ${unrestorableCaptures.join(', ')} captured in a different working directory. Rewind the conversation only, or from a turn that keeps those records`,
+          { errorKind: 'cross_directory_checkpoint' },
+        );
+      }
+    }
+
     llmClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.clearActiveTodoPlanRevision();
@@ -5864,7 +5916,6 @@ export class Session implements SessionContext {
       !preserveQueuedPromptPriority;
     this.todoStopGuard.blockUntilOrdinaryPromptStarts();
 
-    const rewindFiles = opts?.rewindFiles !== false;
     const fileHistoryService = this.config.getFileHistoryService();
     // Every rewind surface resolves a turn through this array's positions:
     // `getRewindSnapshots` hands out the index, and the agent resolves a
@@ -5877,9 +5928,6 @@ export class Session implements SessionContext {
     //
     // The file path keeps the target snapshot: the agent restores files by
     // promptId after this returns, so that snapshot must still be findable.
-    const survivingSnapshots = rewindFiles
-      ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
-      : snapshotsBeforeRewind.slice(0, targetTurnIndex);
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     const approvalMode = this.config.getApprovalMode();
@@ -5931,6 +5979,34 @@ export class Session implements SessionContext {
         throw new RequestError(-32602, 'History recording is unavailable', {
           errorKind: 'session_message_deletion_unsupported',
         });
+      // The live service has hydrated aliases and may retain fewer checkpoints
+      // than the recorder. Check its actual input before replacing the transcript.
+      const records = [...(await recording.readActiveTranscriptChain())];
+      const selected = new Set(request.groupIds);
+      const removedRecords = new Set(
+        getTranscriptMessageGroups(records)
+          .filter((group) => selected.has(group.id))
+          .flatMap((group) => group.recordIds),
+      );
+      const removedPromptIds = new Set(
+        records
+          .filter((record) => removedRecords.has(record.uuid))
+          .map((record) => record.promptId)
+          .filter(
+            (id): id is string => typeof id === 'string' && id.length > 0,
+          ),
+      );
+      try {
+        removeFileHistorySnapshots(
+          this.config.getFileHistoryService().getSnapshots(),
+          removedPromptIds,
+        );
+      } catch {
+        throw new MessageGroupDeletionError(
+          'invalid_history',
+          'Deleting these message groups would discard local file history recovery evidence or change backup version reservations; refusing to keep file restoration safe',
+        );
+      }
       const result = await recording.deleteMessageGroups(request);
       persisted = true;
       deletedGroupIds = result.deletedGroupIds;
@@ -5972,15 +6048,17 @@ export class Session implements SessionContext {
       .getChatRecordingService()!
       .readActiveTranscriptChain();
     const restored = buildSessionHistoryFromConversation({ messages: records });
+    const fileHistory = this.config.getFileHistoryService();
+    const snapshots = removeFileHistorySnapshots(
+      fileHistory.getSnapshots(),
+      removed,
+    );
     const current = this.captureHistorySnapshot();
     const prelude = current.slice(0, getStartupContextLength(current));
     const llmClient = this.config.getLlmClient()!;
     llmClient.setHistory([...prelude, ...restored.apiHistory]);
     llmClient.getChat().setCompletedToolCallIds(restored.completedToolCallIds);
-    const fileHistory = this.config.getFileHistoryService();
-    fileHistory.restoreFromSnapshots(
-      removeFileHistorySnapshots(fileHistory.getSnapshots(), removed),
-    );
+    fileHistory.restoreFromSnapshots(snapshots);
     this.pendingDeletedApiPromptIds = undefined;
   }
 

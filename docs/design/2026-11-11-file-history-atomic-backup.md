@@ -2,11 +2,11 @@
 
 [English](2026-11-11-file-history-atomic-backup.md) | [简体中文](2026-11-11-file-history-atomic-backup.zh-CN.md)
 
-Status: Implemented and verified (pilot for issue #16896, porting the
-crash-safe capture from `v1.0.0-preview` @ `587e3429cabf` into main's existing
-file history). Reproduced via failure injection on the base commit, fixed,
-and verified with the regression suite plus an interactive E2E pass on
-2026-11-11.
+Status: The atomic-publication pilot for #16896 was implemented and validated
+on 2026-11-11. The relocation and conservative deletion extension for #16982
+is a local candidate with targeted evidence, not final acceptance; independent
+review and the repository-wide gates remain required. The historical pilot
+results below do not certify this larger candidate.
 
 ## Problem
 
@@ -30,9 +30,9 @@ size/content mismatch and `rewind` restores the truncated content as if it
 were the captured checkpoint: a silent wrong-restore in a feature whose whole
 purpose is reliable undo.
 
-## Current state
+## Pre-change state (atomic-publication pilot)
 
-Main's capture flow (`createBackup`):
+The pilot base used this capture flow (`createBackup`):
 
 1. `stat(filePath)`; ENOENT → record a `null` backup (the file did not exist).
 2. `safeCopyFile(filePath, backupPath)` — direct `copyFile` onto the final
@@ -51,18 +51,21 @@ UUIDs; main's deterministic names need an adaptation (see below).
 
 ## Goals
 
-- A crash or I/O error during capture never leaves incomplete content at the
-  final backup path.
+- Interrupted copy, permission and publication operations must not publish
+  their partial temporary content at the final backup path.
 - Failures keep surfacing through the existing `failed` / `filesFailed`
   semantics — no new flags, no caller changes.
 - Failure-injection regression tests for `copyFile` / `chmod` / `rename`.
-- Evaluate the per-snapshot `cwd` item and close it with evidence.
+- Evaluate worktree entry/exit separately from relocation, and preserve
+  labelled capture coordinates through readers, previews and restoration.
+- Refuse message-group deletion before persistence when recovery evidence or
+  deterministic publish reservations cannot be retained.
 
 ## Non-goals (from issue #16896)
 
 - Replacing `FileHistoryService` with preview's `FileHistoryManager`.
-- UUID-based backup names (main's `hash@version` + max-version scanning
-  already avoids collisions).
+- UUID-based backup names or allocator redesign. Deterministic `hash@version`
+  naming is unchanged; deletion must not change its reservation lifetimes.
 - Re-porting `captureFailed` / per-file rewind-failure reporting (main already
   has `failed` / `filesFailed`).
 - Session-fork backup migration (hardlink copy).
@@ -73,8 +76,9 @@ UUIDs; main's deterministic names need an adaptation (see below).
 
 ## Proposed solution
 
-Change only `createBackup` and `safeCopyFile` in
-`packages/core/src/services/fileHistoryService.ts`:
+The atomic-publication portion changes `createBackup` and `safeCopyFile` in
+`packages/core/src/services/fileHistoryService.ts`; the relocation/deletion
+extension and its consumers are described separately below:
 
 1. `safeCopyFile` gains an optional `mode` parameter (default `0`, the
    `copyFile` default) so the exclusive flag applies to both the first attempt
@@ -176,7 +180,7 @@ removed by the existing sweeps: session deletion
 directory) and housekeeping (`cleanupOldFileHistoryBackups` sweeps session
 directories by mtime). No new sweeper is added.
 
-### Per-snapshot `cwd`: evaluated, no change
+### Per-snapshot `cwd`: no change for worktrees; implemented for relocation (#16982)
 
 The issue asks to record the producing `cwd` per snapshot **only if a real
 wrong-restore defect is confirmed across enter/exit worktree**. Investigation
@@ -195,19 +199,98 @@ of main at the pilot's base commit shows no such path:
 - ACP managed conversations refuse `enter_worktree` / `exit_worktree`
   outright; the standalone ACP path uses the same non-relocating tools.
 
-Recording a per-snapshot `cwd` would therefore add no correctness to
-enter/exit worktree. The item closes as "documented, no change".
+Recording a per-snapshot `cwd` therefore adds no correctness for
+enter/exit worktree; the worktree half of the item stays closed as
+"documented, no change".
 
-Adjacent observation (out of pilot scope, candidate follow-up): `/cd`
-(`cdCommand`) and ACP `session/cd` call `relocateWorkingDirectory`, which
-resets `fileHistoryService` but leaves `sessionData` untouched; the lazy
-`getFileHistoryService()` then rehydrates `sessionData.fileHistorySnapshots`
-(the resume-time payload) against the **new** cwd. In a resumed session, a
-rewind to a pre-`cd` checkpoint could restore relative tracking paths under
-the new directory. This is a directory-relocation question, not a worktree
-enter/exit question; it is tracked as #16982 (which asks for an end-to-end
-reproduction before implementing per-snapshot cwd) and is not changed by
-this pilot.
+The adjacent relocation observation — `/cd` (`cdCommand`) and ACP
+`session/cd` call `relocateWorkingDirectory`, which resets
+`fileHistoryService` while the lazy `getFileHistoryService()` rehydrates
+`sessionData.fileHistorySnapshots` (the resume-time payload) against the
+**new** cwd — is the P1 reported as #16982 and is implemented by PR #17400:
+
+- **Decision**: `FileHistorySnapshot` gains an optional `cwd` recording the
+  working directory the snapshot was captured under. The
+  `FileHistoryService` constructor anchors that directory once — native
+  `resolve()` on Win32, and on POSIX an absolute spelling verbatim (a
+  relative one anchored to the process cwd) — and `makeSnapshot` records
+  the anchored spelling, preserving POSIX parent expressions and
+  double-leading-slash syntax rather than resolving them away. Serialized
+  payloads without the field keep their previous
+  meaning. Generic remote snapshot origins accept canonical POSIX or Win32
+  paths independently of the reader OS and preserve their bytes; Linux CSI
+  specifically requires POSIX origins in both TypeScript and Java. Native
+  execution-directory validation is unchanged.
+- **Refusal semantics**: core `rewind` checks its complete checkpoint state
+  before touching files or truncating history. ACP `rewindToTurn` checks the
+  exact surviving checkpoint slice before truncating the conversation.
+  Foreign checkpoints in a discarded suffix do not block a local restore
+  unless they hold a required baseline that the surviving slice cannot
+  restore (including paths under the current root or outside both roots).
+  Either a foreign surviving checkpoint or such a required discarded
+  baseline yields `cross_directory_checkpoint`, mapped to non-retryable
+  HTTP 409. Both `getDiffStats` and `getTurnDiff` return no
+  preview while their timeline contains a foreign checkpoint.
+  Conversation-only rewind stays available, but its retained prefix can still
+  contain foreign checkpoints: ordinary truncation does not necessarily
+  make subsequent file rewind available. Returning to an earlier directory
+  only helps when every remaining labelled checkpoint matches that root.
+- **Deletion safety**: message-group deletion uses the same pure admission as
+  direct snapshot removal and reports `invalid_history` before transcript
+  replacement on refusal. The recorder preflights the raw full transcript and
+  its raw retained slice. Before calling the recorder, Session independently
+  checks its actual hydrated local snapshot array with the same deletion
+  utility and the selected groups' prompt identities. Ordinary singleton
+  hydration can shorten an absolute key while a multi-alias group keeps its
+  raw spellings; a raw slice is not a substitute for this consumer check. The
+  recorder also refuses selected raw fragments whose nonempty prompt identities
+  disagree with their aggregated record, so its removal set cannot silently
+  expand beyond the Session caller's view. An existing
+  endpoint is not proof that a disjoint
+  deleted capture is dispensable. Neither a refused source nor a refused
+  destination root can authorize transfer through normalized origin equality.
+  The candidate must preserve each exact raw capture record, including null
+  and failed reservations, at its newest distance from the timeline end. This
+  preserves exact-record presence in future retained windows, not merely the
+  current maximum. Candidate identity order, raw alias choice and the latest
+  reusable file-backed captures are compared for the current input only;
+  conflicting aliases or different version-one baselines conservatively
+  refuse deletion rather than invent capture ordering. Empty histories,
+  redundant same-root captures and evidence-preserving folds remain useful.
+  Ordinary edited histories can also refuse deletion: for example, after an
+  earlier fold a second deletion may otherwise lose a newly tracked file or
+  change a version reservation. These restrictions apply to message-group
+  deletion, not every existing rewind/truncation/retention operation. No new
+  storage or provenance format, allocator, or filesystem-alias detector is
+  introduced. Mixed legacy/labelled records cannot be relabelled silently;
+  an explicit adoption policy remains a maintainer decision.
+- **Inherited future-order / physical-alias limit**: this admission is not a
+  guarantee of equal physical bytes for every later restore. An admitted sparse
+  loaded history with T maps `{g:G,f:F}`, `{f:F}` (deleted), `{g:G}`, `{f:F}`,
+  `{g:G}` preserves exact-record newest distances and current candidate order.
+  After 96 actual captures, serialization and reload, the unchanged and deleted
+  histories select `f,g` and `g,f` respectively. Separate regular files restore
+  equally; when g is a symlink to f, the final bytes differ (`G BASELINE` versus
+  `F BASELINE`) despite empty failure lists. The upstream planner produces the
+  same deletion plan: this is an inherited loaded-history/physical-alias limit,
+  not newly introduced corruption. It is not claimed to be a shape naturally
+  emitted by one fresh current-writer session. Future-order certification and
+  general alias detection are outside this bounded repair.
+- **Legacy fallback**: checkpoints created before this change carry no
+  `cwd` and never count as foreign — refusing them wholesale would make
+  every pre-upgrade session unrestorable. On unlabeled timelines the
+  original wrong-restore path therefore remains by design; tightening it
+  (for example marking a relocated timeline root-unknown and refusing file
+  restore while keeping conversation-only rewind) is an explicit follow-up
+  decision for the maintainers.
+- **Mixed-version deployment**: new readers accept old records without
+  `cwd`; old strict readers reject new records containing that key. This is
+  new-reader/old-payload compatibility, not old-reader/new-payload
+  compatibility. Upgrade all readers (including control-plane and Java CSI
+  consumers) before enabling writers that emit the field. Rolling back a
+  reader after new records have been written requires handling those records
+  first. No schema version negotiation, dual writing or storage migration is
+  introduced here.
 
 ## Constraints
 
@@ -363,14 +446,28 @@ this pilot.
 
 ## Acceptance criteria
 
-- No code path publishes incomplete content at a final backup path.
+- The exercised copy/permission/flush/rename failure paths do not publish
+  partial temporary content at a final backup path.
 - `copyFile` / `chmod` / `rename` failures surface through the existing
   `failed` / `filesFailed` semantics, with temporary files cleaned up.
-- Concurrent captures of the same deterministic path remain harmless.
-- The `cwd` evaluation item is closed with the evidence above.
+- Concurrent captures keep complete-only, last-writer-wins publication; this
+  is not a general guarantee about arbitrary filesystem aliases.
+- Relocation refusal is verified separately from the historical worktree
+  evaluation; legacy and Config-selective-restore boundaries remain explicit.
+- DI-1 repeated deletion, DI-2 refused-root transfer and DI-3 reservation
+  changes either retain their evidence or refuse before effects. Native
+  controls check future capture bytes, including reservation lifetime after
+  retained-window eviction; focused tests are not full repository acceptance.
 - Bilingual design doc and regression tests land in the same change.
 
 ## Open questions
 
-None. The `cwd` item is resolved as "documented, no change" for worktree
-enter/exit; the `/cd` rehydration observation is tracked as #16982.
+The worktree enter/exit evaluation is "documented, no change"; the labelled
+full-resume relocation path from #16982 is protected by this PR's refusal.
+The attribution policy for unlabelled legacy checkpoints remains open, as
+does preserving deletability of mixed-origin history through explicit
+endpoint provenance rather than the conservative pre-write refusal above.
+The separate Config selective-restore lifecycle can lose its in-memory
+checkpoint payload when the service is recreated after relocation; that
+path is not changed here and must not be described as end-to-end coverage
+of every resume mode.

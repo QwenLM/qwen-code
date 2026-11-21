@@ -54,6 +54,7 @@ import {
   readCsiFileHistoryObservation,
   readCsiPreparationEvidence,
   type CsiFileHistoryObservation,
+  type CsiHistoryPreparation,
 } from './managed-csi-file-history-protocol.js';
 import {
   CSI_FILE_FINALIZE_PATH,
@@ -73,11 +74,12 @@ const CONFIG = `sha256:${createHash('sha256')
 
 class HistoryCapacityError extends Error {}
 
-function historyFits(
+export function historyFits(
   request: Record<string, unknown>,
   before: CsiFileHistoryObservation,
   promptId: string,
   paths: string[],
+  preparation?: CsiHistoryPreparation,
 ): boolean {
   const projected = structuredClone(before);
   const snapshots = projected.state.snapshots;
@@ -95,6 +97,10 @@ function historyFits(
       promptId,
       timestamp: '9999-12-31T23:59:59.999Z',
       trackedFileBackups: {},
+      // Reserve the worst-case wire shape for the snapshot cwd: the runtime
+      // records it on every new snapshot (see fileHistoryService.makeSnapshot)
+      // and the protocol bounds it at 4096 chars, same as absolutePath.
+      cwd: `/${'f'.repeat(4095)}`,
     });
   const snapshot = snapshots.at(-1)!;
   snapshot.trackedFileBackups = Object.assign(
@@ -128,9 +134,42 @@ function historyFits(
       mode: 0o7777,
     };
   }
+  // The durable session record (commitHostedCsiHistory) serializes the
+  // snapshots TWICE: once inlined in the observation state and once in
+  // record.systemPayload.snapshots, under the same 64 KiB contract limit.
+  // Budget the snapshot section at two copies so an accepted preparation
+  // cannot outgrow the durable record after the history already changed.
+  const snapshotsForBudget = projected.state.snapshots;
+  const envelopeWithoutSnapshots = JSON.stringify({
+    ...request,
+    observation: { ...projected, state: { ...projected.state, snapshots: [] } },
+  });
+  const snapshotsBytes = Buffer.byteLength(JSON.stringify(snapshotsForBudget));
+  // The durable prepared record additionally embeds the actual preparation
+  // payload (invocations + paths are fully determined by prepare time) and
+  // gains an intentRef durable ref pointing at the intent record. Budget the
+  // serialized preparation with a worst-case ref so an accepted preparation
+  // cannot overflow the durable record after the runtime history changed.
+  const preparationBytes = preparation
+    ? Buffer.byteLength(
+        JSON.stringify({ ...preparation, intentRef: 'f'.repeat(256) }),
+      )
+    : 0;
+  // Metadata allowance, enumerated from the durable prepared record's actual
+  // composition (commitHostedCsiHistory): authority.recordEnvelope embeds the
+  // host-session cwd. Its protocol bound is 4096 CHARACTERS, and JSON string
+  // escaping expands each character to as many as 6 bytes (\uXXXX for
+  // control chars; quotes and backslashes to 2) — so the serialized cwd
+  // alone can reach ~24.6 KiB. Add uuid/timestamp/revision/operationId/
+  // previousRecordRef/schemaVersion/profile (~600 B) and reserve the full
+  // worst case, so admission can never pass an input whose durable commit
+  // would then exceed the 64 KiB contract after the runtime history changed.
+  const metadataBytes = 25600;
   return (
-    Buffer.byteLength(JSON.stringify({ ...request, observation: projected })) +
-      1024 <=
+    Buffer.byteLength(envelopeWithoutSnapshots) +
+      2 * snapshotsBytes +
+      preparationBytes +
+      metadataBytes <=
     64 * 1024
   );
 }
@@ -405,6 +444,7 @@ export async function startManagedCsiFileWorker(
                       current.observation,
                       current.preparation.promptId,
                       current.preparation.paths,
+                      current.preparation,
                     )
                   )
                     throw new HistoryCapacityError();

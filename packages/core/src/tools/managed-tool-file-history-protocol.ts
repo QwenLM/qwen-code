@@ -142,13 +142,20 @@ function snapshots(value: unknown): SerializedFileHistorySnapshot[] {
       'promptId',
       'timestamp',
       'trackedFileBackups',
+      'cwd',
     ]);
     const promptId = parseManagedToolFileHistoryPromptId(snapshot['promptId']);
     if (prompts.has(promptId)) throw new ManagedToolProtocolError();
     prompts.add(promptId);
+    // Snapshot origins describe the producer, not the reader's execution OS.
+    const cwd =
+      snapshot['cwd'] === undefined
+        ? undefined
+        : snapshotOrigin(snapshot['cwd']);
     return {
       promptId,
       timestamp: timestamp(snapshot['timestamp']),
+      ...(cwd !== undefined ? { cwd } : {}),
       trackedFileBackups: Object.fromEntries(
         Object.entries(record(snapshot['trackedFileBackups'])).map(
           ([filePath, value]) => {
@@ -190,6 +197,21 @@ function snapshots(value: unknown): SerializedFileHistorySnapshot[] {
       ),
     };
   });
+}
+
+function snapshotOrigin(value: unknown): string {
+  const result = text(value, 4096);
+  if (
+    [...result].some(
+      (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
+    ) ||
+    ![path.posix, path.win32].some(
+      (grammar) =>
+        grammar.isAbsolute(result) && grammar.normalize(result) === result,
+    )
+  )
+    throw new ManagedToolProtocolError();
+  return result;
 }
 
 function absolutePath(value: unknown): string {

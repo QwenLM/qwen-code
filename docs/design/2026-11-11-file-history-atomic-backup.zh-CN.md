@@ -2,9 +2,9 @@
 
 [English](2026-11-11-file-history-atomic-backup.md) | [简体中文](2026-11-11-file-history-atomic-backup.zh-CN.md)
 
-状态：已实现并验证（issue #16896 试点，将 `v1.0.0-preview` @ `587e3429cabf`
-的崩溃安全捕获移植到 main 现有文件历史）。已在基线 commit 上以故障注入复现、
-修复，并于 2026-11-11 通过回归套件与交互式 E2E 验证。
+状态：#16896 原子发布试点已于 2026-11-11 实现并验证。#16982 的迁移与保守
+删除扩展目前是带定向证据的本地候选，不是最终验收；仍需独立审查与全仓门禁。
+下文历史试点结果不能用来认证这一更大候选。
 
 ## 问题
 
@@ -25,9 +25,9 @@
 截断内容当作捕获的检查点恢复：在一个以可靠撤销为全部目的的功能里，这是静默
 的错误恢复。
 
-## 现状
+## 变更前状态（原子发布试点）
 
-main 的捕获流程（`createBackup`）：
+试点基线的捕获流程（`createBackup`）：
 
 1. `stat(filePath)`；ENOENT → 记录 `null` 备份（文件当时不存在）。
 2. `safeCopyFile(filePath, backupPath)`——直接 `copyFile` 到最终路径，带
@@ -45,15 +45,18 @@ preview 分支（`packages/core/src/file-history/file-history.ts`）已解决此
 
 ## 目标
 
-- 捕获期间的崩溃或 I/O 错误绝不在最终备份路径留下不完整内容。
+- 复制、权限和发布操作中断时，不得把临时文件的部分内容发布到最终备份路径。
 - 失败继续通过现有 `failed` / `filesFailed` 语义暴露——不新增标记、不改调用方。
 - 针对 `copyFile` / `chmod` / `rename` 的故障注入回归测试。
-- 评估逐快照 `cwd` 项并以证据关闭。
+- 分开评估 worktree 进入／退出与目录迁移，并在读取、预览和恢复中保留带标签的
+  捕获坐标。
+- 无法保留恢复证据或确定性发布版本预留时，在持久化前拒绝消息组删除。
 
 ## 非目标（来自 issue #16896）
 
 - 用 preview 的 `FileHistoryManager` 替换 `FileHistoryService`。
-- UUID 备份命名（main 的 `hash@version` + 最大版本号扫描已避免冲突）。
+- UUID 备份命名或分配器重构。确定性的 `hash@version` 命名保持不变；删除不得
+  改变版本预留的留存寿命。
 - 重复移植 `captureFailed` / 逐文件 rewind 失败报告（main 已有
   `failed` / `filesFailed`）。
 - 会话 fork 的备份迁移（硬链接复制）。
@@ -62,8 +65,8 @@ preview 分支（`packages/core/src/file-history/file-history.ts`）已解决此
 
 ## 方案
 
-只改 `packages/core/src/services/fileHistoryService.ts` 的 `createBackup` 与
-`safeCopyFile`：
+原子发布部分修改 `packages/core/src/services/fileHistoryService.ts` 的
+`createBackup` 与 `safeCopyFile`；迁移／删除扩展及其消费方在后文单独说明：
 
 1. `safeCopyFile` 增加可选 `mode` 参数（默认 `0`，即 `copyFile` 的默认值），
    使独占标志对首次尝试与 `mkdir` 后的重试都生效。`restoreBackup` 继续不带
@@ -145,7 +148,7 @@ workflow journal）都经 `utils/atomicFileWrite.ts` 的 `renameWithRetry` 发�
 整个会话目录）与 housekeeping（`cleanupOldFileHistoryBackups` 按 mtime 清扫
 会话目录）。不新增清扫器。
 
-### 逐快照 `cwd`：已评估，无需改动
+### 逐快照 `cwd`：worktree 无需改动；relocation 已实现（#16982）
 
 issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时**才记录每个
 快照产生时的 `cwd`。对试点基线 commit 的 main 的调查表明不存在该路径：
@@ -161,16 +164,65 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
 - ACP 托管会话直接拒绝 `enter_worktree` / `exit_worktree`；独立 ACP 路径使用
   同样的不 relocate 的工具。
 
-因此逐快照记录 `cwd` 不会为 enter/exit worktree 增加任何正确性。该项以
-「已评估、无需改动」关闭。
+因此逐快照记录 `cwd` 不会为 enter/exit worktree 增加任何正确性；该项的
+worktree 一半维持「已评估、无需改动」关闭。
 
-相邻观察（超出试点范围，候选后续项）：`/cd`（`cdCommand`）与 ACP `session/cd`
-调用 `relocateWorkingDirectory`，它重置 `fileHistoryService` 但不动
-`sessionData`；随后惰性的 `getFileHistoryService()` 会把
-`sessionData.fileHistorySnapshots`（resume 时载入的载荷）按**新** cwd 重新
-水合。在已 resume 的会话里，rewind 到 `cd` 之前的检查点可能把相对跟踪路径恢复
-到新目录下。这是目录 relocate 问题，不是 worktree enter/exit 问题；已立
-#16982 跟踪（要求实现逐快照 cwd 前先落端到端复现），本试点不改动。
+相邻的 relocate 观察——`/cd`（`cdCommand`）与 ACP `session/cd` 调用
+`relocateWorkingDirectory`，它重置 `fileHistoryService`，随后惰性的
+`getFileHistoryService()` 会把 `sessionData.fileHistorySnapshots`（resume 时
+载入的载荷）按**新** cwd 重新水合——即 #16982 报告的 P1，已由 PR #17400
+实现：
+
+- **决策**：`FileHistorySnapshot` 新增可选 `cwd`，记录快照产生时的工作目录。
+  该目录由 `FileHistoryService` 构造时一次性原生锚定：Win32 走原生
+  `resolve()`，POSIX 绝对拼写原样保留（相对拼写锚定到进程 cwd）；
+  `makeSnapshot` 记录锚定后的拼写，不消解 POSIX 父表达式与双前导斜杠
+  语法。不含该字段的序列化载荷语义不变。通用远端
+  快照来源独立于读取端操作系统接受规范 POSIX 或 Win32 路径，并保留原字符串；
+  Linux CSI 在 TypeScript 与 Java 中均明确要求 POSIX 来源。本地执行目录校验不变。
+- **拒绝语义**：core `rewind` 在触碰文件、截断历史之前检查其完整检查点状态。
+  ACP `rewindToTurn` 则在截断会话之前检查实际保留的检查点切片。将被丢弃的
+  后缀中的异目录检查点不阻止本地恢复，除非它们持有保留切片无法自行恢复的
+  必需基线（包括当前根目录内或两个根目录之外的路径）。保留集合中的异目录
+  检查点或这种必需的被丢弃基线均产生 `cross_directory_checkpoint`，HTTP 映射为
+  非重试的 409。`getDiffStats` 与
+  `getTurnDiff` 在其时间线存在异目录检查点时都不提供预览。纯会话回退保留，
+  但保留的前缀仍可能含异目录检查点，普通截断并不一定使后续文件回退可用。
+  移回先前目录也仅在所有剩余带标签检查点都与该根目录匹配时才有帮助。
+- **删除安全**：消息组删除与直接快照删除使用同一纯函数准入；拒绝时在替换
+  transcript 前报告 `invalid_history`。recorder 检查原始完整 transcript 及其原始
+  留存切片；Session 在调用 recorder 之前，使用同一删除函数和所选消息组的 prompt
+  身份单独检查实际已水合的本地快照数组。普通单键水合可能缩短绝对路径，而多别名
+  组保留原始拼写，因此原始切片不能替代实际消费方检查。recorder 还拒绝所选原始
+  片段的非空 prompt 身份与聚合记录不一致的输入，防止实际删除集合静默超出 Session
+  调用方可见范围。已有端点不能证明另一
+  文件的被删捕获可丢弃；
+  来源端或接收端的拒绝根目录也不能因规范化后相等而获得转移权限。候选必须保留
+  每个原始捕获记录（含 null 与 failed 预留）距时间线末尾最近一次出现的距离，
+  因而保留精确记录在未来留存窗口中的存在性，而非只保留当前最大版本号。候选
+  身份顺序、原始别名选择和最新可复用的文件备份仅针对当前输入比较；别名冲突或同一身份
+  不同的 v1 基线保守拒绝删除，不推断捕获先后。空历史、同根冗余捕获与保全证据的
+  折叠仍可使用。普通编辑历史也可能拒绝：例如先前已有折叠时，再次删除可能丢失
+  新增文件的基线或改变版本预留。本限制针对消息组删除，不涵盖所有已有的
+  rewind／截断／留存操作。不引入新存储或来源格式、分配器、文件系统别名检测器。
+  legacy／带标签混合记录不能静默改标签；明确的根目录采纳策略仍由维护者决定。
+- **继承的未来顺序／物理别名限制**：本准入不保证任意后续恢复的物理字节相等。
+  一个允许加载的稀疏历史，其 T 映射依次为 `{g:G,f:F}`、`{f:F}`（删除）、
+  `{g:G}`、`{f:F}`、`{g:G}`，保留精确记录最近距离与当前候选顺序。实际捕获
+  96 次并序列化、重载后，未删与已删历史的候选顺序分别为 `f,g` 和 `g,f`。
+  独立普通文件恢复字节相同；g 为指向 f 的 symlink 时，最终字节分别为
+  `G BASELINE` 和 `F BASELINE`，即使失败列表为空。upstream planner 对该输入产生
+  相同删除计划：这是继承的已加载历史／物理别名限制，不是新引入的数据破坏。
+  不声称单个全新当前写入会话会自然产生此形状。未来顺序认证和通用别名检测不在
+  本轮有界修复范围内。
+- **legacy 兜底**：本变更之前创建的检查点不带 `cwd`，永不计为外来——对其
+  全量拒绝会使所有升级前的会话无法恢复。因此无标签时间线上原始的错误恢复
+  路径是有意保留的；收紧它（例如把 relocate 后的时间线标记为根目录未知、
+  拒绝文件恢复但保留 conversation-only 回退）是留给维护者的后续决策。
+- **混版部署**：新读取端接受不含 `cwd` 的旧记录；旧的严格读取端拒绝含该键的
+  新记录。这是新读旧兼容，不是旧读新兼容。启用会写入该字段的写入端前，应先
+  升级所有读取端（包括控制面与 Java CSI 消费方）。写入新记录后回滚读取端，
+  必须先处理这些记录。本变更不引入版本协商、双写或存储迁移。
 
 ## 约束
 
@@ -288,14 +340,23 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
 
 ## 验收标准
 
-- 没有任何代码路径在最终备份路径发布不完整内容。
+- 实际覆盖的复制／权限／刷盘／rename 失败路径不在最终备份路径发布临时文件的
+  部分内容。
 - `copyFile` / `chmod` / `rename` 失败通过现有 `failed` / `filesFailed` 语义
   暴露，且临时文件被清理。
-- 同一确定性路径的并发捕获仍然无害。
-- `cwd` 评估项以上述证据关闭。
+- 并发捕获保持完整副本、最后写入生效的发布语义，不构成任意文件系统别名安全的
+  一般保证。
+- 迁移拒绝与历史 worktree 评估分别验证；legacy 与 Config 选择性恢复边界明确保留。
+- DI-1 重复删除、DI-2 拒绝根目录转移与 DI-3 版本预留变化必须保留证据或在效果
+  发生前拒绝。原生对照检查后续捕获的实际字节，包括留存窗口淘汰后的预留寿命；
+  定向测试不是全仓验收。
 - 双语设计文档与回归测试在同一变更内落地。
 
 ## 开放问题
 
-无。`cwd` 项对 worktree enter/exit 已按「已评估、无需改动」解决；`/cd` 水合
-观察已立 #16982 跟踪。
+worktree enter/exit 已按「已评估、无需改动」处理；本 PR 以拒绝语义保护
+#16982 中带标签的完整恢复后迁移路径。无标签 legacy 检查点的归属策略仍待决策；
+若要在保留恢复安全的同时允许混合来源历史删除，也需以明确的端点来源设计替代
+上述持久化前保守拒绝。另有 Config 选择性恢复生命周期路径：迁移后重建服务时，
+可能丢失内存中的检查点载荷；本 PR 未修改该路径，不将其描述为覆盖所有恢复模式
+的端到端验证。
