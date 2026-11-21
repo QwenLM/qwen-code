@@ -33790,6 +33790,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agent.beginManagedShutdown().writerShutdown;
 
     expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
+    expect(liveSession.waitForActiveTurnsToSettle).toHaveBeenCalledOnce();
     expect(
       liveSession.flushPendingPeerNotifications.mock.invocationCallOrder[0],
     ).toBeLessThan(
