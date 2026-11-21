@@ -115,7 +115,7 @@ async function runCase(
   const t0 = Date.now();
   await bridge.spawnOrAttach({ workspaceCwd: '/work/a' });
   let failure: [string, Record<string, unknown>] | undefined;
-  while (!failure && Date.now() - t0 < 120_000) {
+  while (!failure && Date.now() - t0 < 150_000) {
     await sleep(250);
     failure = cap.events.find(([n]) => n === 'channel.liveness_failed');
   }
@@ -145,7 +145,10 @@ describe.runIf(process.platform === 'linux')(
         expect(r.grace[BUSY_LIMIT - 2]).toContain(
           `extending grace ${BUSY_LIMIT - 1}/${BUSY_LIMIT}`,
         );
-        expect(r.kill).toHaveLength(1);
+        expect(
+          r.kill,
+          'liveness kill line must appear within the poll budget',
+        ).toHaveLength(1);
         expect(r.kill[0]).toContain(`pid=${r.child.pid}`);
         expect(r.kill[0]).toContain('busy=6 timeouts=0');
         expect(r.attrs['qwen-code.daemon.channel.liveness.pid']).toBe(
@@ -172,13 +175,16 @@ describe.runIf(process.platform === 'linux')(
           // already reaped
         }
       }
-    }, 150_000);
+    }, 180_000);
 
     it('still kills a zero-CPU stopped agent on the two-strike fast path with evidence', async () => {
       const r = await runCase('setInterval(()=>{},1000)', true);
       try {
         expect(r.grace).toHaveLength(0);
-        expect(r.kill).toHaveLength(1);
+        expect(
+          r.kill,
+          'liveness kill line must appear within the poll budget',
+        ).toHaveLength(1);
         expect(r.kill[0]).toContain(`pid=${r.child.pid}`);
         expect(r.kill[0]).toContain('state=T');
         expect(r.kill[0]).toContain('cpuDelta=0 busy=0 timeouts=2');

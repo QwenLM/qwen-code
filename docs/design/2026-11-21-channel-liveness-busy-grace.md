@@ -228,8 +228,9 @@ unaffected.
 - `channel-process-sample.test.ts`: parser fixtures (plain comm, comm with
   spaces and `)`, malformed input), pid guards, platform gate, and a live
   self-sample on Linux.
-- Real-process rig and real-daemon E2E per
-  `.qwen/e2e-tests/2026-11-21-channel-liveness-busy-grace.md`: SIGSTOPped
+- Real-process regression committed as
+  `integration-tests/cli/qwen-serve-liveness-grace.test.ts` (Linux-gated,
+  real timers, production sampler and startup wiring): SIGSTOPped
   agent → evidence-bearing kill; busy child → extensions then bounded kill;
   healthy channel → no failure. Baseline dry-run against the global `qwen`
   first.

@@ -185,8 +185,9 @@ SIGKILL 销毁了现场：没有任何记录保存 kill 时刻 agent 的进程�
   非忙碌计入。
 - `channel-process-sample.test.ts`：解析夹具（普通 comm、含空格与 `)` 的
   comm、畸形输入）、pid 守卫、平台门、Linux 上的自身实时采样。
-- 真实进程 rig 与真实 daemon E2E 见
-  `.qwen/e2e-tests/2026-11-21-channel-liveness-busy-grace.md`：SIGSTOP 的
+- 真实进程回归已提交为
+  `integration-tests/cli/qwen-serve-liveness-grace.test.ts`（Linux 门禁、
+  真实计时器、生产采样器与 startup 接线）：SIGSTOP 的
   agent → 带证据的 kill；busy 子进程 → 宽限后有界 kill；健康通道 → 无失败。
   先对全局 `qwen` 做基线 dry-run。
 - `npm run build && npm run typecheck`、受影响包的聚焦测试、lint/format。
