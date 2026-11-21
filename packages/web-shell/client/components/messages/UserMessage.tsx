@@ -433,7 +433,8 @@ export const UserMessage = memo(function UserMessage({
     };
   }, [automaticTriggerSource, content]);
   const expansionGeneration = {
-    source,
+    // Replay aliases do not change the automatic variant or hide its details.
+    automatic: automaticTriggerSource !== undefined,
     content,
     imageCount: images?.length ?? 0,
     fileCount: files?.length ?? 0,
@@ -442,7 +443,7 @@ export const UserMessage = memo(function UserMessage({
   const [detailsGeneration, setDetailsGeneration] =
     useState(expansionGeneration);
   if (
-    detailsGeneration.source !== source ||
+    detailsGeneration.automatic !== expansionGeneration.automatic ||
     detailsGeneration.content !== content ||
     detailsGeneration.imageCount !== expansionGeneration.imageCount ||
     detailsGeneration.fileCount !== expansionGeneration.fileCount ||
@@ -453,7 +454,7 @@ export const UserMessage = memo(function UserMessage({
     setExpanded(false);
   }
   const interactiveDetailsExpanded =
-    detailsGeneration.source === source &&
+    detailsGeneration.automatic === expansionGeneration.automatic &&
     detailsGeneration.content === content &&
     detailsGeneration.imageCount === expansionGeneration.imageCount &&
     detailsGeneration.fileCount === expansionGeneration.fileCount &&
@@ -563,9 +564,12 @@ export const UserMessage = memo(function UserMessage({
     setHeightOverflowing(el.scrollHeight > 400);
   }, []);
 
+  // The generation above handles variant changes without resetting aliases.
   useLayoutEffect(() => {
-    setExpanded(false);
-    if (!automaticTriggerSource) measureOverflow();
+    if (!automaticTriggerSource) {
+      setExpanded(false);
+      measureOverflow();
+    }
     // `editing` is a dep so leaving the editor re-measures the re-shown
     // content: it is `hidden` while editing, which reads as zero height.
   }, [

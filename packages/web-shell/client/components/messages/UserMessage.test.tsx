@@ -905,6 +905,52 @@ describe('UserMessage', () => {
     expect(parse).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps expanded details when loop normalizes to cron', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const content = 'First instruction\nSecond instruction';
+    const view = (source: 'cron' | 'loop') => (
+      <I18nProvider language="en">
+        <UserMessage content={content} source={source} />
+      </I18nProvider>
+    );
+    act(() => root.render(<StrictMode>{view('loop')}</StrictMode>));
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+
+    act(() => root.render(<StrictMode>{view('cron')}</StrictMode>));
+    expect(
+      container
+        .querySelector('[data-web-shell-automatic-trigger-message]')
+        ?.getAttribute('data-source'),
+    ).toBe('cron');
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+
+    act(() => root.render(<StrictMode>{view('loop')}</StrictMode>));
+    expect(
+      container
+        .querySelector('[data-web-shell-automatic-trigger-message]')
+        ?.getAttribute('data-source'),
+    ).toBe('loop');
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+  });
+
   it('does not rescan an unchanged automatic instruction during edits', () => {
     const matcher = vi.spyOn(automaticTrigger, 'isDetailFreeAutomaticEcho');
     const content = 'Original automatic prompt\nwith details';
