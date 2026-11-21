@@ -753,6 +753,72 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('history discard does not restore a paste replaced after double ESC', async () => {
+    const placeholder = '[Pasted Content 1500 chars]';
+    const originalBody = 'A'.repeat(1500);
+    const recalledBody = 'R'.repeat(1500);
+    const replacementBody = 'B'.repeat(1500);
+    const onPendingPastesChange = vi.fn();
+    props.buffer.text = placeholder;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: placeholder,
+          recallText: recalledBody,
+          pasteExpansions: new Map([[placeholder, recalledBody]]),
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    function StatefulPrompt() {
+      const [pastes, setPastes] = useState<Map<string, string>>(
+        new Map([[placeholder, originalBody]]),
+      );
+      return (
+        <InputPrompt
+          {...props}
+          pendingPastes={pastes}
+          onPendingPastesChange={(next) => {
+            onPendingPastesChange(next);
+            setPastes(next);
+          }}
+        />
+      );
+    }
+
+    const { stdin, unmount } = renderWithProviders(<StatefulPrompt />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    act(() => historyArgs.onChange(recalledBody));
+    stdin.write('\x1B');
+    await wait(50);
+    stdin.write('\x1B');
+    await wait(50);
+    act(() => {
+      stdin.write(`\x1b[200~${replacementBody}\x1b[201~`);
+    });
+    await flush();
+    props.buffer.text = placeholder;
+
+    const returnedHistoryArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!returnedHistoryArgs) {
+      throw new Error('useInputHistory was not called');
+    }
+    act(() => returnedHistoryArgs.onChange(recalledBody));
+    act(() => returnedHistoryArgs.onChange(placeholder));
+
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(
+      new Map([[placeholder, replacementBody]]),
+    );
+    unmount();
+  });
+
   it('queues the prompt for the next turn on Ctrl+Q', async () => {
     props.buffer.setText('send this later');
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);

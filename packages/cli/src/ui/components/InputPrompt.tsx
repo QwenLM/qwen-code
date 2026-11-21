@@ -499,20 +499,22 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     [],
   );
 
+  const pendingPastesBeforeHistoryRef = useRef<Map<string, string> | undefined>(
+    undefined,
+  );
+
   // Paired reset for the paste map and the placeholder-id pool: the two
   // must move together or later same-size pastes keep numbering at #2.
   const clearPendingPastes = useCallback(() => {
     setPendingPastes(new Map());
     activePlaceholderIds.current.clear();
+    pendingPastesBeforeHistoryRef.current = undefined;
   }, [setPendingPastes]);
 
   // Ref to inputHistory.resetHistoryNav, populated after useInputHistory runs.
   // Needed because handleSubmitAndClear is passed into useInputHistory as
   // onSubmit, so we can't reference inputHistory directly here without a cycle.
   const resetHistoryNavRef = useRef<() => void>(() => {});
-  const pendingPastesBeforeHistoryRef = useRef<Map<string, string> | undefined>(
-    undefined,
-  );
 
   const handleSubmitAndClear = useCallback(
     (submittedValue: string, deferUntilIdle = false) => {
@@ -683,6 +685,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const prevHasAgentsRef = useRef(hasAgents);
   useEffect(() => {
     if (hasAgents && !prevHasAgentsRef.current) {
+      pendingPastesBeforeHistoryRef.current = undefined;
       inputHistory.resetHistoryNav();
     }
     prevHasAgentsRef.current = hasAgents;
