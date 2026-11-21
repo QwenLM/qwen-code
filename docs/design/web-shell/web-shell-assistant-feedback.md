@@ -199,9 +199,10 @@ marks on answers that still show Copy.
 - The mark is keyed by session and turn, so it requires both. A transcript
   without a session id is not offered the marks rather than accepting clicks that
   could not be stored.
-- Two tabs, or two panes, do not synchronize live, and a write replaces the whole
-  stored payload: each renders from the storage it read when it mounted, and a
-  mark made in one instance can be dropped by a write from another.
+- Two tabs, or two panes, do not synchronize live. Each write merges the pane's
+  pending marks and clears onto the freshest persisted store, so either survives
+  another pane's write. A cross-tab read-modify-write can still race, and a failed
+  write is retried by that pane's next mark.
 - A session that is deleted, rewound, or forked leaves its marks behind until the
   ten-session cap ages them out. They are never shown for a different session.
 
@@ -244,7 +245,10 @@ Unit tests:
   built from stamped blocks, and invents no id for a block that has none.
 - `hooks/useAssistantFeedback.test.tsx`: marks immediately without a host
   handler, notifies with `previousRating`, clears on a repeat click, restores the
-  mark after a remount, and keeps marks per session.
+  mark after a remount, and keeps marks per session. Concurrency cases preserve
+  two panes and distinct turns, do not resurrect a clear, retry a failed write
+  without dropping another pane's edit, and keep a mounted pane's earlier marks
+  after storage ages its session out.
 - `components/messages/AssistantMessage.test.tsx`: no marks unless opted in,
   `aria-pressed` projection, the per-direction colour class, pointer-versus-
   keyboard focus handling, click-to-notify payloads, and the localized titles.
