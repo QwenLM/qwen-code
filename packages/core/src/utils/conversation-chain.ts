@@ -9,6 +9,7 @@ import {
   isTranscriptConversationRecord,
   selectTranscriptLeaf,
   walkTranscriptUuidChain,
+  type TranscriptGapReason,
   type TranscriptRecordInput,
 } from './transcript-records.js';
 
@@ -34,6 +35,11 @@ export interface HistoryGap {
   childUuid: string;
   /** The parentUuid value that could not be found in the file. */
   missingParentUuid: string;
+  /**
+   * Set when the parent is still in the file but before the window an
+   * over-size transcript is read from; the earlier history was not lost.
+   */
+  reason?: TranscriptGapReason;
 }
 
 export interface OrderedChainResult {
