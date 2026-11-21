@@ -53,6 +53,15 @@ public final class ExternalWorkspaceRetirementService {
             long runtimeGeneration, String providerId, String provisionRequestId, String handleIdentity) { }
     public record TerminationProof(Identity identity, String sandboxId, String state, Instant observedAt,
             String auditId, String evidenceSha256) { }
+    public record UnallocatedProof(Identity identity, String state, Instant observedAt,
+            String auditId, String evidenceSha256) { }
+    @FunctionalInterface
+    public interface CancellationVerifier {
+        /** Durably fences the original host request against every future allocation attempt. */
+        UnallocatedProof cancel(Identity identity);
+    }
+    public record CancellationReceipt(String retirementId, Identity identity, String state,
+            long fencedVersion, String proofDigest, String auditId) { }
     @FunctionalInterface
     public interface TerminationVerifier {
         /** 可信宿主须从原分配回执核对身份并重新 GET 同一实例；禁止采纳用户自报状态或创建/删除实例。 */
@@ -62,6 +71,77 @@ public final class ExternalWorkspaceRetirementService {
             String proofDigest, String sandboxId, String auditId, Instant observedAt, String evidenceSha256,
             boolean resumed) { }
     private record Plan(int version, Request request, Identity identity) { }
+
+    public CancellationReceipt cancelUnallocated(Request request, CancellationVerifier verifier) {
+        requireOwner(request);
+        var prior = operations(request).find(KIND, request.retirementId(), false);
+        if (prior != null) {
+            return cancellationReceipt(request, prior);
+        }
+        RuntimeBindingRecord original = original(request);
+        requireUnallocated(original);
+        Identity identity = identity(request, original);
+        UnallocatedProof proof = Objects.requireNonNull(verifier, "Trusted cancellation verifier").cancel(identity);
+        verifyCancellation(identity, proof);
+        return transaction.execute(status -> {
+            lock(request);
+            var operations = operations(request);
+            var saved = operations.find(KIND, request.retirementId(), true);
+            if (saved != null) {
+                return cancellationReceipt(request, saved);
+            }
+            requireWorkspace(request, "ACTIVE");
+            RuntimeBindingRecord current = jdbc.execute((ConnectionCallback<RuntimeBindingRecord>) connection ->
+                    bindings.findByIdForUpdate(connection, original.getBindingId()));
+            require(current != null && current.getVersion() == request.expectedVersion());
+            requireOriginal(request, current);
+            requireUnallocated(current);
+            require(identity.equals(identity(request, current)));
+            verifyCancellation(identity, proof);
+            RuntimeBindingRecord released = jdbc.execute((ConnectionCallback<RuntimeBindingRecord>) connection ->
+                    bindings.cancelUnallocatedExternal(connection, current));
+            operations.create(KIND, request.retirementId(), WorkspaceOperations.values(
+                    "state", "RELEASED", "binding_id", current.getBindingId(),
+                    "runtime_generation", current.getGeneration(), "storage_id", current.getRequest().getStorageId(),
+                    "request_json", encode(new Plan(2, request, identity)), "proof_json", encode(proof),
+                    "proof_digest", cancellationDigest(request, proof), "fenced_version", released.getVersion(), "resumed", true));
+            return cancellationReceipt(request, operations.find(KIND, request.retirementId(), true));
+        });
+    }
+
+    private static void requireUnallocated(RuntimeBindingRecord binding) {
+        require((binding.getState() == RuntimeBindingRecord.State.PROVISIONING
+                || binding.getState() == RuntimeBindingRecord.State.RECOVERY_BLOCKED)
+                && binding.getLease() == null && binding.getAttestationGeneration() == 0
+                && !binding.hasLiveOperationAt(Instant.now()));
+    }
+
+    private void verifyCancellation(Identity identity, UnallocatedProof proof) {
+        require(proof != null && identity.equals(proof.identity())
+                && "NEVER_ALLOCATED_AND_CANCELLED".equals(proof.state())
+                && proof.observedAt() != null && !proof.observedAt().isAfter(Instant.now().plusSeconds(5))
+                && Duration.between(proof.observedAt(), Instant.now()).compareTo(Duration.ofMinutes(2)) <= 0
+                && proof.auditId() != null && proof.auditId().matches("cancel-[0-9a-f-]{36}")
+                && proof.evidenceSha256() != null && proof.evidenceSha256().matches("[0-9a-f]{64}"));
+    }
+
+    private CancellationReceipt cancellationReceipt(Request request, Map<String, Object> saved) {
+        Plan plan = decode((String) saved.get("request_json"), Plan.class);
+        UnallocatedProof proof = decode((String) saved.get("proof_json"), UnallocatedProof.class);
+        require(plan.version() == 2 && request.equals(plan.request()) && "RELEASED".equals(saved.get("state"))
+                && plan.identity().equals(proof.identity()) && "NEVER_ALLOCATED_AND_CANCELLED".equals(proof.state())
+                && cancellationDigest(request, proof).equals(saved.get("proof_digest")));
+        return new CancellationReceipt(request.retirementId(), plan.identity(), "RELEASED",
+                ((Number) saved.get("fenced_version")).longValue(), (String) saved.get("proof_digest"), proof.auditId());
+    }
+
+    private static String cancellationDigest(Request request, UnallocatedProof proof) {
+        Identity id = proof.identity();
+        return WorkspaceOperations.hash("external-unallocated-cancellation/1", request.retirementId(), request.ownerUserId(),
+                id.tenantId(), id.workspaceId(), Long.toString(id.workspaceGeneration()), id.bindingId(),
+                Long.toString(id.runtimeGeneration()), id.providerId(), id.provisionRequestId(), id.handleIdentity(),
+                proof.state(), proof.observedAt().toString(), proof.auditId(), proof.evidenceSha256());
+    }
 
     public ExternalWorkspaceRetirementService(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
@@ -188,7 +268,7 @@ public final class ExternalWorkspaceRetirementService {
 
     private void requireOriginal(Request request, RuntimeBindingRecord binding) {
         require(binding != null
-                && WorkspaceExecutionProfile.isExternalWorkspaceRequest(
+                && WorkspaceExecutionProfile.isExternalWorkspaceRetirementRequest(
                         binding.getRequest()));
         var scope = binding.getRequest().getScope();
         require("workspace".equals(scope.getIsolationClass()) && request.tenantId().equals(scope.getTenantId())

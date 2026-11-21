@@ -11,7 +11,16 @@ import java.util.Map;
  * provider class at compile time.
  */
 public interface ExternalWorkspaceRecoverySupport {
-    /** Validates an unleased first-start original without adopting a replacement endpoint. */
+    /**
+     * Validates the saved original for terminal settlement only. Historical
+     * shared-Workspace profiles are checked structurally, without rebuilding
+     * their boot or granting execution/recovery authority. This check requires
+     * no host resource receipt. The caller must independently verify either
+     * termination against the matching original allocation launch/boot receipt,
+     * or that the exact provision request was never allocated and is durably
+     * cancelled against future allocation. Missing proof must fail closed;
+     * passing this structural check alone never authorizes settlement.
+     */
     void validateTerminalOriginal(RuntimeBindingRecord binding);
 
     /** Exports the original boot only to the trusted local recovery host. */

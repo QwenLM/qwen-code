@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
@@ -480,18 +481,41 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         }
     }
 
-    /** Validates an unleased first-start original without adopting a replacement endpoint. */
+    /**
+     * Validates saved terminal identity, never execution admission. A historical
+     * boot cannot safely be reconstructed from today's profile. The caller must
+     * independently prove either termination of the matching original allocation
+     * or cancellation of a never-allocated request with future allocation fenced.
+     * This structural check itself requires no host resource receipt.
+     */
     public final void validateTerminalOriginal(RuntimeBindingRecord binding) {
         if (binding == null || executor.isShutdown()) {
             throw conflict();
         }
-        validate(binding.getRequest(), binding.getProvisionSeed());
+        var request = binding.getRequest();
+        var seed = binding.getProvisionSeed();
+        if (WorkspaceExecutionProfile.isExternalWorkspaceRetirementRequest(request)
+                && !WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)) {
+            String cwd = request.getScope().getCanonicalCwd();
+            if (seed == null || !kind().equals(request.getProvisionerKind())
+                    || seed.getEpoch() > 9_007_199_254_740_991L
+                    || !cwd.startsWith("/") || Arrays.stream(cwd.substring(1).split("/", -1))
+                            .anyMatch(part -> part.isEmpty() || part.equals(".") || part.equals(".."))) {
+                throw conflict();
+            }
+            validateHandleFields(request, seed, binding.getResourceHandle());
+            if (!(binding.getResourceHandle().getValue().get("identity") instanceof String identity)
+                    || !identity.matches("[0-9a-f]{64}")) {
+                throw conflict();
+            }
+        } else {
+            validate(request, seed);
+            validateHandle(request, seed, binding.getResourceHandle());
+        }
         if (binding.getLease() != null
-                && !binding.getProvisionSeed().matches(binding.getLease())) {
+                && !seed.matches(binding.getLease())) {
             throw conflict();
         }
-        validateHandle(binding.getRequest(), binding.getProvisionSeed(),
-                binding.getResourceHandle());
     }
 
     /** Exports the original boot only to the trusted local recovery host. */
@@ -549,11 +573,18 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     private void validateHandle(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle, Map<String, Object> boot) {
+        validateHandleFields(request, seed, handle);
+        if (!identity(request, boot).equals(handle.getValue().get("identity"))) {
+            throw conflict();
+        }
+    }
+
+    private void validateHandleFields(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle handle) {
         if (!supportsStartupRecovery(handle) || handle.getVersion() != handleVersion(request)
                 || handle.getValue().size() != 4
                 || !providerId.equals(handle.getValue().get("providerId"))
-                || !seed.getProvisionRequestId().equals(handle.getValue().get("provisionRequestId"))
-                || !identity(request, boot).equals(handle.getValue().get("identity"))) {
+                || !seed.getProvisionRequestId().equals(handle.getValue().get("provisionRequestId"))) {
             throw conflict();
         }
         if (!Map.of("requestId", seed.getProvisionRequestId()).equals(handle.getValue().get("provider"))) {

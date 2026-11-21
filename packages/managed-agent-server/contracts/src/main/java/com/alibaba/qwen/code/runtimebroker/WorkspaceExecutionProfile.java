@@ -100,6 +100,17 @@ public final class WorkspaceExecutionProfile {
                 && request.getScope().getWorkspaceId().equals(request.getStorageId());
     }
 
+    /** Saved identity only; this predicate never admits execution or replacement provisioning. */
+    public static boolean isExternalWorkspaceRetirementRequest(RuntimeProvisionRequest request) {
+        return request != null
+                && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(request.getProvisionerKind())
+                && request.isManagedContext()
+                && "workspace".equals(request.getScope().getIsolationClass())
+                && request.getIsolationKey() == null
+                && request.getScope().getWorkspaceId().equals(request.getStorageId())
+                && request.getScope().getCapabilityDigest().matches("sha256:[0-9a-f]{64}");
+    }
+
     /**
      * The external foreground-Shell placement: registered storage, one worker
      * per Session, its own capability digest. Structural selection only;

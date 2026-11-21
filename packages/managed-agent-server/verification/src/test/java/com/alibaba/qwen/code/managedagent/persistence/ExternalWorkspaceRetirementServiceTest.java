@@ -111,6 +111,75 @@ class ExternalWorkspaceRetirementServiceTest {
                 Instant.now(), "audit-original", "a".repeat(64));
     }
 
+    private ExternalWorkspaceRetirementService.UnallocatedProof cancelled(ExternalWorkspaceRetirementService.Identity identity) {
+        return new ExternalWorkspaceRetirementService.UnallocatedProof(identity, "NEVER_ALLOCATED_AND_CANCELLED", Instant.now(),
+                "cancel-" + UUID.randomUUID(), "b".repeat(64));
+    }
+
+    @Test
+    void cancellationIsDurableIdempotentAndDoesNotDrainWorkspace() {
+        var receipt = service.cancelUnallocated(request, this::cancelled);
+        assertThat(receipt.state()).isEqualTo("RELEASED");
+        assertThat(bindings.findById(original.getBindingId()).getState()).isEqualTo(RuntimeBindingRecord.State.RELEASED);
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_workspace", String.class)).isEqualTo("ACTIVE");
+        assertThat(service.cancelUnallocated(request, ignored -> { throw new AssertionError("No repeated cancellation"); }))
+                .isEqualTo(receipt);
+        assertThatThrownBy(() -> service.inspect(request)).isInstanceOf(RuntimeBrokerException.class);
+        var next = bindings.findOrCreate(placement);
+        assertThat(service.cancelUnallocated(request, ignored -> { throw new AssertionError("Keep replacement"); })).isEqualTo(receipt);
+        assertThat(bindings.findActive(placement).getBindingId()).isEqualTo(next.getBindingId());
+    }
+
+    @Test
+    void cancellationPreservesOtherReadyBindingAndForeignStorageHolder() throws Exception {
+        var otherRequest = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/var/lib/managed-workspace",
+                WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST, "workspace"), null, "external-workspace", "workspace");
+        // Reproduce persisted legacy overlap; normal placement correctly forbids creating this overlap today.
+        jdbc.update("UPDATE ma_runtime_binding SET binding_state = 'RELEASED' WHERE binding_id = ?", original.getBindingId());
+        var other = bindings.findOrCreate(otherRequest);
+        jdbc.update("UPDATE ma_runtime_binding SET binding_state = 'RECOVERY_BLOCKED' WHERE binding_id = ?", original.getBindingId());
+        other = bindings.claimOperation(other.getBindingId(), "other", Duration.ofMinutes(1));
+        var otherHandle = provider.ensureResource(otherRequest, other.getProvisionSeed(), null).toCompletableFuture().get();
+        var seed = other.getProvisionSeed();
+        other = bindings.compareAndSet(other, other.withAttestation(new RuntimeLease(seed.getProvisionalRuntimeId(),
+                URI.create("http://127.0.0.1:19219"), seed.getToken(), seed.getLeaseId(), seed.getEpoch()),
+                otherHandle, Instant.now(), Instant.now()));
+        other = bindings.releaseOperation(other.getBindingId(), "other", other.getOperationGeneration());
+        jdbc.update("UPDATE ma_storage_owner SET holder_key = 'foreign', binding_id = ?, runtime_generation = ?, runtime_session_id = 'foreign-session'",
+                other.getBindingId(), other.getGeneration());
+        var ownerBefore = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var otherBefore = bindings.findById(other.getBindingId());
+
+        service.cancelUnallocated(request, this::cancelled);
+
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(ownerBefore);
+        assertThat(bindings.findById(other.getBindingId()).getVersion()).isEqualTo(otherBefore.getVersion());
+        assertThat(bindings.findActive(otherRequest).getBindingId()).isEqualTo(other.getBindingId());
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_workspace", String.class)).isEqualTo("ACTIVE");
+    }
+
+    @Test
+    void cancellationRefusesAttestedBindingBeforeCallingHost() {
+        makeReady();
+        var before = durableState();
+        assertThatThrownBy(() -> service.cancelUnallocated(request, ignored -> {
+            throw new AssertionError("Must refuse before host cancellation");
+        })).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(durableState()).isEqualTo(before);
+    }
+
+    @Test
+    void cancellationRefusesExecutionHistoryAndUntrustedProofWithoutRelease() {
+        runtimeSession(RuntimeSessionRecord.State.RELEASED);
+        var before = durableState();
+        assertThatThrownBy(() -> service.cancelUnallocated(request, this::cancelled)).isInstanceOf(RuntimeException.class);
+        assertThat(durableState()).isEqualTo(before);
+        assertThatThrownBy(() -> service.cancelUnallocated(request, identity ->
+                new ExternalWorkspaceRetirementService.UnallocatedProof(identity, "Terminated", Instant.now(), "audit", "b".repeat(64))))
+                .isInstanceOf(RuntimeBrokerException.class);
+        assertThat(durableState()).isEqualTo(before);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"RECOVERY_BLOCKED", "LOST"})
     void preservesActiveSessionsAndMakesRetirementReplayIndependentOfNextGeneration(String state) {
