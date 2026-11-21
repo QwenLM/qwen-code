@@ -392,6 +392,7 @@ describe('ManagedArtifactLibraryPage', () => {
     expect(document.querySelector('[role="alert"]')).toBeNull();
     expect(document.querySelector('[role="status"]')).not.toBeNull();
     await act(async () => refresh.resolve(page([other])));
+    expect(document.querySelector('[role="alert"]')).toBeNull();
     expect(row(other.id)?.getAttribute('aria-pressed')).toBe('true');
   });
 
