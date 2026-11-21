@@ -77,7 +77,9 @@ final class RuntimeDispatchPayloadAdmission {
         // instead of hashing and parsing the same bytes a second time.
         VerifiedDispatchPayload verifiedPayload =
                 VerifiedDispatchPayload.of(digest, toolName);
-        if (WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())) {
+        boolean externalShell = WorkspaceExecutionProfile.isExternalShellRequest(
+                context.binding().getRequest());
+        if (externalShell && v3) {
             // The external foreground-Shell lane admits exactly one Tool v3
             // family member. Background Shell and Monitor keep their own
             // ledgers and holds, which this placement's single-worker drain
@@ -87,7 +89,7 @@ final class RuntimeDispatchPayloadAdmission {
             // foreground command carrying an explicit `false` must admit.
             Map<?, ?> shellInput = payload.get("input") instanceof Map<?, ?> value
                     ? value : Map.of();
-            if (!v3 || record.getReference().containsKey("runtimeProtocol")
+            if (record.getReference().containsKey("runtimeProtocol")
                     || !"run_shell_command".equals(toolName)
                     || Boolean.TRUE.equals(shellInput.get("is_background"))
                     || Boolean.TRUE.equals(shellInput.get("is_monitor"))
@@ -103,7 +105,8 @@ final class RuntimeDispatchPayloadAdmission {
                 throw invalid("runtime_payload_invalid",
                         "External Shell requires a foreground Tool v3 Shell payload");
             }
-        } else if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+        } else if ((externalShell
+                || WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest()))
                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
             executionRepository.settlePrepared(record, Map.of(

@@ -27,6 +27,9 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -137,6 +140,12 @@ class ExternalWorkspaceRecoveryServiceTest {
         when(claimed.getOperationGeneration()).thenReturn(1L);
         when(fenced.getBindingId()).thenReturn("binding");
         when(fenced.getGeneration()).thenReturn(1L);
+        when(fenced.getState()).thenReturn(RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+        when(fenced.getOperationGeneration()).thenReturn(1L);
+        when(fenced.getOperationOwner()).thenReturn("broker-owner");
+        // The compensation re-reads the row it fenced, exactly as it must in
+        // production: the claim renewal between steps rewrites the version.
+        when(bindings.findById("binding")).thenReturn(binding, fenced);
         // The tool admitted between the eligibility read and the fence is
         // exactly what the fence exists to protect: every evidence path
         // requires READY/DRAINING, so the conflict must put the row back.
@@ -175,6 +184,137 @@ class ExternalWorkspaceRecoveryServiceTest {
         } finally {
             nativeBroker.close();
         }
+    }
+
+    @Test
+    void anEmptyObservationRestoresTheAttemptsFence() {
+        // R4-1: an observation that answers nothing is not a verdict. The
+        // fence exists to close new writes while the row is re-observed, so
+        // the attempt that wrote it must undo it before answering; otherwise
+        // a successful recovery leaves the healthy binding RECOVERY_BLOCKED.
+        assertFenceRestored(null);
+    }
+
+    @Test
+    void aStartingObservationRestoresTheAttemptsFence() {
+        // STARTING/UNKNOWN are the other no-verdict shapes: the Runtime is
+        // neither identified nor lost, so recovery must stay retryable.
+        assertFenceRestored(com.alibaba.qwen.code.runtimebroker.RuntimeObservation.starting(
+                binding.getResourceHandle()));
+    }
+
+    @Test
+    void aConflictingObservationKeepsTheFence() {
+        // The counterpart of the two cases above: identity evidence is a
+        // verdict, so the fence stays and the binding remains blocked.
+        var provisioner = mock(com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner.class);
+        var request = binding.getRequest();
+        var lease = binding.getLease();
+        var seed = binding.getProvisionSeed();
+        var handle = binding.getResourceHandle();
+        when(provisioner.supportsKind("external-workspace")).thenReturn(true);
+        when(provisioner.supportsStartupRecovery(handle)).thenReturn(true);
+        when(binding.isActive()).thenReturn(true);
+        RuntimeBindingRecord claimed = recoveryRow(request, lease, seed, handle,
+                RuntimeBindingRecord.State.READY, 8L);
+        RuntimeBindingRecord fenced = recoveryRow(request, lease, seed, handle,
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, 9L);
+        RuntimeBindingRecord renewed = recoveryRow(request, lease, seed, handle,
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, 10L);
+        RuntimeBindingRecord blocked = recoveryRow(request, lease, seed, handle,
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, 11L);
+        RuntimeBindingRecord restored = recoveryRow(request, lease, seed, handle,
+                RuntimeBindingRecord.State.READY, 11L);
+        when(bindings.claimOperation(eq("binding"), anyString(), any())).thenReturn(claimed);
+        when(claimed.withState(eq(RuntimeBindingRecord.State.RECOVERY_BLOCKED), any(), any())).thenReturn(fenced);
+        when(bindings.compareAndSet(claimed, fenced)).thenReturn(fenced);
+        when(bindings.renewOperation(eq("binding"), anyString(), eq(1L), any())).thenReturn(renewed);
+        when(renewed.withState(eq(RuntimeBindingRecord.State.RECOVERY_BLOCKED), any(), any())).thenReturn(blocked);
+        when(bindings.compareAndSet(renewed, blocked)).thenReturn(blocked);
+        when(bindings.findById("binding")).thenReturn(binding, renewed, blocked);
+        when(executions.hasActiveByBinding("binding", 1L)).thenReturn(false);
+        when(provisioner.reconcile(any(), any(), any(), any())).thenReturn(
+                java.util.concurrent.CompletableFuture.completedFuture(
+                        com.alibaba.qwen.code.runtimebroker.RuntimeObservation.conflict(handle)));
+        var nativeBroker = new com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService(
+                mock(com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver.class), provisioner,
+                mock(com.alibaba.qwen.code.runtimebroker.RuntimeTransport.class), bindings,
+                mock(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class), executions,
+                "broker-owner", java.time.Duration.ofSeconds(30), java.time.Duration.ofSeconds(30));
+        try {
+            RuntimeBindingRecord recovered = nativeBroker.recoverExternalWorkspaceBinding("binding", 1, 7)
+                    .toCompletableFuture().join();
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED, recovered.getState());
+            // The verdict write keeps the fence; only the no-verdict paths
+            // write READY back.
+            verify(bindings).compareAndSet(renewed, blocked);
+            verify(bindings, never()).compareAndSet(any(), eq(restored));
+        } finally {
+            nativeBroker.close();
+        }
+    }
+
+    private void assertFenceRestored(
+            com.alibaba.qwen.code.runtimebroker.RuntimeObservation observed) {
+        var provisioner = mock(com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner.class);
+        var request = binding.getRequest();
+        var lease = binding.getLease();
+        var seed = binding.getProvisionSeed();
+        var handle = binding.getResourceHandle();
+        when(provisioner.supportsKind("external-workspace")).thenReturn(true);
+        when(provisioner.supportsStartupRecovery(handle)).thenReturn(true);
+        when(binding.isActive()).thenReturn(true);
+        RuntimeBindingRecord claimed = recoveryRow(request, lease, seed, handle,
+                RuntimeBindingRecord.State.READY, 8L);
+        RuntimeBindingRecord fenced = recoveryRow(request, lease, seed, handle,
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, 9L);
+        RuntimeBindingRecord renewed = recoveryRow(request, lease, seed, handle,
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, 10L);
+        RuntimeBindingRecord restored = recoveryRow(request, lease, seed, handle,
+                RuntimeBindingRecord.State.READY, 11L);
+        when(bindings.claimOperation(eq("binding"), anyString(), any())).thenReturn(claimed);
+        when(claimed.withState(eq(RuntimeBindingRecord.State.RECOVERY_BLOCKED), any(), any())).thenReturn(fenced);
+        when(bindings.compareAndSet(claimed, fenced)).thenReturn(fenced);
+        when(bindings.renewOperation(eq("binding"), anyString(), eq(1L), any())).thenReturn(renewed);
+        when(renewed.withState(eq(RuntimeBindingRecord.State.READY), any(), any())).thenReturn(restored);
+        when(bindings.compareAndSet(renewed, restored)).thenReturn(restored);
+        when(bindings.findById("binding")).thenReturn(binding, renewed);
+        when(executions.hasActiveByBinding("binding", 1L)).thenReturn(false);
+        when(provisioner.reconcile(any(), any(), any(), any())).thenReturn(
+                java.util.concurrent.CompletableFuture.completedFuture(observed));
+        var nativeBroker = new com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService(
+                mock(com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver.class), provisioner,
+                mock(com.alibaba.qwen.code.runtimebroker.RuntimeTransport.class), bindings,
+                mock(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class), executions,
+                "broker-owner", java.time.Duration.ofSeconds(30), java.time.Duration.ofSeconds(30));
+        try {
+            RuntimeBindingRecord recovered = nativeBroker.recoverExternalWorkspaceBinding("binding", 1, 7)
+                    .toCompletableFuture().join();
+            assertEquals(RuntimeBindingRecord.State.READY, recovered.getState());
+            // The restoration CAS names the renewed claim: the steps in
+            // between rewrote the row version, so a stale snapshot would
+            // leave the fence in place.
+            verify(bindings).compareAndSet(renewed, restored);
+        } finally {
+            nativeBroker.close();
+        }
+    }
+
+    private RuntimeBindingRecord recoveryRow(RuntimeProvisionRequest request, RuntimeLease lease,
+            RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+            RuntimeBindingRecord.State state, long version) {
+        RuntimeBindingRecord row = mock(RuntimeBindingRecord.class);
+        when(row.getBindingId()).thenReturn("binding");
+        when(row.getGeneration()).thenReturn(1L);
+        when(row.getVersion()).thenReturn(version);
+        when(row.getState()).thenReturn(state);
+        when(row.getOperationGeneration()).thenReturn(1L);
+        when(row.getOperationOwner()).thenReturn("broker-owner");
+        when(row.getRequest()).thenReturn(request);
+        when(row.getLease()).thenReturn(lease);
+        when(row.getProvisionSeed()).thenReturn(seed);
+        when(row.getResourceHandle()).thenReturn(handle);
+        return row;
     }
 
     @Test

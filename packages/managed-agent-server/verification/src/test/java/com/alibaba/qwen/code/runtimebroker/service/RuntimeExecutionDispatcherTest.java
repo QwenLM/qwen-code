@@ -436,10 +436,27 @@ class RuntimeExecutionDispatcherTest {
             ticks.add(call.getArgument(0));
             return mock(ScheduledFuture.class);
         });
+        var now = new AtomicReference<>(Instant.parse("2026-11-01T00:00:00Z"));
+        var mutableClock = new Clock() {
+            @Override
+            public java.time.ZoneId getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(java.time.ZoneId zone) {
+                return this;
+            }
+
+            @Override
+            public Instant instant() {
+                return now.get();
+            }
+        };
         var dispatcher = new RuntimeExecutionDispatcher(registry, mock(RuntimeExecutionState.class), bindings,
                 sessions, executions, mock(RuntimeProvisioner.class), mock(RuntimeTransport.class),
                 mock(RuntimePublicationVerifier.class), "broker", Duration.ofSeconds(60),
-                Duration.ofSeconds(10), Clock.fixed(Instant.parse("2026-11-01T00:00:00Z"), ZoneOffset.UTC),
+                Duration.ofSeconds(10), mutableClock,
                 scheduler, mock(ScheduledExecutorService.class), new AtomicBoolean());
         dispatcher.beginDispatch(context, prepared, Map.of("toolName", "read_file", "input", Map.of()), null,
                 com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload.of("digest", "read_file"));
@@ -462,8 +479,98 @@ class RuntimeExecutionDispatcherTest {
         verify(executions, never()).settlePrepared(any(), any(), any());
         assertFalse(queued.isDone());
         assertEquals(3, ticks.size());
+        // The deadline is the retry's ceiling too: once the window closes the
+        // next tick stops retrying and answers the same timeout refusal the
+        // occupied-slot path uses, settling the row it can no longer dispatch.
+        now.set(now.get().plus(Duration.ofSeconds(11)));
+        ticks.get(2).run();
+        assertEquals(3, ticks.size());
+        verify(executions).settlePrepared(eq(prepared), argThat(result ->
+                "not_started".equals(result.get("executionStatus"))
+                        && result.get("error") instanceof Map<?, ?> refusal
+                        && "dispatch_timeout".equals(refusal.get("type"))),
+                any(Instant.class));
+        var error = assertThrows(java.util.concurrent.ExecutionException.class,
+                () -> queued.get(1, TimeUnit.SECONDS));
+        assertTrue(error.getCause() instanceof RuntimeBrokerException);
+        assertEquals("runtime_execution_conflict",
+                ((RuntimeBrokerException) error.getCause()).getCode());
         dispatcher.cancelPendingOperations();
         scheduler.shutdownNow();
+    }
+
+    // The wait's success exit: by the next tick another attempt already moved
+    // the row out of PREPARED, so the wait completes instead of rescheduling
+    // and deregisters its awaiting entry. Without it the caller's request
+    // would hang until the deadline even though the slot is free.
+    @Test
+    @Timeout(15)
+    @SuppressWarnings("unchecked")
+    void aRowReleasedByAnotherAttemptCompletesTheWaitAndLeavesTheAwaitingSet()
+            throws Exception {
+        var registry = mock(RuntimeBindingRegistry.class);
+        var bindings = mock(RuntimeBindingRepository.class);
+        var sessions = mock(RuntimeSessionRepository.class);
+        var executions = mock(ToolExecutionRepository.class);
+        var scheduler = mock(ScheduledExecutorService.class);
+        var context = mock(SessionContext.class);
+        var binding = mock(RuntimeBindingRecord.class);
+        var session = mock(RuntimeSession.class);
+        var prepared = mock(ToolExecutionRecord.class);
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null,
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE,
+                "workspace");
+        when(binding.getRequest()).thenReturn(request);
+        when(context.binding()).thenReturn(binding);
+        when(context.session()).thenReturn(session);
+        when(session.getScope()).thenReturn(scope);
+        when(session.getHarnessSessionId()).thenReturn("harness");
+        when(prepared.getExecutionCallId()).thenReturn("execution");
+        when(prepared.getState()).thenReturn(ToolExecutionRecord.State.PREPARED);
+        when(prepared.sameIdentity(prepared)).thenReturn(true);
+        when(prepared.getReference()).thenReturn(Map.of("sessionId", "runtime", "dispatchMode", "deferred"));
+        when(executions.findByExecutionCallId("execution")).thenReturn(prepared);
+        var ticks = new java.util.ArrayList<Runnable>();
+        when(scheduler.schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS))).thenAnswer(call -> {
+            ticks.add(call.getArgument(0));
+            return mock(ScheduledFuture.class);
+        });
+        var dispatcher = new RuntimeExecutionDispatcher(registry, mock(RuntimeExecutionState.class), bindings,
+                sessions, executions, mock(RuntimeProvisioner.class), mock(RuntimeTransport.class),
+                mock(RuntimePublicationVerifier.class), "broker", Duration.ofSeconds(60),
+                Duration.ofSeconds(10), Clock.fixed(Instant.parse("2026-11-01T00:00:00Z"), ZoneOffset.UTC),
+                scheduler, mock(ScheduledExecutorService.class), new AtomicBoolean());
+        dispatcher.beginDispatch(context, prepared, Map.of("toolName", "read_file", "input", Map.of()), null,
+                com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload.of("digest", "read_file"));
+        var field = RuntimeExecutionDispatcher.class.getDeclaredField("dispatches");
+        field.setAccessible(true);
+        var dispatches = (java.util.concurrent.ConcurrentMap<String, CompletableFuture<Void>>) field.get(dispatcher);
+        var queued = dispatches.get("execution");
+        assertNotNull(queued);
+        var awaitingField = RuntimeExecutionDispatcher.class.getDeclaredField("awaiting");
+        awaitingField.setAccessible(true);
+        var awaiting = (java.util.Map<String, ?>) awaitingField.get(dispatcher);
+        assertTrue(awaiting.containsKey("execution"));
+
+        // Still occupied: another tick is scheduled and the caller keeps
+        // waiting.
+        ticks.getFirst().run();
+        assertFalse(queued.isDone());
+        assertTrue(awaiting.containsKey("execution"));
+        assertEquals(2, ticks.size());
+
+        // The occupant finishes elsewhere; the row is no longer PREPARED, so
+        // this tick is the wait's successful exit.
+        var released = mock(ToolExecutionRecord.class);
+        when(released.getState()).thenReturn(ToolExecutionRecord.State.EXECUTING);
+        when(executions.findByExecutionCallId("execution")).thenReturn(released);
+        ticks.get(1).run();
+        queued.get(1, TimeUnit.SECONDS);
+        assertFalse(awaiting.containsKey("execution"));
+        assertEquals(2, ticks.size());
+        verify(executions, never()).settlePrepared(any(), any(), any());
     }
 
     // The initial schedule is the one exit the tick's own catch cannot cover:

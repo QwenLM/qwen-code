@@ -142,19 +142,18 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                             aliasKey).isEmpty()) {
                 throw conflict("alias_conflict");
             }
-            jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, tenant_id, storage_id,"
+            jdbc.update("INSERT INTO ma_storage_owner (storage_key, tenant_id, storage_id,"
                             + " storage_kind, mount_root, mount_revision)"
-                            + " VALUES (?, ?, ?, ?, 'EPHEMERAL', ?, ?)",
-                    ownerKey, ownerKey, tenant, workspace, registration.mountRoot(),
+                            + " VALUES (?, ?, ?, 'EPHEMERAL', ?, ?)",
+                    ownerKey, tenant, workspace, registration.mountRoot(),
                     registration.registrationRevision());
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id,"
-                            + " storage_id, physical_key, storage_kind, registration_state,"
-                            + " registration_revision, registration_json, gmt_create, gmt_modified)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, 'EPHEMERAL', 'REGISTERED', ?, ?, "
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, physical_key,"
+                            + " storage_kind, registration_state, registration_revision,"
+                            + " registration_json, gmt_create, gmt_modified)"
+                            + " VALUES (?, ?, ?, ?, 'EPHEMERAL', 'REGISTERED', ?, ?, "
                             + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                    aliasKey, RuntimeAdmissionFences.storageFenceKey(tenant),
-                    RuntimeAdmissionFences.storageFenceKey(workspace), tenant, workspace,
-                    ownerKey, registration.registrationRevision(), encoded);
+                    aliasKey, tenant, workspace, ownerKey,
+                    registration.registrationRevision(), encoded);
             long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);
             ManagedReceipts.insert(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT, tenant,
                     idempotencyKey, digest, "REGISTER_EPHEMERAL_WORKSPACE", null, null,

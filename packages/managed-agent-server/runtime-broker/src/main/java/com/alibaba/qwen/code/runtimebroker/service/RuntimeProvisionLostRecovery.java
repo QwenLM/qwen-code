@@ -57,6 +57,32 @@ final class RuntimeProvisionLostRecovery {
     private static final int MAX_RECOVERY_PASSES = 16;
 
     /**
+     * Undo the fence this recovery attempt itself wrote, when the observation
+     * produced no verdict. Only a claim that was READY before the fence is
+     * restored: a RECOVERY_BLOCKED claim was already blocked by another actor
+     * or verdict, so its fence stays. Claim renewals between steps rewrite the
+     * row version, so the latest row is always re-read before the CAS; a lost
+     * CAS means another writer took the row over and the caller answers from
+     * that state.
+     */
+    RuntimeBindingRecord restoreFence(RuntimeBindingRecord claimed) {
+        String bindingId = claimed.getBindingId();
+        RuntimeBindingRecord latest = bindingRepository.findById(bindingId);
+        if (claimed.getState() != RuntimeBindingRecord.State.READY
+                || latest == null
+                || latest.getState() != RuntimeBindingRecord.State.RECOVERY_BLOCKED
+                || !brokerOwnerId.equals(latest.getOperationOwner())
+                || latest.getOperationGeneration() != claimed.getOperationGeneration()) {
+            return latest;
+        }
+        RuntimeBindingRecord restored = bindingRepository.compareAndSet(latest,
+                latest.withState(RuntimeBindingRecord.State.READY,
+                        latest.getLease(), clock.instant()));
+        return restored != null ? restored : bindingRepository.findById(bindingId);
+    }
+
+
+    /**
      * Lost executions can be terminated by journal-loss evidence; releasing
      * their Sessions and placement additionally requires writer-stop proof.
      * Reclamation

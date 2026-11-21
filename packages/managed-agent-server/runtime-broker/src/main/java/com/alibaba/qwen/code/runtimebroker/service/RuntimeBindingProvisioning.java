@@ -972,20 +972,14 @@ final class RuntimeBindingProvisioning {
                     // 抢先进入的工具在资格读取与围栏之间落地，而所有取证路径
                     // 都要求 READY/DRAINING：围栏本是为了保护这个工具，因此
                     // 冲突返回前必须把本次围栏补偿回 READY，不能把健康的
-                    // binding 卡住。补偿失败说明有别的写者持有该行，不归我们处理。
-                    if (claimed.getState() == RuntimeBindingRecord.State.READY) {
-                        bindingRepository.compareAndSet(fenced,
-                                fenced.withState(
-                                        RuntimeBindingRecord.State.READY,
-                                        fenced.getLease(),
-                                        clock.instant()));
-                    }
+                    // binding 卡住。
+                    lostRecovery.restoreFence(claimed);
                     return failed(conflict("runtime_broker_recovery_blocked",
                             "Recovery admission is unsettled"));
                 }
             }
             if (!lookupOnly && claimed.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(claimed)) {
-                return CompletableFuture.completedFuture(claimed);
+                return CompletableFuture.completedFuture(lostRecovery.restoreFence(claimed));
             }
             if (claimed.getState() == RuntimeBindingRecord.State.LOST) {
                 if (lookupOnly) {
@@ -998,12 +992,25 @@ final class RuntimeBindingProvisioning {
             }
             return renewingStep(claimed, () -> provisioner.reconcile(claimed.getRequest(), claimed.getProvisionSeed(),
                     claimed.getResourceHandle(), claimed.getLease()))
+                    .handle((observed, error) -> {
+                        if (error != null) {
+                            // 一次失败的重新取证不构成身份结论：它是"没有证据",
+                            // 因此本次围栏不能留下来把健康的 binding 卡住。
+                            lostRecovery.restoreFence(claimed);
+                            throw error instanceof CompletionException
+                                    ? (CompletionException) error
+                                    : new CompletionException(unwrap(error));
+                        }
+                        return observed;
+                    })
                     .thenCompose(observed -> {
                         RuntimeBindingRecord current = lostRecovery.renewRecoveryClaim(claimed);
                         if (observed == null) {
-                            return CompletableFuture.completedFuture(current);
+                            return CompletableFuture.completedFuture(
+                                    lostRecovery.restoreFence(claimed));
                         }
                         if (lookupOnly && observed.getOutcome() != RuntimeObservation.Outcome.READY) {
+                            lostRecovery.restoreFence(claimed);
                             return failed(conflict("workspace_close_identity_unverified", "Original Hook Runtime is unverified"));
                         }
                         if (observed.getOutcome() == RuntimeObservation.Outcome.NOT_FOUND
@@ -1026,8 +1033,12 @@ final class RuntimeBindingProvisioning {
                         }
                         if (observed.getOutcome() == RuntimeObservation.Outcome.CONFLICT) {
                             blockRecovery(current);
+                            return CompletableFuture.completedFuture(bindingRepository.findById(bindingId));
                         }
-                        return CompletableFuture.completedFuture(bindingRepository.findById(bindingId));
+                        // 其余结果（STARTING/UNKNOWN、无止损证据的 NOT_FOUND）
+                        // 都不是结论：围栏必须补偿回 READY，否则一次无法定论的
+                        // 观察会把健康的 binding 永久留在 RECOVERY_BLOCKED。
+                        return CompletableFuture.completedFuture(lostRecovery.restoreFence(claimed));
                     });
         });
         // The inner steps are each bounded and the claim is renewed between

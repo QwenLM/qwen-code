@@ -274,7 +274,7 @@ remote191 上指定的公开 files/close E2E（`ExternalPublicFilesE2E`，随第
 
 ## 15. 切片 C：外部前台 Shell（`hosted-workspace-external-shell/1`）
 
-状态：**已完成本地实现；由本节末尾「本地已验证」列出的本地证据支撑。本切片未跑过任何 CI 门禁**（PR 的 base 是特性分支，按 main 过滤的 CI 与 managed-agent 门禁都不触发）。下面写的是代码写成了什么，加上那里明确列出的本地测试观察。
+状态：**已完成本地实现；由本节末尾「本地已验证」列出的本地证据支撑。** PR #17474 的目标分支是 `main`，因此该切片的 main 过滤 CI 与 managed-agent 门禁都会运行（lint/static、单测树、kernel 与共享 managed loops、host bundle、SDK real-daemon E2E 与 tier 选择）。下面写的是代码写成了什么，加上那里明确列出的本地测试观察。
 
 ### 边界
 
