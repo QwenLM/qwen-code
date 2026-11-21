@@ -219,13 +219,13 @@ describe('session attachment chunk client', () => {
     const pending = upload();
     await vi.waitFor(() => expect(discoveries).toBe(1));
     client.dispose();
-    await upload();
+    await expect(upload()).rejects.toBeInstanceOf(DaemonAttachmentUploadError);
     resolveFirst(json({ features: ['session_attachment_chunk_upload'] }));
-    await pending;
-    await upload();
+    await expect(pending).rejects.toBeInstanceOf(DaemonAttachmentUploadError);
+    await expect(upload()).rejects.toBeInstanceOf(DaemonAttachmentUploadError);
 
-    expect(discoveries).toBe(2);
-    expect(calls.at(-1)!.url).toContain('/attachments?');
+    expect(discoveries).toBe(1);
+    expect(calls).toHaveLength(1);
     expect(transportFetch).not.toHaveBeenCalled();
   });
 
