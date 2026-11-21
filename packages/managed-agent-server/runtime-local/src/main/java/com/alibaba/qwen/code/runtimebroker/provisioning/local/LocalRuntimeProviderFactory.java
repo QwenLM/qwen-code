@@ -173,7 +173,9 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
             if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
                 try {
                     requireRecoveryDirectoryOutsideWorkspaces(broker, absolute);
-                    RuntimeStateFiles.validateDirectory(directory);
+                    // Validate the absolute path create() uses: the canonical
+                    // check compares against toRealPath(), which is absolute.
+                    RuntimeStateFiles.validateDirectory(absolute);
                 } catch (IOException | RuntimeException error) {
                     return new Check(name, Status.FAIL,
                             path + " is not a valid durable state directory: " + error.getMessage(),

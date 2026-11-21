@@ -310,6 +310,29 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
         }
     }
 
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    void durableRelativeExistingPrivateDirectoryPassesPreflight() throws Exception {
+        // A relative configured path resolves against the process working
+        // directory, exactly as create() absolutizes it; the canonical check
+        // must run on the absolute path, not the relative spelling.
+        Path relative = Path.of("target", "durable-rel-state");
+        Files.createDirectories(relative);
+        Files.setPosixFilePermissions(relative,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        try {
+            var settings = durableSettings(relative);
+            settings.getRuntimeBroker().setWorkspaceCwd(directory.toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> assertThat(check.status())
+                            .isEqualTo(RuntimeProviderFactory.Status.PASS));
+        } finally {
+            Files.deleteIfExists(relative);
+        }
+    }
+
     private static ManagedAgentProperties settings(Path state) {
         var settings = new ManagedAgentProperties();
         var broker = settings.getRuntimeBroker();
