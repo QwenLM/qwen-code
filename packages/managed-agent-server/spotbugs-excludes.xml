@@ -29,16 +29,4 @@
     <Method name="rebuildBatch"/>
     <Bug pattern="NP_NULL_ON_SOME_PATH"/>
   </Match>
-  <!--
-    False positive: require(raw instanceof byte[], ...) is a fail-closed
-    assertion that throws ContractViolationException before the cast and
-    bytes.length dereference. SpotBugs cannot see through that helper; the
-    nullable blob-load path cannot reach the dereference. This narrowly scoped
-    exception does not bypass any production validation.
-  -->
-  <Match>
-    <Class name="com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore"/>
-    <Method name="acknowledgementReceiptCatalog"/>
-    <Bug pattern="NP_NULL_ON_SOME_PATH"/>
-  </Match>
 </FindBugsFilter>
