@@ -89,6 +89,15 @@ export enum Command {
   PAGE_DOWN = 'pageDown',
   SCROLL_HOME = 'scrollHome',
   SCROLL_END = 'scrollEnd',
+
+  // Transcript structure navigation and in-session search. These need the
+  // virtual viewport (ui.useTerminalBuffer): the legacy <Static> path hands
+  // scrolling to the host terminal, which offers no item-level anchoring.
+  PREV_TURN = 'prevTurn',
+  NEXT_TURN = 'nextTurn',
+  PREV_TOOL_OUTPUT = 'prevToolOutput',
+  NEXT_TOOL_OUTPUT = 'nextToolOutput',
+  TRANSCRIPT_SEARCH = 'transcriptSearch',
 }
 
 /**
@@ -280,4 +289,16 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.PAGE_DOWN]: [{ key: 'pagedown' }],
   [Command.SCROLL_HOME]: [{ key: 'home', ctrl: true }],
   [Command.SCROLL_END]: [{ key: 'end', ctrl: true }],
+
+  // Transcript structure navigation. Alt+PageUp/PageDown are deliberately
+  // unused elsewhere; Ctrl+Shift+Up/Down already belongs to the embedded
+  // foreground shell's own scrolling, so it stays untouched.
+  [Command.PREV_TURN]: [{ key: 'pageup', meta: true }],
+  [Command.NEXT_TURN]: [{ key: 'pagedown', meta: true }],
+  [Command.PREV_TOOL_OUTPUT]: [{ key: 'up', ctrl: true, meta: true }],
+  [Command.NEXT_TOOL_OUTPUT]: [{ key: 'down', ctrl: true, meta: true }],
+
+  // In-session transcript search. Ctrl+F toggles the embedded shell's input
+  // focus and Ctrl+R is prompt/shell reverse search, so this uses Alt+S.
+  [Command.TRANSCRIPT_SEARCH]: [{ key: 's', meta: true }],
 };

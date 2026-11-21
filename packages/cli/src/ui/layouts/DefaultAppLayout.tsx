@@ -44,6 +44,11 @@ export const DefaultAppLayout: React.FC = () => {
       scrollBy: (delta: number) => scrollActionsRef.current?.scrollBy(delta),
       hasScrollableTranscript: () =>
         scrollActionsRef.current?.hasScrollableTranscript() ?? false,
+      scrollToIndex: (index: number) =>
+        scrollActionsRef.current?.scrollToIndex?.(index) ?? false,
+      scrollToEnd: () => scrollActionsRef.current?.scrollToEnd?.(),
+      getScrollIndex: () =>
+        scrollActionsRef.current?.getScrollIndex?.() ?? null,
     }),
     [],
   );

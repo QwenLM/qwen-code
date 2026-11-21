@@ -22,6 +22,10 @@ import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { useMouseEvents } from '../../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../../utils/mouse.js';
+import type {
+  AnchorDirection,
+  TranscriptAnchorKind,
+} from '../../utils/transcript-navigation.js';
 
 export { SCROLL_TO_ITEM_END } from './VirtualizedList.js';
 
@@ -30,6 +34,23 @@ interface ScrollableListProps<T> extends VirtualizedListProps<T> {
   width?: string | number;
   targetScrollIndex?: number;
   containerHeight?: number;
+  /**
+   * Structure navigation (turn / tool-output jumps). The list owns every
+   * scroll-adjacent keybinding but knows nothing about transcript semantics,
+   * so the item owner supplies the jump itself; leaving this unset keeps the
+   * new keys inert for non-transcript lists.
+   */
+  onNavigateStructure?: (
+    direction: AnchorDirection,
+    kind: TranscriptAnchorKind,
+  ) => void;
+  /**
+   * Fired for every scroll the user performs by line/page keys, by mouse
+   * wheel or by dragging the scrollbar — but NOT for structure jumps. Lets
+   * the item owner invalidate position bookkeeping (e.g. its navigation
+   * cursor) precisely when the reader moves for another reason.
+   */
+  onUserScroll?: () => void;
 }
 
 export type ScrollableListRef<T> = VirtualizedListRef<T>;
@@ -42,9 +63,18 @@ function ScrollableList<T>(
   // VirtualizedList. Spreading the full props would silently forward
   // `hasFocus` (which VirtualizedList does not declare) and create a
   // latent name collision if VirtualizedList ever adds the same prop.
-  const { hasFocus, ...virtualizedListProps } = props;
+  const {
+    hasFocus,
+    onNavigateStructure,
+    onUserScroll,
+    ...virtualizedListProps
+  } = props;
   const virtualizedListRef = useRef<VirtualizedListRef<T>>(null);
   const isDraggingScrollbar = useRef(false);
+  // Ref mirror of cancelPendingScroll (declared below the keypress handler):
+  // a structure jump must cancel a coalesced wheel/drag flush, but naming the
+  // function in the handler's dependency array would hit its TDZ at render.
+  const cancelPendingScrollRef = useRef<() => void>(() => {});
 
   useImperativeHandle(
     ref,
@@ -86,25 +116,60 @@ function ScrollableList<T>(
   useKeypress(
     useCallback(
       (key: Key) => {
-        if (keyMatchers[Command.SCROLL_UP](key)) {
+        // Structure jumps go first: the plain scroll bindings deliberately
+        // ignore modifiers, so Alt+PageUp ALSO matches Command.PAGE_UP. When
+        // no structure handler is supplied these branches are skipped and
+        // Alt+PageUp keeps its historical page-up behavior.
+        if (
+          onNavigateStructure &&
+          (keyMatchers[Command.PREV_TURN](key) ||
+            keyMatchers[Command.NEXT_TURN](key) ||
+            keyMatchers[Command.PREV_TOOL_OUTPUT](key) ||
+            keyMatchers[Command.NEXT_TOOL_OUTPUT](key))
+        ) {
+          // A wheel burst or drag queued in the same frame would otherwise
+          // flush AFTER the jump and displace it.
+          cancelPendingScrollRef.current();
+        }
+        if (onNavigateStructure && keyMatchers[Command.PREV_TURN](key)) {
+          onNavigateStructure('previous', 'turn');
+        } else if (onNavigateStructure && keyMatchers[Command.NEXT_TURN](key)) {
+          onNavigateStructure('next', 'turn');
+        } else if (
+          onNavigateStructure &&
+          keyMatchers[Command.PREV_TOOL_OUTPUT](key)
+        ) {
+          onNavigateStructure('previous', 'tool');
+        } else if (
+          onNavigateStructure &&
+          keyMatchers[Command.NEXT_TOOL_OUTPUT](key)
+        ) {
+          onNavigateStructure('next', 'tool');
+        } else if (keyMatchers[Command.SCROLL_UP](key)) {
+          onUserScroll?.();
           virtualizedListRef.current?.scrollBy(-1);
         } else if (keyMatchers[Command.SCROLL_DOWN](key)) {
+          onUserScroll?.();
           virtualizedListRef.current?.scrollBy(1);
         } else if (keyMatchers[Command.PAGE_UP](key)) {
+          onUserScroll?.();
           const state = getScrollState();
           const delta = state.innerHeight > 0 ? state.innerHeight : 20;
           virtualizedListRef.current?.scrollBy(-delta);
         } else if (keyMatchers[Command.PAGE_DOWN](key)) {
+          onUserScroll?.();
           const state = getScrollState();
           const delta = state.innerHeight > 0 ? state.innerHeight : 20;
           virtualizedListRef.current?.scrollBy(delta);
         } else if (keyMatchers[Command.SCROLL_HOME](key)) {
+          onUserScroll?.();
           virtualizedListRef.current?.scrollTo(0);
         } else if (keyMatchers[Command.SCROLL_END](key)) {
+          onUserScroll?.();
           virtualizedListRef.current?.scrollToEnd();
         }
       },
-      [getScrollState],
+      [getScrollState, onNavigateStructure, onUserScroll],
     ),
     { isActive: hasFocus },
   );
@@ -152,6 +217,7 @@ function ScrollableList<T>(
     pendingDragRow.current = null;
     cancelScrollFlush();
   }, [cancelScrollFlush]);
+  cancelPendingScrollRef.current = cancelPendingScroll;
 
   // Losing focus unsubscribes the keypress and mouse handlers, so a still-armed
   // flush belongs to a gesture the user can no longer steer. Letting it fire
@@ -175,24 +241,28 @@ function ScrollableList<T>(
           // wheel/drag intent (and its timer) so a flush scheduled moments
           // earlier can't yank the view off the clicked row.
           cancelPendingScroll();
+          onUserScroll?.();
           virtualizedListRef.current.scrollToScrollbarRow(event.row);
         }
         return;
       }
       if (event.name === 'move' && isDraggingScrollbar.current) {
+        onUserScroll?.();
         pendingDragRow.current = event.row;
         scheduleScrollFlush();
         return;
       }
       if (event.name === 'scroll-up') {
+        onUserScroll?.();
         pendingWheelDelta.current -= WHEEL_LINES_PER_TICK;
         scheduleScrollFlush();
       } else if (event.name === 'scroll-down') {
+        onUserScroll?.();
         pendingWheelDelta.current += WHEEL_LINES_PER_TICK;
         scheduleScrollFlush();
       }
     },
-    [scheduleScrollFlush, cancelPendingScroll],
+    [scheduleScrollFlush, cancelPendingScroll, onUserScroll],
   );
 
   // The VP viewport owns the wheel (this IS the in-app scroller), so opt out
