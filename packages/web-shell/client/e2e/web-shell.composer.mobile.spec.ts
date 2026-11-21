@@ -110,8 +110,21 @@ async function installTestSoftwareKeyboard(page: Page): Promise<void> {
     (
       window as typeof window & {
         __setTestSoftwareKeyboard: (visible: boolean) => void;
+        __setTestSoftwareKeyboardSilently: (visible: boolean) => void;
       }
     ).__setTestSoftwareKeyboard = setKeyboard;
+    // Same state change without the `visualViewport` resize. A shell that only
+    // hears window resize must still recompute, and this is the only way to
+    // tell that listener apart from the viewport one.
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboardSilently: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboardSilently = (nextOpen: boolean) => {
+      if (open === nextOpen) return;
+      open = nextOpen;
+      document.querySelector('[data-test-software-keyboard]')?.remove();
+    };
     document.addEventListener(
       'focusout',
       (event) => {
@@ -695,6 +708,42 @@ test('anchors the empty mobile composer with the textarea backend', async ({
   await expect(textarea).toHaveValue(
     'Composer remains interactive on touch devices',
   );
+});
+
+test('recomputes the inset from a window resize the visual viewport never emits', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await gotoEmptyMobileWelcomeHarness(page);
+
+  const inset = () =>
+    page.evaluate(() =>
+      getComputedStyle(
+        document.querySelector('[data-web-shell-root]') as HTMLElement,
+      )
+        .getPropertyValue('--web-shell-visual-viewport-inset-bottom')
+        .trim(),
+    );
+
+  await setTestSoftwareKeyboard(page, true);
+  await expect.poll(inset).not.toBe('0px');
+  const occludedInset = await inset();
+  expect(Number.parseFloat(occludedInset)).toBeGreaterThan(0);
+
+  // The keyboard state changes and the viewport stays silent; only the window
+  // resize below can deliver the new geometry to the shell.
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboardSilently: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboardSilently(false);
+    window.dispatchEvent(new Event('resize'));
+  });
+
+  await expect.poll(inset).toBe('0px');
 });
 
 test('submits welcome and follow-up prompts on the first tap above a software keyboard @smoke', async ({

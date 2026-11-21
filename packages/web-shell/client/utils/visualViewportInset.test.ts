@@ -32,6 +32,18 @@ describe('visualViewportBottomInset', () => {
     ).toBe(0);
   });
 
+  it('never insets more than the shell is tall', () => {
+    // A shell shorter than the occluded band (embedded pane, split view) must
+    // not lift its composer above its own top edge, so the clamp is part of
+    // the contract and not just arithmetic happenstance.
+    expect(
+      visualViewportBottomInset(
+        { bottom: 400, height: 200 },
+        { height: 100, offsetTop: 0, scale: 1 },
+      ),
+    ).toBe(200);
+  });
+
   it('ignores pinch zoom instead of moving the composer', () => {
     expect(
       visualViewportBottomInset(
