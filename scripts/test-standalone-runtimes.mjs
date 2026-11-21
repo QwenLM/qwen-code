@@ -126,6 +126,18 @@ async function worker(root, node, bun, expectedHost) {
     QWEN_UPDATE_TEST_ENV: 'preserved',
   });
   delete process.env.NODE_DISABLE_COMPILE_CACHE;
+  // A self-hosted runner operated from a qwen session inherits its stamps:
+  // CLI_VERSION and QWEN_CODE_RELAUNCH_ARGS hijack the production wrapper's
+  // --version fast path and NODE_OPTIONS/BUN_OPTIONS inject preloads, so the
+  // probes below would measure the outer session instead of the fixture.
+  // The ambient control already strips these keys per probe.
+  for (const key of [
+    'NODE_OPTIONS',
+    'BUN_OPTIONS',
+    'CLI_VERSION',
+    'QWEN_CODE_RELAUNCH_ARGS',
+  ])
+    delete process.env[key];
   // Observe allocations before importing the real built module. Bun 1.3.14
   // does not synchronize named builtin bindings; only claim zero allocations
   // on a host whose successful update passes the positive control below.

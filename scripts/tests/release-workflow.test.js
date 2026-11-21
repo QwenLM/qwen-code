@@ -4024,6 +4024,24 @@ esac`,
     );
   });
 
+  it('isolates the standalone runtime worker from inherited session stamps', () => {
+    const source = readFileSync('scripts/test-standalone-runtimes.mjs', 'utf8');
+    // A self-hosted runner operated from a qwen session inherits its env
+    // stamps: CLI_VERSION and QWEN_CODE_RELAUNCH_ARGS answer --version for
+    // the fixture through the production wrapper, failing the metadata-only
+    // positive control of the release's quality_scripts job (#17966). The
+    // worker must drop them, with the preload injectors, before any probe
+    // runs; the setup slice ends at the updater module import, ahead of the
+    // first probe.
+    const setup = source.slice(
+      source.indexOf('async function worker('),
+      source.indexOf('const modulePath = path.join('),
+    );
+    expect(setup).toMatch(
+      /for \(const key of \[\s*'NODE_OPTIONS',\s*'BUN_OPTIONS',\s*'CLI_VERSION',\s*'QWEN_CODE_RELAUNCH_ARGS',?\s*\]\)\s*delete process\.env\[key\];/,
+    );
+  });
+
   it('stages every integration package manifest after versioning', () => {
     expect(releaseStepScript).toContain(
       'git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
