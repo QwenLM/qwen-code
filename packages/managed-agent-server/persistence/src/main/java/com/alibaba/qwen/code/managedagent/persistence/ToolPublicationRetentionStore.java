@@ -67,21 +67,19 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
      * (#13800).
      */
     static void lockTenant(JdbcTemplate jdbc, String tenant, int timeoutSeconds) {
-        String key = hash(tenant);
         jdbc.execute((ConnectionCallback<Void>) connection -> {
             try (PreparedStatement insert = connection.prepareStatement(
-                    "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
-                            + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key")) {
+                    "INSERT INTO ma_tenant_guard (tenant_id, guard_domain) VALUES (?, 'output_publication')"
+                            + " ON DUPLICATE KEY UPDATE tenant_id = tenant_id")) {
                 insert.setQueryTimeout(timeoutSeconds);
-                insert.setString(1, key);
-                insert.setBytes(2, ManagedSchemaKeys.identity(tenant));
+                insert.setString(1, tenant);
                 insert.executeUpdate();
             }
             try (PreparedStatement lock = connection.prepareStatement(
                     "SELECT tenant_id FROM ma_tenant_guard"
-                            + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE")) {
+                            + " WHERE guard_domain = 'output_publication' AND tenant_id = ? FOR UPDATE")) {
                 lock.setQueryTimeout(timeoutSeconds);
-                lock.setString(1, key);
+                lock.setString(1, tenant);
                 try (ResultSet result = lock.executeQuery()) {
                     ToolPublicationContract.require(result.next() && tenant.equals(result.getString("tenant_id")),
                             "Retention tenant conflicts");

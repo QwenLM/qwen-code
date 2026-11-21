@@ -109,7 +109,7 @@ public final class StoreLockTrace extends DelegatingDataSource {
             }
             if (event.sql().startsWith("select tenant_id from ma_tenant_guard ")
                     && event.sql().contains("guard_domain = 'runtime_placement' for update")
-                    && com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys.valueKey(tenant).equals(event.arguments().get(1))) {
+                    && tenant.equals(event.arguments().get(1))) {
                 placements.add(transaction);
             }
             if (event.scope(tenant, session) && event.root()) {

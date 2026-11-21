@@ -50,7 +50,7 @@
 
 ### 3.4 transport 通知
 
-父设计 §4.2 的到期复核保留，改为 wake 围栏中的一个 head 列条件（`TransportWakeActivator.java:125-139`）：满足 `wake_seal_revision = journal_revision AND (is_wake_pending = 0 OR wake_retry_at > NOW)` 的 head，要么没有可投递的输入，要么其下一次尝试已由兜底在 `wake_retry_at` 负责，所以丢弃该通知（`NOT_DUE`）。由于戳认证的是整个投影，`is_wake_pending = 0` 这一分支与未来到期分支同样安全，它覆盖的是延迟到 seal 之后才到达、而对应输入已经结算的通知。到期的带戳 head 收到通知时仍通过现有的 `activateForWake` 加载；把 transport 改为被动动词不属于这一批改动。
+父设计 §4.2 的到期复核保留，改为 wake 围栏中的一个 head 列条件（`TransportWakeActivator.java:125-139`）：满足 `wake_seal_revision = journal_revision AND (is_wake_pending = 0 OR wake_retry_at > NOW)` 的 head，要么没有可投递的输入，要么其下一次尝试已由兜底在 `wake_retry_at` 负责，所以丢弃该通知（`NOT_DUE`）。由于戳认证的是整个投影，`is_wake_pending = 0` 这一分支与未来到期分支同样安全，它覆盖的是延迟到 seal 之后才到达、而对应输入已经结算的通知。到期的带戳 head 收到通知时，与围栏放行的其他通知一样，通过兜底所用的被动 `recoverForWake` 加载（父设计 §4.2 第 3 步）；它不再走主动的 `activateForWake`，后者的接管加载可能驱动已崩溃 Session 的 Runtime 恢复。
 
 ### 3.5 发布
 

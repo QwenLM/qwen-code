@@ -73,8 +73,12 @@ import {
 import { HookSystem } from '../hooks/hookSystem.js';
 import { AsyncHookRegistry } from '../hooks/asyncHookRegistry.js';
 import {
+  ASYNC_HOOK_CONTEXT_CLOSE,
   ASYNC_HOOK_CONTEXT_OPEN,
+  drainAsyncHookContextPart,
   isAsyncHookContextPartText,
+  MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+  wrapAsyncHookContext,
 } from '../hooks/async-hook-context.js';
 import { isUserPromptSubmitContextPartText } from '../utils/transcript-records.js';
 import {
@@ -1475,7 +1479,17 @@ describe('Gemini Client (client.ts)', () => {
 
   describe('async hook output delivery (L11)', () => {
     beforeEach(() => {
-      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+      // Simulate the chat's successful history push so the async-block
+      // settlement (which keys off the push snapshot) sees the block delivered
+      // and does not retain it for the next send.
+      let pushes = 0;
+      vi.spyOn(client.getChat(), 'getUserContentPushCount').mockImplementation(
+        () => pushes,
+      );
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, pushes++);
+        return textTurn('ok');
+      });
     });
 
     /** Complete a background hook whose additionalContext is pending. */
@@ -1497,6 +1511,28 @@ describe('Gemini Client (client.ts)', () => {
       vi.mocked(mockConfig.getHookSystem).mockReturnValue({
         getPendingAsyncOutput: () => registry.getPendingOutput(),
       } as unknown as ReturnType<Config['getHookSystem']>);
+      return registry;
+    };
+
+    /** A stamped async part (as the drain builds it), for seeding a stripped entry. */
+    const stampedAsyncPart = (context: string) => {
+      const reg = new AsyncHookRegistry();
+      reg.register({
+        hookId: 'stamp-1',
+        hookName: 'Background Hook',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: JSON.stringify({
+          hookSpecificOutput: { additionalContext: context },
+        }),
+        stderr: '',
+      });
+      reg.complete('stamp-1');
+      return drainAsyncHookContextPart({
+        getPendingAsyncOutput: () => reg.getPendingOutput(),
+      })!;
     };
 
     // Identify the async envelope with the same exact matcher the code under
@@ -1775,6 +1811,336 @@ describe('Gemini Client (client.ts)', () => {
       expect((parts.find(isAsyncHookPart) as Part).text).toContain(
         'owned hook output',
       );
+    });
+
+    it('a loop-detection exit before the drain leaves the block for the next send', async () => {
+      // The result-aware loop detection returns the turn before the drain site,
+      // so the get-and-clear block must not be consumed by the halted turn.
+      const registry = installAsyncOutput('survives loop detection');
+      const detector = (
+        client as unknown as {
+          loopDetector: {
+            recordToolResultByCallId: (...a: never[]) => boolean;
+          };
+        }
+      ).loopDetector;
+      const recordSpy = vi
+        .spyOn(detector, 'recordToolResultByCallId')
+        .mockReturnValue(true);
+      const events = await run(
+        [fnResponse('read_file', { ok: true }, 'call-loop')],
+        'prompt-loop',
+        { type: SendMessageType.ToolResult },
+      );
+      expect(events.some((e) => e.type === LlmEventType.LoopDetected)).toBe(
+        true,
+      );
+      // The block must still be pending in the registry — never consumed by the
+      // halted turn. This separates "never drained" (drain after loop detection)
+      // from "drained then re-retained" (a drain folded back above the guards),
+      // which the next-send delivery assertion alone cannot distinguish.
+      expect(registry.hasPendingOutput()).toBe(true);
+      recordSpy.mockReturnValue(false);
+      await run([{ text: 'next' }], 'prompt-loop-next', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('survives loop detection');
+    });
+
+    it('retains the block when the send exits before the push; the next send delivers it', async () => {
+      // A chat-side pre-push exit consumes the block at the drain but never
+      // pushes it; the push-snapshot settlement must retain it, not lose it.
+      installAsyncOutput('survives a pre-push exit');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-prepush', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('chat pre-push failure');
+      await run([{ text: 'second' }], 'prompt-after-prepush', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('survives a pre-push exit');
+    });
+
+    it('a retained block is not consumed by a side send', async () => {
+      installAsyncOutput('retained owned block');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-retain', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('chat pre-push failure');
+      // The side send is gated; it must not re-attach/consume the retained block.
+      await run([{ text: '/btw question' }], 'prompt-retain-side', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+      expect(getLastTurnRequestText()).not.toContain('retained owned block');
+      // The owning turn's next send still delivers it.
+      await run([{ text: 'owner next' }], 'prompt-retain', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('retained owned block');
+    });
+
+    it('a Retry re-attaches the block recovered from the stripped orphaned entry exactly once', async () => {
+      // The failed attempt drained the block and pushed it into history; the
+      // provider then failed. Retry strips that orphaned entry (which carries
+      // the block) and rebuilds from the caller's parts (which do not), so the
+      // recovery must re-attach the block — not lose it from both history and
+      // the wire, and not double it via the restore path.
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        stampedAsyncPart('retry recovered block'),
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('retry response');
+      });
+      await run([{ text: 'retry me' }], 'prompt-retry-async', {
+        type: SendMessageType.Retry,
+      });
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      // Rebuilt from the caller's parts, with the recovered block attached once.
+      expect(parts).toContainEqual({ text: 'retry me' });
+      const asyncParts = parts.filter(isAsyncHookPart);
+      expect(asyncParts).toHaveLength(1);
+      expect((asyncParts[0] as Part).text).toContain('retry recovered block');
+      // The block was removed from the stripped entry, so the restore path
+      // cannot re-add a second copy.
+      expect(orphan.parts?.some(isAsyncHookPart)).toBe(false);
+    });
+
+    it('a continue Retry whose payload already carries the block delivers it exactly once', async () => {
+      // The continue-interrupted caller clones the pushed trailing entry into
+      // the Retry payload, envelope included; the recovery must not re-attach a
+      // second copy on top of the one the payload already carries.
+      const envelope = wrapAsyncHookContext('continue carried block');
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        stampedAsyncPart('continue carried block'),
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('retry response');
+      });
+      await run(
+        [{ text: 'original prompt' }, { text: envelope }],
+        'prompt-continue-retry',
+        { type: SendMessageType.Retry },
+      );
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts.filter(isAsyncHookPart)).toHaveLength(1);
+    });
+
+    it('a retained block is delivered once and then dropped (splice, not a peek)', async () => {
+      installAsyncOutput('deliver once then drop');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-once', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('chat pre-push failure');
+      await run([{ text: 'second' }], 'prompt-once-2', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('deliver once then drop');
+      // A third send must not re-deliver it: the retention was spliced away on
+      // the successful send, not peeked and left to re-attach forever.
+      await run([{ text: 'third' }], 'prompt-once-3', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).not.toContain('deliver once then drop');
+    });
+
+    it('repeated pre-push exits keep the combined async payload within the cap', async () => {
+      const big = (tag: string) => tag + 'x'.repeat(6000);
+      installAsyncOutput(big('block-one '));
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 1');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-bound-1', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 1');
+      installAsyncOutput(big('block-two '));
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 2');
+      });
+      await expect(
+        run([{ text: 'second' }], 'prompt-bound-2', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 2');
+      await run([{ text: 'third' }], 'prompt-bound-3', {
+        type: SendMessageType.UserQuery,
+      });
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      const asyncParts = parts.filter(isAsyncHookPart);
+      // The two retained blocks merge into a single bounded envelope rather
+      // than riding as two separate (individually capped) parts.
+      expect(asyncParts).toHaveLength(1);
+      const envelopeOverhead =
+        ASYNC_HOOK_CONTEXT_OPEN.length + ASYNC_HOOK_CONTEXT_CLOSE.length + 2;
+      expect((asyncParts[0] as Part).text?.length ?? 0).toBeLessThanOrEqual(
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH + envelopeOverhead,
+      );
+    });
+
+    it('a continue Retry that exits before the push still delivers the carried block once', async () => {
+      // The dedup drops the retained copy because the payload already carries
+      // it, but must register it for settlement: a pre-push exit restores the
+      // stripped entry WITHOUT the envelope, so only the retention can save it.
+      const envelope = wrapAsyncHookContext('carried then pre-push exit');
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        stampedAsyncPart('carried then pre-push exit'),
+      );
+      let pushes = 0;
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn(() => pushes),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run(
+          [{ text: 'original prompt' }, { text: envelope }],
+          'prompt-continue-prepush',
+          { type: SendMessageType.Retry },
+        ),
+      ).rejects.toThrow('chat pre-push failure');
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, pushes++);
+        return textTurn('ok');
+      });
+      // The next send (block-free payload) must still deliver the block once.
+      await run([{ text: 'next' }], 'prompt-continue-prepush-next', {
+        type: SendMessageType.UserQuery,
+      });
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      const asyncParts = parts.filter(isAsyncHookPart);
+      expect(asyncParts).toHaveLength(1);
+      expect((asyncParts[0] as Part).text).toContain(
+        'carried then pre-push exit',
+      );
+    });
+
+    it('a byte-identical fresh drain of a retained block is deduped', async () => {
+      // A standing hook rule produces the same output each turn; the retained
+      // copy and the identical fresh drain must merge to one, not two.
+      installAsyncOutput('stable standing rule');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 1');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-seen-1', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 1');
+      installAsyncOutput('stable standing rule');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 2');
+      });
+      await expect(
+        run([{ text: 'second' }], 'prompt-seen-2', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 2');
+      await run([{ text: 'third' }], 'prompt-seen-3', {
+        type: SendMessageType.UserQuery,
+      });
+      // Count occurrences: toContain would pass with a duplicated block too.
+      expect(
+        getLastTurnRequestText().split('stable standing rule').length - 1,
+      ).toBe(1);
+    });
+
+    it('a Retry leaves a caller-authored envelope-shaped part in the entry (provenance)', async () => {
+      // Shape alone cannot prove hook provenance: a caller-authored part that
+      // happens to match the envelope must stay in the entry as text, not be
+      // recovered and re-attached as an injected block.
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        { text: wrapAsyncHookContext('not from a hook') },
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('ok');
+      });
+      await run([{ text: 'retry me' }], 'prompt-caller-envelope', {
+        type: SendMessageType.Retry,
+      });
+      // Not recovered: the caller's part stays in the entry...
+      expect(orphan.parts?.some(isAsyncHookPart)).toBe(true);
+      // ...and no async block is attached to the request.
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts.filter(isAsyncHookPart)).toHaveLength(0);
+    });
+
+    it('a continue Retry dedups a carried envelope differing only by whitespace', async () => {
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        stampedAsyncPart('padded dedup block'),
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('ok');
+      });
+      // The payload re-serialised the envelope with a trailing newline.
+      const padded = wrapAsyncHookContext('padded dedup block') + '\n';
+      await run(
+        [{ text: 'original prompt' }, { text: padded }],
+        'prompt-padded-dedup',
+        { type: SendMessageType.Retry },
+      );
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts.filter(isAsyncHookPart)).toHaveLength(1);
     });
   });
 
