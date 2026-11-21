@@ -120,6 +120,8 @@ function Harness({
           ref={composer.mobileComposer.expandedTextareaRef}
           value={composer.mobileComposer.value}
           onChange={composer.mobileComposer.onChange}
+          onBlur={composer.mobileComposer.onBlur}
+          onSelect={() => composer.resetVerticalColumn()}
           onPasteCapture={composer.imageTransferHandlers.onPasteCapture}
           data-expanded
         />
@@ -166,6 +168,7 @@ async function mount({
   let currentAttachmentsEnabled = attachmentsEnabled;
   let currentComposerInput = composerInput;
   let currentComposerInputVersion = composerInput ? 1 : 0;
+  let currentExpanded = expanded;
   const render = () => {
     root!.render(
       <WebShellPortalRootContext.Provider value={null}>
@@ -180,7 +183,7 @@ async function mount({
             onInputTextChange={onInputTextChange}
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
-            expanded={expanded}
+            expanded={currentExpanded}
             shellModeEnabled={shellModeEnabled}
             persistFileReferences={persistFileReferences}
             attachmentsEnabled={currentAttachmentsEnabled}
@@ -199,6 +202,10 @@ async function mount({
     setComposerInput(next: WebShellComposerInput) {
       currentComposerInput = next;
       currentComposerInputVersion += 1;
+      act(() => render());
+    },
+    setExpanded(next: boolean) {
+      currentExpanded = next;
       act(() => render());
     },
     switchSession(
@@ -1505,6 +1512,104 @@ describe('touch editing-row keys', () => {
     expect(textarea().selectionStart).toBe(2);
   });
 
+  it('uses the current layout after the textarea width changes', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('a'.repeat(24));
+    const el = textarea();
+    let width = 300;
+    Object.defineProperty(el, 'clientWidth', {
+      configurable: true,
+      get: () => width,
+    });
+    const rectSpy = vi
+      .spyOn(Range.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: Range) {
+        const mirrorWidth = Number.parseInt(
+          this.startContainer.parentElement?.style.width ?? '300',
+          10,
+        );
+        // Eight graphemes per row at the first width, three after reflow.
+        const columns = mirrorWidth > 200 ? 8 : 3;
+        return {
+          top: Math.floor(this.startOffset / columns) * 10,
+        } as DOMRect;
+      });
+    try {
+      el.setSelectionRange(15, 15);
+      act(() => latest!.pressEditingKey('down'));
+      expect(el.selectionStart).toBe(23);
+      width = 150;
+      act(() => latest!.pressEditingKey('down'));
+      expect(el.selectionStart).toBe(24);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('discards the measurement mirror when the composer unmounts', async () => {
+    mockTouchDevice();
+    await mount();
+    Object.defineProperty(textarea(), 'clientWidth', {
+      value: 300,
+      configurable: true,
+    });
+    act(() => latest!.pressEditingKey('up'));
+    const mirrors = () =>
+      document.querySelectorAll('[data-web-shell-caret-mirror]').length;
+    expect(mirrors()).toBe(1);
+    act(() => root?.unmount());
+    expect(mirrors()).toBe(0);
+    root = null;
+  });
+
+  it('keeps both textarea .current views live across expand and detach', async () => {
+    mockTouchDevice();
+    const composer = await mount({ expanded: true });
+    typeText('abc');
+    const expanded = () =>
+      document.querySelector<HTMLTextAreaElement>('textarea[data-expanded]')!;
+    expect(latest!.mobileComposer!.textareaRef.current).toBe(textarea());
+    expect(latest!.mobileComposer!.expandedTextareaRef.current).toBe(
+      expanded(),
+    );
+    const first = expanded();
+    composer.setExpanded(false);
+    expect(latest!.mobileComposer!.expandedTextareaRef.current).toBeNull();
+    expect(latest!.mobileComposer!.textareaRef.current).toBe(textarea());
+    composer.setExpanded(true);
+    const reopened = expanded();
+    expect(reopened).not.toBe(first);
+    expect(latest!.mobileComposer!.expandedTextareaRef.current).toBe(reopened);
+  });
+
+  it('drops a detached expanded textarea mirror without unmounting the hook', async () => {
+    mockTouchDevice();
+    const composer = await mount({ expanded: true });
+    typeText('abc\ndef');
+    const expandedTextarea = () =>
+      document.querySelector<HTMLTextAreaElement>('textarea[data-expanded]')!;
+    Object.defineProperty(expandedTextarea(), 'clientWidth', {
+      value: 300,
+      configurable: true,
+    });
+    expandedTextarea().setSelectionRange(3, 3);
+    act(() => latest!.pressEditingKey('down'));
+    const mirrors = () =>
+      document.querySelectorAll('[data-web-shell-caret-mirror]').length;
+    expect(mirrors()).toBe(1);
+    composer.setExpanded(false);
+    expect(mirrors()).toBe(0);
+    composer.setExpanded(true);
+    Object.defineProperty(expandedTextarea(), 'clientWidth', {
+      value: 300,
+      configurable: true,
+    });
+    expandedTextarea().setSelectionRange(3, 3);
+    act(() => latest!.pressEditingKey('down'));
+    expect(mirrors()).toBe(1);
+  });
+
   it('recomputes the column after a horizontal move instead of writing it back', async () => {
     mockTouchDevice();
     await mount();
@@ -1543,6 +1648,31 @@ describe('touch editing-row keys', () => {
     expect(textarea().selectionStart).toBe(8);
     act(() => latest!.pressEditingKey('down'));
     expect(textarea().selectionStart).toBe(12);
+  });
+
+  it('resets both vertical coordinates when a draft edit occurs', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('aaaa\nbb\ncccc');
+    // Isolate setText's atomic reset from the separate onSelect jump reset.
+    const selectReset = vi
+      .spyOn(latest!, 'resetVerticalColumn')
+      .mockImplementation(() => undefined);
+    try {
+      textarea().setSelectionRange(12, 12);
+      act(() => latest!.pressEditingKey('up'));
+      expect(textarea().selectionStart).toBe(7);
+      act(() => latest!.pressEditingKey('down'));
+      expect(textarea().selectionStart).toBe(12);
+      act(() => latest!.setText('aaaa\nbbbbbb\nx'));
+      textarea().setSelectionRange(13, 13);
+      act(() => latest!.pressEditingKey('up'));
+      expect(textarea().selectionStart).toBe(6);
+      act(() => latest!.pressEditingKey('down'));
+      expect(textarea().selectionStart).toBe(13);
+    } finally {
+      selectReset.mockRestore();
+    }
   });
 
   it('resets the held column when the user jumps the selection', async () => {

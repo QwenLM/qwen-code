@@ -92,6 +92,7 @@ import {
   offsetAtGraphemeColumn,
   lineIndexAt,
   revealCaret,
+  touchLayoutFingerprint,
 } from '../utils/touchCaret';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
@@ -1602,6 +1603,26 @@ function createImageIngestionLane(generation: number): ImageIngestionLane {
   };
 }
 
+function createComposerMirrorRef(
+  textareaRef: React.MutableRefObject<HTMLTextAreaElement | null>,
+  hosts: React.MutableRefObject<Set<HTMLTextAreaElement>>,
+): React.RefCallback<HTMLTextAreaElement> &
+  React.RefObject<HTMLTextAreaElement | null> {
+  const callback = (el: HTMLTextAreaElement | null) => {
+    const previous = textareaRef.current;
+    if (previous === el) return;
+    if (previous) {
+      discardMirror(previous);
+      hosts.current.delete(previous);
+    }
+    textareaRef.current = el;
+  };
+  // Expose the live node for imperative focus/blur/selection consumers.
+  return Object.defineProperty(callback, 'current', {
+    get: () => textareaRef.current,
+  }) as typeof callback & React.RefObject<HTMLTextAreaElement | null>;
+}
+
 export interface UseComposerCoreReturn {
   containerRef: React.RefObject<HTMLDivElement | null>;
   viewRef: React.RefObject<EditorView | null>;
@@ -1809,7 +1830,18 @@ export function useComposerCore(
   // wrap boundary the next press must use this line, not the line of the
   // character after the caret — otherwise Up re-selects the same offset.
   const verticalLineStartRef = useRef<number | null>(null);
+  // Cache the layout that packed the anchor: reflow can change visual lines
+  // without a selection event, so an offset alone is not a stable identity.
+  const verticalLayoutKeyRef = useRef<string | null>(null);
   const mirrorHostsRef = useRef<Set<HTMLTextAreaElement>>(new Set());
+  const mobileTextareaCallbackRef = useMemo(
+    () => createComposerMirrorRef(mobileTextareaRef, mirrorHostsRef),
+    [],
+  );
+  const expandedTextareaCallbackRef = useMemo(
+    () => createComposerMirrorRef(expandedTextareaRef, mirrorHostsRef),
+    [],
+  );
   // selectionchange (React onSelect) also fires for our own setSelectionRange
   // calls; without this exemption the reset would erase the column we just
   // remembered and the vertical run would crawl like the pre-fix behavior.
@@ -1828,6 +1860,7 @@ export function useComposerCore(
     mobileTextRef.current = text;
     verticalColumnRef.current = null;
     verticalLineStartRef.current = null;
+    verticalLayoutKeyRef.current = null;
     programmaticSelectionRef.current = null;
     if (text === '') {
       for (const host of mirrorHostsRef.current) discardMirror(host);
@@ -5105,8 +5138,8 @@ export function useComposerCore(
       const start = el.selectionStart ?? text.length;
       const end = el.selectionEnd ?? start;
       if (key === 'right') {
-        // Horizontal moves never touch line measurement: stepping one
-        // grapheme needs no layout, even on a 50k-char draft.
+        // A grapheme step skips visual-line enumeration. Only the bounded
+        // viewport reveal below may measure (and cache) the current layout.
         const target = computeCaretTarget(text, start, end, 'right');
         programmaticSelectionRef.current = [target, target];
         el.focus();
@@ -5119,7 +5152,10 @@ export function useComposerCore(
       // move clears it above and must not write the pre-move column back.
       // At a wrap boundary the anchor is the line the last vertical move
       // landed on, not the line of the character after the caret.
-      const anchor = verticalLineStartRef.current ?? end;
+      const anchor =
+        verticalLayoutKeyRef.current === touchLayoutFingerprint(el)
+          ? (verticalLineStartRef.current ?? end)
+          : end;
       const lineStarts = visualLineStartsAround(el, text, anchor);
       const column =
         verticalColumnRef.current ??
@@ -5141,9 +5177,11 @@ export function useComposerCore(
       // A soft-wrap clamp can equal the next line's start; lineIndexAt(target)
       // would then remember that next line instead of the actual destination.
       verticalLineStartRef.current = lineStarts[targetIndex];
+      verticalLayoutKeyRef.current = touchLayoutFingerprint(el);
       programmaticSelectionRef.current = [target, target];
       el.focus();
       el.setSelectionRange(target, target);
+      // Reveal after focus: focus-linked styles can change the layout.
       revealCaret(el, text, target);
     },
     [insertText, isTouchComposer, setMobileText],
@@ -5162,6 +5200,7 @@ export function useComposerCore(
     }
     verticalColumnRef.current = null;
     verticalLineStartRef.current = null;
+    verticalLayoutKeyRef.current = null;
   }, []);
 
   const getText = useCallback(() => {
@@ -5880,8 +5919,8 @@ export function useComposerCore(
     workspaceActionsRef,
     mobileComposer: isTouchComposer
       ? {
-          textareaRef: mobileTextareaRef,
-          expandedTextareaRef,
+          textareaRef: mobileTextareaCallbackRef,
+          expandedTextareaRef: expandedTextareaCallbackRef,
           value: mobileText,
           onChange: handleMobileChange,
           onBlur: () => saveCurrentDraftRef.current(),

@@ -5,8 +5,9 @@
  */
 
 // Touch follow-up suggestion acceptance. Runs under the `mobile-chromium`
-// (Pixel 7) project only: `mobile-webkit` greps @smoke and these cases carry
-// no such tag, so WebKit coverage is not claimed here. The composer is the
+// (Pixel 7) project, and — apart from the CDP-IME and 50k-timing cases — under
+// `mobile-webkit`, which selects `*.mobile.spec.ts` via its `@smoke` grep.
+// The composer is the
 // plain-textarea backend: the suggestion renders as a single tappable chip
 // bar above the input in every variant — its content is its label, and the
 // editing row carries no follow-up-specific key. Tapping the chip fills the
@@ -365,6 +366,13 @@ test('@smoke mobile right key steps whole graphemes and slash keeps emoji intact
   expect(await caret()).toBe(3);
   await page.locator('[data-web-shell-mobile-insert-slash]').tap();
   await expect(textarea).toHaveValue('A😀/B');
+  const family = '👨‍👩‍👧‍👦';
+  await textarea.fill(`A${family}B`);
+  await textarea.evaluate((el) => el.setSelectionRange(1, 1));
+  await page.locator('[data-web-shell-mobile-caret-right]').tap();
+  expect(await caret()).toBe(12);
+  await page.locator('[data-web-shell-mobile-insert-slash]').tap();
+  await expect(textarea).toHaveValue(`A${family}/B`);
   // Native parity: ArrowRight from the same caret also lands after the pair.
   await textarea.fill('A😀B');
   await textarea.evaluate((el) => el.setSelectionRange(1, 1));
@@ -570,6 +578,7 @@ test('@smoke mobile expanded dialog keeps the suggestion on its placeholder', as
   await page.getByRole('button', { name: 'Expand editor', exact: true }).tap();
   const expanded = page.locator('[data-web-shell-expanded-editor] textarea');
   await expect(expanded).toBeVisible();
+  await expect(expanded).toBeFocused();
   await expect(expanded).toHaveAttribute('placeholder', SUGGESTION);
   await expect(expanded).toHaveAttribute('aria-label', SUGGESTION);
   await page.screenshot({
@@ -587,18 +596,19 @@ test('@smoke mobile mirror does not accumulate and is discarded on clear', async
   const daemon = await installScenario(page, scenario, testInfo);
   await gotoHarness(page, scenario, daemon, 'default');
   const textarea = page.locator(COMPOSER_TEXTAREA);
-  const right = page.locator('[data-web-shell-mobile-caret-right]');
-  const mirrorCount = () => page.locator('div[aria-hidden="true"]').count();
+  const up = page.locator('[data-web-shell-mobile-caret-up]');
+  const mirrorCount = () =>
+    page.locator('[data-web-shell-caret-mirror]').count();
   await textarea.fill('a');
-  await right.tap();
-  const base = await mirrorCount();
+  await up.tap();
+  expect(await mirrorCount()).toBe(1);
   for (let i = 2; i <= 10; i += 1) {
     await textarea.fill('a'.repeat(i));
-    await right.tap();
+    await up.tap();
   }
-  expect(await mirrorCount()).toBe(base);
+  expect(await mirrorCount()).toBe(1);
   await textarea.fill('');
-  expect(await mirrorCount()).toBe(base - 1);
+  expect(await mirrorCount()).toBe(0);
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
@@ -670,9 +680,16 @@ test('@smoke mobile caret and dismiss icons share the 18px sibling geometry', as
     .locator('svg');
   const caretSvg = page.locator('[data-web-shell-mobile-caret-up] svg');
   const dismissSvg = page.locator(`${FOLLOWUP_DISMISS} svg`);
-  const expandBox = (await expandSvg.boundingBox())!;
-  expect((await caretSvg.boundingBox())!.width).toBe(expandBox.width);
-  expect((await dismissSvg.boundingBox())!.width).toBe(expandBox.width);
+  for (const [name, svg] of [
+    ['expand', expandSvg],
+    ['caret', caretSvg],
+    ['dismiss', dismissSvg],
+  ] as const) {
+    expect(await svg.boundingBox(), name).toMatchObject({
+      width: 18,
+      height: 18,
+    });
+  }
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 

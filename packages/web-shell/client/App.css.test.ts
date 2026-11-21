@@ -123,25 +123,30 @@ describe('Chat layout relayout boundary CSS contracts', () => {
   });
 });
 
-describe('touch follow-up chip hover tokens', () => {
+describe('touch follow-up chip background tokens', () => {
   it('uses background tokens declared in both theme blocks', () => {
-    const hoverRules = findRules(
-      chatEditorCss,
+    for (const selector of [
+      '.mobileFollowupAccept',
       '.mobileFollowupAccept:not(:disabled):hover',
-    );
-    expect(hoverRules.length).toBeGreaterThan(0);
-    const backgroundTokens = hoverRules
-      .flatMap((decls) => decls.get('background') ?? '')
-      .join(' ')
-      .match(/--chat-editor-[\w-]+/g);
-    expect(backgroundTokens).not.toBeNull();
-    for (const theme of ['.themeDark', '.themeLight']) {
-      const declared = new Set<string>();
-      findRules(appCss, theme).forEach((decls) => {
-        for (const prop of decls.keys()) declared.add(prop);
-      });
-      for (const token of backgroundTokens!) {
-        expect(declared.has(token), `${theme} declares ${token}`).toBe(true);
+    ]) {
+      const rules = findRules(chatEditorCss, selector);
+      expect(rules.length, `${selector} exists`).toBeGreaterThan(0);
+      const backgroundTokens = rules
+        .flatMap((decls) => decls.get('background') ?? '')
+        .join(' ')
+        .match(/--chat-editor-[\w-]+/g);
+      expect(
+        backgroundTokens,
+        `${selector} uses background tokens`,
+      ).not.toBeNull();
+      for (const theme of ['.themeDark', '.themeLight']) {
+        const declared = new Set<string>();
+        findRules(appCss, theme).forEach((decls) => {
+          for (const prop of decls.keys()) declared.add(prop);
+        });
+        for (const token of backgroundTokens!) {
+          expect(declared.has(token), `${theme} declares ${token}`).toBe(true);
+        }
       }
     }
   });

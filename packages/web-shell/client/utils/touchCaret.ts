@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Caret math for the touch editing-row keys. Textarea carets are UTF-16
-// offsets, but stepping or clamping by a single code unit can land inside a
-// surrogate pair (or a wider grapheme cluster), so every boundary here is a
-// grapheme boundary. Vertical navigation uses the *displayed* lines: a long
+// Caret math for the touch editing-row keys. Use Intl.Segmenter for true
+// grapheme boundaries when available. The fallback walks code points without
+// splitting valid surrogate pairs; it does not synthesize full clusters.
+// Vertical navigation uses the *displayed* lines: a long
 // paragraph soft-wraps, and the keys must move between those visual lines the
 // way the native arrow keys do, not between '\n' separators only.
 
@@ -39,7 +39,15 @@ export function graphemeBoundaries(text: string): number[] {
     // Code-point fallback: still never splits a surrogate pair.
     for (let i = 0; i < text.length; i += 1) {
       const code = text.charCodeAt(i);
-      if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) i += 1;
+      if (
+        code >= 0xd800 &&
+        code <= 0xdbff &&
+        i + 1 < text.length &&
+        text.charCodeAt(i + 1) >= 0xdc00 &&
+        text.charCodeAt(i + 1) <= 0xdfff
+      ) {
+        i += 1;
+      }
       if (i + 1 < text.length) boundaries.push(i + 1);
     }
   }
@@ -121,25 +129,59 @@ export function offsetAtGraphemeColumn(
 
 interface MirrorCache {
   text: string;
-  width: number;
+  fingerprint: string;
   mirror: HTMLDivElement;
   node: Text;
+}
+
+/** Inputs and font readiness that determine the mirrored wrapping layout. */
+const MIRRORED_STYLE_PROPERTIES = [
+  'font',
+  'fontSize',
+  'fontFamily',
+  'fontWeight',
+  'letterSpacing',
+  'wordSpacing',
+  'lineHeight',
+  'tabSize',
+  'paddingTop',
+  'paddingRight',
+  'paddingBottom',
+  'paddingLeft',
+  'borderTopWidth',
+  'borderRightWidth',
+  'borderBottomWidth',
+  'borderLeftWidth',
+] as const;
+
+export function touchLayoutFingerprint(el: HTMLTextAreaElement): string {
+  const style = window.getComputedStyle(el);
+  return JSON.stringify([
+    el.clientWidth,
+    ...MIRRORED_STYLE_PROPERTIES.map((property) => style[property]),
+    document.fonts?.status ?? '',
+  ]);
 }
 
 const mirrorCache = new WeakMap<HTMLTextAreaElement, MirrorCache>();
 
 /**
  * Build (or reuse) a mirror replicating the textarea's wrapping styles. The
- * mirror is cached per text+width, so a vertical run pays one layout, not
- * one per key. Measuring line tops never enumerates the whole draft —
+ * mirror is cached by text and layout fingerprint, so an unchanged layout
+ * reuses its measurement instead of rebuilding it for each keypress.
+ * Measuring line tops never enumerates the whole draft —
  * `topAt` answers in O(log n) binary searches around the caret instead of a
  * per-grapheme rect loop, which would block the key handler on long drafts.
  */
 function getMirror(el: HTMLTextAreaElement, text: string): MirrorCache | null {
   const width = el.clientWidth;
   if (typeof document === 'undefined' || width <= 0) return null;
+  const fingerprint = touchLayoutFingerprint(el);
   const cached = mirrorCache.get(el);
-  if (cached && cached.text === text && cached.width === width) return cached;
+
+  if (cached && cached.text === text && cached.fingerprint === fingerprint) {
+    return cached;
+  }
   // Never abandon a superseded mirror in the document: it would hold a full
   // copy of that old draft for the life of the page. One live mirror per
   // textarea, discarded on clear/unmount via discardMirror.
@@ -148,6 +190,7 @@ function getMirror(el: HTMLTextAreaElement, text: string): MirrorCache | null {
   const style = window.getComputedStyle(el);
   const mirror = document.createElement('div');
   mirror.setAttribute('aria-hidden', 'true');
+  mirror.setAttribute('data-web-shell-caret-mirror', 'true');
   mirror.style.position = 'fixed';
   mirror.style.left = '-99999px';
   mirror.style.top = '0';
@@ -157,22 +200,16 @@ function getMirror(el: HTMLTextAreaElement, text: string): MirrorCache | null {
   mirror.style.whiteSpace = 'pre-wrap';
   mirror.style.overflowWrap = 'break-word';
   mirror.style.wordBreak = 'normal';
-  mirror.style.width = `${width}px`;
-  mirror.style.font = style.font;
-  mirror.style.fontSize = style.fontSize;
-  mirror.style.fontFamily = style.fontFamily;
-  mirror.style.fontWeight = style.fontWeight;
-  mirror.style.letterSpacing = style.letterSpacing;
-  mirror.style.lineHeight = style.lineHeight;
-  mirror.style.tabSize = style.tabSize;
-  mirror.style.paddingTop = style.paddingTop;
-  mirror.style.paddingBottom = style.paddingBottom;
-  mirror.style.paddingLeft = style.paddingLeft;
-  mirror.style.paddingRight = style.paddingRight;
-  mirror.style.borderTopWidth = style.borderTopWidth;
-  mirror.style.borderBottomWidth = style.borderBottomWidth;
-  mirror.style.borderLeftWidth = style.borderLeftWidth;
-  mirror.style.borderRightWidth = style.borderRightWidth;
+  // clientWidth includes padding but excludes borders; the outer border-box
+  // width needs exactly those two border tracks, not another copy of padding.
+  mirror.style.width = `${
+    width +
+    (parseFloat(style.borderLeftWidth) || 0) +
+    (parseFloat(style.borderRightWidth) || 0)
+  }px`;
+  for (const property of MIRRORED_STYLE_PROPERTIES) {
+    mirror.style[property] = style[property];
+  }
   mirror.style.borderStyle = 'solid';
   mirror.style.borderColor = 'transparent';
   // A trailing '\n' only renders its empty line box when something follows
@@ -182,7 +219,7 @@ function getMirror(el: HTMLTextAreaElement, text: string): MirrorCache | null {
   );
   mirror.appendChild(node);
   document.body.appendChild(mirror);
-  const entry: MirrorCache = { text, width, mirror, node };
+  const entry: MirrorCache = { text, fingerprint, mirror, node };
   mirrorCache.set(el, entry);
   return entry;
 }
@@ -340,12 +377,17 @@ export function revealCaret(
   let caretTop: number;
   const cache = getMirror(el, text);
   if (cache) {
-    caretTop = topAt(cache, text, caret) - topAt(cache, text, 0);
+    // Use the fallback's content origin: padding must not hide the final row.
+    caretTop =
+      (parseFloat(style.paddingTop) || 0) +
+      topAt(cache, text, caret) -
+      topAt(cache, text, 0);
   } else {
     caretTop =
       (parseFloat(style.paddingTop) || 0) +
       lineIndexAt(logicalLineStarts(text), caret) * lineHeight;
   }
+
   if (caretTop < el.scrollTop) {
     el.scrollTop = caretTop;
   } else if (caretTop + lineHeight > el.scrollTop + el.clientHeight) {

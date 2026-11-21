@@ -49,6 +49,15 @@ describe('touch editing-key caret targets', () => {
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(next)).toBe(false);
     expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(next)).toBe(false);
     expect(computeCaretTarget('A😀B', 3, 3, 'right')).toBe(4);
+
+    const family = '👨‍👩‍👧‍👦';
+    const draft = `A${family}B`;
+    const familyCaret = computeCaretTarget(draft, 1, 1, 'right');
+    expect(familyCaret).toBe(12);
+    expect(draft.slice(0, familyCaret) + '/' + draft.slice(familyCaret)).toBe(
+      `A${family}/B`,
+    );
+    expect(computeCaretTarget('Ae\u0301B', 1, 1, 'right')).toBe(3);
   });
 
   it('clamps vertical moves to grapheme boundaries on astral lines', () => {
