@@ -116,6 +116,15 @@ function builtInMark(): Element | null {
   return container.querySelector('svg[data-testid="qwen-brand-mark"]');
 }
 
+function expectCompactDarkMark(): void {
+  const mark = builtInMark();
+  expect(mark?.getAttribute('viewBox')).toBe('0 0 24 24');
+  expect(mark?.getAttribute('fill')).toBe('currentColor');
+  expect(mark?.getAttribute('fill-rule')).toBe('evenodd');
+  expect(mark?.querySelectorAll('path')).toHaveLength(1);
+  expect(mark?.querySelector('path')?.getAttribute('d')).toBe(expectedDarkPath);
+}
+
 function expectOriginalLightMark(): void {
   const canonical = new DOMParser().parseFromString(
     canonicalLightSvg,
@@ -387,14 +396,7 @@ describe('sidebar brand', () => {
   it('uses the compact dark-theme artwork with theme-aware color', () => {
     renderSidebar();
 
-    const mark = builtInMark();
-    expect(mark?.getAttribute('viewBox')).toBe('0 0 24 24');
-    expect(mark?.getAttribute('fill')).toBe('currentColor');
-    expect(mark?.getAttribute('fill-rule')).toBe('evenodd');
-    expect(mark?.querySelectorAll('path')).toHaveLength(1);
-    expect(mark?.querySelector('path')?.getAttribute('d')).toBe(
-      expectedDarkPath,
-    );
+    expectCompactDarkMark();
   });
 
   it('keeps the original blue mark in the light theme', () => {
@@ -499,13 +501,7 @@ describe('sidebar brand', () => {
       });
 
       expect(brandLogoImage()).toBeNull();
-      const mark = builtInMark();
-      expect(mark?.getAttribute('viewBox')).toBe('0 0 24 24');
-      expect(mark?.getAttribute('fill')).toBe('currentColor');
-      expect(mark?.querySelectorAll('path')).toHaveLength(1);
-      expect(mark?.querySelector('path')?.getAttribute('d')).toBe(
-        expectedDarkPath,
-      );
+      expectCompactDarkMark();
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining('brand logo could not be rendered'),
