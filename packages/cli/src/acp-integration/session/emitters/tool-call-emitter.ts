@@ -513,6 +513,10 @@ export class ToolCallEmitter extends BaseEmitter {
     };
   }
 
+  isMachineTitleTool(toolName: string): boolean {
+    return MACHINE_TITLE_TOOLS.has(toolName);
+  }
+
   /**
    * Maps core Tool Kind enum to ACP ToolKind string literals.
    *

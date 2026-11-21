@@ -33,6 +33,7 @@ export function extractPendingPermission(
       typeof metaRecord?.['toolName'] === 'string'
         ? metaRecord['toolName']
         : undefined;
+    const titleIsMachine = metaRecord?.['titleIsMachine'];
     const todoApproval = getRecord(metaRecord?.['qwenTodoApproval']);
     const planId = getString(todoApproval, 'planId');
     const sourceCallId = getString(todoApproval, 'sourceCallId');
@@ -41,6 +42,7 @@ export function extractPendingPermission(
       sessionId: perm.sessionId,
       toolCallId,
       title: perm.title,
+      ...(typeof titleIsMachine === 'boolean' ? { titleIsMachine } : {}),
       toolKind,
       toolName,
       hasDiffPreview: hasPermissionDiffPreview(toolCallRecord),

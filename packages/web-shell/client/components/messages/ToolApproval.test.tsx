@@ -2326,3 +2326,103 @@ describe('floating variant scroll layout', () => {
     expect(diffRegion.className).not.toContain('linesFill');
   });
 });
+
+describe('ToolApproval RTL description isolation', () => {
+  it('isolates a machine tool title in the description under an RTL UI', () => {
+    // The transcript row for the same call wraps the daemon title in
+    // MachineText; the approval card must not bidi-reorder the very string
+    // the user is asked to approve.
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'write_file',
+        title: 'Writing to مجلد/ملف.ts',
+        rawInput: { file_path: 'مجلد/ملف.ts', content: 'x' },
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi[dir="ltr"]')?.textContent).toBe(
+      'Writing to مجلد/ملف.ts',
+    );
+  });
+
+  it('isolates the description when the request carries machine provenance', () => {
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'write_file',
+        title: 'WriteFile: مجلد/ملف.ts',
+        titleIsMachine: true,
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi[dir="ltr"]')?.textContent).toBe(
+      'WriteFile: مجلد/ملف.ts',
+    );
+  });
+
+  it('keeps the description unisolated when the producer says it is prose', () => {
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'write_file',
+        title: 'WriteFile: مجلد/ملف.ts',
+        titleIsMachine: false,
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi')).toBeNull();
+    expect(desc.textContent).toBe('WriteFile: مجلد/ملف.ts');
+  });
+
+  it('does not isolate model-supplied description prose even with provenance', () => {
+    // The flag describes the daemon title; `rawInput.description` overrides
+    // the shown text with authored prose, which must keep the UI direction.
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'write_file',
+        title: 'WriteFile: مجلد/ملف.ts',
+        titleIsMachine: true,
+        rawInput: { description: 'اكتب الملف المطلوب' },
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi')).toBeNull();
+    expect(desc.textContent).toBe('اكتب الملف المطلوب');
+  });
+
+  it('does not isolate a prose title without machine framing', () => {
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'agent',
+        title: 'Agent: research the codebase',
+        rawInput: { prompt: 'research the codebase' },
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi')).toBeNull();
+    expect(desc.textContent).toBe('Agent: research the codebase');
+  });
+});

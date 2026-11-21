@@ -180,6 +180,15 @@ describe('runAcpToolBatch', () => {
         emitError: record('error'),
         emitLifecycle: record('lifecycle'),
         mapToolKind: () => 'edit',
+        isMachineTitleTool: (name: string) =>
+          [
+            'read_file',
+            'write_file',
+            'edit',
+            'list_directory',
+            'grep_search',
+            'glob',
+          ].includes(name),
       },
       messageEmitter: { emitAgentMessage: record('message') },
       sendUpdate: record('update'),
@@ -513,7 +522,10 @@ describe('runAcpToolBatch', () => {
           status: 'pending',
           title: 'Writing to a.txt',
           rawInput: write.args,
-          _meta: expect.objectContaining({ toolName: 'write_file' }),
+          _meta: expect.objectContaining({
+            toolName: 'write_file',
+            titleIsMachine: true,
+          }),
         }),
       }),
     ]);

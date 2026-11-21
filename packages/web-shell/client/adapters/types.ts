@@ -108,6 +108,8 @@ export interface PermissionRequest {
   sessionId?: string;
   toolCallId?: string;
   title?: string;
+  /** Producer provenance for `title`: true when it is machine-framed text. */
+  titleIsMachine?: boolean;
   toolKind?: string;
   /** Canonical tool name (from the ACP frame's `_meta.toolName`). */
   toolName?: string;

@@ -1066,6 +1066,26 @@ describe('ToolCallEmitter', () => {
     });
   });
 
+  describe('isMachineTitleTool', () => {
+    it.each([
+      ToolNames.READ_FILE,
+      ToolNames.WRITE_FILE,
+      ToolNames.EDIT,
+      ToolNames.LS,
+      ToolNames.GREP,
+      ToolNames.GLOB,
+    ])('reports machine framing for %s', (toolName) => {
+      expect(emitter.isMachineTitleTool(toolName)).toBe(true);
+    });
+
+    it.each(['run_shell_command', 'agent', 'todo_write', ''])(
+      'leaves %s to the display fallback',
+      (toolName) => {
+        expect(emitter.isMachineTitleTool(toolName)).toBe(false);
+      },
+    );
+  });
+
   describe('resolveToolMetadata', () => {
     it.each([
       [WriteFileTool, 'WriteFile: Writing to ', { content: 'demo' }],

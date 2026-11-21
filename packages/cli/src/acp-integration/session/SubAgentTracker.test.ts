@@ -19,9 +19,11 @@ import type {
   AgentUsageEvent,
   ToolEditConfirmationDetails,
   ToolInfoConfirmationDetails,
+  AnyDeclarativeTool,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentEventType,
+  Kind,
   ToolConfirmationOutcome,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
@@ -732,6 +734,57 @@ describe('SubAgentTracker', () => {
             // consumers (e.g. the Agent prompt) get the same identity the
             // primary path in Session.ts provides.
             _meta: expect.objectContaining({ toolName: 'edit_file' }),
+          }),
+        }),
+      );
+    });
+
+    it('stamps machine-title provenance on the subagent permission frame', async () => {
+      const tool = {
+        displayName: 'WriteFile',
+        kind: Kind.Edit,
+        build: vi.fn().mockReturnValue({
+          getDescription: () => 'Writing to مجلد/ملف.ts',
+          toolLocations: () => [],
+        }),
+      } as unknown as AnyDeclarativeTool;
+      vi.mocked(mockContext.config.getToolRegistry().getTool).mockReturnValue(
+        tool,
+      );
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const args = { file_path: 'مجلد/ملف.ts', content: 'x' };
+      eventEmitter.emit(
+        AgentEventType.TOOL_CALL,
+        createToolCallEvent({ name: 'write_file', callId: 'call-write', args }),
+      );
+      eventEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        createApprovalEvent({
+          name: 'write_file',
+          callId: 'call-write',
+          args,
+          confirmationDetails: createEditConfirmation({
+            fileName: 'ملف.ts',
+            filePath: 'مجلد/ملف.ts',
+            newContent: 'x',
+          }),
+          respond: vi.fn().mockResolvedValue(undefined),
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(requestPermissionSpy).toHaveBeenCalled();
+      });
+      expect(requestPermissionSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            toolCallId: 'call-write',
+            title: 'WriteFile: Writing to مجلد/ملف.ts',
+            _meta: expect.objectContaining({
+              toolName: 'write_file',
+              titleIsMachine: true,
+            }),
           }),
         }),
       );
