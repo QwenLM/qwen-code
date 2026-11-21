@@ -2333,10 +2333,19 @@ test('runner registration retries honor GitHub response headers', async (t) => {
     {
       name: 'waits for the primary quota reset',
       status: 403,
-      reason: 'API rate limit exceeded',
+      reason: 'Forbidden',
       headers: 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1090',
       minDelay: 90_000,
       maxDelay: 91_000,
+    },
+    {
+      name: 'caps the spread after a long deadline',
+      status: 429,
+      reason: 'Too Many Requests',
+      headers: 'Retry-After: 400',
+      random: 0.5,
+      minDelay: 415_000,
+      maxDelay: 415_000,
     },
     {
       name: 'spreads retries past a shared primary reset',
@@ -2361,6 +2370,14 @@ test('runner registration retries honor GitHub response headers', async (t) => {
       status: 429,
       reason: 'You have exceeded a secondary rate limit',
       headers: 'Retry-After: 75',
+      minDelay: 75_000,
+      maxDelay: 76_000,
+    },
+    {
+      name: 'uses Retry-After as rate-limit evidence on a 403',
+      status: 403,
+      reason: 'Forbidden',
+      headers: 'Retry-After: 75\r\nX-RateLimit-Remaining: 42',
       minDelay: 75_000,
       maxDelay: 76_000,
     },
@@ -2396,6 +2413,7 @@ test('runner registration retries honor GitHub response headers', async (t) => {
       headers: 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1090000',
       minDelay: 15_000,
       maxDelay: 30_000,
+      resetIgnored: true,
     },
     {
       name: 'honors Retry-After alongside a malformed primary reset',
@@ -2405,6 +2423,7 @@ test('runner registration retries honor GitHub response headers', async (t) => {
         'Retry-After: 4\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1090000',
       minDelay: 4_000,
       maxDelay: 5_000,
+      resetIgnored: true,
     },
     {
       name: 'keeps rate-limit backoff for a bare 429',
@@ -2433,6 +2452,7 @@ test('runner registration retries honor GitHub response headers', async (t) => {
     minDelay,
     maxDelay,
     permission,
+    resetIgnored,
   } of cases) {
     await t.test(name, async (t) => {
       const { f, clock, messages } = await stallHarness(t, { random });
@@ -2461,7 +2481,7 @@ test('runner registration retries honor GitHub response headers', async (t) => {
         command,
         sleep: async (ms) => {
           clock.now += ms;
-          if (clock.now > 1_150_000) manager.stop();
+          if (clock.now - attempts[0] > maxDelay + 5000) manager.stop();
         },
       });
       await manager.start();
@@ -2472,13 +2492,68 @@ test('runner registration retries honor GitHub response headers', async (t) => {
         `next registration was attempted after ${delay / 1000}s`,
       );
       assert.deepEqual(requests, attempts, 'no cleanup request after refusal');
+      assert.equal(
+        messages.some((message) =>
+          message.includes('ignored X-RateLimit-Reset'),
+        ),
+        resetIgnored ?? false,
+      );
       if (permission)
         assert.match(
           messages.join('\n'),
           /registration permission denied \(HTTP 403\); check runner administration permissions and restart/,
         );
+      else
+        assert.ok(
+          !messages.some((message) => message.includes('permission denied')),
+        );
     });
   }
+});
+
+test('a runner alerts during the retry deadline wait without retrying early', async (t) => {
+  const { f, alerts, clock, messages } = await stallHarness(t);
+  const startedAt = clock.now;
+  const attempts = [];
+  const alertTimes = [];
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 10 },
+    {
+      command: async (program, args, options) => {
+        if (program === 'docker' && args[0] === 'start') manager.stop();
+        if (
+          program === 'gh' &&
+          args.some((arg) => arg.endsWith('/generate-jitconfig'))
+        ) {
+          attempts.push(clock.now - startedAt);
+          if (attempts.length === 1) {
+            return runCommand(process.execPath, [
+              '-e',
+              'process.stdout.write("HTTP/2.0 429\\nRetry-After: 60\\r\\n\\r\\n"); process.exitCode = 1;',
+              '--',
+              ...args,
+            ]);
+          }
+        }
+        return f.command(program, args, options);
+      },
+      sleep: async (ms) => {
+        if (alerts().length > alertTimes.length)
+          alertTimes.push(clock.now - startedAt);
+        clock.now += ms;
+        if (clock.now - startedAt > 65_000) manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  assert.deepEqual(attempts, [0, 60_000]);
+  assert.ok(messages.some((message) => message.includes('started runner')));
+  assert.deepEqual(alertTimes, [10_000]);
+  assert.equal(alerts().length, 1);
+  assert.match(
+    alerts()[0],
+    /for 10s across 1 consecutive identical failures.*waiting to retry after a GitHub rate limit/,
+  );
 });
 
 test('a failed removal of refused slot state preserves the registration error', async (t) => {

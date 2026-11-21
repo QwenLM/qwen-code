@@ -230,19 +230,21 @@ disk quotas or a dedicated data volume as appropriate for the host.
 
 Failed cycles use jittered exponential backoff: 10 s doubling to a 60 s
 cap, or 30 s doubling to a 300 s cap on rate limits without a usable
-deadline. For JIT registration, the manager waits at least until GitHub's
-quota reset or `Retry-After`, whichever is later when both apply, and
-spreads retries after that time to avoid a burst across slots. A
+deadline. For JIT registration, a quota reset applies when GitHub reports zero
+remaining quota and the reset is within the next two hours. The manager logs and
+ignores resets beyond that window. It waits at least until the applicable reset
+or `Retry-After`, whichever is later when both apply, and spreads retries after
+that time to avoid a burst across slots. A
 permission-only 403 uses the ordinary cadence and logs which permission to
 check. Restart the service if the token changes. Shutdown can interrupt the
 wait.
 
 `stallAlertSeconds` (default 1800, thirty minutes) sets how long a slot may
-repeat the same failure before the manager logs `STALL ALERT` instead of the
-ordinary retry line. The clock resets whenever a cycle succeeds or the failure
-changes, and each stall episode alerts once. The manager checks the threshold
-when a failure is observed, so a wait for GitHub's deadline can delay this
-per-slot alert. The alert means the slot is serving no jobs. Check the error
+repeat the same failure before the manager logs `STALL ALERT`. The clock resets
+whenever a cycle succeeds or the failure changes, and each stall episode alerts
+once. The manager checks the threshold after a failure and once per second while
+waiting for a GitHub retry deadline. The alert identifies a slot serving no
+jobs and reports when it is waiting on GitHub. Check the error
 to see whether operator action is needed. The manager keeps retrying and never
 exits on its own, so systemd does not restart it. Alert on that journal marker
 rather than on service state.

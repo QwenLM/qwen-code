@@ -99,9 +99,11 @@ export function command(
           exhausted && /^\d+$/.test(reset ?? '') ? Number(reset) * 1000 : 0;
         // The primary quota resets hourly. Allow clock skew, but reject values
         // too far away to be this window (such as epoch milliseconds).
+        const resetTooFar = resetAt > now + 7_200_000;
+        if (resetTooFar) error.ignoredRateLimitReset = true;
         const retryAt = Math.max(
           Number.isSafeInteger(retryAfterAt) ? retryAfterAt : 0,
-          resetAt <= now + 7_200_000 ? resetAt : 0,
+          resetTooFar ? 0 : resetAt,
         );
         if (retryAt > now) error.retryAt = retryAt;
         if (!error.rateLimited)
@@ -233,25 +235,22 @@ export function createManager(config, dependencies = {}) {
   const lockPath = join(stateDir, 'manager.lock');
   const slotPath = (slot) => join(stateDir, `slot-${slot}.json`);
   const log = (message) => console.log(`[${config.poolId}] ${message}`);
-  // Time-based, not retry-count-based: with jittered exponential backoff a
-  // retry count no longer maps to a fixed wall-clock delay. Half an hour is
-  // long enough that a pool-wide rate-limit storm — every slot backing off on
-  // the same 300 s ceiling — does not put one alert per slot in the journal at
-  // once, and short enough that a genuinely wedged slot is still surfaced
-  // within a shift.
+  // Time-based, not retry-count-based: neither jittered backoff nor a GitHub
+  // retry deadline maps a retry count to a fixed wall-clock delay.
   const stallAlertMs = (config.stallAlertSeconds ?? 1800) * 1000;
   // A backoff sleep must stay interruptible: the service gives the manager
-  // TimeoutStopSec to exit, and an unsliced five-minute sleep would have
+  // TimeoutStopSec to exit, and an unsliced long sleep would have
   // systemd SIGKILL it mid-cycle. Wake at least once a second and cut the
   // sleep short once stop() sets the stopping flag. The flag alone bounds
   // the overshoot to one 1 s slice; a stopAt term here would also make the
   // loop skip every slice when shutdownGraceSeconds is 0.
-  const interruptibleWait = async (ms) => {
+  const interruptibleWait = async (ms, onTick) => {
     let remaining = ms;
     while (!stopping && remaining > 0) {
       const chunk = Math.min(1000, remaining);
       await wait(chunk);
       remaining -= chunk;
+      if (!stopping) onTick?.();
     }
   };
   // Draining is a shutdown-only cost, so a five-second poll per slot is
@@ -1226,17 +1225,33 @@ export function createManager(config, dependencies = {}) {
                         Math.min(30_000, Math.max(5_000, remaining / 10)),
                     )
                   : backoffDelay(consecutiveFailures, isRateLimited);
-              if (!stallAlerted && Date.now() - stalledSince >= stallAlertMs) {
+              const reportStall = () => {
+                if (stallAlerted) return false;
+                const stalledFor = Date.now() - stalledSince;
+                if (stalledFor < stallAlertMs) return false;
                 stallAlerted = true;
+                const detail =
+                  error.retryAt === undefined
+                    ? 'this slot is backing off before retrying'
+                    : 'this slot is waiting to retry after a GitHub rate limit';
                 log(
-                  `STALL ALERT slot ${slot}: no runner replenished for ${Math.round((Date.now() - stalledSince) / 1000)}s across ${failures} consecutive identical failures ` +
-                    `(${error.message}); this slot serves no jobs until it is reconciled`,
+                  `STALL ALERT slot ${slot}: no runner replenished for ${Math.round(stalledFor / 1000)}s across ${failures} consecutive identical failures ` +
+                    `(${error.message}); ${detail}`,
                 );
-              } else
+                return true;
+              };
+              if (error.ignoredRateLimitReset)
+                log(
+                  `slot ${slot}: ignored X-RateLimit-Reset more than 2 hours away`,
+                );
+              if (!reportStall())
                 log(
                   `slot ${slot}: ${error.message}; ${error.rateLimited === false ? 'check runner administration permissions and restart if the token changes; next attempt' : 'retrying'} in ${Math.round(delay / 1000)}s without replenishing`,
                 );
-              await interruptibleWait(delay);
+              await interruptibleWait(
+                delay,
+                error.retryAt === undefined ? undefined : reportStall,
+              );
             }
           }
         }),
