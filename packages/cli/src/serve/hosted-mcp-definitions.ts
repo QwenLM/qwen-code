@@ -10,8 +10,15 @@ export interface HostedMcpServerPin {
   readonly definitionDigest: string;
 }
 
+export const HOSTED_COUNTER_CEILING = Number.MAX_SAFE_INTEGER - 1;
+
+// `stored` reads a pin this build already persisted. The ceiling is an
+// admission bound: applying it to the stored readers would refuse Sessions
+// that were admitted under the wider bound they were created with, and a
+// refused load cannot be deleted because attach is the delete precondition.
 export function parseHostedMcpServers(
   value: unknown,
+  stored = false,
 ): readonly HostedMcpServerPin[] {
   // Saved Sessions retain the original pin format so they can load and detach.
   if (!Array.isArray(value) || value.length < 1 || value.length > 32) {
@@ -29,6 +36,7 @@ export function parseHostedMcpServers(
       !/^[A-Za-z0-9._:-]{1,128}$/u.test(pin['serverId']) ||
       !Number.isSafeInteger(pin['serverRevision']) ||
       Number(pin['serverRevision']) < 1 ||
+      (!stored && Number(pin['serverRevision']) > HOSTED_COUNTER_CEILING) ||
       typeof pin['definitionDigest'] !== 'string' ||
       !/^[0-9a-f]{64}$/u.test(pin['definitionDigest']) ||
       ids.has(pin['serverId'])

@@ -5703,7 +5703,7 @@ export function registerHostedHarnessSessionRoutes(
       if (body?.['hookCatalog'] !== undefined) {
         if (!brokerOptions || (create && !toolProfile))
           throw new Error('Hooks require a Hosted Workspace profile.');
-        hookCatalog = parseHostedHookPin(body['hookCatalog']);
+        hookCatalog = parseHostedHookPin(body['hookCatalog'], !create);
       }
     } catch {
       error(res, 400, 'invalid_hosted_hook_catalog');
@@ -5716,14 +5716,14 @@ export function registerHostedHarnessSessionRoutes(
           body?.['lifecycleAuthority'] === undefined ||
           body?.['mcpServers'] !== undefined)
       )
-        mcpServers = parseHostedMcpServers(body?.['mcpServers']);
+        mcpServers = parseHostedMcpServers(body?.['mcpServers'], !create);
       else if (body?.['mcpServers'] !== undefined) {
         if (
           !isHostedWorkspacePublicShellProfile(toolProfile) ||
           !contract.lifecycleV2Profiles?.includes(toolProfile)
         )
           throw new Error('MCP requires a supported Workspace profile.');
-        mcpServers = parseHostedMcpServers(body['mcpServers']);
+        mcpServers = parseHostedMcpServers(body['mcpServers'], !create);
       }
       if (
         create &&
@@ -7030,11 +7030,22 @@ export function registerHostedHarnessSessionRoutes(
             definition?.['mcpServers'] !== undefined)) &&
         mcpServers === undefined
       ) {
-        mcpServers = parseHostedMcpServers(definition?.['mcpServers']);
+        // A definition persisted under an older admission bound still has to
+        // load: the ceiling is an admission bound, and a refused load cannot
+        // be deleted because attach is the delete precondition. A definition
+        // that fails even the stored reader keeps the declared error the
+        // create path uses, not the generic 503 handler.
+        try {
+          mcpServers = parseHostedMcpServers(definition?.['mcpServers'], true);
+        } catch {
+          await managed.close();
+          error(res, 400, 'invalid_hosted_mcp_servers');
+          return;
+        }
       }
       if (!create && hookCatalog === undefined && definition?.['hookCatalog']) {
         try {
-          hookCatalog = parseHostedHookPin(definition['hookCatalog']);
+          hookCatalog = parseHostedHookPin(definition['hookCatalog'], true);
         } catch {
           await managed.close();
           error(res, 409, 'hosted_tool_profile_conflict');
@@ -10464,7 +10475,7 @@ export function registerHostedHarnessSessionRoutes(
     const pins = session.definition?.['mcpServers'];
     return new HostedMcpManager(
       session.managed,
-      pins === undefined ? [] : parseHostedMcpServers(pins),
+      pins === undefined ? [] : parseHostedMcpServers(pins, true),
       { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
       session.mcp,
       () => session.hooks?.broker,
@@ -10512,7 +10523,7 @@ export function registerHostedHarnessSessionRoutes(
           legacy.at(-1)?.servers ??
           (baseMcp === undefined
             ? []
-            : parseHostedMcpServers(baseMcp).map((pin) => ({
+            : parseHostedMcpServers(baseMcp, true).map((pin) => ({
                 ...pin,
                 state: 'enabled' as const,
               }))),
@@ -10520,7 +10531,7 @@ export function registerHostedHarnessSessionRoutes(
           session.hooks?.selectedPin ??
           (session.definition?.['hookCatalog'] === undefined
             ? null
-            : parseHostedHookPin(session.definition['hookCatalog'])),
+            : parseHostedHookPin(session.definition['hookCatalog'], true)),
       },
       {
         validate: (packages) => {

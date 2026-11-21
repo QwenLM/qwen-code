@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.catalog;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionPolicyStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
@@ -61,7 +62,7 @@ public class ManagedMcpManagementService {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         if (!ACTIONS.contains(command.action()) || !command.serverId().matches("[A-Za-z0-9._:-]{1,128}")
                 || command.expectedRevision() == null || command.expectedRevision() < 0
-                || command.expectedRevision() >= 9_007_199_254_740_991L
+                || command.expectedRevision() > ManagedSessionStoreModels.MAX_SAFE_COUNTER
                 || Set.of("add", "edit").contains(command.action()) != (command.server() != null)
                 || command.server() != null && !command.serverId().equals(command.server().serverId())) {
             throw new ManagedAgentException(400, "invalid_request", "Invalid MCP management command.");
@@ -173,6 +174,7 @@ public class ManagedMcpManagementService {
 
     private static boolean counter(JsonNode value, long minimum) {
         return value.isIntegralNumber() && value.canConvertToLong()
-                && value.longValue() >= minimum && value.longValue() <= 9_007_199_254_740_991L;
+                && value.longValue() >= minimum
+                && value.longValue() <= ManagedSessionStoreModels.MAX_SAFE_COUNTER;
     }
 }

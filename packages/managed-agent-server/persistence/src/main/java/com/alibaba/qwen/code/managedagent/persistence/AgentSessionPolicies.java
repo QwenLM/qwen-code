@@ -192,7 +192,10 @@ final class AgentSessionPolicies {
         return new AgentPin(Long.toString(revision.revision()),
                 revision.digest(), compiled.approvalMode(),
                 compiled.toolProfile(), content.containsKey("hook_catalog"),
-                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile()).isEmpty(),
+                // The stored read: a definition this deployment pinned is
+                // read back under the wider bound it was admitted with, so
+                // an older pin cannot wedge its Session out of the estimate.
+                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile(), true).isEmpty(),
                 AgentDefinitionExtensions.skills(content.get("skills"), true));
     }
 
@@ -201,7 +204,7 @@ final class AgentSessionPolicies {
             return false;
         }
         boolean pinned = session.agentDefinitionDigest() != null && !AgentDefinitionExtensions.mcpServers(
-                definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile()).isEmpty();
+                definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile(), true).isEmpty();
         return ManagedMcpSettings.find(jdbc, session.tenantId(), session.sessionId()) != null || pinned;
     }
 

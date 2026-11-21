@@ -134,7 +134,10 @@ function object(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-export function parseHostedMcpCommand(value: unknown): HostedMcpCommand {
+export function parseHostedMcpCommand(
+  value: unknown,
+  stored = false,
+): HostedMcpCommand {
   const command = object(value);
   const action = command['action'];
   const needsServer = action === 'add' || action === 'edit';
@@ -172,7 +175,7 @@ export function parseHostedMcpCommand(value: unknown): HostedMcpCommand {
   )
     throw new Error('Invalid MCP command.');
   const pin = needsServer
-    ? parseHostedMcpServers([command['server']])[0]
+    ? parseHostedMcpServers([command['server']], stored)[0]
     : undefined;
   if (pin && pin.serverId !== command['serverId'])
     throw new Error('MCP command server identity conflicts.');
@@ -231,7 +234,7 @@ export async function readHostedMcpSettings(
         .length > 32
     )
       throw new Error('Invalid MCP settings.');
-    const command = parseHostedMcpCommand(body['command']);
+    const command = parseHostedMcpCommand(body['command'], true);
     if (
       command.operationId !== body['operationId'] ||
       command.expectedRevision + 1 !== revision
@@ -241,7 +244,7 @@ export async function readHostedMcpSettings(
     const servers = body['servers'].map(
       (value: unknown): HostedMcpSelection => {
         const { state, ...pin } = object(value);
-        const [parsed] = parseHostedMcpServers([pin]);
+        const [parsed] = parseHostedMcpServers([pin], true);
         if (
           !['enabled', 'disabled', 'removed'].includes(String(state)) ||
           ids.has(parsed.serverId)

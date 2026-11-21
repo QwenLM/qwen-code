@@ -61,6 +61,7 @@ import {
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
 import { waitForTurn } from './hosted-turn-wait.js';
 import { hostedShellInputError } from './hosted-shell-input.js';
+import { HOSTED_COUNTER_CEILING } from './hosted-mcp-definitions.js';
 
 export class HostedHookRecoveryRequiredError extends Error {
   constructor() {
@@ -352,7 +353,10 @@ export function hostedHookOccurrenceId(
   return `hook-plan-${digest([event, occurrenceId])}`;
 }
 
-export function parseHostedHookPin(value: unknown): ManagedHookCatalogPin {
+export function parseHostedHookPin(
+  value: unknown,
+  stored = false,
+): ManagedHookCatalogPin {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Invalid Hook catalog pin.');
   const pin = value as Record<string, unknown>;
@@ -363,6 +367,7 @@ export function parseHostedHookPin(value: unknown): ManagedHookCatalogPin {
     !/^[A-Za-z0-9._:-]{1,128}$/u.test(pin['catalogId']) ||
     !Number.isSafeInteger(pin['catalogRevision']) ||
     (pin['catalogRevision'] as number) < 1 ||
+    (!stored && (pin['catalogRevision'] as number) > HOSTED_COUNTER_CEILING) ||
     typeof pin['definitionDigest'] !== 'string' ||
     !/^[a-f0-9]{64}$/u.test(pin['definitionDigest'])
   )
