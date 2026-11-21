@@ -42,7 +42,13 @@ final class RuntimeToolAcknowledgements {
 
     CompletionStage<Void> acknowledgePersistedTools(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
         boolean external = WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest());
-        boolean externalShell = WorkspaceExecutionProfile.isExternalShellRequest(binding.getRequest());
+        // The Shell placement drains two shapes: its publication-v3 Shell
+        // result, and the no-start answer a v2 Shell call settles with. A
+        // deferred file Tool on the same placement publishes nothing, so it
+        // drains through the file arm like any other external file result.
+        boolean externalShell = WorkspaceExecutionProfile.isExternalShellRequest(binding.getRequest())
+                && (isPublicationV3(execution.getReference())
+                        || externalShellNoStartAnswer(execution.getResult()));
         if (external && !externalShell && (!execution.isSettled() || execution.getResult() == null
                 || execution.getResult().containsKey("capture")
                 || !execution.getReference().keySet().equals(
@@ -50,9 +56,7 @@ final class RuntimeToolAcknowledgements {
                 || !"deferred".equals(execution.getReference().get("dispatchMode")))) {
             return failed(conflict("workspace_close_identity_unverified", "External drain requires settled file Tool v2 results"));
         }
-        if (externalShell && (!execution.isSettled() || execution.getResult() == null
-                || !externalShellNoStartAnswer(execution.getResult())
-                        && !isPublicationV3(execution.getReference()))) {
+        if (externalShell && (!execution.isSettled() || execution.getResult() == null)) {
             return failed(conflict("workspace_close_identity_unverified",
                     "External Shell drain requires a settled Tool v3 result"));
         }

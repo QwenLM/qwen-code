@@ -25,6 +25,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -210,6 +211,45 @@ class RuntimeExecutionDispatcherTest {
         when(fixture.binding.getBindingId()).thenReturn("binding");
         when(fixture.binding.getGeneration()).thenReturn(7L);
         when(fixture.session.getScope()).thenReturn(scope);
+        var record = mock(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.class);
+        when(record.getSession()).thenReturn(fixture.session);
+        when(fixture.sessions.findById(scope, "runtime")).thenReturn(record);
+        var execution = mock(ToolExecutionRecord.class);
+        var reference = Map.<String, Object>of("sessionId", "runtime", "promptId", "prompt",
+                "callId", "call", "argsDigest", "digest", "dispatchMode", "deferred");
+        when(execution.isSettled()).thenReturn(true);
+        when(execution.getResult()).thenReturn(Map.<String, Object>of("executionStatus", "success"));
+        when(execution.getReference()).thenReturn(reference);
+        when(execution.belongsTo(record)).thenReturn(true);
+        when(execution.getBindingId()).thenReturn("binding");
+        when(execution.getRuntimeGeneration()).thenReturn(7L);
+        when(execution.getRuntimeSessionId()).thenReturn("runtime");
+        when(execution.getHarnessSessionId()).thenReturn("harness");
+        when(fixture.transport.acknowledgeV2(fixture.lease, fixture.session, reference))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        fixture.dispatcher.acknowledgePersistedTools(fixture.binding, execution)
+                .toCompletableFuture().join();
+
+        verify(fixture.transport).acknowledgeV2(fixture.lease, fixture.session, reference);
+    }
+
+    // R5-1/R1-10 second half: the drain's acknowledgement judged the Shell
+    // placement by its publication type alone, so a deferred file Tool that
+    // settled through the file arm could never be acknowledged or released.
+    @Test
+    void deferredFileToolAcknowledgementOnTheExternalShellPlacementReachesV2() {
+        var fixture = new Fixture();
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST, "session");
+        var request = new RuntimeProvisionRequest(scope, "harness", "external-workspace", "workspace");
+        when(fixture.binding.getRequest()).thenReturn(request);
+        when(fixture.binding.getLease()).thenReturn(fixture.lease);
+        when(fixture.binding.getBindingId()).thenReturn("binding");
+        when(fixture.binding.getGeneration()).thenReturn(7L);
+        when(fixture.session.getScope()).thenReturn(scope);
+        assertTrue(WorkspaceExecutionProfile.isExternalShellRequest(request),
+                "The request must be an external Shell");
         var record = mock(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.class);
         when(record.getSession()).thenReturn(fixture.session);
         when(fixture.sessions.findById(scope, "runtime")).thenReturn(record);
@@ -573,6 +613,111 @@ class RuntimeExecutionDispatcherTest {
         verify(executions, never()).settlePrepared(any(), any(), any());
     }
 
+    // R5-2: a claim this wait committed, whose dispatch then failed retryably
+    // before the row reached EXECUTING, leaves a DISPATCHING row owned by this
+    // broker. The next tick must re-drive it: completing the wait there would
+    // report a call that never ran as successful.
+    @Test
+    @Timeout(15)
+    @SuppressWarnings("unchecked")
+    void aClaimWhoseDispatchFailedRetryablyIsRedrivenInsteadOfCompleted()
+            throws Exception {
+        var registry = mock(RuntimeBindingRegistry.class);
+        var bindings = mock(RuntimeBindingRepository.class);
+        var sessions = mock(RuntimeSessionRepository.class);
+        var executions = mock(ToolExecutionRepository.class);
+        var scheduler = mock(ScheduledExecutorService.class);
+        var context = mock(SessionContext.class);
+        var binding = mock(RuntimeBindingRecord.class);
+        var session = mock(RuntimeSession.class);
+        var prepared = mock(ToolExecutionRecord.class);
+        var claimed = mock(ToolExecutionRecord.class);
+        var executing = mock(ToolExecutionRecord.class);
+        var provisioner = mock(RuntimeProvisioner.class);
+        var transport = mock(RuntimeTransport.class);
+        var state = mock(RuntimeExecutionState.class);
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null,
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE,
+                "workspace");
+        when(binding.getRequest()).thenReturn(request);
+        when(binding.getBindingId()).thenReturn("binding");
+        when(binding.getGeneration()).thenReturn(1L);
+        when(context.binding()).thenReturn(binding);
+        when(context.session()).thenReturn(session);
+        when(context.lease()).thenReturn(mock(RuntimeLease.class));
+        when(session.getScope()).thenReturn(scope);
+        when(session.getHarnessSessionId()).thenReturn("harness");
+        when(prepared.getExecutionCallId()).thenReturn("execution");
+        when(prepared.getState()).thenReturn(ToolExecutionRecord.State.PREPARED);
+        when(prepared.sameIdentity(prepared)).thenReturn(true);
+        when(prepared.getReference()).thenReturn(Map.of("sessionId", "runtime", "dispatchMode", "deferred"));
+        when(claimed.getExecutionCallId()).thenReturn("execution");
+        when(claimed.getState()).thenReturn(ToolExecutionRecord.State.DISPATCHING);
+        when(claimed.getDispatchOwner()).thenReturn("broker");
+        when(claimed.getDispatchGeneration()).thenReturn(7L);
+        when(claimed.getReference()).thenReturn(Map.of("sessionId", "runtime"));
+        when(claimed.sameIdentity(prepared)).thenReturn(true);
+        when(claimed.isCancelRequested()).thenReturn(false);
+        when(executing.getExecutionCallId()).thenReturn("execution");
+        when(executing.getState()).thenReturn(ToolExecutionRecord.State.EXECUTING);
+        when(executing.getDispatchOwner()).thenReturn("broker");
+        when(executing.getDispatchGeneration()).thenReturn(7L);
+        when(executing.getReference()).thenReturn(Map.of("sessionId", "runtime"));
+        // First the slot is occupied; the first tick takes it and its dispatch
+        // fails retryably; the next tick re-reads the DISPATCHING row.
+        when(executions.findByExecutionCallId("execution")).thenReturn(prepared, claimed);
+        when(executions.claimValidatedDispatch(eq("execution"), eq("broker"), any(Duration.class), any()))
+                .thenReturn(null, claimed);
+        when(bindings.authorizeDispatch(sessions, executions, claimed, "broker", 7L))
+                .thenReturn(executing);
+        // The first dispatch cannot even read the provisioner: a transient
+        // store failure after the claim committed. The second tick, re-driving
+        // the same claim, succeeds.
+        org.mockito.Mockito.doThrow(new com.alibaba.qwen.code.runtimebroker.StoreFailureException(
+                        "connection reset", new java.sql.SQLException("reset")))
+                .doReturn(true).when(provisioner).isUsable(any());
+        Map<String, Object> result = Map.of("executionStatus", "success");
+        Map<String, Object> payload = Map.of("toolName", "read_file", "input", Map.of());
+        when(transport.execute(any(), any(), any(), eq(payload)))
+                .thenReturn(CompletableFuture.completedFuture(result));
+        var ticks = new java.util.ArrayList<Runnable>();
+        when(scheduler.schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS))).thenAnswer(call -> {
+            ticks.add(call.getArgument(0));
+            return mock(ScheduledFuture.class);
+        });
+        var renewalScheduler = mock(ScheduledExecutorService.class);
+        when(renewalScheduler.scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(),
+                eq(TimeUnit.MILLISECONDS))).thenReturn(mock(ScheduledFuture.class));
+        var dispatcher = new RuntimeExecutionDispatcher(registry, state, bindings,
+                sessions, executions, provisioner, transport,
+                mock(RuntimePublicationVerifier.class), "broker", Duration.ofSeconds(60),
+                Duration.ofSeconds(10), Clock.fixed(Instant.parse("2026-11-01T00:00:00Z"), ZoneOffset.UTC),
+                scheduler, renewalScheduler, new AtomicBoolean());
+        dispatcher.beginDispatch(context, prepared, payload, null,
+                com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload.of("digest", "read_file"));
+        var field = RuntimeExecutionDispatcher.class.getDeclaredField("dispatches");
+        field.setAccessible(true);
+        var dispatches = (java.util.concurrent.ConcurrentMap<String, CompletableFuture<Void>>) field.get(dispatcher);
+        var queued = dispatches.get("execution");
+        assertNotNull(queued);
+
+        // Tick 1 claims, then the dispatch fails retryably: the row stays
+        // DISPATCHING under this broker and the wait reschedules.
+        ticks.getFirst().run();
+        assertFalse(queued.isDone());
+        assertEquals(2, ticks.size());
+
+        // Tick 2 re-reads the claim this wait owns and drives it, instead of
+        // treating "not PREPARED" as another attempt's success.
+        ticks.get(1).run();
+        queued.get(1, TimeUnit.SECONDS);
+        verify(transport).execute(any(), any(), any(), eq(payload));
+        verify(state).settleExecution(executing, result);
+        verify(state, never()).markUnknown(any());
+    }
+
     // The initial schedule is the one exit the tick's own catch cannot cover:
     // a dispatch that lost the race to RuntimeBrokerService.close() (scheduler
     // shut down after the null claim) must still settle its PREPARED row, or
@@ -808,5 +953,42 @@ class RuntimeExecutionDispatcherTest {
             throw new AssertionError("The files gate refused the Shell dispatch: "
                     + failure.getMessage(), failure);
         }
+    }
+
+    // R5-1/R1-10: the external Shell profile advertises the file Tools as well
+    // as the foreground Shell. Those calls are ordinary Tool v2 reservations
+    // (deferred, no grant), so the Shell lane must not demand a publication
+    // for them; refusing here made every advertised file Tool unusable.
+    @Test
+    @Timeout(15)
+    void aDeferredFileToolDispatchesOnTheExternalShellPlacement() {
+        var fixture = new Fixture();
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST, "session");
+        var request = new RuntimeProvisionRequest(scope, "harness", "external-workspace", "workspace");
+        when(fixture.binding.getRequest()).thenReturn(request);
+        when(fixture.binding.getBindingId()).thenReturn("binding");
+        when(fixture.binding.getGeneration()).thenReturn(1L);
+        when(fixture.prepared.isCancelRequested()).thenReturn(false);
+        assertTrue(WorkspaceExecutionProfile.isExternalShellRequest(request),
+                "The request must be an external Shell");
+        Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "turn",
+                "callId", "call", "argsDigest", "sha256:" + "a".repeat(64),
+                "dispatchMode", "deferred");
+        when(fixture.prepared.getReference()).thenReturn(reference);
+        when(fixture.executing.getReference()).thenReturn(reference);
+        Map<String, Object> payload = Map.of("toolName", "read_file",
+                "input", Map.of("absolute_path", "/workspace/witness"));
+        Map<String, Object> result = Map.of("executionStatus", "success",
+                "responseParts", List.of());
+        when(fixture.transport.execute(eq(fixture.lease), eq(fixture.session), eq(reference),
+                eq(payload))).thenReturn(CompletableFuture.completedFuture(result));
+
+        fixture.dispatcher.beginDispatch(fixture.context, fixture.prepared, payload);
+
+        verify(fixture.transport).execute(eq(fixture.lease), eq(fixture.session), eq(reference),
+                eq(payload));
+        verify(fixture.state).settleExecution(fixture.executing, result);
+        verify(fixture.state, never()).markUnknown(any());
     }
 }

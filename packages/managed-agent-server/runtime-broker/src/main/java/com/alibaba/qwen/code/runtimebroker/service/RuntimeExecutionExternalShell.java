@@ -68,8 +68,9 @@ final class RuntimeExecutionExternalShell {
      */
     CompletionStage<String> channel(SessionContext context,
             ToolExecutionRecord executing, RuntimePublicationGrant grant) {
-        if (!WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
-                || executing.isCancelRequested()) {
+        // A deferred file Tool on the Shell placement has no channel: it
+        // publishes nothing, so `lane` is false and there is nothing to open.
+        if (!lane(context, executing) || executing.isCancelRequested()) {
             return CompletableFuture.completedFuture(null);
         }
         var producer = publicationVerifier == null ? null : publicationVerifier.externalShell();
@@ -91,7 +92,9 @@ final class RuntimeExecutionExternalShell {
     CompletionStage<Map<String, Object>> move(SessionContext context,
             ToolExecutionRecord executing, RuntimePublicationGrant grant,
             String externalChannelId, Map<String, Object> result) {
-        if (!WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())) {
+        // Only the publication-v3 Shell result has bytes to move; a deferred
+        // file Tool settles on the worker's own answer.
+        if (!lane(context, executing)) {
             return CompletableFuture.completedFuture(result);
         }
         var producer = publicationVerifier == null ? null : publicationVerifier.externalShell();

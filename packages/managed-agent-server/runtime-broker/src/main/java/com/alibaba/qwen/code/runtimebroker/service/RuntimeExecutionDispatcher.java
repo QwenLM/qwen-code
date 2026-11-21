@@ -158,10 +158,14 @@ final class RuntimeExecutionDispatcher {
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant,
             VerifiedDispatchPayload verifiedPayload, String externalChannelId) {
+        // Only the placement's publication-v3 Shell call is the Broker-moved
+        // lane, so only it must carry a grant and a foreground payload. A
+        // deferred file Tool on the same profile publishes nothing and takes
+        // the file arm below; a v2 Shell call still fails that arm's tool set.
         if (WorkspaceExecutionProfile.isExternalShellRequest(
                 context.binding().getRequest())
-                && (!isPublicationV3(prepared.getReference())
-                        || prepared.getReference().containsKey("runtimeProtocol")
+                && isPublicationV3(prepared.getReference())
+                && (prepared.getReference().containsKey("runtimeProtocol")
                         || !prepared.isCancelRequested() && (grant == null
                                 || publicationVerifier == null
                                 || publicationVerifier.externalShell() == null
@@ -173,9 +177,11 @@ final class RuntimeExecutionDispatcher {
             throw invalid("runtime_payload_invalid",
                     "External Shell requires a foreground Tool v3 Shell payload");
         }
-        if (!WorkspaceExecutionProfile.isExternalShellRequest(
-                context.binding().getRequest())
-                && WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+        // The file arm: a Tool v2 reservation on either external placement. A
+        // publication-v3 record is the Shell lane above, which this arm would
+        // otherwise refuse for its non-file payload.
+        if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                && !isPublicationV3(prepared.getReference())
                 && (!"deferred".equals(prepared.getReference().get("dispatchMode"))
                         || prepared.getReference().containsKey("runtimeProtocol") || grant != null
                         || !prepared.isCancelRequested() && (payload == null
@@ -297,9 +303,26 @@ final class RuntimeExecutionDispatcher {
                     ToolExecutionRecord waiting =
                             executionRepository.findByExecutionCallId(
                                     prepared.getExecutionCallId());
-                    if (waiting == null || !waiting.sameIdentity(prepared)
-                            || waiting.getState()
-                                    != ToolExecutionRecord.State.PREPARED) {
+                    if (waiting == null || !waiting.sameIdentity(prepared)) {
+                        queued.complete(null);
+                        return;
+                    }
+                    // A claim this wait committed, whose dispatch then failed
+                    // retryably before the row reached EXECUTING, leaves a
+                    // DISPATCHING row this broker owns. Nothing renews or
+                    // reconciles it, so reporting success here would complete
+                    // the call over a dispatch that never ran: re-drive it. A
+                    // DISPATCHING row under another owner is that attempt's
+                    // work, and the wait completes as before.
+                    if (waiting.getState()
+                            == ToolExecutionRecord.State.DISPATCHING
+                            && brokerOwnerId.equals(waiting.getDispatchOwner())) {
+                        redriveClaimed(context, waiting, payload, grant,
+                                externalChannelId, queued);
+                        return;
+                    }
+                    if (waiting.getState()
+                            != ToolExecutionRecord.State.PREPARED) {
                         queued.complete(null);
                         return;
                     }
@@ -322,16 +345,8 @@ final class RuntimeExecutionDispatcher {
                                 v3PollDelayMillis(attempt.getAndIncrement()),
                                 TimeUnit.MILLISECONDS);
                     } else {
-                        dispatchClaimed(
-                                context, next, payload, grant, externalChannelId)
-                                .whenComplete((ignored, error) -> {
-                                    if (error == null) {
-                                        queued.complete(null);
-                                    } else {
-                                        queued.completeExceptionally(
-                                                unwrap(error));
-                                    }
-                                });
+                        redriveClaimed(context, next, payload, grant,
+                                externalChannelId, queued);
                     }
                 } catch (RuntimeException | Error error) {
                     // A transient store or admission failure before the
@@ -379,6 +394,25 @@ final class RuntimeExecutionDispatcher {
             throw rejected;
         }
         return queued;
+    }
+
+    /**
+     * Drives a claim this wait owns and completes the wait with its outcome. A
+     * claim whose dispatch fails retryably stays DISPATCHING; the next tick
+     * re-enters here with the re-read row instead of reporting success.
+     */
+    private void redriveClaimed(SessionContext context,
+            ToolExecutionRecord claimed, Map<String, Object> payload,
+            RuntimePublicationGrant grant, String externalChannelId,
+            CompletableFuture<Void> queued) {
+        dispatchClaimed(context, claimed, payload, grant, externalChannelId)
+                .whenComplete((ignored, error) -> {
+                    if (error == null) {
+                        queued.complete(null);
+                    } else {
+                        queued.completeExceptionally(unwrap(error));
+                    }
+                });
     }
 
     /**

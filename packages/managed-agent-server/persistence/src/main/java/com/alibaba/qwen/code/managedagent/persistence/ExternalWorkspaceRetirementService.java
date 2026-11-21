@@ -270,11 +270,16 @@ public final class ExternalWorkspaceRetirementService {
             // (TOOL_RESULT_PROJECTION / SESSION_WORKTREE success), SUCCEEDED
             // (CAPTURE_GC / SESSION_RESOURCE_GC), RETURNED (OBJECT_PUT), SUPPRESSED
             // (projection suppressed by session deletion) and REMOVED (worktree
-            // cleanup). Unknown states stay fencing: a new nonterminal state must
-            // block retirement, never silently pass it.
+            // cleanup). CHANNEL_INGRESS keeps its own lowercase admission
+            // vocabulary: `admitted` is its permanent outcome (the receipt was
+            // written with the input), while `staged` is an event the relay may
+            // still admit and therefore still fences. Unknown states stay
+            // fencing: a new nonterminal state must block retirement, never
+            // silently pass it.
             empty("SELECT operation_id FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
                     + " AND state NOT IN ('COMPLETED','FAILED','CANCELLED','SUPERSEDED',"
-                    + "'READY','SUCCEEDED','RETURNED','SUPPRESSED','REMOVED') LIMIT 1 FOR UPDATE",
+                    + "'READY','SUCCEEDED','RETURNED','SUPPRESSED','REMOVED')"
+                    + " AND NOT (operation_kind = 'CHANNEL_INGRESS' AND state = 'admitted') LIMIT 1 FOR UPDATE",
                     request.tenantId(), session);
         }
         // 孤立 head 不能当作没有成员；常规 Hosted 写入在同一 placement guard 后串行提交。

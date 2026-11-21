@@ -135,7 +135,11 @@ class ExternalWorkspaceRetirementServiceTest {
         makeReady();
         var runtime = claimExactHolder(runtimeSession(RuntimeSessionRecord.State.READY));
         settleTool(runtime);
-        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        // The mount identity spans the owner row and its storage alias: the
+        // owner keeps tenant/storage/mount columns, the alias keeps the
+        // physical key.
+        var owner = jdbc.queryForMap("SELECT o.*, s.physical_key FROM ma_storage_owner o"
+                + " JOIN ma_storage s ON s.physical_key = o.storage_key");
         assertThat(owner.get("holder_key")).isNotNull();
         assertThat(owner.get("binding_id")).isEqualTo(original.getBindingId());
         assertThat(owner.get("runtime_generation")).isEqualTo(original.getGeneration());
@@ -151,8 +155,9 @@ class ExternalWorkspaceRetirementServiceTest {
                 .isEqualTo(RuntimeBindingRecord.State.RELEASED);
         assertThat(jdbc.queryForMap("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
                 + " FROM ma_storage_owner").values()).containsOnlyNulls();
-        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, physical_key, mount_root, mount_revision"
-                + " FROM ma_storage_owner")).isEqualTo(Map.of(
+        assertThat(jdbc.queryForMap("SELECT o.tenant_id, o.storage_id, s.physical_key, o.mount_root,"
+                + " o.mount_revision FROM ma_storage_owner o"
+                + " JOIN ma_storage s ON s.physical_key = o.storage_key")).isEqualTo(Map.of(
                         "tenant_id", owner.get("tenant_id"),
                         "storage_id", owner.get("storage_id"),
                         "physical_key", owner.get("physical_key"),
@@ -441,6 +446,42 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThat(receipt.state()).isEqualTo("RELEASED");
         assertThat(bindings.findById(original.getBindingId()).getState())
                 .isEqualTo(RuntimeBindingRecord.State.RELEASED);
+    }
+
+    // R5-3: a channel-messaged Session keeps its route admission row forever.
+    // `admitted` is CHANNEL_INGRESS's permanent outcome — the receipt and the
+    // session input are written with it — so it must not fence retirement.
+    @Test
+    void admittedChannelIngressDoesNotFenceRetirement() {
+        insertChannelIngress("admitted", "ADMITTED");
+
+        var receipt = service.retire(request, this::terminated);
+
+        assertThat(receipt.state()).isEqualTo("RELEASED");
+        assertThat(bindings.findById(original.getBindingId()).getState())
+                .isEqualTo(RuntimeBindingRecord.State.RELEASED);
+    }
+
+    // The other half of that fence: a `staged` route is an event the relay may
+    // still admit into this Session, so it is not terminal and still blocks.
+    @Test
+    void stagedChannelIngressStillFencesRetirement() {
+        insertChannelIngress("staged", "STAGING");
+
+        assertThatThrownBy(() -> service.retire(request, this::terminated))
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("statusCode", 409)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
+    }
+
+    private void insertChannelIngress(String state, String phase) {
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'CHANNEL_INGRESS', ?, 'user-session', 'SESSION', ?,"
+                + " 'digest', '{}', ?, ?, 'DONE', 1, 1)",
+                ("channel-" + state).repeat(5).substring(0, 64), "b".repeat(64),
+                ("channel-" + state).getBytes(StandardCharsets.UTF_8),
+                "tenant".getBytes(StandardCharsets.UTF_8), "c".repeat(64), state, phase);
     }
 
     @Test
