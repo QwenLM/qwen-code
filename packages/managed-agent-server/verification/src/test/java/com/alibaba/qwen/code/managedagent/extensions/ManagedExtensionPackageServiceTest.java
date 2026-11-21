@@ -607,9 +607,9 @@ class ManagedExtensionPackageServiceTest {
     private Pin insertPackage(String tenant, String workspace, String id, long revision, String state, boolean listed) throws Exception {
         String digest = DigestUtils.sha256Hex(ManagedSchemaKeys.key(tenant, workspace, id, Long.toString(revision)));
         var version = new Manifest(1, 1, manifest.name(), Long.toString(revision), manifest.target(), manifest.components());
-        jdbc.update("INSERT INTO ma_extension_package (package_key, scope_key, tenant_id, workspace_id, extension_id, package_revision,"
-                        + " package_digest, manifest_json, byte_length, state, is_catalog_listed, gmt_create) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-                ManagedSchemaKeys.key(tenant, workspace, id, Long.toString(revision)), ManagedSchemaKeys.key(tenant, workspace), tenant, workspace,
+        jdbc.update("INSERT INTO ma_extension_package (scope_key, tenant_id, workspace_id, extension_id, package_revision,"
+                        + " package_digest, manifest_json, byte_length, state, is_catalog_listed, gmt_create) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                ManagedSchemaKeys.key(tenant, workspace), tenant, workspace,
                 id, revision, digest, json.writeValueAsString(version), bytes.length, state, listed);
         return new Pin(id, revision, digest, null);
     }

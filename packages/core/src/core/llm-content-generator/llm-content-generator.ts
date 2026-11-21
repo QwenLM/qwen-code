@@ -44,20 +44,127 @@ import { markRequestDispatched } from '../loggingContentGenerator/request-dispat
 
 const debugLogger = createDebugLogger('GEMINI');
 
-function installIsolatedTransport(client: GoogleGenAI): boolean {
+type GeminiStreamPart = { responseInternal: Response };
+
+type GeminiApiClient = {
+  apiCall?(url: string, init: RequestInit): Promise<Response>;
+  processStreamResponse?(response: Response): AsyncGenerator<GeminiStreamPart>;
+  includeExtraHttpOptionsToRequestInit(
+    init: RequestInit,
+    options: HttpOptions,
+    url: string,
+    signal?: AbortSignal,
+  ): Promise<RequestInit>;
+};
+
+function isThirdPartyGeminiBaseUrl(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname !== 'generativelanguage.googleapis.com';
+  } catch {
+    return true;
+  }
+}
+
+function withoutDoneSentinel(
+  stream: AsyncGenerator<GeminiStreamPart, void, unknown>,
+  response: Response,
+): AsyncGenerator<GeminiStreamPart, void, unknown> {
+  const iterator = stream[Symbol.asyncIterator]();
+  return {
+    async next() {
+      const result = await iterator.next();
+      if (result.done) return result;
+      const payload = await result.value.responseInternal.clone().text();
+      if (payload.trim() !== '[DONE]') return result;
+      await iterator.return?.();
+      try {
+        await response.body?.cancel();
+      } catch {
+        // A reset after a complete sentinel does not invalidate the response.
+      }
+      return { done: true, value: undefined };
+    },
+    async return() {
+      if (iterator.return) return iterator.return();
+      return { done: true, value: undefined };
+    },
+    async throw(error?: unknown) {
+      if (iterator.throw) return iterator.throw(error);
+      await iterator.return?.();
+      throw error;
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+  };
+}
+
+function installIsolatedTransport(
+  client: GoogleGenAI,
+  options: { apiKey?: string },
+): boolean {
   // @google/genai 2.6 has no public fetch hook. Both model request paths use
   // this instance's final HTTP call after the SDK has built the URL and auth.
   const { apiClient } = client as unknown as {
-    apiClient?: {
-      apiCall?(url: string, init: RequestInit): Promise<Response>;
-    };
+    apiClient?: GeminiApiClient;
   };
   if (typeof apiClient?.apiCall !== 'function') return false;
+  const destinations = new WeakMap<Response, string>();
+  // apiCall shallow-copies RequestInit but preserves the Headers instance.
+  const explicitNativeHeaderRequests = new WeakSet<Headers>();
+  if (typeof apiClient.includeExtraHttpOptionsToRequestInit === 'function') {
+    const includeExtraHttpOptionsToRequestInit =
+      apiClient.includeExtraHttpOptionsToRequestInit.bind(apiClient);
+    apiClient.includeExtraHttpOptionsToRequestInit = async (
+      init,
+      options,
+      url,
+      signal,
+    ) => {
+      const hasExplicitNativeHeader = Object.keys(options.headers ?? {}).some(
+        (name) => name.toLowerCase() === 'x-goog-api-key',
+      );
+      const request = await includeExtraHttpOptionsToRequestInit(
+        init,
+        options,
+        url,
+        signal,
+      );
+      if (hasExplicitNativeHeader && request.headers) {
+        explicitNativeHeaderRequests.add(request.headers as Headers);
+      }
+      return request;
+    };
+  }
   const apiCall = apiClient.apiCall.bind(apiClient);
-  apiClient.apiCall = (url, init) =>
-    retryContext.getStore()?.singleAttempt
+  apiClient.apiCall = async (url, init) => {
+    if (options.apiKey && !client.vertexai && isThirdPartyGeminiBaseUrl(url)) {
+      const headers = new Headers(init.headers);
+      if (
+        !headers.has('authorization') &&
+        !explicitNativeHeaderRequests.has(init.headers as Headers)
+      ) {
+        headers.set('Authorization', `Bearer ${options.apiKey}`);
+        init = { ...init, headers };
+      }
+    }
+    const response = await (retryContext.getStore()?.singleAttempt
       ? fetch(url, { ...init, redirect: 'error' })
-      : apiCall(url, init);
+      : apiCall(url, init));
+    destinations.set(response, url);
+    return response;
+  };
+  if (typeof apiClient.processStreamResponse === 'function') {
+    const processStreamResponse =
+      apiClient.processStreamResponse.bind(apiClient);
+    apiClient.processStreamResponse = (response) => {
+      const stream = processStreamResponse(response);
+      const destination = destinations.get(response) ?? response.url;
+      return !client.vertexai && isThirdPartyGeminiBaseUrl(destination)
+        ? withoutDoneSentinel(stream, response)
+        : stream;
+    };
+  }
   return true;
 }
 
@@ -151,7 +258,9 @@ export class LlmContentGenerator implements ContentGenerator {
     ) {
       throw new Error('Configure baseUrl explicitly for this Google model.');
     }
-    this.hasIsolatedTransport = installIsolatedTransport(this.googleGenAI);
+    this.hasIsolatedTransport = installIsolatedTransport(this.googleGenAI, {
+      apiKey: finalOptions.apiKey,
+    });
     this.contentGeneratorConfig = contentGeneratorConfig;
     this.cliConfig = cliConfig;
   }

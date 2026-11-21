@@ -36,11 +36,16 @@ class WakeRecoveryStampedHeadsTest {
     private long revision;
     private long sequence;
 
-    @BeforeEach
-    void setup() {
+    protected DataSource dataSource() {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:wake-stamped-" + UUID.randomUUID()
                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
+        return source;
+    }
+
+    @BeforeEach
+    void setup() {
+        var source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create,"
