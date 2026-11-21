@@ -162,7 +162,16 @@ function applyUtf8Prefix(command: string, shell: ShellType): string {
  */
 export type ShellAbortReason =
   | { kind: 'cancel' }
-  | { kind: 'background'; shellId?: string };
+  | {
+      kind: 'background';
+      shellId?: string;
+      /** Moved so that a message from the user could reach the model. */
+      forUserMessage?: boolean;
+      /** Called once the promoted process is registered and can be stopped. */
+      onRegistered?: (shellId: string) => void;
+      /** Called if execution settles without accepting the promotion. */
+      onRefused?: () => void;
+    };
 
 /**
  * Returns true only for a real process-signal termination.

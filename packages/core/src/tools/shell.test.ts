@@ -4177,7 +4177,7 @@ describe('ShellTool', () => {
         });
         await Promise.resolve();
         await Promise.resolve();
-        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+        expect(setPromoteAbortController).not.toHaveBeenCalled();
 
         await vi.advanceTimersByTimeAsync(5_000);
         expect(updateOutputMock).not.toHaveBeenCalled();
@@ -5622,7 +5622,10 @@ describe('ShellTool', () => {
         resolveShellExecution({ pid: 12345 });
         await promise;
 
-        expect(setPromoteAc).toHaveBeenCalledTimes(1);
+        expect(setPromoteAc.mock.calls).toEqual([
+          [expect.any(AbortController)],
+          [undefined],
+        ]);
         const passedAc = setPromoteAc.mock.calls[0][0] as AbortController;
         expect(passedAc).toBeInstanceOf(AbortController);
 
@@ -5690,6 +5693,35 @@ describe('ShellTool', () => {
         // No `error`: promote is success-shaped (#3831 design question 7 /
         // @tanzhenxin's PR-1 review).
         expect(result.error).toBeUndefined();
+      });
+
+      it('reports the registered id and says why when moved for a user message', async () => {
+        const { promise, setPromoteAc } = executeWithPromote(build('npm test'));
+        const onRegistered = vi.fn((shellId: string) =>
+          expect(shellId).toBe(registeredEntry().shellId),
+        );
+        await vi.waitFor(() => expect(setPromoteAc).toHaveBeenCalledTimes(1));
+        (setPromoteAc.mock.calls[0][0] as AbortController).abort({
+          kind: 'background',
+          forUserMessage: true,
+          onRegistered,
+        });
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 4242,
+        });
+        const result = await promise;
+
+        const { shellId } = registeredEntry();
+        expect(onRegistered).toHaveBeenCalledExactlyOnceWith(shellId);
+        expectText(result.llmContent, [
+          `Foreground command "npm test" was moved to the background as ${shellId}, without being interrupted, so that a message from the user could reach you. The user's message follows.`,
+          `task_stop({ task_id: '${shellId}' })`,
+        ]);
       });
 
       it('aborting entry.abortController kills the child via SIGTERM/SIGKILL and marks the registry entry cancelled', async () => {
@@ -5789,7 +5821,8 @@ describe('ShellTool', () => {
           | AbortController
           | undefined;
         expect(promoteAc).toBeInstanceOf(AbortController);
-        promoteAc!.abort({ kind: 'background', shellId: 'bg_late' });
+        const onRefused = vi.fn();
+        promoteAc!.abort({ kind: 'background', onRefused });
         resolveShellExecution({
           output: 'oops too late\n',
           exitCode: null,
@@ -5798,6 +5831,7 @@ describe('ShellTool', () => {
           pid: 33333,
         });
         const result = await promise;
+        expect(onRefused).toHaveBeenCalledExactlyOnceWith();
 
         // Not "timed out": the benign race is explained so the agent doesn't
         // retry it as a cancellation/timeout, and the output is preserved.

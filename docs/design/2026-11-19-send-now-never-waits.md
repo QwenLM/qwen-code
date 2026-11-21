@@ -2,7 +2,7 @@
 
 [English](2026-11-19-send-now-never-waits.md) | [简体中文](2026-11-19-send-now-never-waits.zh-CN.md)
 
-Status: decided; implemented in two PRs.
+Status: decided; implemented in two PRs (PR 1: #17825).
 
 [Send queued mid-turn messages now](2026-10-08-send-mid-turn-messages-now.md)
 includes the decision "No cut once a tool call starts" and guarantees that
@@ -93,12 +93,12 @@ The table assumes no ordinary prompt is already queued ahead of the message.
 | What the turn is doing                                                       | Action                                                                                          | Turn that answers  |
 | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------ |
 | Model writing text or thinking, no tool call yet                             | Existing: drain, then cut the response                                                          | Same turn          |
-| Only foreground shells left running in the batch                             | Move them to the background (PR 2); the batch ends and the tool boundary drains                 | Same turn          |
+| Only foreground shells eligible to move left running in the batch            | Move them to the background (PR 2); the batch ends and the tool boundary drains                 | Same turn          |
 | Anything else: response started a tool call, tools running, approval pending | Abort the turn with `MID_TURN_SEND_NOW_ABORT_REASON`; the daemon promotes the queue to a prompt | Next turn, at once |
 
-For a batch with foreground shells and other tools: PR 1 interrupts the whole
-batch (the shells are cancelled too); from PR 2 on, the shells move to the
-background first and then the other tools are interrupted.
+For a batch with eligible foreground shells and other tools, PR 1 interrupts
+the whole batch. PR 2 moves the eligible shells to the background first and
+then interrupts the other tools.
 
 ### Interrupt (PR 1)
 
@@ -147,29 +147,49 @@ background first and then the other tools are interrupted.
 
 ### Move shells to the background (PR 2)
 
-1. Expose the promotion controllers for running foreground shells to the
-   session. In the legacy loop, pass `setPromoteAbortControllerCallback` from
-   `runTool`. In the shared round, read the existing controllers from scheduler
-   updates in `runAcpToolBatch` and pass them through the batch host.
+1. Expose the promotion controller once a top-level local foreground shell
+   process starts. In the legacy loop, `runTool` passes
+   `setPromoteAbortControllerCallback` for these calls. In the shared round,
+   `runAcpToolBatch` forwards controller updates and settlements for top-level
+   calls. The shell withdraws the controller as soon as its process settles,
+   even while `PostToolUse` is still running. Shells awaiting spawn, shells
+   whose process has exited, calls nested in `exec`, simulated `sed` edits,
+   and Managed runtime calls follow the PR 1 interrupt path.
 2. When a Send now request arrives, each handle gets
-   `abort({ kind: 'background' })`. If only those shells were left in the batch,
-   the batch ends, the tool boundary drains, and the same turn answers; if other
-   tools remain, the turn is then interrupted as in PR 1.
-3. The tool result carries the background id and the output location, and says
-   why: the command moved to the background so a user message could arrive, and
-   it was not interrupted (unlike a manual move by the user).
+   `abort({ kind: 'background', forUserMessage: true, onRegistered, onRefused })`.
+   If the process has exited and the service refuses the move, core calls
+   `onRefused` before post-processing. The session interrupts the turn as in
+   PR 1 once any accepted moves' results are recorded. For accepted moves, core
+   assigns a `bg_` ID and returns it to the session through `onRegistered`
+   once the task is in the registry. The batch counts pending top-level
+   executable calls, including scheduled calls awaiting execution. Nested
+   calls and replays are excluded. If only shells being moved remain, the
+   batch ends, the tool boundary drains, and the same turn answers. If other
+   tools remain, the PR 1 interrupt waits for the moved shells' tool calls to
+   settle. An earlier interrupt would replace their results with the
+   interrupt text. The model would lose the background ID and might run the
+   command again. The drain and
+   late-message checks of PR 1 apply to that interrupt only, and are checked
+   again when it fires. A later Send now request can move shells that have
+   since started. It updates the same batch's wait to include those shells
+   and counts the work still pending at that request.
+3. The tool result gives the background ID, output location and status. It
+   tells the model that the command kept running in the background to make
+   room for the user's message. If `PostToolUse` rejects the tool result,
+   the agent requests cancellation of the promoted process.
 4. When such a shell ends later, ACP's existing background shell notification
    reports it.
-5. If the user presses Stop later in the same turn, the shells moved for the
-   message are stopped too; once the next turn starts they get no special
-   treatment.
+5. Stop cancels the shells moved by its turn. It requests cancellation
+   immediately for registered tasks and at registration for moves still in
+   progress. This also applies if Send now has already interrupted the turn
+   and it is still settling. The next turn treats those tasks as ordinary
+   background jobs.
 
 ### Web Shell
 
-Only the tooltip changes: "Send queued messages now. Interrupts the model if it
-is responding or calling tools", with "running commands move to the background
-and keep running" added in PR 2. No new row state: after the interrupt the
-message soon appears as the next turn, and the queued row goes away. While an
+The tooltip explains that the current response or tools may be interrupted
+and that eligible shell commands continue in the background. After an interrupt,
+the message soon appears as the next turn and the queued row goes away. While an
 approval is pending, Web Shell replaces the composer and the queued rows with
 the approval panel, so only other clients (such as the SDK) can ask to send now
 in that phase.
@@ -224,7 +244,8 @@ in that phase.
   same as Stop, and the tooltip says it interrupts.
 - Some tools finish their current operation before cancellation settles. A
   directory scan in `record_artifact` or a worktree mutation already in progress
-  can delay the next prompt.
+  can delay the next prompt. When a shell moves to the background, a slow
+  `PostToolUse` hook can delay delivery while the tool result settles.
 - The interrupt relies on "with no drain in flight, the messages are still with
   the daemon", that is, the request and drain answers arrive in order on one
   channel; this needs a dedicated test. If the user deletes every queued
@@ -252,7 +273,9 @@ in that phase.
   stays bound to its turn, does nothing without a turn, and avoids interrupting
   a turn with a drain in flight. An interrupted approval has no rejection
   record. PR 2 tests cover same-turn delivery after moving a shell to the
-  background, the tool result's explanation, and stopping those shells later.
+  background, the tool result's explanation, batch accounting for nested calls
+  and replays, Send now after process exit, and stopping promoted shells
+  during post-processing.
 - Daemon: promoted messages keep their order and originating client after the
   interrupt.
 - E2E (`qwen serve` + Web Shell + a scripted provider): reuse the old doc's
@@ -261,16 +284,16 @@ in that phase.
 
 ## Acceptance criteria
 
-- With no earlier ordinary prompt queued and no drain controlling delivery,
-  the model request carrying the message starts within 1 s of the click in
-  the cases below:
+- When no earlier ordinary prompt, in-flight drain, or tool settlement delays
+  delivery, the model request carrying the message starts within 1 s of the
+  click in the cases below:
 
-| State at the click            | Today              | Target                                            |
-| ----------------------------- | ------------------ | ------------------------------------------------- |
-| Model writing text            | about 50 ms        | Unchanged                                         |
-| Model streaming tool args     | Waits for the tool | Next turn, < 1 s (PR 1)                           |
-| Foreground shell running      | 6.1 s              | PR 1: next turn; PR 2: same turn, command running |
-| Tool that can cancel promptly | Waits for the tool | Next turn, < 1 s (PR 1)                           |
+| State at the click                | Today              | Target                                            |
+| --------------------------------- | ------------------ | ------------------------------------------------- |
+| Model writing text                | about 50 ms        | Unchanged                                         |
+| Model streaming tool args         | Waits for the tool | Next turn, < 1 s (PR 1)                           |
+| Eligible foreground shell running | 6.1 s              | PR 1: next turn; PR 2: same turn, command running |
+| Tool that can cancel promptly     | Waits for the tool | Next turn, < 1 s (PR 1)                           |
 
 - The Goal stays active after the interrupt. Queued automatic turns resume
   after the handoff.

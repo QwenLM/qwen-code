@@ -2677,7 +2677,8 @@ export const ZH_TW: Record<string, MessageValue> = {
   'queue.insertTip': '插入當前回合',
   'queue.insertCommandDisabled': '命令不能插入當前回合',
   'queue.sendNow': '立即傳送',
-  'queue.sendNowTip': '立即傳送排隊的訊息。模型正在回覆或呼叫工具時會打斷它',
+  'queue.sendNowTip':
+    '立即傳送排隊的訊息。可能中斷目前的回覆或工具呼叫。可轉到背景的 shell 命令會繼續執行。',
   'queue.sendNowFailed': '立即傳送排隊訊息失敗',
   'queue.footer': '按 ↑ 編輯最後一條排隊訊息 · Esc 清空佇列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 張圖片）`,
