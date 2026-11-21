@@ -1843,9 +1843,8 @@ describe('UiTelemetryService live usage accounting', () => {
       expect(requests(service.getMetrics())).toBe(2);
       expect(prompt(service.getMetrics())).toBe(105);
       expect(requests(service.getMetricsForSession('b'))).toBe(2);
-      expect(service.getSessionStartTime().getTime()).toBe(
-        previousStart + 60_000,
-      );
+      expect(service.getSessionStartTime().getTime()).toBe(previousStart);
+      expect(service.getRunStartTime().getTime()).toBe(previousStart + 60_000);
     } finally {
       vi.useRealTimers();
     }
@@ -1856,6 +1855,7 @@ describe('UiTelemetryService live usage accounting', () => {
       expect(service.getSessionStartTime().getTime()).toBe(
         previousStart + 120_000,
       );
+      expect(service.getRunStartTime().getTime()).toBe(previousStart + 120_000);
     } finally {
       vi.useRealTimers();
     }
@@ -1864,14 +1864,28 @@ describe('UiTelemetryService live usage accounting', () => {
   it('restores live usage when an abandoned swap is undone', () => {
     service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 'a');
     const snapshot = service.snapshotForReplay('b', 'a');
-    // The abandoned swap replays history and accrues a live turn of its own.
-    service.addReplayedEvent(apiResponse('m', 10, [900, 9, 909, 0, 0]), 'b');
-    service.addEvent(apiResponse('m', 10, [7, 1, 8, 0, 0]), 'b');
-    expect(prompt(service.getLiveMetrics())).toBe(12);
+    vi.useFakeTimers();
+    vi.advanceTimersByTime(60_000);
+    service.resetLiveMetrics();
+    service.setSessionStartTime(
+      new Date(snapshot.sessionStartTime.getTime() + 60_000),
+    );
+    try {
+      // The abandoned swap replays history and accrues a live turn of its own.
+      service.addReplayedEvent(apiResponse('m', 10, [900, 9, 909, 0, 0]), 'b');
+      service.addEvent(apiResponse('m', 10, [7, 1, 8, 0, 0]), 'b');
+      expect(prompt(service.getLiveMetrics())).toBe(7);
 
-    service.restoreFromReplaySnapshot(snapshot);
+      service.restoreFromReplaySnapshot(snapshot);
 
-    expect(prompt(service.getLiveMetrics())).toBe(5);
-    expect(prompt(service.getMetrics())).toBe(5);
+      expect(prompt(service.getLiveMetrics())).toBe(5);
+      expect(prompt(service.getMetrics())).toBe(5);
+      expect(service.getRunStartTime()).toEqual(snapshot.runStartTime);
+      expect(service.getRunStartTime()).not.toBe(snapshot.runStartTime);
+      expect(service.getSessionStartTime()).toEqual(snapshot.sessionStartTime);
+      expect(service.getSessionStartTime()).not.toBe(snapshot.sessionStartTime);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

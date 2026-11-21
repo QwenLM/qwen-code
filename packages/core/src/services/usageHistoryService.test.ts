@@ -31,6 +31,7 @@ vi.mock('../utils/debugLogger.js', () => ({
 import {
   metricsToUsageRecord as toRecord,
   aggregateUsage,
+  dedupBySessionId,
   loadUsageHistory,
   loadUsageHistoryWithLive,
   persistSessionUsage,
@@ -653,6 +654,37 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(merged[0]!.models['qwen-max']!.totalTokens).toBe(1000);
   });
 
+  it('withLive: preserves a prior transcript beside a disjoint run-scoped record', async () => {
+    const sessionId = 'sess-transcript-and-later-run';
+    plantChatJsonl(sessionId, 1000);
+    const runStart = Date.parse('2026-06-11T01:00:00Z');
+    seedPersisted([runRec(sessionId, 200, runStart, runStart + 60_000)]);
+
+    const merged = await loadUsageHistoryWithLive({ sinceMs: 0 });
+
+    expect(merged.some((r) => r.transcriptRebuild === true)).toBe(true);
+    expect(merged).toHaveLength(2);
+    expect(totalTokensOf(aggregateUsage(merged, 'all'))).toBe(1200);
+  });
+
+  it('loadUsageHistory: rebuilds only known run-scoped transcripts without discovering other sessions', async () => {
+    const sessionId = 'sess-known-run-history';
+    plantChatJsonl(sessionId, 1000);
+    plantChatJsonl('sess-never-persisted', 777);
+    const runStart = Date.parse('2026-06-11T01:00:00Z');
+    seedPersisted([runRec(sessionId, 200, runStart, runStart + 60_000)]);
+
+    const records = await loadUsageHistory();
+
+    expect(records).toHaveLength(2);
+    expect(records.every((r) => r.sessionId === sessionId)).toBe(true);
+    expect(records.some((r) => r.transcriptRebuild === true)).toBe(true);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(1200);
+    // A boundary-limited supplement is in-memory, not another authoritative
+    // full-session snapshot to append on disk.
+    expect(usageLines()).toHaveLength(1);
+  });
+
   it('withLive: with a persisted base, the trailing window excludes stale transcripts (sinceMs:0 includes them)', async () => {
     // A persisted base means the window engages (old days come from the file).
     seedPersisted([persistedRec('sess-persisted', 500)]);
@@ -797,16 +829,77 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(3000);
   });
 
-  it('still collapses a run written twice (overlapping windows, last wins)', async () => {
+  it('still collapses a run written twice (partially overlapping windows, last wins)', async () => {
     seedPersisted([
       runRec('sess-twice', 1000, t0, t0 + 60_000),
-      runRec('sess-twice', 1600, t0, t0 + 60_000),
+      runRec('sess-twice', 1600, t0, t0 + 120_000),
     ]);
 
     const records = await loadUsageHistory();
 
     expect(records).toHaveLength(1);
     expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1600);
+  });
+
+  it('collapses exactly identical runs, including zero-length copies', async () => {
+    seedPersisted([
+      runRec('sess-equal', 1000, t0, t0 + 60_000),
+      runRec('sess-equal', 1600, t0, t0 + 60_000),
+      runRec('sess-zero', 2000, t0, t0),
+      runRec('sess-zero', 3000, t0, t0),
+    ]);
+
+    const records = await loadUsageHistory();
+
+    expect(records).toHaveLength(2);
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1600);
+    expect(records[1]!.models['qwen-max']!.totalTokens).toBe(3000);
+  });
+
+  it('collapses a run and rebuild over exactly the same zero-length window', () => {
+    const records = dedupBySessionId([
+      { ...runRec('sess-zero-mixed', 10, t0, t0) },
+      {
+        ...runRec('sess-zero-mixed', 1000, t0, t0),
+        runScoped: false,
+        transcriptRebuild: true,
+      },
+    ]);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(10);
+  });
+
+  it('keeps a rebuild whose window and counters cover the live run', () => {
+    const records = dedupBySessionId([
+      {
+        ...persistedRec('sess-covered', 1000),
+        startTime: t0,
+        timestamp: t0 + 120_000,
+        transcriptRebuild: true,
+      },
+      runRec('sess-covered', 10, t0 + 10_000, t0 + 20_000),
+    ]);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.transcriptRebuild).toBe(true);
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+  });
+
+  it('does not retain a partial-overlap rebuild merely for another disjoint run', () => {
+    const records = dedupBySessionId([
+      runRec('sess-mixed', 200, t0 + 10_000, t0 + 30_000),
+      runRec('sess-mixed', 100, t0 + 60_000, t0 + 70_000),
+      {
+        ...persistedRec('sess-mixed', 1000),
+        startTime: t0 + 20_000,
+        timestamp: t0 + 50_000,
+        transcriptRebuild: true,
+      },
+    ]);
+
+    expect(records).toHaveLength(2);
+    expect(records.every((record) => !record.transcriptRebuild)).toBe(true);
   });
 
   it('keeps last-wins for cumulative records, which are copies not runs', async () => {
@@ -826,6 +919,91 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
 
     expect(records).toHaveLength(1);
     expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1600);
+  });
+
+  it('keeps a real transcript migration beside a later disjoint run', async () => {
+    writeTranscript('repro-migration', 'sess-migration', {
+      cwd: '/repro/migration',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens: 1000,
+      assistant: true,
+    });
+    const migrated = await loadUsageHistory();
+    expect(migrated).toHaveLength(1);
+    expect(migrated[0]!.transcriptRebuild).toBe(true);
+    expect(totalTokensOf(aggregateUsage(migrated, 'all'))).toBe(1000);
+
+    persistSessionUsage({
+      sessionId: 'sess-migration',
+      startTime: new Date(migrated[0]!.timestamp),
+      endTime: new Date(migrated[0]!.timestamp + DAY),
+      project: '/repro/migration',
+      metrics: makeMetrics({
+        models: {
+          'qwen-max': modelMetrics([2, 0, 100], [200, 0, 200, 0, 0]),
+        },
+      }),
+    });
+
+    const kept = await loadUsageHistory();
+
+    expect(kept).toHaveLength(2);
+    expect(kept.some((record) => record.transcriptRebuild === true)).toBe(true);
+    expect(totalTokensOf(aggregateUsage(kept, 'all'))).toBe(1200);
+  });
+
+  it('preserves an old migration beside a run without double-counting its later transcript activity', async () => {
+    const sessionId = 'sess-legacy-with-later-run';
+    const filePath = plantChatJsonl(sessionId, 1000);
+    const [legacy] = await loadUsageHistory();
+    expect(legacy).toBeDefined();
+    delete legacy!.transcriptRebuild;
+
+    const runStart = Date.parse('2026-06-11T00:03:00Z');
+    const laterResponse = {
+      sessionId,
+      timestamp: new Date(runStart + 10_000).toISOString(),
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': new Date(runStart + 10_000).toISOString(),
+          response_id: 'later-run',
+          model: 'qwen-max',
+          duration_ms: 1200,
+          input_token_count: 120,
+          output_token_count: 60,
+          cached_content_token_count: 0,
+          thoughts_token_count: 20,
+          total_token_count: 200,
+          prompt_id: 'later-run',
+        },
+      },
+    };
+    const assistant = {
+      sessionId,
+      timestamp: new Date(runStart + 60_000).toISOString(),
+      type: 'assistant',
+      message: { role: 'assistant', content: 'done' },
+    };
+    fs.appendFileSync(
+      filePath,
+      `${JSON.stringify(laterResponse)}\n${JSON.stringify(assistant)}\n`,
+    );
+    seedPersisted([
+      legacy!,
+      runRec(sessionId, 200, runStart, runStart + 60_000),
+    ]);
+
+    const records = await loadUsageHistory();
+
+    expect(records).toHaveLength(2);
+    const rebuilt = records.find((r) => r.transcriptRebuild === true);
+    expect(rebuilt?.models['qwen-max']?.inputTokens).toBe(600);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(1200);
+    expect(usageLines()).toHaveLength(2);
   });
 
   it('keeps whole-transcript rebuilds cumulative and collapses copies', async () => {
@@ -1926,6 +2104,26 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
 
     expect(commitUsageBeforeTranscriptDeletion(prepared!)).toBe(false);
     expect(usageLines()).toHaveLength(1);
+  });
+
+  it('salvages disjoint transcript history beside a later run-scoped record', async () => {
+    const sessionId = 'sess-salvage-disjoint';
+    const filePath = plantTranscript(sessionId, true);
+    persistSessionUsage({
+      sessionId,
+      project: '/salvage/project',
+      startTime: new Date('2026-07-01T01:00:00Z'),
+      endTime: new Date('2026-07-01T01:01:00Z'),
+      metrics: makeMetrics(),
+    });
+
+    const prepared = await prepareUsageBeforeTranscriptDeletion(filePath);
+    expect(prepared).not.toBeNull();
+    expect(commitUsageBeforeTranscriptDeletion(prepared!)).toBe(true);
+
+    const lines = usageLines().map((line) => JSON.parse(line));
+    expect(lines).toHaveLength(2);
+    expect(lines.at(-1)?.transcriptRebuild).toBe(true);
   });
 
   it('returns false for a transcript with no telemetry and writes nothing', async () => {

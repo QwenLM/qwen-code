@@ -930,6 +930,7 @@ export class LlmClient {
   ) {
     signal?.throwIfAborted();
     const sessionId = this.config.getSessionId();
+    const previousSessionId = this.initializedSessionId;
     this.lastPromptId = sessionId;
 
     if (this.isInitialized() && this.initializedSessionId === sessionId) {
@@ -1004,6 +1005,15 @@ export class LlmClient {
     }
 
     signal?.throwIfAborted();
+    // Bind Wall Time only after a successful initialization; replay failure
+    // restores the captured clock rather than keeping the incoming session's.
+    if (previousSessionId !== sessionId) {
+      const recordedStart = resumedSessionData?.conversation.startTime;
+      const parsedStart = recordedStart ? new Date(recordedStart) : new Date();
+      uiTelemetryService.setSessionStartTime(
+        Number.isNaN(parsedStart.getTime()) ? new Date() : parsedStart,
+      );
+    }
     this.initializedSessionId = sessionId;
 
     // Clean up stale tool result files from previous sessions (fire-and-forget)

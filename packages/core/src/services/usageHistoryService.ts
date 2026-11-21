@@ -98,6 +98,8 @@ export interface UsageSummaryRecord {
    * under one id copies of the same spend rather than separate runs.
    */
   runScoped?: boolean;
+  /** True when built from a transcript's event-time telemetry records. */
+  transcriptRebuild?: boolean;
 }
 
 export interface PreparedUsageBeforeTranscriptDeletion {
@@ -164,6 +166,26 @@ function getUsageHistoryPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'usage_record.jsonl');
 }
 
+export function hasRunActivity(metrics: SessionMetrics): boolean {
+  return (
+    Object.values(metrics.models).some((m) => m.api.totalRequests > 0) ||
+    (metrics.skills?.totalCalls ?? 0) > 0
+  );
+}
+
+export function metricsToRunUsageRecord(
+  sessionId: string,
+  project: string,
+  startTime: number,
+  endTime: number,
+  metrics: SessionMetrics,
+): UsageSummaryRecord {
+  return {
+    ...metricsToUsageRecord(sessionId, project, startTime, endTime, metrics),
+    runScoped: true,
+  };
+}
+
 export function persistSessionUsage(params: {
   sessionId: string;
   startTime: Date;
@@ -172,15 +194,13 @@ export function persistSessionUsage(params: {
   metrics: SessionMetrics;
 }): void {
   const { sessionId, startTime, endTime, project, metrics } = params;
-  const record = metricsToUsageRecord(
+  const record = metricsToRunUsageRecord(
     sessionId,
     project,
     startTime.getTime(),
     endTime.getTime(),
     metrics,
   );
-  // The caller passes this run's live metrics, so the counters are a delta.
-  record.runScoped = true;
   jsonl.writeLineSync(getUsageHistoryPath(), record);
 }
 
@@ -348,6 +368,7 @@ function extractLastTopLevelTimestamp(line: string): string | undefined {
  */
 async function summarizeTranscriptFile(
   filePath: string,
+  beforeMs?: number,
 ): Promise<{ sessionId: string; record: UsageSummaryRecord | null } | null> {
   const telemetry = new UiTelemetryService();
   let hasEvents = false;
@@ -396,11 +417,15 @@ async function summarizeTranscriptFile(
     try {
       for await (const line of rl) {
         if (line.trim().length === 0) continue;
-        lastLine = line;
         // First-match extraction: a record's own `timestamp` precedes any nested
         // payload, so this is the record's timestamp even on huge tool-result
         // lines. Tolerant of non-compact writers (spaces around the colon).
         const ts = extractJsonStringField(line, 'timestamp');
+        if (beforeMs !== undefined) {
+          const timestamp = ts === undefined ? NaN : Date.parse(ts);
+          if (!Number.isFinite(timestamp) || timestamp >= beforeMs) continue;
+        }
+        lastLine = line;
         if (ts !== undefined) lastTsFallback = ts;
 
         if (!header) {
@@ -481,14 +506,34 @@ async function summarizeTranscriptFile(
   }
   return {
     sessionId,
-    record: metricsToUsageRecord(
-      sessionId,
-      header.cwd,
-      startTime,
-      endTime,
-      telemetry.getMetrics(),
-    ),
+    record: {
+      ...metricsToUsageRecord(
+        sessionId,
+        header.cwd,
+        startTime,
+        endTime,
+        telemetry.getMetrics(),
+      ),
+      transcriptRebuild: true,
+    },
   };
+}
+
+/**
+ * A run can replace a transcript only when its window covers the entire
+ * transcript. Ordinary and already reconstructed sessions are cumulative.
+ */
+function isTranscriptAlreadyCovered(
+  existing: UsageSummaryRecord,
+  rebuilt: UsageSummaryRecord,
+): boolean {
+  return (
+    existing?.sessionId === rebuilt.sessionId &&
+    (existing.runScoped !== true ||
+      existing.transcriptRebuild === true ||
+      (existing.startTime <= rebuilt.startTime &&
+        existing.timestamp >= rebuilt.timestamp))
+  );
 }
 
 export async function prepareUsageBeforeTranscriptDeletion(
@@ -496,13 +541,16 @@ export async function prepareUsageBeforeTranscriptDeletion(
 ): Promise<PreparedUsageBeforeTranscriptDeletion | null> {
   try {
     const summarized = await summarizeTranscriptFile(transcriptPath);
-    if (!summarized?.record) return null;
+    const rebuilt = summarized?.record;
+    if (!rebuilt) return null;
 
     const usagePath = getUsageHistoryPath();
     try {
       if (fs.existsSync(usagePath)) {
         const existing = await jsonl.read<UsageSummaryRecord>(usagePath);
-        if (existing.some((r) => r?.sessionId === summarized.sessionId)) {
+        if (
+          existing.some((record) => isTranscriptAlreadyCovered(record, rebuilt))
+        ) {
           return null;
         }
       }
@@ -514,7 +562,7 @@ export async function prepareUsageBeforeTranscriptDeletion(
         `persistUsageBeforeTranscriptDeletion: cannot read history: ${e}`,
       );
     }
-    return { usagePath, record: summarized.record };
+    return { usagePath, record: rebuilt };
   } catch (e) {
     debugLogger.debug(`prepareUsageBeforeTranscriptDeletion: ${e}`);
     return null;
@@ -538,7 +586,9 @@ export function commitUsageBeforeTranscriptDeletion(
                 trimmed,
                 prepared.usagePath,
               )
-              .some((record) => record.sessionId === prepared.record.sessionId)
+              .some((record) =>
+                isTranscriptAlreadyCovered(record, prepared.record),
+              )
           );
         });
       if (alreadyPersisted) return false;
@@ -578,11 +628,15 @@ interface RebuildFromSessionJsonlOptions {
    */
   sinceMs?: number;
   /**
-   * Session ids already covered by the persisted history. Their transcripts are
-   * skipped by filename (`{sessionId}.jsonl`) with no file read, avoiding a full
-   * replay of sessions the persisted file already records authoritatively.
+   * Session ids whose cumulative records already cover the whole transcript,
+   * or which have a real transcript reconstruction. A run-only id must not be
+   * skipped: its older transcript may belong to a disjoint run.
    */
   skipSessionIds?: ReadonlySet<string>;
+  /** Restrict replay to known run ids rather than discovering other sessions. */
+  onlySessionIds?: ReadonlySet<string>;
+  /** Reconcile only transcript rows before the earliest known run boundary. */
+  beforeMsBySession?: ReadonlyMap<string, number>;
 }
 
 type TranscriptSummary = {
@@ -620,6 +674,8 @@ async function rebuildFromSessionJsonl(
     persist = true,
     sinceMs,
     skipSessionIds,
+    onlySessionIds,
+    beforeMsBySession,
   } = options;
   const projectsDir = path.join(Storage.getGlobalQwenDir(), 'projects');
   try {
@@ -631,9 +687,9 @@ async function rebuildFromSessionJsonl(
     return [];
   }
 
-  // Only the read-only live merge uses the replay cache; the one-time
-  // persisting migration always rebuilds from disk.
-  const useCache = !persist;
+  // Full read-only replay can use the cache. A boundary-limited supplement
+  // must not reuse a whole-transcript snapshot for a different temporal scope.
+  const useCache = !persist && !beforeMsBySession;
   const nextCache = useCache ? new Map<string, ReplayCacheEntry>() : null;
   let projectDirs: string[];
   try {
@@ -689,13 +745,12 @@ async function rebuildFromSessionJsonl(
       // skip transcripts untouched before `sinceMs`.
       if (sinceMs !== undefined && stats.mtimeMs < sinceMs) continue;
 
-      // Skip sessions the persisted history already records, before any file
-      // read: the transcript filename is `{sessionId}.jsonl`
-      // (chatRecordingService.ts), so the sessionId — the same value the
-      // scan below derives from the first record — needs no I/O.
-      if (skipSessionIds && skipSessionIds.size > 0) {
+      // Read no transcript on an ID skip, and limit scoped supplements to
+      // known run ids. Both checks happen before any transcript I/O.
+      if (skipSessionIds || onlySessionIds) {
         const fileSessionId = path.basename(file, '.jsonl');
-        if (skipSessionIds.has(fileSessionId)) continue;
+        if (skipSessionIds?.has(fileSessionId)) continue;
+        if (onlySessionIds && !onlySessionIds.has(fileSessionId)) continue;
       }
 
       candidates.push({ filePath, stats });
@@ -720,7 +775,10 @@ async function rebuildFromSessionJsonl(
         ) {
           summarized = cached.summarized;
         } else {
-          summarized = await summarizeTranscriptFile(filePath);
+          summarized = await summarizeTranscriptFile(
+            filePath,
+            beforeMsBySession?.get(path.basename(filePath, '.jsonl')),
+          );
         }
         if (nextCache) {
           nextCache.set(filePath, {
@@ -769,6 +827,7 @@ async function rebuildFromSessionJsonl(
       // a permanent duplicate in usage_record.jsonl (issue #4994).
       if (skipSessionInRebuild && record.sessionId === skipSessionInRebuild)
         continue;
+      if (beforeMsBySession?.has(record.sessionId)) continue;
       jsonl.writeLineSync(usagePath, record);
     }
   }
@@ -787,11 +846,48 @@ async function rebuildFromSessionJsonl(
  * Run-scoped records carry only their own run's spend, so disjoint windows are
  * separate runs and must all survive — collapsing them would silently drop
  * every run but the last. Overlapping windows still collapse to the last one,
- * keeping the #4994 protection for a run written twice. A cumulative record
- * loses to any run-scoped record for the same id, which is what keeps a
- * whole-transcript replay from being added on top of persisted runs.
+ * keeping the #4994 protection for a run written twice. An ordinary cumulative
+ * record loses to a run-scoped one. Transcript reconstructions have separate
+ * provenance: disjoint history survives, equal windows duplicate, and a
+ * reconstruction that wholly covers a run's window and counters can replace
+ * it without adding both. Partially overlapping reconstructions are dropped
+ * rather than guessing at unknown overlap. Run boundaries may also limit a
+ * reconstruction to events before the earliest run. Those supplements stay
+ * in memory rather than becoming a new whole-session authority.
  */
-function dedupBySessionId(records: UsageSummaryRecord[]): UsageSummaryRecord[] {
+function rebuildCoversRun(
+  rebuilt: UsageSummaryRecord,
+  run: UsageSummaryRecord,
+): boolean {
+  if (rebuilt.startTime > run.startTime || rebuilt.timestamp < run.timestamp) {
+    return false;
+  }
+  const fields = [
+    'requests',
+    'inputTokens',
+    'outputTokens',
+    'cachedTokens',
+    'thoughtsTokens',
+    'totalTokens',
+  ] as const;
+  for (const [model, counters] of Object.entries(run.models)) {
+    const full = rebuilt.models[model];
+    if (!full) return false;
+    if (fields.some((field) => (full[field] ?? 0) < counters[field])) {
+      return false;
+    }
+  }
+  return (
+    rebuilt.tools.totalCalls >= run.tools.totalCalls &&
+    (rebuilt.skills?.totalCalls ?? 0) >= (run.skills?.totalCalls ?? 0) &&
+    rebuilt.files.linesAdded >= run.files.linesAdded &&
+    rebuilt.files.linesRemoved >= run.files.linesRemoved
+  );
+}
+
+export function dedupBySessionId(
+  records: UsageSummaryRecord[],
+): UsageSummaryRecord[] {
   const groups = new Map<string, UsageSummaryRecord[]>();
   for (const r of records) {
     const group = groups.get(r.sessionId);
@@ -811,6 +907,7 @@ function dedupBySessionId(records: UsageSummaryRecord[]): UsageSummaryRecord[] {
       for (let i = kept.length - 1; i >= 0; i--) {
         const k = kept[i]!;
         const overlaps = k.startTime < r.timestamp && r.startTime < k.timestamp;
+        // Exact windows, including zero-length ones, are duplicate copies.
         const sameWindow =
           k.startTime === r.startTime && k.timestamp === r.timestamp;
         if (overlaps || sameWindow) {
@@ -819,7 +916,34 @@ function dedupBySessionId(records: UsageSummaryRecord[]): UsageSummaryRecord[] {
       }
       kept.push(r);
     }
-    out.push(...kept);
+    const rebuilt = group.filter((r) => r.transcriptRebuild === true);
+    const latestRebuild = rebuilt[rebuilt.length - 1];
+    if (latestRebuild) {
+      const compatibleRuns: UsageSummaryRecord[] = [];
+      let canKeepRebuild = true;
+      for (const run of kept) {
+        if (
+          run.timestamp === latestRebuild.timestamp &&
+          run.startTime === latestRebuild.startTime
+        ) {
+          canKeepRebuild = false;
+          break;
+        }
+        if (
+          run.timestamp <= latestRebuild.startTime ||
+          latestRebuild.timestamp <= run.startTime
+        ) {
+          compatibleRuns.push(run);
+        } else if (!rebuildCoversRun(latestRebuild, run)) {
+          canKeepRebuild = false;
+          break;
+        }
+      }
+      if (canKeepRebuild) out.push(latestRebuild);
+      out.push(...(canKeepRebuild ? compatibleRuns : kept));
+    } else {
+      out.push(...kept);
+    }
   }
 
   if (out.length < records.length) {
@@ -830,24 +954,88 @@ function dedupBySessionId(records: UsageSummaryRecord[]): UsageSummaryRecord[] {
   return out;
 }
 
+interface TranscriptReplayScope {
+  onlySessionIds: Set<string>;
+  skipSessionIds: Set<string>;
+  beforeMsBySession: Map<string, number>;
+}
+
+function transcriptReplayScope(
+  records: UsageSummaryRecord[],
+  currentSessionId?: string,
+): TranscriptReplayScope {
+  const scope: TranscriptReplayScope = {
+    onlySessionIds: new Set(),
+    skipSessionIds: new Set(),
+    beforeMsBySession: new Map(),
+  };
+  for (const record of records) {
+    if (record.runScoped === true && record.transcriptRebuild !== true) {
+      scope.onlySessionIds.add(record.sessionId);
+    }
+    if (record.transcriptRebuild === true) {
+      if (record.sessionId !== currentSessionId) {
+        scope.skipSessionIds.add(record.sessionId);
+        scope.onlySessionIds.delete(record.sessionId);
+      }
+    } else if (
+      record.runScoped !== true &&
+      record.sessionId !== currentSessionId
+    ) {
+      scope.skipSessionIds.add(record.sessionId);
+    }
+    if (record.runScoped === true && Number.isFinite(record.startTime)) {
+      const previous = scope.beforeMsBySession.get(record.sessionId);
+      if (previous === undefined || record.startTime < previous) {
+        scope.beforeMsBySession.set(record.sessionId, record.startTime);
+      }
+    }
+  }
+  for (const sessionId of scope.onlySessionIds) {
+    scope.skipSessionIds.delete(sessionId);
+  }
+  if (currentSessionId) {
+    scope.onlySessionIds.add(currentSessionId);
+    scope.skipSessionIds.delete(currentSessionId);
+  }
+  return scope;
+}
+
 export async function loadUsageHistory(
   skipSessionInRebuild?: string,
-  options?: { persistRebuild?: boolean },
+  options?: {
+    persistRebuild?: boolean;
+    beforeMsBySession?: ReadonlyMap<string, number>;
+  },
 ): Promise<UsageSummaryRecord[]> {
+  let persisted: UsageSummaryRecord[] = [];
   try {
     const records = await jsonl.read<UsageSummaryRecord>(getUsageHistoryPath());
-    const filtered = records.filter((r) => r.version === 1);
-    if (filtered.length > 0) return dedupBySessionId(filtered);
+    persisted = records.filter((r) => r.version === 1);
   } catch (e) {
     debugLogger.debug(`loadUsageHistory: failed to read usage file: ${e}`);
   }
 
-  return dedupBySessionId(
-    await rebuildFromSessionJsonl({
-      skipSessionInRebuild,
-      persist: options?.persistRebuild ?? true,
-    }),
-  );
+  const scope = transcriptReplayScope(persisted, skipSessionInRebuild);
+  const scoped = scope.onlySessionIds.size > 0;
+  if (!scoped && persisted.length > 0 && !skipSessionInRebuild) {
+    return dedupBySessionId(persisted);
+  }
+  const beforeMsBySession = new Map(scope.beforeMsBySession);
+  for (const [sessionId, beforeMs] of options?.beforeMsBySession ?? []) {
+    const previous = beforeMsBySession.get(sessionId);
+    if (previous === undefined || beforeMs < previous) {
+      beforeMsBySession.set(sessionId, beforeMs);
+    }
+  }
+  const rebuilt = await rebuildFromSessionJsonl({
+    skipSessionInRebuild,
+    skipSessionIds: scope.skipSessionIds,
+    onlySessionIds: scoped ? scope.onlySessionIds : undefined,
+    beforeMsBySession: beforeMsBySession.size ? beforeMsBySession : undefined,
+    persist: options?.persistRebuild ?? true,
+  });
+  return dedupBySessionId([...rebuilt, ...persisted]);
 }
 
 /**
@@ -855,13 +1043,13 @@ export async function loadUsageHistory(
  * written to `usage_record.jsonl` — notably daemon / Web Shell sessions (only
  * the TUI `/clear` path persists usage) and any still-in-progress session.
  *
- * Unlike {@link loadUsageHistory}, which returns the persisted file verbatim
- * whenever it is non-empty (and so silently omits everything not yet
- * persisted), this replays recent transcripts for sessions the persisted file
- * does not already cover and unions the two. Persisted records win on any
- * sessionId conflict — they are the authoritative final snapshot. This is what
- * the daemon usage-dashboard reads so its totals reflect live Web Shell
- * activity. Read-only: never writes `usage_record.jsonl`.
+ * Unlike {@link loadUsageHistory}, whose migration supplements only known
+ * run-scoped ids when a history file exists, this also considers transcripts
+ * with no persisted row. Legacy cumulative records and actual transcript
+ * rebuilds remain authoritative snapshots. Run-scoped increments may instead
+ * coexist with disjoint earlier transcript history. This is what the daemon
+ * usage-dashboard reads so its totals reflect live Web Shell activity.
+ * Read-only: never writes `usage_record.jsonl`.
  *
  * The transcript scan is bounded to a trailing window (mtime-based) so an
  * established history does not pay a full cross-project replay on every load.
@@ -884,13 +1072,14 @@ export async function loadUsageHistoryWithLive(options?: {
     );
   }
 
-  const persistedIds = new Set(persisted.map((r) => r.sessionId));
+  const scope = transcriptReplayScope(persisted);
+  const persistedIds = scope.skipSessionIds;
 
   // The trailing window bounds an *incremental* live merge on top of persisted
   // history: old days come from the persisted file, so only recent transcripts
-  // need replaying. When there is no persisted base (fresh machine, or a user
-  // who only ever ran Web Shell so `/clear` never persisted), nothing else
-  // covers older history — replay it all (unbounded) rather than silently
+  // need replaying. When no cumulative/rebuilt base covers older transcripts
+  // (a fresh machine, a never-persisted Web Shell session, or a history with
+  // only run-scoped rows for this id), replay all of it rather than silently
   // truncating the dashboard, matching the pre-existing empty-file behavior.
   const sinceMs =
     options?.sinceMs ??
@@ -902,11 +1091,13 @@ export async function loadUsageHistoryWithLive(options?: {
     persist: false,
     sinceMs,
     skipSessionIds: persistedIds,
+    beforeMsBySession: scope.beforeMsBySession.size
+      ? scope.beforeMsBySession
+      : undefined,
   });
 
-  // Persisted records are the authoritative final snapshot, so they win on any
-  // sessionId conflict — place them last (dedupBySessionId is last-wins). The
-  // rebuilt set only adds sessions the persisted file never captured.
+  // Persists come last to retain last-wins behavior for ordinary cumulative
+  // records. Provenance and window checks below preserve all disjoint runs.
   return dedupBySessionId([...rebuilt, ...persisted]);
 }
 

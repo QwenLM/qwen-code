@@ -250,6 +250,29 @@ describe('handleResumeSession', () => {
     expect(replay.at(-1)?.type).toBe('done');
   });
 
+  it('still completes the swap when usage persistence fails', async () => {
+    persistUsageMock.mockImplementationOnce(() => {
+      throw new Error('EACCES');
+    });
+    const { config, calls } = createFakeConfig();
+    const host = createFakeHost(config);
+    uiTelemetryService.addEvent(liveApiResponse(5), 'old-session');
+    const resetLive = vi.spyOn(uiTelemetryService, 'resetLiveMetrics');
+
+    await expect(
+      handleResumeSession(host, 'target-session'),
+    ).resolves.toBeUndefined();
+
+    expect(calls.startNewSession[0]).toEqual([
+      'target-session',
+      expect.objectContaining({ conversation: expect.anything() }),
+    ]);
+    expect(host.startNewSession).toHaveBeenCalledWith('target-session');
+    expect(host.setSessionName).toHaveBeenCalledWith('Custom Title');
+    expect(resetLive).toHaveBeenCalledOnce();
+    expect(uiTelemetryService.getLiveMetrics().models).toEqual({});
+  });
+
   it('rejects a Managed target before loading or switching sessions', async () => {
     vi.mocked(
       SessionService.prototype.assertLegacySessionExecution,

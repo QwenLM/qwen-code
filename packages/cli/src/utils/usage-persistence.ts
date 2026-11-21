@@ -5,19 +5,19 @@
  */
 
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import { persistSessionUsage } from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
+import {
+  hasRunActivity,
+  persistSessionUsage,
+} from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
 import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
 
 function persistLiveUsage(config: Config, sessionId: string): void {
   try {
     const metrics = uiTelemetryService.getLiveMetrics();
-    const hasActivity =
-      Object.values(metrics.models).some((m) => m.api.totalRequests > 0) ||
-      (metrics.skills?.totalCalls ?? 0) > 0;
-    if (!hasActivity) return;
+    if (!hasRunActivity(metrics)) return;
     persistSessionUsage({
       sessionId,
-      startTime: uiTelemetryService.getSessionStartTime(),
+      startTime: uiTelemetryService.getRunStartTime(),
       endTime: new Date(),
       project: config.getProjectRoot(),
       metrics,

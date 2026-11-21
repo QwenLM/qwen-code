@@ -7,6 +7,7 @@
 import {
   loadUsageHistory,
   aggregateUsage,
+  dedupBySessionId,
   getTimeRangeBounds,
   buildUsageDayTable,
   filterUsageRecordsByLocalDay,
@@ -180,40 +181,6 @@ function applyTokenWindow(
   report.totalLatencyMs = latency;
 }
 
-export function getPreviousRangeBounds(
-  range: TimeRange,
-): { start: Date; end: Date } | null {
-  if (range === 'all') return null;
-
-  const now = new Date();
-  switch (range) {
-    case 'today': {
-      const todayStart = new Date(
-        now.getFullYear(),
-        now.getMonth(),
-        now.getDate(),
-      );
-      const yesterdayStart = new Date(todayStart);
-      yesterdayStart.setDate(yesterdayStart.getDate() - 1);
-      return { start: yesterdayStart, end: todayStart };
-    }
-    case 'week': {
-      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      const fourteenDaysAgo = new Date(
-        now.getTime() - 14 * 24 * 60 * 60 * 1000,
-      );
-      return { start: fourteenDaysAgo, end: sevenDaysAgo };
-    }
-    case 'month': {
-      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-      const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
-      return { start: sixtyDaysAgo, end: thirtyDaysAgo };
-    }
-    default:
-      return null;
-  }
-}
-
 export function computeDelta(
   current: AggregatedReport,
   previous: AggregatedReport,
@@ -312,15 +279,72 @@ function countLocalDays(startKey: string, endKey: string): number {
   return count;
 }
 
+function hasAllLedgerDays(
+  ledgerDaily: TokenUsageDailyByModel,
+  startKey: string,
+  endKey: string,
+): boolean {
+  for (let day = startKey; day <= endKey; day = addLocalDays(day, 1)) {
+    if (!ledgerDaily.has(day)) return false;
+  }
+  return true;
+}
+
+function canUseLedgerDelta(
+  records: readonly UsageSummaryRecord[],
+  ledgerDaily: TokenUsageDailyByModel,
+  startKey: string,
+  endKey: string,
+): boolean {
+  const hasRecordBackedModelActivity = records.some((record) =>
+    Object.values(record.models).some(
+      (model) =>
+        model.requests > 0 ||
+        model.inputTokens > 0 ||
+        model.outputTokens > 0 ||
+        model.cachedTokens > 0 ||
+        model.thoughtsTokens > 0 ||
+        model.totalTokens > 0 ||
+        (model.totalLatencyMs ?? 0) > 0,
+    ),
+  );
+  return (
+    !hasRecordBackedModelActivity ||
+    hasAllLedgerDays(ledgerDaily, startKey, endKey)
+  );
+}
+
 export async function loadStatsData(
   range: TimeRange,
   currentSession?: UsageSummaryRecord,
+  currentSessionId?: string,
 ): Promise<StatsData> {
-  const persisted = await loadUsageHistory(currentSession?.sessionId);
+  const sessionId = currentSession?.sessionId ?? currentSessionId;
+  const persisted = await loadUsageHistory(sessionId, {
+    beforeMsBySession: currentSession
+      ? new Map([[currentSession.sessionId, currentSession.startTime]])
+      : undefined,
+  });
   let records = persisted;
   if (currentSession) {
-    records = persisted.filter((r) => r.sessionId !== currentSession.sessionId);
-    records.push(currentSession);
+    const first = persisted.findIndex(
+      (r) => r.sessionId === currentSession.sessionId,
+    );
+    if (first < 0) {
+      records = [...persisted, currentSession];
+    } else {
+      const last = persisted.findLastIndex(
+        (r) => r.sessionId === currentSession.sessionId,
+      );
+      records = [
+        ...persisted.slice(0, first),
+        ...dedupBySessionId([
+          ...persisted.slice(first, last + 1),
+          currentSession,
+        ]),
+        ...persisted.slice(last + 1),
+      ];
+    }
   }
   const { start, end } = getTimeRangeBounds(range);
   const currentStartKey = localDateKey(start.getTime());
@@ -354,7 +378,9 @@ export async function loadStatsData(
   applyTokenWindow(report, table, currentStartKey, currentEndKey);
 
   const heatmap = buildHeatmap(table, currentStartKey, currentEndKey);
-  const heatmapDates = Object.keys(heatmap);
+  const heatmapDates = Object.entries(heatmap)
+    .filter(([, tokens]) => tokens > 0)
+    .map(([date]) => date);
   const { currentStreak, longestStreak } = calculateStreaks(heatmapDates);
 
   const tokensPerDay = buildTokensPerDay(table, currentStartKey, currentEndKey);
@@ -374,22 +400,33 @@ export async function loadStatsData(
     if (prevFiltered.length > 0 || ledgerCoversPrev) {
       // Compare only completed local days; never compare a partial today
       // against full days or invent intraday data by scaling them.
-      const currentDeltaReport = aggregateUsage(
-        filterUsageRecordsByLocalDay(
-          records,
-          currentStartKey,
-          currentCompletedEndKey,
-        ),
-        'all',
-      );
-      const previousReport = aggregateUsage(prevFiltered, 'all');
-      applyTokenWindow(
-        currentDeltaReport,
-        table,
+      const currentCompletedRecords = filterUsageRecordsByLocalDay(
+        records,
         currentStartKey,
         currentCompletedEndKey,
       );
-      applyTokenWindow(previousReport, table, prevStartKey, prevEndKey);
+      const currentDeltaReport = aggregateUsage(currentCompletedRecords, 'all');
+      const previousReport = aggregateUsage(prevFiltered, 'all');
+      if (
+        canUseLedgerDelta(
+          currentCompletedRecords,
+          ledgerDaily,
+          currentStartKey,
+          currentCompletedEndKey,
+        ) &&
+        canUseLedgerDelta(prevFiltered, ledgerDaily, prevStartKey, prevEndKey)
+      ) {
+        applyTokenWindow(
+          currentDeltaReport,
+          table,
+          currentStartKey,
+          currentCompletedEndKey,
+        );
+        applyTokenWindow(previousReport, table, prevStartKey, prevEndKey);
+      }
+      // Model-bearing records need complete ledger coverage. Without them,
+      // missing keys may be ordinary zero-request days, and there is no
+      // replayed record basis to mix with the ledger.
       delta = computeDelta(currentDeltaReport, previousReport);
     }
   }

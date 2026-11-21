@@ -429,6 +429,8 @@ const createInitialMetrics = (): SessionMetrics => ({
 export interface UiTelemetryReplaySnapshot {
   readonly metrics: SessionMetrics;
   readonly liveMetrics: SessionMetrics;
+  readonly sessionStartTime: Date;
+  readonly runStartTime: Date;
   readonly sessionId: string;
   /** Absent when the session had no bucket yet — restore removes it again. */
   readonly sessionMetrics: SessionMetrics | undefined;
@@ -461,7 +463,10 @@ export class UiTelemetryService extends EventEmitter {
   #closedSessions: Set<string> = new Set();
   #lastPromptTokenCount = 0;
   #lastCachedContentTokenCount = 0;
+  /** Display/session lifetime. Kept intact when a new run begins. */
   #sessionStartTime: Date = new Date();
+  /** Lifetime of the usage counters written for the active run. */
+  #runStartTime: Date = new Date();
 
   addEvent(event: UiEvent, sessionId?: string) {
     this.#record(event, sessionId, true);
@@ -514,10 +519,10 @@ export class UiTelemetryService extends EventEmitter {
     return this.#liveMetrics;
   }
 
-  /** Starts a new run's persistable counters without clearing the display. */
+  /** Starts a new run without restarting the conversation's wall clock. */
   resetLiveMetrics(): void {
     this.#liveMetrics = createInitialMetrics();
-    this.#sessionStartTime = new Date();
+    this.#runStartTime = new Date();
   }
 
   getMetricsForSession(sessionId: string): SessionMetrics {
@@ -619,6 +624,16 @@ export class UiTelemetryService extends EventEmitter {
     return this.#sessionStartTime;
   }
 
+  /** Clock for the displayed conversation, independent of the current run. */
+  setSessionStartTime(startTime: Date): void {
+    this.#sessionStartTime = new Date(startTime);
+  }
+
+  /** Start of the active run for persisted usage records, not the UI clock. */
+  getRunStartTime(): Date {
+    return this.#runStartTime;
+  }
+
   getLastCachedContentTokenCount(): number {
     return this.#lastCachedContentTokenCount;
   }
@@ -658,6 +673,8 @@ export class UiTelemetryService extends EventEmitter {
     return {
       metrics: cloneSessionMetrics(this.#metrics),
       liveMetrics: cloneSessionMetrics(this.#liveMetrics),
+      sessionStartTime: new Date(this.#sessionStartTime),
+      runStartTime: new Date(this.#runStartTime),
       sessionId,
       sessionMetrics: sessionMetrics
         ? cloneSessionMetrics(sessionMetrics)
@@ -691,6 +708,8 @@ export class UiTelemetryService extends EventEmitter {
   restoreFromReplaySnapshot(snapshot: UiTelemetryReplaySnapshot): void {
     this.#metrics = cloneSessionMetrics(snapshot.metrics);
     this.#liveMetrics = cloneSessionMetrics(snapshot.liveMetrics);
+    this.#sessionStartTime = new Date(snapshot.sessionStartTime);
+    this.#runStartTime = new Date(snapshot.runStartTime);
     this.#restoreSessionState(
       snapshot.sessionId,
       snapshot.sessionMetrics,
@@ -750,6 +769,7 @@ export class UiTelemetryService extends EventEmitter {
     this.#lastPromptTokenCount = 0;
     this.#lastCachedContentTokenCount = 0;
     this.#sessionStartTime = new Date();
+    this.#runStartTime = new Date();
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,

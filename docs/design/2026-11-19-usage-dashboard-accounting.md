@@ -122,8 +122,8 @@ explicitly left the local-`today` window semantics out of scope.
 - Out of scope: the `/stats` session view, whose cumulative resumed-history
   semantics are intentional; the ledger record schema and a usage-record version
   bump or migration; migrating records already on disk; cost billing; the replay
-  cache's scan bounds. One optional, additive record flag (`runScoped`) is in
-  scope and is not a schema version change.
+  cache's scan bounds. Two optional, additive provenance flags (`runScoped` and
+  `transcriptRebuild`) are in scope and are not a schema version change.
 
 ## Implemented solution (Option A)
 
@@ -167,9 +167,21 @@ by `/clear`, successful session switches and the process-exit cleanup.
 
 - No subtraction and no schema version bump or migration: the live counter is
   built by the same accumulator, so with no replay it is field-for-field identical
-  to the display aggregate. The only record-shape addition is the optional
-  `runScoped` flag described in the next section, which every existing reader
-  already ignores safely.
+  to the display aggregate. The optional `runScoped` flag and transcript-rebuild
+  provenance described in the next section remain compatible with readers that
+  do not know these fields.
+- The session clock and run clock have distinct owners. `resetLiveMetrics()`
+  resets only the live counters and `getRunStartTime()`, not the displayed
+  conversation clock. On successful initialization of a different session id,
+  the client binds `getSessionStartTime()` to the incoming conversation's own
+  `conversation.startTime`, falling back to a fresh Date when that metadata is
+  absent or invalid. It does not carry the previous conversation's clock into
+  the new one. If initialization or replay fails, the replay snapshot restores
+  both the prior session and run clocks. `SessionStatsProvider` reads that clock
+  after initialization rather than constructing an unrelated `new Date()` for
+  each display transition. The swap-persist helper and `/clear` stamp outgoing
+  usage with `getRunStartTime()`, and `/clear` fully resets both clocks for the
+  new conversation.
 - `reset()` clears it, so each `/clear` segment bills only itself. A successful
   `/resume` or `/branch` also writes the outgoing run under its captured session
   id, then calls `resetLiveMetrics()` at the UI commit point. That resets the
@@ -194,29 +206,61 @@ Deferred rather than built speculatively.
 
 `persistSessionUsage` marks what it writes `runScoped: true`, because its caller
 passes that run's live metrics. Records reconstructed from a whole transcript
-(`summarizeTranscriptFile`, the persisting migration, the pre-deletion salvage)
-carry no marker — they are cumulative.
+carry no run marker and remain cumulative. Actual event-time reconstruction
+(`summarizeTranscriptFile`, the persisting migration and the pre-deletion
+salvage) additionally writes `transcriptRebuild: true`, distinguishing measured
+history from an old unmarked record whose provenance is unknowable.
 
 `dedupBySessionId` groups by sessionId and then:
 
 - **No run-scoped record in the group** -> last-wins, exactly as before. This is
   what keeps existing history unchanged and keeps the #4994 duplicate protection.
-- **Any run-scoped record** -> keep the run-scoped ones, dropping every cumulative
-  record for that id (a whole-transcript replay must not be added on top of
-  persisted runs). Among the runs, windows are half-open: a new run starting
-  exactly when the previous one ended is retained, not deleted as an overlap.
-  Equal `[startTime, endTime)` windows are duplicates and still collapse to the
-  last, along with strictly overlapping ones. Adjacent runs written in the same
-  millisecond therefore all survive.
+- **Run-scoped records present** -> retain disjoint runs. Windows are half-open:
+  a new run starting exactly when the previous one ended is retained. Equal
+  `[startTime, endTime)` windows and partial overlaps are duplicates or
+  ambiguous and collapse to the last matching write. Adjacent runs in the same
+  millisecond therefore survive.
+- **Provenance and window shape.** An ordinary unmarked cumulative record loses
+  to run deltas because it may be another replay-inflated copy. A measured
+  transcript reconstruction survives beside disjoint runs. An exactly matching
+  window is a duplicate, not two spends. Otherwise, a reconstruction that wholly
+  covers a run's window and its model/tool/skill/file counters may replace that
+  run without counting it twice. Partial overlap remains ambiguous and drops
+  the reconstructed copy rather than guessing what to subtract. Multiple
+  correlated whole-transcript snapshots remain last-wins.
 
-The marker is an optional field, so every reader that filters `version === 1`
-keeps working and no migration is needed.
+Both markers are optional, so every reader that filters `version === 1` keeps
+working without a schema migration.
 
-**Deliberate trade:** for a conversation that spans the upgrade, a cumulative
-record and run deltas coexist under one id. The cumulative one is dropped even
-though it may cover earlier runs, because it may also be replay-inflated.
-Undercounting that ambiguous overlap is the safe direction; double counting is
-not.
+**Deliberate trade:** an ordinary cumulative record spanning an upgrade loses to
+run deltas even if it covers earlier activity. Measured transcript rebuilds need
+not be lost when the later runs are disjoint. Undercounting an ambiguous overlap
+is the safe direction; double counting is not.
+
+The normal `loadUsageHistory()` considers only known run-scoped ids and the
+explicit current session. It does not discover other unrecorded transcripts:
+this is provenance repair, not the deferred session census. Where a transcript
+would otherwise overlap its run, only record timestamps strictly before the
+earliest relevant run start are backfilled. Later events retain their own run
+assignment. These boundary-limited supplements are merged in memory, not
+appended as new authoritative whole-session snapshots. Unknown legacy
+cumulative records still lose to run deltas rather than being promoted on
+filename alone; the supplemental history comes from actual transcript events
+with usable timestamps. Other history retains its existing short read and
+reduction behavior.
+
+`loadUsageHistoryWithLive()` applies the same distinction before skipping a
+transcript: only an ordinary cumulative record or a real transcript rebuild is
+full-session authority. A run-only id cannot hide older, disjoint transcript
+history behind its session id. If no cumulative/rebuilt base covers older
+history, the live read can scan the complete transcript set; otherwise its
+mtime-bounded recent replay remains unchanged.
+
+Pre-deletion salvage checks coverage again in both `prepare` and `commit`, so
+the second check still handles a racing writer. An ordinary cumulative record,
+an actual reconstruction, or a run whose window covers the whole transcript
+suppresses a duplicate. A disjoint run does not: the reconstructed transcript
+is persisted too, then reduced with the run by provenance and window.
 
 **Session counts now count runs, not conversations.** Keeping every disjoint run
 means the sessions tile, the TUI Sessions number and the per-day session counts
@@ -239,17 +283,32 @@ The table build and window sum are now **shared exports** of
 two cannot drift. `TokenUsageDayModelTotals` gained `apiDurationMs` so the latency
 column comes from the same source as the tokens.
 
-`loadStatsData` reads the ledger on every open (reaching back far enough for the
-previous range too), builds the table, and replaces the report's `models`,
-`totalRequests` and `totalLatencyMs` for both the current and the previous window
-— otherwise the delta would compare a ledger-backed present against a
-record-backed past. Concurrent opens of the same start day share one pending
-read. The TUI also supplies a cache of completed month aggregates to the ledger
-loader, so immutable historical months are not reparsed on every open. Current
-and future month files are always streamed afresh: no settled whole-window
-snapshot can hide a just-completed turn or an external process's new ledger row.
+`loadStatsData` reads the ledger on every open, reaching back far enough for the
+previous range. It replaces the current report's `models`, `totalRequests` and
+`totalLatencyMs` with the shared token table. For each completed-day side,
+model-bearing session records require every completed local day to have a
+ledger key before that side uses the ledger. A side with no such records may
+use a sparse ledger: missing days can be ordinary zero-request days. If either
+side requires coverage it cannot prove, both sides stay on the session-record
+basis instead of comparing incompatible measurements. Concurrent opens of the
+same start day share one pending read. Only immutable completed-month
+aggregates are cached; current and future month files are always streamed again.
 The day/model table and subsequent report shapes are rebuilt on each load from
-those month aggregates. Heatmap, tokens-per-day and streaks derive from it.
+those month aggregates. Token streaks count only days with positive token
+spend. Skill calls, files and other non-token fields still come from the session
+records, never from an invented model-token surrogate.
+
+The current in-progress record comes from `getLiveMetrics()` and
+`getRunStartTime()`, not the display aggregate. Its activity predicate and
+record construction are shared with the persistence writer. The session id is
+also passed separately, so a restored session with no new live activity can
+reconstruct its unpersisted transcript without fabricating an empty run record
+or charging replayed history as a new run. Otherwise, the current live record is
+built by that shared constructor. The already-reduced history supplies only the
+current session's contiguous group for another local reduction; unrelated groups
+do not undergo a second whole-history comparison. Earlier disjoint runs and
+compatible transcript reconstructions keep their own tokens and session-granular
+fields.
 
 Stays on session records: `sessionCount`, `totalDurationMs`, tools, files, skills
 and **projects**, all selected by the same inclusive local-day keys as tokens.
@@ -348,9 +407,10 @@ than a fabricated attribution.
   ledger only starts 2026-07-30 and a run with usage statistics disabled also
   writes none, so this is an upper bound on the replay footprint, not a proof that
   every one of those records is inflated.
-- **Mixed-era sessions.** A conversation spanning the upgrade keeps only its run
-  deltas, so pre-upgrade activity for that id can be undercounted (see the
-  deliberate trade above).
+- **Mixed-era sessions.** A conversation spanning the upgrade drops an unmarked
+  cumulative copy when run deltas exist, so ambiguous pre-upgrade activity can
+  be undercounted. A real transcript rebuild remains alongside disjoint later
+  runs (see the deliberate trade above).
 - **Per-project tokens stay inflated.** The TUI projects table cannot be corrected
   from the ledger, so it disagrees with the corrected totals above it.
 - **Calendar-day windows now apply to every record-derived tile too.** Tokens,
@@ -387,14 +447,29 @@ than a fabricated attribution.
   asserting display keeps history while live does not, and `/clear` asserting a
   pure resume writes no record. Plus a two-arm probe driving the real replay and
   persist functions from each checkout.
-- Reduction: unit tests for the marker on write, disjoint runs surviving, a run
-  written twice collapsing, cumulative records keeping last-wins, a cumulative
-  record losing to run deltas, and a whole-transcript replay not adding on top.
-  Plus a two-arm comparison of `loadUsageHistory` on the real history.
+- Reduction: unit tests for run scoping and transcript provenance, disjoint runs
+  surviving, partial-overlap and identical-window writes collapsing, stale
+  cumulative records keeping last-wins, ambiguous copies losing to run deltas,
+  and actual reconstruction surviving disjoint later runs. Include a mixed
+  overlap/disjoint group, full-coverage replacement, zero-length cross-source
+  copies, and an old unmarked migration whose later transcript contains new API
+  activity. Its pre-run events must survive without double-counting later run
+  activity; the temporal supplement must not be persisted as a fresh authority.
 - TUI: unit tests for day replacement, per-day attribution, wholly uncovered runs,
   a ledger-backed previous window, equal-length flat-usage deltas, same-day
-  record-derived fields, and fresh reads between opens; plus `loadStatsData`
-  against an independent ledger scan on both the live history and a frozen copy.
+  record-derived fields, and fresh reads between opens. Also cover replay-only
+  current sessions creating no record, a live run merging with disjoint prior
+  runs, and pairwise ledger coverage falling both delta sides back to records
+  when either side is incomplete. Also cover zero-record sparse-ledger deltas and
+  zero-token skill activity without a token streak. Mount the data-loading
+  component with the real context shape and assert it passes live metrics and
+  run start. Merge only the current session group and verify the reducer's input
+  size does not include unrelated sessions. Bind the incoming conversation's
+  clock at successful initialization, preserve the displayed conversation clock
+  through live reset, and restore both clocks after rollback. Include real files
+  for an existing A session and a never-persisted B session, with and without
+  new activity, so history is included once and the current session is not
+  prematurely persisted.
 - Mutation-witness each new guard, and record which suites were actually run.
 
 ## Acceptance criteria
@@ -420,6 +495,19 @@ than a fabricated attribution.
 - Two runs of one conversation both survive the read side. **Verified**: the same
   probe loaded 1 record / 2,000 tokens before the reduction change and 2 records /
   3,000 after.
+- A real transcript migration stays beside a disjoint live run. **Verified** by
+  unit tests and on actual JSONL using the isolated runtime: 1,000 + 200 = 1,200,
+  and the `loadStatsData` all-time row had the same total and two runs.
+- Current stats do not convert replayed history into a live record, preserve the
+  session clock across a live reset, and compare matching bases. **Verified** in
+  the focused suites and real-file oracle: replay-only returned no record; the
+  the restored conversation supplied the display clock while the run start
+  advanced independently; a partial ledger
+  yielded the same-record-basis -100% delta, while complete coverage on both
+  sides yielded +100%. The current token table independently summed to 7,007.
+  `SessionStatsProvider` also kept the original fake-time clock after Ink's
+  `startNewSession()` call; before that follow-up fix the test really advanced
+  its wall clock by the simulated minute.
 - Existing history reduces exactly as before. **Verified** on the real
   `usage_record.jsonl`: 2,065 raw records, none marked, both arms returning 2,043
   records / 379,387,040,763 tokens with an identical per-session/per-window key
@@ -443,5 +531,7 @@ than a fabricated attribution.
   other way, now that it disagrees with the corrected totals?
 - No session-identity change is needed: finding 4 was retracted, and the reduction
   keys on `sessionId` plus the run window without touching what any writer uses as
-  its identity. The pre-deletion salvage and the persisting migration keep writing
-  cumulative records and are unaffected.
+  its identity. The pre-deletion salvage and persisting migration still write
+  cumulative event-time reconstructions. They suppress only an already covered
+  transcript, and explicit reconstruction provenance preserves disjoint history
+  beside per-run deltas.

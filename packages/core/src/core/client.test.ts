@@ -357,6 +357,7 @@ const mockUiTelemetryService = vi.hoisted(() => ({
   setLastCachedContentTokenCount: vi.fn(),
   reset: vi.fn(),
   resetSession: vi.fn(),
+  setSessionStartTime: vi.fn(),
   addEvent: vi.fn(),
   addReplayedEvent: vi.fn(),
 }));
@@ -1237,6 +1238,23 @@ describe('Gemini Client (client.ts)', () => {
       await freshClient.initialize(SessionStartSource.Resume);
       return { freshClient, firstChat };
     };
+
+    it('binds the clock to the resumed conversation after successful initialization', async () => {
+      const data = resumedSession([])!;
+      const start = '2020-02-03T04:05:06.000Z';
+      data.conversation.startTime = start;
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue(data);
+      mockUiTelemetryService.setSessionStartTime.mockClear();
+
+      await initializedClient();
+
+      expect(mockUiTelemetryService.setSessionStartTime).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockUiTelemetryService.setSessionStartTime).toHaveBeenCalledWith(
+        new Date(start),
+      );
+    });
 
     it('keeps the restored tool boundary through startup reminder refresh', async () => {
       const result = content('user', fnResponse('update_goal', {}, 'ended'));
