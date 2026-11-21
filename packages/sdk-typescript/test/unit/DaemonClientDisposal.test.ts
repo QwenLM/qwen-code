@@ -145,6 +145,7 @@ describe('DaemonClient disposal', () => {
 
   it('wakes a parked BTW backoff when disposed', async () => {
     vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     try {
       const fetch = vi.fn(
         async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -157,8 +158,10 @@ describe('DaemonClient disposal', () => {
       const stream = client.streamSessionBtw('session-1', 'Question');
       const next = stream.next();
       await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
-      await Promise.resolve();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.waitFor(() =>
+        expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1_000),
+      );
 
       client.dispose();
 
@@ -168,6 +171,7 @@ describe('DaemonClient disposal', () => {
       ).toHaveLength(1);
       await stream.return(undefined);
     } finally {
+      setTimeoutSpy.mockRestore();
       vi.useRealTimers();
     }
   });
