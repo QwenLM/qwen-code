@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import * as composerTag from '../../utils/composerTag';
+import * as automaticTrigger from '../../utils/automatic-trigger';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
 import {
@@ -723,6 +724,45 @@ describe('UserMessage', () => {
     },
   );
 
+  it.each([false, true])(
+    'respects custom composer-tag rendering (document=%s)',
+    (documentMode) => {
+      const content = '@secret-token';
+      const container = render(
+        <TranscriptRenderModeProvider
+          value={documentMode ? 'document' : 'interactive'}
+        >
+          <WebShellCustomizationProvider
+            value={{
+              renderComposerTag: () => <span>[redacted]</span>,
+            }}
+          >
+            <UserMessage
+              content={content}
+              source="cron"
+              inputAnnotations={[
+                referenceAnnotation(content, '@secret-token', {
+                  id: 'secret',
+                  kind: 'file',
+                  label: '@secret-token',
+                  value: 'secret-token',
+                }),
+              ]}
+            />
+          </WebShellCustomizationProvider>
+        </TranscriptRenderModeProvider>,
+      );
+      expect(container.textContent).toBe('[redacted]');
+      expect(container.textContent).not.toContain('secret-token');
+      expect(
+        container.querySelector('[data-web-shell-automatic-trigger-summary]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-web-shell-automatic-trigger-message]'),
+      ).toBeNull();
+    },
+  );
+
   it('keeps attachments and the complete editor text for automatic input', () => {
     const content = '/loop full original instruction';
     const container = render(
@@ -843,6 +883,26 @@ describe('UserMessage', () => {
       ),
     ).toBeNull();
     expect(parse).not.toHaveBeenCalled();
+    act(() => automaticToggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+    expect(parse).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not rescan an unchanged automatic instruction during edits', () => {
+    const matcher = vi.spyOn(automaticTrigger, 'isDetailFreeAutomaticEcho');
+    const content = 'Original automatic prompt\nwith details';
+    const container = render(
+      <UserMessage editing content={content} source="cron" />,
+    );
+    const editor = container.querySelector('textarea');
+    expect(editor).not.toBeNull();
+    act(() => setTextareaValue(editor as HTMLTextAreaElement, 'edited once'));
+    const calls = matcher.mock.calls.length;
+    act(() => setTextareaValue(editor as HTMLTextAreaElement, 'edited twice'));
+    expect(matcher).toHaveBeenCalledTimes(calls);
   });
 
   it('collapses changed automatic content without re-parsing it', () => {
@@ -888,6 +948,61 @@ describe('UserMessage', () => {
       ),
     ).toBeNull();
     expect(parse).not.toHaveBeenCalled();
+    act(() => nextToggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe('Second automatic instruction');
+    expect(parse).toHaveBeenCalledTimes(2);
+  });
+
+  it('collapses an image update before parsing it again', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const view = (images: Array<{ data: string; mimeType: string }>) => (
+      <UserMessage
+        content="Instructions with image attachments"
+        source="cron"
+        images={images}
+      />
+    );
+    act(() =>
+      root.render(
+        view([{ data: 'data:image/png;base64,YQ==', mimeType: 'image/png' }]),
+      ),
+    );
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+    expect(parse).toHaveBeenCalledTimes(1);
+    parse.mockClear();
+
+    act(() =>
+      root.render(
+        view([
+          { data: 'data:image/png;base64,YQ==', mimeType: 'image/png' },
+          { data: 'data:image/png;base64,Yg==', mimeType: 'image/png' },
+        ]),
+      ),
+    );
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      ),
+    ).toBeNull();
+    expect(parse).not.toHaveBeenCalled();
+    act(() => toggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe('Instructions with image attachments');
+    expect(parse).toHaveBeenCalledTimes(1);
   });
 
   it('keeps committed expanded details after an abandoned update', async () => {

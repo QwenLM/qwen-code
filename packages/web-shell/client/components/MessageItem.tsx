@@ -599,6 +599,25 @@ function agentMessagesEqual(
   );
 }
 
+function stableFilesEqual(
+  prev: Extract<Message, { role: 'user' }>['files'] | undefined,
+  next: Extract<Message, { role: 'user' }>['files'] | undefined,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next || prev.length !== next.length) return false;
+  return prev.every((file, index) => {
+    const other = next[index];
+    return (
+      other !== undefined &&
+      file.name === other.name &&
+      file.mimeType === other.mimeType &&
+      file.text === other.text &&
+      file.attachmentId === other.attachmentId &&
+      file.data === other.data
+    );
+  });
+}
+
 function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
@@ -614,7 +633,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
         next.role === 'user' &&
         prev.content === next.content &&
         prev.source === next.source &&
-        stableImagesEqual(prev.images, next.images)
+        stableImagesEqual(prev.images, next.images) &&
+        stableFilesEqual(prev.files, next.files)
       );
     case 'assistant':
       return (

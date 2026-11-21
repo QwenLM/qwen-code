@@ -198,22 +198,21 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
 
 function AutomaticTriggerMessage({
   source,
-  content,
+  summary,
+  hasDetails,
   expanded,
   onToggle,
   children,
 }: {
   source: 'cron' | 'loop';
-  content: string;
+  summary: string;
+  hasDetails: boolean;
   expanded: boolean;
   onToggle: () => void;
   children: ReactNode;
 }) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
-  const summary = content.replace(/\s+/g, ' ').trim();
-  // These runtime echoes contain only a label, not the full modelText.
-  const hasDetails = !isDetailFreeAutomaticEcho(content);
   return (
     <div
       className={styles.scheduledTaskRun}
@@ -420,9 +419,19 @@ export const UserMessage = memo(function UserMessage({
     // A host-provided renderer owns the complete body, including any redaction.
     !renderUserMessageContent &&
     !parseUserMessageContent &&
+    !renderComposerTag &&
+    !renderComposerTagTooltip &&
     isAutomaticTriggerSource(source)
       ? source
       : undefined;
+  const automaticPresentation = useMemo(() => {
+    if (!automaticTriggerSource) return undefined;
+    return {
+      summary: content.replace(/\s+/g, ' ').trim(),
+      // These runtime echoes contain only a label, not the full modelText.
+      hasDetails: !isDetailFreeAutomaticEcho(content),
+    };
+  }, [automaticTriggerSource, content]);
   const expansionGeneration = {
     source,
     content,
@@ -452,7 +461,7 @@ export const UserMessage = memo(function UserMessage({
     expanded;
   const automaticInstructionsExpanded =
     !automaticTriggerSource ||
-    (!isDetailFreeAutomaticEcho(content) &&
+    (automaticPresentation?.hasDetails &&
       (documentMode ? documentExpanded : interactiveDetailsExpanded));
   const renderedContent = useMemo(() => {
     if (scheduledTaskRun) {
@@ -533,18 +542,20 @@ export const UserMessage = memo(function UserMessage({
     scheduledTaskRun,
     automaticInstructionsExpanded,
   ]);
-  const bodyContent = automaticTriggerSource ? (
-    <AutomaticTriggerMessage
-      source={automaticTriggerSource}
-      content={content}
-      expanded={documentMode ? documentExpanded : interactiveDetailsExpanded}
-      onToggle={() => setExpanded((value) => !value)}
-    >
-      {renderedContent}
-    </AutomaticTriggerMessage>
-  ) : (
-    renderedContent
-  );
+  const bodyContent =
+    automaticTriggerSource && automaticPresentation ? (
+      <AutomaticTriggerMessage
+        source={automaticTriggerSource}
+        summary={automaticPresentation.summary}
+        hasDetails={automaticPresentation.hasDetails}
+        expanded={documentMode ? documentExpanded : interactiveDetailsExpanded}
+        onToggle={() => setExpanded((value) => !value)}
+      >
+        {renderedContent}
+      </AutomaticTriggerMessage>
+    ) : (
+      renderedContent
+    );
 
   const measureOverflow = useCallback(() => {
     const el = contentRef.current;

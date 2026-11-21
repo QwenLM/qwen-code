@@ -5,7 +5,6 @@ import {
   installMockDaemon,
   turnCompleteEvent,
   userTextEvent,
-  type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
 import { completeReplay } from './visuals/harness';
@@ -65,10 +64,7 @@ async function openFixture(
   page: Page,
   baseURL: string,
   events: WebShellDaemonScenario['events'],
-): Promise<{
-  scenario: WebShellDaemonScenario;
-  daemon: MockDaemonController;
-}> {
+): Promise<void> {
   await page.clock.setFixedTime(new Date('2026-11-20T03:15:00.000Z'));
   const scenario = createWebShellDaemonScenario({ events });
   const daemon = await installMockDaemon(page, scenario, { baseURL });
@@ -93,7 +89,6 @@ async function openFixture(
     scenario.sessionId,
     scenario.events.length,
   );
-  return { scenario, daemon };
 }
 
 function completedTurnEvents(): WebShellDaemonScenario['events'] {

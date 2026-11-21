@@ -27,6 +27,13 @@ vi.mock('../WebShellContexts', async () => {
 const captured = vi.hoisted(() => ({
   userMessageProps: null as null | {
     source?: string;
+    files?: Array<{
+      name: string;
+      mimeType: string;
+      data?: Blob;
+      text?: string;
+      attachmentId?: string;
+    }>;
     editing?: boolean;
     submittingEdit?: boolean;
   },
@@ -38,6 +45,13 @@ vi.mock('./messages/UserMessage', async () => {
     UserMessage: (props: {
       content: string;
       source?: string;
+      files?: Array<{
+        name: string;
+        mimeType: string;
+        data?: Blob;
+        text?: string;
+        attachmentId?: string;
+      }>;
       editing?: boolean;
       submittingEdit?: boolean;
       onEditSubmit?: (content: string) => void;
@@ -734,4 +748,27 @@ it('forwards automatic source updates to UserMessage', () => {
   expect(captured.userMessageProps?.source).toBe('loop');
   act(() => root.render(row()));
   expect(captured.userMessageProps?.source).toBeUndefined();
+});
+
+it('re-renders when only user-message files change', () => {
+  const files = [
+    { name: 'first.txt', mimeType: 'text/plain', text: 'first' },
+    { name: 'second.txt', mimeType: 'text/plain', text: 'second' },
+  ];
+  const row = (update: typeof files) => (
+    <MessageItem
+      message={{
+        id: 'file-update',
+        role: 'user',
+        content: 'Same prompt',
+        timestamp: 0,
+        source: 'cron',
+        files: update,
+      }}
+    />
+  );
+  const { root } = renderWithRoot(row(files.slice(0, 1)));
+  expect(captured.userMessageProps?.files).toEqual(files.slice(0, 1));
+  act(() => root.render(row(files)));
+  expect(captured.userMessageProps?.files).toEqual(files);
 });
