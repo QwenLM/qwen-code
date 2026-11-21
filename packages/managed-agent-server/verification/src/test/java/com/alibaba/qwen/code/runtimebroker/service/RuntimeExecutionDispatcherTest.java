@@ -589,9 +589,11 @@ class RuntimeExecutionDispatcherTest {
         var dispatches = (java.util.concurrent.ConcurrentMap<String, CompletableFuture<Void>>) field.get(dispatcher);
         var queued = dispatches.get("execution");
         assertNotNull(queued);
-        var awaitingField = RuntimeExecutionDispatcher.class.getDeclaredField("awaiting");
+        var waitField = RuntimeExecutionDispatcher.class.getDeclaredField("sharedDispatchWait");
+        waitField.setAccessible(true);
+        var awaitingField = SharedDispatchWait.class.getDeclaredField("awaiting");
         awaitingField.setAccessible(true);
-        var awaiting = (java.util.Map<String, ?>) awaitingField.get(dispatcher);
+        var awaiting = (java.util.Map<String, ?>) awaitingField.get(waitField.get(dispatcher));
         assertTrue(awaiting.containsKey("execution"));
 
         // Still occupied: another tick is scheduled and the caller keeps
