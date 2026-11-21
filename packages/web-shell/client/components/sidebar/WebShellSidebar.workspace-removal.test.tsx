@@ -4781,7 +4781,10 @@ describe('WebShellSidebar non-primary archive', () => {
         : [],
     );
 
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/danger' });
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/danger',
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await ensureWorkspaceExpanded('danger');
     expect(container.textContent).toContain('Untrusted active');
     expect(sessionAction('Untrusted active')).toBeUndefined();

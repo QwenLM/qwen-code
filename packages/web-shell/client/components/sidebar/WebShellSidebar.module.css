@@ -117,14 +117,29 @@
      otherwise overflow a host narrower than that (e.g. a 250px embed). */
   width: clamp(
     min(var(--web-shell-sidebar-min-width, 220px), 100%),
-    calc(var(--web-shell-sidebar-container-width, 100vw) * 0.85),
+    calc(var(--web-shell-sidebar-container-width, 100vw) * 0.7),
     var(--web-shell-sidebar-max-width, 420px)
   );
   min-width: clamp(
     min(var(--web-shell-sidebar-min-width, 220px), 100%),
-    calc(var(--web-shell-sidebar-container-width, 100vw) * 0.85),
+    calc(var(--web-shell-sidebar-container-width, 100vw) * 0.7),
     var(--web-shell-sidebar-max-width, 420px)
   );
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .sidebar.mobileOpen {
+    width: clamp(
+      min(var(--web-shell-sidebar-min-width, 220px), 100%),
+      calc(var(--web-shell-sidebar-container-width, 100vw) * 0.85),
+      var(--web-shell-sidebar-max-width, 420px)
+    );
+    min-width: clamp(
+      min(var(--web-shell-sidebar-min-width, 220px), 100%),
+      calc(var(--web-shell-sidebar-container-width, 100vw) * 0.85),
+      var(--web-shell-sidebar-max-width, 420px)
+    );
+  }
 }
 
 .sidebar.mobileOpen .resizeHandle {
@@ -1562,6 +1577,14 @@ button.livePendingSession:hover {
 
   .sessionActionButton {
     pointer-events: auto;
+  }
+}
+
+/* Very narrow touch drawers prioritize the title and enabled actions over
+   branch/source decoration. PR state and goal markers stay visible. */
+@media (hover: none) and (pointer: coarse) and (max-width: 280px) {
+  .sidebar.mobileOpen .sessionGitIcon {
+    display: none;
   }
 }
 

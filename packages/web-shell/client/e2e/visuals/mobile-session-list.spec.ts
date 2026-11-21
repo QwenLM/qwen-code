@@ -5,8 +5,6 @@
  */
 
 import { devices, expect, test } from '@playwright/test';
-import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
-import { createWebShellDaemonScenario } from '../utils/mockDaemon';
 import {
   captureScreenshot,
   gotoSession,
@@ -14,42 +12,17 @@ import {
   resolveBaseURL,
   type VisualTheme,
 } from './harness';
+import {
+  createSessionListDensityScenario,
+  LONG_SESSION_TITLE,
+} from '../utils/sessionListDensityFixture';
 
-const LONG_TITLE = '优化 iPhone 会话列表标题与拉取请求审阅流程';
+const LONG_TITLE = LONG_SESSION_TITLE;
 const THEMES: readonly VisualTheme[] = ['dark', 'light'];
+const IS_BASE_CAPTURE = process.env.WEB_SHELL_VISUALS_ARM === 'before';
 
 function createSessionListScenario() {
-  const workspaceCwd = '/tmp/qwen-web-shell-mobile-sidebar';
-  const sessions: DaemonSessionSummary[] = [
-    {
-      sessionId: 'density-long-title',
-      workspaceCwd,
-      createdAt: '2026-07-03T00:00:00.000Z',
-      updatedAt: '2026-07-03T00:00:00.000Z',
-      displayName: LONG_TITLE,
-      clientCount: 1,
-      hasActivePrompt: false,
-      prs: [
-        {
-          number: 52484,
-          state: 'open',
-          url: 'https://github.com/QwenLM/qwen-code/pull/52484',
-        },
-      ],
-    },
-  ];
-  const scenario = createWebShellDaemonScenario({
-    workspaceCwd,
-    sessionId: 'density-long-title',
-    displayName: LONG_TITLE,
-    sessions,
-  });
-  scenario.capabilities.features.push(
-    'session_organization',
-    'session_archive',
-    'session_archive_idle_guard',
-  );
-  return scenario;
+  return createSessionListDensityScenario();
 }
 
 for (const theme of THEMES) {
@@ -67,6 +40,34 @@ for (const theme of THEMES) {
       const page = await context.newPage();
       const scenario = createSessionListScenario();
       const daemon = await installScenario(page, scenario, baseURL);
+      const organizationWrites: unknown[] = [];
+      if (!IS_BASE_CAPTURE) {
+        await page.route(
+          /\/(?:workspaces\/[^/]+\/)?session\/density-long-title\/organization$/,
+          async (route) => {
+            organizationWrites.push(route.request().postDataJSON());
+            const pinnedAt = '2026-07-03T00:00:00.000Z';
+            scenario.sessions = scenario.sessions.map((session) =>
+              session.sessionId === 'density-long-title'
+                ? { ...session, isPinned: true, pinnedAt }
+                : session,
+            );
+            scenario.sessionCatalogVersion = {
+              ...scenario.sessionCatalogVersion,
+              revision: scenario.sessionCatalogVersion.revision + 1,
+            };
+            await route.fulfill({
+              json: {
+                sessionId: 'density-long-title',
+                isPinned: true,
+                pinnedAt: '2026-07-03T00:00:00.000Z',
+                groupId: null,
+                color: null,
+              },
+            });
+          },
+        );
+      }
       await gotoSession(page, scenario, daemon, theme);
       await page.getByRole('button', { name: 'Toggle menu' }).tap();
       const drawer = page.getByRole('dialog', { name: 'Workspace sidebar' });
@@ -109,29 +110,52 @@ for (const theme of THEMES) {
         contentType: 'application/json',
       });
 
-      expect(sidebarBox.width).toBeCloseTo(390 * 0.85, 1);
-      // Preserve the visible PR state while keeping at least 120px for the title.
-      expect(titleBox.width).toBeGreaterThan(120);
-      await expect(
-        row.getByRole('button', { name: 'Pin', exact: true }),
-      ).toHaveCount(0);
-      await expect(prBadge).toHaveCSS('margin-left', '2px');
-      await expect(prBadge).toHaveCSS('padding-left', '2px');
-      await expect(prBadge).toHaveCSS('padding-right', '2px');
-      await expect(prBadge).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      expect(sidebarBox.width).toBeCloseTo(
+        IS_BASE_CAPTURE ? Math.min(Math.max(390 * 0.7, 276), 420) : 390 * 0.85,
+        1,
+      );
+      if (!IS_BASE_CAPTURE) {
+        // Leave room for DejaVu's wider PR-number metrics on the visual runner.
+        expect(titleBox.width).toBeGreaterThan(110);
+      }
+      if (IS_BASE_CAPTURE) {
+        await expect(
+          row.getByRole('button', { name: 'Pin', exact: true }),
+        ).toBeVisible();
+      } else {
+        await expect(
+          row.getByRole('button', { name: 'Pin', exact: true }),
+        ).toHaveCount(0);
+        await expect(prBadge).toHaveCSS('margin-left', '2px');
+        await expect(prBadge).toHaveCSS('padding-left', '2px');
+        await expect(prBadge).toHaveCSS('padding-right', '2px');
+        await expect(prBadge).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      }
+      await captureScreenshot(page, `iphone-session-list-${theme}`);
       await expect(
         prBadge.locator('svg.lucide-git-pull-request'),
       ).toBeVisible();
-      await captureScreenshot(page, `iphone-session-list-${theme}`);
 
       await row
         .getByRole('button', { name: 'More actions', exact: true })
         .tap();
       const menu = page.getByRole('menu');
-      await expect(
-        menu.getByRole('menuitem', { name: 'Pin', exact: true }),
-      ).toBeVisible();
+      const pin = menu.getByRole('menuitem', { name: 'Pin', exact: true });
+      if (IS_BASE_CAPTURE) await expect(pin).toHaveCount(0);
+      else await expect(pin).toBeVisible();
       await captureScreenshot(page, `iphone-session-list-menu-${theme}`);
+      if (!IS_BASE_CAPTURE) {
+        await pin.tap();
+        await expect.poll(() => organizationWrites.length).toBe(1);
+        expect(organizationWrites[0]).toEqual({ isPinned: true });
+        await expect(menu).toHaveCount(0);
+        await row
+          .getByRole('button', { name: 'More actions', exact: true })
+          .tap();
+        await expect(
+          menu.getByRole('menuitem', { name: 'Unpin', exact: true }),
+        ).toBeVisible();
+      }
     } finally {
       await context.close();
     }
@@ -165,25 +189,31 @@ for (const theme of THEMES) {
     await expect(prBadge).toContainText('#52484');
     await expect(more).toBeVisible();
     await expect(more).toHaveCSS('opacity', '1');
-    await expect(
-      row.getByRole('button', { name: 'Pin', exact: true }),
-    ).toHaveCount(0);
-    await expect(prBadge).toHaveCSS('margin-left', '2px');
-    await expect(prBadge).toHaveCSS('padding-left', '2px');
-    await expect(prBadge).toHaveCSS('padding-right', '2px');
-    await expect(prBadge).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
-    await expect(prBadge.locator('svg.lucide-git-pull-request')).toBeVisible();
-    const titleBox = await title.boundingBox();
-    if (!titleBox)
-      throw new Error('The desktop session title is not laid out.');
-    expect(titleBox.width).toBeGreaterThan(120);
+    if (IS_BASE_CAPTURE) {
+      await expect(
+        row.getByRole('button', { name: 'Pin', exact: true }),
+      ).toBeVisible();
+    } else {
+      await expect(
+        row.getByRole('button', { name: 'Pin', exact: true }),
+      ).toHaveCount(0);
+      await expect(prBadge).toHaveCSS('margin-left', '2px');
+      await expect(prBadge).toHaveCSS('padding-left', '2px');
+      await expect(prBadge).toHaveCSS('padding-right', '2px');
+      await expect(prBadge).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      const titleBox = await title.boundingBox();
+      if (!titleBox)
+        throw new Error('The desktop session title is not laid out.');
+      expect(titleBox.width).toBeGreaterThan(120);
+    }
     await captureScreenshot(page, `desktop-session-list-${theme}`);
+    await expect(prBadge.locator('svg.lucide-git-pull-request')).toBeVisible();
 
     await more.click();
     const menu = page.getByRole('menu');
-    await expect(
-      menu.getByRole('menuitem', { name: 'Pin', exact: true }),
-    ).toBeVisible();
+    const pin = menu.getByRole('menuitem', { name: 'Pin', exact: true });
+    if (IS_BASE_CAPTURE) await expect(pin).toHaveCount(0);
+    else await expect(pin).toBeVisible();
     await captureScreenshot(page, `desktop-session-list-menu-${theme}`);
   });
 }

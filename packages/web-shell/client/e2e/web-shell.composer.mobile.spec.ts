@@ -702,7 +702,10 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
     drawerWidth: element.parentElement?.getBoundingClientRect().width ?? 0,
     sidebarWidth: element.getBoundingClientRect().width,
   }));
-  expect(sidebarWidth).toBeCloseTo(drawerWidth * 0.7, 0);
+  expect(sidebarWidth).toBeCloseTo(
+    Math.min(Math.max(drawerWidth * 0.85, 220), 420),
+    0,
+  );
   expect(sidebarWidth).toBeLessThanOrEqual(drawerWidth);
 
   await page.screenshot({

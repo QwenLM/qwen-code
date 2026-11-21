@@ -19,7 +19,7 @@ interface SessionPrBadgeProps {
    * owns roving-tabindex keyboard navigation (e.g. picker dialogs).
    */
   tabIndex?: number;
-  /** Uses tighter spacing without pill decoration in narrow sidebar rows. */
+  /** Uses less spacing and no pill background in sidebar session rows. */
   compact?: boolean;
 }
 
