@@ -42,6 +42,11 @@ import {
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
 import {
+  MCPServerStatus,
+  removeMCPServerStatus,
+  updateMCPServerStatus,
+} from '../tools/mcp-status.js';
+import {
   AGENT_LOOP_SURFACES,
   UNIFIED_SURFACE_DEFAULTS,
   EVENT_BUS_SURFACE_DEFAULTS,
@@ -8129,6 +8134,22 @@ describe('Server Config (config.ts)', () => {
         pendingMcpServers: ['pending'],
       });
       expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('getFailedMcpServerNames does not report a server that is still connecting', () => {
+      // Under the shared transport pool a slow stdio server is still
+      // CONNECTING when `waitForMcpReady()` resolves (the pool spawn can
+      // outlive the discovery promise). Treating that as a failure made the
+      // non-interactive warning name a server that connects moments later.
+      const config = makeConfig({
+        mcpServers: { slow: new MCPServerConfig() },
+      });
+      updateMCPServerStatus('slow', MCPServerStatus.CONNECTING);
+      expect(config.getFailedMcpServerNames()).toEqual([]);
+
+      updateMCPServerStatus('slow', MCPServerStatus.DISCONNECTED);
+      expect(config.getFailedMcpServerNames()).toEqual(['slow']);
+      removeMCPServerStatus('slow');
     });
 
     it('approveMcpServerForSession drops only the approved pending server', () => {
