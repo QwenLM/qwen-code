@@ -514,10 +514,14 @@ function getClearableToolOutput(
   if (typeof output !== 'string') return { chars: 0, persisted: false };
   // A persisted-output stub has already had its oversized content moved to
   // a file; the model keeps recovering it by paging that file back in. Clearing
-  // the stub would trade a preview for nothing (it is already preview-sized)
-  // and destroy the only reference to the saved bytes, so it is never
-  // clearable. Truncations without a saved file keep no such reference and
-  // stay clearable. Prefer the Part-aware recovery handle because it covers
+  // the stub would destroy the only reference to the saved bytes, so its text
+  // is never clearable. Protection keys on that reference, not on the resident
+  // text being small: producers budget their own previews, and `web_fetch`'s
+  // failed-summarizer fallback keeps as much as ~98K chars behind its saved-path
+  // header. Whatever stays resident still joins the size trigger's total below,
+  // so an oversized preview keeps the valve honest instead of hiding from it.
+  // Truncations without a saved file keep no such reference and stay
+  // clearable. Prefer the Part-aware recovery handle because it covers
   // every producer without recognizing their model-visible text. The string
   // fallback remains necessary after JSON serialization or resume drops the
   // non-enumerable handle.
@@ -761,6 +765,24 @@ function planSizeBasedClearing(
 
     clearRefs.push(ref);
     remainingChars -= chars;
+  }
+
+  // Persisted stubs are not spendable — their text is the only reference to
+  // the saved bytes — but nested media on such a part is not part of that
+  // reference and is re-sent on every request. The idle path reaches the
+  // media-strip branch through the `hasNestedMedia` bypass; without these refs
+  // the size trigger would keep reporting a total it refuses to reduce and the
+  // inline bytes would stay resident until an idle pass. They add no
+  // reclaimable chars, so the spend accounting above (and the reported
+  // before/after totals) is unchanged; the clearing loop strips only the media
+  // and leaves the stub text intact.
+  for (const ref of compactableToolRefs) {
+    const key = refKey(ref);
+    if (ref.contentIndex >= history.length || keepToolRefs.has(key)) continue;
+    const part = getPart(virtualHistory, ref);
+    if (!part || !hasNestedMedia(part)) continue;
+    if (!getClearableToolOutput(part, callIdentityById).persisted) continue;
+    clearRefs.push(ref);
   }
 
   return {

@@ -1096,6 +1096,65 @@ the last characters`;
     expect(result.meta!.tokensSaved).toBeGreaterThan(0);
   });
 
+  it('reclaims nested media from a persisted-output stub on the size path', () => {
+    // Same shape as the idle case above, reached through the size valve. The
+    // stub's own chars push the total over the threshold but are not
+    // spendable, so without the media-only refs this branch is unreachable
+    // here and the inline bytes ride along in every request until an idle
+    // pass. The newest result holds the single keepRecent slot.
+    const stub = makePersistedOutputStub();
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'c1',
+              name: 'run_shell_command',
+              response: { output: stub },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'BASE64IMAGE' } },
+              ],
+            } as unknown as NonNullable<
+              Content['parts']
+            >[number]['functionResponse'],
+          },
+        ],
+      },
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'r'.repeat(5_000)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 1,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    const cleared = result.history[1]!.parts![0]!.functionResponse as {
+      response: { output: string };
+      parts?: unknown;
+    };
+    expect(cleared.response.output).toBe(stub);
+    expect(cleared.parts).toBeUndefined();
+    expect(result.meta).toMatchObject({
+      triggerReason: 'size',
+      mediaCleared: 1,
+      toolsCleared: 0,
+    });
+    // The media-only refs are not spendable: the valve's own totals remain
+    // exactly the resident text counted before the strip, so the reclaimed
+    // media can never be double-charged as reclaimed chars.
+    expect(result.meta!.toolResultCharsBefore).toBe(stub.length + 5_000);
+    expect(result.meta!.toolResultCharsAfter).toBe(
+      result.meta!.toolResultCharsBefore,
+    );
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('r'.repeat(5_000));
+  });
+
   it('leaves a truncate-and-save envelope intact on the size path too', () => {
     const envelope = makeTruncationEnvelope();
     const history: Content[] = [
@@ -1272,6 +1331,58 @@ the last characters`;
     ).toBe(protectedRecovery.functionResponse!.response!['output']);
     expect(
       result.history[7]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('newest ordinary output');
+  });
+
+  it('protects a part by the recovery handle alone', () => {
+    // The finalizer stamps the handle on every part of an entry, including one
+    // whose text the budget left intact. Such a part carries no recognized
+    // stub header, so only the Part-aware handle can keep the reference to the
+    // saved file alive — the string fallback would clear it as ordinary text.
+    const outputFile = '/tmp/tool-results/handle-only.output';
+    const [finalized] = enforceFunctionResponseBudget(
+      [
+        {
+          callId: 'handle-only-call',
+          toolName: 'run_shell_command',
+          responseParts: makeToolResult('run_shell_command', 'retained output')
+            .parts!,
+          persistedOutputFiles: [outputFile],
+        },
+      ],
+      1_000,
+    );
+    const part = finalized!.responseParts[0]!;
+    const output = part.functionResponse!.response!['output'] as string;
+    expect(output).toBe('retained output');
+    expect(isPersistedOutputStub(output)).toBe(false);
+    expect(getToolOutputRecovery(part)?.persistedOutputFiles).toEqual([
+      outputFile,
+    ]);
+
+    const result = microcompactHistory(
+      [
+        makeToolCall('run_shell_command'),
+        { role: 'user', parts: [part] },
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'older ordinary output'),
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'newest ordinary output'),
+      ],
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
+      { force: true },
+    );
+
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('retained output');
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history[5]!.parts![0]!.functionResponse!.response!['output'],
     ).toBe('newest ordinary output');
   });
 
