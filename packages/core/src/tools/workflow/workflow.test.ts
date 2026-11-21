@@ -879,7 +879,10 @@ await agent('scan package.json')
   // reached, when the `schema` entry gained what is refused before dispatch
   // and what a failed structured result reports; from 28,500 for the dynamic
   // import() refusal and the per-call batch limit with its batching example
-  // (29,211).
+  // (29,211); from 29,500 for the provable and undetected schema
+  // contradictions now distinguished before dispatch (29,954); from 30,000
+  // for the complete refusal and skip rules (30,085), then their dialect
+  // precondition (30,202).
   it('keeps the inline fallback description within its budget', () => {
     const tool = new WorkflowTool({
       ...fakeConfig(),
@@ -890,7 +893,7 @@ await agent('scan package.json')
     } as unknown as Config);
 
     expect(tool.authoringSurface).toBe('inline');
-    expect(tool.description.length).toBeLessThanOrEqual(29_500);
+    expect(tool.description.length).toBeLessThanOrEqual(30_300);
   });
 
   it.each([

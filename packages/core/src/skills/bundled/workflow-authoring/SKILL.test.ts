@@ -35,6 +35,7 @@ import {
   MAX_WORKFLOW_STALL_MS_ENV,
 } from '../../../agents/runtime/workflow-stall.js';
 import { WorkflowAgentFailedError } from '../../../agents/runtime/workflow-agent-failure.js';
+import { prepareWorkflowSchema } from '../../../agents/runtime/workflow-schema.js';
 import {
   DEFAULT_WORKFLOW_SIZE_GUIDELINE,
   DEFAULT_WORKFLOW_SIZE_WARNING_AGENTS,
@@ -90,6 +91,68 @@ describe('bundled workflow-authoring skill', () => {
     // to run one. The opt-in rule lives in the tool description.
     expect(skill.description).toContain('does not itself authorize');
     expect(skillProse()).toContain('does not authorize a run');
+  });
+
+  it('ties the schema refusal prose to the runtime pre-flight checks', () => {
+    const refused = [
+      null,
+      { propertees: true },
+      { $async: true },
+      { type: 'string' },
+      { type: 'object', required: ['a'], properties: { a: false } },
+      { type: 'object', required: ['a', 'b'], maxProperties: 1 },
+      { unevaluatedProperties: {} },
+      { dependentRequired: {} },
+      { dependentSchemas: {} },
+      { $dynamicRef: '#' },
+      { $recursiveRef: '#' },
+    ];
+    for (const schema of refused) {
+      expect(prepareWorkflowSchema(schema).ok).toBe(false);
+    }
+    const contradictory = {
+      type: 'object',
+      required: ['a'],
+      properties: { a: false },
+    };
+    for (const schema of [
+      { ...contradictory, $ref: '#' },
+      { ...contradictory, allOf: [{}] },
+      { ...contradictory, anyOf: [{}] },
+      { ...contradictory, oneOf: [{}] },
+      { ...contradictory, not: {} },
+      { ...contradictory, if: {}, then: {}, else: {} },
+      { ...contradictory, dependencies: {} },
+      { ...contradictory, propertyNames: {} },
+      ...[
+        'unevaluatedProperties',
+        'dependentRequired',
+        'dependentSchemas',
+        '$dynamicRef',
+        '$recursiveRef',
+      ].map((keyword) => ({
+        ...contradictory,
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        [keyword]: keyword.endsWith('Ref') ? '#' : {},
+      })),
+    ]) {
+      expect(prepareWorkflowSchema(schema).ok).toBe(true);
+    }
+
+    const prose = skillProse();
+    for (const anchor of [
+      'not an object',
+      'fails strict compilation',
+      'uses `$async`',
+      'root `type`/`const`/`enum`',
+      'required property its own object forbids',
+      'required list longer than `maxProperties` allows',
+      'skips a node carrying',
+      'property-name keywords',
+      'newer-dialect spellings need a matching `$schema`',
+    ]) {
+      expect(prose).toContain(anchor);
+    }
   });
 
   // Guidance that left the tool description for this skill. Each anchor is
