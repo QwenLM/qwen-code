@@ -74,6 +74,10 @@ import {
   type DaemonDiscoveryEntry,
   type DaemonDiscoveryRecord,
 } from '../serve/daemon-discovery.js';
+import {
+  readDaemonOccupancy,
+  startDaemonOccupancyPublisher,
+} from '../serve/daemon-occupancy.js';
 
 function entry(port: number): DaemonDiscoveryEntry {
   return {
@@ -884,6 +888,110 @@ describe('qwen daemon command', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/health');
     } finally {
+      stdout.mockRestore();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('shows unchecked and dead daemon samples offline, then prunes the dead sample online', async () => {
+    const dir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-offline-status-'),
+    );
+    vi.stubEnv('QWEN_RUNTIME_DIR', dir);
+    const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const fetchMock = vi.fn(async () => new Response('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+    const stopPublishers: Array<() => Promise<void>> = [];
+    const records = [
+      { ...entry(4170).record, pidNamespace: 'pid:[2]' },
+      { ...entry(4171).record, pidNamespace: 'pid:[1]' },
+      { ...entry(4172).record, pidNamespace: 'pid:[2]' },
+    ];
+    const run = (...args: string[]) =>
+      yargs([])
+        .exitProcess(false)
+        .fail(false)
+        .command(daemonCommand)
+        .parseAsync(['daemon', 'status', ...args]);
+
+    try {
+      const entries = records.map((record) => ({
+        record,
+        path: writeDaemonDiscovery(record),
+      }));
+      for (const item of entries.slice(0, 2)) {
+        stopPublishers.push(
+          startDaemonOccupancyPublisher(
+            item,
+            () => ({
+              total: 1,
+              bySurface: {
+                restEvents: 1,
+                agentEvents: 0,
+                generation: 0,
+                artifactLibrary: 0,
+                hostedEvents: 0,
+                acpSse: 0,
+                acpWs: 0,
+              },
+              byListener: {
+                primary: 1,
+                'local-control': 0,
+                'remote-access': 0,
+              },
+            }),
+            () => {},
+          ),
+        );
+      }
+      await vi.waitFor(() => {
+        expect(readDaemonOccupancy(entries[0]!)).toBeDefined();
+        expect(readDaemonOccupancy(entries[1]!)).toBeDefined();
+      });
+
+      await run('--offline', '--json');
+      const rows = stdout.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(rows).toMatchObject([
+        {
+          port: 4170,
+          status: 'unchecked',
+          streamOccupancy: {
+            total: 1,
+            stale: false,
+            asOf: expect.any(String),
+            bySurface: { restEvents: 1 },
+            byListener: { primary: 1 },
+          },
+        },
+        { port: 4171, status: 'stale', streamOccupancy: { stale: true } },
+        { port: 4172, status: 'unchecked', streamOccupancy: null },
+      ]);
+      expect(fetchMock).not.toHaveBeenCalled();
+      await expect(run('--offline', '--prune')).rejects.toThrow(
+        '--offline cannot be combined',
+      );
+      await expect(run('--offline', '--detail')).rejects.toThrow(
+        '--offline cannot be combined',
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+      await expect(fsp.stat(entries[1]!.path)).resolves.toBeDefined();
+
+      await run('--prune', '--json');
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      await expect(fsp.stat(entries[1]!.path)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(readDaemonOccupancy(entries[1]!)).toBeUndefined();
+      expect(readDaemonOccupancy(entries[0]!)).toBeDefined();
+    } finally {
+      await Promise.all(stopPublishers.map((stop) => stop()));
       stdout.mockRestore();
       vi.unstubAllGlobals();
       vi.unstubAllEnvs();

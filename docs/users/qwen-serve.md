@@ -134,6 +134,7 @@ qwen daemon start --port 4170      # detached; waits for the discovery record
 qwen daemon status                 # ports, PIDs, workspaces, and health
 qwen daemon status --json          # one JSON object per daemon
 qwen daemon status --detail        # version, uptime, sessions, and issues
+qwen daemon status --offline       # local listener-slot counts without HTTP
 qwen daemon logs --port 4170 -f    # follow the recorded log file
 qwen daemon stop --port 4170       # SIGTERM the recorded process
 qwen daemon restart --port 4170    # stop, then start with the recorded settings
@@ -144,6 +145,8 @@ Records live under the runtime directory (`$QWEN_RUNTIME_DIR`, `$QWEN_HOME`, or 
 `status --detail` asks the daemon for its own status: version, uptime, active sessions, and issue count. It sends `QWEN_SERVER_TOKEN` only when the record says the daemon uses a bearer and the recorded process is alive, addressable, and started when the record says it did; a record whose recorded PID namespace this process cannot address is never sent the bearer. Without a token, a daemon that requires a bearer reports that authentication is required.
 
 With `status --detail --json`, each daemon's `detail` also preserves the available `runtime.process`, `runtime.memory`, and `limits.memory` diagnostics from `/daemon/status`. Values retain their original units and nulls; fields unavailable on older daemons are omitted. `runtime.process` describes the daemon process, not its process tree. Child RSS is a sampled sum: check `children.sampled` and `oldestReadingAgeMs`, since sampling requires an active SSE/WS watcher and zero samples do not mean zero child memory use.
+
+`status --offline` reads the last local sample of occupied listener slots when an HTTP health check cannot get through. It shows the total, a breakdown by stream surface and listener, and the sampling time. The daemon refreshes the sample every five seconds. A sample at least 15 seconds old or from a known-exited process is marked stale. Health is `unchecked` when the reader cannot establish that the process has exited. In `status --offline --json`, the sample is in `streamOccupancy` with an `asOf` timestamp and a `stale` flag. Missing or unreadable data appears as unavailable (`null` in JSON). Use `--detail` for a live HTTP check and `--prune` to remove stale records in separate invocations.
 
 `qwen daemon start` spawns `qwen serve` detached, waits for its discovery record, and prints the bound URL, PID, log path, and stop command. It drops the launching session's identifiers and private capability bindings so the child is a fresh daemon, keeps the operator's model/auth environment, and passes `--no-token-qr` so the startup log cannot contain a token. Workspaces are canonicalized, relative runtime directories are pinned to the launching directory before spawn, and Windows drive-relative roots are resolved against the launching drive. A non-loopback bind requires `QWEN_SERVER_TOKEN`; use `qwen serve` directly if you want an ephemeral token. The startup log is `0600` and is removed after a successful start. `--wait` waits until the runtime is serving (no `daemon_runtime_starting` issue and not `error`); a timeout keeps the startup log and exits non-zero.
 

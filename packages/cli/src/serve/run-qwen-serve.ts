@@ -317,7 +317,9 @@ import {
   removeDaemonDiscovery,
   removeDaemonToken,
   writeDaemonDiscovery,
+  type DaemonDiscoveryRecord,
 } from './daemon-discovery.js';
+import { startDaemonOccupancyPublisher } from './daemon-occupancy.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -4849,15 +4851,22 @@ async function runQwenServeImpl(
 
   let actualPort = opts.port;
   let discoveryRecordPath: string | undefined;
+  let stopOccupancyPublisher: (() => Promise<void>) | undefined;
   const removeDiscoveryRecord = (): void => {
     if (!discoveryRecordPath) return;
+    const dir = path.dirname(discoveryRecordPath);
     discoveryRecordPath = undefined;
+    process.off('exit', removeDiscoveryRecordOnExit);
     try {
-      removeDaemonDiscovery(actualPort, { expectedPid: process.pid });
-      removeDaemonToken(actualPort, process.pid);
+      removeDaemonDiscovery(actualPort, { dir, expectedPid: process.pid });
+      removeDaemonToken(actualPort, process.pid, dir);
     } catch {
       // Best-effort: a stale record is pruned by `qwen daemon status`.
     }
+  };
+  const removeDiscoveryRecordOnExit = (): void => {
+    void stopOccupancyPublisher?.();
+    removeDiscoveryRecord();
   };
 
   // Resolve the built Web Shell SPA so createServeApp can mount the UI at the
@@ -4911,6 +4920,9 @@ async function runQwenServeImpl(
   // collapses to "did we resolve real assets".
   const webShellMounted = !!webShellDir;
   const serveAppLifecycle = new ServeAppLifecycleController();
+  serveAppLifecycle.addAppDrain(async () => {
+    await stopOccupancyPublisher?.();
+  });
   const restartForUpdate = deps.updateRestartArgv
     ? createDaemonUpdateRestarter({
         argv: deps.updateRestartArgv,
@@ -10941,7 +10953,7 @@ async function runQwenServeImpl(
           // dangling stdin/stdout pipes — visible as orphan
           // `qwen` processes in the operator's `ps` output.
           daemonLog.warn(`received ${signal} during drain — forcing exit`);
-          removeDiscoveryRecord();
+          removeDiscoveryRecordOnExit();
           try {
             managedProcessRegistry?.killAllSync();
             channelWorkerManager?.killAllSync();
@@ -11454,7 +11466,7 @@ async function runQwenServeImpl(
       );
       try {
         const discoveryLogPath = daemonLog.getLogPath();
-        discoveryRecordPath = writeDaemonDiscovery({
+        const record: DaemonDiscoveryRecord = {
           v: DAEMON_DISCOVERY_VERSION,
           pid: process.pid,
           port: actualPort,
@@ -11473,8 +11485,18 @@ async function runQwenServeImpl(
           requireAuth: opts.requireAuth === true,
           ...(discoveryLogPath ? { logPath: discoveryLogPath } : {}),
           pidNamespace: currentPidNamespace(),
-        });
-        process.once('exit', removeDiscoveryRecord);
+        };
+        discoveryRecordPath = writeDaemonDiscovery(record);
+        process.once('exit', removeDiscoveryRecordOnExit);
+        stopOccupancyPublisher = startDaemonOccupancyPublisher(
+          { record, path: discoveryRecordPath },
+          getSseOccupancy,
+          (error) => {
+            daemonLog.warn('could not update the daemon occupancy snapshot', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          },
+        );
       } catch (err) {
         writeStderrLine(
           `qwen serve: could not write the daemon discovery record: ${
