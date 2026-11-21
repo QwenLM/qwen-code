@@ -37,7 +37,7 @@ describe('query()', () => {
     mockQuery.mockImplementation(() => ({
       initialized: Promise.resolve(),
       getSessionId: () => 'test-session-id',
-      streamInput: vi.fn(),
+      streamInput: vi.fn().mockResolvedValue(undefined),
     }));
   });
 
