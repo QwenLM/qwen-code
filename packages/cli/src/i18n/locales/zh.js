@@ -2555,6 +2555,8 @@ export default {
   '[{{label}}] failed: {{error}}': '[{{label}}] 失败：{{error}}',
   'Loading suggestions...': '正在加载建议...',
   'Open the memory manager.': '打开记忆管理器。',
+  'Print the combined memory content the session carries.':
+    '打印当前会话携带的组合记忆内容。',
   'Show current process memory diagnostics': '显示当前进程的内存诊断。',
   'Record a CPU profile for Chrome DevTools analysis':
     '录制 CPU 性能分析文件，用于 Chrome DevTools 分析',

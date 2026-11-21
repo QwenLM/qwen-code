@@ -2246,6 +2246,8 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': '打開記憶管理器。',
+  'Print the combined memory content the session carries.':
+    '列印目前工作階段攜帶的組合記憶內容。',
   'Show current process memory diagnostics': '顯示目前程序的內存診斷。',
   'Record a CPU profile for Chrome DevTools analysis':
     '錄製 CPU 效能分析檔案，用於 Chrome DevTools 分析',

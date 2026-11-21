@@ -1592,6 +1592,8 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': 'メモリマネージャーを開く。',
+  'Print the combined memory content the session carries.':
+    'セッションが保持している結合メモリの内容を出力します。',
   'Save a durable memory to the memory system.':
     '永続メモリをメモリシステムに保存する。',
   prompts: 'プロンプト',

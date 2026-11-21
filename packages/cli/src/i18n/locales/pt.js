@@ -2056,6 +2056,8 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': 'Abrir o gerenciador de memória.',
+  'Print the combined memory content the session carries.':
+    'Imprime o conteúdo de memória combinado que a sessão carrega.',
   'Save a durable memory to the memory system.':
     'Salvar uma memória durável no sistema de memória.',
   prompts: 'Prompts (sugestões)',
