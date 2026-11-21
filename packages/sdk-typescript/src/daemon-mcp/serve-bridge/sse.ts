@@ -179,6 +179,7 @@ export function startSessionCleanup(state: BridgeState): () => void {
   const timer = setInterval(() => {
     const now = Date.now();
     for (const [sessionId, stream] of state.eventStreams) {
+      if (stream.activeCollector) continue;
       if (now - stream.lastActivityMs > SESSION_TTL_MS) {
         process.stderr.write(
           `[serve-bridge] Cleaning up idle session SSE: ${sessionId}\n`,
