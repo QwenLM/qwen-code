@@ -1195,6 +1195,32 @@ describe('ci flaky rerun patrol', () => {
     }
   });
 
+  it('keeps the failure payload of a control-free quoted JSON object', () => {
+    // Regression: the repair pass re-matched the already-redacted value and ran
+    // its whitespace-bounded token to the end of the line, eating the rest of
+    // the JSON object — the failure identifier the excerpt exists to show. A
+    // quoted value must stop at its closing quote; an already-[redacted] value
+    // followed by a structural delimiter must not be re-redacted greedily.
+    for (const [line, payload] of [
+      [
+        '{"authToken":"s3cr3t","err":"TestFailed:suiteA"}',
+        '"err":"TestFailed:suiteA"',
+      ],
+      [
+        '{"apiKey":"s3cr3t","msg":"AssertionError: expected 1 to be 2"}',
+        '"msg":"AssertionError: expected 1 to be 2"',
+      ],
+      [
+        '{"db_password":"x","msg":"AssertionError: boom"}',
+        '"msg":"AssertionError: boom"',
+      ],
+    ]) {
+      const evidence = skillLog(`${line}\n`);
+      expect(evidence, line).toContain(payload);
+      expect(evidence, line).not.toContain('s3cr3t');
+    }
+  });
+
   it('keeps the failure line a welded URL userinfo would otherwise reach', () => {
     // The scheme rule's userinfo is a tempered token per @-segment: it runs to
     // the next whitespace or @ but never across the ##[error] marker. Two

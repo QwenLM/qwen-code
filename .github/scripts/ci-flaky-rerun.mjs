@@ -257,31 +257,44 @@ function redactLog(log) {
 // span likewise stops the private-key match, preserving the marker over
 // redacting the span. Recorded in the design doc.
 function redactWeldedTokens(log) {
-  return log
-    .replace(
-      /-----BEGIN [^-\r\n]+-----(?:(?!##\[error\])[\s\S])*?-----END [^-\r\n]+-----/g,
-      '[redacted private key]',
-    )
-    .replace(
-      /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
-      '[redacted jwt]',
-    )
-    .replace(/(Bearer[^\S\n]*)(?:(?!##\[error\])[^\s])+/gi, '$1[redacted]')
-    .replace(
-      /(?:gh[pousr]_|github_pat_|glpat-|xox[bp]-)[A-Za-z0-9_-]{8,}/g,
-      '[redacted]',
-    )
-    .replace(/sk-(?:proj-)?[A-Za-z0-9-]{20,}/g, 'sk-[redacted]')
-    .replace(/(?:AKIA|ASIA)[A-Z0-9]{16}/g, '[redacted]')
-    .replace(/npm_[A-Za-z0-9]{20,}/g, '[redacted]')
-    .replace(
-      /([a-z][a-z0-9+.-]{0,19}:\/\/)(?:(?:(?!##\[error\])[^/\s@])+@)+/gi,
-      '$1[redacted]@',
-    )
-    .replace(
-      /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?(?:(?!##\[error\])[^\s])+["']?/gi,
-      '$1$2$3[redacted]',
-    );
+  return (
+    log
+      .replace(
+        /-----BEGIN [^-\r\n]+-----(?:(?!##\[error\])[\s\S])*?-----END [^-\r\n]+-----/g,
+        '[redacted private key]',
+      )
+      .replace(
+        /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
+        '[redacted jwt]',
+      )
+      .replace(/(Bearer[^\S\n]*)(?:(?!##\[error\])[^\s])+/gi, '$1[redacted]')
+      .replace(
+        /(?:gh[pousr]_|github_pat_|glpat-|xox[bp]-)[A-Za-z0-9_-]{8,}/g,
+        '[redacted]',
+      )
+      .replace(/sk-(?:proj-)?[A-Za-z0-9-]{20,}/g, 'sk-[redacted]')
+      .replace(/(?:AKIA|ASIA)[A-Z0-9]{16}/g, '[redacted]')
+      .replace(/npm_[A-Za-z0-9]{20,}/g, '[redacted]')
+      .replace(
+        /([a-z][a-z0-9+.-]{0,19}:\/\/)(?:(?:(?!##\[error\])[^/\s@])+@)+/gi,
+        '$1[redacted]@',
+      )
+      // Quoted values are bounded by their matching closing quote so a value does
+      // not run into the next JSON field. Unquoted values use a whitespace-bounded
+      // tempered token, but skip a value that is already the [redacted] placeholder
+      // followed by a structural delimiter: pass 1 redacted it, and re-running the
+      // greedy token would eat the rest of the JSON object (the failure payload).
+      // A fork's [redacted]secret is still redacted — more credential characters,
+      // not a delimiter, follow the placeholder.
+      .replace(
+        /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)(["'])((?:(?!##\[error\])[^\\])*?)\4/gi,
+        '$1$2$3[redacted]',
+      )
+      .replace(
+        /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?(?!\[redacted\](?=[,}"'\s]|$))(?:(?!##\[error\])[^\s])+["']?/gi,
+        '$1$2$3[redacted]',
+      )
+  );
 }
 
 const TERMINAL_CONTROLS =
