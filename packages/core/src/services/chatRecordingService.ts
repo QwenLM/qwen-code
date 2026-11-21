@@ -1222,6 +1222,7 @@ interface StrictRecordAppendOptions {
   updateActiveTail?: boolean;
   expectedBranchGeneration?: number;
   afterWrite?: (legacyConversationFile?: string) => void;
+  projectPromptTitle?: boolean;
 }
 
 interface BufferedRecordAppend {
@@ -1311,6 +1312,7 @@ export class ChatRecordingService {
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
   private legacyArchiveGeneration?: { filePath: string; value?: string };
+  private pendingPromptTitleProjections = 0;
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
   private pinnedSessionId: string | undefined;
   private state:
@@ -1638,32 +1640,64 @@ export class ChatRecordingService {
     }
   }
 
-  private persistPromptDerivedTitle(
+  private preparePromptTitleProjection(
     record: ChatRecord,
     legacyConversationFile?: string,
-  ): void {
-    if (this.managedSink) return;
-    // The projected restore carries no record stream, so the session's first
-    // prompt is unknown. Inventing a label from a later prompt would name the
-    // session after the wrong turn as soon as its transcript loses its head.
-    if (this.firstPromptUnknown) return;
-    try {
-      const sidecarPath = this.titleSidecarPath(legacyConversationFile);
-      // Any persisted label wins: a later prompt must not replace the first
-      // prompt's label, a rename, or an auto title. This also lets an
-      // image-only first prompt leave the slot open for the next text prompt.
+  ): StrictRecordAppendOptions['afterWrite'] {
+    // The projected restore carries no record stream, so a later prompt
+    // cannot stand in for the original prompt when the transcript loses its head.
+    if (this.managedSink || this.firstPromptUnknown) return undefined;
+    const text = firstPromptLabelText(record);
+    if (!text) return undefined;
+    const project = (filePath?: string) => {
+      const sidecarPath = this.titleSidecarPath(filePath);
+      // An earlier prompt or an explicit title always wins.
       if (readSessionTitleSidecar(sidecarPath)) return;
-      const text = firstPromptLabelText(record);
-      if (!text) return;
       writeSessionTitleSidecar(
         sidecarPath,
         truncateTitleForList(text),
         'prompt',
       );
+    };
+    try {
+      // An already published title requires no lock or write.
+      if (
+        readSessionTitleSidecar(this.titleSidecarPath(legacyConversationFile))
+      ) {
+        return undefined;
+      }
+      if (this.pendingPromptTitleProjections === 0) {
+        if (!legacyConversationFile) {
+          project(); // The active writer already owns the long-lived lease.
+          return undefined;
+        }
+        const generation = this.legacyArchiveGeneration?.value;
+        const published = withSessionArchiveWriteLockSync(
+          legacyConversationFile,
+          () => {
+            assertSessionArchiveGeneration(legacyConversationFile, generation);
+            if (!fs.existsSync(legacyConversationFile)) return false;
+            project(legacyConversationFile);
+            return true;
+          },
+        );
+        if (published) return undefined;
+      }
     } catch {
-      // Best-effort: recording the prompt itself must not depend on the label
-      // sidecar, which can be unwritable (read-only home, partial Config).
+      // A busy or unwritable sidecar must never drop a transcript record.
     }
+    // The queued append retries under the same lock. A later prompt cannot
+    // bypass a deferred one and take the label first.
+    this.pendingPromptTitleProjections++;
+    return (filePath) => {
+      try {
+        project(filePath);
+      } catch {
+        // Best effort: the transcript is still authoritative.
+      } finally {
+        this.pendingPromptTitleProjections--;
+      }
+    };
   }
 
   /**
@@ -1673,16 +1707,42 @@ export class ChatRecordingService {
    * session never gets because the first prompt is already in its history.
    */
   private seedTitleSidecar(promptDisplayText?: string): void {
-    if (this.managedSink) return;
+    if (this.managedSink || (!this.currentCustomTitle && !promptDisplayText)) {
+      return;
+    }
     try {
       if (this.writerLeaseRequired) {
         this.seedTitleSidecarWhileOwned(promptDisplayText);
-      } else {
-        const { filePath, value } = this.captureLegacyArchiveGeneration();
-        if (!fs.existsSync(filePath)) return;
-        withSessionArchiveWriteLockSync(filePath, () => {
-          assertSessionArchiveGeneration(filePath, value);
-          this.seedTitleSidecarWhileOwned(promptDisplayText);
+        return;
+      }
+      const { filePath, value } = this.captureLegacyArchiveGeneration();
+      if (!fs.existsSync(filePath)) return;
+      const seed = () => {
+        assertSessionArchiveGeneration(filePath, value);
+        if (fs.existsSync(filePath)) {
+          this.seedTitleSidecarWhileOwned(promptDisplayText, filePath);
+        }
+      };
+      try {
+        withSessionArchiveWriteLockSync(filePath, seed);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ELOCKED') throw error;
+        // Do not let the next prompt take the label before this resume seed.
+        this.pendingPromptTitleProjections++;
+        this.operationTail = this.operationTail.then(async () => {
+          try {
+            const lock = await acquireSessionArchiveWriteLock(filePath);
+            try {
+              lock.assertHeld();
+              seed();
+            } finally {
+              await lock.release();
+            }
+          } catch {
+            // A failed seed does not break the resumed recorder.
+          } finally {
+            this.pendingPromptTitleProjections--;
+          }
         });
       }
     } catch {
@@ -1690,8 +1750,11 @@ export class ChatRecordingService {
     }
   }
 
-  private seedTitleSidecarWhileOwned(promptDisplayText?: string): void {
-    const sidecarPath = this.titleSidecarPath();
+  private seedTitleSidecarWhileOwned(
+    promptDisplayText?: string,
+    legacyConversationFile?: string,
+  ): void {
+    const sidecarPath = this.titleSidecarPath(legacyConversationFile);
     const existing = readSessionTitleSidecar(sidecarPath);
     const customTitle = this.currentCustomTitle?.trim();
     if (customTitle) {
@@ -2128,7 +2191,9 @@ export class ChatRecordingService {
       record,
       legacyConversationFile,
       updateActiveTail,
-      options?.afterWrite,
+      options?.projectPromptTitle
+        ? this.preparePromptTitleProjection(record, legacyConversationFile)
+        : options?.afterWrite,
     );
     this.updateMetadataAnchorTracking(record);
   }
@@ -2957,10 +3022,7 @@ export class ChatRecordingService {
       if (turnId) this.pendingHookTurnParents.delete(turnId);
       this.turnPromptIds.push(turnId);
       this.turnDaemonPromptIds.push(record.daemonPromptId);
-      this.appendRecord(record, {
-        afterWrite: (filePath) =>
-          this.persistPromptDerivedTitle(record, filePath),
-      });
+      this.appendRecord(record, { projectPromptTitle: true });
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
     }

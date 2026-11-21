@@ -203,6 +203,71 @@ describe('archive fences legacy transcript writers', () => {
     );
   });
 
+  it.each(['archived', 'restored'] as const)(
+    'does not let a stale recorder seed a missing title on a %s transcript',
+    async (state) => {
+      const { writer, content } = await seed();
+      fs.rmSync(liveTitlePath);
+      expect((await service.archiveSessions([sessionId])).archived).toEqual([
+        sessionId,
+      ]);
+      if (state === 'restored') {
+        expect(
+          (await service.unarchiveSessions([sessionId])).unarchived,
+        ).toEqual([sessionId]);
+      }
+
+      writer.recordUserMessage([{ text: 'Stale prompt' }]);
+      expect(fs.existsSync(liveTitlePath)).toBe(false);
+      await expect(writer.flush()).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      expect(fs.existsSync(livePath)).toBe(state === 'restored');
+      expect(fs.existsSync(liveTitlePath)).toBe(false);
+      expect(
+        fs.readFileSync(state === 'restored' ? livePath : archivedPath, 'utf8'),
+      ).toBe(content);
+    },
+  );
+
+  it('keeps the first prompt label when its synchronous projection is busy', async () => {
+    fs.mkdirSync(path.dirname(livePath), { recursive: true });
+    const lock = await acquireSessionArchiveWriteLock(livePath);
+    const writer = recorder();
+    try {
+      writer.recordUserMessage([{ text: 'First prompt' }]);
+      expect(readSessionTitleSidecar(liveTitlePath)).toBeUndefined();
+    } finally {
+      await lock.release();
+    }
+    writer.recordUserMessage([{ text: 'Second prompt' }]);
+    await writer.flush();
+    expect(readSessionTitleSidecar(liveTitlePath)?.displayName).toBe(
+      'First prompt',
+    );
+  });
+
+  it('seeds a busy resume from its actual first prompt before the next prompt', async () => {
+    const { content } = await seed();
+    fs.rmSync(liveTitlePath);
+    const records = content
+      .trimEnd()
+      .split('\n')
+      .map((line) => JSON.parse(line) as ChatRecord);
+    const lock = await acquireSessionArchiveWriteLock(livePath);
+    const resumed = recorder({ records, tail: records.at(-1)!.uuid });
+    try {
+      expect(readSessionTitleSidecar(liveTitlePath)).toBeUndefined();
+    } finally {
+      await lock.release();
+    }
+    resumed.recordUserMessage([{ text: 'Prompt after resume' }]);
+    await resumed.flush();
+    expect(readSessionTitleSidecar(liveTitlePath)?.displayName).toBe(
+      'First prompt',
+    );
+  });
+
   it('serializes a title queued while archive is inside the move boundary', async () => {
     const { writer, content } = await seed();
     let enter!: () => void;

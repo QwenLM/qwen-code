@@ -23,6 +23,9 @@ processes, or change deletion or ownership of sibling sessions.
   rename, and archive/unarchive use a short per-transcript filesystem lock in
   the active `chats` directory. An archive cannot move a transcript between an
   accepted legacy append and its title sidecar write.
+  Prompt labels and resume seeds still appear immediately when the active
+  path is uncontended. If the lock is busy, the projection is deferred
+  without allowing a later prompt to take the label first.
 - Immediately before a real archive/unarchive move or conflict resolution, the
   service atomically replaces the sibling `<id>.jsonl.archive-generation`
   token. A recorder retains the token it saw when it loaded or first recorded
