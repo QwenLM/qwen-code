@@ -673,6 +673,7 @@ describe('release workflow', () => {
           env: {
             ...process.env,
             PUBLISH_AUDIO_CAPTURE: 'true',
+            PUBLISH_CHANNEL_MSTEAMS: 'true',
             PUBLISH_EXTERNAL_CONTEXT_MEM0: 'true',
           },
         },
@@ -685,6 +686,73 @@ describe('release workflow', () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  // The publish-set matrix drives all three switches from one value, so a
+  // gate cloned onto a sibling variable stays green there. Enable one gate
+  // at a time and expect the set from the package identity, not the flag.
+  const BOOTSTRAP_SWITCHES = {
+    '@qwen-code/audio-capture': 'PUBLISH_AUDIO_CAPTURE',
+    '@qwen-code/channel-msteams': 'PUBLISH_CHANNEL_MSTEAMS',
+    '@qwen-code/external-context-mem0': 'PUBLISH_EXTERNAL_CONTEXT_MEM0',
+  };
+
+  // audio-capture is gated on the repository, not on a bootstrap variable,
+  // so its remedy is not a switch a maintainer can set.
+  const SKIP_NOTICES = {
+    '@qwen-code/audio-capture':
+      '::notice::Skipping @qwen-code/audio-capture; it publishes only from QwenLM/qwen-code',
+    '@qwen-code/channel-msteams':
+      '::notice::Skipping @qwen-code/channel-msteams; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true to re-enable it (bootstrap complete)',
+    '@qwen-code/external-context-mem0':
+      '::notice::Skipping @qwen-code/external-context-mem0; set NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED=true',
+  };
+
+  it.each(Object.entries(BOOTSTRAP_SWITCHES))(
+    'selects %s only when its own publish switch is set',
+    (pkg, variable) => {
+      const env = { ...process.env };
+      for (const key of Object.values(BOOTSTRAP_SWITCHES)) env[key] = 'false';
+      env[variable] = 'true';
+      const result = spawnSync(
+        process.execPath,
+        [join(process.cwd(), 'scripts/release-packages.mjs')],
+        { encoding: 'utf8', env },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim().split('\n')).toEqual(
+        RELEASE_WORKSPACES.filter(
+          (name) => name === pkg || !(name in BOOTSTRAP_SWITCHES),
+        ),
+      );
+      // A silent skip is indistinguishable from a mistyped variable, so every
+      // gated package names itself and its remedy in the runner log — and
+      // emits no notice for itself when it does publish.
+      for (const other of Object.keys(BOOTSTRAP_SWITCHES)) {
+        if (other === pkg) {
+          expect(result.stderr).not.toContain(`::notice::Skipping ${other}`);
+        } else {
+          expect(result.stderr).toContain(SKIP_NOTICES[other]);
+        }
+      }
+    },
+  );
+
+  // release.yml always materialises 'true'/'false', so only a direct
+  // invocation can omit a switch. Unset must skip like 'false': a gate
+  // narrowed to === 'false' would publish a never-bootstrapped package.
+  it('skips every bootstrap-gated package when its switch is unset', () => {
+    const env = { ...process.env };
+    for (const key of Object.values(BOOTSTRAP_SWITCHES)) delete env[key];
+    const result = spawnSync(
+      process.execPath,
+      [join(process.cwd(), 'scripts/release-packages.mjs')],
+      { encoding: 'utf8', env },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim().split('\n')).toEqual(
+      RELEASE_WORKSPACES.filter((name) => !(name in BOOTSTRAP_SWITCHES)),
+    );
   });
 
   it('keeps the workflow focused on orchestration', () => {
@@ -800,6 +868,7 @@ describe('release workflow', () => {
               IS_DRY_RUN: dryRun,
               NPM_TAG: 'preview',
               PUBLISH_AUDIO_CAPTURE: optional,
+              PUBLISH_CHANNEL_MSTEAMS: optional,
               PUBLISH_EXTERNAL_CONTEXT_MEM0: optional,
               PUBLISH_FAILURE: failure,
               CLI_PUBLISHED: cliPublished,
@@ -830,6 +899,7 @@ describe('release workflow', () => {
               optional === 'true' ||
               ![
                 '@qwen-code/audio-capture',
+                '@qwen-code/channel-msteams',
                 '@qwen-code/external-context-mem0',
               ].includes(name),
           ),
@@ -4030,19 +4100,26 @@ esac`,
     );
   });
 
-  it('publishes the Mem0 Extension only after trusted publishing bootstrap', () => {
+  it('publishes bootstrap-gated packages only after trusted publishing bootstrap', () => {
     const publishSteps = releaseYaml.jobs.publish.steps;
     const publishStep = publishSteps.find(
       (step) => step.name === 'Publish npm packages',
     );
-    expect(publishStep.env.PUBLISH_EXTERNAL_CONTEXT_MEM0).toContain(
-      "vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true'",
+    // npm cannot bind trusted publishing to a package that has never been
+    // published, so the first Teams release failed the nightly's publish job
+    // (#17898). Pin whole expressions, not substrings: `toContain` survives
+    // `&&` -> `||`, which publishes a gate before its bootstrap exists.
+    expect(publishStep.env.PUBLISH_EXTERNAL_CONTEXT_MEM0).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true' }}",
+    );
+    expect(publishStep.env.PUBLISH_CHANNEL_MSTEAMS).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED == 'true' }}",
     );
     // The audio-capture switch replaced a deleted step-level
     // `if: github.repository == 'QwenLM/qwen-code'` gate. Unpinned, a fork
     // running this workflow would publish @qwen-code/audio-capture.
-    expect(publishStep.env.PUBLISH_AUDIO_CAPTURE).toContain(
-      "github.repository == 'QwenLM/qwen-code'",
+    expect(publishStep.env.PUBLISH_AUDIO_CAPTURE).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' }}",
     );
   });
 

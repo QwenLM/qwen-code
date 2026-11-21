@@ -31,17 +31,36 @@ export const RELEASE_WORKSPACES = getWorkspacePackageJsonPaths(root, workspaces)
   .map((pkg) => pkg.name);
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  // Skip notices go to stderr, never stdout: stdout is the publish step's
+  // --filter payload.
   for (const name of RELEASE_WORKSPACES) {
     if (
       name === '@qwen-code/audio-capture' &&
       process.env.PUBLISH_AUDIO_CAPTURE !== 'true'
-    )
+    ) {
+      console.error(
+        `::notice::Skipping ${name}; it publishes only from QwenLM/qwen-code`,
+      );
       continue;
+    }
+    if (
+      name === '@qwen-code/channel-msteams' &&
+      process.env.PUBLISH_CHANNEL_MSTEAMS !== 'true'
+    ) {
+      console.error(
+        `::notice::Skipping ${name}; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true to re-enable it (bootstrap complete)`,
+      );
+      continue;
+    }
     if (
       name === '@qwen-code/external-context-mem0' &&
       process.env.PUBLISH_EXTERNAL_CONTEXT_MEM0 !== 'true'
-    )
+    ) {
+      console.error(
+        `::notice::Skipping ${name}; set NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED=true after its bootstrap publish`,
+      );
       continue;
+    }
     console.log(name);
   }
 }

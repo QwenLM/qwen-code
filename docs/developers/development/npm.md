@@ -79,9 +79,40 @@ Every scheduled or manual release follows these steps:
 5.  Builds and publishes the packages to npm with the appropriate dist-tag.
 6.  Creates a GitHub Release for the version.
 
+### Bootstrap-gated packages
+
+npm only lets a maintainer configure trusted publishing for a package that
+already exists, and `Publish Release` authenticates with trusted publishing
+alone — it carries no npm token. A package that has never been published
+therefore cannot be released by the workflow, and attempting it fails the
+whole `publish` job, not just that package. Such packages are gated on
+repository variables so a release skips them instead of failing to
+authenticate.
+
+`@qwen-code/external-context-mem0` is still awaiting its one-time public
+bootstrap publish. It stays out of the publish set until a maintainer
+bootstrap-publishes it and binds it to `release.yml` in the `production-release`
+environment, then sets `NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED`
+to `true` (it defaults to off). Bootstrap at a version that has already shipped
+— the first release that ships with the package skipped — never at an upcoming
+one, and do not invent a second version line. The version probe runs once, in
+`prepare`: a stable release increments past a hand publish that landed before
+that probe, leaving the stray version on npm for good. Once the version is
+frozen, a hand publish before the push guard refuses the release without a
+failure issue. One after it does not: the publish step skips a version that
+already exists, and a package whose gate is off is never in the publish set —
+so the release completes and the stray version stays on npm.
+
+`@qwen-code/channel-msteams` was bootstrap-published on 2026-11-20 and has been
+published by the release workflow since, so it is no longer awaiting a
+bootstrap. Its gate `NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED` is already
+`true`, which puts it in the publish set; the variable now serves only as an
+off switch. The push-time guard still keeps a partial release from being
+overwritten by a retry.
+
 ### Failure Handling
 
-If any step in the release workflow fails, it will automatically create a new issue in the repository with the labels `bug` and a type-specific failure label (e.g., `nightly-failure`, `preview-failure`). The issue will contain a link to the failed workflow run for easy debugging.
+If any step in the release workflow fails, it will automatically create a new issue in the repository with the labels `bug` and a type-specific failure label (e.g., `nightly-failure`, `preview-failure`). The issue will contain a link to the failed workflow run for easy debugging. A push-time version refusal opens no issue; it is reported inline on the failed step instead.
 
 ### When a release sits in the queue
 
