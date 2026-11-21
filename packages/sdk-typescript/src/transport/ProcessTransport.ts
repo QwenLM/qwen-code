@@ -278,13 +278,24 @@ export class ProcessTransport implements Transport {
   private setupEventHandlers(): void {
     if (!this.childProcess) return;
 
+    this.childStdin?.on('error', (error: Error) => {
+      this.inputClosed = true;
+      // Writable errors are emitted asynchronously, outside write()'s catch.
+      if (this.closed) return;
+      this.ready = false;
+      this._exitError ??= new Error(`CLI stdin error: ${error.message}`, {
+        cause: error,
+      });
+      this.requestChildProcessExit();
+    });
+
     this.childProcess.on('error', (error) => {
       this.unregisterForProcessExit();
       this.ready = false;
       if (this.abortController.signal.aborted) {
         this._exitError = new AbortError('CLI process aborted by user');
       } else {
-        this._exitError = new Error(`CLI process error: ${error.message}`);
+        this._exitError ??= new Error(`CLI process error: ${error.message}`);
         logger.error(this._exitError.message);
       }
     });
@@ -298,7 +309,7 @@ export class ProcessTransport implements Transport {
       } else {
         const error = this.getProcessExitError(code, signal);
         if (error) {
-          this._exitError = error;
+          this._exitError ??= error;
           logger.error(error.message);
         }
       }
