@@ -447,6 +447,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.experimental.eventBusAgentLoop': '事件总线 Agent Loop',
   'settings.description.experimental.eventBusAgentLoop':
     '让共享 agent loop 运行在事件总线架构上（实验性）。对运行在共享 agent loop 上的入口生效：默认是 headless 会话（`-p` 与 stream-json）、Ink TUI 和子代理，开启 experimental.unifiedAgentLoop 时还有 ACP 会话（Zed、VS Code、Web Shell、channel）和 OpenTUI；其他 surface 保留现有的 loop 内部实现。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 环境变量覆盖此设置：`1` 开启，`0` 关闭，逗号分隔的列表（如 `headless=0`）强制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 为保留名）。今天只有这些已接线的入口生效；裸 `1`/`0` 只作为整值识别，不在列表内生效，列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
+  'settings.label.experimental.modelAvailabilityTracking': '模型可用性台账',
+  'settings.description.experimental.modelAvailabilityTracking':
+    '在会话内跨请求记住模型健康状态（实验性）。当某个 fallback 模型在容量错误（429/503/529）上耗尽重试后，模型 fallback 链在本轮剩余请求中跳过它，并在下一轮重新探测一次；显式重试也会重新探测被跳过的模型。primary 模型仍每个请求都会被尝试。永久配额耗尽仍快速失败，不视为瞬时容量跳过。关闭时 fallback 链行为与之前完全一致。',
   'settings.label.experimental.artifact': '启用 Artifacts',
   'settings.description.experimental.artifact':
     '启用 artifact 工具，默认开启。在交互式非 SDK 会话中，模型可以把自包含 HTML 页面发布为交互式 Artifact 并在浏览器中打开；非 SDK 的 daemon 会话可使用仅记录元数据的 record_artifact 工具。设为 false 或用 QWEN_CODE_DISABLE_ARTIFACT=1 可同时禁用两者。',

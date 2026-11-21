@@ -14,7 +14,6 @@ type MemoryScope = 'global' | 'workspace';
 type MemoryTab = MemoryScope | 'auto';
 
 interface MemoryMessageProps {
-  refreshSignal?: number;
   addSignal?: number;
   addScope?: DaemonContextFileScope;
   onMessage?: (message: string, type?: 'status' | 'error') => void;
@@ -47,7 +46,6 @@ function scopeLabel(
 }
 
 export function MemoryMessage({
-  refreshSignal = 0,
   addSignal = 0,
   addScope = 'workspace',
   onMessage,
@@ -59,12 +57,21 @@ export function MemoryMessage({
   const autoMemoryAvailable =
     connection.capabilities?.features?.includes('workspace_auto_memory') ??
     false;
-  const { files, status, loading, error, readMemoryFile, reload, writeMemory } =
-    useMemory({
-      autoLoad: true,
-    });
+  const {
+    files,
+    status,
+    loading,
+    error,
+    readMemoryFile,
+    reload,
+    reloadWithOutcome,
+    writeMemory,
+  } = useMemory({
+    autoLoad: true,
+  });
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const loadSeqRef = useRef(0);
+  const refreshSeqRef = useRef(0);
   const [selectedTab, setSelectedTab] = useState<MemoryTab>('workspace');
   const [mode, setMode] = useState<MemoryMode>('view');
   const [content, setContent] = useState('');
@@ -92,6 +99,9 @@ export function MemoryMessage({
     selectedTab === 'auto' && !autoMemoryAvailable
       ? lastFileTabRef.current
       : selectedTab;
+  const pendingRefreshRef = useRef<
+    (MemoryEntry & { refreshSeq: number }) | undefined
+  >(undefined);
 
   const entries = useMemo<MemoryEntry[]>(() => {
     const globalFile = fileForScope(files, 'global');
@@ -128,15 +138,23 @@ export function MemoryMessage({
   const canReplace = editable && status !== undefined;
 
   const loadContent = useCallback(
-    (entry: MemoryEntry | undefined, nextMode: MemoryMode) => {
+    (
+      entry: MemoryEntry | undefined,
+      nextMode?: MemoryMode,
+      refreshSeq?: number,
+    ) => {
       const loadSeq = ++loadSeqRef.current;
       loadedKeyRef.current = entry ? entryKey(entry) : null;
-      setMode(nextMode);
+      if (nextMode !== undefined) setMode(nextMode);
       setMessage(null);
       setContent('');
       setDraft('');
       setEditable(true);
       if (!entry?.file) {
+        setContentLoading(false);
+        if (refreshSeq === refreshSeqRef.current) {
+          setMessage(t('memory.refreshed'));
+        }
         if (nextMode === 'edit') {
           requestAnimationFrame(() => editorRef.current?.focus());
         }
@@ -150,16 +168,26 @@ export function MemoryMessage({
           if (result.truncated) {
             setEditable(false);
             setMode('view');
-            setMessage(t('memory.fileTruncated'));
+            if (
+              refreshSeq === undefined ||
+              refreshSeq === refreshSeqRef.current
+            ) {
+              setMessage(t('memory.fileTruncated'));
+            }
             return;
           }
           setDraft(result.content);
+          if (refreshSeq === refreshSeqRef.current) {
+            setMessage(t('memory.refreshed'));
+          }
           requestAnimationFrame(() => editorRef.current?.focus());
         })
         .catch((readError: unknown) => {
           if (loadSeq !== loadSeqRef.current) return;
           setEditable(false);
           setMode('view');
+          if (refreshSeq !== undefined && refreshSeq !== refreshSeqRef.current)
+            return;
           if (entry.scope === 'global') {
             setMessage(t('memory.globalReadUnsupported'));
             return;
@@ -185,8 +213,17 @@ export function MemoryMessage({
 
   useEffect(() => {
     if (activeTab === 'auto' || !selectedEntry) return;
+    const refreshed = pendingRefreshRef.current;
+    pendingRefreshRef.current = undefined;
     if (keepsDraft(selectedEntry)) return;
-    loadContent(selectedEntry, mode);
+    loadContent(
+      selectedEntry,
+      mode,
+      refreshed?.scope === selectedEntry.scope &&
+        refreshed.file?.path === selectedEntry.file?.path
+        ? refreshed.refreshSeq
+        : undefined,
+    );
     // Only reload when the selected file changes. Mode changes are explicit
     // button actions that call loadContent directly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -196,19 +233,42 @@ export function MemoryMessage({
     if (error) setMessage(error.message);
   }, [error]);
 
-  useEffect(() => {
-    if (refreshSignal <= 0) return;
-    reload()
-      .then(() => setMessage(t('memory.refreshed')))
-      .catch((refreshError: unknown) => {
-        const text =
-          refreshError instanceof Error
-            ? refreshError.message
-            : String(refreshError);
-        setMessage(text);
-        onMessage?.(text, 'error');
-      });
-  }, [onMessage, refreshSignal, reload, t]);
+  const handleRefresh = useCallback(() => {
+    if (!selectedEntry) return;
+    const refreshSeq = ++refreshSeqRef.current;
+    const loadSeq = loadSeqRef.current;
+    void reloadWithOutcome().then(
+      ({ data: nextStatus, superseded, error: refreshError }) => {
+        if (
+          refreshSeq !== refreshSeqRef.current ||
+          loadSeq !== loadSeqRef.current
+        ) {
+          return;
+        }
+        if (superseded) {
+          const text = t('memory.refreshSuperseded');
+          setMessage(text);
+          onMessage?.(text, 'status');
+          return;
+        }
+        if (!nextStatus) {
+          const text = refreshError?.message ?? t('memory.refreshFailed');
+          setMessage(text);
+          onMessage?.(text, 'error');
+          return;
+        }
+        const nextEntry = {
+          ...selectedEntry,
+          file: fileForScope(nextStatus.files, selectedEntry.scope),
+        };
+        if (nextEntry.file?.path === selectedEntry.file?.path) {
+          loadContent(nextEntry, undefined, refreshSeq);
+        } else {
+          pendingRefreshRef.current = { ...nextEntry, refreshSeq };
+        }
+      },
+    );
+  }, [loadContent, onMessage, reloadWithOutcome, selectedEntry, t]);
 
   useEffect(() => {
     if (addSignal <= 0) return;
@@ -233,6 +293,8 @@ export function MemoryMessage({
 
   const handleSave = () => {
     if (!selectedEntry || !canReplace) return;
+    // A newer save owns the feedback, even if an older refresh finishes later.
+    refreshSeqRef.current++;
     if (!draft.trim()) {
       setMessage(t('memory.contentEmpty'));
       return;
@@ -312,10 +374,7 @@ export function MemoryMessage({
 
       <section className={styles.detail}>
         {activeTab === 'auto' ? (
-          <AutoMemoryPanel
-            onMessage={onMessage}
-            refreshSignal={refreshSignal}
-          />
+          <AutoMemoryPanel onMessage={onMessage} />
         ) : (
           <>
             <header className={styles.detailHeader}>
@@ -323,6 +382,14 @@ export function MemoryMessage({
                 <div className={styles.detailPath}>{path}</div>
               </div>
               <div className={styles.actions}>
+                <button
+                  type="button"
+                  className={styles.actionButton}
+                  disabled={saving || loading}
+                  onClick={handleRefresh}
+                >
+                  {t('memory.refresh')}
+                </button>
                 <button
                   type="button"
                   className={styles.actionButton}

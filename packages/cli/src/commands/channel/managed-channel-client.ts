@@ -51,6 +51,22 @@ export class HttpManagedChannelControlPlane
     this.root = `${options.baseUrl.replace(/\/+$/, '')}/internal/managed-channels/v1/channels/${encodeURIComponent(options.channelId)}`;
   }
 
+  get destinationKey(): string {
+    const base = this.options.baseUrl.replace(/\/+$/, '');
+    // The full registration identity: a pending ledger must follow the owning
+    // actor/workspace/cwd-relative too, not just the tenant/channel, or a
+    // restart that re-registers the same channel under a different workspace
+    // would replay the prior owner's pending messages into the new Session.
+    return [
+      base,
+      this.options.tenantId,
+      this.options.channelId,
+      this.options.actorId,
+      this.options.workspaceId,
+      this.options.cwdRelative,
+    ].join(String.fromCharCode(0));
+  }
+
   async register(request: {
     platform: ManagedChannelAdapter;
     accountId: string;
@@ -126,6 +142,118 @@ export class HttpManagedChannelControlPlane
           }
         : { outcome: receipt.outcome },
     );
+  }
+
+  /**
+   * PR-watch binding list (github-local GithubPrWatchControlPlane surface). The
+   * shared client carries it because pr-watch rides the same trusted channel
+   * adapter prefix; email/DingTalk never call it.
+   */
+  async listPrWatchBindings(): Promise<
+    Array<{
+      owner: string;
+      repo: string;
+      prNumber: number;
+      sessionId: string;
+      events: string[];
+    }>
+  > {
+    const answer = await this.call('POST', '/pr-watch:list', {});
+    const bindings: unknown = answer['bindings'];
+    // A 200 that does not carry the documented rows is not an empty binding
+    // set: the adapter prunes every persisted watch the answer omits, so
+    // reading a malformed body as `[]` would delete each PR's baseline, fired
+    // ring and pending queue. Throw — the adapter's watch pass contains the
+    // failure and keeps its state for the next tick.
+    if (!Array.isArray(bindings)) {
+      throw new Error(
+        'Managed channel control plane answered pr-watch:list without a bindings array.',
+      );
+    }
+    return bindings.map((binding, index) => {
+      const row = (binding ?? {}) as Record<string, unknown>;
+      const owner = row['owner'];
+      const repo = row['repo'];
+      const prNumber = row['prNumber'];
+      const events = row['events'];
+      if (
+        typeof owner !== 'string' ||
+        owner.length === 0 ||
+        typeof repo !== 'string' ||
+        repo.length === 0 ||
+        !Number.isSafeInteger(prNumber) ||
+        (prNumber as number) < 1 ||
+        !Array.isArray(events) ||
+        events.some((event) => typeof event !== 'string')
+      ) {
+        throw new Error(
+          `Managed channel control plane answered pr-watch:list with a malformed binding at row ${index}.`,
+        );
+      }
+      return {
+        owner,
+        repo,
+        prNumber: prNumber as number,
+        sessionId: String(row['sessionId']),
+        events: (events as unknown[]).map(String),
+      };
+    });
+  }
+
+  /**
+   * Inject one watched-PR transition into the binding's Session (private-only).
+   * The adapter supplies the transition evidence; the model-facing prompt text
+   * is composed here because the inject contract requires it. The control plane
+   * forces the target Session from the binding and derives the idempotent input
+   * id (episode included).
+   */
+  async injectPrEvent(event: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    transition: string;
+    headSha: string;
+    evidence: string;
+    episode: number;
+  }): Promise<void> {
+    const text =
+      `The watched pull request ${event.owner}/${event.repo}#${event.prNumber} ` +
+      `reported a ${event.transition} transition on head ${event.headSha}. ` +
+      'Inspect the pull request and decide whether action is needed.';
+    await this.call('POST', '/pr-watch:inject', {
+      owner: event.owner,
+      repo: event.repo,
+      prNumber: event.prNumber,
+      transition: event.transition,
+      headSha: event.headSha,
+      episode: event.episode,
+      evidence: event.evidence,
+      text,
+    });
+  }
+
+  /**
+   * Retire this channel's PR-watch binding so the PR stops consuming an
+   * observation slot and can be bound to another Session. Idempotent: a
+   * binding that is already gone answers 404, which is a tolerated no-op.
+   */
+  async retirePrWatchBinding(pr: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+  }): Promise<void> {
+    try {
+      await this.call('POST', '/pr-watch:retire', {
+        owner: pr.owner,
+        repo: pr.repo,
+        prNumber: pr.prNumber,
+      });
+    } catch (error) {
+      if (error instanceof ManagedChannelClientError && error.status === 404) {
+        return;
+      }
+      throw error;
+    }
   }
 
   private async call(

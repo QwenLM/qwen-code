@@ -167,6 +167,10 @@ class QwenHostedMcpManagementAttachmentTest {
         } else {
             var conflict = mock(DaemonHttpException.class);
             when(conflict.getStatusCode()).thenReturn(409);
+            // The re-take keys on the code, not the bare status: the same 409
+            // also carries a closing gate, a full cold-open slot and a wedged
+            // teardown, which must reach the caller instead of loading again.
+            when(conflict.getErrorCode()).thenReturn("hosted_session_already_attached");
             error = conflict;
         }
         when(fixture.client.createSession(any())).thenThrow(error);

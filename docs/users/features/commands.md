@@ -171,10 +171,10 @@ See [Code Review](./code-review.md) for full `/review` documentation, and [Autof
 
 The `/btw` command allows you to ask quick side questions without interrupting or affecting the main conversation flow.
 
-| Command                | Description                           |
-| ---------------------- | ------------------------------------- |
-| `/btw <your question>` | Ask a quick side question             |
-| `?btw <your question>` | Alternative syntax for side questions |
+| Command                | Description                                                                                    |
+| ---------------------- | ---------------------------------------------------------------------------------------------- |
+| `/btw <your question>` | Ask a side question.                                                                           |
+| `?btw <your question>` | Ask a side question in OpenTUI. In Ink, this sends a regular message to the main conversation. |
 
 **How It Works:**
 
@@ -615,6 +615,8 @@ Use {{args}} for parameter injection.
 | ---------------- | --------------------------------------- | --------------------- | ------------------------ |
 | Raw Injection    | `prompt = "Fix: {{args}}"`              | `/fix "Button issue"` | `Fix: "Button issue"`    |
 | In Shell Command | `prompt = "Search: !{grep {{args}} .}"` | `/search "hello"`     | Execute `grep "hello" .` |
+
+Argument text is inserted literally: dollar sequences such as `$$` and `$&` keep their characters, and placeholder names inside the arguments are not expanded again. Arguments inside `!{...}` still receive shell escaping before permission checks and execution.
 
 #### 2. Default Parameter Processing
 

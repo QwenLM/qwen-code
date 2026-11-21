@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.StandaloneSkill;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -124,7 +125,7 @@ final class ManagedLoopSkill {
      */
     static List<Map<String, Object>> mergeInto(List<Map<String, Object>> merged,
             List<Map<String, Object>> callerSkills, String profile,
-            boolean sessionSkillsSupported) {
+            boolean sessionSkillsSupported, List<StandaloneSkill> packageSkills) {
         int definitionCount = merged.size();
         merged.addAll(callerSkills);
         if (!sessionSkillsSupported) {
@@ -163,7 +164,7 @@ final class ManagedLoopSkill {
         candidate.add(loop);
         List<Map<String, Object>> validated;
         try {
-            validated = AgentDefinitionExtensions.sessionSkills(candidate);
+            validated = AgentDefinitionExtensions.sessionSkills(candidate, packageSkills);
         } catch (ManagedAgentException overCapacity) {
             // Skip the injection and leave the bundled import dropped: restoring
             // it would push the catalog back over capacity and the admission

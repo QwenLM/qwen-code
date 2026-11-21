@@ -90,10 +90,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/hosted-harness-session.ts',
     {
       reason:
-        'Packaged E2E fault arms set process-scoped test switches on a single Harness generation, never in production. The load-reply-lost arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement so the session bridge loses exactly the first load attach reply for that Session; the finished-before-commit arm sets QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId> on the generation that must crash so the turn holds after its stream Finished marker is durable but before the assistant output commits. Each is read once and fires once.',
+        'Packaged E2E fault arms set process-scoped test switches on a single Harness generation, never in production. The load-reply-lost arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement so the session bridge loses exactly the first load attach reply for that Session; the finished-before-commit arm sets QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId> on the generation that must crash so the turn holds after its stream Finished marker is durable but before the assistant output commits. Each is read once and fires once. The idle-suspension acceptance arms set QWEN_E2E_IDLE_SUSPEND_MS to a shorter candidate idle period so a packaged run observes suspension without waiting out the production constant; it is read once per registration and only accepts a value below that constant.',
       accesses: {
         'key:QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT': 1,
         'key:QWEN_E2E_DROP_LOAD_REPLY': 1,
+        'key:QWEN_E2E_IDLE_SUSPEND_MS': 1,
       },
     },
   ],
