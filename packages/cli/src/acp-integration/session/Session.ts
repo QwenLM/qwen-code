@@ -2849,6 +2849,13 @@ export class Session implements SessionContext {
   private readonly movableShells = new Map<string, MovableShell>();
   // How many calls of the running tool batch have not settled.
   private openToolCalls: (() => number) | undefined;
+  private midTurnShellWait:
+    | {
+        turn: AbortSignal;
+        batch: (() => number) | undefined;
+        shells: ReadonlySet<MovableShell>;
+      }
+    | undefined;
   // Shells moved to the background for a message, stopped if the turn that
   // moved them is stopped.
   private shellsMovedFor:
@@ -4125,19 +4132,36 @@ export class Session implements SessionContext {
       this.midTurnRecoveredMessages.length === 0 &&
       (this.midTurnToolPhaseFor === pending.signal ||
         this.openResponseHasToolCall?.(pending.signal) === true);
-    if (!shouldInterrupt()) return;
-    if (moving.length === 0) {
+    const batch = this.openToolCalls;
+    const waiting = this.midTurnShellWait;
+    const previous =
+      waiting?.turn === pending.signal && waiting.batch === batch
+        ? waiting
+        : undefined;
+    if (!previous && !shouldInterrupt()) return;
+    if (!previous && moving.length === 0) {
       pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
       return;
     }
-    const hasOtherCalls = (this.openToolCalls?.() ?? Infinity) > moving.length;
-    // Preserve accepted handoffs before interrupting other tools. A refused
-    // handoff is ready to interrupt before its PostToolUse runs.
-    void Promise.all(moving.map((shell) => shell.settled)).then((moved) => {
-      if ((hasOtherCalls || moved.includes(false)) && shouldInterrupt()) {
-        pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
-      }
-    });
+    const hasOtherCalls = (batch?.() ?? Infinity) > moving.length;
+    // A later Send now can move a shell that just started. It supersedes
+    // the previous wait and carries forward the earlier promotion outcomes.
+    const shells = new Set([...(previous?.shells ?? []), ...moving]);
+    const wait = { turn: pending.signal, batch, shells };
+    this.midTurnShellWait = wait;
+    void Promise.all(Array.from(shells, (shell) => shell.settled)).then(
+      (moved) => {
+        if (this.midTurnShellWait !== wait) return;
+        this.midTurnShellWait = undefined;
+        if (
+          this.openToolCalls === batch &&
+          (hasOtherCalls || moved.includes(false)) &&
+          shouldInterrupt()
+        ) {
+          pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
+        }
+      },
+    );
   }
 
   #trackMovableShell(

@@ -22,7 +22,10 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
-import { deferredToolUpdateContext } from './acp-tool-batch.js';
+import {
+  deferredToolUpdateContext,
+  type runAcpToolBatch,
+} from './acp-tool-batch.js';
 import {
   getStartupContextLength,
   markCompressedHistory,
@@ -73,6 +76,7 @@ import * as core from '@qwen-code/qwen-code-core';
 import { createUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
+import type { ShellAbortReason } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
 import {
   getCurrentAgentId,
   runWithAgentContext,
@@ -5295,6 +5299,70 @@ describe('Session', () => {
         });
       },
     );
+
+    it('waits for a shell moved by a later Send now in the same batch', async () => {
+      const shellCalls = ['first', 'second'].map((id) => ({
+        id,
+        name: 'run_shell_command',
+        args: { command: 'cat fixture.txt' },
+      }));
+      const shellIds = ['bg_0123abcd', 'bg_1234abcd'];
+      const send = useSharedRounds(
+        [...shellCalls.map(toolCall), finished()],
+        [text('Both tasks are running.'), finished()],
+      );
+      let batch: Parameters<typeof runAcpToolBatch>[1] | undefined;
+      let finishBatch!: () => void;
+      const releaseBatch = new Promise<void>((resolve) => {
+        finishBatch = resolve;
+      });
+      runAcpToolBatchSpy.mockImplementationOnce(
+        async (_host: unknown, options: NonNullable<typeof batch>) => {
+          batch = options;
+          await releaseBatch;
+          return {
+            parts: options.requests.map((request, index) => ({
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response: { output: shellIds[index] },
+              },
+            })),
+            results: [],
+            stopAfterPermissionCancel: false,
+          };
+        },
+      );
+      const done = prompt();
+      await vi.waitFor(() => expect(batch).toBeDefined());
+      const { requests, onShellMovable, onCallSettled, signal } = batch!;
+      const move = (index: number) => {
+        const controller = new AbortController();
+        onShellMovable?.(requests[index].callId, controller);
+        session.sendMidTurnInputNow();
+        const reason = controller.signal.reason as Extract<
+          ShellAbortReason,
+          { kind: 'background' }
+        >;
+        expect(reason.kind).toBe('background');
+        reason.onRegistered?.(shellIds[index]);
+      };
+
+      move(0);
+      move(1);
+      onCallSettled?.(requests[0].callId, 'success');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const abortedBeforeSecondSettled = signal.aborted;
+      onCallSettled?.(requests[1].callId, 'success');
+      finishBatch();
+
+      const result = await done;
+      expect(abortedBeforeSecondSettled).toBe(false);
+      expect(result.stopReason).toBe('end_turn');
+      const followup = JSON.stringify(send.mock.calls[1]?.[0]);
+      expect(followup).toContain(shellIds[0]);
+      expect(followup).toContain(shellIds[1]);
+    });
 
     it('sends a fresh prompt as a UserQuery whose user turn it recorded', async () => {
       const send = useSharedRounds([text('Hello'), finished()]);
