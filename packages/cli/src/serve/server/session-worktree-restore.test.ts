@@ -35,13 +35,18 @@ const coreMocks = vi.hoisted(() => ({
   write: vi.fn(),
 }));
 
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
-  coreMocks.realWrite = actual.writeWorktreeSession;
-  coreMocks.write.mockImplementation(actual.writeWorktreeSession);
-  return { ...actual, writeWorktreeSession: coreMocks.write };
-});
+vi.mock(
+  '@qwen-code/qwen-code-core/services/worktreeSessionService.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/worktreeSessionService.js')
+      >();
+    coreMocks.realWrite = actual.writeWorktreeSession;
+    coreMocks.write.mockImplementation(actual.writeWorktreeSession);
+    return { ...actual, writeWorktreeSession: coreMocks.write };
+  },
+);
 
 let root: string;
 
@@ -235,12 +240,14 @@ describe('session worktree snapshot restore', () => {
       await makeRetainedSession(target, { slug: 'bind-only', dirty: true }),
     );
     const create = vi.spyOn(GitWorktreeService.prototype, 'createUserWorktree');
+    coreMocks.write.mockClear();
     coreMocks.write.mockImplementationOnce(async () => {
       throw new Error('injected binding write failure');
     });
     await expect(restore(target, state.id)).rejects.toThrow(
       'injected binding write failure',
     );
+    expect(coreMocks.write).toHaveBeenCalledTimes(1);
     expect(
       fs.readFileSync(path.join(state.worktreePath, '.qwen-session'), 'utf8'),
     ).toBe(state.id);
@@ -262,10 +269,12 @@ describe('session worktree snapshot restore', () => {
       target,
       await makeRetainedSession(target, { slug: 'late-change', dirty: true }),
     );
+    coreMocks.write.mockClear();
     coreMocks.write.mockImplementationOnce(async () => {
       throw new Error('injected binding write failure');
     });
     await expect(restore(target, state.id)).rejects.toThrow();
+    expect(coreMocks.write).toHaveBeenCalledTimes(1);
     const changed = path.join(state.worktreePath, 'tracked.txt');
     fs.writeFileSync(changed, 'human-late-change\n');
 
