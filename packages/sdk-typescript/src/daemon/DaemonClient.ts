@@ -1818,7 +1818,7 @@ export class DaemonClient {
 
   async workspaceGitCommit(
     message: string,
-    opts?: { all?: boolean },
+    opts?: { all?: boolean; paths?: string[] },
   ): Promise<DaemonGitCommitResult> {
     return await this.jsonRequest<DaemonGitCommitResult>(
       '/workspace/git/commit',
@@ -9202,7 +9202,7 @@ export class WorkspaceDaemonClient {
 
   workspaceGitCommit(
     message: string,
-    opts?: { all?: boolean },
+    opts?: { all?: boolean; paths?: string[] },
     cwd?: string,
     sessionId?: string,
   ): Promise<DaemonGitCommitResult> {

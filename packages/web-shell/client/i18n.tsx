@@ -638,6 +638,17 @@ const EN: Messages = {
   'gitCommit.commitPushSuccess': (v) => `Committed & pushed ${v?.sha ?? ''}`,
   'gitCommit.commitSuccessPushFailed': (v) =>
     `Committed ${v?.sha ?? ''} — push failed: ${v?.error ?? 'unknown'}`,
+  'gitCommit.filesSelected': (v) =>
+    `Files to commit (${v?.selected ?? 0}/${v?.total ?? 0})`,
+  'gitCommit.nothingToCommit': 'Nothing to commit — the working tree is clean',
+  'gitCommit.listRefreshed':
+    'The file list changed — review it and commit again',
+  'gitCommit.listCapped': 'The list is truncated — committing every change',
+  'gitCommit.listLoading': 'The file list is still loading — try again shortly',
+  'gitCommit.fileAdded': 'Added',
+  'gitCommit.fileDeleted': 'Deleted',
+  'gitCommit.fileRenamed': 'Renamed',
+  'gitCommit.fileModified': 'Modified',
   'branchSelect.baseBranch': 'Base branch',
   'branchSelect.search': 'Search branches…',
   'branchSelect.loading': 'Loading…',

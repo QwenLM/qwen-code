@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { sanitizeControlChars } from '../messages/toolFormatting';
 import { Markdown } from '../messages/Markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { DialogShell } from './DialogShell';
@@ -93,6 +94,28 @@ export function GitDialog({
   const [view, setView] = useState(initialView);
   const [subtitle, setSubtitle] = useState<string>();
   const [commitMsg, setCommitMsg] = useState('');
+  // Uncommitted files offered for selective commit; `null` until the diff
+  // loads, and kept as the last known list so a failed reload does not drop
+  // the user's selection.
+  const [commitFiles, setCommitFiles] = useState<
+    DaemonWorkspaceGitDiffFile[] | null
+  >(null);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  // `null` until the first list lands, which is what separates "first load"
+  // (preselect everything) from "every row was deliberately unchecked".
+  const commitFilesRef = useRef<DaemonWorkspaceGitDiffFile[] | null>(null);
+  // Whether the list above is the whole dirty tree: the daemon caps the
+  // per-file rows (`hiddenCount`) and returns `available: false` for a
+  // transient state, and either way a paths-only commit would cover a subset.
+  const [commitListComplete, setCommitListComplete] = useState(true);
+  const loadedPathsRef = useRef<Set<string>>(new Set());
+  // A commit consumes the selection: the listing that follows reports the
+  // tree the commit produced, and an empty one shows no rows at all, so the
+  // next listing is a fresh starting point rather than a set the user cleared.
+  const selectionSpentRef = useRef(false);
+  // Files whose deletion must be committed together with their addition.
+  // Map of `path` -> `oldPath`; both paths are sent for a renamed file.
+  const renameOldPaths = useRef(new Map<string, string>());
   const [commitBusy, setCommitBusy] = useState<'commit' | 'push' | null>(null);
   const [generating, setGenerating] = useState(false);
   const [genFailed, setGenFailed] = useState(false);
@@ -161,6 +184,119 @@ export function GitDialog({
   const startedInCommit = useRef(initialView === 'commit').current;
   const isCommit = view === 'commit';
   const effectiveTab = isCommit ? 'diff' : view;
+
+  // Keep the previous selection for files that are still dirty, and preselect
+  // files that appear for the first time, so reopening the commit view does
+  // not silently drop a deliberate unselection.
+  const applyCommitFiles = useCallback(
+    (files: DaemonWorkspaceGitDiffFile[], complete = true) => {
+      setCommitListComplete(complete);
+      setCommitFiles(files);
+      const firstLoad = commitFilesRef.current === null;
+      // The listing that follows a commit reports the tree the commit left
+      // behind — often empty — so the first non-empty one after it is a fresh
+      // starting point, and holding the flag across the empty refreshes keeps
+      // it that way.
+      const freshAfterCommit = selectionSpentRef.current && files.length > 0;
+      if (freshAfterCommit) selectionSpentRef.current = false;
+      commitFilesRef.current = files;
+      // The record of paths already shown accumulates: a refresh that comes
+      // back empty (a merge or index lock in progress) must not erase it, or
+      // the next complete listing would treat every cleared row as new and
+      // re-select what the user just excluded. The write sits outside the
+      // `setSelectedPaths` updater so a StrictMode double-invoke cannot
+      // replay it against an already-mutated set.
+      const seen = loadedPathsRef.current;
+      loadedPathsRef.current = new Set([
+        ...seen,
+        ...files.map((file) => file.path),
+      ]);
+      setSelectedPaths((prev) => {
+        // `prev.size === 0` cannot stand in for "first load": unchecking every
+        // row is a deliberate state, and the next refresh must not re-add them.
+        // Once loaded, keep what is still selected and preselect only paths
+        // that appear for the first time.
+        const next = new Set<string>();
+        for (const file of files) {
+          if (
+            firstLoad ||
+            freshAfterCommit ||
+            prev.has(file.path) ||
+            !seen.has(file.path)
+          ) {
+            next.add(file.path);
+          }
+        }
+        return next;
+      });
+      // A rename's old path has to be forwarded or the commit stages only the
+      // new one. A COPY reports the same shape (`diff.renames=copies`), but its
+      // source is still a live path in this list — forwarding it would commit a
+      // file the user left unchecked — so that is the discriminator.
+      const livePaths = new Set(files.map((file) => file.path));
+      renameOldPaths.current = new Map(
+        files
+          .filter((file) => file.oldPath && !livePaths.has(file.oldPath))
+          .map((file) => [file.path, file.oldPath as string]),
+      );
+    },
+    [],
+  );
+
+  // Refresh the file list when the selection could have gone stale. Failures
+  // are silent: the previous list and selection stay usable, and the commit
+  // itself reports the real error.
+  const refreshCommitFiles = useCallback(() => {
+    const ws = client.workspaceByCwd(workspaceCwd);
+    return ws
+      .workspaceGitDiff(gitCwd, gitSessionId)
+      .then((diff) =>
+        applyCommitFiles(diff.files, diff.available && diff.hiddenCount === 0),
+      )
+      .catch(() => {});
+  }, [client, workspaceCwd, gitCwd, gitSessionId, applyCommitFiles]);
+
+  const toggleCommitPath = useCallback((path: string) => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const commitPathList = useCallback((): string[] => {
+    const paths: string[] = [];
+    for (const file of commitFiles ?? []) {
+      if (!selectedPaths.has(file.path)) continue;
+      paths.push(file.path);
+      const oldPath = renameOldPaths.current.get(file.path);
+      if (oldPath && !paths.includes(oldPath)) paths.push(oldPath);
+    }
+    return paths;
+  }, [commitFiles, selectedPaths]);
+
+  // The file checklist only needs git, so it loads even when no session is
+  // available for message generation.
+  useEffect(() => {
+    if (!isCommit) return;
+    const abort = new AbortController();
+    void (async () => {
+      const ws = client.workspaceByCwd(workspaceCwd);
+      try {
+        const diff = await ws.workspaceGitDiff(gitCwd, gitSessionId);
+        if (!abort.signal.aborted)
+          applyCommitFiles(
+            diff.files,
+            diff.available && diff.hiddenCount === 0,
+          );
+      } catch {
+        // Keep whatever list is already shown; the commit itself reports the
+        // real error if the tree really is unreadable.
+      }
+    })();
+    return () => abort.abort();
+  }, [isCommit, client, workspaceCwd, gitCwd, gitSessionId, applyCommitFiles]);
 
   // Auto-generate commit message via session side-query when commit view opens.
   useEffect(() => {
@@ -294,16 +430,109 @@ export function GitDialog({
   const doCommit = useCallback(
     async (andPush: boolean) => {
       if (commitBusy || prBusy || !commitMsg.trim()) return;
+      // A click while the first listing is still in flight has no checklist on
+      // screen and no selection behind it. Falling through to `all` would
+      // commit the whole tree with nothing disclosing it — refuse and let the
+      // list arrive instead. A listing that loaded and *is* capped still goes
+      // to `all`, which the legend says so.
+      if (commitFilesRef.current === null) {
+        setCommitStatus({ msg: t('gitCommit.listLoading'), type: 'error' });
+        return;
+      }
+      const paths = commitPathList();
+      // A capped or unavailable listing cannot express the tree as a path
+      // list: the rows it dropped would silently stay uncommitted, and an
+      // empty list is indistinguishable from "nothing selected". In that case
+      // commit everything — `all` and `paths` are mutually exclusive, so the
+      // request carries `all` alone. A listing that never loaded counts too:
+      // `commitListComplete` starts `true`, so without this the Commit click
+      // would die on the "select at least one file" guard while no checklist
+      // is rendered at all. The ref reads the same never-loaded state without
+      // putting the files array in this callback's dependencies.
+      const commitAll = !commitListComplete;
+      // The request is built from a diff read at commit time, not from the
+      // checklist: a row can appear after the snapshot loaded, and a commit
+      // empties it while the tree may be dirty again by the next click. A
+      // list that would leave every row out is shown instead of committed.
       setCommitBusy(andPush ? 'push' : 'commit');
       setCommitStatus(null);
       try {
         const ws = client.workspaceByCwd(workspaceCwd);
+        let request: { all?: true; paths?: string[] } = commitAll
+          ? { all: true }
+          : { paths };
+        if (!commitAll) {
+          try {
+            const diff = await ws.workspaceGitDiff(gitCwd, gitSessionId);
+            const complete = diff.available && diff.hiddenCount === 0;
+            if (complete) {
+              if (diff.files.length === 0) {
+                setCommitStatus({
+                  msg: t('gitCommit.nothingToCommit'),
+                  type: 'success',
+                });
+                return;
+              }
+              const live = new Set(diff.files.map((file) => file.path));
+              // The pairing comes from the listing read just now, not from the
+              // snapshot the checklist was built on. A rename the tree no
+              // longer pairs — its old name was recreated, or the pair fell
+              // below git's similarity threshold — would otherwise forward a
+              // pre-image whose current occupant is committed in place of a
+              // deletion the user never selected rows for.
+              const oldPaths = new Map(
+                diff.files
+                  .filter((file) => file.oldPath && !live.has(file.oldPath))
+                  .map((file) => [file.path, file.oldPath as string]),
+              );
+              // The request is the rows the user ticked, re-checked against the
+              // listing read now. A path that only rode along as a rename's
+              // pre-image is not a row of its own: it comes back below only
+              // while the tree still pairs it.
+              const kept = paths.filter(
+                (p) => live.has(p) && selectedPaths.has(p),
+              );
+              if (kept.length === 0) {
+                // Nothing the previous listing offered survives. Either the
+                // user cleared every row, or the tree moved on under the
+                // dialog (a commit elsewhere, an agent edit) and the rows on
+                // screen are stale. Committing the new tree unasked is the
+                // hazard the path list exists to prevent, so show it instead:
+                // the refreshed checklist renders every row selected, and the
+                // user can confirm with one click.
+                applyCommitFiles(diff.files);
+                setCommitStatus({
+                  msg: t('gitCommit.listRefreshed'),
+                  type: 'success',
+                });
+                return;
+              }
+              const refreshed: string[] = [];
+              for (const p of kept) {
+                refreshed.push(p);
+                const oldPath = oldPaths.get(p);
+                if (oldPath && !refreshed.includes(oldPath))
+                  refreshed.push(oldPath);
+              }
+              // Rows that appeared after the snapshot start unchecked, so they
+              // stay out of this commit rather than riding along unasked.
+              if (kept.length < diff.files.length) {
+                applyCommitFiles(diff.files);
+              }
+              request = { paths: refreshed };
+            }
+          } catch {
+            // The snapshot is still usable; the commit below reports the real
+            // error if the tree really is unreadable.
+          }
+        }
         const result = await ws.workspaceGitCommit(
           commitMsg.trim(),
-          { all: true },
+          request,
           gitCwd,
           gitSessionId,
         );
+        selectionSpentRef.current = true;
         if (andPush) {
           try {
             await ws.workspaceGitPush(
@@ -312,6 +541,7 @@ export function GitDialog({
               gitSessionId,
             );
             setCommitMsg('');
+            void refreshCommitFiles();
             setCommitStatus({
               msg: t('gitCommit.commitPushSuccess', { sha: result.sha }),
               type: 'success',
@@ -328,6 +558,7 @@ export function GitDialog({
           }
         } else {
           setCommitMsg('');
+          void refreshCommitFiles();
           setCommitStatus({
             msg: t('gitCommit.commitSuccess', { sha: result.sha }),
             type: 'success',
@@ -350,6 +581,11 @@ export function GitDialog({
       commitMsg,
       commitBusy,
       prBusy,
+      commitListComplete,
+      commitPathList,
+      selectedPaths,
+      refreshCommitFiles,
+      applyCommitFiles,
       t,
     ],
   );
@@ -710,6 +946,61 @@ export function GitDialog({
         </div>
         {isCommit && (
           <div className={styles.commitPanel}>
+            {commitFiles !== null && commitFiles.length > 0 && (
+              <fieldset className={styles.commitFiles}>
+                <legend className={styles.commitFilesLegend}>
+                  {t('gitCommit.filesSelected', {
+                    selected: commitFiles.filter((f) =>
+                      selectedPaths.has(f.path),
+                    ).length,
+                    total: commitFiles.length,
+                  })}
+                  {!commitListComplete && (
+                    <span className={styles.commitFilesCapped}>
+                      {t('gitCommit.listCapped')}
+                    </span>
+                  )}
+                </legend>
+                <div className={styles.commitFileList}>
+                  {commitFiles.map((file) => (
+                    <label key={file.path} className={styles.commitFile}>
+                      <input
+                        type="checkbox"
+                        checked={selectedPaths.has(file.path)}
+                        disabled={!commitListComplete}
+                        onChange={() => toggleCommitPath(file.path)}
+                      />
+                      <span
+                        className={styles.commitFileStatus}
+                        aria-hidden="true"
+                      >
+                        {file.isUntracked
+                          ? 'A'
+                          : file.isDeleted
+                            ? 'D'
+                            : file.oldPath
+                              ? 'R'
+                              : 'M'}
+                      </span>
+                      <span className="sr-only">
+                        {file.isUntracked
+                          ? t('gitCommit.fileAdded')
+                          : file.isDeleted
+                            ? t('gitCommit.fileDeleted')
+                            : file.oldPath
+                              ? t('gitCommit.fileRenamed')
+                              : t('gitCommit.fileModified')}
+                      </span>
+                      <span className={styles.commitFilePath}>
+                        {file.oldPath
+                          ? `${sanitizeControlChars(file.oldPath)} → ${sanitizeControlChars(file.path)}`
+                          : sanitizeControlChars(file.path)}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+            )}
             <textarea
               ref={textareaRef}
               className={styles.commitMessage}
