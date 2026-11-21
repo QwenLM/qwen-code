@@ -16,6 +16,12 @@ params:
   publish:
     description: "true publishes MAS/SDK to Maven and uploads the release manifest with Worker/Harness digests"
     default: "false"
+  publishOss:
+    description: "true uploads the runtime archive and release manifest to OSS"
+    default: "true"
+  publishMaven:
+    description: "true deploys MAS/SDK artifacts to Maven"
+    default: "true"
 jobs:
   native_release:
     runs-on: [aone-hosted, dind]
@@ -211,6 +217,13 @@ jobs:
       - name: Publish the Managed release
         run: |
           mkdir -p .aone-output/release_bundle
+          SKIP_ARGS=""
+          if [ "${{ params.publishOss }}" != "true" ]; then
+            SKIP_ARGS="$SKIP_ARGS --skip-oss"
+          fi
+          if [ "${{ params.publishMaven }}" != "true" ]; then
+            SKIP_ARGS="$SKIP_ARGS --skip-maven"
+          fi
           python3 .aoneci/scripts/publish-managed-release.py \
             --release-id "${{ params.releaseId }}" \
             --source-sha "${{ params.sourceSha }}" \
@@ -219,8 +232,7 @@ jobs:
             --runtime-dir .aone-publish/runtime \
             --worker-image-dir .aone-publish/worker-image \
             --harness-image-dir .aone-publish/harness-image \
-            --oss-skip-if-no-credential \
-            --published-manifest-out .aone-output/release_bundle/release-manifest.json
+            $SKIP_ARGS
       - uses: upload-artifact@1.1.4
         inputs:
           name: managed-agent-release-bundle
