@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   CircleDashedIcon,
@@ -8,6 +8,8 @@ import {
   LockIcon,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
+import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
+import { getShadowAwareActiveElement } from '../utils/dom';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -71,6 +73,140 @@ interface WorkspaceSelectorProps {
 const STANDALONE_OPTION_ID = '__standalone__';
 
 /**
+ * Composer focus target inside the owning composer shell: CodeMirror's
+ * contenteditable on desktop, the textarea itself on the mobile composer.
+ */
+function findComposerFocusTarget(scope: ParentNode): HTMLElement | null {
+  const editor = scope.querySelector<HTMLElement>(
+    '[data-web-shell-composer-editor]',
+  );
+  return editor?.querySelector<HTMLElement>('.cm-content') ?? editor;
+}
+
+/**
+ * Moves focus into the prompt composer after a workspace is picked.
+ *
+ * The lookup is scoped to the element that owns both the trigger and its
+ * composer: the composer shell (`data-web-shell-composer`, the
+ * ChatEditor root) around the trigger. The selector renders inside that
+ * same shell, so a remount of the shell unmounts the selector and its
+ * cleanup stops the watch — the watch can never outlive its shell, and a
+ * document-wide lookup is deliberately off the table (a first-match
+ * against a page with a hidden managed-home composer, or a second Web
+ * Shell, would focus the wrong instance, or a hidden one).
+ *
+ * The focus is taken in 150 ms steps instead of once: while the menu
+ * closes its trapped focus scope still claims focus, and a selection from
+ * the active session can remount the owning pane (SplitView keys panes by
+ * session and workspace) AFTER the synchronous attempt has landed,
+ * detaching the shell and the focused node. Each step re-resolves the
+ * target from the still-connected shell; a step that finds the shell
+ * disconnected stops instead.
+ *
+ * The watch stops when the user takes over: a `focusin` into their own
+ * field (registered for the watch only, so the closing menu's own focus
+ * movement never counts), or — once a step has actually landed — a blur
+ * of the claimed composer to nowhere: a click on an unfocusable area
+ * drops the caret to <body>, which fires no focusin at all, and the next
+ * step would pull it back. The active-element check resolves from the
+ * target's own root so shells mounted in a shadow root see the real
+ * focus (document.activeElement retargets to the shadow host).
+ *
+ * Returns the stop handle: the watch cannot see its own owner, so the
+ * caller must call it when the selector unmounts or the menu re-opens.
+ */
+function scheduleComposerFocus(trigger: HTMLElement | null): () => void {
+  const shell = trigger?.closest('[data-web-shell-composer]') ?? null;
+  let attemptsLeft = 3;
+  let timer: number | undefined;
+  let currentTarget: HTMLElement | null = null;
+  let settled = false;
+  let done = false;
+  const stop = (): void => {
+    if (done) return;
+    done = true;
+    if (timer !== undefined) window.clearTimeout(timer);
+    document.removeEventListener('focusin', onUserFocus);
+    document.removeEventListener('focusout', onUserBlur);
+  };
+  const onUserFocus = (event: Event): void => {
+    // composedPath resolves inside shadow roots; event.target retargets
+    // to the shadow host. The menu trigger, body, and the composer we
+    // are claiming are ours, not the user's. Focus inside the open menu
+    // is the trap's own (our focus() re-triggers it on the way) — not a
+    // user move either.
+    const el = event.composedPath()[0] as Element | null;
+    if (!el || el === document.body || el === trigger) return;
+    if (el.closest('[role="menu"], [data-radix-popper-content-wrapper]')) {
+      return;
+    }
+    if (currentTarget && (el === currentTarget || currentTarget.contains(el)))
+      return;
+    stop();
+  };
+  const onUserBlur = (event: FocusEvent): void => {
+    // Armed only after a landing: the close sequence blurs to <body>
+    // while the menu tears down, and that is not the user taking over.
+    // The claimed element must still be connected: a remount detaches it
+    // before the next step can stop the watch, and its implicit blur is
+    // the remount, not a user blur.
+    if (!settled || !currentTarget || !currentTarget.isConnected) return;
+    const from = event.composedPath()[0] as Element | null;
+    if (!from || (from !== currentTarget && !currentTarget.contains(from)))
+      return;
+    const related = event.relatedTarget;
+    if (related && related !== document.body) return;
+    stop();
+  };
+  document.addEventListener('focusin', onUserFocus);
+  document.addEventListener('focusout', onUserBlur);
+  const attempt = (): void => {
+    timer = undefined;
+    if (done) return;
+    // A remount of the shell unmounts the selector with it and runs the
+    // unmount cleanup; a step that finds the shell disconnected stops
+    // instead of falling back to a document-wide lookup (the selector can
+    // only ever see its own shell, which is the one that remounts).
+    if (!shell?.isConnected) {
+      stop();
+      return;
+    }
+    const target = findComposerFocusTarget(shell);
+    if (target) {
+      currentTarget = target;
+    }
+    if (!target) {
+      if (attemptsLeft > 0) {
+        attemptsLeft -= 1;
+        timer = window.setTimeout(attempt, 150);
+      } else {
+        stop();
+      }
+      return;
+    }
+    try {
+      target.focus({ preventScroll: true });
+      const landed = getShadowAwareActiveElement(target);
+      if (landed === target || target.contains(landed)) {
+        settled = true;
+      }
+    } catch {
+      // focus() can throw in exotic hosts; keep retrying.
+    }
+    // Still watch once more: the selection may remount the owning shell
+    // after this lands, detaching the focused node.
+    if (attemptsLeft > 0) {
+      attemptsLeft -= 1;
+      timer = window.setTimeout(attempt, 150);
+    } else {
+      stop();
+    }
+  };
+  attempt();
+  return stop;
+}
+
+/**
  * Composer workspace menu. Capability-gated creation actions and disabled
  * untrusted entries keep presentation aligned with daemon authorization.
  */
@@ -98,6 +234,21 @@ export function WorkspaceSelector({
   const menuOpenRef = useRef(false);
   const suppressTooltipRef = useRef(false);
   const pointerDismissedRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  // A radio selection was dispatched for the in-flight close; the composer
+  // takes focus, so Radix must not restore it to the trigger.
+  const selectedRef = useRef(false);
+  // Stop handle of the focus watch started by the last selection.
+  const focusStopRef = useRef<(() => void) | null>(null);
+  // The watch's timers and document listeners outlive this component
+  // unless cancelled: a pending step would otherwise re-focus a composer
+  // after the selector is gone.
+  useEffect(
+    () => () => {
+      focusStopRef.current?.();
+    },
+    [],
+  );
   const selected = workspaces.find((workspace) =>
     selectedWorkspaceCwd
       ? workspace.cwd === selectedWorkspaceCwd
@@ -140,7 +291,12 @@ export function WorkspaceSelector({
       <DropdownMenu
         open={menuOpen}
         onOpenChange={(open) => {
-          if (open) pointerDismissedRef.current = false;
+          if (open) {
+            pointerDismissedRef.current = false;
+            // A reopened menu takes the user's focus back; the pending
+            // step would pull it out again behind the open menu.
+            focusStopRef.current?.();
+          }
           menuOpenRef.current = open;
           setMenuOpen(open);
           suppressTooltipRef.current = true;
@@ -159,6 +315,7 @@ export function WorkspaceSelector({
           <TooltipTrigger asChild>
             <DropdownMenuTrigger asChild disabled={disabled || busy}>
               <button
+                ref={triggerRef}
                 type="button"
                 className={className}
                 aria-label={t('sidebar.workspaceSelectLabel')}
@@ -202,15 +359,40 @@ export function WorkspaceSelector({
             pointerDismissedRef.current = true;
           }}
           onCloseAutoFocus={(event) => {
-            if (pointerDismissedRef.current) event.preventDefault();
+            // Suppress Radix's restore to the trigger after a selection
+            // (the composer takes focus) and after a pointer dismissal
+            // (the existing behaviour); only escape — or a coarse-pointer
+            // keyboard selection — keeps the restore.
+            if (pointerDismissedRef.current || selectedRef.current) {
+              event.preventDefault();
+            }
             pointerDismissedRef.current = false;
+            selectedRef.current = false;
           }}
         >
           <DropdownMenuRadioGroup
             value={selectedStandalone ? STANDALONE_OPTION_ID : selected?.id}
             onValueChange={(id) => {
+              // Every accepted selection ends with the prompt composer in
+              // focus; the trigger is captured before dispatch so the
+              // lookup still identifies the right composer if the
+              // selection remounts it.
+              const focusComposerAfterSelect = (): void => {
+                // Programmatic focus on a coarse pointer claims the active
+                // element without opening the keyboard, and later taps may
+                // then raise no keyboard at all (#5958) — the same gate the
+                // toolbar controls use. Gate BEFORE arming `selectedRef`:
+                // a keyboard selection on a coarse device must keep
+                // Radix's restore to the trigger.
+                if (isCoarsePointerDevice()) return;
+                selectedRef.current = true;
+                focusStopRef.current = scheduleComposerFocus(
+                  triggerRef.current,
+                );
+              };
               if (standaloneSelectable && id === STANDALONE_OPTION_ID) {
                 onSelectStandalone?.();
+                focusComposerAfterSelect();
                 return;
               }
               const next = workspaces.find((workspace) => workspace.id === id);
@@ -221,6 +403,7 @@ export function WorkspaceSelector({
               } else {
                 onSelectWorkspace(cwd);
               }
+              focusComposerAfterSelect();
             }}
           >
             {groups.map((group) => (
