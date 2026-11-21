@@ -138,17 +138,6 @@ export function shellBodyChromeRows(
 const DIFF_BODY_ROWS = 14;
 const SUBAGENTS_BODY_ROWS = 12;
 
-const Row = ({ label, value }: { label: string; value: string }) => (
-  <box flexDirection="row">
-    <box width={22}>
-      <text fg={C.dim}>{label}</text>
-    </box>
-    <box flexGrow={1}>
-      <text fg={C.text}>{value}</text>
-    </box>
-  </box>
-);
-
 type P = {
   config?: Config;
   settings: LoadedSettings;
@@ -388,20 +377,7 @@ export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
   );
 }
 
-export function OpenTuiTrustDialog({ config, onClose }: P) {
-  useEsc(onClose);
-  const trusted = config?.isTrustedFolder?.() ?? false;
-  return (
-    <Shell title="Trust" onClose={onClose} shrinkable>
-      <box flexDirection="column" marginTop={1}>
-        <Row label="Folder trusted:" value={trusted ? 'yes' : 'no'} />
-        <text fg={C.dim}>
-          {'Untrusted folders block privileged approval modes.'}
-        </text>
-      </box>
-    </Shell>
-  );
-}
+export { OpenTuiTrustDialog } from './TrustDialog.js';
 
 /**
  * Session deletion: the same picker ink's `/delete` mounts, driven by ink's own
