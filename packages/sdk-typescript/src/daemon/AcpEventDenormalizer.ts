@@ -88,7 +88,7 @@ export function denormalizeAcpNotification(
       }
       data = d;
     } else {
-      data = params['data'] ?? params;
+      data = withEnvelopeSessionId(params['data'] ?? params, params);
     }
 
     // _meta may live inside the update object or at params level.
@@ -135,7 +135,7 @@ export function denormalizeAcpNotification(
       id: nextSyntheticId++,
       v: 1,
       type,
-      data: params['data'] ?? params,
+      data: withEnvelopeSessionId(params['data'] ?? params, params),
       _meta: isRecord(params['_meta']) ? params['_meta'] : undefined,
       originatorClientId:
         typeof params['originatorClientId'] === 'string'
@@ -214,4 +214,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     (Object.getPrototypeOf(value) === Object.prototype ||
       Object.getPrototypeOf(value) === null)
   );
+}
+
+function withEnvelopeSessionId(
+  data: unknown,
+  params: Record<string, unknown>,
+): unknown {
+  return isRecord(data) && typeof params['sessionId'] === 'string'
+    ? { ...data, sessionId: params['sessionId'] }
+    : data;
 }
