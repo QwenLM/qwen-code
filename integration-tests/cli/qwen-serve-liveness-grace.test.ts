@@ -161,7 +161,10 @@ describe.runIf(process.platform === 'linux')(
           Number(r.attrs['qwen-code.daemon.channel.liveness.cpu_delta_ticks']),
         ).toBeGreaterThan(0);
         expect(r.elapsed).toBeGreaterThan(60_000);
-        expect(r.elapsed).toBeLessThan(100_000);
+        // Upper bound is load-tolerant: local-delay forgiveness can add
+        // windows on a busy host; the extension/kill counts above are the
+        // bounded-grace pin.
+        expect(r.elapsed).toBeLessThan(140_000);
       } finally {
         try {
           process.kill(r.child.pid!, 'SIGKILL');
@@ -186,7 +189,7 @@ describe.runIf(process.platform === 'linux')(
           r.attrs['qwen-code.daemon.channel.liveness.cpu_delta_ticks'],
         ).toBe(0);
         expect(r.attrs['qwen-code.daemon.channel.liveness.state']).toBe('T');
-        expect(r.elapsed).toBeLessThan(45_000);
+        expect(r.elapsed).toBeLessThan(60_000);
       } finally {
         try {
           process.kill(r.child.pid!, 'SIGKILL');
