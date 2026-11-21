@@ -716,6 +716,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_sub_session_send',
   'session_prompt',
   'session_turn_status',
+  'session_turn_feedback',
   'session_attachments',
   'session_attachment_chunk_upload',
   'session_attachment_list',

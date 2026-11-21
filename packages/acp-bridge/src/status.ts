@@ -290,6 +290,15 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionMcpRuntimeRemove: 'qwen/control/session/mcp/runtime-remove',
   /** Read a bounded settled `turn_result` from the active transcript. */
   sessionTurnStatus: 'qwen/control/session/turn_status',
+  /**
+   * Record a per-turn satisfied/not-satisfied mark into the session's
+   * telemetry pipeline. Params: `{ sessionId, promptId, rating: 'up' |
+   * 'down' }`; result: `{ recorded }` — false when the session workspace's
+   * `ui.enableUserFeedback` setting suppresses collection. The child maps
+   * the rating onto `UserFeedbackRating` and calls `logUserFeedback` with
+   * its own session Config.
+   */
+  sessionFeedback: 'qwen/control/session/feedback',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceModelProvidersReload:
