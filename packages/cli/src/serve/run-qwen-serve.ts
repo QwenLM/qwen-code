@@ -3556,7 +3556,11 @@ async function runQwenServeImpl(
   // The Hosted Harness is the Managed Agent's session host. Stamp the
   // attribution marker before the base env freeze so the in-process Hosted
   // turns (loadCliConfig's ACP fallback reads process.env) and every spawned
-  // child inherit it. Registered with the lifecycle immediately so a startup
+  // child inherit it. Any other profile drops an inherited marker instead:
+  // a shell tool inside a Managed session composes child envs with
+  // {...process.env}, so an independently launched daemon would otherwise
+  // attribute its sessions to managed (same rule as `qwen daemon start`'s
+  // START_ENV_DROP). Registered with the lifecycle immediately so a startup
   // failure before the loader scrub still restores an embedded caller's env;
   // the later scrubApplied registration supersedes this with the combined
   // restore, and close() runs both.
@@ -3564,9 +3568,10 @@ async function runQwenServeImpl(
     process.env[QWEN_CODE_MANAGED_RUNTIME_ENV];
   if (optsIn.profile === 'hosted-harness') {
     process.env[QWEN_CODE_MANAGED_RUNTIME_ENV] = '1';
+  } else {
+    delete process.env[QWEN_CODE_MANAGED_RUNTIME_ENV];
   }
   const restoreManagedRuntimeMarker = (): void => {
-    if (optsIn.profile !== 'hosted-harness') return;
     if (previousManagedRuntimeMarker === undefined) {
       delete process.env[QWEN_CODE_MANAGED_RUNTIME_ENV];
     } else {

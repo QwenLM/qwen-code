@@ -58,7 +58,9 @@ CLI 的 ACP channel 回退（`packages/cli/src/config/acp-channel-fallback.ts`�
 Managed Agent 的会话宿主是 Hosted Harness daemon（`qwen serve --profile hosted-harness`），
 由 Java `managed-agent-server` 经 Runtime Broker 承载。它在启动时（`run-qwen-serve.ts`，
 base env 冻结之前）把 `QWEN_CODE_MANAGED_RUNTIME=1` 打进自身 `process.env`，close 时还原
-（嵌入式调用方不残留标记）。两条会话执行路径因此都归因为 `managed`：
+（嵌入式调用方不残留标记）。其余 profile 在同一位置删除继承来的标记：Managed 会话内的
+shell 工具用 `{...process.env}` 组装子进程环境，独立启动的 `qwen serve` 否则会把归因
+带进它的全部会话子进程；close 时还原继承值。两条会话执行路径因此都归因为 `managed`：
 
 - **Managed 引擎**：Hosted turn 在 harness 进程内运行，每 turn 用合成 argv（`acp: true`、
   无 channel）经 `loadCliConfig` 构造 Config，不经过 `parseArguments`。`loadCliConfig`
@@ -86,7 +88,7 @@ daemon 的桥接模型不同（`packages/acp-bridge/src/bridge.ts`）：**一个
 - `app.channel` 语义与取值不变；显式 `--channel` 的既有取值（`VSCode`/`desktop`/`SDK`/worker 名）不变。
 - `QWEN_CODE_SERVE` / `QWEN_CODE_MANAGED_RUNTIME` 为信息性标记，不含敏感信息；不进入 `SCRUBBED_CHILD_ENV_KEYS`（denylist 语义不受影响）。
 - docker/podman sandbox 会显式透传 `QWEN_CODE_SERVE` / `QWEN_CODE_DESKTOP` / `QWEN_CODE_MANAGED_RUNTIME`，避免 sandbox 内子进程退回 `ACP`；项目 `.env`/`settings.env` 不能设置这三个标记，避免 workspace 伪造客户端归因。
-- `qwen daemon start` 的 `START_ENV_DROP` 会丢弃 `QWEN_CODE_MANAGED_RUNTIME`：从 Managed 会话内启动的新 daemon 是独立 daemon，不是 Hosted Harness worker。
+- `qwen daemon start` 的 `START_ENV_DROP` 会丢弃 `QWEN_CODE_MANAGED_RUNTIME`：从 Managed 会话内启动的新 daemon 是独立 daemon，不是 Hosted Harness worker。第二道门同规则：任何非 hosted-harness profile 的 `qwen serve` 启动都在冻结 base env 前删除继承标记，close 时还原。
 
 ## 5. 后续工作（不在本次范围）
 

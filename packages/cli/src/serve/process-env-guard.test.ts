@@ -446,15 +446,17 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'The Hosted Harness capability digest and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap. ' +
         'One more whole-object read resolves serve.sessionPrWatch: its two environment overrides are boot-time operator ' +
         'contracts, read once beside the settings they override rather than per tick. ' +
-        'QWEN_CODE_MANAGED_RUNTIME is the Managed Agent attribution marker: the Hosted Harness profile reads the ' +
-        "launcher's previous value once, stamps '1' before the base env freeze so in-process Hosted turns and spawned " +
-        'children resolve channel=managed, and restores the previous value on close or startup failure (delete when ' +
-        'unset) so an embedded caller keeps no leftover marker — four accesses: read, stamp, delete, restore.',
+        'QWEN_CODE_MANAGED_RUNTIME is the Managed Agent attribution marker: the serve entry reads the ' +
+        "launcher's previous value once, stamps '1' for the Hosted Harness profile (or deletes an inherited value " +
+        'for every other profile, so an independent daemon launched inside a Managed session does not attribute ' +
+        'its sessions to managed) before the base env freeze, and restores the previous value on close or startup ' +
+        'failure (delete when unset) so an embedded caller keeps no leftover marker — five accesses: read, stamp, ' +
+        'inherit-drop, restore-delete, restore-write.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
         'computed:HOSTED_CSI_SESSION_STORE_URL_ENV': 1,
-        'computed:QWEN_CODE_MANAGED_RUNTIME_ENV': 4,
+        'computed:QWEN_CODE_MANAGED_RUNTIME_ENV': 5,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,

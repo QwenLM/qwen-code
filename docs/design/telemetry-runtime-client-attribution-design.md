@@ -55,7 +55,7 @@ Attribution matrix:
 
 ### Managed Agent attribution (`managed`)
 
-The Managed Agent's session host is the Hosted Harness daemon (`qwen serve --profile hosted-harness`), operated by the Java `managed-agent-server` through the Runtime Broker. At boot (`run-qwen-serve.ts`, before the base env freeze) it stamps `QWEN_CODE_MANAGED_RUNTIME=1` into its own `process.env` and restores the previous value on close (an embedded caller keeps no leftover marker). Both session execution paths therefore attribute as `managed`:
+The Managed Agent's session host is the Hosted Harness daemon (`qwen serve --profile hosted-harness`), operated by the Java `managed-agent-server` through the Runtime Broker. At boot (`run-qwen-serve.ts`, before the base env freeze) it stamps `QWEN_CODE_MANAGED_RUNTIME=1` into its own `process.env` and restores the previous value on close (an embedded caller keeps no leftover marker). Every other profile deletes an inherited marker at the same point: shell tools inside a Managed session compose child envs with `{...process.env}`, so an independently launched `qwen serve` would otherwise carry the attribution into all of its session children; close restores the inherited value. Both session execution paths therefore attribute as `managed`:
 
 - **Managed engine**: Hosted turns run inside the harness process. Each turn builds its Config through `loadCliConfig` with a synthesized argv (`acp: true`, no channel) that never passes through `parseArguments`. `loadCliConfig` applies the same fallback to ACP argv without an explicit channel, so reading the marker reports `managed`.
 - **Legacy engine**: the `qwen --acp` children the harness spawns through `createSpawnChannelFactory` inherit the marker (alongside the daemon's `QWEN_CODE_SERVE=1`); in the fallback, `managed` wins over `daemon`.
@@ -80,7 +80,7 @@ Environment markers plus fallback resolution are therefore the only process-leve
 - `app.channel` semantics and values are unchanged; the existing explicit `--channel` values (`VSCode`/`desktop`/`SDK`/worker names) are unchanged.
 - `QWEN_CODE_SERVE` / `QWEN_CODE_MANAGED_RUNTIME` are informational markers carrying no sensitive data; they do not enter `SCRUBBED_CHILD_ENV_KEYS` (denylist semantics are unaffected).
 - docker/podman sandboxes explicitly pass through `QWEN_CODE_SERVE` / `QWEN_CODE_DESKTOP` / `QWEN_CODE_MANAGED_RUNTIME` so children inside the sandbox do not fall back to `ACP`; project `.env`/`settings.env` cannot set these three markers, so a workspace cannot spoof client attribution.
-- `qwen daemon start`'s `START_ENV_DROP` discards `QWEN_CODE_MANAGED_RUNTIME`: a new daemon started from inside a Managed session is an independent daemon, not a Hosted Harness worker.
+- `qwen daemon start`'s `START_ENV_DROP` discards `QWEN_CODE_MANAGED_RUNTIME`: a new daemon started from inside a Managed session is an independent daemon, not a Hosted Harness worker. The same rule holds at the second door: any non-hosted-profile `qwen serve` boot deletes an inherited marker before freezing the base env, and restores it on close.
 
 ## 5. Follow-up work (out of scope here)
 
