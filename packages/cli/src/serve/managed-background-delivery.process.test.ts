@@ -317,6 +317,34 @@ async function streamSummary(
     byteLength: content.byteLength,
   }));
 }
+/**
+ * Re-attaches a fresh applier the way a reload does (§4.6): hold live pushes,
+ * install at the newer generation, then seed the cursor from the watermark the
+ * worker reports. Without the seed the first post-acknowledgement entry looks
+ * out of order, because the worker already trimmed the acked prefix.
+ */
+async function reattach(
+  r: Awaited<ReturnType<typeof rig>>,
+  applier: HostedShellPublisher,
+  generation: number,
+): Promise<void> {
+  applier.restoreBackgroundCapture(
+    EXECUTION,
+    'child_run',
+    r.childRuns.record(EXECUTION)!.outputRef,
+  );
+  const release = applier.holdDeliveries();
+  try {
+    const installed = await r.install(applier, generation);
+    const observed = (installed['observedRuns'] ?? {}) as Record<
+      string,
+      number
+    >;
+    await applier.applyStagedDeliveries([], observed, async () => {});
+  } finally {
+    release();
+  }
+}
 it('a quiet exit while detached settles from the terminal entry on re-attach', async () => {
   const r = await rig();
   await r.detach(1);
@@ -357,4 +385,57 @@ it('a quiet exit while detached settles from the terminal entry on re-attach', a
   expect(settled.outputRef).not.toBeNull();
   const summary = await streamSummary(r, settled.outputRef!);
   expect(summary.every((stream) => stream.byteLength === 0)).toBe(true);
+});
+it('a Harness restart mid-stream keeps one capture and every byte exactly once', async () => {
+  const r = await rig();
+  const chunks = 48;
+  const chunkWidth = 8192;
+  const expected = Array.from(
+    { length: chunks },
+    (_, i) => String(i + 1).padStart(chunkWidth, '0') + '\n',
+  ).join('');
+  const { exited, drained } = driveRealProcess(
+    r.sink,
+    `for i in $(seq 1 ${chunks}); do printf '%0${chunkWidth}d\\n' "$i"; sleep 0.01; done`,
+  );
+
+  // The first Harness applies a prefix, then dies while the process runs on.
+  await waitFor(() => r.sink.run.lastApplied > 0);
+  const appliedBeforeRestart = r.sink.run.lastApplied;
+  await r.detach(1);
+  await publishers[0]!.close();
+
+  const second = r.newPublisher();
+  await reattach(r, second, 2);
+
+  const { code } = await exited;
+  await drained;
+  r.sink.setProcessResult({
+    exitCode: code,
+    signal: null,
+    rawOutput: Buffer.from(expected),
+    output: expected,
+    error: null,
+    aborted: false,
+    pid: 0,
+    executionMethod: 'child_process',
+  });
+  const envelope = await r.sink.finalize('success', [{ text: expected }]);
+  expect(envelope.executionStatus).toBe('success');
+  await r.registry.accept(r.prepared.identity, envelope);
+  await waitFor(() => r.childRuns.record(EXECUTION)!.run.state === 'settled');
+
+  const settled = r.childRuns.record(EXECUTION)!;
+  expect(settled.exitCode).toBe(0);
+  expect(appliedBeforeRestart).toBeGreaterThan(0);
+  // Every byte exactly once, in order, through one capture lineage.
+  const manifest = parseToolResultManifestBytes(
+    await r.resources.read(settled.outputRef!),
+  );
+  const stdout = manifest.contents.find((c) => c.streamId === 'stdout')!;
+  expect(stdout.byteLength).toBe(Buffer.byteLength(expected));
+  expect(stdout.digest).toBe(
+    createHash('sha256').update(expected).digest('hex'),
+  );
+  expect(manifest.revision).toBeGreaterThan(1);
 });

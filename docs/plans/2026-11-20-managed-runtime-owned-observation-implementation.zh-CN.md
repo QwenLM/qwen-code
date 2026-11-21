@@ -68,7 +68,11 @@
 
 ### 已落地
 
-- **真实进程静默退出**（`packages/cli/src/serve/managed-background-delivery.process.test.ts`）：真实 `bash` 子进程在 publisher 已摘除时静默退出；worker 保留 terminal 条目，新 applier 以更新的 writer generation 重挂，记录带退出证据结算，且 manifest 声明每个流零字节。这是 §10「Quiet exit」在真实管道（而非合成 sink 写入）上的用例。
+- **真实进程静默退出**（`packages/cli/src/serve/managed-background-delivery.process.test.ts`）：真实 `bash` 子进程在 publisher 已摘除时静默退出；worker 保留 terminal 条目，新 applier 以更新的 writer generation 重挂，记录带退出证据结算，且 manifest 声明每个流零字节。
+- **真实进程流中 Harness 重启**（同文件）：真实生产者跨过段边界、首个 applier 应用了一段前缀后死亡，新 applier 以 generation 2 重挂。结算后的 manifest 声明整段输出的精确字节长度与 SHA-256，且属同一 lineage —— 这是 §10「Harness restart」在真实管道上的用例。
+
+  该装置必须精确照抄生产协议：先 `holdDeliveries` 暂住实时推送、再安装、然后用安装响应报告的 `observedRuns` 水位播种游标。缺少播种时，第一条「已确认之后」的条目会被判 `Delivery sequence is not contiguous`（worker 早已裁剪已确认前缀）——产品是对的，装置是错的。生产的 `reattachAndDrainBackgroundDeliveries` 本就如此。
+
 - **投递批次上界（验收发现的缺陷）。** 原先一个 revision 最多携带 1024 个 256 KiB 段，base64 后单个 output 条目即可超过 `MANAGED_DELIVERY_REQUEST_LIMIT_BYTES`（512 KiB）。`deliverRpc` 在发出任何 HTTP 之前就拒绝超限请求，因此该条目永远推不出去、run 永久停在 held——违反 §11「预算下界为最大 flush 批次」。背景采集现改为 128 KiB 段、每段一页，使一个 revision 只携带单个段（编码后约 175 KB），即使两个流同时封页进同一条目也远低于上限。副作用是输出可见性提升：每 128 KiB 一个 revision，而非每 1024 段一页。
 
 ### 真实 MySQL 8.4 — 已落地
@@ -92,7 +96,7 @@ mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
 
 ### 剩余故障用例与精确下一步
 
-- **流中 Harness 重启 / 背压下强制停止。** 两个真实进程装置现在都能走到最后一步（批次上界修复消除了第一个阻塞，无界生产者保证被停进程仍存活），但记录不结算：当同批次中 terminal 之前存在 output 条目时，经 `restoreBackgroundCapture` 的 applier 拒绝该 terminal 投递，run 回退 held。静默退出用例经同一路径在**没有**前置 output 条目时能结算，这把故障定位到「restored capture 上 output→terminal 序列」。下一步：在 settle 等待**之前**导出 publisher 的拒绝原因（run 会吞掉它），再据此修 applier 或装置。不要以红测试提交。
+- **背压下强制停止。** 唯一剩余用例。用 `SIGSTOP` 冻结无界生产者再强杀后，terminal 条目带停止原因发出、run 报告 closed/terminal，但重挂后 40s 内记录仍不结算。管道链停驻在一个永远拿不到 outbox 空间的 write 上，因此 capture 以 partial/broken 收尾；当前假设是其终态 manifest 无法通过 `isToolResultManifestChainLink`，或 broken capture 的结算走的是与装置预期不同的路径。下一步：在装置里包住 `HostedShellPublisher.prototype['applyDelivery']` 捕获抛出的错误（express 处理器把错误丢弃，只回 `hosted_shell_publication_failed`），再判断是 applier 还是预期错了。未以红测试提交。
 - **带在途 pull 的 re-attach/drain、挂起期间首条观测、detach→seal 窗口、挂起期间 monitor 策略停止、边界/水位线 wake、挂起资格矩阵、worker 丢失、跨 Broker 重启/副本围栏、删除挂起 Session** — Java 侧已由 H2 上的 `RuntimeStageStoreTest`、`RuntimeObservationPullerTest`、`WakeSealStampTest`、`SessionRecoveryServiceTest`、`HostedCleanupDebtStoreTest`、`RuntimeBrokerServiceTest` 覆盖；各自仍需 MySQL 8.4 运行与 daemon 级 E2E。
 - **§7 度量** — pull 成本/延迟、活跃输出下的 staging 行数与字节、1/100/10,000 条观测的 drain 成本、常驻等价性；这些确定 pull 等待、staged-bytes 水位线、硬上限与 outbox 预算（§11 开放问题 1 与 3）。
 
