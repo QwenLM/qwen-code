@@ -76,6 +76,7 @@ async function fixture() {
   const states = new Map<string, { state: string; revision: number }>();
   let rejectPrepare = false;
   let rejectActivation = false;
+  let degradePackages = false;
   const control = vi
     .spyOn(HostedWorkspaceBroker.prototype, 'extensionControl')
     .mockImplementation(async function (
@@ -107,9 +108,18 @@ async function fixture() {
               agents: [],
               context: [],
               mcpServers: {},
-              hooks: {},
+              hooks: degradePackages
+                ? {
+                    PostToolUse: [
+                      { hooks: [{ type: 'command', command: 'collect.sh' }] },
+                    ],
+                  }
+                : {},
               settings: [],
             },
+            ...(degradePackages
+              ? { degradedComponents: ['hooks'] as const }
+              : {}),
           })),
           mcpServers: operation.baseMcpServers,
           hookCatalog: null,
@@ -180,6 +190,9 @@ async function fixture() {
     },
     failActivation: (fail = true) => {
       rejectActivation = fail;
+    },
+    degrade: (value = true) => {
+      degradePackages = value;
     },
   };
 }
@@ -330,5 +343,36 @@ describe('Hosted extension Session configuration', () => {
         ([operation]) => operation.kind === 'extension-reconcile',
       ),
     ).toHaveLength(1);
+  });
+
+  it('carries per-package degradation into the committed bundle and recovery', async () => {
+    const context = await fixture();
+    context.degrade();
+    await context.manager.submit(context.command());
+    expect(await context.manager.active()).toMatchObject({
+      configRevision: 1,
+      packages: [
+        { pin: { extensionId: 'sample' }, degradedComponents: ['hooks'] },
+      ],
+    });
+    context.failActivation();
+    const failed = context.command(1, 'replacement');
+    await expect(context.manager.submit(failed)).rejects.toThrow();
+    context.failActivation(false);
+    await context.manager.recoverPrevious(failed.operationId);
+    expect(await context.manager.active()).toMatchObject({
+      configRevision: 3,
+      packages: [
+        { pin: { extensionId: 'sample' }, degradedComponents: ['hooks'] },
+      ],
+    });
+  });
+
+  it('omits degradation from the committed bundle when nothing degraded', async () => {
+    const context = await fixture();
+    await context.manager.submit(context.command());
+    const active = await context.manager.active();
+    expect(active!.packages[0]!.degradedComponents).toBeUndefined();
+    expect(JSON.stringify(active)).not.toContain('degradedComponents');
   });
 });

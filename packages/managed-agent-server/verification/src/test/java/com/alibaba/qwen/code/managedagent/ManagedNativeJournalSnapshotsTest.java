@@ -90,12 +90,10 @@ class ManagedNativeJournalSnapshotsTest {
         try (var holder = java.util.concurrent.Executors.newSingleThreadExecutor()) {
             var hold = holder.submit(() -> tx.executeWithoutResult(status -> {
                 JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, TENANT);
-                String key = com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract
-                        .sha256(TENANT.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?,"
-                        + " 'output_publication') ON DUPLICATE KEY UPDATE tenant_key = tenant_key", key, TENANT);
+                jdbc.update("INSERT INTO ma_tenant_guard (tenant_id, guard_domain) VALUES (?,"
+                        + " 'output_publication') ON DUPLICATE KEY UPDATE tenant_id = tenant_id", TENANT);
                 jdbc.queryForList("SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain = 'output_publication'"
-                        + " AND tenant_key = ? FOR UPDATE", key);
+                        + " AND tenant_id = ? FOR UPDATE", TENANT);
                 held.countDown();
                 try {
                     release.await(30, java.util.concurrent.TimeUnit.SECONDS);

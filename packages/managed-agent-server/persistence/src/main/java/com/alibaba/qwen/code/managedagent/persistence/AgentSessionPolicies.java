@@ -204,7 +204,7 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
@@ -238,7 +238,7 @@ final class AgentSessionPolicies {
     }
 
     void requireMcpSettingsCommit(String tenantId, String workspaceId, String sessionId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())
                 || !WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null) {
@@ -249,7 +249,7 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
@@ -292,7 +292,7 @@ final class AgentSessionPolicies {
     }
 
     void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())) {
             throw new ManagedAgentException(409, "unsupported_feature", "Extension management is unavailable.");
         }
@@ -503,7 +503,7 @@ final class AgentSessionPolicies {
     WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
             String sessionId, String key, String digest, String modelId, long expectedRevision,
             boolean supported) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null) {
@@ -576,7 +576,7 @@ final class AgentSessionPolicies {
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null) {

@@ -19,6 +19,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import java.net.URI;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,7 +28,6 @@ import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -59,8 +59,9 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     protected final HttpRuntimeTransport transport = new HttpRuntimeTransport();
     private final ExecutorService executor = Executors.newThreadPerTaskExecutor(
             Thread.ofVirtual().name("runtime-external-", 0).factory());
-    private final Map<RuntimeProvisionSeed, Placement> placements = new ConcurrentHashMap<>();
-    private final Map<List<Object>, Placement> placementsByLease = new ConcurrentHashMap<>();
+    // Both maps are guarded by the placements monitor.
+    private final Map<RuntimeProvisionSeed, Placement> placements = new HashMap<>();
+    private final Map<List<Object>, Placement> placementsByLease = new HashMap<>();
 
     public ExternalRuntimeProvisioner(ExternalRuntimeClient client, String providerId, Duration startupTimeout) {
         if (client == null || startupTimeout == null || startupTimeout.isNegative() || startupTimeout.isZero()) {
@@ -143,7 +144,10 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         return CompletableFuture.supplyAsync(() -> {
             validate(request, seed);
-            Placement saved = placements.get(seed);
+            Placement saved;
+            synchronized (placements) {
+                saved = placements.get(seed);
+            }
             if (saved == null || saved.handle() == null || !saved.request().equals(request)) {
                 throw conflict();
             }

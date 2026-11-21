@@ -3137,6 +3137,9 @@ export interface components {
             revision: number;
             extensions: components["schemas"]["ManagedExtensionPackagePin"][];
             requestedExtensions: components["schemas"]["ManagedExtensionPackagePin"][];
+            degradedComponents?: {
+                [key: string]: ("mcp" | "hooks")[];
+            };
             operation?: components["schemas"]["ManagedExtensionApplyOperation"];
             selfService?: {
                 supported: boolean;

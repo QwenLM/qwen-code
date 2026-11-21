@@ -75,7 +75,7 @@ env:
   # SKIP_LABEL; pinned to them by
   # scripts/tests/qwen-autofix-fork-bridge-workflow.test.js.
   AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
-  REVIEW_BOT: 'qwen-code-ci-bot'
+  REVIEW_BOT: 'qwen-code-review-bot'
   TAKEOVER_LABEL: 'autofix/takeover'
   SKIP_LABEL: 'autofix/skip'
 

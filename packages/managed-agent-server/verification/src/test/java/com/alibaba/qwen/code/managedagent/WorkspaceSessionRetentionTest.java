@@ -333,14 +333,11 @@ class WorkspaceSessionRetentionTest {
         // none. The recorded unarchive below keeps answering through it,
         // while the fresh key meets the same 404 every other read gets.
         String fence = UUID.randomUUID().toString();
-        if (jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE tenant_key = ? AND storage_key = ?",
-                fence, RuntimeAdmissionFences.storageFenceKey(tenant),
-                RuntimeAdmissionFences.storageFenceKey("storage")) == 0) {
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
-                            + " fence_operation_id) VALUES (?, ?, ?, ?, 'storage', ?)",
-                    RuntimeAdmissionFences.storageAliasKey(tenant, "storage"),
-                    RuntimeAdmissionFences.storageFenceKey(tenant),
-                    RuntimeAdmissionFences.storageFenceKey("storage"), tenant, fence);
+        if (jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?",
+                fence, RuntimeAdmissionFences.storageAliasKey(tenant, "storage")) == 0) {
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id,"
+                            + " fence_operation_id) VALUES (?, ?, 'storage', ?)",
+                    RuntimeAdmissionFences.storageAliasKey(tenant, "storage"), tenant, fence);
         }
         // Replay-first, like every other mutation path: the recorded
         // success answers its body with the Session as last visible

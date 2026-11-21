@@ -51,7 +51,6 @@ import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFe
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requireStorageAdmission;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.storageAliasKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.storageFence;
-import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.storageFenceKey;
 
 /** JDBC Runtime binding repository coordinated through a shared database. */
 public final class JdbcRuntimeBindingRepository
@@ -576,18 +575,16 @@ public final class JdbcRuntimeBindingRepository
                     lockPlacementDomain(connection, tenantId);
                     try (PreparedStatement statement =
                             connection.prepareStatement(
-                                    "INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
+                                    "INSERT INTO ma_storage (alias_key,"
                                         + " tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified) VALUES (?,"
-                                        + " ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
+                                        + " ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
                                         + " gmt_modified = CASE WHEN fence_operation_id IS NULL THEN VALUES(gmt_modified) ELSE gmt_modified END,"
                                         + " fence_operation_id = COALESCE(fence_operation_id,"
                                         + " VALUES(fence_operation_id))")) {
                         statement.setString(1, storageAliasKey(tenantId, storageId));
-                        statement.setString(2, storageFenceKey(tenantId));
-                        statement.setString(3, storageFenceKey(storageId));
-                        JdbcRepositorySupport.setIdentity(statement, 4, tenantId);
-                        JdbcRepositorySupport.setIdentity(statement, 5, storageId);
-                        JdbcRepositorySupport.setIdentity(statement, 6, operationId);
+                        JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
+                        JdbcRepositorySupport.setIdentity(statement, 3, storageId);
+                        JdbcRepositorySupport.setIdentity(statement, 4, operationId);
                         statement.executeUpdate();
                     }
                     if (!operationId.equals(storageFence(connection, tenantId, storageId))) {
@@ -1680,24 +1677,22 @@ public final class JdbcRuntimeBindingRepository
      */
     public static void lockPlacementDomain(Connection connection, String tenantId, int timeoutSeconds)
             throws SQLException {
-        String key = JdbcRepositorySupport.valueKey(tenantId);
         try (PreparedStatement insert = connection.prepareStatement(
-                        "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES"
-                            + " (?, ?, 'runtime_placement') ON DUPLICATE KEY UPDATE tenant_key ="
-                            + " tenant_key")) {
+                        "INSERT INTO ma_tenant_guard (tenant_id, guard_domain) VALUES"
+                            + " (?, 'runtime_placement') ON DUPLICATE KEY UPDATE tenant_id ="
+                            + " tenant_id")) {
             insert.setQueryTimeout(timeoutSeconds);
-            insert.setString(1, key);
-            JdbcRepositorySupport.setIdentity(insert, 2, tenantId);
+            insert.setString(1, tenantId);
             insert.executeUpdate();
         }
         try (PreparedStatement lock = connection.prepareStatement(
-                        "SELECT tenant_id FROM ma_tenant_guard WHERE tenant_key = ? AND"
+                        "SELECT tenant_id FROM ma_tenant_guard WHERE tenant_id = ? AND"
                                 + " guard_domain = 'runtime_placement' FOR UPDATE")) {
             lock.setQueryTimeout(timeoutSeconds);
-            lock.setString(1, key);
+            lock.setString(1, tenantId);
             try (ResultSet result = lock.executeQuery()) {
                 if (!result.next() || !tenantId.equals(result.getString("tenant_id"))) {
-                    throw new IllegalStateException("Runtime placement tenant hash collision");
+                    throw new IllegalStateException("Runtime placement tenant conflict");
                 }
             }
         }

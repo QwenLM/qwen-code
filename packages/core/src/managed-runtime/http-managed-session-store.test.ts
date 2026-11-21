@@ -2876,6 +2876,60 @@ describe('HTTP Managed Session store', () => {
     return { stores, session };
   }
 
+  it.each([false, true])(
+    'stamps a clean suspension seal with its wake projection (wakeDispatch=%s)',
+    async (wakeDispatch) => {
+      const server = new FakeManagedSessionStore();
+      server.wakeDispatch = wakeDispatch;
+      const { stores, session } = await bootStoresAndSession(server);
+      expect(stores.supportsWakeDispatch()).toBe(wakeDispatch);
+      await session.authority.close({ pending: true, dueAt: 1234 });
+      expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+        revision: server.storedTransactions.length,
+        pending: true,
+        dueAt: 1234,
+      });
+    },
+  );
+
+  it('sends no wake stamp on a bare seal', async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    const { session } = await bootStoresAndSession(server);
+    await session.authority.close();
+    expect(server.sealBodies.at(-1)).not.toHaveProperty('wake');
+  });
+
+  it('refreshes the wake-dispatch capability on every ordinary writer renewal', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      expect(stores.supportsWakeDispatch()).toBe(false);
+      server.wakeDispatch = true;
+      await stores.assertWritable();
+      expect(stores.supportsWakeDispatch()).toBe(true);
+      server.wakeDispatch = false;
+      await stores.assertWritable();
+      expect(stores.supportsWakeDispatch()).toBe(false);
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
+
+  it('refreshes the wake-dispatch capability on an activation renewal', async () => {
+    const server = new FakeManagedSessionStore();
+    server.activationLeaseRenewal = true;
+    const { stores, authority } = await bootOriginalCsiAuthority(server);
+    try {
+      expect(stores.supportsWakeDispatch()).toBe(false);
+      server.wakeDispatch = true;
+      await authority.renewActivation({ leaseDurationMs: 60_000 });
+      expect(stores.supportsWakeDispatch()).toBe(true);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
   it('commits model statistics', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
@@ -9452,6 +9506,8 @@ describe('HTTP Managed Session store', () => {
 
 class FakeManagedSessionStore {
   activationLeaseRenewal = false;
+  wakeDispatch = false;
+  readonly sealBodies: Array<Record<string, unknown>> = [];
   private activationLease?: ManagedSessionActivationLease;
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
@@ -9592,6 +9648,9 @@ class FakeManagedSessionStore {
     }
     if (suffix === '/writers:seal') {
       this.sealCount++;
+      this.sealBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
       if (this.sealFailuresRemaining > 0) {
         this.sealFailuresRemaining--;
         return jsonResponse(
@@ -9896,6 +9955,7 @@ class FakeManagedSessionStore {
   private grant(): Record<string, unknown> {
     return {
       activationLeaseRenewal: this.activationLeaseRenewal,
+      ...(this.wakeDispatch ? { wakeDispatch: true } : {}),
       ...(this.activationLease
         ? { activationLease: this.activationLease }
         : {}),

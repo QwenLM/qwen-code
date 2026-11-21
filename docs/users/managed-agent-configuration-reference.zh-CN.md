@@ -46,6 +46,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `session-worktree.scan-delay` | — | 时长 | `1000` | Session worktree 任务两次运行之间的间隔；每次运行继续未完成的单 Session Git worktree 步骤，并使 worktree 未能准备好的 Session 的初始 Turn 失败。接受 `1s` 这类时长；不带单位的数字按毫秒计。 |
 | `side-queries-enabled` | `QWEN_MANAGED_AGENT_SIDE_QUERIES_ENABLED` | 布尔 | `false` | 为具备显式 model_config、执行权限、Session Store 以及声明 side-query/1 的 Harness 的 ACTIVE Session 开启新的 actor 私有 BTW 与 recap 生成。默认关闭。关闭新请求受理后仍保留已授权结果读取和已受理任务。此版本不支持模型目录或默认模型 Session。 |
 | `trusted-actor-header` | `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` | 字符串 | *（空）* | 一个请求头名称（例如 `X-Qwen-Actor-Id`），在没有上游认证主体时，其值连同 `X-Qwen-Tenant-Id` 一起被信任为调用方的 actor ID。仅在 open 认证模式下使用；与 signed 模式同时配置时启动时拒绝。open 模式下开启 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 时必须设置本项。切勿在不可信客户端能访问服务端的环境中设置。为空时禁用。 |
+| `wake-dispatch.enabled` | `QWEN_MANAGED_AGENT_WAKE_DISPATCH_ENABLED` | 布尔 | `false` | 允许 Hosted Harness 挂起一个空闲 Session，前提是它的待处理输入全部是延后到期且未被尝试过的唤醒输入。Session Store 会在 writer grant 中公告该能力，挂起时的 seal 会在 head 上记下最早的到期时间，唤醒恢复扫描在到期时加载该 Session，无需重放 journal。默认关闭。关闭后不再产生新的此类挂起；已带戳的 head 仍会在到期时投递。 |
 | `wake-recovery.scan-delay` | — | 时长 | `2s` | 唤醒恢复扫描两次运行之间的间隔；每次运行最多找出 8 个存有已提交输入但无写入者持有的 Session，并重新挂接以运行其唤醒。仅在开启 `qwen.managed-agent.session-store.enabled` 且 Hosted Harness 可用时运行。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 
 ## `qwen.managed-agent.artifacts`

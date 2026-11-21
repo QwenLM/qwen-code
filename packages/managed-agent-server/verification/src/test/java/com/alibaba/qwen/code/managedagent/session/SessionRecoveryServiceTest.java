@@ -54,9 +54,10 @@ class SessionRecoveryServiceTest {
         jdbc.execute("CREATE TABLE ma_session_head (tenant_id VARCHAR, session_id VARCHAR,"
                 + " head_kind VARCHAR, recovery_status VARCHAR, recovery_detail_code VARCHAR,"
                 + " state VARCHAR, activation_phase VARCHAR, activation_head_revision BIGINT,"
-                + " journal_revision BIGINT, is_wake_pending INT, wake_head_revision BIGINT)");
-        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L);
+                + " journal_revision BIGINT, is_wake_pending INT, wake_head_revision BIGINT,"
+                + " wake_seal_revision BIGINT)");
+        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L, null);
         // The obligation projections the sealed-head proof reads. Empty by
         // default: a cleanly suspended Session owes nothing.
         jdbc.execute("CREATE TABLE ma_turn (tenant_id VARCHAR, session_id VARCHAR, status VARCHAR)");
@@ -132,6 +133,35 @@ class SessionRecoveryServiceTest {
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("operator_required");
         assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @Test
+    void aSealStampedSuspensionWithAnUnattemptedInputIsReadyRightAfterItsSeal() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = 1, wake_seal_revision = 5");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        assertThat(recovery.nextTurnAllowed()).isTrue();
+        verifyNoInteractions(harness, coordinator);
+    }
+
+    @Test
+    void aStampClearedByARefusedLoadIsNotReady() {
+        sealCleanly();
+        // The refused load's acquisition cleared the stamp; its bare seal
+        // leaves the same sealed, released, current-projection head.
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = 1, wake_seal_revision = NULL");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+    }
+
+    @Test
+    void aStampForAnOlderRevisionIsNotReady() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = 1, wake_seal_revision = 4");
+        var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.nextTurnAllowed()).isFalse();
     }
 

@@ -872,6 +872,11 @@
       "en": "The name of a request header (for example `X-Qwen-Actor-Id`) whose value is trusted as the caller's actor ID, together with `X-Qwen-Tenant-Id`, when no upstream principal is present. Used only in open authentication mode; combining it with signed mode is refused at startup. In open mode, `qwen.managed-agent.runtime-broker.local-directory-import-enabled` requires it. Never set it where untrusted clients can reach the server. Empty disables it.",
       "zh": "一个请求头名称（例如 `X-Qwen-Actor-Id`），在没有上游认证主体时，其值连同 `X-Qwen-Tenant-Id` 一起被信任为调用方的 actor ID。仅在 open 认证模式下使用；与 signed 模式同时配置时启动时拒绝。open 模式下开启 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 时必须设置本项。切勿在不可信客户端能访问服务端的环境中设置。为空时禁用。"
     },
+    "qwen.managed-agent.wake-dispatch.enabled": {
+      "en": "Lets a Hosted Harness suspend an idle Session whose only pending inputs are deferred, unattempted wake inputs. The Session Store advertises the capability in its writer grants, the suspension seal stamps the head with the earliest due time, and the wake recovery scan loads the Session when that time arrives without replaying its journal. Defaults off. Disabling it stops new such suspensions; heads already stamped are still delivered when due.",
+      "zh": "允许 Hosted Harness 挂起一个空闲 Session，前提是它的待处理输入全部是延后到期且未被尝试过的唤醒输入。Session Store 会在 writer grant 中公告该能力，挂起时的 seal 会在 head 上记下最早的到期时间，唤醒恢复扫描在到期时加载该 Session，无需重放 journal。默认关闭。关闭后不再产生新的此类挂起；已带戳的 head 仍会在到期时投递。",
+      "type": "boolean"
+    },
     "qwen.managed-agent.wake-recovery.scan-delay": {
       "en": "How long the wake recovery scan waits between passes; each pass finds up to eight Sessions holding committed inputs that no writer owns and reattaches them so their wake runs. Runs only with `qwen.managed-agent.session-store.enabled` and an available Hosted Harness. Accepts a duration such as `2s`; a plain number is milliseconds.",
       "zh": "唤醒恢复扫描两次运行之间的间隔；每次运行最多找出 8 个存有已提交输入但无写入者持有的 Session，并重新挂接以运行其唤醒。仅在开启 `qwen.managed-agent.session-store.enabled` 且 Hosted Harness 可用时运行。接受 `2s` 这类时长；不带单位的数字按毫秒计。",

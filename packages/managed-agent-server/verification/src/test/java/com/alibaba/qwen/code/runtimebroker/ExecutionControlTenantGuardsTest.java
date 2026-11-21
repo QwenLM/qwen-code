@@ -58,6 +58,23 @@ class ExecutionControlTenantGuardsTest {
     }
 
     @Test
+    void hostSentinelScopeFitsGuardColumn() throws SQLException {
+        String sentinel = "local-storage-host/" + "f".repeat(64);
+        try (Connection connection = source.getConnection()) {
+            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, sentinel);
+            try (var statement = connection.prepareStatement(
+                    "SELECT tenant_id FROM ma_tenant_guard"
+                            + " WHERE guard_domain = 'runtime_placement' AND tenant_id = ?")) {
+                statement.setString(1, sentinel);
+                try (var rows = statement.executeQuery()) {
+                    assertTrue(rows.next());
+                    assertEquals(sentinel, rows.getString(1));
+                }
+            }
+        }
+    }
+
+    @Test
     void sessionIsolatedDispatchCompletesWhileBothTenantGuardsAreHeld() throws Exception {
         var fixture = sessionFixture(true);
         var claimed = executions.claimDispatch(fixture.prepare("call").getExecutionCallId(), "owner",
@@ -273,17 +290,15 @@ class ExecutionControlTenantGuardsTest {
                     if (placement) {
                         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant);
                     }
-                    String key = ManagedSchemaKeys.key(tenant);
-                    try (var insert = connection.prepareStatement("INSERT INTO ma_tenant_guard (tenant_key, tenant_id,"
-                            + " guard_domain) VALUES (?, ?, 'output_publication') ON DUPLICATE KEY UPDATE"
-                            + " tenant_key = tenant_key")) {
-                        insert.setString(1, key);
-                        insert.setBytes(2, ManagedSchemaKeys.identity(tenant));
+                    try (var insert = connection.prepareStatement("INSERT INTO ma_tenant_guard (tenant_id,"
+                            + " guard_domain) VALUES (?, 'output_publication') ON DUPLICATE KEY UPDATE"
+                            + " tenant_id = tenant_id")) {
+                        insert.setString(1, tenant);
                         insert.executeUpdate();
                     }
                     try (var lock = connection.prepareStatement("SELECT tenant_id FROM ma_tenant_guard WHERE"
-                            + " guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE")) {
-                        lock.setString(1, key);
+                            + " guard_domain = 'output_publication' AND tenant_id = ? FOR UPDATE")) {
+                        lock.setString(1, tenant);
                         lock.executeQuery().close();
                     }
                     held.countDown();

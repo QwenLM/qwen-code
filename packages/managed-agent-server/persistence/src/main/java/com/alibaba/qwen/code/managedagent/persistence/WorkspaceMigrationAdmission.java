@@ -30,10 +30,8 @@ final class WorkspaceMigrationAdmission {
 
     // With a lock clause, locks the storage row through alias_key, which locks
     // the alias record and then the primary record, as Runtime binding
-    // creation, execution membership and journal commits do. Locking it
-    // through (tenant_key, storage_key) took the primary record first, and
-    // requireOpen asked for the alias record afterwards, in
-    // requirePhysicalOpen, which deadlocked with them (#16320).
+    // creation, execution membership and journal commits do. Taking the
+    // primary record first deadlocked with them (#16320).
     private static String owner(JdbcTemplate jdbc, String tenant, String storage, String lock) {
         var rows = jdbc.query("SELECT tenant_id, storage_id, fence_operation_id FROM ma_storage"
                 + " WHERE alias_key = ?" + lock, (row, index) -> WorkspaceOperations.values(
@@ -135,7 +133,7 @@ final class WorkspaceMigrationAdmission {
         }
         var registered = registrations.getFirst();
         var owners = jdbc.query("SELECT * FROM ma_storage_owner WHERE storage_key = ?" + lock,
-                (row, index) -> registered.ownerKey().equals(row.getString("physical_key"))
+                (row, index) -> registered.ownerKey().equals(row.getString("storage_key"))
                         && registered.storageKind().equals(row.getString("storage_kind"))
                         && tenant.equals(row.getString("tenant_id")) && storage.equals(row.getString("storage_id"))
                         && registered.mountRoot().equals(row.getString("mount_root"))

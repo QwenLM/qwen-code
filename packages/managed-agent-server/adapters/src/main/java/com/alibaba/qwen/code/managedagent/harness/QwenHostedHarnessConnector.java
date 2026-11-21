@@ -2752,12 +2752,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
      * G3: instead of pinning every bound Session to one dead Harness
      * process, a live control plane adopts the next generation. The next
      * {@link #client()} call renegotiates, so a capability change fails
-     * closed at the boundary instead of masking it. The connector monitor
-     * only guards the client handoff and never wraps the map churn (a
+     * closed at the boundary instead of masking it. The clientLock only
+     * guards the client handoff and never wraps the map churn (a
      * {@code ConcurrentHashMap.computeIfAbsent} bin lock is held across an
-     * in-flight load, so clearing maps under the monitor would invert the
-     * lock order and could deadlock). The handoff does build the
-     * replacement under the monitor, so a renegotiation blocks other
+     * in-flight load, so clearing maps under the lock would invert the
+     * lock order and could deadlock). {@link #client()} builds the
+     * replacement under the same lock, so a renegotiation blocks other
      * Sessions' attaches for at most its connect + request timeouts —
      * bounded, unlike the in-flight load it replaced.
      * <p>
@@ -2776,7 +2776,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         HostedHarnessClient stale = null;
         boolean dropped = false;
-        synchronized (this) {
+        // client() and close() hand the client over under the same lock, so
+        // an adoption and a close never both take and close one client.
+        clientLock.lock();
+        try {
             HostedHarnessClient current = client;
             if (current == null) {
                 return;
@@ -2787,10 +2790,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 stale = current;
                 dropped = true;
             }
+        } finally {
+            clientLock.unlock();
         }
-        // No map work under the monitor: a computeIfAbsent bin lock is
+        // No map work under the clientLock: a computeIfAbsent bin lock is
         // held across an in-flight load elsewhere, so touching either map
-        // while holding `this` inverts the lock order. Evicting by boot
+        // while holding it inverts the lock order. Evicting by boot
         // identity instead of clearing also keeps whatever a concurrent
         // rebuild already minted under the generation now serving, and
         // dropping the markers of evicted entries keeps the two maps in
