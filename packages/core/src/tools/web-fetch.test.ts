@@ -564,6 +564,47 @@ describe('WebFetchTool', () => {
       },
     );
 
+    it('keeps a spilled success recoverable when the finalizer cannot write', async () => {
+      stubFetch({
+        contentType: 'text/plain',
+        body: Buffer.from('word '.repeat(30_000)),
+      });
+      mockGenerateContent.mockResolvedValue({ text: 'summary '.repeat(1000) });
+      const result = await run('https://example.com/large');
+      const originalArtifact = (result.llmContent as string).match(
+        /Full extracted text saved to: (.*)\. Page in/,
+      )?.[1];
+      expect(originalArtifact).toBeDefined();
+
+      const [finalized] = await finalizeToolResponses(
+        {
+          ...mockConfig,
+          getToolOutputBatchBudget: () => 2_000,
+          getToolResultBytesWritten: () => Number.MAX_SAFE_INTEGER,
+        } as Config,
+        [
+          {
+            callId: 'web',
+            toolName: 'web_fetch',
+            responseParts: convertToFunctionResponse(
+              'web_fetch',
+              'web',
+              result.llmContent,
+              result,
+            ),
+          },
+        ],
+      );
+
+      const output = finalized.responseParts[0].functionResponse!.response![
+        'output'
+      ] as string;
+      expect(output).toContain(
+        `Persisted tool-output artifact: ${originalArtifact}`,
+      );
+      expect(isPersistedOutputStub(output)).toBe(true);
+    });
+
     it('keeps a spilled success recoverable when its metadata header exceeds 4 KB', async () => {
       const longUrl = `https://example.com/large?${'x'.repeat(5_000)}`;
       stubFetch({
@@ -573,6 +614,19 @@ describe('WebFetchTool', () => {
       mockGenerateContent.mockResolvedValue({ text: 'Summary' });
 
       const result = await run(longUrl);
+
+      expect(result.llmContent).toContain('Full extracted text saved to:');
+      expect(isPersistedOutputStub(result.llmContent as string)).toBe(true);
+    });
+
+    it('recognizes a spilled success when the URL contains a blank line', async () => {
+      stubFetch({
+        contentType: 'text/plain',
+        body: Buffer.from('word '.repeat(30_000)),
+      });
+      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+
+      const result = await run('https://example.com/large\n\nignored');
 
       expect(result.llmContent).toContain('Full extracted text saved to:');
       expect(isPersistedOutputStub(result.llmContent as string)).toBe(true);

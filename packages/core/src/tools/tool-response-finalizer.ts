@@ -139,11 +139,10 @@ function recoveryHeader(files: string[] | undefined): string {
 
 function minimumRecoveryBudget(slot: TextSlot): number {
   const text = slot.recovery?.text;
-  return (
-    recoveryHeader(slot.recovery?.persistedOutputFiles).length +
-    (text ? text.length + 2 : 0) +
-    3
-  );
+  const files = slot.recovery?.persistedOutputFiles?.length
+    ? slot.recovery.persistedOutputFiles
+    : slot.recovery?.fallbackPersistedOutputFiles;
+  return recoveryHeader(files).length + (text ? text.length + 2 : 0) + 3;
 }
 
 function isBudgetExemptOutputName(name: string | undefined): boolean {
@@ -379,11 +378,14 @@ function replaceTextSlots(
     if (slot.text.length <= allocations[index]) continue;
     const entry = result[slot.entryIndex];
     const part = entry.responseParts[slot.partIndex];
-    const files =
+    const persistedFiles =
       entry.persistedOutputFiles ?? slot.recovery?.persistedOutputFiles;
+    const files = persistedFiles?.length
+      ? persistedFiles
+      : slot.recovery?.fallbackPersistedOutputFiles;
     const recovery = { ...slot.recovery, persistedOutputFiles: files };
-    // The header path is the entry's persisted artifact — data this module
-    // wrote, never a string recovered from model-visible text.
+    // Paths come from producer metadata or this module's write, never from a
+    // string recovered from model-visible text.
     const replacement = fitText(
       slot.text,
       allocations[index],
@@ -567,7 +569,8 @@ export async function finalizeToolResponses(
         // persist an artifact and then send a contentless notice.
         (budgetOverride !== undefined ||
           slot.recovery?.text ||
-          slot.recovery?.persistedOutputFiles?.length) &&
+          slot.recovery?.persistedOutputFiles?.length ||
+          slot.recovery?.fallbackPersistedOutputFiles?.length) &&
         allocations[index] < minimumRecoveryBudget(slot),
     )
   ) {

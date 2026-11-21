@@ -9,6 +9,7 @@ import type { Part } from '@google/genai';
 export interface ToolOutputRecovery {
   text?: string;
   persistedOutputFiles?: string[];
+  fallbackPersistedOutputFiles?: string[];
 }
 
 const recoveryKey = Symbol('tool-output-recovery');

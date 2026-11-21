@@ -630,10 +630,9 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       }
 
       const header =
-        this.buildMetadataHeader(entry) +
         (entry.persistedTextPath
-          ? `\n${WEB_FETCH_SAVED_TEXT_PREFIX}${entry.persistedTextPath}. Page in with read_file using file_path, offset and limit.`
-          : '');
+          ? `${WEB_FETCH_SAVED_TEXT_PREFIX}${entry.persistedTextPath}. Page in with read_file using file_path, offset and limit.\n`
+          : '') + this.buildMetadataHeader(entry);
       const binaryNote = entry.persistedPath
         ? `\n\n[Binary content (${entry.persistedMime || entry.contentType || 'unknown'}, ${formatByteSize(entry.persistedSize ?? entry.byteLength)}) saved to ${entry.persistedPath}.${readHintForPath(entry.persistedPath)}]`
         : '';
@@ -768,6 +767,7 @@ ${entry.content}
         llmContent: `${header}\n\n${resultText}${binaryNote}`,
         returnDisplay: `${displaySummary}${elapsedSuffix()}`,
         rawOutputSize: entry.rawOutputSize,
+        fallbackPersistedOutputFiles: persistedOutputFiles,
         ...(entry.persistedPath
           ? { resultFilePaths: [entry.persistedPath] }
           : {}),
