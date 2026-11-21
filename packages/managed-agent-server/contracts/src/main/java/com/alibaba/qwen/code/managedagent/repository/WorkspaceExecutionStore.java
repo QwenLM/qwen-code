@@ -69,6 +69,10 @@ public interface WorkspaceExecutionStore {
 
     public void releaseMount(ContextBinding binding, RuntimeSessionRecord session);
 
+    default void releaseConfined(ContextBinding binding, RuntimeSessionRecord session, RuntimeBindingRecord runtime) {
+        throw unavailable();
+    }
+
     public String holdForMaintenance(ContextBinding binding, String maintenanceId,
             long claimGeneration);
 

@@ -125,6 +125,7 @@ export async function executePrivateRootBwrap(
           '--unshare-user',
           '--disable-userns',
           '--unshare-pid',
+          '--as-pid-1',
           '--unshare-net',
           '--unshare-ipc',
           '--unshare-uts',
@@ -176,6 +177,8 @@ export async function executePrivateRootBwrap(
       }),
       onOutput,
       cancel.signal,
+      false,
+      { maxBufferedOutputBytes: 64 * 1024 },
     );
     return {
       ...handle,

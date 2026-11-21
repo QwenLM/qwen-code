@@ -119,6 +119,18 @@ import {
  * The routes of a worker booted with v2. Attestation v2 is not among them,
  * so it answers 404 and the Runtime never presents two identities.
  */
+import {
+  CONFINEMENT_DENIED,
+  CONFINEMENT_UNAVAILABLE,
+  runPrivateRootShell,
+} from './managed-private-root.js';
+
+export const CONFINED_CONTEXT_WORKER_ROUTES = Object.freeze([
+  ...MANAGED_CONTEXT_ROUTES,
+  WORKSPACE_ACTIVATION_ROUTE,
+  ...OWNED_MANAGED_RUNTIME_ROUTES.filter((route) => route.key !== 'attest'),
+]);
+
 export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   ...MANAGED_CONTEXT_ROUTES,
   WORKSPACE_ACTIVATION_ROUTE,
@@ -327,6 +339,7 @@ export function registerManagedContextRoutes(
   mount = new ManagedContextMount(bootDocument.mountRoot),
   ledger?: ManagedRuntimeLedger,
   sshForegroundOnly = false,
+  confinementQualified = false,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
   if (isCsiFilesCapability(boot.capabilityDigest))
@@ -392,6 +405,7 @@ export function registerManagedContextRoutes(
   if (resident && boot.isolationClass !== 'workspace')
     throw new Error('Resident Workspace requires Workspace isolation.');
   const requiresActivation = publisherMode.requiresActivation;
+  let executor: ManagedToolExecutor;
   const admissionOpen = (): boolean => executor.isAdmissionOpen;
   const remotePublisher = publisherMode.remotePublisher
     ? new RemoteShellResultPublisher()
@@ -410,7 +424,12 @@ export function registerManagedContextRoutes(
     authorizeManagedRuntime(boot),
     managedRuntimeJsonBody(attestRoute.requestBodyLimitBytes),
     (req: express.Request, res: express.Response) => {
-      send(res, checkManagedContextAttestation(req.body, boot));
+      const outcome = checkManagedContextAttestation(req.body, boot);
+      if (outcome.status === 200 && boot.privateRoot && !confinementQualified) {
+        res.status(409).json({ code: CONFINEMENT_UNAVAILABLE });
+        return;
+      }
+      send(res, outcome);
     },
     handleManagedRuntimeJsonError,
   );
@@ -420,6 +439,17 @@ export function registerManagedContextRoutes(
     authorizeManagedRuntime(boot),
     managedRuntimeJsonBody(contextRoute.requestBodyLimitBytes),
     async (req: express.Request, res: express.Response) => {
+      if (
+        boot.privateRoot &&
+        (!confinementQualified || req.body?.binding?.cwdRelative !== '.')
+      ) {
+        res.status(409).json({
+          code: confinementQualified
+            ? CONFINEMENT_DENIED
+            : CONFINEMENT_UNAVAILABLE,
+        });
+        return;
+      }
       send(
         res,
         await installations.install(
@@ -432,6 +462,47 @@ export function registerManagedContextRoutes(
     },
     handleManagedRuntimeJsonError,
   );
+
+  if (boot.privateRoot) {
+    const recipe = boot.privateRoot;
+    executor = new ManagedToolExecutor(
+      async (reference) => {
+        const isActive = () =>
+          confinementQualified && activations.isActive(reference.sessionId);
+        if (
+          !isActive() ||
+          installations.installed(reference.sessionId)?.cwdRelative !== '.'
+        )
+          return undefined;
+        const directory = await mount.resolve('.');
+        if (directory === undefined || directory !== boot.mountRoot)
+          return undefined;
+        return {
+          sessionId: reference.sessionId,
+          directory,
+          isActive,
+          admitsDirectory: () => false,
+          tools: new Map(),
+        };
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        confinedShell: (directory, command, signal) =>
+          runPrivateRootShell(recipe, directory, command, signal),
+      },
+    );
+    if (confinementQualified) {
+      activations.register(app, boot, installations, executor);
+      registerManagedRuntimeToolRoutes(app, boot, executor);
+    }
+    return executor;
+  }
 
   const mcp = foregroundOnly
     ? undefined
@@ -505,7 +576,7 @@ export function registerManagedContextRoutes(
   // One monitor registry shared by executor and maintenance routes: a
   // private second instance could only ever answer unknown.
   const monitorRegistry = new ManagedMonitorRegistry();
-  const executor: ManagedToolExecutor = new ManagedToolExecutor(
+  executor = new ManagedToolExecutor(
     async (reference, invocation) => {
       const isActive = () =>
         extensionRuntime?.isChanging(reference.sessionId) !== true &&

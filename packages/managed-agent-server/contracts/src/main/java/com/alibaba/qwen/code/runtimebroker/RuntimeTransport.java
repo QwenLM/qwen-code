@@ -226,6 +226,8 @@ public interface RuntimeTransport {
     public CompletionStage<Boolean> release(RuntimeLease lease,
             RuntimeSession session);
 
+    public default void requireExecutionAdmission(RuntimeLease lease, RuntimeSession session) { }
+
     /**
      * Frees only the Workspace execution mount the Session holds, leaving
      * the Session itself — its READY identity, its renewals and every later

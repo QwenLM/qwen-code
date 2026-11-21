@@ -51,6 +51,7 @@ describe('Hosted Harness private contract', () => {
       lifecycleV2Profiles: [
         'hosted-workspace-files/1',
         'hosted-workspace-shell/1',
+        'hosted-workspace-confined-shell/1',
       ],
       titleProtocolVersion: 1,
       features: [

@@ -2385,7 +2385,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private void requireShellApproval(SessionRecord session) {
-        if (session.workspace() != null && WorkspaceToolProfiles.isPublicShell(session.toolProfile())
+        if (session.workspace() != null && WorkspaceToolProfiles.hasForegroundShell(session.toolProfile())
                 && (actions == null || !WorkspaceToolProfiles.supportsApprovalMode(
                         actions.approvalMode(session.tenantId(), session.sessionId())))) {
             throw new IllegalStateException("Hosted Workspace Shell requires a valid persisted approval mode");
@@ -2550,6 +2550,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private boolean foregroundOnly(SessionRecord session) {
+        if (WorkspaceToolProfiles.CONFINED_SHELL.equals(session.toolProfile())) {
+            return true;
+        }
         // D5′: an admitted public child Session (persisted version 1) keeps its
         // background surface on SSH — roots and depth-1 children alike. The
         // worker refuses a version-1 attach that carries foregroundOnly:true,

@@ -7,6 +7,7 @@ public final class WorkspaceToolProfiles {
     public static final String EXTERNAL_FILES = "hosted-workspace-external-files/1";
     public static final String MCP = "hosted-workspace-mcp/1";
     public static final String SHELL = "hosted-workspace-shell/1";
+    public static final String CONFINED_SHELL = "hosted-workspace-confined-shell/1";
     /**
      * Self-paced /loop revision: `shell/1` plus loop_wakeup and the cron
      * union. `shell/2` was retired by the unified Shell lifecycle (#15330)
@@ -39,6 +40,10 @@ public final class WorkspaceToolProfiles {
                 || SHELL_V4.equals(profile);
     }
 
+    public static boolean hasForegroundShell(String profile) {
+        return isPublicShell(profile) || CONFINED_SHELL.equals(profile);
+    }
+
     /** The internal team-lead lanes, never selectable by a public definition. */
     public static boolean isInternalTeamLead(String profile) {
         return INTERNAL_TEAM_LEAD.equals(profile) || INTERNAL_TEAM_LEAD_V2.equals(profile);
@@ -56,7 +61,7 @@ public final class WorkspaceToolProfiles {
             return 1;
         }
         if (FILES.equals(profile) || SHELL.equals(profile) || SHELL_V3.equals(profile)
-                || SHELL_V4.equals(profile) || MCP.equals(profile)) {
+                || SHELL_V4.equals(profile) || CONFINED_SHELL.equals(profile) || MCP.equals(profile)) {
             return 2;
         }
         return 0;

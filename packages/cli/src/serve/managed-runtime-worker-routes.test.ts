@@ -188,6 +188,35 @@ describe('resolveManagedShellPublisherMode', () => {
   );
 });
 
+describe('private-root Runtime route plan', () => {
+  it('opens only v2 tools after qualification', () => {
+    const privateRoot =
+      'sha256:e3b6f905a8c29c601d33a2a6204d69c307aa77bbe40e5146e3e45d8c616bf85c';
+    const qualified = resolveManagedRuntimeWorkerRoutePlan(
+      planInput({ capabilityDigest: privateRoot, confinementQualified: true }),
+    );
+    expect(keys(qualified.routes)).toEqual([
+      'POST /internal/managed-runtime/v2/acknowledge',
+      'POST /internal/managed-runtime/v2/cancel',
+      'POST /internal/managed-runtime/v2/execute',
+      'POST /internal/managed-runtime/v2/status',
+      'POST /internal/managed-runtime/v3/activation',
+      'POST /internal/managed-runtime/v3/attest',
+      'POST /internal/managed-runtime/v3/context',
+    ]);
+    expect(
+      keys(
+        resolveManagedRuntimeWorkerRoutePlan(
+          planInput({
+            capabilityDigest: privateRoot,
+            confinementQualified: false,
+          }),
+        ).routes,
+      ),
+    ).toEqual(['POST /internal/managed-runtime/v3/attest']);
+  });
+});
+
 describe('resolveManagedRuntimeWorkerRoutePlan', () => {
   const base = keys(MANAGED_CONTEXT_WORKER_ROUTES);
 

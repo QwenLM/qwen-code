@@ -21,6 +21,7 @@ import {
   MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
 } from './managed-extension-profile.js';
 import { computeManagedContextDigest } from './managed-workspace-binding.js';
+import { PRIVATE_ROOT_CAPABILITY_DIGEST } from './managed-private-root.js';
 import type { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
 
 export const WORKSPACE_EXECUTION_PROFILE = 'managed-workspace-execution/1';
@@ -165,6 +166,7 @@ export class WorkspaceActivations {
             : ![
                 WORKSPACE_CAPABILITY_DIGEST,
                 EXTERNAL_SHELL_CAPABILITY_DIGEST,
+                PRIVATE_ROOT_CAPABILITY_DIGEST,
                 MEASURED_WORKSPACE_CAPABILITY_DIGEST,
                 MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
                 ...(boot.managedExtensions
@@ -200,6 +202,14 @@ export class WorkspaceActivations {
               )))
         ) {
           res.status(409).json({ code: 'managed_activation_conflict' });
+          return;
+        }
+        if (
+          !active &&
+          executor.isConfined &&
+          !executor.closeConfinedSessionAdmission(sessionId)
+        ) {
+          res.status(409).json({ code: 'workspace_writer_unproven' });
           return;
         }
         if (!active && executor.hasActiveSession(sessionId)) {

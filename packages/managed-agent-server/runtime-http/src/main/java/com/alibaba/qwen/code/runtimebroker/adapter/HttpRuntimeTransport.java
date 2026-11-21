@@ -140,6 +140,12 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
     private ExtensionPreparation extensionPreparation;
     private String managedExtensionCacheDirectory;
     private String managedExtensionCgroupRoot;
+    private java.util.function.Supplier<Map<String, Object>> privateRoot =
+            () -> { throw WorkspaceExecutionProfile.confinementUnavailable(); };
+
+    public void withPrivateRoot(java.util.function.Supplier<Map<String, Object>> recipe) {
+        privateRoot = Objects.requireNonNull(recipe, "recipe");
+    }
 
     public HttpRuntimeTransport withManagedExtensionCacheDirectory(String directory, String cgroupRoot) {
         if (directory == null || !Path.of(directory).isAbsolute()) {
@@ -155,7 +161,8 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         return ManagedContextProtocol.boot(request, seed,
                 ManagedExtensionExecutionProfile.admits(digest)
                         ? ManagedExtensionExecutionProfile.configuration(digest,
-                                managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null);
+                                managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null,
+                WorkspaceExecutionProfile.isConfined(digest) ? privateRoot.get() : null);
     }
 
     public void configureExtensionPreparation(ExtensionPreparation preparation) {
@@ -2018,6 +2025,20 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                 && (V3_EXECUTE_PATH.equals(path) || V3_STATUS_PATH.equals(path))) {
             return error(501, "runtime_tool_v3_unsupported",
                     "Managed Runtime does not support Tool v3.", false);
+        }
+        if (response.statusCode() == 409 && !body.overflow()
+                && ManagedContextProtocol.ATTEST_PATH.equals(path)
+                && "no-store".equals(response.headers().firstValue("Cache-Control").orElse(""))
+                && jsonContentType(response.headers().firstValue("Content-Type").orElse(""))
+                && response.headers().firstValue("Content-Encoding").isEmpty()) {
+            try {
+                if (ManagedContextProtocol.parse(body.bytes()).equals(
+                        Map.of("code", WorkspaceExecutionProfile.CONFINEMENT_UNAVAILABLE))) {
+                    return WorkspaceExecutionProfile.confinementUnavailable();
+                }
+            } catch (RuntimeBrokerException ignored) {
+                // Unknown responses are handled by the generic transport error.
+            }
         }
         if (response.statusCode() == 409 && !body.overflow()
                 && !path.endsWith("/attest")

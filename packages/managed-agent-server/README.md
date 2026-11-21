@@ -1417,9 +1417,8 @@ background Shell and Monitor operations that need a separate cgroup supervisor
 are unavailable in this profile. The original unit remains bound to its saved
 Runtime identity when configuration changes. A LOST binding whose original
 unit is still populated requires an operator to stop that unit before the
-existing offline recovery command can attest it. See the [English stop-proof
-design](../../docs/design/managed-agents/2026-11-21-managed-local-cgroup-stop-proof.md)
-and the [Chinese design](../../docs/design/managed-agents/2026-11-21-managed-local-cgroup-stop-proof.zh-CN.md).
+existing offline recovery command can attest it. See the [cgroup stop-proof
+design (Simplified Chinese)](../../docs/design/managed-agents/2026-11-21-managed-hosted-confinement.zh-CN.md#持久-cgroup-身份与停止证明).
 
 Trusted same-host reboot recovery is also on by default on Linux and macOS. It requires
 durable local mode with the `local-process` provisioner, so a deployment that

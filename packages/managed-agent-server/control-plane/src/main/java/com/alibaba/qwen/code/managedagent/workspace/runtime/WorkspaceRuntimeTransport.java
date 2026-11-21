@@ -42,6 +42,23 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     private final RuntimeBindingRepository bindings;
     private final RuntimeSessionRepository sessions;
     private final java.util.function.Function<RuntimeBindingRecord, CompletionStage<Void>> verifyExternalAcquisition;
+    private java.util.function.Function<RuntimeBindingRecord, CompletionStage<Void>> verifyConfinedHandback =
+            ignored -> CompletableFuture.failedFuture(WorkspaceExecutionProfile.confinementUnavailable());
+
+    public void configureConfinedHandback(java.util.function.Function<RuntimeBindingRecord, CompletionStage<Void>> verifier) {
+        verifyConfinedHandback = java.util.Objects.requireNonNull(verifier);
+    }
+
+    @Override
+    public void requireExecutionAdmission(RuntimeLease lease, RuntimeSession session) {
+        if (managed(session) && (confined(session) || resolver != null && resolver.privateRootEnabled())) {
+            context(lease, session, true);
+        }
+    }
+
+    private static boolean confined(RuntimeSession session) {
+        return WorkspaceExecutionProfile.isConfined(session.getScope().getCapabilityDigest());
+    }
     // READY Sessions whose mount went back early (#13800): the worker still
     // holds their installation, so their full release must reach it even
     // though the holder is already gone. In memory only — a Broker restart
@@ -106,6 +123,9 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || !WorkspaceExecutionProfile.admitsCapabilityDigest(current.getRequest().getScope().getCapabilityDigest())) {
             throw WorkspaceExecutionStore.unavailable();
         }
+        if (WorkspaceExecutionProfile.isConfined(current.getRequest().getScope().getCapabilityDigest())) {
+            throw WorkspaceExecutionProfile.confinementDenied();
+        }
         return delegate.mcpDefinitions(current);
     }
 
@@ -113,6 +133,9 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     public CompletionStage<Map<String, Object>> extensionControl(RuntimeBindingRecord runtime,
             String harnessSessionId, Map<String, Object> operation) {
         RuntimeBindingRecord current = bindings.findById(runtime.getBindingId());
+        if (current != null && WorkspaceExecutionProfile.isConfined(current.getRequest().getScope().getCapabilityDigest())) {
+            throw WorkspaceExecutionProfile.confinementDenied();
+        }
         if (current != null && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
                 .equals(current.getRequest().getProvisionerKind())) {
             throw WorkspaceExecutionStore.unavailable();
@@ -211,6 +234,10 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             try {
                 Context context = context(lease, session, true);
                 requireExternalFile(context, reference);
+                if (confined(session) && !WorkspaceExecutionProfile.allowsConfinedShell(
+                        reference.get("toolName"), reference.get("input"))) {
+                    throw WorkspaceExecutionProfile.confinementDenied();
+                }
                 ownership.requireExternalExecution(context.binding());
                 if (external(context) && context.session().getState() != RuntimeSessionRecord.State.READY) {
                     throw WorkspaceExecutionStore.unavailable();
@@ -372,6 +399,9 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private void requireOwnedWorkspace(RuntimeLease lease, RuntimeSession session) {
+        if (confined(session)) {
+            throw WorkspaceExecutionProfile.confinementDenied();
+        }
         if (!managed(session)) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -563,6 +593,14 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             return delegate.release(lease, session);
         }
         Context context = context(lease, session, false);
+        if (confined(session)) {
+            return delegate.activateWorkspace(context.runtime(), context.session(), context.binding(), false)
+                    .thenCompose(ignored -> verifyConfinedHandback.apply(context.runtime()))
+                    .thenApply(ignored -> {
+                        ownership.releaseConfined(context.binding(), context.session(), context.runtime());
+                        return true;
+                    });
+        }
         String detach = detachKey(context);
         // RELEASING fences later claims; an absent holder needs no physical
         // release unless a mount handback left the worker's detach owed.
@@ -642,6 +680,10 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         if (!managed(session)) {
             return RuntimeTransport.super.releaseMount(lease, session);
         }
+        if (confined(session)) {
+            throw new RuntimeBrokerException(409, "workspace_writer_unproven",
+                    "Confined Workspace handback needs original Runtime stop evidence.", false);
+        }
         // Only the execution mount: the Session row stays READY so the
         // recovery fleet can still adopt this identity. The worker keeps the
         // installation a re-drive reuses, so the detach stays owed to the
@@ -666,6 +708,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
 
     @Override
     public CompletionStage<Void> reclaimMount(RuntimeLease lease, RuntimeSession session) {
+        requireExecutionAdmission(lease, session);
         if (!managed(session)) {
             return CompletableFuture.completedFuture(null);
         }

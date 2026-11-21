@@ -39,6 +39,17 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
             throw new IllegalStateException("Local provider-options.cgroup-root requires durable Linux local-process"
                     + " and no Managed extension profile.");
         }
+        if (broker.privateRootfs() != null
+                && (StringUtils.isBlank(cgroupRoot) || !Path.of(broker.privateRootfs()).isAbsolute()
+                    || !broker.isVerifiedWorkspaceRecoveryEnabled()
+                    || !"session".equals(broker.getBoundSessionIsolationClass())
+                    || broker.isChildWorkspacesEnabled() || broker.isSessionWorktreesEnabled()
+                    || settings.getHarness().isWorkspaceChildAgentsEnabled() || broker.isToolMeasurements()
+                    || broker.isWebTerminal() || settings.getToolPublication().isEnabled()
+                    || !broker.getSsh().getNodes().isEmpty())) {
+            throw new IllegalStateException("Private-root confinement requires an absolute image, verified"
+                    + " Session-exclusive local cgroups, and no optional executable profile.");
+        }
         if (settings.getManagedExtensions().isEnabled()) {
             String directory = settings.getManagedExtensions().getCacheDirectory();
             if (directory == null || !Path.of(directory).isAbsolute()) {
@@ -67,7 +78,8 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
         String cgroupRoot = broker.getProviderOptions().get(CGROUP_ROOT);
         LocalProcessRuntimeProvisioner provider = broker.isDurableLocalProcess()
                 ? LocalProcessRuntimeProvisioner.durable(command, stateDirectory, http(transport),
-                        broker.isTrustedLocalRebootRecovery(), StringUtils.isBlank(cgroupRoot) ? null : Path.of(cgroupRoot))
+                        broker.isTrustedLocalRebootRecovery(), StringUtils.isBlank(cgroupRoot) ? null : Path.of(cgroupRoot),
+                        broker.privateRootfs() == null ? null : Path.of(broker.privateRootfs()))
                 : new LocalProcessRuntimeProvisioner(command, stateDirectory, http(transport));
         try {
             if (settings.getManagedExtensions().isEnabled()) {

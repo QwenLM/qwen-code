@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  CONFINED_SHELL_PROFILE,
+  CONFINEMENT_DENIED,
+} from './managed-private-root.js';
 import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
 import {
   enableManagedExecutionDiagnostics,
@@ -5526,6 +5530,13 @@ export function registerHostedHarnessSessionRoutes(
       body?.['toolProfile'] ??
       (!create ? sessions.get(req.params['id']!)?.toolProfile : undefined);
     if (
+      requestedProfile === CONFINED_SHELL_PROFILE &&
+      (!contract.lifecycleV2Profiles?.includes(CONFINED_SHELL_PROFILE) ||
+        hasHostedExternalExcludedOptions(body, requestedProfile) ||
+        body?.['foregroundOnly'] !== true)
+    )
+      return error(res, 409, CONFINEMENT_DENIED);
+    if (
       requestedProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
       (!contract.features?.includes(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE) ||
         contract.lifecycleProtocolVersion !== 1 ||
@@ -5675,6 +5686,7 @@ export function registerHostedHarnessSessionRoutes(
         toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
         toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
         !isHostedWorkspaceExternalShellProfile(toolProfile) &&
+        toolProfile !== CONFINED_SHELL_PROFILE &&
         toolProfile !== 'hosted-workspace-shell/1') ||
         (create && toolProfile === undefined) ||
         body?.['mcpServers'] !== undefined ||
@@ -5744,6 +5756,13 @@ export function registerHostedHarnessSessionRoutes(
             body?.['approvalTimeoutMs'],
           )
         : undefined;
+    if (
+      create &&
+      toolProfile === CONFINED_SHELL_PROFILE &&
+      approval?.mode !== 'default' &&
+      approval?.mode !== 'auto-edit'
+    )
+      return error(res, 409, CONFINEMENT_DENIED);
     if (create && toolProfile !== undefined && !approval) {
       error(res, 400, 'invalid_hosted_approval');
       return;
@@ -5860,6 +5879,7 @@ export function registerHostedHarnessSessionRoutes(
           toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
           toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
           !isHostedWorkspaceExternalShellProfile(toolProfile) &&
+          toolProfile !== CONFINED_SHELL_PROFILE &&
           toolProfile !== 'hosted-workspace-shell/1'))
     ) {
       error(res, 409, 'hosted_tool_profile_conflict');
@@ -6975,6 +6995,15 @@ export function registerHostedHarnessSessionRoutes(
       }
       const savedProfile = definition?.['toolProfile'];
       if (
+        savedProfile === CONFINED_SHELL_PROFILE &&
+        (hasHostedExternalExcludedOptions(definition, savedProfile) ||
+          definition?.['foregroundOnly'] !== true ||
+          hasHostedExternalExcludedOptions(body, savedProfile))
+      ) {
+        await managed.close();
+        return error(res, 409, CONFINEMENT_DENIED);
+      }
+      if (
         (definition?.['foregroundOnly'] !== undefined &&
           typeof definition['foregroundOnly'] !== 'boolean') ||
         (requestedForegroundOnly !== undefined &&
@@ -7054,6 +7083,7 @@ export function registerHostedHarnessSessionRoutes(
           ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
             toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
             !isHostedWorkspaceExternalShellProfile(toolProfile) &&
+            toolProfile !== CONFINED_SHELL_PROFILE &&
             toolProfile !== 'hosted-workspace-shell/1') ||
             mcpServers !== undefined ||
             hookCatalog !== undefined ||
@@ -7213,7 +7243,12 @@ export function registerHostedHarnessSessionRoutes(
             ).toString('utf8'),
           ),
         );
-      if ((externalFiles || externalShell) && hasExtensionConfiguration) {
+      if (
+        (externalFiles ||
+          externalShell ||
+          toolProfile === CONFINED_SHELL_PROFILE) &&
+        hasExtensionConfiguration
+      ) {
         await managed.close();
         return error(res, 409, 'hosted_tool_profile_conflict');
       }

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { PRIVATE_ROOT_CAPABILITY_DIGEST } from './managed-private-root.js';
 import {
   parseManagedRuntimeProviderResult,
   type ManagedWorkspaceContextFile,
@@ -420,6 +421,10 @@ export class HostedWorkspaceBroker {
           MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST &&
         scope['capabilityDigest'] !==
           MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST &&
+        !(
+          scope['capabilityDigest'] === PRIVATE_ROOT_CAPABILITY_DIGEST &&
+          scope['isolationClass'] === 'session'
+        ) &&
         !(
           scope['capabilityDigest'] === RESIDENT_WORKSPACE_CAPABILITY_DIGEST &&
           scope['isolationClass'] === 'workspace'

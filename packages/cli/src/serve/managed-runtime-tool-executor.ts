@@ -258,6 +258,11 @@ export type ManagedToolSetResolver = (
   },
 ) => Promise<ManagedToolSet | undefined>;
 
+import {
+  admitsConfinedShell,
+  CONFINEMENT_DENIED,
+} from './managed-private-root.js';
+
 const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   ReadFileTool.Name,
   WriteFileTool.Name,
@@ -933,6 +938,11 @@ export class ManagedToolExecutor {
       readonly ledger?: ManagedRuntimeLedger;
       readonly groupEvidenceTimeoutMs?: number;
       readonly sshForegroundOnly?: boolean;
+      readonly confinedShell?: (
+        directory: string,
+        command: string,
+        signal: AbortSignal,
+      ) => Promise<ManagedToolResultPayload | undefined>;
     } = {},
   ) {
     this.backgroundRegistry =
@@ -966,7 +976,12 @@ export class ManagedToolExecutor {
     );
   }
 
+  get isConfined(): boolean {
+    return this.options.confinedShell !== undefined;
+  }
+
   hasTool(toolName: string): boolean {
+    if (this.isConfined) return toolName === ShellTool.Name;
     return (
       ADMITTED_TOOL_NAMES.has(toolName) ||
       (toolName === MANAGED_MCP_TOOL && this.mcp !== undefined)
@@ -998,6 +1013,19 @@ export class ManagedToolExecutor {
 
   unclaimProviderSession(sessionId: string): void {
     this.providerSessions.delete(sessionId);
+  }
+
+  closeConfinedSessionAdmission(sessionId: string): boolean {
+    this.closedSessions.add(sessionId);
+    return (
+      this.pendingStarts.size === 0 &&
+      ![...this.entries.values()].some(
+        (entry) =>
+          entry.reference.sessionId === sessionId &&
+          entry.state !== 'settled' &&
+          entry.state !== 'acknowledged',
+      )
+    );
   }
 
   closeSessionAdmission(sessionId: string): void {
@@ -1041,6 +1069,18 @@ export class ManagedToolExecutor {
     input: Record<string, unknown>,
     measure?: true,
   ): Promise<ManagedToolResultPayload> {
+    if (
+      this.isConfined &&
+      (measure || toolName !== ShellTool.Name || !admitsConfinedShell(input))
+    )
+      return {
+        executionStatus: 'not_started',
+        responseParts: [],
+        error: {
+          type: CONFINEMENT_DENIED,
+          message: 'Only confined foreground Shell is admitted.',
+        },
+      };
     if (
       this.options.sshForegroundOnly &&
       toolName === ShellTool.Name &&
@@ -1162,12 +1202,12 @@ export class ManagedToolExecutor {
       );
     }
     const tool = tools.tools.get(toolName);
-    if (!tool) {
+    if (!tool && !this.isConfined) {
       throw new ManagedToolConflictError(
         `Managed Runtime does not admit tool ${toolName}.`,
       );
     }
-    if (toolName === ShellTool.Name) {
+    if (toolName === ShellTool.Name && tool) {
       let isBackground = false;
       try {
         const params = structuredClone(input);
@@ -1196,8 +1236,37 @@ export class ManagedToolExecutor {
       controller: new AbortController(),
     };
     this.entries.set(reference.callId, entry);
-    entry.promise = this.run(entry, tool, tools, tools.directory);
+    entry.promise = this.options.confinedShell
+      ? this.runConfinedShell(
+          entry,
+          tools.directory!,
+          this.options.confinedShell,
+        )
+      : this.run(entry, tool!, tools, tools.directory);
     return join(entry, reference, toolName, inputJson);
+  }
+
+  private async runConfinedShell(
+    entry: JournalEntry,
+    directory: string,
+    launch: NonNullable<ManagedToolExecutor['options']['confinedShell']>,
+  ): Promise<void> {
+    entry.state = 'executing';
+    entry.lastSequence++;
+    try {
+      const result = await launch(
+        directory,
+        entry.input!['command'] as string,
+        AbortSignal.any([
+          entry.controller.signal,
+          AbortSignal.timeout(Number(entry.input!['timeout'] ?? 120_000)),
+        ]),
+      );
+      if (result) entry.result = result;
+    } finally {
+      entry.state = entry.result ? 'settled' : 'unknown';
+      entry.lastSequence++;
+    }
   }
 
   executeV3(

@@ -24,6 +24,7 @@ import {
   ManagedMcpToolUnknownError,
   type ManagedToolReference,
 } from './managed-runtime-tool-executor.js';
+import { CONFINEMENT_DENIED } from './managed-private-root.js';
 import { ManagedMcpError } from './managed-mcp-runtime.js';
 
 const REFERENCE_KEYS = Object.freeze([
@@ -133,7 +134,9 @@ export function registerManagedRuntimeToolRoutes(
       }
       if (!executor.hasTool(toolName)) {
         res.status(409).json({
-          code: 'managed_runtime_identity_conflict',
+          code: executor.isConfined
+            ? CONFINEMENT_DENIED
+            : 'managed_runtime_identity_conflict',
           error: 'Managed Runtime does not admit this tool.',
         });
         return;

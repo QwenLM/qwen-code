@@ -17,6 +17,12 @@ import {
   type ManagedContextBinding,
 } from './managed-workspace-binding.js';
 
+import {
+  parsePrivateRootRecipe,
+  PRIVATE_ROOT_CAPABILITY_DIGEST,
+  type PrivateRootRecipe,
+} from './managed-private-root.js';
+
 // TypeScript half of the managed-context/1 envelope contract (W0a-2). The
 // shared fixtures in contracts/managed-context-v1.fixtures.json pin it, and a
 // conformance test in packages/managed-agent-server pins the same key sets,
@@ -145,6 +151,7 @@ export type ManagedContextIsolationClass = 'session' | 'workspace';
 export interface ManagedContextBoot {
   readonly type: 'boot';
   readonly managedExtensions?: import('./managed-extension-profile.js').ManagedExtensionRuntimeConfiguration;
+  readonly privateRoot?: PrivateRootRecipe;
   readonly version: typeof MANAGED_CONTEXT_BOOT_VERSION;
   readonly managedContext: typeof MANAGED_CONTEXT_PROTOCOL;
   readonly runtimeInstanceId: string;
@@ -177,6 +184,7 @@ export interface ManagedContextReady {
 
 export interface ManagedContextAttestationResponse {
   readonly managedExtensions?: import('./managed-extension-profile.js').ManagedExtensionRuntimeConfiguration;
+  readonly privateRoot?: PrivateRootRecipe;
   readonly protocolVersion: typeof PROTOCOL_VERSION;
   readonly managedContext: typeof MANAGED_CONTEXT_PROTOCOL;
   readonly runtimeInstanceId: string;
@@ -248,9 +256,15 @@ export function parseManagedContextBoot(value: unknown): ManagedContextBoot {
     !!value &&
     typeof value === 'object' &&
     Object.hasOwn(value, 'managedExtensions');
+  const hasPrivateRoot =
+    !!value && typeof value === 'object' && Object.hasOwn(value, 'privateRoot');
   const boot = readClosed(
     value,
-    hasExtensions ? [...BOOT_KEYS, 'managedExtensions'].sort() : BOOT_KEYS,
+    [
+      ...BOOT_KEYS,
+      ...(hasExtensions ? (['managedExtensions'] as const) : []),
+      ...(hasPrivateRoot ? (['privateRoot'] as const) : []),
+    ].sort(),
   );
   if (
     !boot ||
@@ -279,6 +293,14 @@ export function parseManagedContextBoot(value: unknown): ManagedContextBoot {
       boot['capabilityDigest'] as string,
     );
   }
+  if (
+    (boot['capabilityDigest'] === PRIVATE_ROOT_CAPABILITY_DIGEST) !==
+      hasPrivateRoot ||
+    (hasPrivateRoot && boot['isolationClass'] !== 'session')
+  )
+    throw new Error(INVALID_BOOT_MESSAGE);
+  if (hasPrivateRoot)
+    boot['privateRoot'] = parsePrivateRootRecipe(boot['privateRoot']);
   return Object.freeze(boot) as unknown as ManagedContextBoot;
 }
 
@@ -345,9 +367,11 @@ export function checkManagedContextAttestation(
   const identity = parseManagedContextBoot(boot);
   const request = readClosed(
     body,
-    identity.managedExtensions
-      ? [...ATTESTATION_KEYS, 'managedExtensions'].sort()
-      : ATTESTATION_KEYS,
+    [
+      ...ATTESTATION_KEYS,
+      ...(identity.managedExtensions ? (['managedExtensions'] as const) : []),
+      ...(identity.privateRoot ? (['privateRoot'] as const) : []),
+    ].sort(),
   );
   if (
     !request ||
@@ -368,7 +392,16 @@ export function checkManagedContextAttestation(
       return INVALID;
     }
   }
+  let recipe;
+  if (identity.privateRoot) {
+    try {
+      recipe = parsePrivateRootRecipe(request['privateRoot']);
+    } catch {
+      return INVALID;
+    }
+  }
   if (
+    JSON.stringify(recipe) !== JSON.stringify(identity.privateRoot) ||
     ATTESTED_KEYS.some((key) => request[key] !== identity[key]) ||
     JSON.stringify(managedExtensions) !==
       JSON.stringify(identity.managedExtensions)
@@ -556,6 +589,7 @@ function attestationResponse(
     mountRoot: identity.mountRoot,
     capabilityDigest: identity.capabilityDigest,
     isolationClass: identity.isolationClass,
+    ...(identity.privateRoot ? { privateRoot: identity.privateRoot } : {}),
     ...(identity.managedExtensions
       ? { managedExtensions: identity.managedExtensions }
       : {}),

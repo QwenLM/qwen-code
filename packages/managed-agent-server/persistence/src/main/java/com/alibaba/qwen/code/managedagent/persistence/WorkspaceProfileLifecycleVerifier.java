@@ -95,10 +95,10 @@ public class WorkspaceProfileLifecycleVerifier {
         if (WorkspaceToolProfiles.FILES.equals(profile)) {
             return;
         }
-        if (!WorkspaceToolProfiles.isPublicShell(profile)) {
+        if (!WorkspaceToolProfiles.hasForegroundShell(profile)) {
             unsettled();
         }
-        verifyShellResources(operation);
+        verifyShellResources(operation, WorkspaceToolProfiles.CONFINED_SHELL.equals(profile));
     }
 
     private void verifyMcpResources(OperationRecord operation, List<RuntimeBindingRecord> bindings) {
@@ -134,7 +134,7 @@ public class WorkspaceProfileLifecycleVerifier {
         }
     }
 
-    private void verifyShellResources(OperationRecord operation) {
+    private void verifyShellResources(OperationRecord operation, boolean confined) {
         Map<String, ToolExecutionRecord> executions = executions(operation).stream()
                 .collect(Collectors.toMap(ToolExecutionRecord::getExecutionCallId, Function.identity()));
         var backgroundCalls = backgroundCalls(operation);
@@ -142,10 +142,19 @@ public class WorkspaceProfileLifecycleVerifier {
                 + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND session_scope_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
                 ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()), operation.tenantId(), operation.sessionId()).stream().map(this::source)
                 .collect(Collectors.groupingBy(JdbcManagedToolResultStore.Source::executionCallId));
-        var inlineInputs = nativeInlineInputs(operation);
+        var inlineInputs = nativeInlineInputs(operation, confined);
         for (ToolExecutionRecord execution : executions.values()) {
             if (!execution.isSettled()) {
                 unsettled();
+            }
+            if (confined) {
+                if (hold(execution) || !execution.getReference().keySet().equals(
+                        java.util.Set.of("sessionId", "promptId", "callId", "argsDigest", "dispatchMode"))
+                        || !"deferred".equals(execution.getReference().get("dispatchMode"))
+                        || !inlineInputs.contains(execution.getRuntimeSessionId() + ":" + execution.getRequestDigest())) {
+                    unsettled();
+                }
+                continue;
             }
             if (hold(execution) || backgroundCalls.contains(execution.getExecutionCallId())) {
                 continue;
@@ -285,7 +294,7 @@ public class WorkspaceProfileLifecycleVerifier {
         return calls;
     }
 
-    private java.util.Set<String> nativeInlineInputs(OperationRecord operation) {
+    private java.util.Set<String> nativeInlineInputs(OperationRecord operation, boolean confined) {
         var inputs = new java.util.HashSet<String>();
         var refs = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256"
                 + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
@@ -304,7 +313,9 @@ public class WorkspaceProfileLifecycleVerifier {
             byte[] payload = input.path("payloadJson").textValue().getBytes(StandardCharsets.UTF_8);
             JsonNode call = ToolPublicationContract.readJson(payload);
             if (call.size() == 2 && call.path("input").isObject()
-                    && List.of("read_file", "write_file", "edit", "glob", "web_fetch", "managed_mcp_call").contains(call.path("toolName").asText())) {
+                    && (confined ? "run_shell_command".equals(call.path("toolName").asText())
+                        : List.of("read_file", "write_file", "edit", "glob", "web_fetch", "managed_mcp_call")
+                                .contains(call.path("toolName").asText()))) {
                 inputs.add(input.path("runtimeSessionId").textValue() + ":sha256:" + ToolPublicationContract.sha256(payload));
             }
         }

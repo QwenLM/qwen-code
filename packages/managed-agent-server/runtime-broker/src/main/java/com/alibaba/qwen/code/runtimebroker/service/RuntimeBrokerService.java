@@ -767,6 +767,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         }
         return bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
+                    if (WorkspaceExecutionProfile.isConfined(context.session().getScope().getCapabilityDigest())) {
+                        throw WorkspaceExecutionProfile.confinementDenied();
+                    }
                     if (ManagedMcpProtocol.isOperation(immutable)) {
                         ManagedMcpProtocol.validateSession(context.session(), immutable);
                     }
@@ -983,6 +986,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     try {
                         bindingRegistry.requireReadySessionRecord(context);
                         ToolExecutionRecord record = executionState.requireExecution(context, executionId);
+                        transport.requireExecutionAdmission(context.lease(), context.session());
                         if (RuntimeToolMeasurements.selected(record.getReference())) {
                             RuntimeToolMeasurements.requireProfile(context.session());
                         }
@@ -1023,6 +1027,13 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                 || isProtocolV3(record.getReference())
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+                        }
+                        if (WorkspaceExecutionProfile.isConfined(context.session().getScope().getCapabilityDigest())
+                                && !WorkspaceExecutionProfile.allowsConfinedShell(toolName, payload.get("input"))) {
+                            executionRepository.settlePrepared(record, Map.of("executionStatus", "not_started",
+                                    "responseParts", List.of(), "error", Map.of("type", WorkspaceExecutionProfile.CONFINEMENT_DENIED,
+                                            "message", "The selected Runtime admits only confined foreground Shell.")), clock.instant());
+                            throw WorkspaceExecutionProfile.confinementDenied();
                         }
                         if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                                 && !WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
@@ -1579,8 +1590,15 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         context.lock();
         try {
             bindingRegistry.requireReadySessionRecord(context);
+            transport.requireExecutionAdmission(context.lease(), context.session());
             Map<String, Object> safeReference = immutableMap(reference,
                     "reference");
+            if (WorkspaceExecutionProfile.isConfined(context.session().getScope().getCapabilityDigest())
+                    && (dispatch || !"deferred".equals(safeReference.get("dispatchMode"))
+                        || safeReference.containsKey("publicationId") || safeReference.containsKey("runtimeProtocol")
+                        || ProviderRuntimeProtocol.isReference(safeReference))) {
+                throw WorkspaceExecutionProfile.confinementDenied();
+            }
             String referenceSessionId = referenceString(safeReference,
                     "sessionId");
             if (!context.session().getRuntimeSessionId().equals(

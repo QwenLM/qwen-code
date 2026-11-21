@@ -13,6 +13,10 @@ public record RuntimeBackendSelection(Set<String> kinds) {
 
     public static RuntimeBackendSelection from(ManagedAgentSettings settings) {
         var broker = settings.getRuntimeBroker();
+        if (broker.privateRootfs() != null && (!broker.isEnabled()
+                || !RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner()))) {
+            throw new IllegalStateException("Private-root confinement requires an enabled local Runtime Broker.");
+        }
         if (!broker.isEnabled()) {
             return new RuntimeBackendSelection(Set.of());
         }

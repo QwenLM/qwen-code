@@ -794,7 +794,7 @@ public class SessionLifecycleCoordinator {
                 String profile = session.toolProfile();
                 try {
                     harness.prepareLifecycleResources(operation);
-                    if (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isPublicShell(profile)) {
+                    if (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.hasForegroundShell(profile)) {
                         var authority = WorkspaceLifecycleStore.authority(operation);
                         if (store.hasMcpServers(session)) {
                             runtimeWarmer.prepareWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)

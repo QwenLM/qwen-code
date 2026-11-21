@@ -29,6 +29,7 @@ record LinuxRuntimeCgroup(Path root, String namespace, String rootKey, String un
             """;
     private static final Path PROCS = Path.of("cgroup.procs");
     private static final Path EVENTS = Path.of("cgroup.events");
+    private static final Path STAT = Path.of("cgroup.stat");
     private static final Path KILL = Path.of("cgroup.kill");
 
     LinuxRuntimeCgroup {
@@ -120,6 +121,17 @@ record LinuxRuntimeCgroup(Path root, String namespace, String rootKey, String un
     boolean contains(long pid) throws IOException {
         try (var child = open()) {
             return contains(child, pid);
+        }
+    }
+
+    boolean onlyMember(long pid) throws IOException {
+        try (var child = open();
+                var pids = new BufferedReader(Channels.newReader(
+                        child.newByteChannel(PROCS, Set.of(LinkOption.NOFOLLOW_LINKS)), StandardCharsets.US_ASCII));
+                var stat = new BufferedReader(Channels.newReader(
+                        child.newByteChannel(STAT, Set.of(LinkOption.NOFOLLOW_LINKS)), StandardCharsets.US_ASCII))) {
+            return Long.toString(pid).equals(pids.readLine()) && pids.readLine() == null
+                    && stat.lines().anyMatch("nr_descendants 0"::equals);
         }
     }
 

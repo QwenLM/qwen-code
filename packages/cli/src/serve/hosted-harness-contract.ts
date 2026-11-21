@@ -17,7 +17,10 @@ export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
   'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST';
 export const HOSTED_LIFECYCLE_V2_PROFILES_ENV =
   'QWEN_HOSTED_LIFECYCLE_V2_PROFILES';
+import { CONFINED_SHELL_PROFILE } from './managed-private-root.js';
+
 const LIFECYCLE_V2_PROFILES = [
+  CONFINED_SHELL_PROFILE,
   'hosted-workspace-files/1',
   'hosted-workspace-shell/1',
   'hosted-workspace-shell/3',
@@ -44,7 +47,7 @@ export function createHostedHarnessContract(
   bootId: string = randomUUID(),
   lifecycleV2Profiles: readonly string[] = (
     process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ??
-    'hosted-workspace-files/1,hosted-workspace-shell/1'
+    `hosted-workspace-files/1,hosted-workspace-shell/1,${CONFINED_SHELL_PROFILE}`
   )
     .split(',')
     .filter(Boolean),

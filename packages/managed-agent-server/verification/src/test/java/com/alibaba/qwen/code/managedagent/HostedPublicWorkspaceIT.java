@@ -98,6 +98,7 @@ class HostedPublicWorkspaceIT {
     private boolean definitionApproval;
     private String shellDecision = "allow";
     private boolean durableClose;
+    private boolean confined;
     private boolean shellLifecycleV2;
     private boolean publicChildren;
     private boolean publicChildBackground;
@@ -851,6 +852,95 @@ class HostedPublicWorkspaceIT {
         durableClose = true;
         shellLifecycleV2 = true;
         publicForegroundShellUsesMandatoryApprovalOnBothSurfaces("allow");
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "qwen.test.private.rootfs", matches = ".+")
+    @Timeout(120)
+    void publicConfinedShellUsesTheSelectedRuntimeAndStopsItsOriginalCgroup() throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        confined = true;
+        shell = true;
+        approvals = true;
+        durableClose = true;
+        var root = boot().getFirst();
+        Files.writeString(decoy.resolve("outside"), "protected");
+        register("workspace-0", "storage-0");
+        var input = List.of(Map.of("type", "input_text", "text", "G0_SHELL_CONFINED"));
+        var invalid = Map.of("agent_id", "qwen-code", "input", input, "workspace",
+                Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
+        assertThat(request("POST", "/v1/agents/sessions", invalid, "confined-subdir", "actor", 409).toString())
+                .contains(WorkspaceExecutionProfile.CONFINEMENT_DENIED);
+        String session = request("POST", "/v1/agents/sessions",
+                Map.of("agent_id", "qwen-code", "input", input, "workspace", Map.of("workspace_id", "workspace-0")),
+                "confined-root", "actor", 202).path("id").asText();
+        assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE session_id = ?", String.class, session))
+                .isEqualTo("hosted-workspace-confined-shell/1");
+        for (int turn = 1; turn <= 2; turn++) {
+            if (turn == 2) {
+                request("POST", "/v1/agents/sessions/" + session + "/events",
+                        Map.of("type", "agent.session.input.message", "input", input), "confined-second", "actor", 202);
+            }
+            int expected = turn;
+            await().atMost(Duration.ofSeconds(30)).failFast(() -> {
+                if (modelFailure.get() != null) {
+                    throw new AssertionError(modelFailure.get());
+                }
+            }).untilAsserted(() -> {
+                answerActions(session, false);
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE session_id = ? AND status = 'COMPLETED'",
+                        Integer.class, session)).isEqualTo(expected);
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE harness_session_id = ?"
+                        + " AND execution_storage_key IS NOT NULL", Integer.class, session)).isZero();
+            });
+        }
+        assertThat(Files.readString(root.resolve("shell-proof.txt"))).isEqualTo("once\nonce\n");
+        assertThat(root.resolve("detached-started")).exists();
+        assertThat(root.resolve("detached-survived")).doesNotExist();
+        String binding = jdbc.queryForObject("SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?"
+                + " AND isolation_key = ?", String.class, tenant, session);
+        assertThat(jdbc.queryForObject("SELECT capability_digest FROM ma_runtime_binding WHERE binding_id = ?",
+                String.class, binding)).isEqualTo(WorkspaceExecutionProfile.PRIVATE_ROOT_CAPABILITY_DIGEST);
+        JsonNode handle = json.readTree(jdbc.queryForObject("SELECT resource_handle_json FROM ma_runtime_binding"
+                + " WHERE binding_id = ?", String.class, binding));
+        Path group = Path.of(handle.path("cgroupRoot").asText()).resolve("qwen-runtime-" + handle.path("resourceId").asText());
+        Path registration = temporary.resolve("broker").resolve(handle.path("resourceId").asText() + ".json");
+        long pid = json.readTree(Files.readString(registration)).path("pid").asLong();
+        var worker = ProcessHandle.of(pid).orElseThrow();
+        assertThat(Files.readAllLines(group.resolve("cgroup.procs"))).containsExactly(Long.toString(pid));
+        var broker = spring.getBean(EmbeddedRuntimeBroker.class).service();
+        String runtimeSession = UUID.randomUUID().toString();
+        String claim = UUID.randomUUID().toString();
+        broker.acquire(session, runtimeSession, "bootstrap", null, claim).toCompletableFuture().get(10, TimeUnit.SECONDS);
+        Process writer = new ProcessBuilder("/bin/sh", "-c", "echo $$ > \"$1\" && exec /bin/sleep 120",
+                "fixture", group.resolve("cgroup.procs").toString()).start();
+        try {
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(Files.readAllLines(group.resolve("cgroup.procs"))).contains(Long.toString(writer.pid())));
+            worker.destroyForcibly();
+            worker.onExit().get(5, TimeUnit.SECONDS);
+            org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                    broker.releaseMount(session, runtimeSession, claim, null).toCompletableFuture().join())
+                    .hasRootCauseInstanceOf(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+            assertThat(jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?",
+                    String.class, runtimeSession)).isNotBlank();
+            assertThat(writer.isAlive()).isTrue();
+            String operation = request("POST", "/v1/agents/sessions/" + session + "/close",
+                    null, "confined-close", "actor", 202).path("id").asText();
+            await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> assertThat(request("GET",
+                    "/v1/agents/sessions/" + session + "/operations/" + operation, null, null, "actor", 200)
+                    .path("status").asText()).isEqualTo("completed"));
+            assertThat(writer.waitFor(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?",
+                    String.class, runtimeSession)).isNull();
+            assertThat(json.readTree(Files.readString(registration)).path("state").asText()).isEqualTo("RETIRED");
+            assertThat(jdbc.queryForObject("SELECT drain_receipt_json FROM ma_runtime_binding WHERE binding_id = ?",
+                    String.class, binding)).isNotBlank();
+        } finally {
+            writer.destroyForcibly();
+            writer.waitFor(5, TimeUnit.SECONDS);
+        }
     }
 
     @ParameterizedTest
@@ -1709,6 +1799,12 @@ class HostedPublicWorkspaceIT {
         if (!publicChildren) {
             arguments.add("--qwen.managed-agent.harness.workspace-child-agents-enabled=false");
         }
+        if (confined) {
+            arguments.add("--qwen.managed-agent.runtime-broker.provider-options.private-rootfs="
+                    + System.getProperty("qwen.test.private.rootfs"));
+            arguments.add("--qwen.managed-agent.runtime-broker.provider-options.cgroup-root="
+                    + System.getProperty("qwen.test.cgroup.root"));
+        }
         if (shellLifecycleV2) {
             arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port,
                     "private-test-bucket", 1048576));
@@ -1868,7 +1964,7 @@ class HostedPublicWorkspaceIT {
         environment.putAll(Map.of("HOME", home.toString(), "USERPROFILE", home.toString(), "QWEN_HOME", config.toString(),
                 "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
-        if (shellLifecycleV2) {
+        if (shellLifecycleV2 || confined) {
             environment.remove("QWEN_HOSTED_LIFECYCLE_V2_PROFILES");
         } else {
             environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "");
@@ -1917,6 +2013,8 @@ class HostedPublicWorkspaceIT {
             if (publicChildren) {
                 assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
                 assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
+            } else if (confined) {
+                assertThat(tools).containsExactly("run_shell_command");
             } else if (shell) {
                 var expectedTools = new ArrayList<>(List.of("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob", "todo_write", "ask_user_question"));
                 if (shellLifecycleV2) {
@@ -1992,6 +2090,17 @@ class HostedPublicWorkspaceIT {
                     case 1 -> Map.of("file_path", "proof.txt", "old_string", "before", "new_string", "after");
                     default -> Map.of("file_path", "proof.txt");
                 };
+                if (confined) {
+                    args = Map.of("command", "test \"$(pwd)\" = /workspace && test ! -e "
+                            + quote(decoy.resolve("outside").toString())
+                            + " && test ! -e /proc/self && test \"$HOME\" = /tmp || exit 9; "
+                            + "/bin/busybox rm -f detached-started; "
+                            + "(printf started > detached-started; /bin/busybox sleep 3;"
+                            + " printf leaked > detached-survived) </dev/null >/dev/null 2>&1 & "
+                            + "while [ ! -e detached-started ]; do :; done; "
+                            + "printf 'once\\n' >> shell-proof.txt; printf 'G0_SHELL_STDOUT\\n'",
+                            "description", "Check private root and write a proof");
+                }
                 if (definitionTurn) {
                     String marker = prompt.get().split("[^A-Z0-9_]", 2)[0];
                     name = step == 0 ? "write_file" : "run_shell_command";

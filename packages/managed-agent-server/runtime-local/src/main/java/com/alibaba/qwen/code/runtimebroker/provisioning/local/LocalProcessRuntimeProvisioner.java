@@ -36,6 +36,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -58,7 +59,7 @@ import java.util.regex.Pattern;
  * after that process attests as the same identity.
  */
 public final class LocalProcessRuntimeProvisioner
-        implements OperatorRuntimeRecovery {
+        implements OperatorRuntimeRecovery, com.alibaba.qwen.code.runtimebroker.spi.ConfinedWorkspaceHandbackVerifier {
     public static final String KIND = "local-process";
     public static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration GRACE_BEFORE_FORCE = Duration.ofSeconds(5);
@@ -150,9 +151,17 @@ public final class LocalProcessRuntimeProvisioner
 
     static LocalProcessRuntimeProvisioner durable(List<String> command, Path stateDirectory,
             HttpRuntimeTransport transport, boolean trustedRebootRecovery, Path cgroupRoot) {
+        return durable(command, stateDirectory, transport, trustedRebootRecovery, cgroupRoot, null);
+    }
+
+    static LocalProcessRuntimeProvisioner durable(List<String> command, Path stateDirectory,
+            HttpRuntimeTransport transport, boolean trustedRebootRecovery, Path cgroupRoot, Path privateRootfs) {
         LocalRuntimeStore.HostIdentity identity = LocalRuntimeStore.HostIdentity.current();
-        return new LocalProcessRuntimeProvisioner(command, stateDirectory, transport, null,
-                new LocalRuntimeStore(stateDirectory, identity, cgroupRoot), trustedRebootRecovery);
+        var store = new LocalRuntimeStore(stateDirectory, identity, cgroupRoot, privateRootfs);
+        if (privateRootfs != null) {
+            transport.withPrivateRoot(store::currentPrivateRoot);
+        }
+        return new LocalProcessRuntimeProvisioner(command, stateDirectory, transport, null, store, trustedRebootRecovery);
     }
 
     LocalProcessRuntimeProvisioner(List<String> command, Path workingDirectory,
@@ -250,6 +259,9 @@ public final class LocalProcessRuntimeProvisioner
         if (store != null) {
             return submit(() -> store.locked(request, seed, knownHandle, true,
                     (resource, registration) -> registration.handle()));
+        }
+        if (WorkspaceExecutionProfile.isConfined(request.getScope().getCapabilityDigest())) {
+            return CompletableFuture.failedFuture(WorkspaceExecutionProfile.confinementUnavailable());
         }
         if (knownHandle != null) {
             if (!KIND.equals(knownHandle.getKind())
@@ -372,6 +384,10 @@ public final class LocalProcessRuntimeProvisioner
 
     @Override
     public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        if (WorkspaceExecutionProfile.isConfined(binding.getRequest().getScope().getCapabilityDigest())
+                && !RuntimeProviderKinds.isLocalProcessCgroup(binding.getResourceHandle())) {
+            return CompletableFuture.failedFuture(LocalRuntimeStore.blocked());
+        }
         if (store == null || !binding.isDrainRequested() || !binding.getRequest().isManagedContext()
                 || !(WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
                         || HarnessOwnership.sharesRuntimeSessions(binding.getRequest()))
@@ -708,7 +724,9 @@ public final class LocalProcessRuntimeProvisioner
         boot.put("workspaceGeneration", scope.getWorkspaceGeneration());
         boot.put("workspaceId", scope.getWorkspaceId());
         Map<String, Object> document = request.isManagedContext()
-                ? ManagedContextProtocol.boot(request, seed, ManagedExtensionExecutionProfile.admits(scope.getCapabilityDigest()) ? ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(), managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null) : boot;
+                ? ManagedContextProtocol.boot(request, seed, ManagedExtensionExecutionProfile.admits(scope.getCapabilityDigest()) ? ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(), managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null,
+                        WorkspaceExecutionProfile.isConfined(scope.getCapabilityDigest()) ? store.currentPrivateRoot() : null)
+                : boot;
         byte[] encoded = JsonCodec.encode(document);
         if (encoded.length > READY_RECORD_LIMIT) {
             throw new IllegalArgumentException("Managed Runtime boot exceeds 32 KiB.");
@@ -779,6 +797,7 @@ public final class LocalProcessRuntimeProvisioner
             if (!store.sameBoot(original)) {
                 throw LocalRuntimeStore.blocked();
             }
+            requireLaunchRecipe(request, document, original);
             LocalRuntimeStore.Registration registration = original;
             if (registration.state() == LocalRuntimeStore.State.INTENT) {
                 resource.save(registration.withState(LocalRuntimeStore.State.LAUNCHING));
@@ -836,6 +855,7 @@ public final class LocalProcessRuntimeProvisioner
     private RuntimeLease adoptDurable(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             Map<String, Object> document, LocalRuntimeStore.Resource resource,
             LocalRuntimeStore.Registration registration) throws IOException {
+        requireLaunchRecipe(request, document, registration);
         boolean contained = RuntimeProviderKinds.isLocalProcessCgroup(registration.handle());
         if (registration.processAbsent()) {
             if (!contained) {
@@ -885,6 +905,33 @@ public final class LocalProcessRuntimeProvisioner
         }
         owned.put(ownershipKey(lease), new OwnedProcess(null, registration, seed));
         return lease;
+    }
+
+    private static void requireLaunchRecipe(RuntimeProvisionRequest request, Map<String, Object> boot,
+            LocalRuntimeStore.Registration registration) {
+        if (WorkspaceExecutionProfile.isConfined(request.getScope().getCapabilityDigest())
+                && !Objects.equals(boot.get("privateRoot"), registration.handle().getValue().get("privateRoot"))) {
+            throw WorkspaceExecutionProfile.confinementUnavailable();
+        }
+    }
+
+    @Override
+    public CompletionStage<Void> verifyConfinedHandback(RuntimeBindingRecord binding) {
+        if (store == null || binding.getProvisionSeed() == null
+                || !RuntimeProviderKinds.isLocalProcessCgroup(binding.getResourceHandle())) {
+            return CompletableFuture.failedFuture(LocalRuntimeStore.blocked());
+        }
+        return submit(() -> store.locked(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle(), false, (resource, registration) -> {
+                    if (!store.sameBoot(registration) || registration.state() != LocalRuntimeStore.State.READY
+                            || registration.process() == null
+                            || !LinuxRuntimeCgroup.saved(registration.handle()).onlyMember(registration.pid())
+                            || registration.process() == null) {
+                        throw new RuntimeBrokerException(409, "workspace_writer_unproven",
+                                "The original confined Runtime did not prove Workspace handback.", false);
+                    }
+                    return null;
+                }));
     }
 
     private RuntimeObservation observeDurable(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,

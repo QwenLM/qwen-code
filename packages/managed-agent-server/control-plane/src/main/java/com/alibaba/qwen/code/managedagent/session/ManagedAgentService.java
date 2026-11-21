@@ -1682,7 +1682,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     private Boolean foregroundShell(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
-        if (session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
+        if (session.workspace() == null || !WorkspaceToolProfiles.hasForegroundShell(session.toolProfile())) {
             return null;
         }
         return session.deletedAt() == null && ready(worktree) && store.workspaceFilesEnabled() && store.workspaceShellEnabled()

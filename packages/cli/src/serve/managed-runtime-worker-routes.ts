@@ -6,7 +6,10 @@
 
 import { MANAGED_TOOL_RESULT_ROUTES } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import { OWNED_MANAGED_RUNTIME_ROUTES } from './managed-runtime-attestation-contract.js';
-import { MANAGED_CONTEXT_WORKER_ROUTES } from './managed-context-worker.js';
+import {
+  CONFINED_CONTEXT_WORKER_ROUTES,
+  MANAGED_CONTEXT_WORKER_ROUTES,
+} from './managed-context-worker.js';
 import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
 import { MANAGED_RUNTIME_TOOL_V4_ROUTES } from './managed-runtime-tool-v4-routes.js';
 import {
@@ -33,6 +36,7 @@ import { MANAGED_TERMINAL_WORKER_ROUTE } from './managed-terminal-routes.js';
 export interface ManagedRuntimeWorkerRouteInput {
   readonly bootVersion: 1 | 2;
   readonly capabilityDigest: string;
+  readonly confinementQualified?: boolean;
   readonly managedExtensions: boolean;
   readonly csi: boolean;
   readonly sshRoute?: { readonly method: string; readonly path: string };
@@ -57,9 +61,21 @@ export interface ManagedRuntimeWorkerRoutePlan {
  * same publisher-mode derivation, so a route cannot be mounted without being
  * gated. See docs/design/2026-11-10-managed-runtime-route-single-source.md.
  */
+import { PRIVATE_ROOT_CAPABILITY_DIGEST } from './managed-private-root.js';
+
 export function resolveManagedRuntimeWorkerRoutePlan(
   input: ManagedRuntimeWorkerRouteInput,
 ): ManagedRuntimeWorkerRoutePlan {
+  if (input.capabilityDigest === PRIVATE_ROOT_CAPABILITY_DIGEST) {
+    return {
+      routes: input.confinementQualified
+        ? CONFINED_CONTEXT_WORKER_ROUTES
+        : CONFINED_CONTEXT_WORKER_ROUTES.slice(0, 1),
+      toolV4: false,
+      toolResult: false,
+      publicationInstall: false,
+    };
+  }
   const terminalControlRoutes =
     input.capabilityDigest === MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST
       ? [MANAGED_TERMINAL_WORKER_ROUTE]

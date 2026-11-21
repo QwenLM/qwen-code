@@ -48,6 +48,7 @@ final class LocalRuntimeStore {
     private final UserPrincipal owner;
     private final HostIdentity identity;
     private final Path cgroupRoot;
+    private final Path privateRootfs;
 
     record HostIdentity(String hostId, String bootId, String pidNamespace, String timeNamespace) {
         HostIdentity {
@@ -196,7 +197,12 @@ final class LocalRuntimeStore {
     }
 
     LocalRuntimeStore(Path directory, HostIdentity identity, Path cgroupRoot) {
+        this(directory, identity, cgroupRoot, null);
+    }
+
+    LocalRuntimeStore(Path directory, HostIdentity identity, Path cgroupRoot, Path privateRootfs) {
         this.cgroupRoot = cgroupRoot;
+        this.privateRootfs = privateRootfs;
         if (cgroupRoot != null) {
             try {
                 LinuxRuntimeCgroup.validateRoot(cgroupRoot);
@@ -276,6 +282,13 @@ final class LocalRuntimeStore {
                     if (!create || known != null || !createdLock) {
                         throw blocked();
                     }
+                    Map<?, ?> recipe = null;
+                    if (WorkspaceExecutionProfile.isConfined(request.getScope().getCapabilityDigest())) {
+                        if (!request.isManagedContext() || cgroupRoot == null) {
+                            throw WorkspaceExecutionProfile.confinementUnavailable();
+                        }
+                        recipe = currentPrivateRoot();
+                    }
                     LinuxRuntimeCgroup unit = null;
                     if (cgroupRoot != null && request.isManagedContext()) {
                         String capability = request.getScope().getCapabilityDigest();
@@ -288,7 +301,7 @@ final class LocalRuntimeStore {
                         }
                         unit = LinuxRuntimeCgroup.create(cgroupRoot, key);
                     }
-                    registration = new Registration(handle(request, seed, key, identity, unit),
+                    registration = new Registration(handle(request, seed, key, identity, unit, recipe),
                             State.INTENT, 0, null, null);
                     resource.save(registration);
                 }
@@ -298,7 +311,8 @@ final class LocalRuntimeStore {
                                 (String) registration.handle().getValue().get("pidNamespace"),
                                 (String) registration.handle().getValue().get("timeNamespace")),
                         RuntimeProviderKinds.isLocalProcessCgroup(registration.handle())
-                                ? LinuxRuntimeCgroup.saved(registration.handle()) : null);
+                                ? LinuxRuntimeCgroup.saved(registration.handle()) : null,
+                        savedPrivateRoot(request, registration.handle()));
                 if (!registration.handle().equals(expected)
                         || known != null && !known.equals(registration.handle())) {
                     throw blocked();
@@ -430,7 +444,7 @@ final class LocalRuntimeStore {
     }
 
     private static RuntimeResourceHandle handle(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            String key, HostIdentity identity, LinuxRuntimeCgroup unit) {
+            String key, HostIdentity identity, LinuxRuntimeCgroup unit, Map<?, ?> privateRoot) {
         RuntimeScope scope = request.getScope();
         Map<String, Object> values = new LinkedHashMap<>();
         values.put("resourceId", key);
@@ -446,8 +460,49 @@ final class LocalRuntimeStore {
         if (unit != null) {
             unit.writeIdentity(values);
         }
+        if (privateRoot != null) {
+            values.put("privateRoot", privateRoot);
+        }
         return new RuntimeResourceHandle(RuntimeProviderKinds.LOCAL_PROCESS,
                 unit == null ? 2 : RuntimeProviderKinds.LOCAL_PROCESS_CGROUP_HANDLE_VERSION, values);
+    }
+
+    Map<String, Object> currentPrivateRoot() {
+        if (privateRootfs == null) {
+            throw WorkspaceExecutionProfile.confinementUnavailable();
+        }
+        try {
+            Path bwrap = Path.of("/usr/bin/bwrap");
+            if (!privateRootfs.equals(privateRootfs.toRealPath()) || !Files.isDirectory(privateRootfs)
+                    || !bwrap.equals(bwrap.toRealPath()) || !Files.isExecutable(bwrap)) {
+                throw WorkspaceExecutionProfile.confinementUnavailable();
+            }
+            return Map.of("version", 1, "rootfs", privateRootfs.toString(),
+                    "rootfsIdentity", fileIdentity(privateRootfs), "bwrapIdentity", fileIdentity(bwrap));
+        } catch (IOException error) {
+            throw WorkspaceExecutionProfile.confinementUnavailable();
+        }
+    }
+
+    private static String fileIdentity(Path path) throws IOException {
+        var attributes = Files.readAttributes(path, "unix:dev,ino", LinkOption.NOFOLLOW_LINKS);
+        return Long.toUnsignedString(((Number) attributes.get("dev")).longValue()) + ":"
+                + Long.toUnsignedString(((Number) attributes.get("ino")).longValue());
+    }
+
+    private static Map<?, ?> savedPrivateRoot(RuntimeProvisionRequest request, RuntimeResourceHandle handle) {
+        Object recipe = handle.getValue().get("privateRoot");
+        if (WorkspaceExecutionProfile.isConfined(request.getScope().getCapabilityDigest())) {
+            if (!RuntimeProviderKinds.isLocalProcessCgroup(handle) || !(recipe instanceof Map<?, ?> config)
+                    || !com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol.validPrivateRoot(config)) {
+                throw blocked();
+            }
+            return config;
+        }
+        if (recipe != null) {
+            throw blocked();
+        }
+        return null;
     }
 
     private static String digest(byte[] bytes) {

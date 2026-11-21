@@ -14,6 +14,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   symlink,
   writeFile,
@@ -290,11 +291,13 @@ test(
         while (!existsSync(marker))
           await delay(15, undefined, { signal: startupDeadline });
         assert.equal(await readFile(marker, 'utf8'), 'started');
+        assert.equal((await readdir(state)).length, 1);
         stop.abort({ kind: 'background' });
         const result = await handle.result;
         assert.equal(result.aborted, true);
         assert.notEqual(result.promoted, true);
         assert.deepEqual(result.sandboxStatus, { state: 'interrupted' });
+        assert.deepEqual(await readdir(state), []);
       },
     );
 
