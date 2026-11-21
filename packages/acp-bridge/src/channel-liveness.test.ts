@@ -606,4 +606,50 @@ describe('startChannelLivenessMonitor', () => {
     });
     expect(failure.evidence.lastCpuDeltaTicks).toBeUndefined();
   });
+
+  it('re-baselines the CPU window after a local delay', async () => {
+    vi.useFakeTimers();
+    let monotonicNow = 0;
+    const probe = vi.fn(() => new Promise<never>(() => {}));
+    const onFailure = vi.fn();
+    const onBusyExtension = vi.fn();
+    let calls = 0;
+    const sampleProcess = vi.fn((): ChannelProcessSample => {
+      calls++;
+      // CPU burned before the local delay (call 1) must not credit the
+      // post-delay window: the refreshed baseline (call 2) already includes
+      // it, and the agent is zero-CPU inside every window afterwards.
+      return {
+        cpuTicks: calls === 1 ? 100 : 500,
+        state: 'T',
+        wchan: '',
+        rssBytes: 1024,
+      };
+    });
+    startChannelLivenessMonitor({
+      probe,
+      onFailure,
+      isActive: () => true,
+      now: () => monotonicNow,
+      sampleProcess,
+      onBusyExtension,
+    });
+
+    await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_INTERVAL_MS);
+    monotonicNow =
+      CHANNEL_LIVENESS_PROBE_TIMEOUT_MS +
+      CHANNEL_LIVENESS_TIMER_LATE_TOLERANCE_MS +
+      1;
+    await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
+    expect(onFailure).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2 * CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
+    expect(onBusyExtension).not.toHaveBeenCalled();
+    expect(onFailure).toHaveBeenCalledOnce();
+    expect(onFailure.mock.calls[0]?.[0].evidence).toMatchObject({
+      consecutiveTimeouts: 2,
+      busyExtensions: 0,
+      lastCpuDeltaTicks: 0,
+    });
+  });
 });

@@ -425,18 +425,39 @@ export function createChannelStartup({
           'qwen-code.daemon.acp_channel.id': info.id,
           'qwen-code.daemon.channel.session_count': sessionCount(info),
           'qwen-code.daemon.channel.transport_error_code': error.code,
+          // Per-field guards: the attribute contract admits no undefined
+          // values, and numeric zero (a zero-CPU stall's cpu_delta_ticks)
+          // is evidence, so guard numerics on !== undefined, not truthiness.
           ...(evidence
             ? {
-                'qwen-code.daemon.channel.liveness.pid': info.channel.pid,
-                'qwen-code.daemon.channel.liveness.state': sample?.state,
-                'qwen-code.daemon.channel.liveness.wchan': sample?.wchan,
-                'qwen-code.daemon.channel.liveness.cpu_delta_ticks':
-                  evidence.lastCpuDeltaTicks,
+                ...(info.channel.pid !== undefined
+                  ? {
+                      'qwen-code.daemon.channel.liveness.pid': info.channel.pid,
+                    }
+                  : {}),
+                ...(sample
+                  ? {
+                      'qwen-code.daemon.channel.liveness.state': sample.state,
+                      ...(sample.wchan
+                        ? {
+                            'qwen-code.daemon.channel.liveness.wchan':
+                              sample.wchan,
+                          }
+                        : {}),
+                      'qwen-code.daemon.channel.liveness.rss_bytes':
+                        sample.rssBytes,
+                    }
+                  : {}),
+                ...(evidence.lastCpuDeltaTicks !== undefined
+                  ? {
+                      'qwen-code.daemon.channel.liveness.cpu_delta_ticks':
+                        evidence.lastCpuDeltaTicks,
+                    }
+                  : {}),
                 'qwen-code.daemon.channel.liveness.busy_extensions':
                   evidence.busyExtensions,
                 'qwen-code.daemon.channel.liveness.consecutive_timeouts':
                   evidence.consecutiveTimeouts,
-                'qwen-code.daemon.channel.liveness.rss_bytes': sample?.rssBytes,
               }
             : {}),
         });

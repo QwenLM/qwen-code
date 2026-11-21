@@ -131,7 +131,7 @@ export function startChannelLivenessMonitor(
     if (!isActive()) return;
     const nonce = nextNonce;
     nextNonce = nonce === Number.MAX_SAFE_INTEGER ? 0 : Math.max(0, nonce + 1);
-    const baselineSample = options.sampleProcess?.();
+    let baselineSample = options.sampleProcess?.();
     const response = Promise.resolve()
       .then(() => options.probe(nonce))
       .then<ProbeOutcome, ProbeOutcome>(
@@ -162,6 +162,9 @@ export function startChannelLivenessMonitor(
       if (outcome.kind !== 'local_delay') break;
       consecutiveTimeouts = 0;
       busyExtensions = 0;
+      // The retry opens a fresh probe window; a baseline from before the
+      // local delay would credit CPU burned outside that window as busy.
+      baselineSample = options.sampleProcess?.();
     }
 
     if (outcome.kind === 'response') {
@@ -182,6 +185,7 @@ export function startChannelLivenessMonitor(
     }
     if (outcome.kind === 'rejected') {
       await Promise.resolve();
+      if (!isActive()) return;
       fail(
         new ChannelLivenessFailure(CHANNEL_LIVENESS_PROTOCOL_ERROR_CODE, {
           lastSample: options.sampleProcess?.(),

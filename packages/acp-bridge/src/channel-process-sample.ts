@@ -11,7 +11,7 @@ export interface ChannelProcessSample {
   cpuTicks: number;
   /** Field 3 of `/proc/<pid>/stat` (`R`, `S`, `D`, `T`, `Z`, …). */
   state: string;
-  /** Kernel wait channel; `''` when running or unreadable. */
+  /** Kernel wait channel; `'0'` when the kernel reports no symbolic wait, `''` when unreadable. */
   wchan: string;
   /** `VmRSS` from `/proc/<pid>/status`, in bytes; `0` when unreadable. */
   rssBytes: number;
