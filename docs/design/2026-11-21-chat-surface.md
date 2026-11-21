@@ -35,18 +35,25 @@ next increment (2f), so this slice is additive and renders nothing on its own.
   on every streaming delta; the cheap block-level classifier still builds the
   signature each render.
 - **Admission is not establishment, in the composer too.** `ChatEditor.onSubmit`
-  dispatches `controller.submit`, returns the literal `false` to defer
-  `useComposerCore`'s synchronous commit, and clears the draft (`commitAccepted`)
-  only on an `accepted` admission — never on establishment, and never before the
-  transport resolves (any other return wipes the draft immediately). Because the
-  deferred commit keeps the draft, the surface passes
-  `submitDisabled={phase === 'submitting'}` so a second Enter/click during the POST
-  round-trip cannot dispatch a duplicate send (the editor stays editable), and it
-  reports an `unknown` admission or a transport rejection through `onError` rather
-  than failing silently. `onCancel` dispatches `controller.cancel`. `isRunning`
-  derives from `phase` (`submitting`/`running`/`cancelling`), so a cancel in flight
-  keeps the stop affordance and the streaming indicator until settlement evidence
-  arrives.
+  dispatches `controller.submit` and clears the draft (`commitAccepted`) only on an
+  `accepted` admission — never on establishment. It returns the literal `false` to
+  defer `useComposerCore`'s synchronous commit **only when a commit callback is
+  present** (`return commitAccepted ? false : undefined`): the commit-less entrances
+  (`submitSearchMatch`, `retryLast`) read `false` as "refused, keep the text", so they
+  must get `undefined` to keep their synchronous clear. Because the controller's
+  `phase` is a getter over a snapshot with no reactive source here, the surface holds
+  its own in-flight latch (ref + state) set synchronously on the first submit and
+  cleared in `.finally`, and passes
+  `submitDisabled={composerSubmitBlocked || transcriptState === 'loading' || submitInFlight || phase === 'submitting'}`
+  so a second Enter/click during the POST round-trip cannot dispatch a duplicate send
+  even for an attachment-bearing prompt (no optimistic echo to trigger a re-render),
+  while mid-turn sends stay allowed. It reports `unknown` and `rejected` admissions
+  and transport rejections through `onError` (the reported `Error` is built from a
+  localized `chat.*` string, since the host sink displays `error.message`), keeping
+  the draft on every non-accepted path. `onCancel` dispatches `controller.cancel`.
+  `isRunning` derives from `phase` (`submitting`/`running`/`cancelling`), so a cancel
+  in flight keeps the stop affordance and the streaming indicator until settlement
+  evidence arrives.
 - **Approvals/questions.** The surface renders the first `pending` approval
   (superseded items are skipped) and the first pending question. `ToolApproval`
   confirmation routes to `respondApproval(id, optionId)` and **rejects** on a

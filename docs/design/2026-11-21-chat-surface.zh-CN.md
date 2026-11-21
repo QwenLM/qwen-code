@@ -30,14 +30,19 @@
 - **拆分保留每增量优化。** 渲染就绪的 request 仅在内容签名变化时抽取（slice 2d 的
   ref 缓存），而非每个流式增量；轻量块级分类器仍每次渲染构建签名。
 - **准入不等于建立，输入框亦然。** `ChatEditor.onSubmit` 派发 `controller.submit`，
-  返回字面量 `false` 以推迟 `useComposerCore` 的同步提交，仅在 `accepted` 准入时清空
-  草稿（`commitAccepted`）——绝不在建立时、也绝不在 transport 落定前（其他任何返回值
-  都会立即清空草稿）。由于延迟提交保留了草稿，表面传
-  `submitDisabled={phase === 'submitting'}`，使 POST 往返期间再按 Enter/点击不会派发
-  重复发送（输入框仍可编辑）；并对 `unknown` 准入或 transport 拒绝经 `onError` 上报，
-  而非静默失败。`onCancel` 派发 `controller.cancel`。`isRunning` 由 `phase`
-  （`submitting`/`running`/`cancelling`）派生，故取消在途时停止入口与流式指示器保持到
-  落定证据到达。
+  仅在 `accepted` 准入时清空草稿（`commitAccepted`）——绝不在建立时。**仅当存在提交
+  回调时**才返回字面量 `false` 以推迟 `useComposerCore` 的同步提交
+  （`return commitAccepted ? false : undefined`）：无提交回调的入口（`submitSearchMatch`、
+  `retryLast`）把 `false` 读作「被拒、保留文本」，故必须拿到 `undefined` 才能保持其同步
+  清空。由于控制器的 `phase` 是对快照的 getter、此处无响应式来源，表面自持一个在途 latch
+  （ref + state），首次提交同步置位、`.finally` 清除，并传
+  `submitDisabled={composerSubmitBlocked || transcriptState === 'loading' || submitInFlight || phase === 'submitting'}`，
+  使 POST 往返期间再按 Enter/点击不会派发重复发送——即便是带附件的 prompt（无乐观回显触发
+  重渲染）——而流式期间的发送仍被允许。对 `unknown`、`rejected` 准入与 transport 拒绝均经
+  `onError` 上报（被上报的 `Error` 由本地化 `chat.*` 字符串构造，因宿主落点显示
+  `error.message`），所有非 accepted 路径都保留草稿。`onCancel` 派发 `controller.cancel`。
+  `isRunning` 由 `phase`（`submitting`/`running`/`cancelling`）派生，故取消在途时停止入口与
+  流式指示器保持到落定证据到达。
 - **审批/提问。** 表面渲染第一个 `pending` 审批（跳过被取代项）与第一个待处理提问。
   `ToolApproval` 确认路由到 `respondApproval(id, optionId)`，并在非 accepted 准入时
   **reject**（经 `onError` 上报），因为 `ToolApproval` 仅经 rejection 重新解锁——resolve

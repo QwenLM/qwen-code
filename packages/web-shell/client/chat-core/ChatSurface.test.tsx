@@ -6,6 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react';
 import type {
   Message,
   PermissionRequest,
@@ -44,6 +45,9 @@ vi.mock('../components/ChatEditor.js', () => ({
     captured.editor = props;
     return <div data-testid="chat-editor" />;
   },
+}));
+vi.mock('../i18n.js', () => ({
+  useI18n: () => ({ t: (key: string) => `localized:${key}` }),
 }));
 
 import { ChatSurface } from './ChatSurface.js';
@@ -104,7 +108,7 @@ type SubmitHandler = (
   files?: unknown,
   commitAccepted?: () => void,
   metadata?: unknown,
-) => boolean;
+) => boolean | undefined;
 type QuestionConfirm = (
   id: string,
   optionId: string,
@@ -241,16 +245,19 @@ describe('ChatSurface', () => {
     mountReact(<ChatSurface controller={controller} />);
     const onSubmit = captured.editor?.onSubmit as SubmitHandler;
     const commitAccepted = vi.fn();
-    const returned = onSubmit(
-      'hello',
-      undefined,
-      undefined,
-      commitAccepted,
-      undefined,
-    );
-    // Only the literal false defers useComposerCore's synchronous commit.
+    let returned: boolean | undefined;
+    await act(async () => {
+      returned = onSubmit(
+        'hello',
+        undefined,
+        undefined,
+        commitAccepted,
+        undefined,
+      );
+    });
+    // Only the literal false defers useComposerCore's synchronous commit; the
+    // draft is then cleared on admission (the fake transport resolves at once).
     expect(returned).toBe(false);
-    expect(commitAccepted).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(commitAccepted).toHaveBeenCalled());
     expect(controller.submit).toHaveBeenCalledWith({
       text: 'hello',
@@ -270,9 +277,17 @@ describe('ChatSurface', () => {
     mountReact(<ChatSurface controller={controller} />);
     const onSubmit = captured.editor?.onSubmit as SubmitHandler;
     const commitAccepted = vi.fn();
-    expect(
-      onSubmit('hello', undefined, undefined, commitAccepted, undefined),
-    ).toBe(false);
+    let returned: boolean | undefined;
+    await act(async () => {
+      returned = onSubmit(
+        'hello',
+        undefined,
+        undefined,
+        commitAccepted,
+        undefined,
+      );
+    });
+    expect(returned).toBe(false);
     await vi.waitFor(() => expect(controller.submit).toHaveBeenCalled());
     expect(commitAccepted).not.toHaveBeenCalled();
   });
@@ -315,6 +330,12 @@ describe('ChatSurface', () => {
     ).toHaveLength(1);
     expect(captured.editor?.dialogOpen).toBe(true);
     expect(captured.transcript?.approvalOverlayActive).toBe(true);
+    // Visibility comes solely from composerHidden (dialogOpen hides nothing),
+    // so pin the positive class, not just dialogOpen.
+    const composerWrap = container.querySelector(
+      '[data-testid="chat-editor"]',
+    )?.parentElement;
+    expect(composerWrap?.className).toContain('composerHidden');
   });
 
   it('threads the plan facts and focus/notification gating to the approval card', () => {
@@ -400,12 +421,40 @@ describe('ChatSurface', () => {
     mountReact(<ChatSurface controller={controller} onError={onError} />);
     const onSubmit = captured.editor?.onSubmit as SubmitHandler;
     const commitAccepted = vi.fn();
-    onSubmit('hello', undefined, undefined, commitAccepted, undefined);
+    await act(async () => {
+      onSubmit('hello', undefined, undefined, commitAccepted, undefined);
+    });
     await vi.waitFor(() => expect(onError).toHaveBeenCalled());
     expect(commitAccepted).not.toHaveBeenCalled();
+    // The reported Error is built from the localized string, not an English
+    // literal, because the host sink displays error.message.
+    expect((onError.mock.calls[0][0] as Error).message).toBe(
+      'localized:chat.promptNotConfirmed',
+    );
   });
 
-  it('reports a submit transport rejection', async () => {
+  it('reports a rejected submit admission and keeps the draft', async () => {
+    const onError = vi.fn();
+    const controller = fakeController({
+      submit: vi.fn(async () => ({
+        admission: 'rejected',
+        target: { sessionId: 's1' },
+      })),
+    });
+    mountReact(<ChatSurface controller={controller} onError={onError} />);
+    const onSubmit = captured.editor?.onSubmit as SubmitHandler;
+    const commitAccepted = vi.fn();
+    await act(async () => {
+      onSubmit('hello', undefined, undefined, commitAccepted, undefined);
+    });
+    await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+    expect(commitAccepted).not.toHaveBeenCalled();
+    expect((onError.mock.calls[0][0] as Error).message).toBe(
+      'localized:chat.promptNotAdmitted',
+    );
+  });
+
+  it('reports a submit transport rejection without wiping the draft', async () => {
     const onError = vi.fn();
     const controller = fakeController({
       submit: vi.fn(async () => {
@@ -414,8 +463,12 @@ describe('ChatSurface', () => {
     });
     mountReact(<ChatSurface controller={controller} onError={onError} />);
     const onSubmit = captured.editor?.onSubmit as SubmitHandler;
-    onSubmit('hello', undefined, undefined, vi.fn(), undefined);
+    const commitAccepted = vi.fn();
+    await act(async () => {
+      onSubmit('hello', undefined, undefined, commitAccepted, undefined);
+    });
     await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+    expect(commitAccepted).not.toHaveBeenCalled();
   });
 
   it('blocks a repeat send while a submit is in flight', () => {
@@ -423,9 +476,61 @@ describe('ChatSurface', () => {
     mountReact(<ChatSurface controller={submitting} />);
     expect(captured.editor?.submitDisabled).toBe(true);
     cleanupReact();
-    const idle = fakeController({ phase: 'idle' });
-    mountReact(<ChatSurface controller={idle} />);
+    // Mid-turn sends must stay allowed (ChatPane does not disable send while
+    // streaming), so only 'submitting' arms the phase guard.
+    for (const phase of ['idle', 'running', 'cancelling'] as const) {
+      const controller = fakeController({ phase });
+      mountReact(<ChatSurface controller={controller} />);
+      expect(captured.editor?.submitDisabled).toBe(false);
+      cleanupReact();
+    }
+  });
+
+  it('latches an in-flight submit even when the phase never re-renders', async () => {
+    let resolveSubmit: ((value: { admission: string }) => void) | undefined;
+    const submit = vi.fn(
+      () =>
+        new Promise<{ admission: string }>((resolve) => {
+          resolveSubmit = resolve;
+        }),
+    );
+    // phase stays 'idle': no optimistic echo, no reactive re-render.
+    const controller = fakeController({ phase: 'idle', submit });
+    mountReact(<ChatSurface controller={controller} />);
+    const onSubmit = captured.editor?.onSubmit as SubmitHandler;
+    await act(async () => {
+      onSubmit('hello', undefined, undefined, vi.fn(), undefined);
+      onSubmit('hello', undefined, undefined, vi.fn(), undefined);
+    });
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(captured.editor?.submitDisabled).toBe(true);
+    await act(async () => {
+      resolveSubmit?.({ admission: 'accepted' });
+    });
     expect(captured.editor?.submitDisabled).toBe(false);
+  });
+
+  it('returns undefined for commit-less submit entrances so they clear synchronously', async () => {
+    const controller = fakeController();
+    mountReact(<ChatSurface controller={controller} />);
+    const onSubmit = captured.editor?.onSubmit as SubmitHandler;
+    let returned: boolean | undefined;
+    await act(async () => {
+      returned = onSubmit('hello', undefined, undefined);
+    });
+    expect(returned).not.toBe(false);
+    expect(returned).toBeUndefined();
+    await vi.waitFor(() => expect(controller.submit).toHaveBeenCalled());
+  });
+
+  it('blocks submit while the transcript is loading or the page blocks writes', () => {
+    const loading = fakeController({ transcriptState: 'loading' });
+    mountReact(<ChatSurface controller={loading} />);
+    expect(captured.editor?.submitDisabled).toBe(true);
+    cleanupReact();
+    const blocked = fakeController();
+    mountReact(<ChatSurface controller={blocked} composerSubmitBlocked />);
+    expect(captured.editor?.submitDisabled).toBe(true);
   });
 
   it('leaves the composer visible and ungated when nothing is pending', () => {

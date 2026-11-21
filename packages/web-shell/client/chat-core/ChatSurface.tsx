@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import type { CommandInfo, TodoItem } from '../adapters/types.js';
 import { TranscriptViewport } from '../components/TranscriptViewport.js';
 import { ToolApproval } from '../components/messages/ToolApproval.js';
 import { AskUserQuestion } from '../components/messages/AskUserQuestion.js';
 import { ChatEditor } from '../components/ChatEditor.js';
+import { useI18n } from '../i18n.js';
 import type { QuestionAnswer, SessionChatController } from './contract.js';
 import styles from './ChatSurface.module.css';
 
@@ -50,6 +51,9 @@ export interface ChatSurfaceProps {
   // and/or an explicit scope key, so the draft persists before a session exists.
   readonly atWorkspaceCwd?: string;
   readonly composerScopeKey?: string;
+  // Page-supplied write block (e.g. rewind sync) folded into submitDisabled,
+  // alongside the transcript-loading and in-flight-submit guards.
+  readonly composerSubmitBlocked?: boolean;
 }
 
 /**
@@ -80,12 +84,20 @@ export function ChatSurface({
   askUserDetails,
   atWorkspaceCwd,
   composerScopeKey,
+  composerSubmitBlocked,
 }: ChatSurfaceProps) {
+  const { t } = useI18n();
   const activeApproval = controller.pendingApprovals.find(
     (approval) => approval.status === 'pending',
   );
   const activeQuestion = controller.pendingQuestions[0];
   const cardActive = Boolean(activeApproval || activeQuestion);
+  // The controller's phase is a getter over a snapshot with no reactive source
+  // here, so an attachment-bearing submit (no optimistic user echo) would not
+  // re-render this surface until admission. Hold the in-flight latch locally so
+  // the repeat-send guard arms synchronously on the first submit.
+  const submitInFlightRef = useRef(false);
+  const [submitInFlight, setSubmitInFlight] = useState(false);
   // A cancel in flight keeps the turn live until settlement evidence arrives.
   const isRunning =
     controller.phase === 'running' ||
@@ -137,8 +149,11 @@ export function ChatSurface({
               if (result.admission !== 'accepted') {
                 // ToolApproval re-arms only through rejection; a non-accepted
                 // admission must surface as an error, not a silent success.
-                const error = new Error('Approval was not accepted');
-                reportError(error, error.message);
+                // Build the Error from the localized string: the host sink
+                // displays error.message, so the fallback alone never shows.
+                const message = t('chat.approvalNotAccepted');
+                const error = new Error(message);
+                reportError(error, message);
                 throw error;
               }
             }}
@@ -192,12 +207,23 @@ export function ChatSurface({
           dialogOpen={cardActive}
           // The deferred commit keeps the draft, so the send button would stay
           // enabled over it; reject every submit path while a submit is in
-          // flight to prevent a double send (the editor stays editable).
-          submitDisabled={controller.phase === 'submitting'}
+          // flight, while the transcript is still loading, or while the page
+          // blocks writes (the editor stays editable).
+          submitDisabled={
+            composerSubmitBlocked ||
+            controller.transcriptState === 'loading' ||
+            submitInFlight ||
+            controller.phase === 'submitting'
+          }
           onCancel={() => {
             void controller.cancel();
           }}
           onSubmit={(text, images, files, commitAccepted, metadata) => {
+            // Block a repeat dispatch while a submit is in flight; keep the
+            // literal false so the still-unsent draft is not wiped.
+            if (submitInFlightRef.current) return false;
+            submitInFlightRef.current = true;
+            setSubmitInFlight(true);
             void controller
               .submit({ text, images, files, metadata })
               .then((result) => {
@@ -205,19 +231,25 @@ export function ChatSurface({
                 if (result.admission === 'accepted') {
                   commitAccepted?.();
                 } else if (result.admission === 'unknown') {
-                  reportError(
-                    new Error('Prompt admission unknown'),
-                    'Prompt not confirmed',
-                  );
+                  const message = t('chat.promptNotConfirmed');
+                  reportError(new Error(message), message);
+                } else {
+                  const message = t('chat.promptNotAdmitted');
+                  reportError(new Error(message), message);
                 }
               })
               .catch((error: unknown) => {
-                reportError(error, 'Failed to send message');
+                reportError(error, t('chat.failedToSend'));
+              })
+              .finally(() => {
+                submitInFlightRef.current = false;
+                setSubmitInFlight(false);
               });
-            // Defer the composer's synchronous commit to admission; only the
-            // literal false does that (useComposerCore commits on any other
-            // return, wiping the draft before the transport resolves).
-            return false;
+            // Defer only when there is a commit to defer: the commit-less
+            // entrances (submitSearchMatch, retryLast) read the literal false
+            // as "refused, keep the text", so they must get undefined to keep
+            // their synchronous clear. Only submitComposerText passes a commit.
+            return commitAccepted ? false : undefined;
           }}
         />
       </div>
