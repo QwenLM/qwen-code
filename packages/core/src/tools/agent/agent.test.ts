@@ -4947,6 +4947,97 @@ describe('AgentTool', () => {
       await capturedOnConfirm!(ToolConfirmationOutcome.ProceedOnce);
       expect(snapshots.some((s) => !s.hasPendingConfirmation)).toBe(true);
     });
+
+    it.each(['onConfirm', 'TOOL_RESULT', 'TOOL_APPROVAL_RESOLVED'] as const)(
+      'surfaces every approval of one batch in turn (answered via %s)',
+      async (answerVia) => {
+        const callIds = ['call-etc', 'call-log'];
+        const responds = callIds.map(() => vi.fn());
+        let pending: AgentResultDisplay['pendingConfirmation'];
+        const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+          callIds.forEach((callId, i) =>
+            emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+              subagentId: 'sub-1',
+              round: 1,
+              callId,
+              name: 'run_shell_command',
+              description: 'true',
+              timestamp: Date.now(),
+              confirmationDetails: { type: 'exec', title: callId },
+              respond: responds[i],
+            } as unknown as AgentApprovalRequestEvent),
+          );
+        });
+        await invocation.execute(undefined, (output) => {
+          pending = (output as AgentResultDisplay).pendingConfirmation;
+        });
+
+        for (const callId of callIds) {
+          expect(pending?.title).toBe(callId);
+          if (answerVia === 'onConfirm') {
+            await pending!.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+          } else if (answerVia === 'TOOL_RESULT') {
+            emitResult(invocation.eventEmitter, callId, 'run_shell_command');
+          } else {
+            invocation.eventEmitter.emit(
+              AgentEventType.TOOL_APPROVAL_RESOLVED,
+              {
+                subagentId: 'sub-1',
+                round: 1,
+                callId,
+                timestamp: Date.now(),
+              },
+            );
+          }
+        }
+        expect(pending).toBeUndefined();
+        if (answerVia === 'onConfirm') {
+          for (const respond of responds)
+            expect(respond).toHaveBeenCalledOnce();
+        }
+      },
+    );
+
+    it.each(['resolves', 'rejects'] as const)(
+      'holds the next approval until the answered one %s',
+      async (settle) => {
+        let settleFirst!: (failed: boolean) => void;
+        const firstRespond = vi.fn(
+          () =>
+            new Promise<void>((resolve, reject) => {
+              settleFirst = (failed) =>
+                failed ? reject(new Error('boom')) : resolve();
+            }),
+        );
+        let pending: AgentResultDisplay['pendingConfirmation'];
+        const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+          ['call-a', 'call-b'].forEach((callId, i) =>
+            emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+              subagentId: 'sub-1',
+              round: 1,
+              callId,
+              name: 'run_shell_command',
+              description: 'true',
+              timestamp: Date.now(),
+              confirmationDetails: { type: 'exec', title: callId },
+              respond: i === 0 ? firstRespond : vi.fn(),
+            } as unknown as AgentApprovalRequestEvent),
+          );
+        });
+        await invocation.execute(undefined, (output) => {
+          pending = (output as AgentResultDisplay).pendingConfirmation;
+        });
+
+        const answered = pending!
+          .onConfirm(ToolConfirmationOutcome.ProceedAlways)
+          .catch(() => {});
+        await vi.waitFor(() => expect(firstRespond).toHaveBeenCalled());
+        expect(pending).toBeUndefined();
+        settleFirst(settle === 'rejects');
+        await answered;
+        expect(pending?.title).toBe('call-b');
+      },
+    );
   });
 
   describe('inline approval record on the registry entry', () => {
