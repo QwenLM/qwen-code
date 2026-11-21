@@ -1386,6 +1386,46 @@ the last characters`;
     ).toBe('newest ordinary output');
   });
 
+  it('keeps a handle-only part protected after stripping its nested media twice', () => {
+    const part = makeToolResult('run_shell_command', 'retained output')
+      .parts![0]!;
+    part.functionResponse!.parts = [
+      { inlineData: { mimeType: 'image/png', data: 'BASE64IMAGE' } },
+    ];
+    setToolOutputRecovery(part, {
+      persistedOutputFiles: ['/tmp/tool-results/handle-only.output'],
+    });
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      { role: 'user', parts: [part] },
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'ordinary output'),
+    ];
+
+    const first = microcompactHistory(
+      history,
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
+      { force: true },
+    );
+    const stripped = first.history[1]!.parts![0]!;
+    expect(stripped.functionResponse!.parts).toBeUndefined();
+    expect(getToolOutputRecovery(stripped)?.persistedOutputFiles).toEqual([
+      '/tmp/tool-results/handle-only.output',
+    ]);
+
+    const second = microcompactHistory(
+      first.history,
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
+      { force: true },
+    );
+    expect(
+      second.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('retained output');
+    expect(second.meta).toBeUndefined();
+  });
+
   it('still clears a bounded envelope that could not save a file', () => {
     const unsaved = `Tool output was too large and has been truncated.
 [Note: Full output could not be saved: session disk budget exhausted]

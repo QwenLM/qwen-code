@@ -11,7 +11,10 @@ import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearCo
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames, canonicalToolName } from '../../tools/tool-names.js';
 import { isPersistedOutputStub } from '../../tools/truncation.js';
-import { getToolOutputRecovery } from '../../tools/tool-output-recovery.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../../tools/tool-output-recovery.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
@@ -1036,9 +1039,12 @@ export function microcompactHistory(
             tokensSaved += estimateNestedMediaTokens(part);
             mediaCleared++;
             touched = true;
-            return {
+            const stripped = {
               functionResponse: stripNestedMedia(part.functionResponse),
             };
+            const recovery = getToolOutputRecovery(part);
+            if (recovery) setToolOutputRecovery(stripped, recovery);
+            return stripped;
           }
           tokensSaved += estimatePartTokens(part);
           toolsCleared++;
