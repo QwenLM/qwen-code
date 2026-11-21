@@ -716,7 +716,8 @@ public final class LocalProcessRuntimeProvisioner
         try {
             Files.createDirectories(workingDirectory);
         } catch (IOException error) {
-            throw new IllegalStateException("Runtime Broker state directory is unavailable", error);
+            throw new IllegalStateException(
+                    "Runtime Broker state directory is unavailable: " + workingDirectory, error);
         }
         ProcessBuilder builder = new ProcessBuilder(command).directory(workingDirectory.toFile())
                 .redirectError(ProcessBuilder.Redirect.DISCARD);

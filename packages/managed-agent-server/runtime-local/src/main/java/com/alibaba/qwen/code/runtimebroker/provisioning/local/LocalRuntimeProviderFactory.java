@@ -49,6 +49,12 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
         Path stateDirectory = Path.of(broker.getStateDirectory()).toAbsolutePath().normalize();
         if (broker.isDurableLocalProcess()) {
             requireRecoveryDirectoryOutsideWorkspaces(broker, stateDirectory);
+        } else if (!canCreateDirectory(stateDirectory)) {
+            // Refuse at wiring time, without creating anything, so a state
+            // path that can never hold the directory is diagnosed here with
+            // its path instead of at every later provision.
+            throw new IllegalStateException(
+                    "Runtime Broker state directory is unavailable: " + stateDirectory);
         }
         LocalProcessRuntimeProvisioner provider = broker.isDurableLocalProcess()
                 ? LocalProcessRuntimeProvisioner.durable(command, stateDirectory, http(transport),
@@ -109,6 +115,14 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
         }
     }
 
+    private static boolean canCreateDirectory(Path directory) {
+        Path existing = directory.toAbsolutePath().normalize();
+        while (existing != null && !Files.exists(existing)) {
+            existing = existing.getParent();
+        }
+        return existing != null && Files.isDirectory(existing) && Files.isWritable(existing);
+    }
+
     private static void requireRecoveryDirectoryOutsideWorkspaces(ManagedAgentSettings.RuntimeBroker broker,
             Path directory) {
         try {
@@ -144,6 +158,16 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                     "set the directory");
         }
         Path directory = Path.of(path);
+        if (!Files.exists(directory)) {
+            // The provisioner creates the state directory at first spawn, so
+            // an absent but creatable path no longer refuses the deployment.
+            if (canCreateDirectory(directory)) {
+                return new Check(name, Status.WARN,
+                        path + " does not exist yet; created at first Runtime spawn", null);
+            }
+            return new Check(name, Status.FAIL,
+                    path + " cannot be created", "create it or fix the parent directory permissions");
+        }
         if (!Files.isDirectory(directory)) {
             return new Check(name, Status.FAIL,
                     path + " is not a directory", "create it");
