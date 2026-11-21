@@ -28,6 +28,7 @@ import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
 import { useSessionCatalogController } from '../../session-catalog/session-catalog-hooks';
+import { titleFromPrompt } from '../../utils/sessionTitleFromPrompt';
 
 interface SideTaskPanelProps {
   tabId: string;
@@ -293,7 +294,15 @@ function SideTaskSession({
   }, [connection.displayName, onTitleChange, tabId]);
   const nameFromFirstPrompt = useCallback(
     (text: string) => {
-      const nextTitle = Array.from(text.trim()).slice(0, 200).join('');
+      // One sanitized value feeds both the tab title and the daemon rename;
+      // the raw prompt may carry line breaks or control characters that the
+      // daemon rejects, which would leave tab and sidebar diverging.
+      const nextTitle = titleFromPrompt(text, {
+        minTitleLength: 1,
+        maxTitleLength: 200,
+        allowMultiLine: true,
+        truncate: true,
+      });
       if (!nextTitle) return;
       onTitleChange(tabId, nextTitle);
       void (async () => {
