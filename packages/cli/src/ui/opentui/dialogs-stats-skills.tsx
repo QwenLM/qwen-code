@@ -6,14 +6,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * OpenTUI-native Stats and Skills dialogs (parity follow-up to #8677).
- * The Stats dialog is a faithful port of the ink `StatsDialog` Session tab
- * (ui/components/StatsSessionTab.tsx) driven by the real
- * `uiTelemetryService` metrics + `computeSessionStats`, so `/stats` shows the
- * same numbers/sections as the original. Tab/shift+tab switch, Esc closes.
- */
-
 import {
   useEffect,
   useLayoutEffect,
@@ -38,14 +30,25 @@ import {
   TOOL_SUCCESS_RATE_HIGH,
   TOOL_SUCCESS_RATE_MEDIUM,
 } from '../utils/displayUtils.js';
-import { fmtTokens, getSeriesColors } from '../components/stats-helpers.js';
+import {
+  fmtTokens,
+  getSeriesColors,
+  RANGE_CYCLE,
+  getRangeLabel,
+} from '../components/stats-formatters.js';
+import type { TimeRange } from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
+import type { BoxRenderable, ScrollBoxRenderable } from '@opentui/core';
+import type { SessionStatsState } from '../contexts/SessionContext.js';
+import { useStatsHistory } from './use-stats-history.js';
+import { StatsHistory, statsMonths } from './StatsHistory.js';
+import { t } from '../../i18n/index.js';
 import { ICON } from '../constants.js';
 import { toOriginalKey } from './key-map.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { C } from './theme.js';
-import { scrollDialogLayout } from './dialogs-core.js';
+import { scrollDialogLayout, wrappedRows } from './dialogs-core.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
-import { truncateToWidth } from '../utils/textUtils.js';
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 
 /** Close the dialog on a raw Escape, like the other dialog hosts. */
 function useEscToClose(onClose: () => void, enabled: boolean) {
@@ -70,12 +73,22 @@ function useEscToClose(onClose: () => void, enabled: boolean) {
 
 const LABEL_W = 28;
 
-const Row = ({ label, children }: { label: string; children?: ReactNode }) => (
-  <box flexDirection="row">
-    <box width={LABEL_W}>
-      <text fg={C.dim}>{label}</text>
+const Row = ({
+  label,
+  children,
+  compact,
+}: {
+  label: string;
+  children?: ReactNode;
+  compact: boolean;
+}) => (
+  <box flexDirection={compact ? 'column' : 'row'} width="100%">
+    <box width={compact ? '100%' : LABEL_W} flexShrink={0}>
+      <text fg={C.dim} wrapMode="word">
+        {label}
+      </text>
     </box>
-    <box flexGrow={1} flexDirection="row">
+    <box flexGrow={1} flexDirection="column" minWidth={0}>
       {children}
     </box>
   </box>
@@ -84,15 +97,21 @@ const Row = ({ label, children }: { label: string; children?: ReactNode }) => (
 const SubRow = ({
   label,
   children,
+  compact,
 }: {
   label: string;
   children?: ReactNode;
+  compact: boolean;
 }) => (
-  <box flexDirection="row" paddingLeft={2}>
-    <box width={26}>
-      <text fg={C.dim}>{`» ${label}`}</text>
+  <box
+    flexDirection={compact ? 'column' : 'row'}
+    paddingLeft={compact ? 0 : 2}
+    width="100%"
+  >
+    <box width={compact ? '100%' : 26} flexShrink={0}>
+      <text fg={C.dim} wrapMode="word">{`» ${label}`}</text>
     </box>
-    <box flexGrow={1} flexDirection="row">
+    <box flexGrow={1} flexDirection="column" minWidth={0}>
       {children}
     </box>
   </box>
@@ -118,11 +137,84 @@ export function OpenTuiStatsDialog(props: {
   onClose: () => void;
   /** Embedded hosts pass false while their own focus zone owns the keys. */
   isFocused?: boolean;
-  /** The popup region's row budget; the stats body does not window, so it is ignored. */
+  sessionStats?: SessionStatsState;
   availableTerminalHeight?: number;
 }) {
   const { config, onClose, isFocused = true } = props;
   const [tab, setTabState] = useState<StatsTabName>('session');
+  const [range, setRange] = useState<TimeRange>('all');
+  const rangeRef = useRef(range);
+  rangeRef.current = range;
+  const [monthOffset, setMonthOffset] = useState(0);
+  const monthRef = useRef(0);
+  monthRef.current = monthOffset;
+  const history = useStatsHistory(config, props.sessionStats, range);
+  const scroll = useRef<ScrollBoxRenderable | null>(null);
+  const frame = useRef<BoxRenderable | null>(null);
+  const dimensions = useTerminalDimensions();
+  const [frameWidth, setFrameWidth] = useState(
+    dialogAreaWidth(dimensions.width),
+  );
+  const [bodyWidth, setBodyWidth] = useState(
+    Math.max(1, dialogAreaWidth(dimensions.width) - 7),
+  );
+  useLayoutEffect(() => {
+    setFrameWidth(frame.current?.width || dialogAreaWidth(dimensions.width));
+  }, [dimensions.width]);
+  const regionHeight = Math.max(
+    1,
+    props.availableTerminalHeight ?? dimensions.height,
+  );
+  const tabText = TABS.map((definition) => ` ${t(definition.label)} `).join(
+    ' ',
+  );
+  const rangeText = RANGE_CYCLE.map(getRangeLabel).join(' · ');
+  const normalHint =
+    tab === 'session'
+      ? 'tab · esc'
+      : range === 'all' && tab === 'activity'
+        ? 'tab · r dates · ←→ month · PgUp/PgDn · esc'
+        : 'tab · r dates · PgUp/PgDn · esc';
+  // The decision uses the outer width with normal padding, never a width
+  // changed by compact padding itself.
+  const compact =
+    frameWidth - 6 <
+      Math.max(
+        getCachedStringWidth(tabText),
+        getCachedStringWidth(rangeText),
+        getCachedStringWidth('tab · r dates · ←→ month · PgUp/PgDn · esc'),
+      ) || regionHeight < 11;
+  const contentWidth = Math.max(1, frameWidth - (compact ? 4 : 6));
+  const headerText = compact
+    ? t(TABS.find((definition) => definition.name === tab)!.label)
+    : tabText;
+  const hint = !isFocused
+    ? ''
+    : compact
+      ? tab === 'session'
+        ? 'tab PgUp/PgDn esc'
+        : range === 'all' && tab === 'activity'
+          ? 'tab r ←→ PgUp/PgDn esc'
+          : 'tab r PgUp/PgDn esc'
+      : normalHint;
+  const visibleRange = compact ? getRangeLabel(range) : rangeText;
+  const headerRows = wrappedRows(headerText, contentWidth);
+  const rangeRows =
+    tab === 'session' ? 0 : wrappedRows(visibleRange, contentWidth);
+  const hintRows = hint ? wrappedRows(hint, contentWidth) : 0;
+  const chromeRows =
+    2 +
+    (compact ? 0 : 2) +
+    headerRows +
+    1 +
+    hintRows +
+    (hint && !compact ? 1 : 0) +
+    rangeRows +
+    (rangeRows && !compact ? 1 : 0);
+  const bodyRows = Math.max(1, regionHeight - chromeRows);
+  useLayoutEffect(() => {
+    scroll.current?.scrollTo(0);
+  }, [tab, range, monthOffset]);
   // A held Tab hands the whole burst to the handler from the last render, so
   // the cycle must read where the previous key of the burst landed.
   const tabRef = useRef(tab);
@@ -145,6 +237,39 @@ export function OpenTuiStatsDialog(props: {
   useKeyboard((key) => {
     if (!isFocused) return;
     const original = toOriginalKey(key);
+    if (original.ctrl || original.meta) return;
+    if (original.name === 'r') {
+      const next =
+        RANGE_CYCLE[
+          (RANGE_CYCLE.indexOf(rangeRef.current) + 1) % RANGE_CYCLE.length
+        ];
+      rangeRef.current = next;
+      monthRef.current = 0;
+      setMonthOffset(0);
+      setRange(next);
+      return;
+    }
+    if (
+      tabRef.current === 'activity' &&
+      rangeRef.current === 'all' &&
+      history.data
+    ) {
+      if (original.name === 'left' || original.name === 'h') {
+        monthRef.current = Math.min(
+          monthRef.current + 1,
+          Math.max(0, statsMonths(history.data).length - 1),
+        );
+        setMonthOffset(monthRef.current);
+      } else if (original.name === 'right' || original.name === 'l') {
+        monthRef.current = Math.max(0, monthRef.current - 1);
+        setMonthOffset(monthRef.current);
+      }
+    }
+    if (original.name === 'pageup' || original.name === 'pagedown') {
+      scroll.current?.scrollBy(
+        (original.name === 'pageup' ? -1 : 1) * bodyRows,
+      );
+    }
     if (original.name === 'tab') {
       const order = TABS.map((t) => t.name);
       const idx = order.indexOf(tabRef.current);
@@ -184,224 +309,249 @@ export function OpenTuiStatsDialog(props: {
 
   return (
     <box
+      ref={(node) => {
+        frame.current = node;
+      }}
+      onSizeChange={() => {
+        if (frame.current?.width) setFrameWidth(frame.current.width);
+      }}
       flexDirection="column"
       border
       borderColor={C.dim}
-      paddingLeft={2}
-      paddingRight={2}
-      paddingTop={1}
-      paddingBottom={1}
-      // A shrinkable frame lets a short region squeeze its text rows to zero
-      // and paint them over each other; staying natural height keeps the rows
-      // contiguous for the region's clip to cut at the tail, as ink does for
-      // /stats. The clip cuts child text but not the frame's own border
-      // strokes, so a frame taller than the region still paints its border
-      // past it, and a body with an explicit height windows itself from the
-      // region budget instead of relying on the clip (Decision 71).
+      paddingLeft={compact ? 1 : 2}
+      paddingRight={compact ? 1 : 2}
+      paddingTop={compact ? 0 : 1}
+      paddingBottom={compact ? 0 : 1}
       flexShrink={0}
     >
-      {/* Tab bar */}
-      <box flexDirection="row">
-        {TABS.map((t) => {
-          const active = t.name === tab;
-          return (
-            <box key={t.name} marginLeft={t.name === 'session' ? 0 : 1}>
-              <text
-                id={
-                  active
-                    ? 'screen-reader-selected-tab'
-                    : 'screen-reader-unselected-tab'
-                }
-                fg={active ? '#1e1e2e' : C.text}
-                bg={active ? C.accent : undefined}
-              >
-                {` ${t.label} `}
-              </text>
-            </box>
-          );
-        })}
-      </box>
-      <box height={1} />
-
-      {tab !== 'session' ? (
-        <box flexDirection="column">
-          <SectionTitle>
-            {tab === 'activity'
-              ? 'Activity (this session)'
-              : 'Efficiency (this session)'}
-          </SectionTitle>
-          <Row label="Requests:">
-            <text fg={C.text}>
-              {Object.values(metrics.models)
-                .reduce((s, m) => s + m.api.totalRequests, 0)
-                .toLocaleString()}
+      {compact ? (
+        <text
+          id="screen-reader-selected-tab"
+          width="100%"
+          height={headerRows}
+          wrapMode="word"
+        >
+          <span fg="#1e1e2e" bg={C.accent}>
+            {headerText}
+          </span>
+        </text>
+      ) : (
+        <box flexDirection="row" height={headerRows} flexShrink={0}>
+          {TABS.map((definition, index) => (
+            <text
+              key={definition.name}
+              id={
+                definition.name === tab
+                  ? 'screen-reader-selected-tab'
+                  : 'screen-reader-unselected-tab'
+              }
+              marginLeft={index ? 1 : 0}
+              fg={definition.name === tab ? '#1e1e2e' : C.text}
+              bg={definition.name === tab ? C.accent : undefined}
+            >
+              {` ${t(definition.label)} `}
             </text>
-          </Row>
-          <Row label="Input:">
-            <text fg={C.yellow}>{totalInput.toLocaleString()}</text>
-          </Row>
-          <Row label="Output:">
-            <text fg={C.yellow}>{totalOutput.toLocaleString()}</text>
-          </Row>
-          {totalCached > 0 && (
-            <Row label="Cached:">
-              <text fg={C.green}>
-                {`${totalCached.toLocaleString()} (${cacheRate.toFixed(1)}%)`}
-              </text>
-            </Row>
-          )}
-          <SectionTitle>Models</SectionTitle>
-          {Object.entries(metrics.models).map(([name, m], i) => (
-            <box key={name} flexDirection="row">
-              <text fg={SERIES_COLORS[i % SERIES_COLORS.length]}>
-                {`${ICON.CIRCLE_FILLED} `}
-              </text>
-              <text fg={C.text}>{`${name} `}</text>
-              <text fg={C.dim}>
-                {`${m.api.totalRequests} reqs · in=${fmtTokens(m.tokens.prompt)} · out=${fmtTokens(m.tokens.candidates)}`}
-              </text>
-            </box>
           ))}
         </box>
-      ) : (
-        <box flexDirection="column">
-          <Row label="Session ID:">
-            <text fg={C.text}>{sessionId ?? 'n/a'}</text>
-          </Row>
+      )}
+      <box height={1} flexShrink={0} />
 
-          <SectionTitle>Interaction Summary</SectionTitle>
-          <Row label="Tool Calls:">
-            <box flexDirection="row">
-              <text fg={C.text}>{`${metrics.tools.totalCalls} ( `}</text>
-              <text fg={C.green}>{`✓ ${metrics.tools.totalSuccess}`}</text>
-              <text fg={C.text}> </text>
-              <text fg={C.red}>{`✗ ${metrics.tools.totalFail}`}</text>
-              <text fg={C.text}>{' )'}</text>
-            </box>
-          </Row>
-          <Row label="Success Rate:">
-            <text
-              fg={successColor}
-            >{`${computed.successRate.toFixed(1)}%`}</text>
-          </Row>
-          {(metrics.files.totalLinesAdded > 0 ||
-            metrics.files.totalLinesRemoved > 0) && (
-            <Row label="Code Changes:">
-              <box flexDirection="row">
-                <text fg={C.green}>{`+${metrics.files.totalLinesAdded}`}</text>
-                <text fg={C.text}> </text>
-                <text fg={C.red}>{`-${metrics.files.totalLinesRemoved}`}</text>
-              </box>
+      <scrollbox
+        ref={(node) => {
+          scroll.current = node;
+        }}
+        height={bodyRows}
+        width="100%"
+        contentOptions={{ width: '100%', paddingRight: compact ? 0 : 1 }}
+        onSizeChange={() => {
+          if (scroll.current)
+            setBodyWidth(
+              Math.max(1, scroll.current.viewport.width - (compact ? 0 : 1)),
+            );
+        }}
+      >
+        {tab !== 'session' ? (
+          history.loading ? (
+            <text fg={C.dim}>{t('Loading stats...')}</text>
+          ) : history.error ? (
+            <text fg={C.red}>{t(history.error)}</text>
+          ) : history.data ? (
+            <StatsHistory
+              data={history.data}
+              tab={tab}
+              range={range}
+              monthOffset={monthOffset}
+              width={bodyWidth}
+            />
+          ) : null
+        ) : (
+          <box flexDirection="column">
+            <Row compact={compact} label="Session ID:">
+              <text fg={C.text}>{sessionId ?? 'n/a'}</text>
             </Row>
-          )}
 
-          <SectionTitle>Performance</SectionTitle>
-          <Row label="Wall Time:">
-            <text fg={C.text}>{formatDuration(wallDuration)}</text>
-          </Row>
-          <Row label="Agent Active:">
-            <text fg={C.text}>{formatDuration(computed.agentActiveTime)}</text>
-          </Row>
-          <SubRow label="API Time:">
-            <box flexDirection="row">
-              <text fg={C.text}>{formatDuration(computed.totalApiTime)}</text>
-              <text
-                fg={C.dim}
-              >{` (${computed.apiTimePercent.toFixed(1)}%)`}</text>
-            </box>
-          </SubRow>
-          <SubRow label="Tool Time:">
-            <box flexDirection="row">
-              <text fg={C.text}>{formatDuration(computed.totalToolTime)}</text>
-              <text
-                fg={C.dim}
-              >{` (${computed.toolTimePercent.toFixed(1)}%)`}</text>
-            </box>
-          </SubRow>
-
-          {lastGeneration && (
-            <box flexDirection="column">
-              <SectionTitle>
-                {`Generation Metrics (Latest Request)`}
-              </SectionTitle>
-              <Row label="Model:">
-                <text fg={C.text}>{lastGeneration.model}</text>
-              </Row>
-              <Row label="TTFT:">
-                <text fg={C.text}>{formatDuration(lastGeneration.ttftMs)}</text>
-              </Row>
-              <Row label="Generation Time:">
-                <text fg={C.text}>
-                  {formatDuration(lastGeneration.generationDurationMs)}
-                </text>
-              </Row>
-              <Row label="Output (incl. Reasoning):">
-                <text fg={C.text}>
-                  {lastGeneration.outputTokens.toLocaleString()}
-                </text>
-              </Row>
-              <Row label="TPS:">
-                <text fg={C.text}>
-                  {lastTps === undefined ? '—' : `${lastTps.toFixed(1)} tok/s`}
-                </text>
-              </Row>
-              <SubRow label="Requests:">
-                <text fg={C.text}>{generation?.timedRequests}</text>
-              </SubRow>
-              <SubRow label="Average TTFT:">
-                <text fg={C.text}>
-                  {averageTtft === undefined
-                    ? '—'
-                    : formatDuration(averageTtft)}
-                </text>
-              </SubRow>
-              <SubRow label="Session TPS:">
-                <text fg={C.text}>
-                  {sessionTps === undefined
-                    ? '—'
-                    : `${sessionTps.toFixed(1)} tok/s`}
-                </text>
-              </SubRow>
-            </box>
-          )}
-
-          <SectionTitle>Tokens</SectionTitle>
-          <Row label="Input:">
-            <text fg={C.yellow}>{totalInput.toLocaleString()}</text>
-          </Row>
-          <Row label="Output:">
-            <text fg={C.yellow}>{totalOutput.toLocaleString()}</text>
-          </Row>
-          {totalCached > 0 && (
-            <Row label="Cached:">
-              <text fg={C.green}>
-                {`${totalCached.toLocaleString()} (${cacheRate.toFixed(1)}%)`}
+            <SectionTitle>Interaction Summary</SectionTitle>
+            <Row compact={compact} label="Tool Calls:">
+              <text fg={C.text} wrapMode="word">
+                {`${metrics.tools.totalCalls} ( `}
+                <span
+                  fg={C.green}
+                >{`✓ ${metrics.tools.totalSuccess}`}</span>{' '}
+                <span fg={C.red}>{`✗ ${metrics.tools.totalFail}`}</span>
+                {' )'}
               </text>
             </Row>
-          )}
+            <Row compact={compact} label="Success Rate:">
+              <text
+                fg={successColor}
+              >{`${computed.successRate.toFixed(1)}%`}</text>
+            </Row>
+            {(metrics.files.totalLinesAdded > 0 ||
+              metrics.files.totalLinesRemoved > 0) && (
+              <Row compact={compact} label="Code Changes:">
+                <text wrapMode="word">
+                  <span
+                    fg={C.green}
+                  >{`+${metrics.files.totalLinesAdded}`}</span>{' '}
+                  <span
+                    fg={C.red}
+                  >{`-${metrics.files.totalLinesRemoved}`}</span>
+                </text>
+              </Row>
+            )}
 
-          {Object.keys(metrics.models).length > 0 && (
-            <box flexDirection="column">
-              <SectionTitle>Models</SectionTitle>
-              {Object.entries(metrics.models).map(([name, m], i) => (
-                <box key={name} flexDirection="row">
-                  <text fg={SERIES_COLORS[i % SERIES_COLORS.length]}>
-                    {`${ICON.CIRCLE_FILLED} `}
+            <SectionTitle>Performance</SectionTitle>
+            <Row compact={compact} label="Wall Time:">
+              <text fg={C.text}>{formatDuration(wallDuration)}</text>
+            </Row>
+            <Row compact={compact} label="Agent Active:">
+              <text fg={C.text}>
+                {formatDuration(computed.agentActiveTime)}
+              </text>
+            </Row>
+            <SubRow compact={compact} label="API Time:">
+              <text fg={C.text} wrapMode="word">
+                {formatDuration(computed.totalApiTime)}
+                <span
+                  fg={C.dim}
+                >{` (${computed.apiTimePercent.toFixed(1)}%)`}</span>
+              </text>
+            </SubRow>
+            <SubRow compact={compact} label="Tool Time:">
+              <text fg={C.text} wrapMode="word">
+                {formatDuration(computed.totalToolTime)}
+                <span
+                  fg={C.dim}
+                >{` (${computed.toolTimePercent.toFixed(1)}%)`}</span>
+              </text>
+            </SubRow>
+
+            {lastGeneration && (
+              <box flexDirection="column">
+                <SectionTitle>
+                  {`Generation Metrics (Latest Request)`}
+                </SectionTitle>
+                <Row compact={compact} label="Model:">
+                  <text fg={C.text}>{lastGeneration.model}</text>
+                </Row>
+                <Row compact={compact} label="TTFT:">
+                  <text fg={C.text}>
+                    {formatDuration(lastGeneration.ttftMs)}
                   </text>
-                  <text fg={C.text}>{`${name} `}</text>
-                  <text fg={C.dim}>
-                    {`${m.api.totalRequests} reqs · in=${fmtTokens(m.tokens.prompt)} · out=${fmtTokens(m.tokens.candidates)}`}
+                </Row>
+                <Row compact={compact} label="Generation Time:">
+                  <text fg={C.text}>
+                    {formatDuration(lastGeneration.generationDurationMs)}
                   </text>
-                </box>
-              ))}
-            </box>
-          )}
+                </Row>
+                <Row compact={compact} label="Output (incl. Reasoning):">
+                  <text fg={C.text}>
+                    {lastGeneration.outputTokens.toLocaleString()}
+                  </text>
+                </Row>
+                <Row compact={compact} label="TPS:">
+                  <text fg={C.text}>
+                    {lastTps === undefined
+                      ? '—'
+                      : `${lastTps.toFixed(1)} tok/s`}
+                  </text>
+                </Row>
+                <SubRow compact={compact} label="Requests:">
+                  <text fg={C.text}>{generation?.timedRequests}</text>
+                </SubRow>
+                <SubRow compact={compact} label="Average TTFT:">
+                  <text fg={C.text}>
+                    {averageTtft === undefined
+                      ? '—'
+                      : formatDuration(averageTtft)}
+                  </text>
+                </SubRow>
+                <SubRow compact={compact} label="Session TPS:">
+                  <text fg={C.text}>
+                    {sessionTps === undefined
+                      ? '—'
+                      : `${sessionTps.toFixed(1)} tok/s`}
+                  </text>
+                </SubRow>
+              </box>
+            )}
+
+            <SectionTitle>Tokens</SectionTitle>
+            <Row compact={compact} label="Input:">
+              <text fg={C.yellow}>{totalInput.toLocaleString()}</text>
+            </Row>
+            <Row compact={compact} label="Output:">
+              <text fg={C.yellow}>{totalOutput.toLocaleString()}</text>
+            </Row>
+            {totalCached > 0 && (
+              <Row compact={compact} label="Cached:">
+                <text fg={C.green}>
+                  {`${totalCached.toLocaleString()} (${cacheRate.toFixed(1)}%)`}
+                </text>
+              </Row>
+            )}
+
+            {Object.keys(metrics.models).length > 0 && (
+              <box flexDirection="column">
+                <SectionTitle>Models</SectionTitle>
+                {Object.entries(metrics.models).map(([name, m], i) => (
+                  <text key={name} wrapMode="word">
+                    <span
+                      fg={SERIES_COLORS[i % SERIES_COLORS.length]}
+                    >{`${ICON.CIRCLE_FILLED} `}</span>
+                    <span fg={C.text}>{`${name} `}</span>
+                    <span
+                      fg={C.dim}
+                    >{`${m.api.totalRequests} reqs · in=${fmtTokens(m.tokens.prompt)} · out=${fmtTokens(m.tokens.candidates)}`}</span>
+                  </text>
+                ))}
+              </box>
+            )}
+          </box>
+        )}
+      </scrollbox>
+      {tab !== 'session' ? (
+        <box marginTop={compact ? 0 : 1} height={rangeRows} flexShrink={0}>
+          <text fg={C.dim} wrapMode="word" width="100%">
+            {compact ? (
+              <span attributes={1}>{visibleRange}</span>
+            ) : (
+              RANGE_CYCLE.map((value, index) => (
+                <span key={value} attributes={value === range ? 1 : 0}>
+                  {`${index ? ' · ' : ''}${getRangeLabel(value)}`}
+                </span>
+              ))
+            )}
+          </text>
         </box>
-      )}
-
-      <box marginTop={1}>
-        <text fg={C.dim}>{'tab · esc'}</text>
-      </box>
+      ) : null}
+      {hint ? (
+        <box marginTop={compact ? 0 : 1} height={hintRows} flexShrink={0}>
+          <text fg={C.dim} width="100%" wrapMode="word">
+            {hint}
+          </text>
+        </box>
+      ) : null}
     </box>
   );
 }

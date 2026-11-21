@@ -1099,6 +1099,7 @@ export default {
   '[dream] memory consolidation (reviewing {{count}} sessions)':
     '[dream] メモリ統合 ({{count}} セッションを確認中)',
   '... and {{count}} more': '... 他 {{count}} 件',
+  '{{count}} more': '他 {{count}} 件',
   'What would you like to do?': '何をしますか?',
   'Choose how to proceed with your session:':
     'セッションの続行方法を選択してください:',
@@ -2033,6 +2034,8 @@ export default {
   Duration: '所要時間',
   Projects: 'プロジェクト',
   'Loading stats...': '統計を読み込み中...',
+  'peak {{value}}': 'ピーク {{value}}',
+  'Statistics owner is unavailable.': '統計の所有者が利用できません。',
   '(no data)': '(データなし)',
   d: '日',
   h: '時',

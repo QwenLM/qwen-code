@@ -2199,6 +2199,9 @@ export default {
   Duration: 'Durada',
   Projects: 'Projectes',
   'Loading stats...': 'Carregant estadístiques...',
+  'peak {{value}}': 'pic {{value}}',
+  'Statistics owner is unavailable.':
+    'El propietari de les estadístiques no està disponible.',
   '(no data)': '(sense dades)',
   d: 'd',
   h: 'h',

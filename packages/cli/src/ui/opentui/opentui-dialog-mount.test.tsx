@@ -232,6 +232,7 @@ const addItem = vi.fn();
 const HOST = {
   handleResume: async () => {},
   addItem,
+  sessionStats: { sessionId: 'owned-session' },
 } as unknown as OpenTuiAppHost;
 
 function mount(
@@ -403,6 +404,16 @@ describe('OpenTuiDialogMount routing', () => {
       host: HOST,
     });
   });
+
+  it.each(['stats', 'settings'] as const)(
+    'passes the actual host session snapshot into %s',
+    (dialog) => {
+      mount({ dialog });
+      expect(mocks.state.dialogProps[dialog]?.['sessionStats']).toBe(
+        HOST.sessionStats,
+      );
+    },
+  );
 
   it('routes every dialog request to its own component', () => {
     expect(REQUESTS).toHaveLength(25);

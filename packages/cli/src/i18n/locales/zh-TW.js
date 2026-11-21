@@ -2401,6 +2401,8 @@ export default {
   Duration: '時長',
   Projects: '專案統計',
   'Loading stats...': '載入統計...',
+  'peak {{value}}': '峰值 {{value}}',
+  'Statistics owner is unavailable.': '統計擁有者不可用。',
   '(no data)': '（暫無資料）',
   d: '天',
   h: '時',

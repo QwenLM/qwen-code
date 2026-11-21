@@ -2894,6 +2894,8 @@ export default {
   Duration: 'Duration',
   'Activity Heatmap': 'Activity Heatmap',
   'Loading stats...': 'Loading stats...',
+  'peak {{value}}': 'peak {{value}}',
+  'Statistics owner is unavailable.': 'Statistics owner is unavailable.',
   '\u2191 tabs \u00b7 r to cycle dates \u00b7 esc to close':
     '\u2191 tabs \u00b7 r to cycle dates \u00b7 esc to close',
   Cost: 'Cost',

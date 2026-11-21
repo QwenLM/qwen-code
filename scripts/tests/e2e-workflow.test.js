@@ -132,7 +132,10 @@ describe('TUI product evidence', () => {
       'packages/cli/src/ui/opentui/status-line-text.ts',
       ['component', 'render'],
     ],
-    ['packages/core/src/telemetry/uiTelemetry.ts', ['component', 'render']],
+    [
+      'packages/core/src/telemetry/uiTelemetry.ts',
+      ['component', 'render', 'integration'],
+    ],
     ['packages/cli/src/ui/opentui/clipboard.ts', ['component', 'input']],
     [
       'packages/cli/src/ui/components/shared/text-buffer.ts',
@@ -148,7 +151,7 @@ describe('TUI product evidence', () => {
     ],
     [
       'packages/cli/src/ui/contexts/SessionContext.tsx',
-      ['component', 'render', 'recovery'],
+      ['component', 'render', 'recovery', 'integration'],
     ],
     ['packages/core/src/config/config.ts', lanes],
     ['packages/cli/src/llm.tsx', lanes],
@@ -204,6 +207,43 @@ describe('TUI product evidence', () => {
     ],
     [
       'integration-tests/interactive/tui-memory-manager.test.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/StatsHistory.tsx',
+      ['component', 'recovery', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/use-stats-history.ts',
+      ['component', 'recovery', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/dialogs-stats-skills.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/dialogs-settings.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/components/StatsDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/components/stats-formatters.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/utils/statsDataService.ts',
+      ['component', 'integration'],
+    ],
+    ['packages/cli/src/ui/utils/asciiCharts.ts', ['component', 'integration']],
+    [
+      'packages/core/src/services/usageHistoryService.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'integration-tests/interactive/tui-stats-history.test.ts',
       ['component', 'integration'],
     ],
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
@@ -411,6 +451,7 @@ describe('TUI product evidence', () => {
       'tui-extension-acquisition',
       'tui-dual-output',
       'tui-memory-manager',
+      'tui-stats-history',
     ],
   };
   it.each(

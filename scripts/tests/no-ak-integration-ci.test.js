@@ -405,6 +405,7 @@ describe('no-AK integration CI wiring', () => {
       'interactive/tui-memory-manager.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-migration.test.ts': 'Runtime budget',
       'interactive/tui-session-recovery.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-stats-history.test.ts': 'Dedicated TUI parity gate',
       'renderer-matrix.test.ts': 'Runtime budget',
       'scratch-dir.test.ts': 'Runtime budget',
       'sdk-typescript/configuration-options.test.ts': 'Real model required',

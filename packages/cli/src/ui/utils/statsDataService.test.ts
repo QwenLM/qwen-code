@@ -10,16 +10,21 @@ import type {
   AggregatedReport,
 } from '@qwen-code/qwen-code-core';
 
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
-  return {
-    ...actual,
-    loadUsageHistory: vi.fn(),
-  };
-});
+vi.mock(
+  '@qwen-code/qwen-code-core/services/usageHistoryService.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/usageHistoryService.js')
+      >();
+    return {
+      ...actual,
+      loadUsageHistory: vi.fn(),
+    };
+  },
+);
 
-import { loadUsageHistory } from '@qwen-code/qwen-code-core';
+import { loadUsageHistory } from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
 import {
   loadStatsData,
   getPreviousRangeBounds,
@@ -294,6 +299,72 @@ describe('computeDelta', () => {
 describe('loadStatsData - new fields', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('keeps the four-session range and independent latency goldens exact', async () => {
+    // The fake instant is local midnight in UTC-12, where 'today' selects
+    // nothing at any fixture timestamp; pin the zone instead of moving it.
+    vi.stubEnv('TZ', 'UTC');
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-15T12:00:00Z'));
+    try {
+      const records = [0, 2, 14, 60].map((days, index) => {
+        const factor = 2 ** index;
+        return makeRecord({
+          sessionId: `history-${index}`,
+          timestamp: Date.now() - days * 86400000 - 1000,
+          project: index % 2 ? '/other/project' : '/owned/project',
+          durationMs: factor * 60000,
+          totalLatencyMs: factor * (index + 1) * 1000,
+          models: {
+            [index % 2 ? 'beta' : 'alpha']: {
+              requests: factor,
+              inputTokens: factor * 111,
+              outputTokens: factor * 17,
+              thoughtsTokens: 0,
+              cachedTokens: index % 2 ? (factor * 111) / 2 : 0,
+              totalTokens: factor * 128,
+              totalLatencyMs: factor * (index + 1) * 1000,
+            },
+          },
+        });
+      });
+      mockedLoadUsageHistory.mockResolvedValue(records);
+      for (const [range, sessions, tokens] of [
+        ['all', 4, 1920],
+        ['month', 3, 896],
+        ['week', 2, 384],
+        ['today', 1, 128],
+      ] as const) {
+        const result = await loadStatsData(range);
+        expect(result.report.sessionCount).toBe(sessions);
+        expect(
+          Object.values(result.report.models).reduce(
+            (sum, model) => sum + model.totalTokens,
+            0,
+          ),
+        ).toBe(tokens);
+      }
+      const result = await loadStatsData('all');
+      expect(result.report.projects).toHaveLength(2);
+      expect(result.report.totalLatencyMs).toBe(49000);
+      expect(result.efficiency.avgLatencyMs).toBeCloseTo(49000 / 15);
+      expect(result.report.models['alpha']?.totalLatencyMs).toBe(13000);
+      expect(result.report.models['beta']?.totalLatencyMs).toBe(36000);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('replaces a persisted live session instead of double-counting it', async () => {
+    const saved = makeRecord({ sessionId: 'live' });
+    const live = makeRecord({ sessionId: 'live', durationMs: 90000 });
+    mockedLoadUsageHistory.mockResolvedValue([saved]);
+    const result = await loadStatsData('all', live);
+    expect(mockedLoadUsageHistory).toHaveBeenCalledWith('live');
+    expect(result.report.sessionCount).toBe(1);
+    expect(result.report.totalDurationMs).toBe(90000);
   });
 
   it('returns delta as null for range "all"', async () => {

@@ -2241,6 +2241,8 @@ export default {
   Duration: 'Длительность',
   Projects: 'Проекты',
   'Loading stats...': 'Загрузка статистики...',
+  'peak {{value}}': 'пик {{value}}',
+  'Statistics owner is unavailable.': 'Владелец статистики недоступен.',
   '(no data)': '(нет данных)',
   d: 'д',
   h: 'ч',

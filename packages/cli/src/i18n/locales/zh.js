@@ -2673,6 +2673,8 @@ export default {
   Duration: '时长',
   'Activity Heatmap': '用量热力统计',
   'Loading stats...': '加载统计数据...',
+  'peak {{value}}': '峰值 {{value}}',
+  'Statistics owner is unavailable.': '统计所有者不可用。',
   '\u2191 tabs \u00b7 r to cycle dates \u00b7 esc to close':
     '\u2191 tab 切换标签 \u00b7 r 切换时间范围 \u00b7 esc 关闭',
   Cost: '费用',

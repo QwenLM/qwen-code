@@ -1715,6 +1715,7 @@ export default {
   '[dream] memory consolidation (reviewing {{count}} sessions)':
     '[dream] consolidation de la mémoire (analyse de {{count}} sessions)',
   '... and {{count}} more': '... et {{count}} de plus',
+  '{{count}} more': '{{count}} de plus',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Le format TOML est obsolète. Souhaitez-vous les migrer vers le format Markdown ?',
   '(Backups will be created and original files will be preserved)':
@@ -2269,6 +2270,9 @@ export default {
   Duration: 'Durée',
   Projects: 'Projets',
   'Loading stats...': 'Chargement des stats...',
+  'peak {{value}}': 'pic {{value}}',
+  'Statistics owner is unavailable.':
+    'Le propriétaire des statistiques est indisponible.',
   '(no data)': '(aucune donnée)',
   d: 'j',
   h: 'h',
