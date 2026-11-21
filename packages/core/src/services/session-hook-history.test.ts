@@ -383,6 +383,49 @@ describe('persisted hook turn pages', () => {
       indexBytes,
     );
   });
+  it('does not let frozen hook retention evict the live newer index', async () => {
+    append(event('one'));
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const anchor = await reader.readTurnIndexPage(sessionId);
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    // Pure append of a large record: the live newer index is cached
+    // alongside the frozen one, and its bytes dwarf a hook aggregate so
+    // the frozen entry's growth stays in the shared class.
+    const extra = append();
+    extra.message = { role: 'user', parts: [{ text: 'x'.repeat(16384) }] };
+    await write();
+    await reader.readTurnIndexPage(sessionId);
+    const liveBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+    // Room for both physical indexes exactly; the frozen aggregate on top
+    // does not fit, and the oversized class cannot take the crossing.
+    setSessionTranscriptIndexCacheMaxBytesForTest(oldBytes + liveBytes);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+    const read = vi.fn();
+    setSessionTranscriptSelectedLineReadHookForTest(read);
+    const build = vi.fn();
+    setSessionTranscriptIndexBuildCompleteHookForTest(build);
+    expect(
+      await reader.readTurnHooksPage(sessionId, promptId, {
+        snapshot: anchor.snapshot,
+      }),
+    ).toMatchObject({ totalExecutions: 1, coverage: 'recorded' });
+    // Retention is refused without evicting the live newer index.
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      oldBytes + liveBytes,
+    );
+    await reader.readTurnIndexPage(sessionId);
+    expect(build).not.toHaveBeenCalled();
+    // The aggregate was not retained: the next frozen read re-reads lines.
+    read.mockClear();
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchor.snapshot,
+    });
+    expect(read).toHaveBeenCalled();
+  });
   it('reclaims a superseded entry when a hook aggregate crosses into a full oversized class', async () => {
     append(event('one'));
     await write();

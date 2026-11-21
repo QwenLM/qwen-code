@@ -1976,9 +1976,15 @@ function getIndexCacheBytesByClass(): { shared: number; oversized: number } {
 // the same file block the target class (an old prefix whose retained
 // projection holds it), they are reclaimed only if the addition fits after
 // the reclaim — the same fit-before-evict judgment the admission doors use.
+// currentSnapshotSize is the verified current file length when the caller
+// just verified the entry's snapshot against the file (the offer door),
+// and undefined for frozen-prefix growth (hook aggregates, projections
+// decoded under a frozen cursor): those reclaim temporally superseded
+// prefixes only, never the live newer index.
 function cacheAdditionFitsClassBudget(
   entry: CacheEntry,
   extraBytes: number,
+  currentSnapshotSize: number | undefined,
 ): boolean {
   const sharedBudget = getIndexCacheMaxBytes();
   const currentBytes = entry.byteSize ?? 0;
@@ -2001,7 +2007,7 @@ function cacheAdditionFitsClassBudget(
     value.snapshotSize,
     value.lastUpdated,
     value.fileIdentity,
-    value.snapshotSize,
+    currentSnapshotSize,
     oversized,
   );
   if (classTotal - reclaimable + added > classBudget) return false;
@@ -2010,7 +2016,7 @@ function cacheAdditionFitsClassBudget(
     value.snapshotSize,
     value.lastUpdated,
     value.fileIdentity,
-    value.snapshotSize,
+    currentSnapshotSize,
     oversized,
   );
   return true;
@@ -2074,41 +2080,41 @@ function pruneCacheByteBudget(oversizedClass: boolean): void {
 }
 
 // A snapshot of the same file that the incoming one supersedes, or that
-// the current file state has left unreachable. Unreachable entries are
-// reclaimable regardless of temporal order: a changed identity (the
-// identity guard rejects their cursors, even when a backup restored an
-// older mtime), a length beyond the current file (the size guard rejects
-// them, even when a same-millisecond truncation kept the mtime), or an
-// equal size at a different mtime (the mtime guard rejects them). The
-// incoming identity equals the current file identity at every call site
-// (the readPage identity guard enforces it for frozen reads; the offer
-// and accounting doors verify the snapshot unchanged), so it stands in
-// for the current identity. Temporal order covers the append case: a
-// strictly older snapshot, or a same-mtime smaller prefix, is reclaimable
-// fit-before-evict. A frozen-prefix read never reclaims the live newer
-// index: its identity equals the current file and its length does not
-// exceed it.
+// the current file state has left unreachable. The unreachable clauses
+// need a verified current file state (currentSnapshotSize defined): a
+// changed identity (the identity guard rejects their cursors, even when a
+// backup restored an older mtime), a length beyond the current file (the
+// size guard rejects them, even when a same-millisecond truncation kept
+// the mtime), or an equal size at a different mtime (the mtime guard
+// rejects them). Only callers that just verified the incoming snapshot
+// against the current file pass that state; a frozen-prefix growth caller
+// passes undefined and reclaims by temporal order alone, so retaining a
+// hook aggregate or projection never evicts the live newer index.
+// Temporal order covers the append case: a strictly older snapshot, or a
+// same-mtime smaller prefix, is reclaimable fit-before-evict.
 function isSupersededSnapshot(
   value: TranscriptIndex,
   filePath: string,
   snapshotSize: number,
   lastUpdated: string,
   fileIdentity: SessionTranscriptFileIdentity,
-  currentSnapshotSize: number,
+  currentSnapshotSize: number | undefined,
 ): boolean {
   if (value.filePath !== filePath) return false;
-  if (
-    value.fileIdentity.dev !== fileIdentity.dev ||
-    value.fileIdentity.ino !== fileIdentity.ino
-  ) {
-    return true;
-  }
-  if (value.snapshotSize > currentSnapshotSize) return true;
-  if (
-    value.snapshotSize === snapshotSize &&
-    value.lastUpdated !== lastUpdated
-  ) {
-    return true;
+  if (currentSnapshotSize !== undefined) {
+    if (
+      value.fileIdentity.dev !== fileIdentity.dev ||
+      value.fileIdentity.ino !== fileIdentity.ino
+    ) {
+      return true;
+    }
+    if (value.snapshotSize > currentSnapshotSize) return true;
+    if (
+      value.snapshotSize === snapshotSize &&
+      value.lastUpdated !== lastUpdated
+    ) {
+      return true;
+    }
   }
   // ISO-8601 UTC strings compare chronologically.
   if (value.lastUpdated < lastUpdated) return true;
@@ -2122,7 +2128,7 @@ function supersededSnapshotBytes(
   snapshotSize: number,
   lastUpdated: string,
   fileIdentity: SessionTranscriptFileIdentity,
-  currentSnapshotSize: number,
+  currentSnapshotSize: number | undefined,
   oversizedClass: boolean,
 ): number {
   const sharedBudget = getIndexCacheMaxBytes();
@@ -2163,7 +2169,7 @@ function evictSupersededSnapshots(
   snapshotSize: number,
   lastUpdated: string,
   fileIdentity: SessionTranscriptFileIdentity,
-  currentSnapshotSize: number,
+  currentSnapshotSize: number | undefined,
   oversizedClass: boolean,
 ): boolean {
   const sharedBudget = getIndexCacheMaxBytes();
@@ -2785,9 +2791,9 @@ async function getCachedIndex(params: {
     // built index is safe to serve, so every sharer of the build fails
     // closed together. allowAppend keeps a prefix frozen across a concurrent
     // append valid.
-    let signatureOk: boolean;
+    let verifiedSize: number | undefined;
     try {
-      signatureOk = await hasSnapshotSignature(
+      verifiedSize = await verifiedSnapshotSize(
         params.filePath,
         params.fileIdentity,
         params.snapshotSize,
@@ -2797,7 +2803,7 @@ async function getCachedIndex(params: {
     } catch (error) {
       // A transient stat error (EMFILE/EIO/EACCES) leaves the file state
       // unknown: serve the built snapshot uncached rather than fail a page
-      // that was ready. ENOENT stays false inside hasSnapshotSignature.
+      // that was ready. ENOENT maps to undefined inside verifiedSnapshotSize.
       if (indexCache.get(key)?.pending === pending) {
         indexCache.delete(key);
       }
@@ -2808,7 +2814,7 @@ async function getCachedIndex(params: {
       );
       return value;
     }
-    if (!signatureOk) {
+    if (verifiedSize === undefined) {
       if (indexCache.get(key)?.pending === pending) {
         indexCache.delete(key);
       }
@@ -2819,7 +2825,11 @@ async function getCachedIndex(params: {
     }
     // The signature check yielded; the pending entry may have been replaced
     // (TTL expiry or the 32-entry LRU). The verified value is still safe to
-    // serve, but this completion no longer owns the cache slot.
+    // serve, but this completion no longer owns the cache slot. Everything
+    // from here to the cache write is synchronous: the ownership check, the
+    // class budget math and the reclaim all see one consistent cache state,
+    // and the reclaim uses the length the signature was verified against
+    // instead of a second stat that could fail or observe a newer file.
     if (indexCache.get(key)?.pending !== pending) {
       debugLogger.debug(`index cache skipped stale completion ${key}`);
       return value;
@@ -2846,15 +2856,15 @@ async function getCachedIndex(params: {
       // Evict superseded prefixes only when the new snapshot fits after the
       // reclaim; otherwise the eviction would force their still-readable
       // frozen cursors to rebuild for an admission that is refused anyway.
-      // The current file length decides whether a longer cached prefix is
-      // unreachable (a same-millisecond truncation keeps the mtime).
-      const currentSnapshotSize = (await fsp.stat(params.filePath)).size;
+      // The verified current file length decides whether a longer cached
+      // prefix is unreachable (a same-millisecond truncation keeps the
+      // mtime).
       const reclaimable = supersededSnapshotBytes(
         params.filePath,
         params.snapshotSize,
         params.lastUpdated,
         params.fileIdentity,
-        currentSnapshotSize,
+        verifiedSize,
         oversized,
       );
       if (
@@ -2874,10 +2884,15 @@ async function getCachedIndex(params: {
         params.snapshotSize,
         params.lastUpdated,
         params.fileIdentity,
-        currentSnapshotSize,
+        verifiedSize,
         oversized,
       );
     }
+    // Map.set updates an existing key in place; the placeholder has held
+    // its insertion position through the build while the count-cap prune
+    // skipped it. Delete first so the completion lands at the MRU tail
+    // instead of being the prune's first eviction candidate.
+    indexCache.delete(key);
     indexCache.set(key, {
       value,
       byteSize,
@@ -2985,6 +3000,36 @@ async function assertIndexSnapshotUnchanged(
   }
 }
 
+// The verified current file length, or undefined when the file no longer
+// matches the snapshot signature. ENOENT maps to undefined; a transient
+// stat error throws so the caller can choose its degradation. Admission
+// reuses the returned length instead of stat-ing again, keeping the
+// ownership check, budget math and cache writes synchronous with the
+// verification — no second syscall can fail uncaught or observe a file
+// state newer than the one the signature was verified against.
+async function verifiedSnapshotSize(
+  filePath: string,
+  fileIdentity: SessionTranscriptFileIdentity,
+  snapshotSize: number,
+  lastUpdated: string,
+  allowAppend = false,
+): Promise<number | undefined> {
+  let stats: fs.Stats;
+  try {
+    stats = await fsp.stat(filePath);
+  } catch (error) {
+    if (isFileMissingError(error)) return undefined;
+    throw error;
+  }
+  const matches =
+    (stats.size === snapshotSize ||
+      (allowAppend && stats.size > snapshotSize)) &&
+    sameFileIdentity(fileIdentityFromStats(stats), fileIdentity) &&
+    ((allowAppend && stats.size > snapshotSize) ||
+      new Date(stats.mtimeMs).toISOString() === lastUpdated);
+  return matches ? stats.size : undefined;
+}
+
 async function hasSnapshotSignature(
   filePath: string,
   fileIdentity: SessionTranscriptFileIdentity,
@@ -2992,19 +3037,14 @@ async function hasSnapshotSignature(
   lastUpdated: string,
   allowAppend = false,
 ): Promise<boolean> {
-  let stats: fs.Stats;
-  try {
-    stats = await fsp.stat(filePath);
-  } catch (error) {
-    if (isFileMissingError(error)) return false;
-    throw error;
-  }
   return (
-    (stats.size === snapshotSize ||
-      (allowAppend && stats.size > snapshotSize)) &&
-    sameFileIdentity(fileIdentityFromStats(stats), fileIdentity) &&
-    ((allowAppend && stats.size > snapshotSize) ||
-      new Date(stats.mtimeMs).toISOString() === lastUpdated)
+    (await verifiedSnapshotSize(
+      filePath,
+      fileIdentity,
+      snapshotSize,
+      lastUpdated,
+      allowAppend,
+    )) !== undefined
   );
 }
 
@@ -3163,7 +3203,9 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
     expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
   };
   indexCache.set(key, entry);
-  accountManagedProjection(index, entry);
+  // Every offer caller verifies the snapshot unchanged immediately before
+  // offering, so the entry's snapshot length is the current file length.
+  accountManagedProjection(index, entry, index.snapshotSize);
 }
 
 function lastUuidMatching(
@@ -3324,11 +3366,20 @@ function estimateManagedProjectionBytes(projection: {
 // A restore projection can be decoded while its index is not yet cached and
 // then offered to the cache; account the retained bodies at admission, or
 // drop them when they do not fit the entry's budget class.
-function accountManagedProjection(index: TranscriptIndex, entry: CacheEntry) {
+// currentSnapshotSize follows cacheAdditionFitsClassBudget: the offer door
+// passes the just-verified snapshot length, a frozen-prefix decode passes
+// undefined so retention never reclaims the live newer index.
+function accountManagedProjection(
+  index: TranscriptIndex,
+  entry: CacheEntry,
+  currentSnapshotSize: number | undefined,
+) {
   const projection = managedProjections.get(index);
   if (!projection) return;
   const projectionBytes = estimateManagedProjectionBytes(projection);
-  if (cacheAdditionFitsClassBudget(entry, projectionBytes)) {
+  if (
+    cacheAdditionFitsClassBudget(entry, projectionBytes, currentSnapshotSize)
+  ) {
     entry.byteSize = (entry.byteSize ?? 0) + projectionBytes;
   } else {
     managedProjections.delete(index);
@@ -3914,8 +3965,10 @@ export class SessionTranscriptReader {
         // Account against the entry's post-add budget class: an oversized
         // index cached elsewhere must not block hook retention on shared
         // entries, and an aggregate that pushes a shared entry past the
-        // shared budget moves it into the oversized class.
-        if (cacheAdditionFitsClassBudget(cached, byteSize)) {
+        // shared budget moves it into the oversized class. The snapshot is
+        // frozen, not verified against the current file: reclaim only
+        // temporally superseded prefixes, never the live newer index.
+        if (cacheAdditionFitsClassBudget(cached, byteSize, undefined)) {
           cached.hookTurns ??= new Map();
           cached.hookTurns.set(promptId, turn);
           cached.byteSize = (cached.byteSize ?? 0) + byteSize;
@@ -4616,9 +4669,11 @@ export class SessionTranscriptReader {
           // Set first, then let the shared admission helper account or drop
           // (it deletes from the WeakMap when the bodies do not fit). The
           // has() guard above keeps the helper's unconditional byte add from
-          // double-counting an already-accounted projection.
+          // double-counting an already-accounted projection. The index may
+          // be a frozen prefix of a grown file: reclaim only temporally
+          // superseded entries, never the live newer index.
           managedProjections.set(index, projection);
-          accountManagedProjection(index, cachedEntry);
+          accountManagedProjection(index, cachedEntry, undefined);
         }
       }
       return [...projection.records];

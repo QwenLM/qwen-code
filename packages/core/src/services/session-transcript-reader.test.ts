@@ -26,8 +26,18 @@ const {
     zeroInode: false,
     failNextWith: null as null | string,
     pauseNext: null as null | Promise<void>,
+    pathCalls: new Map<string, number>(),
+    failOnCall: null as null | { path: string; call: number; code: string },
+    beforeCall: null as null | {
+      path: string;
+      call: number;
+      action: () => Promise<void>;
+    },
   },
-  projectionReads: { count: 0 },
+  projectionReads: {
+    count: 0,
+    pause: null as null | Promise<void>,
+  },
 }));
 
 vi.mock(
@@ -43,6 +53,11 @@ vi.mock(
         options: Parameters<typeof actual.readManagedSessionRecordsAndTitle>[0],
       ) => {
         projectionReads.count++;
+        if (projectionReads.pause) {
+          const pause = projectionReads.pause;
+          projectionReads.pause = null;
+          await pause;
+        }
         return actual.readManagedSessionRecordsAndTitle(options);
       },
     };
@@ -63,6 +78,18 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     ...actual,
     open: vi.fn(actual.open),
     stat: async (...args: Parameters<typeof actual.stat>) => {
+      const target = String(args[0]);
+      const calls = (statFault.pathCalls.get(target) ?? 0) + 1;
+      statFault.pathCalls.set(target, calls);
+      if (
+        statFault.beforeCall &&
+        statFault.beforeCall.path === target &&
+        statFault.beforeCall.call === calls
+      ) {
+        const { action } = statFault.beforeCall;
+        statFault.beforeCall = null;
+        await action();
+      }
       if (statFault.pauseNext) {
         const pause = statFault.pauseNext;
         statFault.pauseNext = null;
@@ -71,6 +98,19 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       if (statFault.failNextWith) {
         const code = statFault.failNextWith;
         statFault.failNextWith = null;
+        const error = new Error(
+          `injected stat failure ${code}`,
+        ) as NodeJS.ErrnoException;
+        error.code = code;
+        throw error;
+      }
+      if (
+        statFault.failOnCall &&
+        statFault.failOnCall.path === target &&
+        statFault.failOnCall.call === calls
+      ) {
+        const code = statFault.failOnCall.code;
+        statFault.failOnCall = null;
         const error = new Error(
           `injected stat failure ${code}`,
         ) as NodeJS.ErrnoException;
@@ -264,6 +304,10 @@ describe('SessionTranscriptReader', () => {
     statFault.zeroInode = false;
     statFault.failNextWith = null;
     statFault.pauseNext = null;
+    statFault.pathCalls.clear();
+    statFault.failOnCall = null;
+    statFault.beforeCall = null;
+    projectionReads.pause = null;
     resetSessionTranscriptIndexCacheForTest();
     Storage.setRuntimeBaseDir(null);
     await fs.rm(runtimeDir, { recursive: true, force: true });
@@ -3778,6 +3822,72 @@ describe('SessionTranscriptReader', () => {
     expect(builds.count).toBe(0);
   });
 
+  it('moves a completing placeholder to the MRU tail instead of self-evicting it', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply', 'third'));
+    const secondSessionId = '880e8400-e29b-41d4-a716-446655440000';
+    const secondPath = await writeRecords(
+      linear('s-', 0, 1, null, () => 'second', secondSessionId),
+      secondSessionId,
+    );
+    const reader = newReader();
+    const releases = new Map<string, () => void>();
+    const started = new Map<string, boolean>();
+    const blockFor = (target: string) => {
+      const blocked = new Promise<void>((resolve) => {
+        releases.set(target, resolve);
+      });
+      return blocked;
+    };
+    const targetBlocked = blockFor(filePath);
+    const secondBlocked = blockFor(secondPath);
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (started.has(builtPath)) return;
+      if (builtPath === filePath) {
+        started.set(builtPath, true);
+        await targetBlocked;
+      } else if (builtPath === secondPath) {
+        started.set(builtPath, true);
+        await secondBlocked;
+      }
+    });
+    const pendingRead = reader.readPage(sessionId, { limit: 1 });
+    await vi.waitFor(() => expect(started.has(filePath)).toBe(true));
+    for (let i = 0; i < 33; i++) {
+      const sid = `770e8400-e29b-41d4-a716-${String(i).padStart(12, '0')}`;
+      await writeRecords(
+        linear('f-', 0, 1, null, () => 'filler', sid),
+        sid,
+      );
+      await reader.readPage(sid, { limit: 1 });
+    }
+    // A second in-flight placeholder pushes the map past the count cap, so
+    // the completion's prune must evict a value entry — and the completing
+    // key, still at its placeholder insertion position without a delete
+    // before set, would be the first value the prune sees.
+    const pendingSecond = reader.readPage(secondSessionId, { limit: 1 });
+    await vi.waitFor(() => expect(started.has(secondPath)).toBe(true));
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(33);
+    releases.get(filePath)!();
+    await pendingRead;
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    // The completion survived its own prune.
+    expect(builds.count).toBe(0);
+    // The next unrelated admission evicts the true LRU value, not the
+    // freshly completed entry.
+    const lateSid = '990e8400-e29b-41d4-a716-446655440000';
+    await writeRecords(
+      linear('late-', 0, 1, null, () => 'late', lateSid),
+      lateSid,
+    );
+    await reader.readPage(lateSid, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(0);
+    releases.get(secondPath)!();
+    await pendingSecond;
+  });
+
   it('evicts a same-mtime smaller prefix to admit the live snapshot when the class is full', async () => {
     setSessionTranscriptIndexCacheMaxBytesForTest(1);
     const reader = newReader();
@@ -3887,6 +3997,157 @@ describe('SessionTranscriptReader', () => {
     const page = await reader.readPage(sessionId, { limit: 1 });
     expect(uuids(page.records)).toEqual(['u1']);
     expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(0);
+  });
+
+  it('runs the reclaim branch without a second stat that can fail uncaught', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    await reader.readPage(sessionId, { limit: 1 });
+    const targetBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    await writeRecords(
+      linear(
+        'filler-',
+        0,
+        19,
+        null,
+        (i) => `filler transcript ${i}`,
+        otherSessionId,
+      ),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const fillerBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    // The class holds the filler but not filler + target, so admission
+    // enters the reclaim branch and refuses (no superseded same-file
+    // entry). The third stat on this path would be a second admission
+    // stat after readPage's and the re-verification's; the synchronous
+    // tail never issues it, so the injected fault must not fire.
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      fillerBytes + targetBytes - 1,
+    );
+    statFault.pathCalls.delete(filePath);
+    statFault.failOnCall = { path: filePath, call: 3, code: 'EIO' };
+    const page = await reader.readPage(sessionId, { limit: 1 });
+    expect(uuids(page.records)).toEqual(['large-0']);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+    expect(
+      mockDebugLogger.debug.mock.calls.some((call) =>
+        String(call[0]).includes('index cache skipped byte-budget admission'),
+      ),
+    ).toBe(true);
+  });
+
+  it('serves frozen sharers the frozen snapshot when a rewrite lands after the re-verification', async () => {
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const warm = await reader.readPage(sessionId, { limit: 1 });
+    const state = warm.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await writeRecords(
+      linear(
+        'filler-',
+        0,
+        19,
+        null,
+        (i) => `filler transcript ${i}`,
+        otherSessionId,
+      ),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const fillerBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    await reader.readPage(otherSessionId, { limit: 1 });
+    // The filler occupies the class so the stale completion enters the
+    // reclaim branch; a second admission stat there would suspend after
+    // the re-verification already passed.
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      fillerBytes + oldBytes - 1,
+    );
+    let releaseBuild: (() => void) | undefined;
+    const buildBlocked = new Promise<void>((resolve) => {
+      releaseBuild = resolve;
+    });
+    let firstBuild = true;
+    let newerBuilds = 0;
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (builtPath !== filePath) return;
+      if (firstBuild) {
+        firstBuild = false;
+        await buildBlocked;
+        return;
+      }
+      newerBuilds++;
+    });
+    const initiator = readAfter(reader, state, { limit: 6 });
+    await vi.waitFor(() => expect(firstBuild).toBe(false));
+    const waiter = readAfter(reader, state, { limit: 6 });
+    void initiator.catch(() => {});
+    void waiter.catch(() => {});
+    await vi.waitFor(() =>
+      expect(
+        mockDebugLogger.debug.mock.calls.some((call) =>
+          String(call[0]).includes('index cache pending hit'),
+        ),
+      ).toBe(true),
+    );
+    // The second stat on this path after the reset would be a reclaim
+    // stat issued after the re-verification already passed. Before it
+    // runs, rewrite the file equal-size at an advanced mtime and read the
+    // newer snapshot, exactly the reviewer's interleaving. The
+    // synchronous tail never issues that stat, so the rewrite can only
+    // land before the re-verification (which fails every sharer closed)
+    // or after the admission (the documented live-body residual).
+    statFault.pathCalls.delete(filePath);
+    statFault.beforeCall = {
+      path: filePath,
+      call: 2,
+      action: async () => {
+        const raw = await fs.readFile(filePath, 'utf8');
+        const rewritten = raw.replace(
+          '"text":"large transcript 5"',
+          '"text":"LARGE transcript 5"',
+        );
+        expect(Buffer.byteLength(rewritten, 'utf8')).toBe(
+          Buffer.byteLength(raw, 'utf8'),
+        );
+        await fs.writeFile(filePath, rewritten, 'utf8');
+        await fs.utimes(filePath, new Date(), new Date(Date.now() + 60000));
+        await reader.readPage(sessionId, { limit: 1 });
+        await reader.readPage(sessionId, { limit: 1 });
+      },
+    };
+    releaseBuild!();
+    const [initPage, waitPage] = await Promise.all([initiator, waiter]);
+    statFault.beforeCall = null;
+    // The frozen pages serve the frozen snapshot, and the newer snapshot
+    // was never built under the stale completion.
+    expect(uuids(initPage.records)).toEqual([
+      'large-1',
+      'large-2',
+      'large-3',
+      'large-4',
+      'large-5',
+      'large-6',
+    ]);
+    expect(initPage.records[4]!.message?.parts?.[0]).toMatchObject({
+      text: 'large transcript 5',
+    });
+    expect(uuids(waitPage.records)).toEqual(uuids(initPage.records));
+    expect(newerBuilds).toBe(0);
+    // The refusal keeps the filler; the frozen build returns uncached.
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual({
+      entries: 1,
+      byteSize: fillerBytes,
+    });
   });
 
   it('evicts an equal-size replacement orphan at a new inode to admit the live snapshot', async () => {
@@ -4530,6 +4791,125 @@ describe('SessionTranscriptReader', () => {
       );
     } finally {
       await authority.close();
+    }
+  });
+
+  it('does not let a frozen projection retention evict the live newer index', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { file, authority, commit } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'short reply' },
+      { uuid: 'u2', parent: 'a1', text: bigText },
+    ]);
+    try {
+      const reader = newReader();
+      await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+      const physicalBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      // Cache the old physical index without its projection: the bodies
+      // do not fit the tightened class, so retention is refused.
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+        physicalBytes + 1024,
+      );
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const oldState = first.nextCursorState!;
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes,
+      );
+      setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+      // Append and cache the live snapshot with its projection retained.
+      await commit('a2', 'u2', 'short appended reply');
+      await reader.readPage(sessionId, { limit: 1 });
+      const liveTotal =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize - physicalBytes;
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      // Room for the old physical index plus the live entry exactly; the
+      // frozen projection on top does not fit.
+      setSessionTranscriptIndexCacheMaxBytesForTest(physicalBytes + liveTotal);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+      const builds = countBuilds(file);
+      projectionReads.count = 0;
+      await readAfter(reader, oldState, { limit: 1 });
+      // Retention is refused without evicting the live newer index.
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes + liveTotal,
+      );
+      await reader.readPage(sessionId, { limit: 1 });
+      expect(builds.count).toBe(0);
+      // The projection was not retained: the next frozen read re-decodes.
+      expect(projectionReads.count).toBe(1);
+      await readAfter(reader, oldState, { limit: 1 });
+      expect(projectionReads.count).toBe(2);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('does not let a frozen projection retention evict a replaced live index at a new inode', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { file, authority, commit } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'short reply' },
+      { uuid: 'u2', parent: 'a1', text: bigText },
+    ]);
+    let closed = false;
+    try {
+      const reader = newReader();
+      await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+      const physicalBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+        physicalBytes + 1024,
+      );
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const oldState = first.nextCursorState!;
+      setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+      // Pause the frozen projection decode; while it is suspended, grow
+      // the transcript and replace it at a new inode, then cache the live
+      // snapshot. The decode's accounting must not treat the frozen
+      // identity as the current file state.
+      let releaseDecode: (() => void) | undefined;
+      const decodeBlocked = new Promise<void>((resolve) => {
+        releaseDecode = resolve;
+      });
+      projectionReads.pause = decodeBlocked;
+      projectionReads.count = 0;
+      const frozenRead = readAfter(reader, oldState, { limit: 1 });
+      await vi.waitFor(() => expect(projectionReads.count).toBe(1));
+      await commit('a2', 'u2', 'short appended reply');
+      // Close the writer before the replacement: the lease seals against
+      // the transcript state its own commits produced.
+      await authority.close();
+      closed = true;
+      const raw = await fs.readFile(file, 'utf8');
+      const temp = `${file}.replacement`;
+      await fs.writeFile(temp, raw, 'utf8');
+      await fs.rename(temp, file);
+      await reader.readPage(sessionId, { limit: 1 });
+      const liveTotal =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize - physicalBytes;
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      setSessionTranscriptIndexCacheMaxBytesForTest(physicalBytes + liveTotal);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+      const builds = countBuilds(file);
+      releaseDecode!();
+      await frozenRead;
+      // The live index at the new inode survives the refused retention.
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes + liveTotal,
+      );
+      await reader.readPage(sessionId, { limit: 1 });
+      expect(builds.count).toBe(0);
+    } finally {
+      if (!closed) await authority.close();
     }
   });
 
