@@ -33710,6 +33710,55 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('lands the re-queued report only after the cancelled turn settles', async () => {
+    // `cancelPendingPrompt()` aborts the controller but does not await the
+    // cancelled delivery turn: a turn parked on an admission round trip
+    // re-queues its teammate report when it unwinds. Flushing before that
+    // scans a queue the report has already left, so the flush has to wait for
+    // the settle — bounded, and still run when the wait fails.
+    const innerConfig = makeRestoreInnerConfig();
+    let releaseSettle: () => void = () => {};
+    const settleHeld = new Promise<void>((resolve) => {
+      releaseSettle = resolve;
+    });
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
+      waitForActiveTurnsToSettle: vi.fn(() => settleHeld),
+      flushPendingPeerNotifications: vi.fn().mockResolvedValue(undefined),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
+
+    const shutdown = agent.beginManagedShutdown().writerShutdown;
+    await vi.waitFor(() =>
+      expect(liveSession.waitForActiveTurnsToSettle).toHaveBeenCalledOnce(),
+    );
+    expect(liveSession.flushPendingPeerNotifications).not.toHaveBeenCalled();
+    expect(innerConfig.closeSessionWriter).not.toHaveBeenCalled();
+
+    releaseSettle();
+    await shutdown;
+
+    expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
+    expect(
+      liveSession.flushPendingPeerNotifications.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(innerConfig.closeSessionWriter).mock.invocationCallOrder[0],
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('still closes the writers when a peer flush throws during managed shutdown', async () => {
     const innerConfig = makeRestoreInnerConfig();
     const liveSession = {

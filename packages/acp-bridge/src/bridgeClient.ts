@@ -699,7 +699,7 @@ function sliceLineRange(
  * `sessionId`, `events`,
  * `clientIds`, `suspendedWorkflowApprovalRefs`, `pendingPermissionIds`,
  * `pendingInteractions`, `activePromptId`,
- * `activePromptOriginatorClientId`. New fields
+ * `activePromptOriginatorClientId`, `lastPromptOriginatorClientId`. New fields
  * BridgeClient grows must be added here too (and the factory's
  * `SessionEntry` is required to provide them — TS enforces the
  * structural match at the callback signature).
@@ -767,6 +767,12 @@ export interface BridgeClientSessionEntry {
   /** Admitted id for the prompt currently executing on this session. */
   activePromptId?: string;
   activePromptOriginatorClientId?: string;
+  /**
+   * The last prompt originator, retained after the prompt settles. A
+   * teammate approval outlives the leader turn that started the team, and
+   * under a `designated` policy it still belongs to that client.
+   */
+  lastPromptOriginatorClientId?: string;
   mcpAppCalls?: Map<string, { clientId: string; cancel: () => void }>;
   /**
    * True while the bridge drives a model roundtrip; the
@@ -1187,12 +1193,20 @@ export class BridgeClient implements Client {
     // A session-scoped (teammate) approval still has a prompt originator to
     // answer to: it was the leader prompt that put the team in motion. Clear
     // the prompt binding but not the client entitled to vote under a
-    // `designated` policy.
+    // `designated` policy. That client can outlive the leader turn —
+    // `settleActivePromptState` deletes `activePromptOriginatorClientId` — so a
+    // session-scoped request consults the retained last originator instead.
+    // Reading only the live field left the request originator-less, and
+    // `voteDesignated` then falls back to first-responder, i.e. any attached
+    // client could answer an approval the policy exists to reserve.
     let permissionOriginator =
       appClientId ??
       (backgroundWorkflowApproval || backgroundTurn || goalTurnId
         ? undefined
-        : entry.activePromptOriginatorClientId);
+        : sessionOwned
+          ? (entry.lastPromptOriginatorClientId ??
+            entry.activePromptOriginatorClientId)
+          : entry.activePromptOriginatorClientId);
     const workflowOriginatorClientId =
       params._meta?.['workflowOriginatorClientId'];
     if (

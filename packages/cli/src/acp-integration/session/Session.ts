@@ -5660,6 +5660,14 @@ export class Session implements SessionContext {
    * carrier, so this has to run while the recorder still accepts writes: on
    * the stored-session close path `recorder.close()` precedes `dispose()`, and
    * `appendRecord` is already a no-op by then.
+   *
+   * Only in-session teammate reports (`producer: 'teammate'`) are landed. A
+   * cross-session message shares `kind: 'peer'` but is still owned by the
+   * transport: `enqueuePeerMessage` deliberately writes no completion record,
+   * because the close retracts undrained deliveries through
+   * `takeQueuedPeerDeliveries()` and tells the sender they were never read.
+   * Landing one here would leave a `completed` row for a message the transport
+   * declares undelivered, and a sender retry would duplicate it.
    */
   #landUndrainedPeerNotifications(
     items: readonly QueuedBackgroundNotification[] = this.notificationQueue,
@@ -5667,7 +5675,7 @@ export class Session implements SessionContext {
     const recording = this.config.getChatRecordingService();
     if (!recording) {
       for (const item of items) {
-        if (item.kind !== 'peer' || item.persisted) continue;
+        if (item.producer !== 'teammate' || item.persisted) continue;
         debugLogger.warn(
           `Peer report lost: no recording service available for task=${item.taskId}`,
         );
@@ -5676,7 +5684,7 @@ export class Session implements SessionContext {
       return;
     }
     for (const item of items) {
-      if (item.kind !== 'peer' || item.persisted) continue;
+      if (item.producer !== 'teammate' || item.persisted) continue;
       // Only cold copies get the task envelope: recovery trims these because
       // the model was never asked anything. Warm copies keep their peer
       // envelope so an unanswered delivered turn remains `interrupted_prompt`.
@@ -5712,11 +5720,31 @@ export class Session implements SessionContext {
    * read as it consumes it, and `notificationQueue` is the report's only
    * carrier after that, so a report consumed past the seal would be read on
    * disk, landed into a writer that no longer accepts records, and lost.
+   *
+   * The landing can also end in a tally rather than a record (no recorder,
+   * hidden workspace). That tally is emitted here as the `queue` frame a drain
+   * would have sent: after this hook the session is closing, both drains bail,
+   * and `dispose()` clears the tally.
    */
   async flushPendingPeerNotifications(): Promise<void> {
     await this.config.getTeamManager()?.quiesceLeaderInbox?.();
     this.peerNotificationsSealed = true;
     this.#landUndrainedPeerNotifications();
+    // A landing with no recorder (hidden workspace) can only tally the loss,
+    // and `dispose()` clears the tally. Emit here, while the client connection
+    // is still live: the drains that normally take the tally both bail while
+    // `closing`, so during a close this is the summary's only way out.
+    const droppedSummary = this.droppedNotifications.take();
+    if (droppedSummary) {
+      try {
+        await this.#emitDroppedNotificationSummary(droppedSummary);
+      } catch (error) {
+        debugLogger.warn(
+          'Failed to display dropped notification summary:',
+          error,
+        );
+      }
+    }
   }
 
   dispose(): void {
@@ -5754,6 +5782,22 @@ export class Session implements SessionContext {
     this.hardSuspendTodoStopGuard();
     this.#landUndrainedPeerNotifications();
     this.notificationQueue = [];
+    // Same window as the pre-close flush, and the last one: the landing above
+    // can still tally a report it has no recorder for, the drains are dead by
+    // now, and the tally is cleared on the next line. `dispose()` is
+    // synchronous, so the frame is fire-and-forget; the connection still
+    // accepts it.
+    const droppedSummary = this.droppedNotifications.take();
+    if (droppedSummary) {
+      void this.#emitDroppedNotificationSummary(droppedSummary).catch(
+        (error) => {
+          debugLogger.warn(
+            'Failed to display dropped notification summary:',
+            error,
+          );
+        },
+      );
+    }
     this.droppedNotifications.clear();
     this.cronQueue = [];
     for (const turn of this.goalQueue.splice(0)) {
