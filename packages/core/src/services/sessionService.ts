@@ -84,6 +84,10 @@ import {
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import {
+  acquireSessionArchiveWriteLock,
+  advanceSessionArchiveGeneration,
+} from './session-archive-write-fence.js';
+import {
   moveSessionPrSidecar,
   readSessionPrsDetailed,
 } from './session-pr-service.js';
@@ -4625,6 +4629,17 @@ export class SessionService {
     return removed;
   }
 
+  private async acquireArchiveWriteLock(activePath: string) {
+    try {
+      return await acquireSessionArchiveWriteLock(activePath);
+    } catch (error) {
+      // The lock is a sibling of the transcript: if its directory has not
+      // been created, there is no active or archived session to mutate.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }
+
   async archiveSessions(
     sessionIds: string[],
     options: ArchiveSessionsOptions = {},
@@ -4636,8 +4651,17 @@ export class SessionService {
     const errors: Array<{ sessionId: string; error: Error }> = [];
 
     for (const sessionId of [...new Set(sessionIds)]) {
+      let lock:
+        | Awaited<ReturnType<typeof acquireSessionArchiveWriteLock>>
+        | undefined;
       try {
         if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+          notFound.push(sessionId);
+          continue;
+        }
+        const activePath = this.getSessionFilePath(sessionId, 'active');
+        lock = await this.acquireArchiveWriteLock(activePath);
+        if (!lock) {
           notFound.push(sessionId);
           continue;
         }
@@ -4668,6 +4692,8 @@ export class SessionService {
           await options.assertStorageUnchanged?.();
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+          lock.assertHeld();
+          advanceSessionArchiveGeneration(activePath);
           this.removeFileIfExists(active.filePath);
           this.transcriptReader.invalidateLastUserPromptAt(sessionId);
           try {
@@ -4736,6 +4762,8 @@ export class SessionService {
         await options.assertStorageUnchanged?.();
         options.assertCanMutate?.();
         this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+        lock.assertHeld();
+        advanceSessionArchiveGeneration(activePath);
         try {
           fs.renameSync(sourcePath, targetPath);
           this.transcriptReader.invalidateLastUserPromptAt(sessionId);
@@ -4760,6 +4788,8 @@ export class SessionService {
           sessionId,
           error: error instanceof Error ? error : new Error(String(error)),
         });
+      } finally {
+        await lock?.release();
       }
     }
 
@@ -4783,6 +4813,7 @@ export class SessionService {
   private async retitleIfCollidesWithActive(
     sessionId: string,
     archivedFilePath: string,
+    assertArchiveLockHeld: () => void,
   ): Promise<void> {
     // The archived row can be named only by its sidecar after a transcript
     // rebuild; the collision check must see that name too, or unarchiving
@@ -4806,7 +4837,14 @@ export class SessionService {
     if (!activeTitles.has(normalizedTitle)) return;
     const baseName = normalizeDerivedBranchTitle(currentTitle) ?? currentTitle;
     const uniqueTitle = await computeUniqueBranchTitle(baseName, this);
-    await this.renameSession(sessionId, uniqueTitle, 'auto', 'archived');
+    await this.renameSessionInternal(
+      sessionId,
+      uniqueTitle,
+      'auto',
+      'archived',
+      undefined,
+      assertArchiveLockHeld,
+    );
   }
 
   async unarchiveSessions(
@@ -4820,7 +4858,20 @@ export class SessionService {
     const errors: Array<{ sessionId: string; error: Error }> = [];
 
     for (const sessionId of [...new Set(sessionIds)]) {
+      let lock:
+        | Awaited<ReturnType<typeof acquireSessionArchiveWriteLock>>
+        | undefined;
       try {
+        if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+          notFound.push(sessionId);
+          continue;
+        }
+        const activePath = this.getSessionFilePath(sessionId, 'active');
+        lock = await this.acquireArchiveWriteLock(activePath);
+        if (!lock) {
+          notFound.push(sessionId);
+          continue;
+        }
         const snapshot =
           await this.resolveMaintainableSessionSnapshot(sessionId);
         const location = snapshot.location;
@@ -4848,6 +4899,8 @@ export class SessionService {
           await options.assertStorageUnchanged?.();
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+          lock.assertHeld();
+          advanceSessionArchiveGeneration(activePath);
           this.removeFileIfExists(archived.filePath);
           this.transcriptReader.invalidateLastUserPromptAt(sessionId);
           try {
@@ -4916,7 +4969,13 @@ export class SessionService {
         await options.assertStorageUnchanged?.();
         options.assertCanMutate?.();
         this.assertMaintainableSessionUnchanged(sessionId, snapshot);
-        await this.retitleIfCollidesWithActive(sessionId, sourcePath);
+        await this.retitleIfCollidesWithActive(
+          sessionId,
+          sourcePath,
+          lock.assertHeld,
+        );
+        lock.assertHeld();
+        advanceSessionArchiveGeneration(activePath);
         try {
           fs.renameSync(sourcePath, targetPath);
           this.transcriptReader.invalidateLastUserPromptAt(sessionId);
@@ -4941,6 +5000,8 @@ export class SessionService {
           sessionId,
           error: error instanceof Error ? error : new Error(String(error)),
         });
+      } finally {
+        await lock?.release();
       }
     }
 
@@ -5014,7 +5075,7 @@ export class SessionService {
     titleSource: TitleSource = 'manual',
     archiveState: SessionArchiveState = 'active',
   ): Promise<boolean> {
-    return this.renameSessionInternal(
+    return this.renameSessionWithArchiveLock(
       sessionId,
       title,
       titleSource,
@@ -5032,13 +5093,41 @@ export class SessionService {
       assertCanMutate?: () => void;
     } = {},
   ): Promise<boolean> {
-    return this.renameSessionInternal(
+    return this.renameSessionWithArchiveLock(
       sessionId,
       title,
       titleSource,
       expectedLocation,
       options,
     );
+  }
+
+  private async renameSessionWithArchiveLock(
+    sessionId: string,
+    title: string,
+    titleSource: TitleSource,
+    archiveState: SessionArchiveState,
+    lifecycleOptions?: {
+      assertStorageUnchanged?: () => void | Promise<void>;
+      assertCanMutate?: () => void;
+    },
+  ): Promise<boolean> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return false;
+    const activePath = this.getSessionFilePath(sessionId, 'active');
+    const lock = await this.acquireArchiveWriteLock(activePath);
+    if (!lock) return false;
+    try {
+      return await this.renameSessionInternal(
+        sessionId,
+        title,
+        titleSource,
+        archiveState,
+        lifecycleOptions,
+        lock.assertHeld,
+      );
+    } finally {
+      await lock.release();
+    }
   }
 
   private async renameSessionInternal(
@@ -5050,6 +5139,7 @@ export class SessionService {
       assertStorageUnchanged?: () => void | Promise<void>;
       assertCanMutate?: () => void;
     },
+    assertArchiveLockHeld?: () => void,
   ): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
@@ -5118,6 +5208,7 @@ export class SessionService {
       };
       await lifecycleOptions?.assertStorageUnchanged?.();
       lifecycleOptions?.assertCanMutate?.();
+      assertArchiveLockHeld?.();
       if (physicalSnapshot) {
         this.assertMaintainableSessionUnchanged(sessionId, physicalSnapshot);
       }
