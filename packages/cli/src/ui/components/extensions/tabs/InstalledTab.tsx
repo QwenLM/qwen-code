@@ -589,23 +589,27 @@ export const InstalledTab = ({
           await toolRegistry?.disableMcpServer(item.name);
         } else {
           // Enable: remove from excluded in both scopes + rediscover.
+          const removedPatterns = new Set<string>();
           for (const scope of [
             CliSettingScope.User,
             CliSettingScope.Workspace,
           ]) {
             const excluded =
               settings.forScope(scope).settings.mcp?.excluded ?? [];
-            if (excluded.includes(item.name)) {
-              settings.setValue(
-                scope,
-                'mcp.excluded',
-                excluded.filter((n: string) => n !== item.name),
-              );
+            const remaining = excluded.filter(
+              (pattern: string) =>
+                !matchesAnyServerPattern(item.name, [pattern]),
+            );
+            if (remaining.length !== excluded.length) {
+              for (const pattern of excluded) {
+                if (!remaining.includes(pattern)) removedPatterns.add(pattern);
+              }
+              settings.setValue(scope, 'mcp.excluded', remaining);
             }
           }
           const runtimeExcluded = config.getExcludedMcpServers() ?? [];
           config.setExcludedMcpServers(
-            runtimeExcluded.filter((n) => n !== item.name),
+            runtimeExcluded.filter((pattern) => !removedPatterns.has(pattern)),
           );
           await toolRegistry?.discoverToolsForServer(item.name);
         }

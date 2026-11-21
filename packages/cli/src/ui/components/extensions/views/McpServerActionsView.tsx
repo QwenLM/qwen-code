@@ -287,20 +287,24 @@ export const McpServerActionsView = ({
             ?.setMcpServerDisabled(extensionName, serverName, false);
         }
         const settings = loadSettings();
+        const removedPatterns = new Set<string>();
         for (const scope of [SettingScope.User, SettingScope.Workspace]) {
           const excluded =
             settings.forScope(scope).settings.mcp?.excluded || [];
-          if (excluded.includes(serverName)) {
-            settings.setValue(
-              scope,
-              'mcp.excluded',
-              excluded.filter((n: string) => n !== serverName),
-            );
+          const remaining = excluded.filter(
+            (pattern: string) =>
+              !matchesAnyServerPattern(serverName, [pattern]),
+          );
+          if (remaining.length !== excluded.length) {
+            for (const pattern of excluded) {
+              if (!remaining.includes(pattern)) removedPatterns.add(pattern);
+            }
+            settings.setValue(scope, 'mcp.excluded', remaining);
           }
         }
         const runtimeExcluded = config.getExcludedMcpServers() || [];
         config.setExcludedMcpServers(
-          runtimeExcluded.filter((n) => n !== serverName),
+          runtimeExcluded.filter((pattern) => !removedPatterns.has(pattern)),
         );
         await toolRegistry?.discoverToolsForServer(serverName);
       } else if (server.source === 'extension') {

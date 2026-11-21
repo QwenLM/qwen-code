@@ -7845,6 +7845,71 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('keeps an operator exclusion an in-session enable does not cover', async () => {
+    // The runtime list is the merge of every scope plus
+    // `--disable-mcp-server`; an enable that only writes User and Workspace
+    // must not drop a System `docs*` pattern that still denies the server.
+    const server = {
+      command: 'node',
+      args: ['server.js'],
+      scope: 'project' as const,
+    };
+    let runtimeExcluded = ['docs*', 'docs'];
+    mockConfig = {
+      ...mockConfig,
+      getMcpServers: vi.fn().mockReturnValue({ docs: server }),
+      getExcludedMcpServers: vi.fn(() => runtimeExcluded),
+      setExcludedMcpServers: vi.fn((next: string[]) => {
+        runtimeExcluded = next;
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        discoverToolsForServer: vi.fn().mockResolvedValue(undefined),
+      }),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+    } as unknown as Config;
+    const innerConfig = await setupSessionMocks('operator-excluded');
+    Object.assign(innerConfig, {
+      getMcpServers: vi.fn().mockReturnValue({ docs: server }),
+      getExcludedMcpServers: vi.fn(() => runtimeExcluded),
+      setExcludedMcpServers: vi.fn((next: string[]) => {
+        runtimeExcluded = next;
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        discoverToolsForServer: vi.fn().mockResolvedValue(undefined),
+      }),
+    });
+    const actionSettings = {
+      ...makeSessionSettings(),
+      forScope: vi.fn((scope: SettingScope) => ({
+        settings:
+          scope === SettingScope.Workspace
+            ? { mcpServers: {}, mcp: { excluded: ['docs'] } }
+            : { mcpServers: {} },
+      })),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockImplementation(() => actionSettings);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpManage, {
+        serverName: 'docs',
+        action: 'enable',
+      }),
+    ).resolves.toMatchObject({ ok: true, action: 'enable' });
+
+    expect(actionSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'mcp.excluded',
+      [],
+    );
+    expect(runtimeExcluded).toEqual(['docs*']);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('releases a Todo Stop Guard that yielded to a cancelled FIFO prompt', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);
