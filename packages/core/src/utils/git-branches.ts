@@ -181,7 +181,7 @@ export function streamGitRecords(
   args: string[],
   onRecord: (record: Buffer) => boolean,
   env?: Readonly<Record<string, string | undefined>>,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; stdin?: string } = {},
 ): Promise<boolean> {
   return new Promise((resolve, reject) => {
     const child = spawn('git', args, {
@@ -189,6 +189,12 @@ export function streamGitRecords(
       env: gitEnv(env),
       windowsHide: true,
     });
+    if (options.stdin !== undefined) {
+      // A reader that stops early (`onRecord` returning true) is killed
+      // before the whole payload is consumed, so a closed pipe is expected.
+      child.stdin?.on('error', () => {});
+      child.stdin?.end(options.stdin);
+    }
     let settled = false;
     const settle = (outcome: () => void) => {
       if (settled) return;
