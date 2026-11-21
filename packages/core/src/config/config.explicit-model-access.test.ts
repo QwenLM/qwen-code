@@ -7,6 +7,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SettingsService } from '@qwen-code/resource';
+import type { SettingsSource } from '@qwen-code/resource';
 import { Config } from './config.js';
 import { FatalAuthenticationError } from '../utils/errors.js';
 import { createEmptyLoadedSettings } from '../test-utils/config.js';
@@ -137,5 +138,169 @@ describe('explicit model resolution', () => {
     await config.getModelProviderManager().start();
     await expect(config.reconcileModelWithListedModels()).rejects.toBe(error);
     expect(stream).not.toHaveBeenCalled();
+  });
+});
+
+describe('workspace trust gates project custom providers at startup', () => {
+  const configs: Config[] = [];
+
+  afterEach(async () => {
+    for (const config of configs.splice(0)) await config.dispose();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  function makeStartupConfig(
+    isTrusted: boolean,
+    providerSettingsSources?: readonly SettingsSource[],
+    projectionSources: readonly SettingsSource[] = ['project', 'local'],
+    providerRejectedEnvKeys?: ReadonlySet<string>,
+  ) {
+    const loadedSettings = createEmptyLoadedSettings();
+    loadedSettings.isTrusted = isTrusted;
+    loadedSettings.project.readOnly = !projectionSources.includes('project');
+    loadedSettings.local.readOnly = !projectionSources.includes('local');
+    const settingsService = new SettingsService();
+    vi.spyOn(settingsService, 'resolve').mockReturnValue(loadedSettings);
+    const settingsText = (providerId: string) =>
+      JSON.stringify({
+        providers: {
+          [providerId]: {
+            baseUrl: 'https://unused.invalid/v1',
+            apiKey: '${QWEN_STARTUP_TRUST_KEY}',
+            models: [{ model: '${QWEN_STARTUP_TRUST_MODEL}' }],
+          },
+        },
+      });
+    const projectRead = vi.fn(() => settingsText('projectGw'));
+    const localRead = vi.fn(() => settingsText('localGw'));
+    vi.spyOn(settingsService, 'getProjectSettingsSources').mockReturnValue({
+      project: { read: projectRead },
+      local: { read: localRead },
+    } as unknown as ReturnType<SettingsService['getProjectSettingsSources']>);
+    const config = new Config({
+      loadedSettings,
+      settingsService,
+      sessionId: 'startup-trust-gate',
+      targetDir: '.',
+      cwd: '.',
+      debugMode: false,
+      model: 'gateway/test-model',
+      modelSource: 'config',
+      providerSettingsSources,
+      providerRejectedEnvKeys,
+    });
+    configs.push(config);
+    return { config, projectRead, localRead };
+  }
+
+  it('reads and admits project and local providers in a trusted workspace', async () => {
+    vi.stubEnv('QWEN_STARTUP_TRUST_KEY', 'resolved-secret');
+    vi.stubEnv('QWEN_STARTUP_TRUST_MODEL', 'test-model');
+    const { config, projectRead, localRead } = makeStartupConfig(true);
+    expect(projectRead).toHaveBeenCalled();
+    expect(localRead).toHaveBeenCalled();
+    const manager = config.getModelProviderManager();
+    await manager.start();
+    const models = await manager.listModels();
+    expect(models.map(({ key }) => key).sort()).toEqual([
+      'localGw/test-model',
+      'projectGw/test-model',
+    ]);
+  });
+
+  it('does not read or admit project or local providers in an untrusted workspace', async () => {
+    vi.stubEnv('QWEN_STARTUP_TRUST_KEY', 'resolved-secret');
+    vi.stubEnv('QWEN_STARTUP_TRUST_MODEL', 'test-model');
+    const { config, projectRead, localRead } = makeStartupConfig(false);
+    const manager = config.getModelProviderManager();
+    await manager.start();
+
+    expect(projectRead).not.toHaveBeenCalled();
+    expect(localRead).not.toHaveBeenCalled();
+    await expect(manager.listModels()).resolves.toEqual([]);
+  });
+
+  it('reads only the project layer when the source selection excludes local', async () => {
+    vi.stubEnv('QWEN_STARTUP_TRUST_KEY', 'resolved-secret');
+    vi.stubEnv('QWEN_STARTUP_TRUST_MODEL', 'test-model');
+    const { config, projectRead, localRead } = makeStartupConfig(true, [
+      'project',
+    ]);
+    // Assert the assembly boundary before manager.start(): preference
+    // storage legitimately re-reads both layers afterwards.
+    expect(projectRead).toHaveBeenCalled();
+    expect(localRead).not.toHaveBeenCalled();
+    const manager = config.getModelProviderManager();
+    await manager.start();
+    const models = await manager.listModels();
+    expect(models.map(({ key }) => key)).toEqual(['projectGw/test-model']);
+  });
+
+  it.each(['project', 'local'] as const)(
+    'reads only %s when the loaded projection excluded the other source',
+    async (source) => {
+      vi.stubEnv('QWEN_STARTUP_TRUST_KEY', 'resolved-secret');
+      vi.stubEnv('QWEN_STARTUP_TRUST_MODEL', 'test-model');
+      const { config, projectRead, localRead } = makeStartupConfig(
+        true,
+        undefined,
+        [source],
+      );
+      expect(projectRead).toHaveBeenCalledTimes(source === 'project' ? 1 : 0);
+      expect(localRead).toHaveBeenCalledTimes(source === 'local' ? 1 : 0);
+      const manager = config.getModelProviderManager();
+      await manager.start();
+      const models = await manager.listModels();
+      expect(models.map(({ key }) => key)).toEqual([`${source}Gw/test-model`]);
+    },
+  );
+
+  it.each([false, true])(
+    'uses only allowed environment values in selected project and local providers (reject: %s)',
+    async (reject) => {
+      vi.stubEnv('QWEN_STARTUP_TRUST_KEY', 'resolved-key');
+      vi.stubEnv('QWEN_STARTUP_TRUST_MODEL', 'test-model');
+      const { config } = makeStartupConfig(
+        true,
+        ['project', 'local'],
+        undefined,
+        new Set(reject ? ['QWEN_STARTUP_TRUST_KEY'] : []),
+      );
+      const manager = config.getModelProviderManager();
+      await manager.start();
+      const models = await manager.listModels();
+      expect(models.map(({ key }) => key).sort()).toEqual(
+        reject ? [] : ['localGw/test-model', 'projectGw/test-model'],
+      );
+      expect(process.env['QWEN_STARTUP_TRUST_KEY']).toBe('resolved-key');
+    },
+  );
+
+  it('reads neither layer for an empty source selection in a trusted workspace', async () => {
+    vi.stubEnv('QWEN_STARTUP_TRUST_KEY', 'resolved-secret');
+    vi.stubEnv('QWEN_STARTUP_TRUST_MODEL', 'test-model');
+    const { config, projectRead, localRead } = makeStartupConfig(true, []);
+    const manager = config.getModelProviderManager();
+    await manager.start();
+
+    expect(projectRead).not.toHaveBeenCalled();
+    expect(localRead).not.toHaveBeenCalled();
+    await expect(manager.listModels()).resolves.toEqual([]);
+  });
+
+  it('keeps the trust gate decisive when both project sources are selected', async () => {
+    vi.stubEnv('QWEN_STARTUP_TRUST_KEY', 'resolved-secret');
+    vi.stubEnv('QWEN_STARTUP_TRUST_MODEL', 'test-model');
+    const { config, projectRead, localRead } = makeStartupConfig(false, [
+      'project',
+      'local',
+    ]);
+    const manager = config.getModelProviderManager();
+    await manager.start();
+
+    expect(projectRead).not.toHaveBeenCalled();
+    expect(localRead).not.toHaveBeenCalled();
+    await expect(manager.listModels()).resolves.toEqual([]);
   });
 });

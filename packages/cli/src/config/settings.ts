@@ -400,8 +400,22 @@ function findEnvFile(workspaceDir: string): string | null {
 
 const loadedEnvironment = new Map<
   string,
-  { previous: string | undefined; injected: string }
+  {
+    previous: string | undefined;
+    injected: string;
+    workspace?: ProviderWorkspace;
+  }
 >();
+interface ProviderWorkspace {
+  cwd: string;
+  isTrusted: boolean;
+}
+
+function providerWorkspacePath(cwd: string): string {
+  // POSIX filesystems can distinguish both case and backslashes in names.
+  return process.platform === 'win32' ? normalizePath(cwd) : path.resolve(cwd);
+}
+
 let environmentOwner = process.env;
 let productProcessOnlyEnvironmentVariables: ReadonlySet<string> = new Set();
 
@@ -418,7 +432,11 @@ export function setProcessOnlyEnvironmentVariables(
   };
 }
 
-function injectEnvironment(key: string, value: string): void {
+function injectEnvironment(
+  key: string,
+  value: string,
+  workspace?: ProviderWorkspace,
+): void {
   if (environmentOwner !== process.env) {
     loadedEnvironment.clear();
     environmentOwner = process.env;
@@ -430,6 +448,7 @@ function injectEnvironment(key: string, value: string): void {
         ? previous.previous
         : process.env[key],
     injected: value,
+    workspace,
   });
   process.env[key] = value;
 }
@@ -445,6 +464,73 @@ export function restoreLoadedEnvironment(): void {
   }
   loadedEnvironment.clear();
   environmentOwner = process.env;
+}
+
+/**
+ * Keys whose current process.env value was injected from a workspace
+ * (project) .env file, mapped to that workspace's trust decision at
+ * injection time. Shell-exported values keep precedence and are never
+ * injected; user-global .env values carry the user origin and are never
+ * listed. The view clears together with the injection map on restore and
+ * process.env replacement.
+ * @internal
+ */
+export function getWorkspaceEnvInjections(): ReadonlyMap<string, boolean> {
+  return new Map(
+    [...currentWorkspaceEnvInjections()].map(([key, workspace]) => [
+      key,
+      workspace.isTrusted,
+    ]),
+  );
+}
+
+function* currentWorkspaceEnvInjections(): Iterable<[string, ProviderWorkspace]> {
+  if (environmentOwner !== process.env) return;
+  for (const [key, { workspace, injected }] of loadedEnvironment) {
+    if (workspace && process.env[key] === injected) yield [key, workspace];
+  }
+}
+
+/** Return an environment lookup for startup decisions about raw providers. */
+export function getProviderStartupEnvironment(): (
+  name: string,
+) => string | undefined {
+  const normalizeKey = (key: string) =>
+    process.platform === 'win32' ? key.toUpperCase() : key;
+  const workspaceKeys = new Set(
+    [...currentWorkspaceEnvInjections()].map(([key]) => normalizeKey(key)),
+  );
+  return (key) =>
+    workspaceKeys.has(normalizeKey(key)) ? undefined : process.env[key];
+}
+
+/**
+ * Workspace .env keys that must not feed provider interpolation under the
+ * effective source selection and workspace. Only active injections from the
+ * current workspace are eligible during Config construction, and only if
+ * trusted at injection and now, with either project or local selected.
+ * Without a workspace context only injection trust and sources apply. Shell
+ * and user-global values are not workspace injections.
+ * @internal
+ */
+export function getRejectedProviderEnvKeys(
+  sources: readonly SettingSource[],
+  workspace = constructionWorkspace,
+): ReadonlySet<string> {
+  const includeWorkspace =
+    sources.includes('project') || sources.includes('local');
+  const cwd = workspace && providerWorkspacePath(workspace.cwd);
+  const rejected = new Set<string>();
+  for (const [key, origin] of currentWorkspaceEnvInjections()) {
+    if (
+      !includeWorkspace ||
+      !origin.isTrusted ||
+      (workspace && (!workspace.isTrusted || origin.cwd !== cwd))
+    ) {
+      rejected.add(key);
+    }
+  }
+  return rejected;
 }
 
 export function loadEnvironment(
@@ -466,6 +552,13 @@ export function loadEnvironment(
       const resolvedEnvFilePath = normalizePath(envFilePath);
       const isProjectExecutionEnvFile =
         resolvedEnvFilePath !== NORMALIZED_USER_CONFIG_ENV_PATH;
+      // The legacy execution check folds case on macOS and backslashes on
+      // POSIX. Neither is safe evidence of a user-global provider source.
+      const workspace =
+        providerWorkspacePath(envFilePath) ===
+        providerWorkspacePath(USER_CONFIG_ENV_PATH)
+          ? undefined
+          : { cwd: providerWorkspacePath(workspaceDir), isTrusted };
 
       for (const key in parsedEnv) {
         if (Object.hasOwn(parsedEnv, key)) {
@@ -504,7 +597,7 @@ export function loadEnvironment(
 
           // Load variable only if it's not already set in the environment.
           if (!Object.hasOwn(process.env, key)) {
-            injectEnvironment(key, value);
+            injectEnvironment(key, value, workspace);
           }
         }
       }
@@ -523,9 +616,11 @@ const ALL_SETTING_SOURCES: readonly SettingSource[] = [
 ];
 
 let defaultSettingSourcesForProcess: readonly SettingSource[] | undefined;
+let constructionSettingSources: readonly SettingSource[] | undefined;
+let constructionWorkspace: ProviderWorkspace | undefined;
 
 function normalizeSettingSources(
-  sources: readonly SettingSource[] | undefined,
+  sources: readonly string[] | undefined,
 ): readonly SettingSource[] {
   if (sources === undefined) {
     return ALL_SETTING_SOURCES;
@@ -545,6 +640,45 @@ export function setDefaultSettingSourcesForProcess(
 ): void {
   defaultSettingSourcesForProcess =
     sources === undefined ? undefined : normalizeSettingSources(sources);
+}
+
+/**
+ * Return the source selection for raw provider reads. Explicit invocation
+ * sources take precedence over synchronous construction scope, then the same
+ * process default used by settings resolution. Omission defaults to all layers.
+ * @internal
+ */
+export function getEffectiveSettingSources(
+  sources?: readonly string[],
+): readonly SettingSource[] {
+  return normalizeSettingSources(
+    sources ?? constructionSettingSources ?? defaultSettingSourcesForProcess,
+  );
+}
+
+/**
+ * Runs synchronous provider construction with the invocation's source
+ * selection. Daemon sessions can declare different `--setting-sources` values
+ * in one process, so their raw provider reads cannot rely on the process
+ * default. The previous selection and workspace are restored even when
+ * construction throws.
+ * @internal
+ */
+export function runWithEffectiveSettingSources<T>(
+  sources: readonly string[] | undefined,
+  action: () => T,
+  workspace?: ProviderWorkspace,
+): T {
+  const previous = constructionSettingSources;
+  const previousWorkspace = constructionWorkspace;
+  constructionSettingSources = getEffectiveSettingSources(sources);
+  constructionWorkspace = workspace ?? previousWorkspace;
+  try {
+    return action();
+  } finally {
+    constructionSettingSources = previous;
+    constructionWorkspace = previousWorkspace;
+  }
 }
 
 /**

@@ -114,6 +114,10 @@ vi.mock('read-package-up', () => ({
 
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })),
+  isWorkspaceTrustedForProviders: vi.fn(() => ({
+    isTrusted: true,
+    source: undefined,
+  })),
 }));
 
 

@@ -51,9 +51,19 @@ import {
   type StartupPhaseObserver,
 } from '@qwen-code/core';
 import type { LoadedSettings } from './settings.js';
-import { type MergedSettings, saveModelChange } from './settings.js';
+import {
+  getEffectiveSettingSources,
+  getProviderStartupEnvironment,
+  getRejectedProviderEnvKeys,
+  runWithEffectiveSettingSources,
+  type MergedSettings,
+  saveModelChange,
+} from './settings.js';
 import { resolvePath } from '../utils/resolvePath.js';
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  isWorkspaceTrusted,
+  isWorkspaceTrustedForProviders,
+} from './trustedFolders.js';
 import { McpServerEnablementManager } from './mcp/mcpServerEnablement.js';
 import {
   getProjectMcpServerNames,
@@ -730,10 +740,66 @@ export async function loadCliConfig(
   const borrowedModelTransportManager = options.modelTransportManager;
   const borrowedCustomProviderManager = options.customProviderManager;
 
+  // Keep the resolved trust for other resources. If a workspace-provided
+  // value changed headless detection, require independent folder trust for
+  // raw providers. Use the session's flags, including those supplied by a
+  // multi-session host rather than on process.argv.
+  // The user-configured folder-trust directory rules for raw provider
+  // admission resolve their environment references through the provider
+  // startup view, which excludes workspace-origin dotenv values: a workspace
+  // .env must not expand a user rule into covering the workspace itself.
+  // Shell and user-global values, literal rules, and the folder-trust toggle
+  // keep their effect, and so does host-selected headless behavior.
+  const providerFolderTrusted =
+    isWorkspaceTrustedForProviders(
+      loadedSettings.user.originalSettings,
+      cwd,
+      getProviderStartupEnvironment(),
+    ).isTrusted ?? false;
+  const providerStartupTrusted =
+    loadedSettings.isTrusted &&
+    // The loaded trust must not depend on a workspace-expanded folder match:
+    // either the match survives recomputation, no folder match was involved,
+    // or the process-level headless detection that also explains the loaded
+    // settings service's auto-trust holds.
+    (providerFolderTrusted ||
+      !isWorkspaceTrusted(
+        loadedSettings.user.settings,
+        cwd,
+        undefined,
+        undefined,
+        false,
+      ).isTrusted ||
+      isHeadlessMode()) &&
+    (!isHeadlessMode(argv) ||
+      isHeadlessMode(argv, getProviderStartupEnvironment()) ||
+      providerFolderTrusted);
+  const providerSettingsSources = getEffectiveSettingSources(
+    argv.settingSources,
+  ).filter(
+    (source) =>
+      !loadedSettings[source].readOnly &&
+      (source === 'user' || providerStartupTrusted),
+  );
+  // Bind raw user-source reads to construction, not to the factory: Config
+  // keeps that factory for reuse when building another session.
+  const createConfig = (params: ConstructorParameters<typeof Config>[0]) =>
+    runWithEffectiveSettingSources(
+      providerSettingsSources,
+      () =>
+        new Config({
+          ...params,
+          providerSettingsSources,
+          providerRejectedEnvKeys:
+            getRejectedProviderEnvKeys(providerSettingsSources),
+        }),
+      { cwd, isTrusted: providerStartupTrusted },
+    );
+
   if (useHostConfig) {
     // ACP 的 Config 暂承载认证、Store 和 ResourceService，不加载未来会话的资源。
     // daemon 查询接口仍需要用户级资源投影，沿用下方完整加载，但不读取会话项目。
-    const config = new Config({
+    const config = createConfig({
       loadedSettings,
       sessionId,
       targetDir: cwd,
@@ -1329,7 +1395,7 @@ export async function loadCliConfig(
   };
 
   const configBuildDone = startupStep('config_build');
-  const config = new Config(
+  const config = createConfig(
     configParams as ConstructorParameters<typeof Config>[0],
   );
   configBuildDone();

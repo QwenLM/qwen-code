@@ -6,6 +6,8 @@
  */
 
 import type { SettingsService } from '@qwen-code/resource';
+import type { SettingsSource } from '@qwen-code/resource';
+import { resolveEnvVarsInObject } from '@qwen-code/resource';
 
 import stripJsonComments from 'strip-json-comments';
 import { Storage } from '../../config/storage.js';
@@ -132,6 +134,9 @@ export function createCustomModelProviders(
  * → CustomModelProvider 列表。逐份取 providers 块浅合并后交给
  * createCustomModelProviders；文本缺失/块缺失/坏块按空处理。JSON 解析
  * 异常由调用方 try/catch 定归属 warn，这里直接抛。
+ *
+ * rejectedEnvKeys hides workspace .env values the caller's trust and source
+ * boundary rejected; the process environment is restored before returning.
  */
 export function createCustomModelProvidersFromSettingsTexts(
   texts: ReadonlyArray<string | undefined | null>,
@@ -139,14 +144,50 @@ export function createCustomModelProvidersFromSettingsTexts(
   settingsService: SettingsService,
   scope: ModelConfigStoreScope,
   cwd?: string,
+  rejectedEnvKeys?: ReadonlySet<string>,
 ): ModelProvider[] {
   return createCustomModelProviders(
-    mergeProviderSettingsTexts(texts),
+    // Expand environment references before provider validation, hiding keys
+    // the caller's trust and source boundary rejected for this assembly.
+    resolveProviderSettingsWithEnvRejections(texts, rejectedEnvKeys),
     transportManager,
     settingsService,
     scope,
     cwd,
   );
+}
+
+/**
+ * Merge provider settings texts and expand their environment references.
+ * Rejected keys are hidden from the synchronous expansion so a value
+ * injected from a workspace .env file the caller's boundary rejected cannot
+ * supply a provider endpoint or credential through an environment reference;
+ * the process environment is restored immediately afterwards, preserving
+ * general dotenv behavior for every other consumer.
+ */
+function resolveProviderSettingsWithEnvRejections(
+  texts: ReadonlyArray<string | undefined | null>,
+  rejectedEnvKeys: ReadonlySet<string> | undefined,
+): Record<string, unknown> {
+  const merged = mergeProviderSettingsTexts(texts);
+  if (!rejectedEnvKeys || rejectedEnvKeys.size === 0) {
+    return resolveEnvVarsInObject(merged);
+  }
+  const restore: Array<[string, string | undefined]> = [];
+  try {
+    for (const key of rejectedEnvKeys) {
+      if (Object.prototype.hasOwnProperty.call(process.env, key)) {
+        restore.push([key, process.env[key]]);
+        delete process.env[key];
+      }
+    }
+    return resolveEnvVarsInObject(merged);
+  } finally {
+    for (const [key, value] of restore) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 }
 
 function mergeProviderSettingsTexts(
@@ -155,11 +196,10 @@ function mergeProviderSettingsTexts(
   const merged: Record<string, unknown> = {};
   for (const text of texts) {
     if (!text) continue;
-    const block = (
-      JSON.parse(stripJsonComments(text.replace(/^\uFEFF/, ''))) as {
-        providers?: unknown;
-      }
-    )['providers'];
+    const settings = JSON.parse(
+      stripJsonComments(text.replace(/^\uFEFF/, '')),
+    ) as { providers?: unknown } | null;
+    const block = settings?.providers;
     if (block && typeof block === 'object' && !Array.isArray(block)) {
       Object.assign(merged, block);
     }
@@ -172,21 +212,34 @@ function mergeProviderSettingsTexts(
  * settings 的 providers 块（local 覆盖 project），只返回配置，不创建实例。
  * 工作区是 home 目录时不读项目层；文件缺失/损坏/读取异常只 warn 留空，
  * 不在装配期抛错。
+ *
+ * With no source selection, read both layers. An explicit selection uses the
+ * same layer names as SettingsService.resolve and skips excluded files before
+ * their raw provider settings can reach environment-reference expansion.
+ * Rejected environment keys are masked during expansion, as for user settings.
  */
 export function loadProjectCustomProviderConfigs(
   settingsService: SettingsService,
   cwd = process.cwd(),
+  sources?: readonly SettingsSource[],
+  rejectedEnvKeys?: ReadonlySet<string>,
 ): CustomProviderConfig[] {
+  const includeProject = sources?.includes('project') ?? true;
+  const includeLocal = sources?.includes('local') ?? true;
+  if (!includeProject && !includeLocal) return [];
   try {
     const storage = new Storage(cwd);
     if (storage.isWorkspaceHomeDir()) return [];
-    const sources = settingsService.getProjectSettingsSources(
+    const fileSources = settingsService.getProjectSettingsSources(
       storage.getWorkspaceSettingsPath(),
       storage.getWorkspaceLocalSettingsPath(),
     );
+    const texts: Array<string | undefined> = [];
+    if (includeProject) texts.push(fileSources.project.read());
+    if (includeLocal) texts.push(fileSources.local.read());
     const { providers, issues } = parseCustomProviderSettings(
       withoutReservedProviderSettings(
-        mergeProviderSettingsTexts([sources.project.read(), sources.local.read()]),
+        resolveProviderSettingsWithEnvRejections(texts, rejectedEnvKeys),
       ),
     );
     for (const issue of issues) {

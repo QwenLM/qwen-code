@@ -8,6 +8,7 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   resolveEnvVarsInString,
+  resolveEnvVarsInStringWithView,
   resolveEnvVarsInObject,
 } from './envVarResolver.js';
 
@@ -411,5 +412,105 @@ describe('resolveEnvVarsInObject', () => {
 
       expect(result.hooks.header).toBe('val1');
     });
+  });
+});
+
+describe('resolveEnvVarsInStringWithView', () => {
+  beforeEach(() => {
+    vi.stubEnv('TEST_VAR', '');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('should keep the placeholder when the view supplies no value', () => {
+    const result = resolveEnvVarsInStringWithView(
+      'Value is $TEST_VAR',
+      () => undefined,
+    );
+
+    expect(result).toBe('Value is $TEST_VAR');
+  });
+
+  it('should resolve a referenced variable the view supplies', () => {
+    const result = resolveEnvVarsInStringWithView(
+      'Value is $TEST_VAR',
+      (name) => (name === 'TEST_VAR' ? 'view-value' : undefined),
+    );
+
+    expect(result).toBe('Value is view-value');
+  });
+
+  it('should resolve ${VAR_NAME} format through the view', () => {
+    const result = resolveEnvVarsInStringWithView(
+      'Value is ${TEST_VAR}',
+      (name) => (name === 'TEST_VAR' ? 'view-value' : undefined),
+    );
+
+    expect(result).toBe('Value is view-value');
+  });
+
+  it('should resolve multiple variables through the view', () => {
+    const result = resolveEnvVarsInStringWithView(
+      'URL: http://$TEST_VAR:${OTHER_VAR}/api',
+      (name) =>
+        name === 'TEST_VAR'
+          ? 'localhost'
+          : name === 'OTHER_VAR'
+            ? '8080'
+            : undefined,
+    );
+
+    expect(result).toBe('URL: http://localhost:8080/api');
+  });
+
+  it('should not fall back to process.env', () => {
+    vi.stubEnv('TEST_VAR', 'process-value');
+
+    const result = resolveEnvVarsInStringWithView(
+      'Value is ${TEST_VAR}',
+      () => undefined,
+    );
+
+    expect(result).toBe('Value is ${TEST_VAR}');
+  });
+
+  it('should prefer the view over a differing process.env value', () => {
+    vi.stubEnv('TEST_VAR', 'process-value');
+
+    const result = resolveEnvVarsInStringWithView(
+      'Value is ${TEST_VAR}',
+      (name) => (name === 'TEST_VAR' ? 'view-value' : undefined),
+    );
+
+    expect(result).toBe('Value is view-value');
+  });
+
+  it('should apply the default when the view has no value', () => {
+    const result = resolveEnvVarsInStringWithView(
+      'URL: ${TEST_VAR:-https://default.example}/api',
+      () => undefined,
+    );
+
+    expect(result).toBe('URL: https://default.example/api');
+  });
+
+  it('should keep the placeholder when the view and default are absent', () => {
+    const result = resolveEnvVarsInStringWithView(
+      'Missing: ${UNDEFINED_VIEW_VAR}',
+      () => undefined,
+    );
+
+    expect(result).toBe('Missing: ${UNDEFINED_VIEW_VAR}');
+  });
+
+  it('should leave a dollar sign without a variable name unchanged', () => {
+    const result = resolveEnvVarsInStringWithView(
+      'Cost is $ 5 today',
+      () => 'ignored',
+    );
+
+    expect(result).toBe('Cost is $ 5 today');
   });
 });

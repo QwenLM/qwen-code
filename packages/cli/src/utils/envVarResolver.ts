@@ -21,39 +21,81 @@
  * resolveEnvVarsInString("URL: ${MISSING_VAR:-https://default.com}") // Returns "URL: https://default.com"
  * resolveEnvVarsInString("Missing: $UNDEFINED_VAR") // Returns "Missing: $UNDEFINED_VAR"
  */
+const ENV_VAR_REGEX = /\$(?:(\w+)|{([^}]+?)(?::-([^}]*))?})/g;
+
+function replaceEnvVarReferences(
+  readEnvironment: (name: string) => string | undefined,
+): (
+  match: string,
+  varName1?: string,
+  varName2?: string,
+  defaultValue?: string,
+) => string {
+  return (
+    match: string,
+    varName1?: string,
+    varName2?: string,
+    defaultValue?: string,
+  ): string => {
+    const varName: string = varName1 || varName2 || '';
+
+    if (!varName) {
+      return match;
+    }
+
+    const resolved = readEnvironment(varName);
+    if (typeof resolved === 'string') {
+      return resolved;
+    }
+    if (defaultValue !== undefined) {
+      return defaultValue;
+    }
+    return match;
+  };
+}
+
 export function resolveEnvVarsInString(
   value: string,
   customEnv?: Record<string, string>,
 ): string {
-  // Regex matches $VAR_NAME, ${VAR_NAME}, and ${VAR_NAME:-DEFAULT_VALUE}
-  const envVarRegex = /\$(?:(\w+)|{([^}]+?)(?::-([^}]*))?})/g;
-
   return value.replace(
-    envVarRegex,
-    (
-      match: string,
-      varName1?: string,
-      varName2?: string,
-      defaultValue?: string,
-    ): string => {
-      const varName: string = varName1 || varName2 || '';
-
-      if (!varName) {
-        return match;
-      }
-
+    ENV_VAR_REGEX,
+    replaceEnvVarReferences((varName) => {
       if (customEnv && typeof customEnv[varName] === 'string') {
         return customEnv[varName];
       }
       if (process && process.env && typeof process.env[varName] === 'string') {
         return process.env[varName];
       }
-      if (defaultValue !== undefined) {
-        return defaultValue;
-      }
-      return match;
-    },
+      return undefined;
+    }),
   );
+}
+
+/**
+ * Resolves environment variables in a string through an explicit environment
+ * view, without consulting process.env. The view decides which values the
+ * string may see: a lookup that returns undefined leaves the placeholder in
+ * place (or applies the :- default), so callers can exclude values by
+ * origin while still resolving shell or user-global values. Placeholder and
+ * default semantics otherwise match {@link resolveEnvVarsInString}.
+ *
+ * @param value - The string that may contain environment variable placeholders
+ * @param readEnvironment - Lookup consulted for every referenced variable
+ * @returns The string with environment variables resolved from the view
+ *
+ * @example
+ * resolveEnvVarsInStringWithView("Token: $API_KEY", (name) =>
+ *   name === "API_KEY" ? "secret-123" : undefined,
+ * ); // Returns "Token: secret-123"
+ * resolveEnvVarsInStringWithView("URL: ${HIDDEN}/api", () => undefined);
+ * // Returns "URL: ${HIDDEN}/api"
+ */
+export function resolveEnvVarsInStringWithView(
+  value: string,
+  readEnvironment: (name: string) => string | undefined,
+): string {
+  return value.replace(ENV_VAR_REGEX, replaceEnvVarReferences(readEnvironment));
 }
 
 /**
