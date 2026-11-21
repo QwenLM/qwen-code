@@ -47230,17 +47230,18 @@ describe('idle suspension', () => {
   });
 
   it('an admitted mutation resets the idle timer', async () => {
-    const server = await app(false, undefined, true, { idleSuspendMs: 1000 });
+    const server = await app(false, undefined, true, { idleSuspendMs: 4000 });
     const clientId = await createIdleSession(server);
-    await sleep(600);
+    await sleep(2400);
     await headers(supertest(server).post(`/session/${SESSION_ID}/title`))
       .set('X-Qwen-Client-Id', clientId)
       .send({ title: 'still here' })
       .expect(200);
-    // Past the original deadline (1000ms + ≤10% jitter), before the one
-    // the title re-armed (≥1600ms from the create). The wide ratio keeps
-    // the assertion meaningful on a loaded shard without racing it.
-    await sleep(600);
+    // Past the original deadline (4000ms + ≤10% jitter), before the one
+    // the title re-armed (≥6400ms from the create). Both bounds are real
+    // timers, so the 1600ms of slack on each side is what a loaded shard's
+    // late setTimeout callbacks have to fit inside (#18053).
+    await sleep(2400);
     expect((await statusOf(server, clientId)).status).toBe(200);
     await vi.waitFor(
       async () => {
