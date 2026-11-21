@@ -4906,7 +4906,10 @@ export class HostedWorkspaceToolTurn {
           if (
             !this.backgroundShellAdmitted() &&
             this.publication &&
-            args['is_background'] !== undefined
+            // The marker is judged by its VALUE, not by its presence: the
+            // admission below admits a foreground command that spells the
+            // default out, and only a genuine background request is refused.
+            backgroundRequested
           ) {
             validationError = 'Hosted Shell requires one foreground command.';
           }

@@ -303,7 +303,7 @@ public class JdbcManagedUserMessageStore
         List<Map<String, Object>> input = agents.userMessageInput(blocks);
         String profile = jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenant, session);
-        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+        if (WorkspaceToolProfiles.isExternal(profile)
                 && input.stream().anyMatch(block -> !"text".equals(block.get("type")))) {
             throw conflict("workspace_unavailable");
         }

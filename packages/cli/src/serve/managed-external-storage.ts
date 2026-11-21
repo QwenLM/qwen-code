@@ -13,19 +13,37 @@ import {
 } from './managed-context-envelope.js';
 import { publisherFields } from './managed-shell-publisher.js';
 import { realpathDeepestExisting } from './managed-runtime-tool-executor.js';
-import { isWorkspaceToolCapability } from './managed-workspace-activation.js';
+import {
+  EXTERNAL_SHELL_CAPABILITY_DIGEST,
+  isWorkspaceToolCapability,
+} from './managed-workspace-activation.js';
 
 const INVALID = 'Managed Runtime external storage admission failed.';
 const directories = new WeakMap<ManagedExternalContextBoot, string>();
 const identifier = /^[A-Za-z0-9._-]{1,128}$/;
+// Boot-envelope identity (provisionRequestId, runtimeIncarnation) follows the
+// wider managed identifier rule, colons included.
+const bootIdentifier = /^[A-Za-z0-9._:-]{1,128}$/;
 
-export interface ManagedExternalStorage {
-  readonly kind: 'external';
-  readonly physicalKey: string;
-  readonly aliasPath: string;
-  readonly mountRoot: string;
-  readonly registrationRevision: number;
-}
+export type ManagedExternalStorage =
+  | {
+      readonly kind: 'external';
+      readonly physicalKey: string;
+      readonly aliasPath: string;
+      readonly mountRoot: string;
+      readonly registrationRevision: number;
+    }
+  | {
+      // Sandbox-owned storage: the registration lives in the trusted boot
+      // envelope itself, so there is no physicalKey/aliasPath journal to
+      // cross-check. Identity is fenced against the boot document instead.
+      readonly kind: 'ephemeral';
+      readonly workspaceId: string;
+      readonly mountRoot: string;
+      readonly registrationRevision: number;
+      readonly provisionRequestId: string;
+      readonly runtimeIncarnation: string;
+    };
 
 export interface ManagedExternalContextBoot extends ManagedContextBoot {
   readonly storage: ManagedExternalStorage;
@@ -46,6 +64,13 @@ function canonicalPath(value: unknown): value is string {
 }
 
 function parseStorage(value: unknown): ManagedExternalStorage {
+  if (
+    value &&
+    typeof value === 'object' &&
+    (value as Record<string, unknown>)['kind'] === 'ephemeral'
+  ) {
+    return parseEphemeralStorage(value);
+  }
   const storage = publisherFields(value, [
     'kind',
     'physicalKey',
@@ -61,6 +86,30 @@ function parseStorage(value: unknown): ManagedExternalStorage {
     !canonicalPath(storage['mountRoot']) ||
     !Number.isSafeInteger(storage['registrationRevision']) ||
     (storage['registrationRevision'] as number) < 1
+  )
+    throw new Error(INVALID);
+  return Object.freeze(storage) as unknown as ManagedExternalStorage;
+}
+
+function parseEphemeralStorage(value: unknown): ManagedExternalStorage {
+  const storage = publisherFields(value, [
+    'kind',
+    'workspaceId',
+    'mountRoot',
+    'registrationRevision',
+    'provisionRequestId',
+    'runtimeIncarnation',
+  ]);
+  if (
+    typeof storage['workspaceId'] !== 'string' ||
+    !identifier.test(storage['workspaceId']) ||
+    !canonicalPath(storage['mountRoot']) ||
+    !Number.isSafeInteger(storage['registrationRevision']) ||
+    (storage['registrationRevision'] as number) < 1 ||
+    typeof storage['provisionRequestId'] !== 'string' ||
+    !bootIdentifier.test(storage['provisionRequestId']) ||
+    typeof storage['runtimeIncarnation'] !== 'string' ||
+    !bootIdentifier.test(storage['runtimeIncarnation'])
   )
     throw new Error(INVALID);
   return Object.freeze(storage) as unknown as ManagedExternalStorage;
@@ -88,10 +137,25 @@ export async function readManagedExternalBoot(
     const { storage: rawStorage, ...context } = object;
     const boot = parseManagedContextBoot(context);
     const storage = parseStorage(rawStorage);
+    // A resident external Workspace is shared across Sessions, so its boot is
+    // workspace-isolated; a single-Session external boot stays session-isolated.
+    // Both are admitted on this external boot path only — plain v1 boots keep
+    // the session requirement in the worker. The substitution fences below
+    // (mount root, capability digest, registration identity) are unchanged.
     if (
-      boot.isolationClass !== 'session' ||
+      (boot.isolationClass !== 'session' &&
+        boot.isolationClass !== 'workspace') ||
       boot.mountRoot !== storage.mountRoot ||
       !isWorkspaceToolCapability(boot.capabilityDigest)
+    )
+      throw new Error(INVALID);
+    // The external Shell lane drains one worker's foreground captures before
+    // its storage may be released, so it is session-isolated over durable
+    // registered storage: neither a shared worker nor a sandbox-owned
+    // directory can produce that proof.
+    if (
+      boot.capabilityDigest === EXTERNAL_SHELL_CAPABILITY_DIGEST &&
+      (boot.isolationClass !== 'session' || storage.kind !== 'external')
     )
       throw new Error(INVALID);
     const directory = path.dirname(bootPath);
@@ -101,6 +165,21 @@ export async function readManagedExternalBoot(
     )
       throw new Error(INVALID);
     await privateDirectory(directory);
+    if (storage.kind === 'ephemeral') {
+      // Sandbox-owned storage carries no adapter journal: its identity is
+      // the trusted boot envelope itself, so fence the storage member
+      // against the boot's workspace, provision request and incarnation
+      // instead of the registration.json cross-check below.
+      if (
+        storage.workspaceId !== boot.workspaceId ||
+        storage.provisionRequestId !== boot.provisionRequestId ||
+        storage.runtimeIncarnation !== boot.runtimeIncarnation
+      )
+        throw new Error(INVALID);
+      const admittedEphemeral = Object.freeze({ ...boot, storage });
+      directories.set(admittedEphemeral, directory);
+      return admittedEphemeral;
+    }
     const handle = await open(
       path.join(directory, 'registration.json'),
       constants.O_RDONLY | constants.O_NOFOLLOW,

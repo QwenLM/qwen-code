@@ -111,6 +111,18 @@ class ExternalWorkspaceProvisionerTest {
     /** Places the worker for one test and returns its handle and lease. */
     private Placement place(ExternalWorkspaceProvisioner subject, String name) throws Exception {
         RuntimeProvisionRequest request = request();
+        return place(subject, name, request);
+    }
+
+    /** The resident (workspace-isolated) request shape reattachment serves. */
+    private static RuntimeProvisionRequest residentRequest() {
+        return new RuntimeProvisionRequest(new RuntimeScope(TENANT, ALIAS, "1", MOUNT,
+                CAPABILITY, "workspace"), null,
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE, ALIAS);
+    }
+
+    private Placement place(ExternalWorkspaceProvisioner subject, String name,
+            RuntimeProvisionRequest request) throws Exception {
         RuntimeProvisionSeed seed = seed(name);
         RuntimeResourceHandle handle = join(subject.ensureResource(request, seed, null));
         client.provisionResponse = Map.of("protocolVersion", 1,
@@ -316,6 +328,20 @@ class ExternalWorkspaceProvisionerTest {
         assertEquals(RuntimeObservation.Outcome.UNKNOWN, join(subject.reconcile(placement.request(),
                 placement.seed(), placement.handle(), placement.lease())).getOutcome());
         assertTrue(subject.isUsable(placement.lease()));
+    }
+
+    @Test
+    void aSessionIsolatedUnknownNeverAttemptsReattach() throws Exception {
+        // The design keeps reattachment on the resident (workspace-isolated)
+        // profile only: a session-isolated provider without a reattach
+        // endpoint must keep its placement and answer UNKNOWN, not conflict.
+        ExternalWorkspaceProvisioner subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        Placement placement = place(subject, "session-unknown");
+        client.observeState = "UNKNOWN";
+        assertEquals(RuntimeObservation.Outcome.UNKNOWN, join(subject.reconcile(placement.request(),
+                placement.seed(), placement.handle(), placement.lease())).getOutcome());
+        assertTrue(subject.isUsable(placement.lease()));
+        assertEquals(0, client.reattaches.size());
     }
 
     @Test
@@ -619,6 +645,93 @@ class ExternalWorkspaceProvisionerTest {
     }
 
     @Test
+    void freshProvisionerReattachesAnUnknownOldBindingWithoutProvisioning() throws Exception {
+        var first = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(first, "reattach-ready", residentRequest());
+        first.close();
+
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        client.observeState = "UNKNOWN";
+        client.reattachState = "RUNNING";
+        client.reattachStorage = evidence("confirms", 1);
+        int observations = client.observes.size();
+        int provisions = client.provisions.size();
+
+        RuntimeObservation observed = join(subject.reconcile(original.request(), original.seed(),
+                original.handle(), original.lease()));
+
+        assertEquals(RuntimeObservation.Outcome.READY, observed.getOutcome());
+        assertEquals(observations + 1, client.observes.size());
+        assertEquals(provisions, client.provisions.size(), "reattach must not provision a replacement");
+        assertEquals(1, client.reattaches.size());
+        Map<String, Object> body = client.reattaches.get(0);
+        assertEquals(1, ((Number) body.get("protocolVersion")).intValue());
+        assertEquals(original.seed().getProvisionRequestId(), body.get("provisionRequestId"));
+        assertEquals(original.handle().getValue().get("identity"), body.get("identity"));
+        assertEquals(original.handle().getValue().get("provider"), body.get("handle"));
+        assertEquals(original.lease().getEndpoint().toString(), body.get("endpoint"));
+        assertTrue(body.get("scope") instanceof Map<?, ?>);
+        assertTrue(body.get("boot") instanceof Map<?, ?>);
+        assertTrue(subject.isUsable(original.lease()));
+    }
+
+    @Test
+    void reattachEndpointDriftFailsClosedWithoutProvisioning() throws Exception {
+        var first = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(first, "reattach-drift", residentRequest());
+        first.close();
+
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        client.observeState = "UNKNOWN";
+        client.reattachState = "RUNNING";
+        client.reattachEndpoint = "http://127.0.0.1:43191";
+        client.reattachStorage = evidence("confirms", 1);
+        int provisions = client.provisions.size();
+
+        assertEquals(RuntimeObservation.Outcome.CONFLICT, join(subject.reconcile(original.request(),
+                original.seed(), original.handle(), original.lease())).getOutcome());
+        assertEquals(1, client.reattaches.size());
+        assertEquals(provisions, client.provisions.size());
+        assertFalse(subject.isUsable(original.lease()));
+    }
+
+    @Test
+    void reattachUnknownRemainsUnknownAndRetryable() throws Exception {
+        var first = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(first, "reattach-unknown", residentRequest());
+        first.close();
+
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        client.observeState = "UNKNOWN";
+        client.reattachState = "UNKNOWN";
+        int provisions = client.provisions.size();
+
+        assertEquals(RuntimeObservation.Outcome.UNKNOWN, join(subject.reconcile(original.request(),
+                original.seed(), original.handle(), original.lease())).getOutcome());
+        assertEquals(1, client.reattaches.size());
+        assertEquals(provisions, client.provisions.size());
+        assertTrue(subject.isUsable(original.lease()));
+    }
+
+    @Test
+    void reattachGoneIsPermanentAndCreatesNothing() throws Exception {
+        var first = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(first, "reattach-gone", residentRequest());
+        first.close();
+
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        client.observeState = "UNKNOWN";
+        client.reattachState = "GONE";
+        int provisions = client.provisions.size();
+
+        assertEquals(RuntimeObservation.Outcome.CONFLICT, join(subject.reconcile(original.request(),
+                original.seed(), original.handle(), original.lease())).getOutcome());
+        assertEquals(1, client.reattaches.size());
+        assertEquals(provisions, client.provisions.size());
+        assertFalse(subject.isUsable(original.lease()));
+    }
+
+    @Test
     void acquisitionRequiresPositiveContinuityButProvisionOnlyParityDoesNot() throws Exception {
         var subject = provisioner(registration(PROVIDER, 1, MOUNT));
         var original = place(subject, "acquire-missing");
@@ -697,11 +810,15 @@ class ExternalWorkspaceProvisionerTest {
         private static final String ENDPOINT = "http://127.0.0.1:43190";
         private final List<Map<String, Object>> provisions = new ArrayList<>();
         private final List<Map<String, Object>> observes = new ArrayList<>();
+        private final List<Map<String, Object>> reattaches = new ArrayList<>();
         private Map<String, Object> provisionResponse = Map.of("protocolVersion", 1,
                 "handle", Map.of("requestId", "request-a"), "endpoint", ENDPOINT);
         private String observeState = "STARTING";
+        private String reattachState = "UNKNOWN";
         private String endpoint = ENDPOINT;
+        private String reattachEndpoint = ENDPOINT;
         private Map<String, Object> storage;
+        private Map<String, Object> reattachStorage;
 
         @Override
         public CompletionStage<Map<String, Object>> provision(Map<String, Object> request) {
@@ -720,6 +837,21 @@ class ExternalWorkspaceProvisionerTest {
             }
             if (storage != null) {
                 response.put("storage", storage);
+            }
+            return CompletableFuture.completedFuture(Map.copyOf(response));
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> reattach(Map<String, Object> request) {
+            reattaches.add(request);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("protocolVersion", 1);
+            response.put("state", reattachState);
+            if ("RUNNING".equals(reattachState)) {
+                response.put("endpoint", reattachEndpoint);
+            }
+            if (reattachStorage != null) {
+                response.put("storage", reattachStorage);
             }
             return CompletableFuture.completedFuture(Map.copyOf(response));
         }

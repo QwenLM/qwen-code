@@ -1774,6 +1774,11 @@ export interface components {
             };
             /** @description Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field. */
             memoryStoreId?: string;
+            /**
+             * @description Optional explicit external Hosted Workspace profile, for the built-in qwen-code Agent on a deployment configured for external registered storage. Omission keeps the profile the deployment already selects. Only a profile this control plane has negotiated is admitted, and the chosen profile is pinned with the Session so later Turns cannot re-derive it; creation idempotency includes this field.
+             * @enum {string}
+             */
+            toolProfile?: "hosted-workspace-external-files/1" | "hosted-workspace-external-shell/1";
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */

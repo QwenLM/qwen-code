@@ -2054,6 +2054,7 @@ async function originalCsiExecutor(
     | 'not_started' = 'complete',
   beforeExecute?: () => Promise<void>,
   accept?: ManagedShellCapturePublisher['accept'],
+  retiresOnDrainProof = false,
 ) {
   const identity = { ...fixture.response.captureIdentity };
   const manifest = { ...fixture.request.acknowledgement.manifest };
@@ -2097,6 +2098,7 @@ async function originalCsiExecutor(
     prepare,
     hasInstalledPublication: true,
     ...(accept ? { accept } : {}),
+    ...(retiresOnDrainProof ? { retiresOnDrainProof } : {}),
   });
   const resultPromise = executor.executeV3({
     reference: fixture.request.reference,
@@ -2118,6 +2120,45 @@ async function originalCsiExecutor(
     resultPromise,
   };
 }
+
+describe('a capture lane that retires on its own drain proof', () => {
+  it('drops the acknowledgement blocker but keeps every other lifecycle gate', async () => {
+    const { executor, fixture } = await originalCsiExecutor(
+      undefined,
+      'complete',
+      undefined,
+      undefined,
+      true,
+    );
+    executor.sealAdmission(fixture.request.retirementId);
+    const observed = executor.getDrainObservation(fixture.request.retirementId);
+    // The external worker holds no control-plane credential, so no ACK ever
+    // reaches its journal: requiring one would refuse every close.
+    expect(observed.blockers).not.toContain('capture_uncommitted');
+    expect(observed.workState).toBe('BLOCKED');
+    for (const blocker of [
+      'shell_lifecycle_unqualified',
+      'capture_preparation_unqualified',
+      'publication_lifecycle_unqualified',
+    ])
+      expect(observed.blockers).toContain(blocker);
+  });
+
+  it('still refuses an incomplete capture, which no drain could publish', async () => {
+    const { executor, fixture } = await originalCsiExecutor(
+      undefined,
+      'partial',
+      undefined,
+      undefined,
+      true,
+    );
+    executor.sealAdmission(fixture.request.retirementId);
+    const observed = executor.getDrainObservation(fixture.request.retirementId);
+    expect(observed.blockers).toContain('capture_incomplete');
+    expect(observed.blockers).not.toContain('capture_uncommitted');
+    expect(observed.workState).toBe('BLOCKED');
+  });
+});
 
 describe('original CSI worker synchronous ACK confirmation', () => {
   it('confirms the actual sink identity, preserves lifecycle blockers and never starts new work', async () => {

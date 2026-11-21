@@ -49,7 +49,9 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
-public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
+public class EmbeddedRuntimeBroker implements RuntimeWarmer,
+        com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoveryGateway,
+        AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(
             EmbeddedRuntimeBroker.class);
     public static final Duration LEASE = Duration.ofSeconds(30);
@@ -64,6 +66,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final HttpRuntimeTransport extensionTransport;
     private final ManagedAgentProperties.RuntimeBroker brokerSettings;
     private final ExternalStorageRegistrationStore externalRegistrations;
+    private final ExternalShellPublicationProducer externalShellProducer;
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     public EmbeddedRuntimeBroker(SessionQueryStore store,
@@ -233,19 +236,36 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         HarnessSessionResolver resolver = com.alibaba.qwen.code.managedagent.workspace.runtime.ManagedRuntimeCoordinator.resolver(
                 store, workspaces, properties, workspaceId, workspaceCwd, workspaceExecutionStore);
         ObjectMapper mapper = new ObjectMapper();
+        // The external foreground-Shell lane (#15512 slice C) needs both halves:
+        // the worker's own read routes and the control-plane producer store. With
+        // either missing the lane stays unavailable and dispatch refuses.
+        this.externalShellProducer = publicationData == null || externalRegistrations == null
+                || !RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(broker.getProvisioner())
+                        ? null
+                        : new ExternalShellPublicationProducer(
+                                new HttpRuntimeTransport(), publicationData, externalRegistrations);
+        com.alibaba.qwen.code.runtimebroker.spi.ExternalShellPublication externalShell =
+                externalShellProducer;
         RuntimePublicationVerifier verifier = publications == null || publicationData == null
                 ? null : new RuntimePublicationVerifier() {
                     @Override
                     public RuntimePublicationGrant verify(ToolExecutionRecord execution,
                             String id, String token) {
-                        var binding = publications.verifyDispatch(execution, id, token);
+                        var grant = publications.verifyDispatchGrant(execution, id, token);
+                        var binding = grant.binding();
                         var fields = mapper.convertValue(binding,
                                 new TypeReference<java.util.Map<String, Object>>() { });
                         var runtime = bindingRepository.findById(execution.getBindingId());
                         var storage = remote && runtime != null ? ssh.runtimeStorage(runtime.getRequest().getScope()) : null;
                         String publicationUrl = storage == null ? properties.getToolPublication().getServiceBaseUrl()
                                 : ssh.connections().publicationEndpoint(ssh.node(storage.nodeId())).toString();
-                        return new RuntimePublicationGrant(id, token, publicationUrl, fields);
+                        // Only the external lane needs the horizon: its worker
+                        // keeps the capture locally and never sees this grant.
+                        long expiresAt = runtime != null
+                                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                                        .isExternalShellRequest(runtime.getRequest())
+                                ? grant.expiresAt() : 0L;
+                        return new RuntimePublicationGrant(id, token, publicationUrl, fields, expiresAt);
                     }
 
                     @Override
@@ -261,6 +281,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                         return saved == null ? null : mapper.convertValue(saved,
                                 new TypeReference<java.util.Map<String, Object>>() { });
                     }
+
+                    @Override
+                    public com.alibaba.qwen.code.runtimebroker.spi.ExternalShellPublication externalShell() {
+                        return externalShell;
+                    }
                 };
         try {
             this.service = new RuntimeBrokerService(resolver, provisioner,
@@ -269,6 +294,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     LEASE, verifier, v3ResultWindow);
         } catch (RuntimeException | Error failure) {
             provisioner.close();
+            if (externalShellProducer != null) {
+                externalShellProducer.close();
+            }
             throw failure;
         }
         try {
@@ -278,6 +306,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             server.start();
         } catch (IOException | IllegalArgumentException error) {
             service.close();
+            if (externalShellProducer != null) {
+                externalShellProducer.close();
+            }
             // The same catch covers the token and port validation, so name
             // the actual refusal instead of blaming the listener for all of
             // them.
@@ -327,7 +358,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
 
     @Override
     public boolean supportsWorkspaceClose(String profile) {
-        return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+        return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isExternal(profile)
                 ? RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(brokerSettings.getProvisioner())
                         && externalRegistrations != null
                         && service.supportsDrainedStopKind(RuntimeProviderKinds.EXTERNAL_WORKSPACE)
@@ -437,6 +468,37 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
     }
 
+    @Override
+    public void validateExternalTerminalOriginal(
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding) {
+        if (!(primaryProvisioner instanceof com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoverySupport external)) {
+            throw new RuntimeBrokerException(409,
+                    "external_workspace_retirement_unavailable",
+                    "External Workspace retirement is unavailable", false);
+        }
+        external.validateTerminalOriginal(binding);
+    }
+
+    @Override
+    public java.util.Map<String, Object> externalRecoveryProviderRequest(
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding) {
+        if (!(primaryProvisioner instanceof com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoverySupport external)) {
+            throw new RuntimeBrokerException(409,
+                    "external_workspace_recovery_unavailable",
+                    "External Workspace recovery is unavailable", false);
+        }
+        return external.recoveryProviderRequest(binding);
+    }
+
+    @Override
+    public CompletionStage<com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord>
+            recoverExternalWorkspaceBinding(
+                    String bindingId, long expectedGeneration,
+                    long expectedVersion) {
+        return service.recoverExternalWorkspaceBinding(
+                bindingId, expectedGeneration, expectedVersion);
+    }
+
     /**
      * The owned Runtime Broker Service, exposed for the child result relay
      * and the close cascade's binding probe at registration time. The
@@ -460,7 +522,14 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         if (recovery != null) {
             recovery.close();
         }
+        // The listener's close also closes the Service, which interrupts the
+        // dispatch lanes. The producer's lane blocks inside guarded repository
+        // calls, so it is torn down only after that, never underneath an
+        // invocation that is still running.
         server.close();
+        if (externalShellProducer != null) {
+            externalShellProducer.close();
+        }
         if (childWorkspaces != null) {
             childWorkspaces.git().close();
         }

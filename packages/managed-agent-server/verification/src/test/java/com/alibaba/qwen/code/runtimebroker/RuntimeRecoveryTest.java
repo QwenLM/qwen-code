@@ -143,4 +143,113 @@ class RuntimeRecoveryTest {
             }
         }
     }
+
+    /**
+     * R3-1/R4-1: the recovery fence is a durable write, so its compensation
+     * has to be witnessed against the durable row. An attempt that fences a
+     * READY binding and then observes nothing conclusive must leave READY
+     * behind, and the same compensation must not resume a binding an operator
+     * deliberately blocked. Mock repositories cannot show either: they return
+     * whatever the stub hands them, so a store refusal looks like success.
+     */
+    @Test
+    @org.junit.jupiter.api.Timeout(120)
+    void storeBackedRecoveryUndoesOnlyTheFenceItsOwnAttemptWrote() {
+        var source = new org.h2.jdbcx.JdbcDataSource();
+        source.setURL("jdbc:h2:mem:external-fence-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
+        RuntimeBindingRecord ready = externalWorkspaceBinding(bindings, "external-ready");
+        RuntimeBindingRecord blocked = blockBinding(bindings, externalWorkspaceBinding(
+                bindings, "external-blocked"));
+        RuntimeProvisioner provisioner = new RuntimeProvisioner() {
+            @Override
+            public String kind() {
+                return com.alibaba.qwen.code.runtimebroker.provisioning.external
+                        .ExternalWorkspaceProvisioner.KIND;
+            }
+            @Override
+            public boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
+                return handle != null;
+            }
+            @Override
+            public java.util.concurrent.CompletionStage<RuntimeLease> provision(
+                    RuntimeProvisionRequest request) {
+                throw new AssertionError("Recovery must not allocate a replacement worker");
+            }
+            @Override
+            public java.util.concurrent.CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+                    RuntimeResourceHandle handle, RuntimeLease lease) {
+                // No verdict: the worker is neither identified nor lost, so
+                // the attempt's fence is all there is to undo.
+                return java.util.concurrent.CompletableFuture.completedFuture(
+                        RuntimeObservation.starting(handle));
+            }
+        };
+        RuntimeTransport noTransport = (RuntimeTransport) Proxy.newProxyInstance(
+                RuntimeTransport.class.getClassLoader(), new Class<?>[] {RuntimeTransport.class},
+                (proxy, method, args) -> { throw new AssertionError("Unexpected transport: " + method); });
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                id -> { throw new AssertionError("Recovery reads the saved row"); },
+                provisioner, noTransport, bindings, sessions, executions,
+                "recovery", Duration.ofSeconds(30), Duration.ofSeconds(30))) {
+            RuntimeBindingRecord recovered = service.recoverExternalWorkspaceBinding(
+                    ready.getBindingId(), ready.getGeneration(), ready.getVersion())
+                    .toCompletableFuture().join();
+            assertEquals(RuntimeBindingRecord.State.READY, recovered.getState());
+            RuntimeBindingRecord stored = bindings.findById(ready.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.READY, stored.getState());
+            assertNull(stored.getOperationOwner());
+
+            RuntimeBindingRecord kept = service.recoverExternalWorkspaceBinding(
+                    blocked.getBindingId(), blocked.getGeneration(), blocked.getVersion())
+                    .toCompletableFuture().join();
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED, kept.getState());
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    bindings.findById(blocked.getBindingId()).getState());
+        }
+    }
+
+    /** A READY workspace-isolated external placement over the real store. */
+    private static RuntimeBindingRecord externalWorkspaceBinding(
+            JdbcRuntimeBindingRepository bindings, String id) {
+        var scope = new RuntimeScope("tenant-" + id, id, "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null,
+                com.alibaba.qwen.code.runtimebroker.provisioning.external
+                        .ExternalWorkspaceProvisioner.KIND,
+                id);
+        var created = bindings.findOrCreate(request);
+        var claimed = bindings.claimOperation(created.getBindingId(), "seed", Duration.ofMinutes(5));
+        var seed = claimed.getProvisionSeed();
+        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(),
+                java.net.URI.create("http://127.0.0.1:2345"),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        var handle = new RuntimeResourceHandle(
+                com.alibaba.qwen.code.runtimebroker.provisioning.external
+                        .ExternalWorkspaceProvisioner.KIND,
+                1, Map.of("resource", id));
+        var ready = bindings.compareAndSet(claimed,
+                claimed.withAttestation(lease, handle,
+                        java.time.Instant.now(), java.time.Instant.now()));
+        // Recovery claims the row itself; the fixture's seed claim must be
+        // gone or the attempt would be refused as already in progress.
+        bindings.releaseOperation(ready.getBindingId(), "seed", ready.getOperationGeneration());
+        return bindings.findById(ready.getBindingId());
+    }
+
+    /** The same placement after an operator blocked its recovery. */
+    private static RuntimeBindingRecord blockBinding(
+            JdbcRuntimeBindingRepository bindings, RuntimeBindingRecord binding) {
+        var claimed = bindings.claimOperation(binding.getBindingId(), "operator", Duration.ofMinutes(5));
+        var blocked = bindings.compareAndSet(claimed, claimed.withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, claimed.getLease(),
+                java.time.Instant.now()));
+        bindings.releaseOperation(blocked.getBindingId(), "operator", blocked.getOperationGeneration());
+        return bindings.findById(blocked.getBindingId());
+    }
 }

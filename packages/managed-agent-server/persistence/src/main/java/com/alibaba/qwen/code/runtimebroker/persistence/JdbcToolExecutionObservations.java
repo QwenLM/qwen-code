@@ -7,8 +7,8 @@ import javax.sql.DataSource;
 import java.time.Instant;
 import java.util.Map;
 
-import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository.selectByExecutionId;
-import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository.updateExecution;
+import static com.alibaba.qwen.code.runtimebroker.persistence.ToolExecutionRows.selectByExecutionId;
+import static com.alibaba.qwen.code.runtimebroker.persistence.ToolExecutionRows.updateExecution;
 
 final class JdbcToolExecutionObservations {
     private JdbcToolExecutionObservations() { }

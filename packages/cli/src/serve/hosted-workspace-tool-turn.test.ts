@@ -5836,10 +5836,7 @@ it.each([
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-it.each([
-  [{ command: 'pwd', timeout: 0 }, 'timeout must be an integer'],
-  [{ command: 'pwd', is_background: false }, 'foreground command'],
-])(
+it.each([[{ command: 'pwd', timeout: 0 }, 'timeout must be an integer']])(
   'returns a durable O2 refusal for invalid Shell arguments %j',
   async (args, message) => {
     const owner = {
@@ -5874,6 +5871,51 @@ it.each([
     expect(owner.request).not.toHaveBeenCalled();
   },
 );
+
+it('admits an explicit foreground marker on the publication-only Shell lane', async () => {
+  // R2-2: the marker is judged by its VALUE. `is_background: false` names
+  // the lane's only mode, so the control plane must hand it to the Broker
+  // instead of refusing it a layer earlier; the Broker's own admission
+  // judges the same value on the deferred_v3 payload.
+  const owner = {
+    owner: vi.fn(),
+    request: vi.fn(),
+    rememberAdmission: vi.fn(),
+  } as unknown as HttpToolPublicationOwner;
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    { owner, captureBytes: 1024 * 1024 },
+  );
+  broker.prepareV3.mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(
+      409,
+      'runtime_broker_execution_conflict',
+    ),
+  );
+  const args = { command: 'pwd', is_background: false };
+  const call = { ...calls[0], name: 'run_shell_command', args };
+  await turn
+    .execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args } }],
+      'model',
+      new AbortController().signal,
+    )
+    .catch(() => undefined);
+  expect(broker.prepareV3).toHaveBeenCalledOnce();
+  // The reserved input is the normalized one: an explicit boolean false.
+  expect(broker.prepareV3.mock.calls[0]?.[1]).toBe(
+    `sha256:${managedToolDigest({ command: 'pwd', is_background: false })}`,
+  );
+  expect(JSON.stringify(await session.sink.project())).not.toContain(
+    'one foreground command',
+  );
+});
 
 it('accepts the runtime foreground spelling is_background false', async () => {
   turn = createTurn(true);
@@ -12853,11 +12895,27 @@ it.each([
       'model',
       new AbortController().signal,
     );
-    if (enabled) {
+    if (enabled)
       expect(shell?.parametersJsonSchema).toHaveProperty(
         'properties.is_background',
       );
-      expect(broker.prepareV3).toHaveBeenCalledOnce();
+    else
+      expect(shell?.parametersJsonSchema).not.toHaveProperty(
+        'properties.is_background',
+      );
+    // R2-2: the marker is judged by its VALUE. A shut background gate
+    // withdraws the declaration but must not refuse a call that spells the
+    // lane's only mode out: the normalized payload still reaches the Broker.
+    // The rig's own outcome is a fabricated not_started, so only the refusal
+    // text and the forwarded payload are asserted here.
+    expect(
+      results[0]?.functionResponse?.response?.['error'] ?? '',
+    ).not.toContain('foreground command');
+    expect(broker.prepareV3).toHaveBeenCalledOnce();
+    expect(broker.prepareV3.mock.calls[0]![1]).toBe(
+      `sha256:${managedToolDigest({ command: 'echo hi', is_background: false })}`,
+    );
+    if (enabled) {
       expect(broker.executeV3).toHaveBeenCalledOnce();
       expect(JSON.parse(broker.executeV3.mock.calls[0]![1])).toMatchObject({
         toolName: 'run_shell_command',
@@ -12866,15 +12924,6 @@ it.each([
       expect(
         JSON.parse(broker.executeV3.mock.calls[0]![1]).input.is_background,
       ).toBe(false);
-    } else {
-      expect(shell?.parametersJsonSchema).not.toHaveProperty(
-        'properties.is_background',
-      );
-      expect(results[0]?.functionResponse?.response?.['error']).toContain(
-        'foreground command',
-      );
-      expect(broker.prepareV3).not.toHaveBeenCalled();
-      expect(broker.executeV3).not.toHaveBeenCalled();
     }
     expect(rig.orchestrator.calls).toEqual([]);
   },

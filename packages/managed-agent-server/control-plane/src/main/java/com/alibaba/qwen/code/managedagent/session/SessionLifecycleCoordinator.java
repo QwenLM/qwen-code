@@ -124,13 +124,13 @@ public class SessionLifecycleCoordinator {
     }
 
     public boolean supportsWorkspaceLifecycle(String profile) {
-        return (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+        return (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isExternal(profile)
                 ? runtimeWarmer.supportsWorkspaceClose(profile) : runtimeWarmer.supportsWorkspaceClose()) && harness.supportsLifecycle(profile);
     }
 
     public boolean supportsWorkspaceLifecycle(SessionRecord session) {
         return session.workspace() != null && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
-                && (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                && (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isExternal(session.toolProfile())
                         ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
     }
 
@@ -755,7 +755,7 @@ public class SessionLifecycleCoordinator {
             lifecycle.requireSettledExecutions(operation);
             JsonNode effects = lifecycle.recoverEffects(operation);
             if (effects == null) {
-                if (!(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                if (!(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isExternal(session.toolProfile())
                         ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()))) {
                     throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
                 }

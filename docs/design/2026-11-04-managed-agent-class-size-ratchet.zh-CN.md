@@ -38,6 +38,12 @@
 
 上限只**降**不升。一个类变小时，下调其在 pin 中的上限；一个类被删除或重命名时，移除其条目；随大类被拆分而下调 `GLOBAL_MAX_LINES`。上调某个上限或全局最大值是一个评审会拒绝的可见 diff——与重载计数棘轮同一约定。pin 的头注在条目旁记录了这一纪律。
 
+例外（PR #16023）：两个 pin 高于基线，因为该 PR 给这些类添加了新的生产代码面。
+`JdbcRuntimeBindingRepository` 新增了 `findLatestForRequest` 与 `retireUnacquiredExternal`
+（外部工作区退役路径），从 2319 增至 2360。`RuntimeBrokerService` 新增了常驻外部调度分支，
+从 1909 增至 2028。两次上调均为覆盖新代码所需的最小幅度；后续拆分提取新代码面后，
+pin 会再次下调。
+
 ## 验证
 
 - 历史基线验证：`ClassSizeRatchetTest` —— `Tests run: 1, Failures: 0, Errors: 0`（JDK 21，隔离任务仓库）。Checkstyle（含测试源码）对新测试报 0 违规。

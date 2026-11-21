@@ -7081,6 +7081,19 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
+      // The external drain proves the captured bytes arrived, so their
+      // capacity must be reserved before the placement admits any Shell.
+      if (
+        externalShell &&
+        (captureBytes === undefined ||
+          !Number.isSafeInteger(captureBytes) ||
+          (captureBytes as number) < 1 ||
+          (captureBytes as number) > 2 ** 41)
+      ) {
+        await managed.close();
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
       if (!acceptingWork()) {
         await managed.close();
         error(res, 409, 'hosted_harness_quiescing');

@@ -473,7 +473,7 @@ final class AgentSessionQueries {
                     if (("qwen-code".equals(row.getString("agent_id"))
                             ? row.getString("agent_definition_digest") != null
                             : row.getString("agent_definition_digest") == null) || row.getString("workspace_id") == null
-                            || !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(row.getString("tool_profile"))
+                            || !(WorkspaceToolProfiles.isExternal(row.getString("tool_profile"))
                                     ? "qwen-code".equals(row.getString("agent_id")) && row.getString("agent_definition_digest") == null
                                             && row.getString("parent_session_id") == null && row.getInt("public_child_agents_version") == 0
                                     : WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))

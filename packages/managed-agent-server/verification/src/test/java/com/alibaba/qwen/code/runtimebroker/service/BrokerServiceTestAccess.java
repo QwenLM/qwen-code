@@ -46,6 +46,48 @@ public final class BrokerServiceTestAccess {
                 dispatchLeaseDuration, clock, executionIdSupplier);
     }
 
+    /**
+     * A fake clock beside the publication verifier: the external Shell lane's
+     * close and recovery arms are decided by both the durable publication and
+     * the claim's lease, so a case has to drive each of them independently.
+     */
+    public static RuntimeBrokerService create(HarnessSessionResolver sessionResolver,
+            RuntimeProvisioner provisioner, RuntimeTransport transport,
+            RuntimeBindingRepository bindingRepository,
+            RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository,
+            String brokerOwnerId, Duration operationLeaseDuration,
+            Duration dispatchLeaseDuration, Clock clock,
+            Supplier<String> executionIdSupplier,
+            RuntimePublicationVerifier publicationVerifier) {
+        try {
+            var constructor = RuntimeBrokerService.class.getDeclaredConstructor(
+                    HarnessSessionResolver.class, RuntimeProvisioner.class, RuntimeTransport.class,
+                    RuntimeBindingRepository.class, RuntimeSessionRepository.class,
+                    ToolExecutionRepository.class, String.class, Duration.class, Duration.class,
+                    RuntimePublicationVerifier.class, Duration.class, Clock.class, Supplier.class,
+                    java.util.concurrent.ScheduledExecutorService.class,
+                    java.util.concurrent.ScheduledExecutorService.class);
+            constructor.setAccessible(true);
+            return constructor.newInstance(sessionResolver, provisioner, transport, bindingRepository,
+                    sessionRepository, executionRepository, brokerOwnerId, operationLeaseDuration,
+                    dispatchLeaseDuration, publicationVerifier, Duration.ofMinutes(30), clock,
+                    executionIdSupplier, newScheduler(), newScheduler());
+        } catch (ReflectiveOperationException unavailable) {
+            throw new IllegalStateException("Cannot build the timed publication-verifier service", unavailable);
+        }
+    }
+
+    private static java.util.concurrent.ScheduledExecutorService newScheduler() {
+        var executor = new java.util.concurrent.ScheduledThreadPoolExecutor(1, runnable -> {
+            var thread = new Thread(runnable, "broker-fixture-scheduler");
+            thread.setDaemon(true);
+            return thread;
+        });
+        executor.setRemoveOnCancelPolicy(true);
+        return executor;
+    }
+
     static RuntimeBindingRegistry registry(RuntimeBrokerService service) throws ReflectiveOperationException {
         var field = RuntimeBrokerService.class.getDeclaredField("bindingRegistry");
         field.setAccessible(true);

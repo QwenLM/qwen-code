@@ -18,14 +18,35 @@ final class ExternalWorkspaceSessionPolicies {
     }
 
     /**
-     * Admission-side eligibility read. The registry predicate throws so execution
+     * Admission-side eligibility read, per profile. Shell answers on its own
+     * flag and its own negotiation, so an operator that qualified files never
+     * gains Shell through this path. The registry predicate throws so execution
      * paths fail closed; on admission an unreadable or drifted registration is a
      * permanent record defect, so the caller answers its own 409 instead of the
      * registry's retryable 503.
      */
-    static boolean externalFilesAllowedOrRefuse(JdbcManagedWorkspaceRegistry workspaces, ContextBinding binding) {
+    static boolean externalProfileAllowedOrRefuse(JdbcManagedWorkspaceRegistry workspaces,
+            ContextBinding binding, String profile) {
         try {
-            return workspaces.externalFilesAllowed(binding);
+            return WorkspaceToolProfiles.isExternalShell(profile)
+                    ? workspaces.externalShellAllowed(binding)
+                    : workspaces.externalFilesAllowed(binding);
+        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException unreadable) {
+            return false;
+        }
+    }
+
+    /**
+     * Workspace resolution precedes the profile choice, so it admits either
+     * negotiated external profile. The registry predicate throws so execution
+     * paths fail closed; on admission an unreadable or drifted registration is
+     * a permanent record defect, so the caller answers its own 409 instead of
+     * the registry's retryable 503.
+     */
+    static boolean externalExecutionAllowedOrRefuse(JdbcManagedWorkspaceRegistry workspaces,
+            ContextBinding binding) {
+        try {
+            return workspaces.externalExecutionAllowed(binding);
         } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException unreadable) {
             return false;
         }
@@ -42,7 +63,10 @@ final class ExternalWorkspaceSessionPolicies {
             AgentSessionPolicies.AgentPin resolvedPin, SessionCreationCommand command) {
         AgentSessionPolicies.AgentPin effective = resolvedPin;
         if (external) {
-            if (!externalFilesAllowedOrRefuse(workspaces, binding)
+            String profile = command.requestedToolProfile() == null
+                    ? WorkspaceToolProfiles.EXTERNAL_FILES : command.requestedToolProfile();
+            if (!WorkspaceToolProfiles.isExternal(profile)
+                    || !externalProfileAllowedOrRefuse(workspaces, binding, profile)
                     || !"qwen-code".equals(command.agentId())
                     || resolvedPin.digest() != null || resolvedPin.hooks() || resolvedPin.mcp()
                     || Boolean.TRUE.equals(command.requestedPlanMode()) || !command.skills().isEmpty() || command.extensionPins() != null
@@ -50,8 +74,15 @@ final class ExternalWorkspaceSessionPolicies {
                     || command.input().stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
+            // The deployment's configured default reaches this path too, so
+            // the profile's own published modes decide, not just a selection.
+            if (!WorkspaceToolProfiles.admitsExternalApprovalMode(profile, resolvedPin.approvalMode())) {
+                throw AgentSessionPolicies.workspaceExecutionUnavailable();
+            }
             effective = new AgentSessionPolicies.AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
-                    WorkspaceToolProfiles.EXTERNAL_FILES, false, false, List.of());
+                    profile, false, false, List.of());
+        } else if (command.requestedToolProfile() != null) {
+            throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         return selectApprovalMode(effective, command.requestedApprovalMode(), command.approvalSelectionSupported());
     }
@@ -75,6 +106,19 @@ final class ExternalWorkspaceSessionPolicies {
 
     /** The legacy v1 close refusal exempts an external-files Session on its registered EXTERNAL Workspace. */
     static boolean admitsLegacyClose(SessionRecord session, JdbcManagedWorkspaceRegistry workspaces) {
-        return WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && workspaces.isExternal(session.workspace());
+        return WorkspaceToolProfiles.isExternal(session.toolProfile()) && workspaces.isExternal(session.workspace());
+    }
+
+    /**
+     * Whether an external Session's own approval selection is refused: its
+     * registered profile stopped allowing it, or the Session became a child
+     * lineage whose policy belongs to its parent. A non-external Session is
+     * never refused here.
+     */
+    static boolean refusesApprovalSelection(SessionRecord session,
+            JdbcManagedWorkspaceRegistry workspaces, AgentSessionQueries sessionQueries) {
+        return WorkspaceToolProfiles.isExternal(session.toolProfile())
+                && (!externalProfileAllowedOrRefuse(workspaces, session.workspace(), session.toolProfile())
+                        || sessionQueries.findChildLineage(session.tenantId(), session.sessionId()) != null);
     }
 }

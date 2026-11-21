@@ -256,7 +256,13 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Void> installPublication(RuntimeLease lease,
             RuntimeSession session, RuntimePublicationGrant grant) {
-        requireOwnedWorkspace(lease, session);
+        Context context = requireOwnedContext(lease, session);
+        // The external worker holds no control-plane credential; the Broker is
+        // that publication's producer, so a grant is never installed there.
+        if (external(context)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        assertHeld(context);
         return delegate.installPublication(lease, session, grant);
     }
 
@@ -372,14 +378,19 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private void requireOwnedWorkspace(RuntimeLease lease, RuntimeSession session) {
+        assertHeld(requireOwnedContext(lease, session));
+    }
+
+    private Context requireOwnedContext(RuntimeLease lease, RuntimeSession session) {
         if (!managed(session)) {
             throw WorkspaceExecutionStore.unavailable();
         }
         Context context = context(lease, session, true);
-        if (external(context)) {
+        if (external(context)
+                && !WorkspaceExecutionProfile.isExternalShellRequest(context.runtime().getRequest())) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        assertHeld(context);
+        return context;
     }
 
     private void requireOriginalRuntime(RuntimeLease lease, RuntimeSession session) {
@@ -406,7 +417,16 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         if (!managed(session) || !v3(reference)) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        requireLocalCapture(context(lease, session, false));
+        Context context = context(lease, session, false);
+        if (WorkspaceExecutionProfile.isExternalShellRequest(context.runtime().getRequest())) {
+            // The external worker holds no control-plane credential: this lane's
+            // publication lives in the control plane and the Broker is its
+            // producer. The ownership proof still runs; only the local-capture
+            // requirement belongs to the other lane.
+            assertHeld(context);
+        } else {
+            requireLocalCapture(context);
+        }
         return delegate.acknowledgeV3(lease, session, wireReference(reference), receipt)
                 .thenApply(WorkspaceRuntimeTransport::projectStatus);
     }
@@ -702,7 +722,9 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private static void requireExternalFile(Context context, Map<String, Object> reference) {
-        if (external(context) && (reference.containsKey("runtimeProtocol")
+        if (external(context)
+                && !WorkspaceExecutionProfile.isExternalShellRequest(context.runtime().getRequest())
+                && (reference.containsKey("runtimeProtocol")
                 || !java.util.Set.of("read_file", "write_file", "edit", "glob").contains(reference.get("toolName")))) {
             throw WorkspaceExecutionStore.unavailable();
         }
