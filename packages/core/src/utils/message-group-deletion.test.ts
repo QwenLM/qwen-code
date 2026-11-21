@@ -12,7 +12,11 @@ import { SessionFileHistoryAccumulator } from '../services/session-file-history-
 import { CompressionStatus } from '../core/turn.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import { buildApiHistoryFromConversation } from '../services/session-api-history.js';
-import { prepareTranscriptRecords } from './transcript-records.js';
+import {
+  prepareTranscriptRecords,
+  selectActiveGeneratedUiStateRecordUuids,
+  selectActiveSideArtifactRecordUuids,
+} from './transcript-records.js';
 import {
   deleteTranscriptMessageGroups,
   getTranscriptMessageGroups,
@@ -54,6 +58,19 @@ function user(id: string, parent: string | null): ChatRecord {
 }
 
 const anchor = record('anchor', null);
+
+/** The system record `recordMemoryCatalogSnapshot` writes. */
+function snapshot(id: string, parent: string | null, text: string): ChatRecord {
+  return record(id, parent, 'system', {
+    subtype: 'memory_catalog_snapshot',
+    message: {
+      role: 'user',
+      parts: [
+        { text, partMetadata: { 'qwen-code:memory-catalog-snapshot': true } },
+      ],
+    },
+  });
+}
 
 describe('message group deletion', () => {
   it('deletes nonconsecutive complete turns and repairs only removed edges', () => {
@@ -121,6 +138,49 @@ describe('message group deletion', () => {
     );
     expect(kept).toEqual([anchor]);
     expect(getTranscriptMessageGroups(kept)).toEqual([]);
+  });
+
+  it('preserves workspace ownership and active artifacts when saved state needs a new root', () => {
+    const artifact = (id: string, parent: string | null) =>
+      record(id, parent, 'system', {
+        subtype: 'session_artifact_event',
+        gitBranch: 'original-branch',
+      });
+    const records = [
+      artifact('abandoned-artifact', null),
+      user('abandoned', null),
+      record('abandoned-reply', 'abandoned', 'assistant'),
+      artifact('before-turn', null),
+      user('u1', null),
+      record('a1', 'u1', 'assistant'),
+      artifact('after-turn', 'a1'),
+      artifact('artifact-child', 'after-turn'),
+      record('card-save', 'a1', 'system', { subtype: 'generated_ui_state' }),
+      user('u2', 'a1'),
+      record('a2', 'u2', 'assistant'),
+    ];
+    const { records: kept } = deleteTranscriptMessageGroups(records, ['u1'], {
+      ...anchor,
+      cwd: '/project/subdirectory',
+      gitBranch: 'nested-branch',
+    });
+    const root = kept[0]!;
+    const active = prepareTranscriptRecords(kept).records.map(
+      ({ uuid }) => uuid,
+    );
+    expect(root).toMatchObject({
+      cwd: '/project',
+      gitBranch: 'original-branch',
+    });
+    expect(active).toEqual([root.uuid, 'u2', 'a2', anchor.uuid]);
+    expect(selectActiveGeneratedUiStateRecordUuids(kept, active)).toEqual([
+      'card-save',
+    ]);
+    expect(selectActiveSideArtifactRecordUuids(kept, active)).toEqual([
+      'before-turn',
+      'after-turn',
+      'artifact-child',
+    ]);
   });
 
   it('remaps directory context identities across a deleted checkpoint turn', () => {
@@ -715,6 +775,59 @@ describe('message group deletion', () => {
     expect(() =>
       deleteTranscriptMessageGroups([legacy, compression], ['legacy'], anchor),
     ).toThrow('legacy turn');
+  });
+  it('deletes a turn together with the catalog snapshot it appended', () => {
+    // The snapshot is written during the turn whose durable request appended
+    // it to the model history. Keeping the record after the turn is gone
+    // would replay it onto an earlier turn on restore.
+    const records = [
+      user('u1', null),
+      record('a1', 'u1', 'assistant'),
+      snapshot('s1', 'a1', 'catalog A'),
+      user('u2', 's1'),
+      record('a2', 'u2', 'assistant'),
+    ];
+    const groups = getTranscriptMessageGroups(records);
+    expect(groups.find((group) => group.id === 'u1')!.recordIds).toContain(
+      's1',
+    );
+
+    const { records: kept } = deleteTranscriptMessageGroups(
+      records,
+      ['u1'],
+      anchor,
+    );
+
+    expect(kept.map((item) => item.uuid)).toEqual(['u2', 'a2', 'anchor']);
+    expect(
+      JSON.stringify(buildApiHistoryFromConversation({ messages: kept })),
+    ).not.toContain('catalog A');
+  });
+
+  it('keeps an earlier turn’s catalog snapshot when a later turn is deleted', () => {
+    const records = [
+      user('u1', null),
+      snapshot('s1', 'u1', 'catalog A'),
+      record('a1', 's1', 'assistant'),
+      user('u2', 'a1'),
+      snapshot('s2', 'u2', 'catalog B'),
+      record('a2', 's2', 'assistant'),
+    ];
+    const groups = getTranscriptMessageGroups(records);
+    expect(groups.find((group) => group.id === 'u1')!.recordIds).toContain(
+      's1',
+    );
+    expect(groups.find((group) => group.id === 'u2')!.recordIds).toContain(
+      's2',
+    );
+
+    const { records: kept } = deleteTranscriptMessageGroups(
+      records,
+      ['u2'],
+      anchor,
+    );
+
+    expect(kept.map((item) => item.uuid)).toEqual(['u1', 's1', 'a1', 'anchor']);
   });
 });
 

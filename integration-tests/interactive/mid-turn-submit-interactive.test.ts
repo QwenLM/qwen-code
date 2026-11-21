@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import stripAnsi from 'strip-ansi';
+import { scaledWait } from './wait.js';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
@@ -178,7 +179,7 @@ describe('Mid-turn submit', () => {
 
   async function waitForRequestBody(fragment: string): Promise<boolean> {
     const start = Date.now();
-    while (Date.now() - start < 30_000) {
+    while (Date.now() - start < scaledWait(30_000)) {
       if (requestBodies().includes(fragment)) return true;
       await sleep(200);
     }

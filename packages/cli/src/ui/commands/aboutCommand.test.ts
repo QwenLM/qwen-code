@@ -11,6 +11,7 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 import { MessageType } from '../types.js';
 import * as systemInfoUtils from '../systemInfo.js';
 import * as sessionPathsUtils from '../../utils/sessionPaths.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 vi.mock('../systemInfo.js');
 vi.mock('../../utils/sessionPaths.js');
@@ -65,7 +66,8 @@ describe('aboutCommand', () => {
     );
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await setLanguageAsync('en');
     vi.unstubAllEnvs();
     process.env = originalEnv;
     vi.clearAllMocks();
@@ -317,6 +319,34 @@ describe('aboutCommand', () => {
   });
 
   describe('non-interactive mode', () => {
+    it.each([
+      ['en', 'acp'],
+      ['zh', 'acp'],
+      ['en', 'non_interactive'],
+      ['zh', 'non_interactive'],
+    ] as const)(
+      'shows Qwen Subscription in %s for %s status output',
+      async (language, executionMode) => {
+        await setLanguageAsync(language);
+        const info = await systemInfoUtils.getExtendedSystemInfo(mockContext);
+        vi.mocked(systemInfoUtils.getExtendedSystemInfo).mockResolvedValue({
+          ...info,
+          selectedAuthType: 'qwen-subscription',
+        });
+
+        const result = await aboutCommand.action!(
+          { ...mockContext, executionMode },
+          '',
+        );
+
+        expect(result).toMatchObject({
+          type: 'message',
+          content: expect.stringContaining('\nAuth: Qwen Subscription\n'),
+        });
+        expect(mockContext.ui.addItem).not.toHaveBeenCalled();
+      },
+    );
+
     it('should return text summary without calling addItem', async () => {
       if (!aboutCommand.action) {
         throw new Error('The about command must have an action.');
@@ -429,6 +459,53 @@ describe('aboutCommand', () => {
       };
 
       expect(result.content).toContain('LSP: enabled, 1/1 ready');
+    });
+
+    it('should include the agent loop when available', async () => {
+      if (!aboutCommand.action) throw new Error('No action');
+
+      vi.mocked(systemInfoUtils.getExtendedSystemInfo).mockResolvedValue({
+        cliVersion: 'test-version',
+        osPlatform: 'test-os',
+        osArch: 'x64',
+        osRelease: '22.0.0',
+        nodeVersion: 'v20.0.0',
+        npmVersion: '10.0.0',
+        sandboxEnv: 'no sandbox',
+        modelVersion: 'test-model',
+        selectedAuthType: 'test-auth',
+        ideClient: '',
+        sessionId: 'sess-1',
+        memoryUsage: '100 MB',
+        baseUrl: undefined,
+        agentLoop: 'headless: legacy',
+      });
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+      } as unknown as Partial<CommandContext>);
+
+      const result = (await aboutCommand.action(nonInteractiveContext, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.content).toContain('Agent Loop: headless: legacy');
+    });
+
+    it('should omit the agent loop line when absent', async () => {
+      if (!aboutCommand.action) throw new Error('No action');
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+      } as unknown as Partial<CommandContext>);
+
+      const result = (await aboutCommand.action(nonInteractiveContext, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.content).not.toContain('Agent Loop:');
     });
   });
 });

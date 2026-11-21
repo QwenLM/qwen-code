@@ -2,26 +2,28 @@
 
 [English](2026-10-16-managed-agent-gate.md) | [简体中文](2026-10-16-managed-agent-gate.zh-CN.md)
 
-状态：已提出，并已在 `.github/workflows/managed-agent-gate.yml` 中实现；是否设为
-必需检查待维护者决定。跟踪 issue：#14392、#14381。
+状态：已在 `.github/workflows/managed-agent-gate.yml` 中实现；必需检查启用由 #17039
+跟踪。历史跟踪 issue：#14392、#14381。
 
 ## 问题
 
 自 #14205 起，SDK Java 套件（`sdk-java.yml`）只在每日定时、手动触发和 Java 发布前
 运行。2026-10-16，#13918 和 #14370 各自全绿，合在一起却让 main 上
 `managed-agent-server` 的测试源码编译失败；直到夜间运行才有人发现。Managed Agent
-现在是重点保障的产品线：改动它、或改动它所驱动的 harness 的 PR，合入前必须通过
-全量套件。
+现在是重点保障的产品线：改动它、或改动它所驱动的 harness 的 PR，合入前必须报告
+稳定门禁；首个 approve 会启动全量套件做更深入验证。
 
 每次 push 都跑全量负担不起。一次全量是 11 个检查，约 330 机器分钟、125 分钟墙上
 时间（run 38874583246）；按最近两天改到 Java 的开放 PR 估算，每天超过 44 机器小时。
 
 ## 目标
 
-- 每个改到 Managed Agent 路径的 PR，在最终 head 上通过全量套件后才能合入。
+- 每个改到 Managed Agent 路径的 PR，在最终 head 上报告稳定门禁后才能合入；fast 层级
+  结果满足该检查，首个 approve 启动全量套件做更深入验证。
 - push 时的反馈保持快速（约 25 分钟）。
 - 没改到这些路径的 PR，除几秒钟的路径匹配外不付出额外成本。
-- 仍然漏进 main 的回归，经现有 `main-ci-failure-issue.yml` 路线自动开 issue。
+- 仍然漏进 main 的回归，经现有 `main-ci-failure-issue.yml` 路线自动开 issue；
+  例外是 main 已越过失败 head、且更新的运行拥有该结果的情形。
 
 ## 非目标
 
@@ -64,41 +66,46 @@ Runtime Broker 子集。其中一部分测试要加载已构建的 Core 与 CLI 
 `.github/scripts/managed-agent-gate-scope.mjs` 匹配变更路径：
 `packages/managed-agent-server/`、`packages/sdk-java/`、
 `packages/cli/src/serve/`、`packages/core/src/managed-runtime/`、Hosted 集成测试
-helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。Pull request 与 review
+helper 与配置、`sdk-java.yml` 运行的脚本、门禁 workflow，以及
+`.github/scripts/managed-agent-gate-tier.sh`。Pull request 与 review
 事件都用测试 merge commit 对比它的第一父提交，得到的就是 PR 自身的变更集；push 对比
 `before..after`，merge group 对比其 base。重命名的新旧路径都计入；diff 关闭 git 的
 路径引号化，因此含非 ASCII 字符的文件名也能匹配。范围外的改动仍由夜间运行兜底。
 
 ### 必需检查
 
-`gate` job 为工作流启动的每次运行报告层级结果。它的名字是计算出来的：
+`gate` job 对每个其结果能够决定合并的运行，都使用稳定的必需检查名
+`Managed Agent gate`。它的结论和 `SDK Java (<tier>)` job 用来区分所选层级：
 
-| 事件                  | 范围                     | 名字                                 |
-| --------------------- | ------------------------ | ------------------------------------ |
-| 任意                  | 未改到                   | `Managed Agent gate`（通过）         |
-| `pull_request`        | 改到                     | `Managed Agent fast tier`            |
-| `pull_request_review` | 改到，跑了全量           | `Managed Agent gate`                 |
-| `pull_request_review` | 改到，未跑全量           | `Managed Agent review (no full run)` |
-| `pull_request_review` | 非 approve，或 PR 已关闭 | 所有 job 跳过，不生成 gate check     |
-| `push`、`merge_group` | 改到                     | `Managed Agent gate`                 |
-| 任意                  | 层级选择失败             | `Managed Agent gate`（失败）         |
+| 事件                  | 范围                     | 结果                                                     |
+| --------------------- | ------------------------ | -------------------------------------------------------- |
+| 任意                  | 未改到                   | 不跑 Java，直接通过                                      |
+| `pull_request`        | 改到，此前无全量报告     | fast 层级结果                                            |
+| `pull_request`        | 改到，此前已有全量报告   | 不跑 Java；非必需的 `Managed Agent review (no full run)` |
+| `pull_request_review` | 改到，跑了全量           | 全量层级结果                                             |
+| `pull_request_review` | 改到，未跑全量           | 非必需的 `Managed Agent review (no full run)`            |
+| `pull_request_review` | 非 approve，或 PR 已关闭 | 所有 job 跳过，不生成必需名字的 check                    |
+| `push`、`merge_group` | 改到                     | fast 层级结果                                            |
+| 任意                  | 层级选择失败             | `Managed Agent gate` 失败                                |
 
 非 approve 的 review，以及 PR 关闭后才提交的 review，都不启动任何 job：GitHub 仍会
 创建这次运行，但它永远选不到 `none` 以上的层级——或者它要报告的检查已经不再门禁任何
-东西——因此 `scope` 与 `gate` 都跳过，运行在几秒内结束且不占用 runner。运行里仍会为
-每个 job 列出一条 skipped check，而 `gate` 的名字显示为未求值的表达式，因此不会出现
-名为 `Managed Agent gate` 或 `Managed Agent review (no full run)` 的 check。它以前会
-报告 `Managed Agent review (no full run)`——一条没有任何规则读取的绿色 check。
+东西——因此 `scope` 与 `gate` 都跳过，运行在几秒内结束且不占用 runner。它计算出来的
+名字保持未求值，因此不会以必需 context 发布 skipped check。
 
-分支保护读取同名检查中最近一次更新的那个。因此改到路径的 PR 会一直显示
-`Managed Agent gate` 为 Expected，直到其 head 上的全量运行报告它；对这类 PR，只有
-全量运行（或失败）能报告这个名字。check run 不需要写权限 token，所以门禁对 fork PR
-同样有效。
+因此 ruleset 可以对每个 PR 要求同一个 context。改到路径的 PR 在首个 approve 前由
+fast 层级结果满足这项检查；approve 仍会启动全量套件，并以同一个名字报告结果。改到路径
+且未选择新全量运行的 review 仍使用非必需的 `Managed Agent review (no full run)` context，
+所以不会覆盖此前的 fast 或全量结果。同一 head 已有全量报告时，重新运行或重新打开
+pull request 也不再跑套件，并让该全量结果留在必需 context 上。GitHub
+允许工作流运行后，check run 不需要写权限 token。首次贡献者的运行可能保持
+`action_required`，直到维护者批准；批准前不会生成门禁 check。
 
-被取代的 fast 层级是中性的、而非红色：当新的 push 取消 pull request 正在进行的运行时，
-门禁把 `Managed Agent fast tier` 报告为警告级通过。其他取消仍然失败——全量运行的取消
-如此，下一个 approve 才能重试套件，而不是对着一个绿色 check 去重；push 与 merge group
-臂上的取消也如此，因为那里不会取消正在进行的运行，取消意味着超时或人工停止。
+被取代的 fast 层级会报告红色、而不是绿色：新的 push 取消 pull request 正在进行的运行时，
+门禁仍以 `Managed Agent gate` 在 branch protection 已不再读取的 head 上报告失败。这样
+没有新 push 的取消不能满足必需检查。其他取消同样失败——全量运行的取消如此，下一个 approve
+才能重试套件，而不是对着一个绿色 check 去重；push 与 merge group 臂上的取消也如此，因为
+那里不会取消正在进行的运行，取消意味着超时或人工停止。
 
 ### 当前 head 的首个 approve
 
@@ -111,10 +118,16 @@ push 之后。只有维护者的 approve 才会启动全量层级：reviewer 的
 
 对这样的 approve，`scope` job 会运行全量层级，除非之前已有
 `pull_request_review` 运行为同一 head 报告了通过或运行中的 `Managed Agent gate`。
-本次运行自己的重跑不算，PR push 运行的通过（未改到的分类）也不算。被认定的运行还必须
+本次运行自己的重跑不算，PR push 运行的 fast 层级或未改到通过也不算。被认定的运行还必须
 属于同一个 pull request，且其 job 列表中存在 `SDK Java (full)` callee：同一 head 上
 另一个 PR 的 review 运行、或未跑套件就报告该名字的运行，都没有跑过任何 Java lane，
-不算数。全量失败后，下一个 approve 或 **Re-run failed jobs** 会重试。
+不算数。GitHub 对 fork review 运行会留下空的 `pull_requests`，因此 approve 去重会先确认
+当前 PR 仍指向这个 head SHA，再把候选运行的 head branch 与该 PR 的 head ref 匹配。
+全量失败后，下一个 approve 或 **Re-run failed jobs** 会重试。
+
+重新打开或手动重跑的 `pull_request` 分支刻意按 SHA 而不是按 PR 去重：branch protection
+按 commit 读取必需 context，因此该 head 上已经发布过的任何全量报告都必须保留，新的
+fast 运行不能覆盖它。
 
 ### 并发
 
@@ -143,9 +156,28 @@ fork 代码留在托管 runner 上，在那里跑全量也不需要任何 secret
 
 ### 失败上报
 
-`main-ci-failure-issue.yml` 也监听 `Managed Agent gate`，合入后快闸变红会和其他 main
-失败一样开去重的 autofix issue。`qwen-triage-finalize.yml` 用 `Managed Agent gate`
-替换了 `SDK Java`——后者自 #14205 起已没有 `pull_request` 触发。
+`main-ci-failure-issue.yml` 也监听 `Managed Agent gate`，合入后快闸变红会经该路线记录：
+能识别失败用例的 run 按测试 marker 复用或新开按签名去重的 issue；识别不了的则在每个
+workflow 共用的汇总 issue 上追加评论，找到匹配的已关闭 issue 时会重新打开。新汇总单使用
+`scope/ci-cd` 和 `status/needs-triage` 标签供人工分诊，不自动指派 autofix。
+`qwen-triage-finalize.yml` 用 `Managed Agent gate` 替换了 `SDK Java`——后者自 #14205
+起已没有 `pull_request` 触发。
+
+当合入后 push 失败的 head 已不再是 main 的 tip 时，如果新 tip 上存在同一 workflow
+的更新 push 运行、且它**已经定论**，这次失败只记录在 analyze 运行的步骤摘要里，不会
+记录到 workflow issue 上：`success` 表示该处代码是绿的，`failure` 会通过自己的完成
+事件上报。以 `timed_out`、`skipped`、`startup_failure` 结束的后继永远不会被分析，
+因此此时仍然上报原始失败。`cancelled` 后继只有在共享判别脚本给出的结论属于会上报的
+那一类时才拥有该结果：`timeout`，或 fail-open 的 `unknown`。`concurrency` 与
+`nothing-executed` 的后继自己保持沉默，因此仍然上报原始失败；`unreadable` 的后继同样
+不接手，因为读取失败无法证明那个 run 的结论是什么，此时本次运行保留自己的 fail-open
+上报（#16272、#16280）。
+
+尚未 `completed` 的后继什么都证明不了，而本 job 也等不起它——报告所在
+的 runner 池把它排了 20-100 分钟，准备好报告时 tip 上的运行通常刚开始不久。此时仍然
+上报，并在正文顶部标注为临时性（provisional）。之所以负担得起，是因为按签名路由的新
+issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关掉，丢掉一条则丢掉整个回归
+（#15470）。
 
 ## 成本
 
@@ -168,8 +200,49 @@ fork 代码留在托管 runner 上，在那里跑全量也不需要任何 secret
   `HostedMonitorRunFaultGatesIT` 的 fg8f 时序断言也会间歇失败。如果现在就设为必需，
   门禁会因噪声卡住大量 Java PR。在 #14361 解决前保持为非必需；期间
   **Re-run failed jobs** 是逃生口。
-- **approve 时机。** 全量在首个 approve 时启动，合入最多要在其后等约两小时。reviewer
-  可以更早 approve；approve 后的 push 会作废它并重新开始。
+
+  2026-11-12 重新实测。这里有两个不同的分母，不能直接相互比较：41% 是
+  `HostedShellLifecycleRecoveryIT` 这一个类的失败率，而下面的数字统计的是「两条
+  Hosted 泳道中至少一条失败」的运行数。
+
+  在 2026-10-27T14:57Z 至 2026-11-11T21:48:10Z 之间创建的 97 次 `sdk-java.yml`
+  运行中，70 次已完成且未被取消，这 70 次都真正执行了两条 Hosted
+  泳道。其中 54 次至少有一条泳道失败（77%），只有 6 次整个运行的所有 job 全绿。
+  在这 70 次里最新的 22 次中，20 次至少有一条失败（91%）。
+
+  **失败几乎集中在一条泳道，而不是两条。** process-fault 失败 54 次、failover 失败
+  8 次，而这 8 次 failover 失败全部发生在 process-fault 也失败的运行里 ——
+  failover 从未单独失败。这个「从未」只是关于该窗口，不是关于这条泳道本身：以同一
+  口径放宽到 2026-10-16 至 2026-11-11T13:44Z，有 163 次运行执行了两条泳道，其中 3 次
+  是 failover 失败而 process-fault 通过（2026-10-18 的 run 39091025824 与
+  39097018288、2026-10-19 的 39201677644），即更早的窗口里 failover 确实单独失败过。
+  更宽窗口下的分布是 process-fault 失败 110 次对 failover 11 次，所以不对称性在换窗口
+  后依然成立，不成立的只是「从未」这个绝对说法。钉住的窗口内分布是：46 次只有
+  process-fault 失败、8 次两条都失败、16 次两条都通过，合计正是那 70 次。
+  本文档早前的版本写的是「process-fault 26 次、failover 26 次」，
+  并据此认为两条泳道各自独立失败；那个计数复现不出来，结论也是反的。接 #14361 的
+  人应当从 process-fault 这条泳道入手。
+
+  这个序列是 nightly 加手工 dispatch，不是门禁自己的运行：那 97 次里有 16 次
+  `schedule` 和 81 次 `workflow_dispatch`，而 `sdk-java.yml` 根本没有
+  `pull_request` 触发器。nightly 一侧更差 —— 16 次 nightly 里有 15 次 Hosted 泳道
+  失败、没有一次全绿；6 次全绿全部来自 54 次已完成的 dispatch 运行。应当把它读作
+  测试脚手架的背景失败率（正是它让门禁无法设为必需），而不是门禁自身的通过率。
+
+  门禁自己的全量档还太新，给不出比率，而且它是另一份运行列表。
+  `managed-agent-gate.yml` 通过可复用工作流调用这两条泳道，job 名带
+  `SDK Java (full) /` 前缀。该 workflow 在 2026-11-11 全天以 success 或 failure
+  结束的 133 次 `pull_request_review` 运行里，有 38 次执行了两条 Hosted 泳道，
+  这 38 次全部是 process-fault 失败、failover 通过 —— 与上面同一形态，而且当天
+  没有一次全量档运行是两条泳道都通过的。
+
+  拒绝原因本身也换了形态：现在是 Runtime Broker 回
+  `409 managed_runtime_identity_conflict`，而最初报告里是 Store 回
+  `400 invalid_request`，但以同样方式冻结 turn。
+
+- **approve 时机。** 全量在首个 approve 时启动，但不会延迟合入：其 gate job 要等依赖
+  完成后才发布，因此全量运行期间 fast 层级结果仍是必需 context。需要全量证明的 reviewer
+  必须人工等待。approve 后的 push 会作废它并重新开始。
 - **分类漂移。** push 运行和 approve 运行各自对自己的 merge commit 分类；两次之间 base
   移动时范围可能不同。两者都对比各自的第一父提交，除非冲突解决改变了变更集，否则 PR 的
   变更集保持稳定。
@@ -182,18 +255,49 @@ fork 代码留在托管 runner 上，在那里跑全量也不需要任何 secret
 3. 维护者把 `Managed Agent gate` 加入 main 的必需检查（若重新启用 merge queue，也加到
    那里）。
 
+第 2 步有一个值得记下来的度量陷阱，因为有两个看起来很令人安心的序列其实完全没有度量
+Hosted 泳道：
+
+- 本 workflow 自己的 `pull_request_review` 运行大多选出 tier `none`。它最近 13 次成功
+  **全部**跑的是 `SDK Java (none)` —— 一行 Java 都没跑，因为那些 head 没有碰到范围内
+  的路径。这里的连续全绿对全量 tier 毫无说明力。
+- 本 workflow 在 main 上的失败可能来自无关步骤。它最近 7 次 main 失败**全部**是
+  `Run Managed Agent Server Checkstyle` —— 一条未使用 import，已由 `da270e434` 修掉
+  —— 此后本 workflow 在 main 上转绿，而 Hosted 泳道仍以上述比率失败。
+
+只有真正执行了 `Hosted process fault gates` 与 `Hosted failover E2E` 的运行才度量第 2
+步。筛选时要求这两个 job 既存在、又不是 `skipped`，然后在读通过率之前排除 cancelled
+运行。一次运行不构成度量的两种情形并不相同：不在范围内的 PR 选出 tier `none`，根本
+不产出任何 Hosted job；而 `fast` 档的运行会产出这两个名字但跳过它们，所以只按「是否
+存在」筛选会把 fast 运行也算成度量。
+
+引用比率时要写明是哪个运行列表并钉住时间窗，因为两个列表并不相同，而不钉窗口的计数会随
+新运行漂移。`sdk-java.yml` 是 nightly 加 dispatch，没有 `pull_request` 触发器；门禁
+自己的运行记在 `managed-agent-gate.yml` 下，其可复用工作流的 job 名带
+`SDK Java (full) /` 前缀（例如 run `43019171265`）。「风险」一节的数字钉在
+2026-10-27T14:57Z 至 2026-11-11T21:48:10Z 之间创建的 `sdk-java.yml` 运行；后来的人用同一
+个查询会得到不同的分母。main 的必需检查位于 ruleset `main`，而不是旧的 branch
+protection；在那里添加名字时不得扰动它「两个 approve」与「push 后作废」这两条规则。
+
+第 3 步只需要那一个名字。fast、全量、未改到、push 与 merge-group 运行都报告
+`Managed Agent gate`，ruleset 因而可以要求它，而不必等待某个层级专用的 context。fast
+层级通过即可满足必需检查；首个 approve 仍会启动全量套件做更深入的验证。
+`Managed Agent review (no full run)` 刻意保持非必需，因此没跑套件的 review 不能覆盖真实的
+门禁结果。不要把这个 context 或已废弃的 `Managed Agent fast tier` context 加入 ruleset。
+
 ## 验证
 
-- `scripts/tests/managed-agent-gate-workflow.test.js` 求值路径匹配、检查名与并发组表达式、
+- `scripts/tests/managed-agent-gate-workflow.test.js` 求值路径匹配、稳定检查名与并发组表达式、
   fast 矩阵，并用桩 `gh` 运行层级选择和结果报告脚本。
 - 现有 SDK Java、Hosted、失败上报、finalize 与 runner 路由元测试钉住了被修改的契约，
   包括 approve fork PR 时仍留在托管 runner。
-- 合入后：改到路径的 PR push 后显示 `Managed Agent fast tier`，首个 approve 后显示
-  `Managed Agent gate`；未改到的 PR 一分钟内显示通过的 `Managed Agent gate`。
+- 合入后：改到路径的 PR push 后以 `Managed Agent gate` 显示 fast 层级结果，首个 approve
+  后以同一个名字显示全量结果；未改到的 PR 一分钟内显示通过的 `Managed Agent gate`。
 
 ## 验收标准
 
-- 改到路径的 PR，在当前 head 没有全量运行时，不能报告通过的 `Managed Agent gate`。
+- 改到路径的 PR push 后以 `Managed Agent gate` 报告 fast 层级结果，首个 approve 后以
+  同一个名字报告全量结果。
 - 未改到路径的 PR 不跑 Java 即报告通过的 `Managed Agent gate`。
 - 同一 head 全量通过后，第二个 approve 不会再启动一次全量。
 - 夜间、手动和发布运行仍执行全部 11 项。

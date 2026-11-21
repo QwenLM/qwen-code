@@ -49,10 +49,8 @@ describe('Managed workspace navigation', () => {
     localStorage.clear();
     list.mockResolvedValue({ data: [workspace], supported: true });
     provider = {
-      kind: 'java',
       storageKey: 'provider:a',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       workspaceBinding: {
         agentId: 'agent',
         list,
@@ -65,6 +63,7 @@ describe('Managed workspace navigation', () => {
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
@@ -135,18 +134,18 @@ describe('Managed workspace navigation', () => {
     expect(provider.listSessions).not.toHaveBeenCalled();
     await act(async () =>
       group('b')
-        .querySelector<HTMLButtonElement>('button[title="New task"]')!
+        .querySelector<HTMLButtonElement>('button[title="New session"]')!
         .click(),
     );
     expect(selectWorkspace).toHaveBeenCalledWith('b');
     expect(
       group('unpaged').querySelector<HTMLButtonElement>(
-        'button[title="New task"]',
+        'button[title="New session"]',
       )!.disabled,
     ).toBe(true);
     await act(async () =>
-      [...group('unpaged').querySelectorAll('button')]
-        .find((item) => item.textContent === 'Task outside')!
+      group('unpaged')
+        .querySelector<HTMLElement>('[data-managed-session-id="outside"]')!
         .click(),
     );
     expect(selectSession).toHaveBeenCalledWith('outside', 'unpaged');
@@ -156,8 +155,8 @@ describe('Managed workspace navigation', () => {
     await render({ active: false });
     expect(container.querySelector('[aria-current]')).toBeNull();
     await act(async () =>
-      [...container.querySelectorAll('button')]
-        .find((item) => item.textContent === 'Task one')!
+      container
+        .querySelector<HTMLElement>('[data-managed-session-id="one"]')!
         .click(),
     );
     expect(selectSession).toHaveBeenCalledWith('one', 'a');
@@ -193,7 +192,7 @@ describe('Managed workspace navigation', () => {
         Boolean(row.querySelector('[role="status"][aria-label="Running"]')),
       ).toBe(running);
       expect(row.getAttribute('aria-current')).toBeNull();
-      await act(async () => (row as HTMLButtonElement).click());
+      await act(async () => (row as HTMLElement).click());
       expect(selectSession).toHaveBeenCalledWith('one', 'a');
     },
   );
@@ -227,7 +226,7 @@ describe('Managed workspace navigation', () => {
         </button>
       ),
     });
-    const row = container.querySelector<HTMLButtonElement>(
+    const row = container.querySelector<HTMLElement>(
       '[data-managed-session-id="one"]',
     )!;
     const action = container.querySelector<HTMLButtonElement>(
@@ -236,7 +235,7 @@ describe('Managed workspace navigation', () => {
     expect(
       row.querySelector('[data-web-shell-session-running]'),
     ).not.toBeNull();
-    expect(row.contains(action)).toBe(false);
+    expect(row.contains(action)).toBe(true);
     await act(async () => action.click());
     expect(archive).toHaveBeenCalledOnce();
     expect(selectSession).not.toHaveBeenCalled();
@@ -341,13 +340,72 @@ describe('Managed workspace navigation', () => {
     );
     expect(group('a').textContent).toContain('Task one');
     expect(
-      group('a').querySelector<HTMLButtonElement>('button[title="New task"]')!
-        .disabled,
+      group('a').querySelector<HTMLButtonElement>(
+        'button[title="New session"]',
+      )!.disabled,
     ).toBe(true);
     await render({ revision: 1 });
     expect(container.querySelector('[role="alert"]')).toBeNull();
     expect(group('new')).not.toBeNull();
   });
+
+  it('opens the artifact library with the workspace identity and label', async () => {
+    const openLibrary = vi.fn();
+    list.mockResolvedValue({
+      data: [workspace],
+      supported: true,
+      artifactLibrary: true,
+    });
+    await render({
+      provider: {
+        ...provider,
+        workspaceArtifacts: { listArtifacts: vi.fn() },
+        toolResults: { canDownload: false } as never,
+      },
+      onOpenArtifactLibrary: openLibrary,
+    });
+    await act(async () =>
+      group('a')
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Artifact library: Project"]',
+        )!
+        .click(),
+    );
+    expect(openLibrary).toHaveBeenCalledWith('a', 'Project');
+    expect(selectWorkspace).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['the page omits the capability', false, true, true],
+    ['the provider lacks the workspace reader', true, false, true],
+    ['the provider lacks the session reader', true, true, false],
+  ] as const)(
+    'hides the artifact library entry when %s',
+    async (_name, artifactLibrary, workspaceArtifacts, toolResults) => {
+      list.mockResolvedValue({
+        data: [workspace],
+        supported: true,
+        artifactLibrary,
+      });
+      await render({
+        provider: {
+          ...provider,
+          ...(workspaceArtifacts
+            ? { workspaceArtifacts: { listArtifacts: vi.fn() } }
+            : {}),
+          ...(toolResults
+            ? { toolResults: { canDownload: false } as never }
+            : {}),
+        },
+        onOpenArtifactLibrary: vi.fn(),
+      });
+      expect(
+        group('a').querySelector(
+          'button[aria-label="Artifact library: Project"]',
+        ),
+      ).toBeNull();
+    },
+  );
 
   it('scopes expansion preferences to the provider even for the same workspace ID', async () => {
     await render({ active: false });

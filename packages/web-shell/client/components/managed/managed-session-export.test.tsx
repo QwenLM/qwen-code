@@ -44,6 +44,80 @@ function provider(pages: ManagedExportPage[], watermark = 2) {
 }
 afterEach(() => vi.useRealTimers());
 describe('Managed reading exports', () => {
+  it('exports live bodies updated after the membership bound without waiting for a snapshot', async () => {
+    const first = item('first');
+    const second = {
+      ...item('second', 'updated live'),
+      firstSequence: 2,
+      lastSequence: 9,
+    };
+    const api = {
+      ...provider(
+        [
+          {
+            items: [first],
+            hasMore: true,
+            nextCursor: 'next',
+            snapshotThroughSequence: 3,
+          },
+          { items: [second], hasMore: false, snapshotThroughSequence: 3 },
+        ],
+        3,
+      ),
+      exportConsistency: 'live' as const,
+    };
+    const data = await collectManagedReadingExport(
+      api,
+      'c',
+      's',
+      new AbortController().signal,
+    );
+    expect(api.exportSnapshot).toHaveBeenCalledTimes(2);
+    expect(data.consistency).toBe('live');
+    expect(data.blocks.map((block) => block.text)).toContain('updated live');
+    expect(renderManagedReadingExport(data, 'md')).toContain(
+      'Live export range: 3',
+    );
+    expect(renderManagedReadingExport(data, 'html')).toContain(
+      'Live export range',
+    );
+  });
+
+  it.each(['future membership', 'duplicate', 'scope', 'range', 'cursor'])(
+    'keeps the live export guard for %s',
+    async (violation) => {
+      const first = {
+        items: [item('first')],
+        hasMore: true,
+        nextCursor: 'next',
+        snapshotThroughSequence: 3,
+      };
+      const second = {
+        items: [item('second')],
+        hasMore: false,
+        nextCursor: 'next',
+        snapshotThroughSequence: 3,
+      };
+      if (violation === 'future membership') second.items[0]!.firstSequence = 4;
+      if (violation === 'duplicate') second.items[0]!.itemId = 'first';
+      if (violation === 'scope') second.items[0]!.sessionId = 'other';
+      if (violation === 'range') second.snapshotThroughSequence = 4;
+      if (violation === 'cursor') second.hasMore = true;
+      const api = {
+        ...provider([first, second], 3),
+        exportConsistency: 'live' as const,
+      };
+      await expect(
+        collectManagedReadingExport(
+          api,
+          'c',
+          's',
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow('invalid_export_snapshot');
+    },
+  );
+
   it('collects immutable pages for inert HTML and original Markdown source', async () => {
     const api = provider([
       {

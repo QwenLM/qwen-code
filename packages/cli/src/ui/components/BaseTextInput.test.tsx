@@ -121,6 +121,32 @@ describe('BaseTextInput', () => {
     expect(buffer.handleInput).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { modifier: 'Shift', key: { shift: true } },
+    { modifier: 'Ctrl', key: { ctrl: true } },
+    { modifier: 'Meta', key: { meta: true } },
+  ])(
+    'uses the logical newline for an unconsumed $modifier+Return',
+    ({ key }) => {
+      const buffer = createBuffer();
+      const onSubmit = vi.fn();
+      const onKeypress = vi.fn(() => false);
+      render(
+        <BaseTextInput
+          buffer={buffer}
+          onSubmit={onSubmit}
+          onKeypress={onKeypress}
+        />,
+      );
+      const event = makeKey({ name: 'return', sequence: '\r', ...key });
+      captureKeypressHandler()(event);
+      expect(onKeypress).toHaveBeenCalledWith(event);
+      expect(buffer.newline).toHaveBeenCalledTimes(1);
+      expect(buffer.handleInput).not.toHaveBeenCalled();
+      expect(onSubmit).not.toHaveBeenCalled();
+    },
+  );
+
   it('still passes pasted µ text through to the buffer', () => {
     const buffer = createBuffer();
 

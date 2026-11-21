@@ -163,6 +163,44 @@ describe('useBranchCommand', () => {
     };
   });
 
+  it('waits for the mode snapshot under the swap latch before forking', async () => {
+    const client = makeSwapSlotClient();
+    client.initialize.mockRejectedValueOnce(new Error('destination failed'));
+    const snapshot = {
+      requested: true,
+      recorded: true,
+      pending: true,
+      turns: 0,
+    };
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const restore = vi.fn();
+    Object.assign(config, {
+      getLlmClient: () => client,
+      captureWorkflowModeState: async () => {
+        expect(client.isTelemetrySwapInProgress()).toBe(true);
+        await held;
+        return snapshot;
+      },
+      restoreWorkflowModeState: restore,
+    });
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = result.current.handleBranch();
+    });
+    const forksBeforeSnapshot = forkSession.mock.calls.length;
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    expect(forksBeforeSnapshot).toBe(0);
+    expect(restore).toHaveBeenCalledExactlyOnceWith(snapshot);
+    expect(client.isTelemetrySwapInProgress()).toBe(false);
+  });
+
   it.each([
     'rollback-init',
     'forward-old',
@@ -299,11 +337,21 @@ describe('useBranchCommand', () => {
     // must land AFTER the stats reset.
     loadSession.mockImplementation(async (id: string) => ({
       conversation: {
-        messages: [0, 1].map((turn) => ({
-          ...userRecord(`turn ${turn}`),
-          sessionId: id,
-          promptId: `${id}########${turn}`,
-        })),
+        messages: [
+          ...[0, 1].map((turn) => ({
+            ...userRecord(`turn ${turn}`),
+            sessionId: id,
+            promptId: `${id}########${turn}`,
+          })),
+          // A background notification claims a higher id but is not a user
+          // turn, so the mint seed (6) and the user-turn seed (2) diverge and
+          // the assertion can tell them apart (R16).
+          {
+            ...userRecord('background', 'notification'),
+            sessionId: id,
+            promptId: `${id}########5`,
+          },
+        ],
       },
       filePath: '/tmp/new.jsonl',
       lastCompletedUuid: 'u2',
@@ -314,7 +362,9 @@ describe('useBranchCommand', () => {
       await result.current.handleBranch('seeded');
     });
 
-    expect(seedPromptCount).toHaveBeenCalledWith(2);
+    // Mint seed 6 (highest claimed id 5 + 1); the visible Prompts statistic
+    // seeds from the user-turn count (2), not the mint seed (S1).
+    expect(seedPromptCount).toHaveBeenCalledWith(6, 2);
     expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
       seedPromptCount.mock.invocationCallOrder[0]!,
     );

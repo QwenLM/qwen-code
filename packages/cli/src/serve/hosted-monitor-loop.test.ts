@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -219,7 +220,7 @@ async function openLoop(harness: Harness): Promise<Rig> {
     transcriptPath: harness.transcriptPath,
   });
   const authority = await LocalManagedSessionAuthority.open({
-    lease,
+    journal: LocalJsonlManagedSessionJournalStore.fromLease(lease, sessionKey),
     sessionKey,
     cwd: '/workspace',
     version: 'test',
@@ -287,6 +288,17 @@ function committed(
 }
 
 describe('HostedMonitorLoop', () => {
+  it('reports liveness for suspension eligibility', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    expect(rig.loop.live).toBe(true);
+    await rig.loop.start(params());
+    expect(rig.loop.live).toBe(true);
+    await rig.loop.stop('stop_requested');
+    expect(rig.loop.live).toBe(false);
+    await closeLoop(rig);
+  });
+
   it('drains an abandoned quota stop before removing its transcript', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);

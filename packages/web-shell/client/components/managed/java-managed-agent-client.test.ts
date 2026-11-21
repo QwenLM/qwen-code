@@ -23,6 +23,209 @@ afterEach(() => {
 });
 
 describe('JavaManagedAgentClient', () => {
+  it('sends Session file locators without a caller-selected Workspace or cwd', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse({}));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    await client.queryWorkspaceFiles({
+      sessionId: 'session-a',
+      directory: '.',
+    });
+    await client.readWorkspaceFile({
+      sessionId: 'session-a',
+      path: 'file.txt',
+      expectedScopeRevision: 'scope',
+    });
+    await client.uploadWorkspaceFile(
+      {
+        sessionId: 'session-a',
+        path: 'file.txt',
+        expectedScopeRevision: 'scope',
+        uploadId: 'upload-id',
+      },
+      new Blob(['text']),
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({
+      sessionId: 'session-a',
+      directory: '.',
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      sessionId: 'session-a',
+      path: 'file.txt',
+      expectedScopeRevision: 'scope',
+    });
+    expect(
+      Object.fromEntries(
+        new URL(String(fetchImpl.mock.calls[2][0])).searchParams,
+      ),
+    ).toEqual({
+      sessionId: 'session-a',
+      path: 'file.txt',
+      expectedScopeRevision: 'scope',
+      uploadId: 'upload-id',
+    });
+  });
+
+  it('queries workspace artifacts through the authenticated WebShell POST', async () => {
+    const page = { data: [], nextCursor: null, hasMore: false };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse(page));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({ authorization: 'Bearer scoped' }),
+      fetch: fetchImpl,
+    });
+    const signal = new AbortController().signal;
+    expect(
+      await client.listWorkspaceArtifacts(
+        { workspaceId: 'ws-1', cursor: 'next', limit: 50 },
+        signal,
+      ),
+    ).toEqual(page);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/artifacts/query',
+    );
+    expect(init?.method).toBe('POST');
+    expect(init?.signal).toBe(signal);
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer scoped',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({
+      workspaceId: 'ws-1',
+      cursor: 'next',
+      limit: 50,
+    });
+    await client.listWorkspaceArtifacts({ workspaceId: 'ws-1' });
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      workspaceId: 'ws-1',
+    });
+  });
+
+  it('maps workspace artifact refusals to typed HTTP errors', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        jsonResponse(
+          { error: { code: 'workspace_not_found', message: 'gone' } },
+          404,
+        ),
+      );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    await expect(
+      client.listWorkspaceArtifacts({ workspaceId: 'ws-1' }),
+    ).rejects.toMatchObject({
+      status: 404,
+      code: 'workspace_not_found',
+    });
+  });
+
+  it('mints a terminal ticket through the authenticated WebShell POST', async () => {
+    const result = { ticket: 'eyJ_abc-123', expiresInSeconds: 30 };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(result));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({ authorization: 'Bearer scoped' }),
+      fetch: fetchImpl,
+    });
+    const signal = new AbortController().signal;
+    expect(await client.terminalTicket('s1', 't1', signal)).toEqual(result);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/gateway/api/agent/web-shell/v1/sessions/terminal-ticket',
+    );
+    expect(init?.method).toBe('POST');
+    expect(init?.credentials).toBe('include');
+    expect(init?.signal).toBe(signal);
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer scoped',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({
+      sessionId: 's1',
+      terminalId: 't1',
+    });
+  });
+
+  it('builds terminal WebSocket URLs with the Session path, terminal ID and replay', () => {
+    const secure = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+    });
+    expect(secure.terminalWebSocketUrl('s-1', 't-1')).toBe(
+      'wss://product.example/gateway/api/agent/web-shell/v1/sessions/s-1/terminal?terminalId=t-1&replay=1',
+    );
+    const insecure = new JavaManagedAgentClient({
+      baseUrl: 'http://localhost:8080',
+    });
+    expect(insecure.terminalWebSocketUrl('s-1', 't-1')).toBe(
+      'ws://localhost:8080/api/agent/web-shell/v1/sessions/s-1/terminal?terminalId=t-1&replay=1',
+    );
+  });
+
+  it('uploads raw bytes to the authenticated Workspace route and queries the same upload ID', async () => {
+    const result = {
+      scopeRevision: 'scope',
+      uploadId: 'upload-id',
+      path: 'folder/你好.pdf',
+      sizeBytes: 4,
+      sha256: 'a'.repeat(64),
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse(result));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({
+        authorization: 'Bearer scoped',
+        'content-type': 'application/json',
+      }),
+      fetch: fetchImpl,
+    });
+    const request = {
+      workspaceId: 'workspace',
+      cwdRelative: 'src',
+      path: result.path,
+      expectedScopeRevision: 'scope',
+      uploadId: result.uploadId,
+    };
+    const data = new Blob([new Uint8Array([0, 255, 128, 1])]);
+    const signal = new AbortController().signal;
+    expect(await client.uploadWorkspaceFile(request, data, signal)).toEqual(
+      result,
+    );
+    const [url, init] = fetchImpl.mock.calls[0];
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe(
+      '/gateway/api/agent/web-shell/v1/workspaces/files/upload',
+    );
+    expect(Object.fromEntries(parsed.searchParams)).toEqual(request);
+    expect(init?.body).toBe(data);
+    expect(init?.signal).toBe(signal);
+    expect(init?.credentials).toBe('include');
+    expect(new Headers(init?.headers).get('content-type')).toBe(
+      'application/octet-stream',
+    );
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer scoped',
+    );
+    await client.queryWorkspaceFileUpload(result.uploadId, signal);
+    expect(fetchImpl.mock.calls[1][0]).toBe(
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/files/uploads/query',
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      uploadId: result.uploadId,
+    });
+  });
+
   it('renames through the authenticated WebShell POST using the original key and signal', async () => {
     const result = { sessionId: 's1', title: 'Confirmed', replayed: false };
     const fetchImpl = vi
@@ -1122,6 +1325,7 @@ describe('JavaManagedAgentClient', () => {
             error: {
               code: 'agent_api_idempotency_conflict',
               message: 'conflict',
+              request_id: 'request-409',
             },
           },
           409,
@@ -1141,6 +1345,7 @@ describe('JavaManagedAgentClient', () => {
         status: 409,
         code: 'agent_api_idempotency_conflict',
         message: 'conflict',
+        requestId: 'request-409',
       }),
     );
   });
@@ -1152,6 +1357,9 @@ describe('JavaManagedAgentClient', () => {
         turnId: 'p1',
         status: 'accepted',
         replayed: false,
+        operationId: 'cancel-1',
+        admissionStage: 'java_durable',
+        deliveryState: 'pending',
       }),
     );
     const client = new JavaManagedAgentClient({
@@ -1177,6 +1385,66 @@ describe('JavaManagedAgentClient', () => {
       sessionId: 's1',
       turnId: 'p1',
     });
+  });
+
+  it('loads one recent Item page and passes its opaque older cursor verbatim', async () => {
+    const page = {
+      items: [{ id: 'recent-item' }],
+      nextCursor: 'signed-backward.cursor',
+      hasMore: true,
+      snapshotThroughSequence: 120,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(page));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const signal = new AbortController().signal;
+    expect(
+      await client.getRecentTranscriptItems(
+        { sessionId: 's1', cursor: 'signed-backward.cursor', limit: 2 },
+        signal,
+      ),
+    ).toEqual(page);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe(
+      'https://product.example/api/agent/web-shell/v1/transcript/items/query',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({
+      sessionId: 's1',
+      cursor: 'signed-backward.cursor',
+      limit: 2,
+    });
+    expect(init?.signal).toBe(signal);
+  });
+
+  it('surfaces an expired recent Item cursor without draining or replaying history', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: { code: 'cursor_expired', message: 'Expired' },
+        }),
+        {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      ),
+    );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    await expect(
+      client.getRecentTranscriptItems({
+        sessionId: 's1',
+        cursor: 'expired',
+        limit: 2,
+      }),
+    ).rejects.toMatchObject({ code: 'cursor_expired', status: 409 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('sends getSession, transcript and submit surfaces verbatim', async () => {
@@ -1231,7 +1499,10 @@ describe('JavaManagedAgentClient', () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       new Response('<html>bad gateway</html>', {
         status: 502,
-        headers: { 'content-type': 'text/html' },
+        headers: {
+          'content-type': 'text/html',
+          'x-request-id': 'gateway-request-502',
+        },
       }),
     );
     const client = new JavaManagedAgentClient({
@@ -1244,6 +1515,7 @@ describe('JavaManagedAgentClient', () => {
       expect.objectContaining<Partial<JavaManagedAgentHttpError>>({
         status: 502,
         code: 'http_502',
+        requestId: 'gateway-request-502',
       }),
     );
   });

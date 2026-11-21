@@ -11,6 +11,8 @@
 
 ## 状态与边界
 
+[剪贴板与来源生命周期批次](2026-10-24-opentui-clipboard-source-lifetime.zh-CN.md)让外部编辑继续使用同一原始展开草稿和最终提交所有者。模型归因只在待完成粘贴落定后添加，不由编辑器或已准备的 Retry 重做。该候选验证与下文历史结果分开记录。
+
 A 批基于 U2A `269600799782a5c507d62f3ae0db011c768be234`
 （[#14946](https://github.com/QwenLM/qwen-code/pull/14946)），从完整保存的
 U2B v10 候选拆出，使一个完整事务符合预期 2–3k 行审查规模。
@@ -51,8 +53,10 @@ unmount 使迟到输出失效，不能覆盖 successor 或其附件。启动前 
 
 Ctrl+D 读取实时 composer：非空 D 继续编辑。C 在清理前 arm，快速第二 C
 退出。响应中空 D 取消而不预先 arm。等待审批时 D 保留确认并 arm D/D 退出；
-C 取消确认且保留退出窗口。复用既有过期/混合键 guard；harness 清理及退出码
-差异不代表优雅退出对齐。
+C 取消确认且保留退出窗口。复用既有过期/混合键 guard。确认的键盘退出在
+三个 renderer/runtime profile 均须完成共享清理后以 0 退出；真实 OS signal
+终止保留原信号码。历史 0/130 观测继续作为基线证据，不代表接受差异；
+harness 清理不等于优雅退出。
 
 Composer 取消在当前 live-turn sequence 注册一个回调。回调、结构化队列
 pop、草稿恢复和入口 C/D 分派整体保留本批。Abort 的生成器收尾后，将返还

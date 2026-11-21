@@ -26,7 +26,7 @@ Provider 支持读取且 `capabilities.tasks` 明确为 true 时，在 Session �
 
 ## Provider 与同步
 
-Managed Provider 增加可选的 `tasks.list`、`tasks.get`、`tasks.listEvents`、`tasks.cancel.submit` 和 `tasks.cancel.query`，summary 携带可选 `capabilities.tasks`。类型直接引用生成的 WebShell 任务、事件和 command operation schema。Java 读取复用 `/api/agent/web-shell/v1` 下的 `/tasks/query`、`/tasks/get` 和 `/tasks/events/query` POST 接口；变更复用 `/tasks/cancel` 与 `/operations/query`。不新增 endpoint、表、契约能力字段或 Session 事件。Daemon 不提供任务操作组。Java 仅在宿主提供包含租户和账号身份的明确 `productScope` 时暴露取消能力。
+Managed Provider 增加可选的 `tasks.list`、`tasks.get`、`tasks.listEvents`、`tasks.cancel.submit` 和 `tasks.cancel.query`，summary 携带可选 `capabilities.tasks`。类型直接引用生成的 WebShell 任务、事件和 command operation schema。Java 读取复用 `/api/agent/web-shell/v1` 下的 `/tasks/query`、`/tasks/get` 和 `/tasks/events/query` POST 接口；变更复用 `/tasks/cancel` 与 `/operations/query`。不新增 endpoint、表、契约能力字段或 Session 事件。Daemon 不提供任务操作组。Java 现在无条件暴露取消能力；`productScope` 要求已在 #16554 中移除。
 
 任务读取和取消恢复分别由 Session 层两个 hook 管理。面板及浏览器标签页可见时，以完成后再调度的串行 3 秒轮询刷新当前原始分页、所选任务及事件页。关闭面板暂停普通读取；重新打开或恢复可见时刷新。事件从保留起点读取，按不透明 cursor 去重，不覆盖任务快照。未知事件类型只推进游标，不渲染。`cursor_expired` 时提示历史缺失并从保留起点重新读取。事件页有 `hasMore` 时等待用户加载更多，再恢复尾部跟踪。切换 Session、Provider 或账号时中止请求、清空读取缓存；请求归属检查防止迟到响应修改其他选择。
 

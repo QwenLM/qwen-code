@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { act, createRef, forwardRef, type ComponentProps } from 'react';
+import {
+  act,
+  createRef,
+  forwardRef,
+  useState,
+  type ComponentProps,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -72,6 +78,17 @@ describe('SessionDetailsTooltip', () => {
       'User input needed',
     ],
     [{ hasActivePrompt: true, activeWorkState: 'active' as const }, 'Running'],
+    // A plain running turn must not claim background work: `toContain` alone
+    // cannot catch an unconditional composition, so this row also rejects it.
+    [{ hasActivePrompt: true, hasRunningBackgroundTasks: false }, 'Running'],
+    [
+      { isWaitingForPermission: true, hasRunningBackgroundTasks: true },
+      'Needs approval · Background tasks running',
+    ],
+    [
+      { isWaitingForUserQuestion: true, hasRunningBackgroundTasks: true },
+      'User input needed · Background tasks running',
+    ],
     [{ activeWorkState: 'active' as const }, 'Active work'],
     [{ activeWorkState: 'unknown' as const }, 'Background activity unknown'],
   ])(
@@ -105,11 +122,49 @@ describe('SessionDetailsTooltip', () => {
         expect(details?.textContent).toContain(expected);
         if (expected !== 'Running')
           expect(details?.textContent).not.toContain('Running');
+        if (flags.hasRunningBackgroundTasks === false)
+          expect(details?.textContent).not.toContain('Background');
       } finally {
         act(() => root.unmount());
       }
     },
   );
+
+  it('names background work alongside a running turn', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'status',
+                workspaceCwd: '/workspace',
+                hasActivePrompt: true,
+                hasRunningBackgroundTasks: true,
+                activeWorkState: 'active',
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain(
+        'Running · Background tasks running',
+      );
+    } finally {
+      act(() => root.unmount());
+    }
+  });
 
   it('supports a ref-forwarding click trigger, keyboard dismissal and the host portal', async () => {
     const container = document.createElement('div');
@@ -235,6 +290,82 @@ describe('SessionDetailsTooltip', () => {
     }
   });
 
+  it('suppresses stale focus restoration after reopening shared-owner details', async () => {
+    vi.useFakeTimers();
+    popoverContentProps.mockClear();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    function SharedDetails() {
+      const [open, setOpen] = useState<string | null>(null);
+      return (
+        <I18nProvider language="en">
+          {['Alpha', 'Bravo'].map((label) => (
+            <SessionDetailsTooltip
+              key={label}
+              session={{ sessionId: label, workspaceCwd: '/w' }}
+              label={label}
+              time=""
+              completedUnread={false}
+              ownerToken="overview"
+              openOnClick={label === 'Alpha'}
+              open={open === label}
+              onOpenChange={(next) =>
+                setOpen((current) =>
+                  next ? label : current === label ? null : current,
+                )
+              }
+            >
+              <button type="button">
+                {label === 'Alpha' ? 'Alpha details' : 'Bravo title'}
+              </button>
+            </SessionDetailsTooltip>
+          ))}
+        </I18nProvider>
+      );
+    }
+    try {
+      await act(async () => root.render(<SharedDetails />));
+      const [detailsButton, hoverTitle] = container.querySelectorAll('button');
+      await act(async () => detailsButton!.click());
+      const copy = document.querySelector<HTMLElement>(
+        '[role="dialog"] [data-web-shell-session-id-copy]',
+      )!;
+      expect(document.activeElement).toBe(copy);
+      await act(async () =>
+        copy.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        ),
+      );
+      await act(async () => vi.advanceTimersByTime(0));
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.activeElement).toBe(detailsButton);
+      await act(async () => detailsButton!.click());
+      expect(document.activeElement).toBe(
+        document.querySelector('[data-web-shell-session-id-copy]'),
+      );
+      const outgoingProps = popoverContentProps.mock.calls
+        .filter(([props]) => props['aria-label'] === 'Alpha')
+        .at(-1)![0];
+      // Check our cancellation independently of Radix's outside-focus guard.
+      const closeEvent = new Event('closeAutoFocus', { cancelable: true });
+      outgoingProps.onCloseAutoFocus(closeEvent);
+      expect(closeEvent.defaultPrevented).toBe(true);
+      await act(async () => {
+        hoverTitle!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => vi.advanceTimersByTime(0));
+      expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+      expect(
+        document.querySelector('[role="dialog"]')?.getAttribute('aria-label'),
+      ).toBe('Bravo');
+      expect(document.activeElement).toBe(hoverTitle);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('shows the same structured details on row hover', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');
@@ -276,6 +407,44 @@ describe('SessionDetailsTooltip', () => {
     expect(details?.querySelector('svg path.fill-popover')).not.toBeNull();
 
     act(() => root.unmount());
+  });
+
+  it('shows the worktree slug when a detached worktree has no branch', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'session-wt',
+                workspaceCwd: '/work/repo',
+                worktree: {
+                  slug: 'swift-fox',
+                  path: '/wt/swift-fox',
+                  branch: '',
+                },
+              }}
+              label="Detached worktree"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Detached worktree</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        );
+      });
+
+      await openDetails(container);
+
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('swift-fox');
+    } finally {
+      act(() => root.unmount());
+    }
   });
 
   it('preserves the standalone workspace label from the sidebar', async () => {

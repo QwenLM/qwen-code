@@ -7,7 +7,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import type { Stats } from 'node:fs';
-import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
@@ -85,26 +85,73 @@ export class LocalManagedSessionResourceStore
     kind: string,
     bytes: Buffer,
   ): Promise<ManagedSessionDurableRef> {
+    if (
+      kind === 'managed-local-journal-snapshot' ||
+      kind === 'managed-local-journal-snapshot-page'
+    ) {
+      throw new ManagedSessionRecordError(
+        'Native snapshot resources use their dedicated publisher.',
+      );
+    }
+    return this.publishBytes(kind, bytes, randomUUID(), false);
+  }
+
+  publishJournalSnapshot(
+    kind:
+      | 'managed-local-journal-snapshot'
+      | 'managed-local-journal-snapshot-page',
+    bytes: Buffer,
+  ): Promise<ManagedSessionDurableRef> {
+    return this.publishBytes(
+      kind,
+      bytes,
+      createHash('sha256').update(bytes).digest('hex'),
+      true,
+    );
+  }
+
+  private async publishBytes(
+    kind: string,
+    bytes: Buffer,
+    resourceId: string,
+    immutable: boolean,
+  ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertPathSegment(kind, 'kind');
     if (bytes.byteLength > MANAGED_SESSION_RESOURCE_LIMITS.maxResourceBytes) {
       throw new ManagedSessionRecordError(
         `${safeKind} is ${bytes.byteLength} bytes where ${MANAGED_SESSION_RESOURCE_LIMITS.maxResourceBytes} is the maximum.`,
       );
     }
-    const resourceId = randomUUID();
     const directory = path.join(this.root, safeKind);
-    const pending = path.join(directory, `.${resourceId}.pending`);
+    const pending = path.join(
+      directory,
+      immutable
+        ? `.${resourceId}.${randomUUID()}.pending`
+        : `.${resourceId}.pending`,
+    );
 
     const target = path.join(directory, resourceId);
     await ensurePrivateDirectory(path.dirname(this.root));
     await ensurePrivateDirectory(this.root);
     const checkedDirectory = await ensurePrivateDirectory(directory);
 
-    const digest = createHash('sha256');
+    const resourceRef: ManagedSessionDurableRef = {
+      resourceId,
+      kind: safeKind,
+      schemaVersion: 1,
+      byteLength: bytes.byteLength,
+      digest: immutable
+        ? resourceId
+        : createHash('sha256').update(bytes).digest('hex'),
+    };
+    if (immutable && (await lstatOrUndefined(target))) {
+      await this.read(resourceRef);
+      await syncDirectory(directory);
+      return resourceRef;
+    }
     const handle = await open(pending, 'wx', 0o600);
     let written: { dev: number; ino: number };
     try {
-      digest.update(bytes);
       await handle.writeFile(bytes);
       await handle.sync();
       written = await handle.stat();
@@ -116,7 +163,20 @@ export class LocalManagedSessionResourceStore
     await handle.close();
 
     try {
-      await rename(pending, target);
+      if (immutable) {
+        try {
+          await link(pending, target);
+        } catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause;
+          await this.read(resourceRef);
+          await unlink(pending);
+          await syncDirectory(directory);
+          return resourceRef;
+        }
+        await unlink(pending);
+      } else {
+        await rename(pending, target);
+      }
       // The directory checks above and this rename are path-based, and Node
       // has no `openat`, so a swap between them can land the bytes outside the
       // session tree. These checks refuse a publish whose entry is no longer
@@ -149,13 +209,7 @@ export class LocalManagedSessionResourceStore
       throw cause;
     }
 
-    return {
-      resourceId,
-      kind: safeKind,
-      schemaVersion: 1,
-      byteLength: bytes.byteLength,
-      digest: digest.digest('hex'),
-    };
+    return resourceRef;
   }
 
   /**

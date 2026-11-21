@@ -28,6 +28,10 @@ import {
 } from '../models/modelConfigErrors.js';
 import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
 import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
+import {
+  getModuleNotFoundError,
+  wrapLazyModuleLoadError,
+} from '../utils/errors.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
 
 /**
@@ -86,6 +90,8 @@ export type ContentGeneratorConfig = {
   baseUrl?: string;
   vertexai?: boolean;
   authType?: AuthType | undefined;
+  /** Separate model route that must use its own provider configuration. */
+  isolatedRoute?: boolean;
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds
@@ -126,11 +132,12 @@ export type ContentGeneratorConfig = {
   // See issue #6642.
   forceGlobalCacheScope?: boolean;
   /**
-   * Default Anthropic `cache_control` retention for every cache anchor
-   * (system text, last tool, trailing user message) unless overridden
-   * per-anchor by {@link cacheRetentionByBlock}. `'ephemeral'` (default)
-   * omits `ttl` on the wire (spec default is 5m); `'1h'` requests the
-   * extended cache tier (`ttl: '1h'`).
+   * Default `cache_control` retention for every cache anchor. On Anthropic
+   * (system text, last tool, trailing user message) it is overridden
+   * per-anchor by {@link cacheRetentionByBlock}; on DashScope it stamps the
+   * qwen4 cache breakpoints. `'ephemeral'` (default) omits `ttl` on the wire
+   * (spec default is 5m); `'1h'` requests the extended cache tier
+   * (`ttl: '1h'`).
    */
   cacheRetention?: 'ephemeral' | '1h';
   /**
@@ -163,9 +170,10 @@ export type ContentGeneratorConfig = {
         // each provider adapter maps + clamps this tier onto the active model:
         //   - 'xhigh'/'max' are extra-strong tiers (DeepSeek `reasoning_effort`,
         //     Anthropic `output_config.effort` on Opus 4.7+, OpenAI `xhigh`).
-        //   - Generic OpenAI-compatible endpoints and the DashScope
-        //     qwen3.8-max family cap at 'xhigh' ('max' is a vendor extension,
-        //     not part of the generic ladder); Gemini caps at 'high'.
+        //   - Generic OpenAI-compatible endpoints cap at 'xhigh' ('max' is a
+        //     vendor extension, not part of the generic ladder); DashScope
+        //     qwen3.8 models accept the tiers their preset declares (up to
+        //     'max'); Gemini caps at 'high'.
         //   - Real Anthropic clamps each tier to the active model's supported
         //     set (Opus 4.7+/5.x accept 'xhigh'/'max'; Opus/Sonnet 4.6 accept
         //     'max'; older models cap at 'high'), logged once per generator via
@@ -192,6 +200,11 @@ export type ContentGeneratorConfig = {
   // Supported input modalities. Unsupported media types are replaced with text
   // placeholders. Leave undefined to use automatic detection from model name.
   modalities?: InputModalities;
+  // Image understanding detail sent on each `image_url` part. Undefined leaves
+  // the decision to the server (qwen4-max defaults to 'high', ~16K image
+  // tokens); 'low' trades resolution for tokens (~2.5K on qwen4-max). Only
+  // applies to providers that read the OpenAI `detail` field.
+  imageDetail?: 'low' | 'high' | 'auto';
   // When true, media parts in tool responses (including the built-in read_file
   // and MCP tools) are split into a follow-up `role: "user"` message instead of
   // being embedded inside the `role: "tool"` message. The OpenAI Chat
@@ -357,7 +370,10 @@ export function validateModelConfig(
   const errors: Error[] = [];
 
   // Qwen OAuth doesn't need validation - it uses dynamic tokens
-  if (config.authType === AuthType.QWEN_OAUTH) {
+  if (
+    config.authType === AuthType.QWEN_OAUTH ||
+    config.authType === AuthType.QWEN_SUBSCRIPTION
+  ) {
     return { valid: true, errors: [] };
   }
 
@@ -425,35 +441,8 @@ export function createContentGeneratorConfig(
   ).config;
 }
 
-function getModuleNotFoundError(
-  error: unknown,
-): NodeJS.ErrnoException | undefined {
-  let current = error;
-
-  while (current instanceof Error) {
-    if (
-      'code' in current &&
-      (current as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND'
-    ) {
-      return current as NodeJS.ErrnoException;
-    }
-    current = current.cause;
-  }
-
-  return undefined;
-}
-
 function wrapProviderLoadError(error: unknown, authType: AuthType): unknown {
-  const moduleNotFoundError = getModuleNotFoundError(error);
-  if (!moduleNotFoundError) {
-    return error;
-  }
-
-  return new Error(
-    `Qwen Code was updated in the background and needs to be restarted.\n` +
-      `Please exit and restart Qwen Code to use the '${authType}' provider.`,
-    { cause: moduleNotFoundError },
-  );
+  return wrapLazyModuleLoadError(error, `the '${authType}' provider`);
 }
 
 class LazyContentGenerator implements ContentGenerator {
@@ -566,6 +555,13 @@ export async function createContentGenerator(
           './openaiResponsesContentGenerator/index.js'
         );
         return createOpenAIResponsesContentGenerator(generatorConfig, config);
+      };
+    } else if (authType === AuthType.QWEN_SUBSCRIPTION) {
+      loadBaseGenerator = async () => {
+        const { createSubscriptionContentGenerator } = await import(
+          '../qwen/subscription-content-generator.js'
+        );
+        return createSubscriptionContentGenerator(generatorConfig, config);
       };
     } else if (authType === AuthType.QWEN_OAUTH) {
       const { getQwenOAuthClient: getQwenOauthClient } = await import(

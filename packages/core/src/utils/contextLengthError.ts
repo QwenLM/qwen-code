@@ -40,6 +40,12 @@ const CONTEXT_LENGTH_PATTERNS = [
   /\bprompt\s+(?:is\s+)?too long\b/i,
   /\binput\s+(?:token\s+)?(?:count\s+|length\s+)?(?:is\s+)?too long\b/i,
   /\brange of input length should be\b/i,
+  // Hugging Face TGI: "Input validation error: `inputs` tokens +
+  // `max_new_tokens` must be <= 32768. Given: 40000 `inputs` tokens and 1000
+  // `max_new_tokens`" and "`inputs` must have less than 32768 tokens. Given:
+  // 40000".
+  /\binputs`?\s+tokens\s*\+\s*`?max_new_tokens`?\s+must be\s*<=/i,
+  /\binputs`?\s+must have less than\s+\d[\d,]*\s+tokens\b/i,
   /\btoo many tokens\b/i,
   /\btokens?\s*>\s*[\d,]+\s*(?:maximum|max|limit)\b/i,
   /\b(?:input|prompt|messages?|context)\b[^\n]{0,120}\btokens?\b[^\n]{0,120}\bexceed(?:s|ed|ing)?\b/i,
@@ -87,6 +93,7 @@ function parseTokenCounts(text: string): {
     };
   }
 
+  // SGLang states the window as "maximum context length of N tokens".
   const maxContextLimitMatch = text.match(
     /maximum context length (?:is|of)\s*(\d[\d,]{0,31})\s*tokens?/i,
   );
@@ -131,6 +138,30 @@ function parseTokenCounts(text: string): {
   if (rangeMatch) {
     return {
       limitTokens: parseInteger(rangeMatch[1]!),
+      limitKind: 'input',
+    };
+  }
+
+  // TGI bounds `inputs + max_new_tokens` by `max_total_tokens`, the server's
+  // real window, and the prompt alone by `max_input_tokens`. Either way the
+  // `inputs` count is the prompt size compaction should start from.
+  const tgiTotalMatch = text.match(
+    /must be\s*<=\s*(\d[\d,]{0,31})\.?\s*Given:\s*(\d[\d,]{0,31})\s*`?inputs`?\s+tokens/i,
+  );
+  if (tgiTotalMatch) {
+    return {
+      actualTokens: parseInteger(tgiTotalMatch[2]!),
+      limitTokens: parseInteger(tgiTotalMatch[1]!),
+      limitKind: 'total',
+    };
+  }
+  const tgiInputMatch = text.match(
+    /must have less than\s+(\d[\d,]{0,31})\s+tokens\.?\s*Given:\s*(\d[\d,]{0,31})/i,
+  );
+  if (tgiInputMatch) {
+    return {
+      actualTokens: parseInteger(tgiInputMatch[2]!),
+      limitTokens: parseInteger(tgiInputMatch[1]!),
       limitKind: 'input',
     };
   }
@@ -285,11 +316,7 @@ export function getContextLengthExceededInfo(
   // sibling field was reported as not-an-overflow and never reached the
   // compaction path. A fragment counts as evidence only if it names a
   // context-length failure and is not itself a timeout message.
-  const isExceeded = fragments.some(
-    (fragment) =>
-      CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
-      !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment)),
-  );
+  const isExceeded = fragments.some(isOverflowText);
   const counts = isExceeded ? parseTokenCounts(message) : {};
 
   return {
@@ -297,6 +324,35 @@ export function getContextLengthExceededInfo(
     message,
     ...counts,
   };
+}
+
+/** A fragment that names a context-length failure and is not a timeout. */
+function isOverflowText(fragment: string): boolean {
+  return (
+    CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
+    !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment))
+  );
+}
+
+/**
+ * The context windows the error's rejections state: one per fragment that is
+ * itself a context-length rejection, when its wording names the window. A
+ * request may only be made smaller by these. An earlier attempt's rejection
+ * carried in another field still names a window the same server stated, so
+ * the caller takes the smallest. Two kinds of figure are left out: an untyped
+ * "N tokens > M" (rate-limit and quota text share the shape), and an input
+ * bound, which lets `prompt + max_tokens` exceed it, so sizing a window by it
+ * floors the summary budget (#13876).
+ */
+export function statedContextWindows(error: unknown): number[] {
+  return uniqueNonEmpty(collectStrings(error, new Set<object>()))
+    .filter(isOverflowText)
+    .map(parseTokenCounts)
+    .flatMap((counts) =>
+      counts.limitKind === 'total' && counts.limitTokens !== undefined
+        ? [counts.limitTokens]
+        : [],
+    );
 }
 
 export function isContextLengthExceededError(error: unknown): boolean {

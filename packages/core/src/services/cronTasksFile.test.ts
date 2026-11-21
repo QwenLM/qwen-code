@@ -388,6 +388,19 @@ describe('cronTasksFile', () => {
   });
 
   describe('appendCronRun', () => {
+    it('keeps the ring in time order when an older slot is booked late', () => {
+      // A gated fire is booked when its gate settles, under its own slot,
+      // after a manual run booked meanwhile.
+      const runs = appendCronRun(
+        appendCronRun([{ at: 60_000, kind: 'scheduled' }], {
+          at: 150_500,
+          kind: 'manual',
+        }),
+        { at: 120_000, kind: 'scheduled', gate: 'delivered' },
+      );
+      expect(runs.map((run) => run.at)).toEqual([60_000, 120_000, 150_500]);
+    });
+
     it('appends newest-last, treating absent history as empty', () => {
       const once = appendCronRun(undefined, { at: 1, kind: 'scheduled' });
       expect(once).toEqual([{ at: 1, kind: 'scheduled' }]);

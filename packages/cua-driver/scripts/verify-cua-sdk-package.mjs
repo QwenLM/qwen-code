@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { isAlreadyPublishedDryRunFailure } from "./publish-dry-run-skip.mjs"
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const driverRoot = resolve(scriptDirectory, "..")
@@ -200,15 +201,36 @@ if (tarballs.length !== 1 || tarballs[0] !== packed.filename) {
     `expected exactly one SDK tarball, found ${tarballs.join(", ")}`,
   )
 }
-run("npm", [
-  "publish",
-  tarball,
-  "--dry-run",
-  "--access",
-  "public",
-  "--json",
-  `--registry=${npmRegistry}`,
-])
+let publishDryRunFailure
+try {
+  run(
+    "npm",
+    [
+      "publish",
+      tarball,
+      "--dry-run",
+      "--access",
+      "public",
+      "--json",
+      `--registry=${npmRegistry}`,
+    ],
+    { capture: true },
+  )
+} catch (error) {
+  publishDryRunFailure = error
+}
+if (publishDryRunFailure) {
+  if (!isAlreadyPublishedDryRunFailure(String(publishDryRunFailure))) {
+    throw publishDryRunFailure
+  }
+  // After a release the packaged version already exists in the registry, so
+  // this collision check can never pass again until the next version bump.
+  // The tarball identity/content checks above and the clean install below
+  // still guard the package itself; only the registry-collision probe skips.
+  process.stdout.write(
+    `::notice::SDK publish dry-run skipped: ${packed.name}@${packed.version} is already present on ${npmRegistry}\n`,
+  )
+}
 
 const consumer = mkdtempSync(join(tmpdir(), "qwen-cua-sdk-consumer-"))
 let releaseFixture

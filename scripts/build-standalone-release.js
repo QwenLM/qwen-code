@@ -15,6 +15,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { stageOpenTuiPackages } from './opentui-package-assets.js';
 import {
   TARGET_CLIPBOARD_PACKAGE,
   standaloneArchiveName,
@@ -62,12 +63,16 @@ const RELEASE_TARGETS = [
 // falls back to ink). --include-opentui-preview adds the bun flavor's
 // archives (suffixed -opentui-preview) to the same release directory.
 const DEFAULT_RUNTIME = 'node';
-const DEFAULT_BUN_VERSION = '1.3.14';
+const DEFAULT_BUN_VERSION = '1.4.4';
 const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
 // The runtime downloads are the publish job's least reliable leg: one
 // transient download failure aborted the v0.23.4 publish while the
-// unchanged re-run passed. Bound each attempt and retry before failing.
-const MAX_DOWNLOAD_ATTEMPTS = 3;
+// unchanged re-run passed. The v0.26.2-preview.0 archive step aborted the
+// same way: its job log shows three consecutive 504s from the GitHub
+// Releases CDN while downloading the bun darwin-x64 runtime, and the
+// unchanged re-run passed. Five attempts back off to ~75s to ride out
+// longer transient bursts.
+const MAX_DOWNLOAD_ATTEMPTS = 5;
 const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 
@@ -143,7 +148,7 @@ async function main() {
     // Node packaging must not install them (nor fail on a missing lockfile
     // entry) at all.
     const opentuiModulesDir = flavors.includes('bun')
-      ? stageOpenTuiPackages(runtimeDir)
+      ? stageOpenTuiPackages(rootDir, runtimeDir, OPENTUI_PLATFORM_PACKAGES)
       : undefined;
 
     for (const flavor of flavors) {
@@ -336,50 +341,6 @@ function stageNativeModules(runtimeDir) {
       '--no-fund',
       ...readClipboardPackageSpecs(),
       ...readNodePtyPackageSpecs(),
-    ],
-    {
-      cwd: rootDir,
-      stdio: 'inherit',
-    },
-  );
-  return path.join(installDir, 'node_modules');
-}
-
-// Temporary OpenTUI preview: the bundled OpenTUI backend resolves its native
-// render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
-// so each standalone archive must ship the matching platform package(s).
-function readOpenTuiPackageSpecs() {
-  return OPENTUI_PLATFORM_PACKAGES.map((packageName) => {
-    const version = readPnpmLockedVersion(packageName);
-    if (!version) {
-      fail(`OpenTUI platform package version is not locked for ${packageName}`);
-    }
-    return `${packageName}@${version}`;
-  });
-}
-
-function stageOpenTuiPackages(runtimeDir) {
-  const installDir = path.join(runtimeDir, 'opentui-modules');
-  fs.mkdirSync(installDir, { recursive: true });
-  console.log('Staging standalone OpenTUI native packages');
-  const npmExecPath = process.env.npm_execpath;
-  if (!npmExecPath) {
-    fail('npm_execpath is unavailable; run package:standalone:release via npm');
-  }
-  execFileSync(
-    process.execPath,
-    [
-      npmExecPath,
-      'install',
-      '--prefix',
-      installDir,
-      '--package-lock=false',
-      '--no-save',
-      '--ignore-scripts',
-      '--force',
-      '--no-audit',
-      '--no-fund',
-      ...readOpenTuiPackageSpecs(),
     ],
     {
       cwd: rootDir,

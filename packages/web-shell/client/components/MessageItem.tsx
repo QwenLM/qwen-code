@@ -12,6 +12,7 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import type { DaemonContextMemoryDetail } from '@qwen-code/web-shell/daemon-react-sdk';
 import { CompactModeContext } from '../WebShellContexts';
 import type {
   WebShellAssistantFeedbackRating,
@@ -29,10 +30,10 @@ import {
   isCompletedAskUserQuestion,
 } from './messages/toolFormatting';
 import {
-  AssistantMessage,
   ThinkingMessage,
   type SessionContentGenerator,
 } from './messages/AssistantMessage';
+import { AssistantMessageRow } from './messages/AssistantMessageRow';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import type { TurnOutputOpenRequest } from './artifacts/TurnOutputs';
@@ -47,12 +48,20 @@ import type {
   DaemonAssistantMessage,
 } from '../adapters/messageTypes';
 import { isTurnCallsPrompt, useOpenTurnCalls } from '../turnCallsContext';
+import { HookStatistics } from './messages/HookStatistics';
+import type { HookStatisticsTurn } from './messages/hook-statistics-context';
 
 interface MessageItemProps {
+  hookTurn?: HookStatisticsTurn;
   message: Message;
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
@@ -82,6 +91,7 @@ interface MessageItemProps {
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   branchRecordId?: string;
   showAssistantActions?: boolean;
+  assistantFooterAlwaysVisible?: boolean;
   showAssistantBranch?: boolean;
   /** Turn id marks are keyed by; unset hides the marks for this message. */
   assistantFeedbackTurnId?: string;
@@ -104,6 +114,7 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onOpenMemoryFile,
   onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
@@ -122,6 +133,8 @@ export const MessageItem = memo(function MessageItem({
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
+  hookTurn,
+  assistantFooterAlwaysVisible = false,
   showAssistantBranch = false,
   assistantFeedbackTurnId,
   assistantFeedbackPromptId,
@@ -219,11 +232,15 @@ export const MessageItem = memo(function MessageItem({
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
             author={message.author}
+            sentFrom={message.sentFrom}
+            sentTo={message.agentMessage?.sentTo}
           />
         );
       case 'assistant':
         return (
-          <AssistantMessage
+          <AssistantMessageRow
+            messageId={message.id}
+            hookTurn={hookTurn}
             content={message.content}
             author={message.author}
             agentMessage={message.agentMessage}
@@ -231,6 +248,7 @@ export const MessageItem = memo(function MessageItem({
             timestamp={message.timestamp}
             onBranchSession={boundBranchSession}
             showFooterActions={showAssistantActions}
+            footerAlwaysVisible={assistantFooterAlwaysVisible}
             showBranchAction={showAssistantBranch}
             showAssistantFeedback={assistantFeedbackPromptId !== undefined}
             assistantFeedbackRating={assistantFeedbackRating}
@@ -302,6 +320,7 @@ export const MessageItem = memo(function MessageItem({
             images={message.images}
             files={message.files}
             onShowContextDetail={onShowContextDetail}
+            onOpenMemoryFile={onOpenMemoryFile}
             onLocateBackgroundSource={onLocateBackgroundSource}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
@@ -383,6 +402,11 @@ export const MessageItem = memo(function MessageItem({
   const selectableSafeBody = (
     <div data-user-selectable="true" style={{ display: 'contents' }}>
       {safeBody}
+      {hookTurn && message.role !== 'assistant' && (
+        <div className="flex items-center pb-6">
+          <HookStatistics turn={hookTurn} />
+        </div>
+      )}
     </div>
   );
 
@@ -480,6 +504,7 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onOpenMemoryFile !== next.onOpenMemoryFile) return false;
   if (prev.onLocateBackgroundSource !== next.onLocateBackgroundSource)
     return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
@@ -500,6 +525,14 @@ function areMessageItemPropsEqual(
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
+  if (
+    prev.hookTurn?.sessionId !== next.hookTurn?.sessionId ||
+    prev.hookTurn?.promptId !== next.hookTurn?.promptId ||
+    prev.hookTurn?.recordId !== next.hookTurn?.recordId
+  )
+    return false;
+  if (prev.assistantFooterAlwaysVisible !== next.assistantFooterAlwaysVisible)
+    return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.assistantFeedbackTurnId !== next.assistantFeedbackTurnId)
     return false;

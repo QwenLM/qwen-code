@@ -6,19 +6,15 @@
 
 import type { Content } from '@google/genai';
 import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
   getStartupContextLength,
   isSystemReminderContent,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
 } from '../core/environmentContext.js';
 import { isClearedMediaPlaceholder } from './microcompaction/microcompact.js';
-
-// Envelope the background registries wrap a notification's `modelText` in
-// (agents, monitors, shells, workflows, the dropped-notification tally).
-// Same shape `turn-interruption.ts` keys on; see that file for the envelope's
-// trust model (role-gated, emitter escaping not uniform).
-const TASK_NOTIFICATION_OPEN = '<task-notification>';
-const TASK_NOTIFICATION_CLOSE = '</task-notification>';
 
 function isWrappedText(text: string, open: string, close: string): boolean {
   return text.startsWith(open) && text.trimEnd().endsWith(close);
@@ -42,6 +38,7 @@ function isWrappedText(text: string, open: string, close: string): boolean {
 function isDeliveredNotificationTurn(content: Content): boolean {
   let sawEnvelope = false;
   for (const part of content.parts ?? []) {
+    if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true) continue;
     if (!('text' in part) || typeof part.text !== 'string') return false;
     if (
       isWrappedText(part.text, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE)
@@ -178,6 +175,8 @@ export function isApiUserPrompt(
   }
 
   return content.parts.some((part) => {
+    if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true)
+      return false;
     if (!('text' in part) || !part.text) return false;
     return !(
       options?.excludeClearedMediaPlaceholders &&
@@ -196,19 +195,20 @@ export function isApiUserPrompt(
  * user prompts than requested, e.g. the target turn was absorbed by chat
  * compression.
  *
- * Two CLI-side walks are not yet delegated here and are near-twins of this
- * one, so a change to the walk semantics below — `includeCompressed`, a new
- * structural entry kind to skip, the -1 convention — has to be re-applied to
- * both or ink/OpenTUI rewind computes a different boundary than ACP for the
- * same history:
+ * One CLI-side walk is not yet delegated here and is a near-twin of this one,
+ * so a change to the walk semantics below — `includeCompressed`, a new
+ * structural entry kind to skip, the -1 convention — must also be reviewed
+ * there when changing the positional walk:
  *
- * - `computeApiTruncationIndex` (`ui/utils/historyMapping.ts`) walks UI items
- *   alongside the API history, so it cannot call this directly.
  * - `rewindApiCutPoint` (`ui/opentui/session-rewind-model.ts`) is 1-based and
  *   returns -1 for `occurrence <= 0`, where this function is 0-based and
  *   returns `startIndex` for `turnIndex <= 0`. They agree on the first turn
  *   only because nothing sits between the startup prelude and the first user
  *   prompt today.
+ *
+ * Live Ink resolves identities rather than using this walk.
+ * `computeApiTruncationIndex` (`ui/utils/historyMapping.ts`) calls
+ * `findApiHistoryPromptIndex`.
  */
 export function findApiRewindCutPoint(
   apiHistory: Content[],

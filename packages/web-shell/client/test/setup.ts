@@ -1,5 +1,8 @@
 import { vi } from 'vitest';
 
+// Keep catalog and synchronous rendering tests independent of chunk timing.
+vi.mock('../i18n-catalogs.js', () => import('../i18n-catalogs.eager.js'));
+
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;

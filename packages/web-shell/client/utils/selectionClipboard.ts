@@ -145,6 +145,8 @@ function plainText(node: Node): string {
   )
     return `${node.textContent}\n`;
   if (node instanceof HTMLImageElement) return node.alt;
+  if (node instanceof Element && node.hasAttribute('data-markdown-image-alt'))
+    return node.getAttribute('data-markdown-image-alt') ?? '';
   if (tag === 'BR') return '\n';
   if (tag === 'PRE') return `${node.textContent}\n`;
   const children = Array.from(node.childNodes).reduce((text, child) => {
@@ -203,6 +205,13 @@ markdown.addRule('taskCheckbox', {
   filter: (node) => node.hasAttribute('data-selection-copy-task'),
   replacement: (_content, node) => node.dataset.selectionCopyTask ?? '',
 });
+markdown.addRule('imageFallback', {
+  filter: (node) => node.hasAttribute('data-markdown-image-alt'),
+  replacement: (_content, node) =>
+    `![${node.getAttribute('data-markdown-image-alt') ?? ''}](${
+      node.getAttribute('data-markdown-image-src') ?? ''
+    })`,
+});
 markdown.addRule('strikethrough', {
   filter: ['del', 's'],
   replacement: (content) => `~~${content}~~`,
@@ -251,14 +260,31 @@ markdown.addRule('code', {
   },
 });
 
-export function getSelectedReplyContent(body: HTMLElement, range: Range) {
+function cloneReplyContent(
+  body: HTMLElement,
+  range: Range,
+): HTMLElement | null {
   if (
     !body.contains(range.startContainer) ||
     !body.contains(range.endContainer)
   ) {
     return null;
   }
-  const selected = cloneSelected(body, range) as HTMLElement | null;
+  return cloneSelected(body, range) as HTMLElement | null;
+}
+
+export function getSelectedReplyText(
+  body: HTMLElement,
+  range: Range,
+): string | null {
+  const selected = cloneReplyContent(body, range);
+  if (!selected) return null;
+  const text = plainText(selected).replace(/^\n+|\n+$/g, '');
+  return text.trim() ? text : null;
+}
+
+export function getSelectedReplyContent(body: HTMLElement, range: Range) {
+  const selected = cloneReplyContent(body, range);
   if (!selected) return null;
   const text = plainText(selected).replace(/^\n+|\n+$/g, '');
   const formatted = markdown.turndown(selected);

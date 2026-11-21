@@ -327,6 +327,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
       return {
         llmContent: 'Monitor was cancelled before it could start.',
         returnDisplay: 'Monitor cancelled.',
+        // Returned rather than thrown, so the scheduler needs this to avoid
+        // reporting a monitor that never spawned as already completed.
+        interruptedBeforeCompletion: true,
       };
     }
 

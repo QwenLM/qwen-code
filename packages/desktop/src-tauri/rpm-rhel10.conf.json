@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "linux": {
+      "rpm": {
+        "depends": ["libwebkit2gtk-4.1.so.0", "glibc >= 2.39"]
+      }
+    }
+  }
+}

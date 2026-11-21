@@ -16,6 +16,7 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { isBunRuntime } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { t } from '../../i18n/index.js';
 import { getGlobalNpmRegistryConfig } from '../../utils/npm-registry-config.js';
+import { getNpmNodePath } from '../../utils/npm-runtime.js';
 
 const debugLogger = createDebugLogger('UPDATE_CHECK');
 
@@ -151,7 +152,7 @@ export async function runGlobalNpm(
   args: string[],
   run: typeof execFileAsync = execFileAsync,
   platform = process.platform,
-  nodePath = process.execPath,
+  nodePath = getNpmNodePath(),
   resolveNpmCliPath = getNpmCliPath,
 ): Promise<string> {
   const { stdout } = await run(

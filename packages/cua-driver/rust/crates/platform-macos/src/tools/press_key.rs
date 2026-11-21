@@ -487,7 +487,19 @@ impl Tool for PressKeyTool {
                                 crate::input::skylight::prepare_background_keyboard(pid, wid)?;
                             }
                         }
-                        crate::input::keyboard::press_key(pid, &key, &m)
+                        let recipient =
+                            if crate::input::keyboard::uses_application_keyboard_target(fg, &m) {
+                                pid
+                            } else {
+                                unsafe {
+                                    crate::ax::exact_target::keyboard_recipient_pid(
+                                        pid,
+                                        window_id,
+                                        pre_focus_ptr,
+                                    )
+                                }?
+                            };
+                        crate::input::keyboard::press_key(recipient, &key, &m)
                     })
                 })
                 .await

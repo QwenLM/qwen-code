@@ -53,14 +53,20 @@ const branchFamily = toPosix(reviewBranch(probePr)).slice(
 const ciYaml = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
 // Every ci.yml job that checks out on the shared self-hosted pool inherits a
 // possibly dirty workspace. Match the pool itself, not just the output
-// reference that usually names it: jobs can also hard-code the shared label
+// references that usually name it: jobs can also hard-code the shared label
 // array, and a checkout on either form inherits the same leftovers.
+// lint_and_static reads lint_runner (every PR reaches the pool), the test
+// lanes read pr_test_runner, the other lanes ubuntu_runner — all name the same
+// shared workspace. pr_test_runner is listed explicitly because jobs that read
+// it are also kept in scope by their own sweep step, which would otherwise hide
+// a future job that adds the pool and forgets the sweep.
 // Include retained recovery steps on hosted jobs too, so rerouting cannot
 // silently restore an untested sweep. Select by properties, not job name.
+const sharedPoolSelector = /ubuntu_runner|lint_runner|pr_test_runner|ecs-qwen/;
 const ciCleanSteps = Object.entries(ciYaml.jobs)
   .filter(
     ([, job]) =>
-      (/ubuntu_runner|ecs-qwen/.test(JSON.stringify(job['runs-on'] ?? '')) ||
+      (sharedPoolSelector.test(JSON.stringify(job['runs-on'] ?? '')) ||
         (job.steps ?? []).some(
           (s) => s.name === 'Clean stale .qwen before checkout',
         )) &&
@@ -377,10 +383,24 @@ describe('review worktree cleanup steps', () => {
     }
   });
 
+  it('matches every pr_test_runner job with the shared-pool selector itself', () => {
+    const poolJobs = Object.entries(ciYaml.jobs).filter(([, job]) =>
+      JSON.stringify(job['runs-on'] ?? '').includes('pr_test_runner'),
+    );
+    expect(poolJobs.length).toBeGreaterThan(0);
+    for (const [id, job] of poolJobs) {
+      expect(
+        sharedPoolSelector.test(JSON.stringify(job['runs-on'] ?? '')),
+        `job "${id}" runs on pr_test_runner and must match the pool selector`,
+      ).toBe(true);
+    }
+  });
+
   it('keeps every shared-pool ci.yml checkout sweep pinned to paths.ts', () => {
     expect(ciCleanSteps.map(({ id }) => id)).toEqual(
       expect.arrayContaining([
         'test',
+        'test_build',
         'web_shell_e2e_smoke',
         'integration_cli',
       ]),

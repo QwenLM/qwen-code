@@ -17,8 +17,8 @@ import {
   resolveRegisteredToolName,
 } from '../tools/tool-names.js';
 import { ToolErrorType } from '../tools/tool-error.js';
-import { MOD_MAX_BYTES } from './types.js';
-import { record, validateInput } from './dispatch.js';
+import { MOD_MAX_BYTES, MOD_MAX_DEPTH } from './types.js';
+import { jsonDepth, record, validateInput } from './dispatch.js';
 import {
   MOD_TOOL_RESERVED,
   type ModToolCall,
@@ -149,7 +149,10 @@ export async function executeModTool(
           response.responseParts.find((part) => part.functionResponse)
             ?.functionResponse?.response ?? {};
         let json = JSON.stringify(result);
-        if (Buffer.byteLength(json) > MOD_MAX_BYTES / 2) {
+        if (
+          Buffer.byteLength(json) > MOD_MAX_BYTES / 2 ||
+          jsonDepth(json) > MOD_MAX_DEPTH / 2
+        ) {
           result = {
             output:
               '[Native tool result exceeds the Mod payload limit; return this reference unchanged to retain it.]',

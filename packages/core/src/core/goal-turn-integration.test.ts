@@ -57,7 +57,9 @@ describe('Goal turn evidence propagation', () => {
       expect.any(Object),
       'goal-prompt',
       permit,
-      undefined,
+      // A Turn built without isSessionTurn (as turnModelRound does for
+      // background rounds) must not claim ledger membership.
+      {},
     );
     const toolRequest = events.find(
       (event) => event.type === LlmEventType.ToolCallRequest,
@@ -84,6 +86,7 @@ describe('Goal turn evidence propagation', () => {
         model: string,
         stream: AsyncGenerator<GenerateContentResponse>,
         routeKey: string,
+        fixedInputVersion: number,
         goalContext?: GoalTurnPermit,
       ) => AsyncGenerator<GenerateContentResponse>;
       pendingPartialAssistantRecord:
@@ -105,6 +108,7 @@ describe('Goal turn evidence propagation', () => {
       'test-model',
       normalStream,
       'test-route',
+      0,
       permit,
     )) {
       // Consume the persisted normal assistant attempt.
@@ -140,6 +144,7 @@ describe('Goal turn evidence propagation', () => {
           'test-model',
           partialStream,
           'test-route',
+          0,
           permit,
         )) {
           // Consume until the deferred partial attempt is staged.

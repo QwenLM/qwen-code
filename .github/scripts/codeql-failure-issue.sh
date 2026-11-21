@@ -7,9 +7,9 @@
 # The scan is schedule-only and never a required check, so nothing turns red
 # when it dies: the old shared 30-minute cap cancelled 57 of 59 nightlies and
 # the Security tab silently stopped updating for weeks (#13249).
-# main-ci-failure-issue.yml cannot cover this: it files autofix-routed issues
-# keyed on failing tests, a timeout has no failing test, and it only fires on
-# `failure` while a `timeout-minutes` overrun reports `cancelled`.
+# main-ci-failure-issue.yml aggregates watched workflow failures, but does not
+# watch CodeQL and only fires on `failure`; a `timeout-minutes` overrun reports
+# `cancelled`, which this reporter also covers.
 set -euo pipefail
 
 # Name the legs that did not finish, so the issue says which language lost its

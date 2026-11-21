@@ -2201,6 +2201,120 @@ describe('createOpenAiCompleter retries', () => {
   });
 });
 
+describe('generateAiContent bounded requests', () => {
+  it('overlaps at most three summaries and preserves order before digest calls', async () => {
+    const pending = [];
+    const calls = [];
+    let active = 0;
+    let peak = 0;
+    const complete = async (request) => {
+      calls.push(request.kind);
+      if (request.kind !== 'summaries') {
+        expect(active).toBe(0);
+        expect(request.entries.map((item) => item.summary)).toEqual(
+          [1, 2, 3, 4, 5, 6, 7].map((number) => `Summary ${number}`),
+        );
+        return { [request.kind]: [] };
+      }
+      active += 1;
+      peak = Math.max(peak, active);
+      return new Promise((resolve) => {
+        pending.push(() => {
+          active -= 1;
+          resolve({
+            summaries: request.entries.map((item) => ({
+              pr: item.number,
+              summary: `Summary ${item.number}`,
+              summaryZh: `摘要 ${item.number}`,
+            })),
+          });
+        });
+      });
+    };
+    const resultPromise = generateAiContent(
+      [1, 2, 3, 4, 5, 6, 7].map((number) => entry(number, `Title ${number}`)),
+      complete,
+      { batchSize: 1 },
+    );
+    expect(pending).toHaveLength(3);
+    pending[2]();
+    pending[1]();
+    await Promise.resolve();
+    expect(pending).toHaveLength(3);
+    pending[0]();
+    await vi.waitFor(() => expect(pending).toHaveLength(6));
+    pending[5]();
+    pending[4]();
+    pending[3]();
+    await vi.waitFor(() => expect(pending).toHaveLength(7));
+    expect(calls.every((kind) => kind === 'summaries')).toBe(true);
+    pending[6]();
+    const result = await resultPromise;
+    expect(peak).toBe(3);
+    expect([...result.summaries.keys()]).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(result.warnings).toEqual([]);
+    expect(calls.slice(-2)).toEqual(['highlights', 'themes']);
+  });
+
+  it('limits the next wave to the remaining failure allowance', async () => {
+    const pending = [];
+    const complete = vi.fn(
+      (request) =>
+        new Promise((resolve, reject) => {
+          const number = request.entries[0].number;
+          pending.push({ resolve, reject, number });
+        }),
+    );
+    const resultPromise = generateAiContent(
+      [1, 2, 3, 4, 5, 6].map((number) => entry(number, `Title ${number}`)),
+      complete,
+      { batchSize: 1 },
+    );
+    expect(pending).toHaveLength(3);
+    pending[2].reject(new Error('third batch'));
+    pending[1].reject(new Error('second batch'));
+    pending[0].resolve({
+      summaries: [{ pr: 1, summary: 'First summary', summaryZh: '第一项摘要' }],
+    });
+    await vi.waitFor(() => expect(pending).toHaveLength(4));
+    pending[3].reject(new Error('fourth batch'));
+    const result = await resultPromise;
+    expect(complete).toHaveBeenCalledTimes(4);
+    expect(result.warnings.slice(0, 3)).toEqual([
+      'Summary batch fallback: second batch',
+      'Summary batch fallback: third batch',
+      'Summary batch fallback: fourth batch',
+    ]);
+    expect(result.warnings).toContain(
+      'Summary batches stopped after 3 consecutive failures; remaining entries use pull-request titles.',
+    );
+    expect([...result.summaries.values()]).toEqual([
+      'First summary',
+      'Title 2',
+      'Title 3',
+      'Title 4',
+      'Title 5',
+      'Title 6',
+    ]);
+  });
+
+  it('rejects invalid scheduling limits before calling the model', async () => {
+    const complete = vi.fn();
+    for (const options of [
+      { batchSize: 0 },
+      { batchSize: 1.5 },
+      { maxConsecutiveBatchFailures: 0 },
+      { maxConsecutiveBatchFailures: -1 },
+      { maxConsecutiveBatchFailures: Infinity },
+    ]) {
+      await expect(
+        generateAiContent([entry(1, 'Title')], complete, options),
+      ).rejects.toThrow('positive integers');
+    }
+    expect(complete).not.toHaveBeenCalled();
+  });
+});
+
 describe('generateAiContent circuit breaker', () => {
   it('stops calling the model after consecutive batch failures', async () => {
     const calls = [];

@@ -574,6 +574,11 @@ export class NodeReplKernelManager {
         '--experimental-vm-modules',
         '--experimental-import-meta-resolve',
         resolveKernelPath(),
+        ...process.argv
+          .slice(2)
+          .filter((argument) =>
+            ['--no-overlay', '--no-pip'].includes(argument),
+          ),
       ],
       {
         cwd: this.options.cwd,
@@ -995,8 +1000,14 @@ export class NodeReplKernelManager {
   }
 
   private async terminateHandle(handle: KernelHandle): Promise<void> {
+    const running =
+      handle.child.exitCode === null && handle.child.signalCode === null;
     try {
       handle.toKernel.write(encodeFrame({ type: 'shutdown' }));
+      // The kernel's pending read on this pipe keeps its process.exit()
+      // from completing until the pipe reaches EOF; without it every
+      // shutdown waits out the grace period and ends in a signal.
+      handle.toKernel.end();
     } catch {
       // The hard stop below remains authoritative.
     }
@@ -1010,10 +1021,33 @@ export class NodeReplKernelManager {
       hardKill = true;
       this.signalProcessTree(handle, true);
       exited = await this.waitForExit(handle.child, TERMINATE_GRACE_MS);
+    } else if (running && !IS_WINDOWS) {
+      // Processes the session started without detaching outlive a kernel
+      // that exits before the hard stop, whether on its own or on SIGTERM
+      // they ignored. They are still in its process group, which keeps its
+      // ID while any of them lives, so stop them as the hard stop would.
+      hardKill = await this.stopLeftoverProcessGroup(handle.pid);
     }
     debugLogger.debug(
       `[node-repl] process tree termination completed (generation=${handle.generation}, pid=${handle.pid}, hardKill=${hardKill}, exited=${exited})`,
     );
+  }
+
+  private async stopLeftoverProcessGroup(pgid: number): Promise<boolean> {
+    const signalGroup = (signal: NodeJS.Signals | 0): boolean => {
+      try {
+        process.kill(-pgid, signal);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (!signalGroup('SIGTERM')) return false;
+    for (let waited = 0; waited < 500; waited += 50) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (!signalGroup(0)) return false;
+    }
+    return signalGroup('SIGKILL');
   }
 
   private signalProcessTree(handle: KernelHandle, hard: boolean): void {

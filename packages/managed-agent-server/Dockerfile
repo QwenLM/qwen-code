@@ -4,6 +4,7 @@ WORKDIR /workspace
 COPY packages/sdk-java/qwencode packages/sdk-java/qwencode
 COPY packages/managed-agent-server packages/managed-agent-server
 COPY packages/core/src/managed-runtime/contracts/managed-tool-result-v1.schema.json packages/core/src/managed-runtime/contracts/
+COPY packages/core/src/managed-runtime/contracts/managed-loop-skill-*.json packages/core/src/managed-runtime/contracts/
 
 RUN mvn --batch-mode --no-transfer-progress \
       -f packages/sdk-java/qwencode/pom.xml \
@@ -11,25 +12,20 @@ RUN mvn --batch-mode --no-transfer-progress \
     && mvn --batch-mode --no-transfer-progress \
       -f packages/managed-agent-server/pom.xml \
       -DskipTests package \
-    # The pom attaches classified repackage executions alongside the
-    # unclassified server jar, so a wildcard matches several artifacts and
-    # a pinned version drifts. Select
-    # the unclassified jar by exclusion and publish it under a fixed name;
+    # The ordinary dependency jar is not executable. Select the exec
+    # classifier without pinning the version and publish it under a fixed name;
     # fail the build (rather than ship a bad image) unless exactly one
     # exists. sh has no nullglob, so a zero-match glob yields the pattern
     # itself — break on it so the count check below still fails, and name
     # the expectation loudly instead of dying at cp.
-    && cd packages/managed-agent-server/target \
+    && cd packages/managed-agent-server/server/target \
     && main="" && count=0 \
-    && for f in qwen-managed-agent-server-*.jar; do \
+    && for f in qwen-managed-agent-server-*-exec.jar; do \
          [ -e "$f" ] || break; \
-         case "$f" in \
-           *-workspace-bundle.jar|*-operator-recovery.jar|*-workspace-migration.jar|*-workspace-maintenance-recovery.jar|*-csi-session.jar|*-csi-runtime.jar) ;; \
-           *) main="$f"; count=$((count+1)) ;; \
-         esac; \
+         main="$f"; count=$((count+1)); \
        done \
     && { [ "$count" -eq 1 ] || { \
-         echo >&2 "expected exactly one unclassified server jar," \
+         echo >&2 "expected exactly one executable server jar," \
             "found $count"; exit 1; \
        }; } \
     && cp "$main" /tmp/qwen-managed-agent-server.jar

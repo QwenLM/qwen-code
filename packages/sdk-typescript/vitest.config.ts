@@ -28,6 +28,10 @@ export default defineConfig({
     },
     include: ['test/**/*.test.ts'],
     exclude: ['node_modules/', 'dist/'],
+    reporters: ['default', 'junit'],
+    outputFile: {
+      junit: 'junit.xml',
+    },
     retry: 2,
     fileParallelism: true,
     poolOptions: {

@@ -18,6 +18,10 @@ import {
   type DefinitionPin,
 } from './managed-extension-record.js';
 import {
+  parseManagedExtensionPin,
+  type ManagedExtensionPin,
+} from './managed-extension-package.js';
+import {
   assertManagedSessionDurableRef,
   ManagedSessionRecordError,
   type ManagedSessionDurableRef,
@@ -127,7 +131,7 @@ export function parsePublicChildModelRoute(
 }
 
 export interface PublicChildLaunchSnapshot {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly sourcePromptId: string;
   readonly approvalMode: 'default' | 'auto-edit' | 'yolo';
   readonly approvalRevision: number;
@@ -135,6 +139,63 @@ export interface PublicChildLaunchSnapshot {
   readonly modelRevision: number;
   readonly modelRoute: PublicChildModelRoute;
   readonly skillsRef: ManagedSessionDurableRef | null;
+  readonly extensionAgent?: PublicChildExtensionAgent;
+}
+
+export interface PublicChildExtensionAgent {
+  readonly configRevision: number;
+  readonly bundleRef: ManagedSessionDurableRef;
+  readonly pin: ManagedExtensionPin;
+  readonly contributionsRef: ManagedSessionDurableRef;
+  readonly agentName: string;
+  readonly toolNames: readonly string[];
+}
+
+export function parsePublicChildExtensionAgent(
+  value: unknown,
+): PublicChildExtensionAgent {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new ManagedSessionRecordError('Invalid extension agent descriptor.');
+  const fields = value as Record<string, ManagedSessionJsonValue>;
+  if (
+    Object.keys(fields).sort().join(',') !==
+      'agentName,bundleRef,configRevision,contributionsRef,pin,toolNames' ||
+    !Number.isSafeInteger(fields['configRevision']) ||
+    Number(fields['configRevision']) < 1 ||
+    typeof fields['agentName'] !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u.test(fields['agentName']) ||
+    !Array.isArray(fields['toolNames']) ||
+    fields['toolNames'].length > 256 ||
+    fields['toolNames'].some(
+      (name) =>
+        typeof name !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/u.test(name),
+    ) ||
+    new Set(fields['toolNames']).size !== fields['toolNames'].length
+  )
+    throw new ManagedSessionRecordError('Invalid extension agent descriptor.');
+  const bundleRef = assertManagedSessionDurableRef(
+    fields['bundleRef'],
+    'extension agent bundle',
+  );
+  const contributionsRef = assertManagedSessionDurableRef(
+    fields['contributionsRef'],
+    'extension agent contributions',
+  );
+  if (
+    bundleRef.kind !== 'managed-extension-config-bundle' ||
+    bundleRef.schemaVersion !== 1 ||
+    contributionsRef.kind !== 'managed-extension-contributions' ||
+    contributionsRef.schemaVersion !== 1
+  )
+    throw new ManagedSessionRecordError('Invalid extension agent references.');
+  return Object.freeze({
+    configRevision: fields['configRevision'] as number,
+    bundleRef,
+    pin: parseManagedExtensionPin(fields['pin']),
+    contributionsRef,
+    agentName: fields['agentName'],
+    toolNames: Object.freeze([...(fields['toolNames'] as string[])]),
+  });
 }
 
 export interface ChildLaunchEnvelope {
@@ -153,8 +214,10 @@ function parsePublicChildLaunch(value: unknown): PublicChildLaunchSnapshot {
   const fields = value as Record<string, unknown>;
   if (
     Object.keys(fields).sort().join(',') !==
-      'approvalMode,approvalRevision,modelId,modelRevision,modelRoute,skillsRef,sourcePromptId,version' ||
-    fields['version'] !== 1 ||
+      (fields['version'] === 2
+        ? 'approvalMode,approvalRevision,extensionAgent,modelId,modelRevision,modelRoute,skillsRef,sourcePromptId,version'
+        : 'approvalMode,approvalRevision,modelId,modelRevision,modelRoute,skillsRef,sourcePromptId,version') ||
+    (fields['version'] !== 1 && fields['version'] !== 2) ||
     typeof fields['sourcePromptId'] !== 'string' ||
     !fields['sourcePromptId'].trim() ||
     fields['sourcePromptId'].length > 144 ||
@@ -173,6 +236,8 @@ function parsePublicChildLaunch(value: unknown): PublicChildLaunchSnapshot {
     );
   }
   parsePublicChildModelRoute(fields['modelRoute']);
+  if (fields['version'] === 2)
+    parsePublicChildExtensionAgent(fields['extensionAgent']);
   if (fields['skillsRef'] !== null) {
     const ref = assertManagedSessionDurableRef(
       fields['skillsRef'] as ManagedSessionJsonValue,

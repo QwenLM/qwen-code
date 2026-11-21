@@ -131,6 +131,10 @@ it.each([
         'capabilityDigest',
         'get',
       ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'resolveCapabilities',
+      ).mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
           this.runtime = {
@@ -236,7 +240,7 @@ it.each([
       const options = JSON.parse(
         (await session.resources.read(action.optionsRef!)).toString(),
       );
-      expect(options.v).toBe(padding === 62_000 ? 3 : 2);
+      expect(options.v).toBe(3);
       if (padding === 63_080)
         expect(options).not.toHaveProperty('continuationRef');
       expect(
@@ -289,7 +293,7 @@ it.each([
 );
 
 function approvalSelectionFixture(
-  legacyVersion: 1 | 2,
+  legacyInputRef: boolean,
   final: boolean,
   previousBatch = false,
 ) {
@@ -311,10 +315,10 @@ function approvalSelectionFixture(
   const optionsRef = (
     requestId: string,
     functionCallId: string,
-    v: 1 | 2 | 3,
+    shape: { inputRef?: boolean; continuationRef?: boolean },
   ) =>
     resource('managed-action-options', {
-      v,
+      v: 3,
       requestId,
       turnId: 'prompt',
       functionCallId,
@@ -324,24 +328,31 @@ function approvalSelectionFixture(
       createdAt: 1,
       expiresAt: 60_001,
       options: HOSTED_APPROVAL_OPTIONS,
-      ...(v >= 2 ? { inputRef } : {}),
-      ...(v === 3 ? { continuationRef: planRef } : {}),
+      ...(shape.inputRef ? { inputRef } : {}),
+      ...(shape.continuationRef ? { continuationRef: planRef } : {}),
     });
   const actions = new Map([
     [
       'first',
       {
         requestId: 'first',
+        kind: 'permission',
         inputRevision: 1,
-        optionsRef: optionsRef('first', 'call-first', 3),
+        optionsRef: optionsRef('first', 'call-first', {
+          inputRef: true,
+          continuationRef: true,
+        }),
       },
     ],
     [
       'legacy',
       {
         requestId: 'legacy',
+        kind: 'permission',
         inputRevision: 1,
-        optionsRef: optionsRef('legacy', 'call-legacy', legacyVersion),
+        optionsRef: optionsRef('legacy', 'call-legacy', {
+          inputRef: legacyInputRef,
+        }),
       },
     ],
   ]);
@@ -420,15 +431,15 @@ function approvalSelectionFixture(
 }
 
 it.each([
-  { legacyVersion: 1 as const, final: false },
-  { legacyVersion: 2 as const, final: false },
-  { legacyVersion: 1 as const, final: true },
-  { legacyVersion: 2 as const, final: true },
+  { legacyInputRef: false, final: false },
+  { legacyInputRef: true, final: false },
+  { legacyInputRef: false, final: true },
+  { legacyInputRef: true, final: true },
 ])(
-  'declines a current v$legacyVersion approval before selecting a plan (final=$final)',
-  async ({ legacyVersion, final }) => {
+  'declines a current continuation-less approval before selecting a plan (inputRef=$legacyInputRef, final=$final)',
+  async ({ legacyInputRef, final }) => {
     const { session, read, planRef } = approvalSelectionFixture(
-      legacyVersion,
+      legacyInputRef,
       final,
     );
     await expect(
@@ -439,7 +450,7 @@ it.each([
 );
 
 it('keeps a later batch recoverable when an earlier legacy Action updates', async () => {
-  const { session, read, planRef } = approvalSelectionFixture(2, true, true);
+  const { session, read, planRef } = approvalSelectionFixture(true, true, true);
   await expect(
     findHostedApprovalContinuation(session, 'prompt'),
   ).rejects.toThrow('current plan selected');

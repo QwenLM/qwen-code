@@ -15,10 +15,16 @@ import { CronScheduler } from '../services/cronScheduler.js';
 import {
   readCronTasks,
   taskHasLegacyCondition,
+  updateCronTasks,
+  withTaskGate,
 } from '../services/cronTasksFile.js';
 import { Storage } from '../config/storage.js';
 import { ApprovalMode } from '../config/approval-mode.js';
-import type { Config } from '../config/config.js';
+import type {
+  Config,
+  CurrentSessionScheduledTaskCreator,
+} from '../config/config.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import type { PermissionCheckContext } from '../permissions/types.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { buildPermissionCheckContext } from '../core/permission-helpers.js';
@@ -29,6 +35,7 @@ function makeConfig(
   over: {
     mode?: ApprovalMode;
     evaluate?: (ctx: PermissionCheckContext) => Promise<string>;
+    creator?: CurrentSessionScheduledTaskCreator;
   } = {},
 ) {
   const scheduler = new CronScheduler(tmpDir, 7 * 24 * 60 * 60 * 1000);
@@ -40,7 +47,7 @@ function makeConfig(
     getApprovalMode: () => over.mode ?? ApprovalMode.DEFAULT,
     getPermissionManager: () =>
       over.evaluate ? { evaluate: over.evaluate } : null,
-    getCurrentSessionScheduledTaskCreator: () => undefined,
+    getCurrentSessionScheduledTaskCreator: () => over.creator,
     getSessionSourceType: () => undefined,
     _scheduler: scheduler,
   } as unknown as Config & { _scheduler: CronScheduler };
@@ -283,10 +290,7 @@ describe('CronCreateTool gate', () => {
   );
 
   it.each([
-    "bash -c './probe.sh --gate'",
     'FOO=1 ./probe.sh',
-    'LD_PRELOAD=/tmp/x.so bash -lc "./probe.sh"',
-    "bash   -c './probe.sh'",
     '  ./probe.sh  ',
     "timeout 10 bash -c './probe.sh --gate'",
     "gh api 'repos/o/r/pulls?state=open&per_page=5'",
@@ -303,13 +307,153 @@ describe('CronCreateTool gate', () => {
     },
   );
 
-  it('rejects a gate with sessionMode "current"', async () => {
-    const result = await tool
-      .build({ ...params, durable: true, sessionMode: 'current' })
-      .execute(signal());
-    expect(result.error?.message).toContain(
-      'not supported with sessionMode "current"',
+  it('threads the gate to the current-session creator', async () => {
+    const requests: Array<Parameters<CurrentSessionScheduledTaskCreator>[0]> =
+      [];
+    config._scheduler.destroy();
+    config = makeConfig({
+      mode: ApprovalMode.YOLO,
+      creator: async (request) => {
+        requests.push(request);
+        return {
+          id: 'cron-current',
+          cron: request.cron,
+          gate: request.gate ?? null,
+        };
+      },
+    });
+    tool = new CronCreateTool(config);
+    const result = await promptIdContext.run('prompt-1', () =>
+      tool
+        .build({ ...params, durable: true, sessionMode: 'current' })
+        .execute(signal()),
     );
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toContain('[gated]');
+    expect(requests).toEqual([
+      {
+        cron: params.cron,
+        prompt: params.prompt,
+        recurring: true,
+        promptId: 'prompt-1',
+        gate: './probe.sh',
+      },
+    ]);
+  });
+
+  it('keeps a dialog confirmation for the current-session task the daemon writes', async () => {
+    // Default mode, no rule covering the gate: only the confirmation lets it
+    // run unattended. The daemon writes the task file and returns its id; this
+    // session's scheduler installs the job on its next reload, and that job
+    // must carry the confirmation or its first fire is blocked.
+    config._scheduler.destroy();
+    config = makeConfig({
+      mode: ApprovalMode.DEFAULT,
+      evaluate: async () => 'ask',
+      creator: async (request) => {
+        await updateCronTasks(tmpDir, (tasks) => [
+          ...tasks,
+          withTaskGate(
+            {
+              id: 'cron-current',
+              cron: request.cron,
+              prompt: request.prompt,
+              recurring: request.recurring,
+              createdAt: Date.now(),
+              lastFiredAt: null,
+            },
+            request.gate,
+          ),
+        ]);
+        return {
+          id: 'cron-current',
+          cron: request.cron,
+          gate: request.gate ?? null,
+        };
+      },
+    });
+    tool = new CronCreateTool(config);
+    const invocation = tool.build({
+      ...params,
+      durable: true,
+      sessionMode: 'current',
+    });
+    const details = await invocation.getConfirmationDetails(signal());
+    await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    const result = await promptIdContext.run('prompt-1', () =>
+      invocation.execute(signal()),
+    );
+    expect(result.error).toBeUndefined();
+
+    await config._scheduler.enableDurable('session-1');
+    const job = config._scheduler.list().find((j) => j.id === 'cron-current');
+    expect(job?.gate).toBe('./probe.sh');
+    expect(job?.gateApproved).toBe(true);
+  });
+
+  it('removes the task and refuses when the daemon drops a requested gate', async () => {
+    // A daemon that predates gated tasks stores the task without its gate and
+    // echoes none back: left alone, the task would run at every slot.
+    config._scheduler.destroy();
+    config = makeConfig({
+      mode: ApprovalMode.YOLO,
+      creator: async (request) => {
+        await updateCronTasks(tmpDir, (tasks) => [
+          ...tasks,
+          {
+            id: 'cron-old',
+            cron: request.cron,
+            prompt: request.prompt,
+            recurring: request.recurring,
+            createdAt: Date.now(),
+            lastFiredAt: null,
+          },
+        ]);
+        return { id: 'cron-old', cron: request.cron };
+      },
+    });
+    tool = new CronCreateTool(config);
+    const result = await promptIdContext.run('prompt-1', () =>
+      tool
+        .build({ ...params, durable: true, sessionMode: 'current' })
+        .execute(signal()),
+    );
+    expect(result.error?.message).toContain('current_session_gate_unsupported');
+    expect(await readCronTasks(tmpDir)).toEqual([]);
+  });
+
+  it('names the ungated task left behind when removing it fails', async () => {
+    config._scheduler.destroy();
+    config = makeConfig({
+      mode: ApprovalMode.YOLO,
+      creator: async (request) => ({ id: 'cron-old', cron: request.cron }),
+    });
+    vi.spyOn(config._scheduler, 'removeDurable').mockRejectedValue(
+      new Error('EACCES'),
+    );
+    tool = new CronCreateTool(config);
+    const result = await promptIdContext.run('prompt-1', () =>
+      tool
+        .build({ ...params, durable: true, sessionMode: 'current' })
+        .execute(signal()),
+    );
+    expect(result.error?.message).toContain('current_session_gate_unsupported');
+    expect(result.error?.message).toContain(
+      'stored task cron-old without its gate, and removing it failed (EACCES)',
+    );
+    expect(result.error?.message).toContain('until deleted with cron_delete');
+  });
+
+  it('refuses a gate wrapped in a shell, whose rebuilt script the rules would read', () => {
+    // Adjacent quotes end the script early: the rules would see `cat` and
+    // the shell would run `touch`.
+    expect(() =>
+      tool.build({
+        ...params,
+        gate: `bash -c 'cat /etc/hostname'";touch /tmp/x;"''`,
+      }),
+    ).toThrow('not wrapped in a shell');
+    expect(config._scheduler.list()).toHaveLength(0);
   });
 
   it('rejects a gate on a one-shot task, which a quiet gate would consume', async () => {
@@ -333,6 +477,17 @@ describe('CronCreateTool gate', () => {
     `bash -c "nohup sh -c './probe.sh &'"`,
   ])('rejects the gate %j at validation', (gate) => {
     expect(() => tool.build({ ...params, gate })).toThrow(/gate/);
+  });
+
+  it.each([
+    ['past the cap', 'x'.repeat(2049), 'must be at most 2048 characters'],
+    [
+      'of only a comment',
+      '# waiting for the token',
+      'must run a command, not only a comment',
+    ],
+  ])('rejects a gate %s with its own reason', (_what, gate, reason) => {
+    expect(() => tool.build({ ...params, gate })).toThrow(reason);
   });
 
   it('forwards the gate to the auto-mode classifier', () => {

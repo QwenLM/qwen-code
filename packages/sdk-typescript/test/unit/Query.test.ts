@@ -22,6 +22,8 @@ import { ControlRequestType } from '../../src/types/protocol.js';
 import { AbortError } from '../../src/types/errors.js';
 import { Stream } from '../../src/utils/Stream.js';
 import { SdkLogger } from '../../src/utils/logger.js';
+import { createSdkMcpServer } from '../../src/daemon-mcp/createSdkMcpServer.js';
+import { tool } from '../../src/daemon-mcp/tool.js';
 
 // Mock Transport implementation
 class MockTransport implements Transport {
@@ -289,6 +291,116 @@ describe('Query', () => {
     if (!transport.closed) {
       await transport.close();
     }
+  });
+
+  describe('session Workflow mode', () => {
+    async function initializeMode(query: Query, expected: boolean) {
+      await vi.waitFor(() =>
+        expect(transport.writtenMessages.length).toBeGreaterThan(0),
+      );
+      const request = transport.getLastWrittenMessage() as CLIControlRequest;
+      expect(request.request).toMatchObject({
+        subtype: 'initialize',
+        workflowMode: expected,
+      });
+      transport.simulateMessage(
+        createControlResponse(request.request_id, true, {
+          capabilities: { can_set_workflow_mode: true },
+        }),
+      );
+      await query.initialized;
+    }
+
+    it.each([true, false])(
+      'stages explicit %s over a custom transport without sending a setter',
+      async (enabled) => {
+        const query = new Query(transport, { workflowMode: enabled });
+        await initializeMode(query, enabled);
+        expect(transport.getAllWrittenMessages()).toHaveLength(1);
+        const get = query.getWorkflowMode();
+        await vi.waitFor(() =>
+          expect(transport.writtenMessages).toHaveLength(2),
+        );
+        const request = transport.getLastWrittenMessage() as CLIControlRequest;
+        expect(request.request.subtype).toBe('get_workflow_mode');
+        let settled = false;
+        void get.then(() => {
+          settled = true;
+        });
+        await Promise.resolve();
+        expect(settled).toBe(false);
+        const state = {
+          requested: enabled,
+          available: true,
+          effective: enabled,
+        };
+        transport.simulateMessage(
+          createControlResponse(request.request_id, true, state),
+        );
+        await expect(get).resolves.toEqual(state);
+        await query.close();
+      },
+    );
+
+    it.each([true, false])(
+      'closes after rejecting an ignored initial choice (%s)',
+      async (workflowMode) => {
+        const query = new Query(transport, { workflowMode });
+        const output = query.next().catch((error: unknown) => error);
+        const input = query.streamInput(
+          (async function* () {
+            yield createUserMessage('ordinary prompt');
+          })(),
+        );
+        const result = input.catch((error: unknown) => error);
+        await vi.waitFor(() =>
+          expect(transport.writtenMessages).toHaveLength(1),
+        );
+        const request = transport.getLastWrittenMessage() as CLIControlRequest;
+        transport.simulateMessage(
+          createControlResponse(request.request_id, true, {}),
+        );
+        expect(await result).toEqual(
+          expect.objectContaining({
+            message: expect.stringContaining('does not support'),
+          }),
+        );
+        expect(transport.getAllWrittenMessages()).toHaveLength(1);
+        expect(await output).toEqual(await result);
+        expect(query.isClosed()).toBe(true);
+        expect(transport.closed).toBe(true);
+      },
+    );
+
+    it('sends strict Boolean setters and rejects malformed status instead of assuming off', async () => {
+      const query = new Query(transport, { workflowMode: false });
+      await initializeMode(query, false);
+      const set = query.setWorkflowMode(true);
+      const result = set.catch((error: unknown) => error);
+      await vi.waitFor(() => expect(transport.writtenMessages).toHaveLength(2));
+      const request = transport.getLastWrittenMessage() as CLIControlRequest;
+      expect(request.request).toEqual({
+        subtype: 'set_workflow_mode',
+        enabled: true,
+      });
+      transport.simulateMessage(
+        createControlResponse(request.request_id, true, {
+          requested: true,
+          available: false,
+          effective: true,
+        }),
+      );
+      expect(await result).toEqual(
+        expect.objectContaining({
+          message: expect.stringContaining('Invalid Workflow mode response'),
+        }),
+      );
+      await expect(
+        query.setWorkflowMode('on' as unknown as boolean),
+      ).rejects.toThrow('boolean');
+      expect(transport.writtenMessages).toHaveLength(2);
+      await query.close();
+    });
   });
 
   describe('Construction and Initialization', () => {
@@ -576,8 +688,26 @@ describe('Query', () => {
       );
 
       await expect(query.initialized).rejects.toThrow();
+      expect(query.isClosed()).toBe(true);
+      expect(transport.closed).toBe(true);
+    });
 
-      await query.close();
+    it('preserves the initialization error when cleanup rejects', async () => {
+      vi.spyOn(transport, 'close').mockRejectedValueOnce(
+        new Error('cleanup failed'),
+      );
+      const query = new Query(transport, {});
+      const output = query.next().catch((error: unknown) => error);
+      await vi.waitFor(() => expect(transport.writtenMessages).toHaveLength(1));
+      const request = transport.getLastWrittenMessage() as CLIControlRequest;
+      transport.simulateMessage(
+        createControlResponse(request.request_id, false),
+      );
+
+      const error = await query.initialized.catch((error: unknown) => error);
+      expect(await output).toBe(error);
+      expect(transport.close).toHaveBeenCalledOnce();
+      expect(query.isClosed()).toBe(true);
     });
   });
 
@@ -875,6 +1005,70 @@ describe('Query', () => {
       await query.close();
     });
 
+    it.each([
+      {
+        label: 'allow',
+        run: async () => ({ behavior: 'allow' as const, updatedInput: {} }),
+        response: { behavior: 'allow', updatedInput: {} },
+      },
+      {
+        label: 'deny',
+        run: async () => ({ behavior: 'deny' as const, message: 'Denied' }),
+        response: { behavior: 'deny', message: 'Denied' },
+      },
+      {
+        label: 'throw',
+        run: () => {
+          throw new Error('Callback error');
+        },
+        response: {
+          behavior: 'deny',
+          message: 'Permission check failed: Callback error',
+        },
+      },
+      {
+        label: 'reject',
+        run: () => Promise.reject(new Error('Callback error')),
+        response: {
+          behavior: 'deny',
+          message: 'Permission check failed: Callback error',
+        },
+      },
+    ])(
+      'arms and clears the default permission deadline on $label',
+      async ({ run, response: expectedResponse }) => {
+        const query = new Query(transport, {
+          cwd: '/test',
+          canUseTool: run,
+        });
+        await respondToInitialize(transport, query);
+        vi.useFakeTimers();
+        const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+        try {
+          transport.simulateMessage(
+            createControlRequest('can_use_tool', 'deadline-permission'),
+          );
+          await vi.waitFor(() => {
+            const response = findControlResponse(
+              transport.getAllWrittenMessages(),
+              'deadline-permission',
+            );
+            expect(response?.response).toMatchObject({
+              subtype: 'success',
+              response: expectedResponse,
+            });
+          });
+          expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 60_000);
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          await query.close();
+          vi.clearAllTimers();
+          timeoutSpy.mockRestore();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('should handle PermissionResult format with updatedInput', async () => {
       const canUseTool = vi.fn().mockResolvedValue({
         behavior: 'allow',
@@ -1124,6 +1318,142 @@ describe('Query', () => {
   });
 
   describe('Lifecycle Management', () => {
+    it.each(['throw', 'reject'])(
+      'cleans pending requests when transport close fails by %s',
+      async (failure) => {
+        const query = new Query(transport, { cwd: '/test' });
+        await respondToInitialize(transport, query);
+        const pending = query.continueLastTurn().catch((error: Error) => error);
+        await vi.waitFor(() => {
+          expect(
+            findControlRequest(
+              transport.getAllWrittenMessages(),
+              ControlRequestType.CONTINUE_LAST_TURN,
+            ),
+          ).toBeDefined();
+        });
+        const closeError = new Error('transport teardown failed');
+        vi.spyOn(transport, 'close').mockImplementationOnce(() => {
+          if (failure === 'throw') throw closeError;
+          return Promise.reject(closeError);
+        });
+
+        await expect(query.close()).rejects.toBe(closeError);
+        expect(await pending).toEqual(new Error('Query is closed'));
+      },
+    );
+
+    it('passes the close-time exit snapshot to pending control requests', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+      await respondToInitialize(transport, query);
+      const pending = query.continueLastTurn().catch((error: Error) => error);
+      await vi.waitFor(() => {
+        expect(
+          findControlRequest(
+            transport.getAllWrittenMessages(),
+            ControlRequestType.CONTINUE_LAST_TURN,
+          ),
+        ).toBeDefined();
+      });
+
+      const exitError = new Error('CLI process exited with code 1');
+      const originalClose = transport.close.bind(transport);
+      vi.spyOn(transport, 'close').mockImplementation(async () => {
+        transport.exitError = exitError;
+        await originalClose();
+      });
+
+      await query.close();
+      expect(await pending).toBe(exitError);
+    });
+
+    it('passes the close-time exit snapshot to pending SDK MCP requests', async () => {
+      let releaseTool = () => {};
+      const toolRelease = new Promise<void>((resolve) => {
+        releaseTool = resolve;
+      });
+      let toolStarted = false;
+      const server = createSdkMcpServer({
+        name: 'held-server',
+        tools: [
+          tool('held', 'Wait for shutdown', {}, async () => {
+            toolStarted = true;
+            await toolRelease;
+            return { content: [] };
+          }),
+        ],
+      });
+      const query = new Query(transport, {
+        cwd: '/test',
+        mcpServers: { 'held-server': server },
+      });
+      try {
+        await respondToInitialize(transport, query);
+        transport.simulateMessage({
+          type: 'control_request',
+          request_id: 'pending-mcp',
+          request: {
+            subtype: 'mcp_message',
+            server_name: 'held-server',
+            message: {
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'tools/call',
+              params: { name: 'held', arguments: {} },
+            },
+          },
+        });
+        await vi.waitFor(() => expect(toolStarted).toBe(true));
+
+        const exitError = new Error('CLI process exited with code 1');
+        const originalClose = transport.close.bind(transport);
+        vi.spyOn(transport, 'close').mockImplementation(async () => {
+          transport.exitError = exitError;
+          await originalClose();
+        });
+        await query.close();
+        await vi.waitFor(() => {
+          expect(
+            findControlResponse(
+              transport.getAllWrittenMessages(),
+              'pending-mcp',
+            )?.response,
+          ).toEqual({
+            subtype: 'error',
+            request_id: 'pending-mcp',
+            error: exitError.message,
+          });
+        });
+      } finally {
+        releaseTool();
+        await query.close();
+      }
+    });
+
+    it('still awaits transport teardown after rejecting pending requests', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+      await respondToInitialize(transport, query);
+      let releaseClose = () => {};
+      const closeRelease = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const originalClose = transport.close.bind(transport);
+      vi.spyOn(transport, 'close').mockImplementation(async () => {
+        await closeRelease;
+        await originalClose();
+      });
+      let settled = false;
+      const closing = query.close().then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(transport.closed).toBe(false);
+      releaseClose();
+      await closing;
+      expect(transport.closed).toBe(true);
+    });
+
     it('should close transport on close()', async () => {
       const query = new Query(transport, { cwd: '/test' });
 

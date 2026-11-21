@@ -116,6 +116,12 @@ export interface CronJob {
   groupId?: string;
   /** Human-readable task label used to name a fresh per-run session. */
   name?: string;
+  /**
+   * On a gated fire only: the task's own prompt, while `prompt` carries the
+   * text the gate delivered (its output, or a failure notice). A fresh
+   * per-run session is titled from this, as a manual run's is.
+   */
+  taskPrompt?: string;
   delivery?: CronTaskDelivery;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
@@ -444,6 +450,10 @@ export class CronScheduler {
   /** See {@link setGateSkippedListener}. */
   private gateSkippedListener: (() => void) | null = null;
 
+  /** Gates confirmed for tasks not loaded yet, by task id. See
+   * {@link approveGate}. */
+  private readonly pendingGateApprovals = new Map<string, string>();
+
   /**
    * Creates a new session-only cron job. Returns the created job.
    * Throws if the max job limit is reached.
@@ -645,6 +655,7 @@ export class CronScheduler {
     // A gate still running for this job must deliver nothing afterwards:
     // delete takes effect immediately (safe-delete design).
     this.abortGate(id);
+    this.pendingGateApprovals.delete(id);
     const job = this.jobs.get(id);
     if (!job) {
       this.restorablePerRunOneShots.delete(id);
@@ -1078,6 +1089,11 @@ export class CronScheduler {
         this.abortGate(task.id);
       }
       const job = durableTaskToJob(task, this.recurringMaxAgeMs, existing);
+      const approvedGate = this.pendingGateApprovals.get(task.id);
+      if (approvedGate !== undefined) {
+        this.pendingGateApprovals.delete(task.id);
+        if (approvedGate === job.gate) job.gateApproved = true;
+      }
       if (existing?.lastFiredAt !== undefined) {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);
       }
@@ -1383,8 +1399,9 @@ export class CronScheduler {
 
   /**
    * Installs a listener called after a gate settles without delivering a
-   * fire: a quiet gate, a failure or block past the first of its streak, a
-   * result dropped because the job is gone, or a gate cancelled by delete()
+   * fire: a quiet gate, a failure or block that neither opens nor changes
+   * its streak, a result dropped because the job is gone, or a gate
+   * cancelled by delete()
    * or a disk reload (not by stop()). Such a settlement reaches no consumer,
    * so a headless run re-checks its hold-open from here — a one-shot or
    * final fire whose gate stays quiet, or a durable catch-up whose task is
@@ -1393,6 +1410,29 @@ export class CronScheduler {
    */
   setGateSkippedListener(listener: (() => void) | null): void {
     this.gateSkippedListener = listener;
+  }
+
+  /** Removes a durable task from disk whether or not this scheduler has
+   * loaded it yet, as for a task another component just wrote. */
+  async removeDurable(id: string): Promise<void> {
+    await this.delete(id);
+    if (this.projectRoot) await removeCronTasks(this.projectRoot, [id]);
+  }
+
+  /**
+   * Records that `cron_create` confirmed `gate` in this process for a task
+   * another component writes to disk (the daemon's current-session creator),
+   * so this scheduler's job for it may run the gate unattended, like a job it
+   * created itself. Applies at once when the job is loaded, otherwise on the
+   * reload that installs it, and only while the task's gate is that command.
+   */
+  approveGate(id: string, gate: string): void {
+    const job = this.jobs.get(id);
+    if (!job) {
+      this.pendingGateApprovals.set(id, gate);
+      return;
+    }
+    if (job.gate === gate) job.gateApproved = true;
   }
 
   /**
@@ -1527,34 +1567,51 @@ export class CronScheduler {
     };
     debugLogger.debug(`gate for ${job.id}: ${outcome} (streak ${streak})`);
 
+    // A notice opens a streak, and again whenever it changes: from blocked to
+    // failed or back, or to another reason the gate is blocked for. The
+    // blocked notice promises silence only until the gate runs, and only a
+    // gate blocked as not approved is told the rule to add.
+    const reportable =
+      streak === 1 ||
+      previous?.lastOutcome !== outcome ||
+      (result.kind === 'blocked' && previous?.lastError !== result.reason);
     let text: string | null = null;
     if (result.kind === 'output') {
       text = buildGatedFirePrompt(job, result, at);
-    } else if (result.kind === 'failed' && streak === 1) {
+    } else if (result.kind === 'failed' && reportable) {
       text = buildGateFailureNotice(job, result);
-    } else if (result.kind === 'blocked' && streak === 1) {
+    } else if (result.kind === 'blocked' && reportable) {
       text = buildGateBlockedNotice(job, result);
     }
     // The run record is written before the consumer sees the fire, so an ACP
     // per-run dispatch that annotates it (annotateRunSession awaits
     // pendingPersist) finds the entry. Only a fire that reaches a session is
-    // booked: a counted failure every slot would flush the 20-entry ring.
-    if (job.durable && outcome !== 'quiet') {
+    // booked: a counted failure every slot would flush the 20-entry ring. A
+    // quiet fire that ends a failure streak is stored at once too: a restart
+    // before the next tick persist would reload the streak and count the
+    // next failure into it, unreported.
+    if (
+      job.durable &&
+      (outcome !== 'quiet' || (previous?.consecutiveFailures ?? 0) > 0)
+    ) {
+      // The fire's own slot, not the live job's: a later slot, or a manual
+      // run stamped while the gate ran, has moved `lastFiredAt` on since.
       this.persistGateOutcome(
         job,
         text !== null ? (outcome as CronGateRunOutcome) : undefined,
-        job.lastFiredAt ?? at,
+        at,
         kind,
       );
     }
     if (text === null) return false;
-    onFire({ ...job, prompt: text });
+    // The consumer annotates the run by this stamp (a per-run session).
+    onFire({ ...job, lastFiredAt: at, prompt: text, taskPrompt: job.prompt });
     return true;
   }
 
   /** Stores the gate status summary and, for a fire that reached a session,
-   * books it in the task's run ring. Quiet fires come through neither path;
-   * their summary rides along with the next tick persist. */
+   * books it in the task's run ring. Other quiet fires come through neither
+   * path; their summary rides along with the next tick persist. */
   private persistGateOutcome(
     job: CronJob,
     run: CronGateRunOutcome | undefined,
@@ -1570,7 +1627,13 @@ export class CronScheduler {
             ? t
             : {
                 ...t,
-                ...(status ? { gateStatus: status } : {}),
+                // Only onto the command that produced it: a PATCH that
+                // replaced the gate (and dropped its status) before this
+                // session reloaded the task must not inherit the old
+                // command's streak. The run itself still happened.
+                ...(status && t.gate === job.gate
+                  ? { gateStatus: status }
+                  : {}),
                 ...(run
                   ? {
                       runs: appendCronRun(t.runs, {
@@ -1781,6 +1844,9 @@ export class CronScheduler {
       controller.abort();
     }
     this.gatesInFlight.clear();
+    // Pending confirmations survive: a turn cancelled between cron_create
+    // and the reload that installs its task stops and re-enables the
+    // scheduler, and the user's confirmation must still reach that task.
 
     if (this.durableEnabled) {
       // Invalidate in-flight durable continuations (see durableGeneration).
@@ -1884,8 +1950,12 @@ export class CronScheduler {
     const firedAt = new Map<string, number>(); // durable recurring fires
     const removedIds: string[] = []; // durable one-shot fires / expiries
     // Gated recurring fires book their run when the gate settles, not here;
-    // the tick persist only moves their stamp and the status summary.
-    const gated = new Map<string, CronGateStatus | undefined>();
+    // the tick persist only moves their stamp and the status summary, kept
+    // with the command it describes.
+    const gated = new Map<
+      string,
+      { gate: string; status: CronGateStatus | undefined }
+    >();
 
     for (const job of this.jobs.values()) {
       // Durable jobs fire under one of two models (see #shouldFireDurable):
@@ -1911,7 +1981,9 @@ export class CronScheduler {
         removedIds.push(job.id);
       } else {
         firedAt.set(job.id, job.lastFiredAt!);
-        if (job.gate) gated.set(job.id, job.gateStatus);
+        if (job.gate) {
+          gated.set(job.id, { gate: job.gate, status: job.gateStatus });
+        }
       }
     }
 
@@ -1977,12 +2049,17 @@ export class CronScheduler {
                 // catch-up persist's equality guard.
                 if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp)
                   return t;
-                if (gated.has(t.id)) {
-                  const status = gated.get(t.id);
+                const gate = gated.get(t.id);
+                if (gate) {
+                  // A PATCH may have replaced the command (and dropped its
+                  // status) since this session loaded the job: the old
+                  // command's summary must not come back onto the new one.
                   return {
                     ...t,
                     lastFiredAt: stamp,
-                    ...(status ? { gateStatus: status } : {}),
+                    ...(gate.status && t.gate === gate.gate
+                      ? { gateStatus: gate.status }
+                      : {}),
                   };
                 }
                 return {
@@ -2224,8 +2301,9 @@ function durableTaskToJob(
     ...(task.name ? { name: task.name } : {}),
     ...(task.delivery && task.sessionId ? { delivery: task.delivery } : {}),
     ...(task.gate ? { gate: task.gate } : {}),
-    // The in-memory summary may be newer than the file's: a quiet settle is
-    // persisted only with the next tick, and a reload can land in between.
+    // The in-memory summary may be newer than the file's: a quiet settle
+    // (other than one ending a failure streak) is persisted only with the
+    // next tick, and a reload can land in between.
     ...(gateStatus ? { gateStatus } : {}),
     ...(existing?.gateApproved && existing.gate === task.gate
       ? { gateApproved: true }
@@ -2238,7 +2316,10 @@ function gateStatusAfterReload(
   existing?: CronJob,
 ): CronGateStatus | undefined {
   const fromFile = task.gateStatus;
-  const inMemory = existing?.gateStatus;
+  // A summary of another command says nothing about this one: a replaced
+  // gate starts its own failure streak, so its first failure is reported.
+  const inMemory =
+    existing && existing.gate === task.gate ? existing.gateStatus : undefined;
   if (!inMemory) return fromFile;
   if (!fromFile || inMemory.lastAt >= fromFile.lastAt) return inMemory;
   return fromFile;

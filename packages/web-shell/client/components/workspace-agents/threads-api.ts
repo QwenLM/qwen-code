@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import { createDaemonRestRequest } from '../../daemon/rest-request.js';
 import type {
   AgentConfigPatch,
   NewWorkspaceAgent,
@@ -59,11 +61,12 @@ export function createThreadsHttpApi(
   baseUrl: string,
   token: string | undefined,
   workspaceCwd: string,
+  client?: DaemonClient,
 ): ThreadsApi {
-  const serverUrl = baseUrl.replace(/\/+$/, '');
-  const root = `${serverUrl}/workspaces/${encodeURIComponent(workspaceCwd)}/agent`;
+  const root = `/workspaces/${encodeURIComponent(workspaceCwd)}/agent`;
+  const rest = createDaemonRestRequest(baseUrl, token, client);
   const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
-    const response = await fetch(`${root}${path}`, {
+    const response = await rest(`${root}${path}`, {
       ...init,
       headers: {
         ...(init?.body ? { 'content-type': 'application/json' } : {}),
@@ -81,14 +84,30 @@ export function createThreadsHttpApi(
     }
     return body;
   };
-  const post = <T>(path: string, body: unknown) =>
-    request<T>(path, { method: 'POST', body: JSON.stringify(body) });
+  const post = <T>(path: string, body: unknown, init?: RequestInit) =>
+    request<T>(path, {
+      ...init,
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
 
   return {
     // No `provider`: a v2 remote reports which programs it has, and the
-    // coordinator adds an agent per program once it heartbeats.
-    connectRemoteHost: (input) => post('/hosts/remote-connect', input),
-    joinCoordinator: (input) => post('/hosts/connect', input),
+    // coordinator adds an agent per program once it heartbeats. The
+    // coordinator's own budget is two sequential remote legs, 20 s and 90 s,
+    // so the caller owns a deadline that outlasts it instead of inheriting
+    // the SDK's 30 s REST timeout.
+    connectRemoteHost: (input) =>
+      post('/hosts/remote-connect', input, {
+        signal: AbortSignal.timeout(120_000),
+      }),
+    // Likewise: this daemon probes its programs, enrolls and sends up to
+    // three heartbeats (up to 10 s each), saves the connection, which can
+    // wait about 13.5 s for its lock, and probes its programs again. Past the
+    // SDK's 30 s, a join that already spent its token would be reported as
+    // failed.
+    joinCoordinator: (input) =>
+      post('/hosts/connect', input, { signal: AbortSignal.timeout(90_000) }),
     listAgents: () => request('/agents'),
     createJoinToken: (supersedesHostId) =>
       post('/hosts/enrollment', supersedesHostId ? { supersedesHostId } : {}),

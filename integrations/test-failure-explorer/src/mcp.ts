@@ -23,10 +23,13 @@ import { APP_URI } from './app-contract.js';
 import type { ReportStore } from './report-store.js';
 
 export function createReportServer(store: ReportStore): McpServer {
-  const server = new McpServer({
-    name: 'test-failure-explorer',
-    version: '1.0.0',
-  });
+  const server = new McpServer(
+    {
+      name: 'test-failure-explorer',
+      version: '1.0.0',
+    },
+    { maxToolInputElements: 100_000 },
+  );
   server.registerTool(
     'test_report_import',
     {
@@ -96,7 +99,7 @@ export function createReportServer(store: ReportStore): McpServer {
       inputSchema: {
         reportId: z.string().regex(/^r1_[0-9a-f]{64}$/),
         view: z
-          .record(z.unknown())
+          .record(z.string(), z.unknown())
           .optional()
           .describe(
             'Optional ViewSpec: {schemaVersion:1,reportId,sections:[...]}. Sections: {kind:"summary"}; {kind:"status-counts"}; {kind:"failure-list",groupBy:"none"|"file",columns:["path"|"title"|"status"|"duration"],initialTextFilter?:string}; {kind:"evidence",initialFailureId?:string}; {kind:"hypothesis-groups",groups:[{label,hypothesis,failureIds:[string]}]}. Require one failure-list, at most one section per kind, nonempty unique columns, and 1–8 nonempty hypothesis groups with unique IDs within each group. All referenced IDs must be failed entries in this report, including file errors; overlapping groups are hypotheses, not proven causes. Limits: 8,000 serialized characters, 128 total group references, 120 characters per label, 400 per hypothesis, 512 per filter. No extra fields, fact values, executable content, URLs, tool names, or authority. Sources, all-failures access and actions remain renderer-controlled.',

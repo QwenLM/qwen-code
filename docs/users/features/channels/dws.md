@@ -34,6 +34,8 @@ Add a channel to `~/.qwen/settings.json`:
       "profile": "profile-name-or-corp-id",
       "privatePolicy": "pairing",
       "groupPolicy": "pairing",
+      "quotePrivateReply": false,
+      "quoteGroupReply": false,
       "watchTodos": true,
       "startReaction": "🤔",
       "endReaction": "赞",
@@ -90,6 +92,12 @@ When a message quotes another DingTalk message, the quoted text is included as r
 `startReaction` is the emoji character or DingTalk reaction name added while an accepted task is running; an omitted or empty value uses the default `🤔`. `endReaction` replaces it after the task completes, fails, or is cancelled; an omitted or empty value disables the end reaction.
 
 ### IM Reply Delivery
+
+`quotePrivateReply` and `quoteGroupReply` independently control whether the agent's final response quotes the originating private or group message. Both are optional booleans and default to `false`, so new replies are ordinary messages unless quoting is enabled. To keep the previous group-reply behavior, set `quoteGroupReply: true`. The channel management form exposes both settings as switches.
+
+When quoting is enabled, the reply references the message that triggered the response. If the original message ID or sender ID is unavailable, the channel sends an ordinary message instead. These switches do not change proactive messages, command acknowledgements, document-comment replies, todo comments, or the quoted context included in incoming messages.
+
+Each completed reply retains the quoting choice captured when it enters the delivery queue, including across retries and restarts. Configuration changes apply to newly queued replies; replies queued by older versions retain their original sending behavior. Managed configuration updates use the existing channel reload flow; restart a standalone channel after editing its settings file.
 
 A completed group @ or direct-message reply is checkpointed before its first send and retried in the background without rerunning the task. The backoff starts at five seconds, doubles, and caps at five minutes. A reply is abandoned after 16 failed delivery attempts. Local deferrals caused by a disconnected channel or an unreadable pairing approval use a separate limit of 32 consecutive checks, so they do not consume the transport-attempt budget. A reply is dropped immediately when its sender, group, or direct-message authorization is definitively revoked. The queue holds up to 100 replies and evicts the oldest entry regardless of its attempt count when full; switching the configured DWS profile clears the queue. These drops are reported on channel stderr, not sent as chat notifications.
 

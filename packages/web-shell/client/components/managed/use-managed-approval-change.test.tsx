@@ -418,6 +418,86 @@ describe('useManagedApprovalChange', () => {
     expect(current.pending).toBeUndefined();
   });
 
+  it('persists rule changes and retries the original policy after a lost reply', async () => {
+    const permissionRules = { allow: ['Read'], ask: [], deny: ['Bash(rm *)'] };
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      permissionRulesSupported: true,
+    });
+    vi.mocked(provider.approvalChange!.submit)
+      .mockRejectedValueOnce(new TypeError('lost reply'))
+      .mockResolvedValue({
+        ...result,
+        approvalMode: 'default',
+        permissionRules,
+      });
+    refresh.mockResolvedValue({ ...summary, approvalRevision: 1 });
+    await render();
+    await act(async () => {
+      await current.submit('default', undefined, permissionRules);
+    });
+    const intent = JSON.parse(sessionStorage.getItem(key)!);
+    expect(intent.permissionRules).toEqual(permissionRules);
+    expect(current.blocked).toBe(true);
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      approvalRevision: 1,
+      permissionRulesSupported: true,
+      permissionRules,
+    });
+    await act(async () => {
+      await current.confirm();
+    });
+    expect(current.pending).toBeUndefined();
+    expect(
+      vi.mocked(provider.approvalChange!.submit).mock.calls[1][2]
+        .idempotencyKey,
+    ).toBe(intent.idempotencyKey);
+    expect(provider.approvalChange!.submit).toHaveBeenLastCalledWith(
+      's1',
+      { approvalMode: 'default', expectedRevision: 0, permissionRules },
+      expect.objectContaining({ idempotencyKey: intent.idempotencyKey }),
+    );
+  });
+
+  it('blocks rule edits during a Turn even when live mode changes are available', async () => {
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      liveSupported: true,
+      permissionRulesSupported: true,
+    });
+    await render({ ...summary, phase: 'agent_running' });
+    await act(async () => {
+      await current.submit('default', undefined, {
+        allow: [],
+        ask: ['Read'],
+        deny: [],
+      });
+    });
+    expect(provider.approvalChange!.submit).not.toHaveBeenCalled();
+  });
+
+  it('retains an unconfirmed rule intent when the receipt contains another policy', async () => {
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      permissionRulesSupported: true,
+    });
+    vi.mocked(provider.approvalChange!.submit).mockResolvedValue({
+      ...result,
+      approvalMode: 'default',
+    });
+    await render();
+    await act(async () => {
+      await current.submit('default', undefined, {
+        allow: [],
+        ask: ['Read'],
+        deny: [],
+      });
+    });
+    expect(current.errorCode).toBe('unconfirmed');
+    expect(current.pending?.permissionRules?.ask).toEqual(['Read']);
+  });
+
   it('confirms the original receipt after another Turn becomes active without admitting a new selection', async () => {
     vi.mocked(provider.approvalChange!.submit).mockRejectedValueOnce(
       new TypeError('lost response'),

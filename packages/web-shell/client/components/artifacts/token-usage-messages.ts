@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ruPlural } from '../../utils/plural.js';
+
 type TokenUsageMessage =
   | string
   | ((vars?: Record<string, string | number>) => string);
@@ -12,11 +14,10 @@ export const TOKEN_USAGE_MESSAGES_EN: Record<string, TokenUsageMessage> = {
   'tokenUsage.total': 'Total tokens',
   'tokenUsage.shareTooltip': (v) => `Token share: ${v?.percent ?? '0.0'}%`,
   'tokenUsage.avgLatency': 'Avg latency',
-  'tokenUsage.firstTokenLatency': (v) =>
-    `First-token latency ${v?.duration ?? ''}`,
-  'tokenUsage.generationTime': (v) => `Generation ${v?.duration ?? ''}`,
-  'tokenUsage.outputSpeed': (v) => `Output speed ${v?.rate ?? ''} tok/s`,
-  'tokenUsage.modelApiMeta': (v) => `${v?.model ?? ''}: Requests · Avg latency`,
+  'tokenUsage.firstToken': 'First token',
+  'tokenUsage.generation': 'Generation',
+  'tokenUsage.outputSpeed': 'Output speed',
+  'tokenUsage.tokensPerSecond': (v) => `${v?.rate ?? ''} tok/s`,
   'tokenUsage.valueWithRate': (v) =>
     `${v?.count ?? 0} (${v?.percent ?? '0.0'}%)`,
   'tokenUsage.cached': 'Cache',
@@ -43,17 +44,48 @@ export const TOKEN_USAGE_MESSAGES_EN: Record<string, TokenUsageMessage> = {
     `${v?.count ?? 0} calls · ${v?.rate ?? 0}% ok · ${v?.duration ?? ''}`,
   'tokenUsage.tools': 'Tools',
   'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
+  'tokenUsage.successRate': 'Success rate',
+  'tokenUsage.successRateHint':
+    'API calls that returned without an error. Each retry counts as a call.',
+  'tokenUsage.successDetail': (v) =>
+    String(v?.failed ?? '0') === '0'
+      ? `All ${v?.requests ?? 0} requests succeeded`
+      : `${v?.failed} of ${v?.requests ?? 0} requests failed`,
+  'tokenUsage.firstTokenDetail': (v) => `First token avg ${v?.duration ?? ''}`,
+  'tokenUsage.modelSharesLabel': 'Token share by model',
+  'tokenUsage.trendTitle': 'Speed over time',
+  'tokenUsage.trendSeconds': 'seconds',
+  'tokenUsage.trendFailed': 'Failed',
+  'tokenUsage.trendNote':
+    'Each dot is one request; the line is the median of five neighbors. × marks a failed request.',
+  'tokenUsage.trendSummary': (v) =>
+    `${v?.metric ?? ''} per request over time. Median: ${v?.models ?? ''}`,
+  'tokenUsage.trendFailure': (v) => `Failed · ${v?.kind ?? ''}`,
+  'tokenUsage.trendSpeed': (v) =>
+    `${v?.rate ?? ''} tok/s · first token ${v?.ttft ?? ''}`,
+  'tokenUsage.trendTtftOnly': (v) => `First token ${v?.ttft ?? ''}`,
+  'tokenUsage.trendOutput': (v) =>
+    `${v?.count ?? 0} output tokens in ${v?.duration ?? ''}`,
+  'tokenUsage.speedSpread': (v) =>
+    `p50 ${v?.p50 ?? ''} · p10–p90 ${v?.p10 ?? ''}–${v?.p90 ?? ''} tok/s`,
+  'tokenUsage.failuresByKind': (v) => `Failed: ${v?.kinds ?? ''}`,
   'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
+  'tokenUsage.bar.turns': (v) =>
+    `${v?.count ?? 0} ${Number(v?.count) === 1 ? 'turn' : 'turns'}`,
+  'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} tok`,
+  'tokenUsage.bar.cacheHit': (v) => `${v?.percent ?? 0}% cache hit`,
+  'tokenUsage.bar.detailTokens': (v) =>
+    `Total ${v?.total ?? 0} · Input ${v?.input ?? 0} (cache ${v?.cached ?? 0}) · Output ${v?.output ?? 0}`,
 };
 
 export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
   'tokenUsage.total': '总 Token',
   'tokenUsage.shareTooltip': (v) => `Token 占比：${v?.percent ?? '0.0'}%`,
   'tokenUsage.avgLatency': '平均延迟',
-  'tokenUsage.firstTokenLatency': (v) => `首 token 延迟 ${v?.duration ?? ''}`,
-  'tokenUsage.generationTime': (v) => `生成 ${v?.duration ?? ''}`,
-  'tokenUsage.outputSpeed': (v) => `输出速度 ${v?.rate ?? ''} tok/s`,
-  'tokenUsage.modelApiMeta': (v) => `${v?.model ?? ''}：请求 · 平均延迟`,
+  'tokenUsage.firstToken': '首 token',
+  'tokenUsage.generation': '生成',
+  'tokenUsage.outputSpeed': '输出速度',
+  'tokenUsage.tokensPerSecond': (v) => `${v?.rate ?? ''} tok/s`,
   'tokenUsage.valueWithRate': (v) =>
     `${v?.count ?? 0}（${v?.percent ?? '0.0'}%）`,
   'tokenUsage.cached': '缓存',
@@ -80,5 +112,103 @@ export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
     `${v?.count ?? 0} 次 · 成功率 ${v?.rate ?? 0}% · ${v?.duration ?? ''}`,
   'tokenUsage.tools': '工具',
   'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
+  'tokenUsage.successRate': '成功率',
+  'tokenUsage.successRateHint': '未报错的 API 调用占比，每次重试单独计数。',
+  'tokenUsage.successDetail': (v) =>
+    String(v?.failed ?? '0') === '0'
+      ? `${v?.requests ?? 0} 次请求全部成功`
+      : `${v?.requests ?? 0} 次请求中 ${v?.failed} 次失败`,
+  'tokenUsage.firstTokenDetail': (v) => `首 token 平均 ${v?.duration ?? ''}`,
+  'tokenUsage.modelSharesLabel': '各模型 Token 占比',
+  'tokenUsage.trendTitle': '速度趋势',
+  'tokenUsage.trendSeconds': '秒',
+  'tokenUsage.trendFailed': '失败',
+  'tokenUsage.trendNote':
+    '每个点是一次请求，线是相邻 5 次的中位数。× 表示失败的请求。',
+  'tokenUsage.trendSummary': (v) =>
+    `每次请求的${v?.metric ?? ''}随时间变化。中位数：${v?.models ?? ''}`,
+  'tokenUsage.trendFailure': (v) => `失败 · ${v?.kind ?? ''}`,
+  'tokenUsage.trendSpeed': (v) =>
+    `${v?.rate ?? ''} tok/s · 首 token ${v?.ttft ?? ''}`,
+  'tokenUsage.trendTtftOnly': (v) => `首 token ${v?.ttft ?? ''}`,
+  'tokenUsage.trendOutput': (v) =>
+    `输出 ${v?.count ?? 0} token，耗时 ${v?.duration ?? ''}`,
+  'tokenUsage.speedSpread': (v) =>
+    `p50 ${v?.p50 ?? ''} · p10–p90 ${v?.p10 ?? ''}–${v?.p90 ?? ''} tok/s`,
+  'tokenUsage.failuresByKind': (v) => `失败：${v?.kinds ?? ''}`,
   'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
+  'tokenUsage.bar.turns': (v) => `${v?.count ?? 0} 轮`,
+  'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} tok`,
+  'tokenUsage.bar.cacheHit': (v) => `缓存命中 ${v?.percent ?? 0}%`,
+  'tokenUsage.bar.detailTokens': (v) =>
+    `总计 ${v?.total ?? 0} · 输入 ${v?.input ?? 0}（缓存 ${v?.cached ?? 0}） · 输出 ${v?.output ?? 0}`,
+};
+
+export const TOKEN_USAGE_MESSAGES_RU: Record<string, TokenUsageMessage> = {
+  'tokenUsage.total': 'Всего токенов',
+  'tokenUsage.shareTooltip': (v) => `Доля токенов: ${v?.percent ?? '0.0'}%`,
+  'tokenUsage.avgLatency': 'Средняя задержка',
+  'tokenUsage.firstToken': 'Первый токен',
+  'tokenUsage.generation': 'Генерация',
+  'tokenUsage.outputSpeed': 'Скорость вывода',
+  'tokenUsage.tokensPerSecond': (v) => `${v?.rate ?? ''} ток/с`,
+  'tokenUsage.valueWithRate': (v) =>
+    `${v?.count ?? 0} (${v?.percent ?? '0.0'}%)`,
+  'tokenUsage.cached': 'Кэш',
+  'tokenUsage.cachedDetail': (v) =>
+    `Кэш: ${v?.count ?? 0} (${v?.percent ?? '0.0'}%)`,
+  'tokenUsage.thoughtsDetail': (v) => `Рассуждение: ${v?.count ?? 0}`,
+  'tokenUsage.input': 'Ввод',
+  'tokenUsage.inputWithCacheRate': (v) =>
+    `${v?.count ?? 0} (доля кэша: ${v?.percent ?? '0.0'}%)`,
+  'tokenUsage.loadError': 'Не удалось загрузить расход токенов.',
+  'tokenUsage.models': 'По моделям',
+  'tokenUsage.noData': 'В этой сессии ещё не было вызовов API.',
+  'tokenUsage.noTools': 'В этой сессии ещё не было вызовов инструментов.',
+  'tokenUsage.open': 'Расход токенов сессии',
+  'tokenUsage.output': 'Всего вывода',
+  'tokenUsage.refresh': 'Обновить',
+  'tokenUsage.requests': 'Запросы',
+  'tokenUsage.retry': 'Повторить',
+  'tokenUsage.agents': 'По агентам',
+  'tokenUsage.mainAgent': 'Основной Agent',
+  'tokenUsage.thoughts': 'Рассуждение',
+  'tokenUsage.title': 'Расход токенов',
+  'tokenUsage.toolRow': (v) =>
+    `${v?.count ?? 0} вызовов · ${v?.rate ?? 0}% ок · ${v?.duration ?? ''}`,
+  'tokenUsage.tools': 'Инструменты',
+  'tokenUsage.updatedAt': (v) => `Обновлено ${v?.time ?? ''}`,
+  'tokenUsage.successRate': 'Доля успеха',
+  'tokenUsage.successRateHint':
+    'Вызовы API, вернувшиеся без ошибки. Каждая повторная попытка считается вызовом.',
+  'tokenUsage.successDetail': (v) =>
+    String(v?.failed ?? '0') === '0'
+      ? `Все ${v?.requests ?? 0} ${ruPlural(v?.requests, 'запрос успешен', 'запроса успешны', 'запросов успешны')}`
+      : `${v?.failed} из ${v?.requests ?? 0} ${ruPlural(v?.requests, 'запроса', 'запросов', 'запросов')} не удались`,
+  'tokenUsage.firstTokenDetail': (v) =>
+    `Среднее до первого токена ${v?.duration ?? ''}`,
+  'tokenUsage.modelSharesLabel': 'Доля токенов по моделям',
+  'tokenUsage.trendTitle': 'Скорость во времени',
+  'tokenUsage.trendSeconds': 'секунды',
+  'tokenUsage.trendFailed': 'Ошибка',
+  'tokenUsage.trendNote':
+    'Каждая точка — один запрос; линия — медиана пяти соседей. × отмечает неудачный запрос.',
+  'tokenUsage.trendSummary': (v) =>
+    `${v?.metric ?? ''} на запрос во времени. Медиана: ${v?.models ?? ''}`,
+  'tokenUsage.trendFailure': (v) => `Ошибка · ${v?.kind ?? ''}`,
+  'tokenUsage.trendSpeed': (v) =>
+    `${v?.rate ?? ''} ток/с · первый токен ${v?.ttft ?? ''}`,
+  'tokenUsage.trendTtftOnly': (v) => `Первый токен ${v?.ttft ?? ''}`,
+  'tokenUsage.trendOutput': (v) =>
+    `${v?.count ?? 0} выходных токенов за ${v?.duration ?? ''}`,
+  'tokenUsage.speedSpread': (v) =>
+    `p50 ${v?.p50 ?? ''} · p10–p90 ${v?.p10 ?? ''}–${v?.p90 ?? ''} ток/с`,
+  'tokenUsage.failuresByKind': (v) => `Ошибки: ${v?.kinds ?? ''}`,
+  'tokenUsage.unavailable': 'Расход токенов для этой сессии недоступен.',
+  'tokenUsage.bar.turns': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
+  'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} ток`,
+  'tokenUsage.bar.cacheHit': (v) => `${v?.percent ?? 0}% попаданий в кэш`,
+  'tokenUsage.bar.detailTokens': (v) =>
+    `Всего ${v?.total ?? 0} · Ввод ${v?.input ?? 0} (кэш ${v?.cached ?? 0}) · Вывод ${v?.output ?? 0}`,
 };

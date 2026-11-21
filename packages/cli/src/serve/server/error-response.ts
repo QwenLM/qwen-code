@@ -23,6 +23,7 @@ import {
 import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { GeneratedUiStateError } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
 import {
   SessionArtifactLibraryError,
   SessionStorageEntryError,
@@ -295,6 +296,18 @@ export function sendBridgeError(
         ? { retryable: true }
         : {}),
     });
+    return;
+  }
+  if (err instanceof GeneratedUiStateError) {
+    const status =
+      err.code === 'state_unavailable'
+        ? 503
+        : err.code === 'state_card_limit'
+          ? 409
+          : 400;
+    if (status >= 500) reportBridgeError(err, ctx, daemonLog);
+    else recordExpectedBridgeError(err, ctx, daemonLog);
+    res.status(status).json({ error: err.message, code: err.code });
     return;
   }
   const sourceErrorKind =
@@ -1039,6 +1052,14 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (kind === 'invalid_mod_row') {
+        res.status(400).json({ error: errorMessage(err), code: kind });
+        return;
+      }
+      if (kind === 'auth_type_enforced') {
+        res.status(403).json({ error: errorMessage(err), code: kind });
+        return;
+      }
       const workflowStatus = workflowRequestErrorStatus(kind);
       if (workflowStatus !== undefined) {
         res.status(workflowStatus).json({
@@ -1248,11 +1269,15 @@ export function sendBridgeError(
         });
         return;
       }
-      if (kind === 'directory_not_found') {
+      if (
+        kind === 'directory_not_found' ||
+        (kind === 'containment_violation' &&
+          ctx?.route === 'POST /session/:id/cd')
+      ) {
         const d = data as { path?: string };
         res.status(400).json({
           error: errorMessage(err),
-          code: 'directory_not_found',
+          code: kind,
           path: d.path,
         });
         return;

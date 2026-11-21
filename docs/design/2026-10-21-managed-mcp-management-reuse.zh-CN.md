@@ -10,7 +10,7 @@ daemon 的 MCP 管理配置其 ACP 进程，并非选定的 Managed Runtime。�
 
 Managed 通过不可变 AgentDefinition 和 `hosted-workspace-mcp/1` profile 固定私有 MCP recipe。该 profile 提供 Read/Write/Edit 和 MCP，但没有 Shell、备份/撤销或 Plan。通用本机 Workspace 隔离 worker 已支持保持 MCP 连接；专用 CSI 常驻文件 profile 是另一份契约。仅复用页面不能让普通文件/Shell 会话使用 MCP。
 
-用户选择优先交付普通 Managed 文件/Shell 与 MCP 组合。在普通公开 shell/1 profile 上允许可选 MCP pins；它本身已有 Read/Write/Edit 和 Shell。保留审批、备份与生命周期，兼容旧 MCP 会话。文件专用 files/1 与 shell/2 的生命周期不同，继续拒绝 pins。同一 PR 还增加会话对已发布 MCP 定义的管理，并复用 daemon 展示组件，详见[会话 MCP 管理](2026-10-22-managed-session-mcp-management.zh-CN.md)。可执行 recipe 编写和资源/prompt 展开仍单独交付。
+用户选择优先交付普通 Managed 文件/Shell 与 MCP 组合。在普通公开 shell/1 profile 上允许可选 MCP pins；它本身已有 Read/Write/Edit 和 Shell。保留审批、备份与生命周期，兼容旧 MCP 会话。文件专用 files/1 继续拒绝 pins。尚未上线的 Shell 变体现统一为 shell/1，并包含原生 glob；部署允许列表不能启用已移除的 Shell 标识。同一 PR 还增加会话对已发布 MCP 定义的管理，并复用 daemon 展示组件，详见[会话 MCP 管理](2026-10-22-managed-session-mcp-management.zh-CN.md)。可执行 recipe 编写和资源/prompt 展开仍单独交付。
 
 ## 准入与不可变配置
 
@@ -65,7 +65,7 @@ Runtime transport 已支持 resources/read 和 prompts/get，但普通 Hosted �
 
 先记录全局已安装 CLI 基线，再验证源码匹配 bundle。使用隔离本机 stdio MCP、确定性模型和一次性数据库，不接触用户预览服务、真实 Session 或凭据。
 
-证明普通 Shell Session 能执行 Read/Write/Edit、前台 Shell 和真实 MCP 调用，后续 Turn 复用同一 MCP 进程。验证持久结果、备份/撤销、Plan 能力/准入/切换拒绝且无 transport 副作用、关闭/排空、旧定义 revision 保留及 snapshot 子会话空能力。另测 files-only/1 与 shell/2 拒绝，保留原 owner/不重放回归。
+证明普通 Shell Session 能执行 Read/Write/Edit、前台 Shell 和真实 MCP 调用，后续 Turn 复用同一 MCP 进程。验证持久结果、备份/撤销、Plan 能力/准入/切换拒绝且无 transport 副作用、关闭/排空、旧定义 revision 保留及 snapshot 子会话空能力。另测 files-only/1 与被移除 Shell profile 的拒绝，保留原 owner/不重放回归。
 
 执行定向包测试、根 build/typecheck/bundle、受影响 Java 测试后 Maven verify 及适用一次性 MySQL/Hosted profiles。区分定向与全量结果，记录未测矩阵。本机夹具不等于 SSH、CSI、真实上游模型、Windows 或生产验收。最后达到连续两轮自审无发现并完成独立审查。
 

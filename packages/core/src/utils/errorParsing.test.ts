@@ -4,12 +4,44 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { parseAndFormatApiError } from './errorParsing.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { StructuredError } from '../core/turn.js';
 
 describe('parseAndFormatApiError', () => {
+  it('only translates marked subscription errors', () => {
+    const translate = vi.fn(() => 'translated quota');
+    const message =
+      "You've used up your weekly credits. Please try again after the reset.";
+    expect(
+      parseAndFormatApiError(
+        { message, status: 403 },
+        AuthType.QWEN_SUBSCRIPTION,
+        translate,
+      ),
+    ).toBe(`[API Error: ${message}]`);
+    expect(translate).not.toHaveBeenCalled();
+    const quota = { type: 'subscription_quota', memberType: 'pro' };
+    expect(
+      parseAndFormatApiError(
+        { message, status: 402, subscriptionQuota: quota },
+        AuthType.QWEN_SUBSCRIPTION,
+        translate,
+      ),
+    ).toBe('[API Error: translated quota]');
+  });
+  it('keeps subscription rate-limit text without adding client advice', () => {
+    expect(
+      parseAndFormatApiError(
+        {
+          status: 429,
+          message: 'Concurrent request limit exceeded (principal scope)',
+        },
+        AuthType.QWEN_SUBSCRIPTION,
+      ),
+    ).toBe('[API Error: Concurrent request limit exceeded (principal scope)]');
+  });
   const vertexMessage = 'request a quota increase through Vertex';
   const geminiMessage = 'request a quota increase through AI Studio';
 

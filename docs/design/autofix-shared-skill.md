@@ -11,6 +11,15 @@ Local Autofix should reuse that skill instead of adding a bundled skill or a
 second maintenance engine. Its input is the current working tree, not a remote
 pull request: staged, unstaged, and untracked changes are reviewed together.
 
+Scope: this design covers `/autofix` on the working tree, and its rules below —
+no GitHub writes, no polling, no `/loop` — are about that command. Watching a
+remote pull request and pushing fixes to it is a different command,
+`/autofix-pr` ([2026-10-21-autofix-pr-command.md](2026-10-21-autofix-pr-command.md)):
+a bundled skill that pushes and replies under the user's identity only after a
+confirmation at each start, through guarded helpers, in a worktree of its own,
+woken by a scheduled task's gate instead of polling. It shares no files with
+the repository Autofix skill and does not change its rules.
+
 ## Design
 
 The existing `.qwen/skills/autofix/SKILL.md` remains the only Autofix skill. It

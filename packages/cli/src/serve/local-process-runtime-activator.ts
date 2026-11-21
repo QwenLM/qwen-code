@@ -22,7 +22,7 @@ import {
   type ManagedRuntimeUse,
   type ManagedWorkerBoot,
 } from './managed-runtime-activator.js';
-import { ManagedRuntimeProviderError } from './managed-runtime-provider.js';
+import { ManagedRuntimeProviderError } from './managed-runtime-provider-error.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 export interface LocalProcessRuntimeActivatorOptions {

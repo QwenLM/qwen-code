@@ -17,6 +17,7 @@ import type {
   ToolKind,
 } from '@agentclientprotocol/sdk';
 import type { MessageRewriteMiddleware } from './rewrite/index.js';
+import { DEFAULT_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core/subagents/builtin-agents.js';
 
 export type { ApprovalModeValue };
 
@@ -77,13 +78,66 @@ export function hasFullSessionContext(
 }
 
 /**
+ * The agent associated with a frame.
+ *
+ * Mirrors the shape OpenAI's Responses multi-agent contract standardizes —
+ * every output item carries `agent: { agent_name }` with a path-style name
+ * (`/root`, `/root/security`) — so a client can attribute output and rebuild
+ * the tree without cross-frame association state. For ordinary output and
+ * activity frames this names the producer; for an inter-agent message it
+ * names the recipient, while `author` and `recipient` carry direction, matching
+ * OpenAI's `agent_message` semantics. Field names stay camelCase to match this
+ * wire's existing `_meta` keys (`subagentType`, `parentToolCallId`); it is the
+ * shape that is borrowed, not the spelling.
+ */
+export interface AgentIdentity {
+  /**
+   * Path-style name from the session's root agent, e.g. `/root/security`.
+   *
+   * Derived from the spawning agent's path plus the subagent type. This is a
+   * readable role path, not a unique execution id: concurrent subagents of the
+   * same type share it, and renaming the agent definition changes it. Use
+   * `parentToolCallId` when a consumer must distinguish subagent executions.
+   */
+  agentName: string;
+  /** 0 for the root agent, 1 for a direct subagent or teammate, and so on. */
+  depth: number;
+  kind: 'root' | 'subagent' | 'teammate';
+}
+
+/** The identity of the agent a session's own frames come from. */
+export const ROOT_AGENT_IDENTITY: AgentIdentity = {
+  agentName: '/root',
+  depth: 0,
+  kind: 'root',
+};
+
+/**
  * Subagent metadata for tracking parent tool call context.
  */
 export interface SubagentMeta {
   /** ID of the parent AgentTool call that created this subagent */
   parentToolCallId?: string;
-  /** Type of subagent (from AgentParams.subagent_type) */
+  /** Resolved definition name once the subagent starts. */
   subagentType?: string;
+  /** The agent that produced this frame. Absent means the root agent. */
+  agent?: AgentIdentity;
+}
+
+/**
+ * Preserve definition casing: live tracking replaces the request with START's
+ * resolved name before emitting frames.
+ */
+export function deriveSubagentIdentity(
+  subagentType: string,
+  parent: AgentIdentity = ROOT_AGENT_IDENTITY,
+): AgentIdentity {
+  const segment = subagentType.trim() || DEFAULT_BUILTIN_SUBAGENT_TYPE;
+  return {
+    agentName: `${parent.agentName}/${segment}`,
+    depth: parent.depth + 1,
+    kind: 'subagent',
+  };
 }
 
 /**

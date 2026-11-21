@@ -17,6 +17,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import {
@@ -25,6 +27,11 @@ import {
 } from '../copy_bundle_assets.js';
 import { copyFiles } from '../copy_files.js';
 import { preparePackage } from '../prepare-package.js';
+import {
+  NPM_BUN_OPTIONAL_DEPENDENCIES,
+  NPM_OPENTUI_NATIVE_ASSETS,
+  OPENTUI_COMMON_ASSETS,
+} from '../opentui-package-assets.js';
 import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const realReadFileSync = fs.readFileSync;
@@ -655,6 +662,7 @@ describe('package asset scripts', () => {
     stubConsole();
 
     copyBundleAssets({ root: rootDir });
+    createOpenTuiArtifacts(rootDir);
     preparePackage({ rootDir, requireNativeAudioCapture: false });
 
     expect(
@@ -1043,6 +1051,7 @@ describe('package asset scripts', () => {
     expect(distPackageJson.bundledDependencies).toBeUndefined();
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
+      ...NPM_BUN_OPTIONAL_DEPENDENCIES,
     });
 
     expect(distPackageJson.optionalDependencies.sharp).toBe('0.35.4');
@@ -1149,6 +1158,227 @@ describe('package asset scripts', () => {
       preparePackage({ rootDir, requireNativeAudioCapture: false }),
     ).toThrow(/installed 0\.35\.4, packages\/core declares \^0\.34\.0/);
   });
+
+  it('publishes a complete POSIX asset tree and leaves host-only dist assets intact', () => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    stubConsole();
+    const windowsAsset =
+      'dist/opentui-assets/@opentui/core-win32-x64/opentui.dll';
+    writeFile(rootDir, windowsAsset, 'windows-host-library');
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+    const published = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist/package.json'), 'utf8'),
+    );
+    expect(published.files).toEqual(
+      expect.arrayContaining([
+        'opentui-assets/@opentui/core',
+        'opentui-assets/web-tree-sitter',
+        ...Object.keys(NPM_OPENTUI_NATIVE_ASSETS).map(
+          (name) => `opentui-assets/${name}`,
+        ),
+      ]),
+    );
+    expect(published.files).not.toContain('opentui-assets');
+    expect(published.files).not.toContain(
+      'opentui-assets/@opentui/core-win32-x64',
+    );
+    expect(readFileSync(path.join(rootDir, windowsAsset), 'utf8')).toBe(
+      'windows-host-library',
+    );
+    expect(published.scripts).toBeUndefined();
+  });
+
+  it.each([
+    ...OPENTUI_COMMON_ASSETS,
+    ...Object.entries(NPM_OPENTUI_NATIVE_ASSETS).map(
+      ([name, library]) => `${name}/${library}`,
+    ),
+  ])('rejects npm packaging without %s', (key) => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    stubConsole();
+    rmSync(path.join(rootDir, 'dist/opentui-assets', key));
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: false }),
+    ).toThrow(`Required npm OpenTUI asset not found: ${key}`);
+  });
+
+  it('prepares desktop metadata without universal assets or Bun dependencies', () => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    stubConsole();
+    rmSync(path.join(rootDir, 'dist/opentui-assets'), { recursive: true });
+    writeFile(
+      rootDir,
+      'dist/opentui-assets/@opentui/core-win32-x64/opentui.dll',
+      'host-native',
+    );
+    preparePackage({
+      rootDir,
+      requireNativeAudioCapture: false,
+      npmDistribution: false,
+    });
+    const published = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist/package.json'), 'utf8'),
+    );
+    expect(
+      Object.keys(published.optionalDependencies).some((name) =>
+        name.startsWith('@oven/'),
+      ),
+    ).toBe(false);
+    expect(
+      readFileSync(
+        path.join(
+          rootDir,
+          'dist/opentui-assets/@opentui/core-win32-x64/opentui.dll',
+        ),
+        'utf8',
+      ),
+    ).toBe('host-native');
+    expect(
+      existsSync(
+        path.join(rootDir, 'dist/opentui-assets/@opentui/core-linux-x64'),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    ['darwin-x64', false],
+    ['win32-x64', false],
+    ['', true],
+    ['', false],
+    ['unknown-x64', false],
+  ])(
+    'keeps VSIX metadata and copied assets scoped to target=%s universal=%s',
+    (target, universal) => {
+      const rootDir = createFixtureRoot();
+      createBundleArtifacts(rootDir);
+      const extension = 'packages/vscode-ide-companion';
+      writeFile(rootDir, `${extension}/package.json`, '{"type":"module"}');
+      for (const script of ['prepackage.js', 'copy-bundled-cli.js']) {
+        writeFile(
+          rootDir,
+          `${extension}/scripts/${script}`,
+          readFileSync(
+            new URL(`../../${extension}/scripts/${script}`, import.meta.url),
+            'utf8',
+          ),
+        );
+      }
+      writeFile(
+        rootDir,
+        'dist/opentui-assets/@opentui/core-win32-x64/opentui.dll',
+        'windows-native',
+      );
+      writeFile(
+        rootDir,
+        `${extension}/dist/qwen-cli/node_modules/existing-runtime/index.js`,
+        'keep-existing-dependency',
+      );
+      const preload = path.join(rootDir, 'prepackage-fixture.mjs');
+      const callsFile = path.join(rootDir, 'calls.jsonl');
+      const bundled = path.join(rootDir, extension, 'dist', 'qwen-cli');
+      // Execute the real orchestration, metadata builder, and copy script.
+      // Only npm build/install processes are replaced; no downloads occur.
+      writeFileSync(
+        preload,
+        `
+import childProcess from 'node:child_process';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { preparePackage } from ${JSON.stringify(new URL('../prepare-package.js', import.meta.url).href)};
+const realSpawn = childProcess.spawnSync;
+childProcess.spawnSync = (command, args, options) => {
+  if (command === 'node') {
+    return realSpawn(process.execPath, args, { ...options, shell: false });
+  }
+  if (args.includes('prepare:package')) {
+    preparePackage({
+      rootDir: ${JSON.stringify(rootDir)},
+      requireNativeAudioCapture: false,
+      npmDistribution: !args.includes('--host-runtime'),
+    });
+  }
+  const manifest = args.includes('install')
+    ? JSON.parse(fs.readFileSync(${JSON.stringify(path.join(bundled, 'package.json'))}, 'utf8'))
+    : undefined;
+  fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify({ args, manifest }) + '\\n');
+  return { status: 0 };
+};
+syncBuiltinESMExports();
+`,
+      );
+      const home = path.join(rootDir, 'home');
+      mkdirSync(home);
+      const result = spawnSync(
+        process.execPath,
+        [
+          '--import',
+          pathToFileURL(preload).href,
+          path.join(rootDir, extension, 'scripts', 'prepackage.js'),
+        ],
+        {
+          cwd: rootDir,
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            HOME: home,
+            USERPROFILE: home,
+            QWEN_HOME: path.join(home, '.qwen'),
+            npm_config_cache: path.join(rootDir, 'npm-cache'),
+            npm_config_prefix: path.join(rootDir, 'npm-prefix'),
+            NODE_OPTIONS: '',
+            UNIVERSAL_BUILD: String(universal),
+            VSCODE_TARGET: target,
+          },
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+      const calls = readFileSync(callsFile, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const install = calls.find(({ args }) => args.includes('install'));
+      expect(
+        Object.keys(install.manifest.optionalDependencies).some((name) =>
+          name.startsWith('@oven/'),
+        ),
+      ).toBe(false);
+      expect(install.manifest.optionalDependencies).toMatchObject({
+        '@qwen-code/audio-capture': '0.17.0',
+        '@teddyzhu/clipboard': '0.0.5',
+        sharp: '0.35.4',
+      });
+      expect(install.args.includes('--omit=optional')).toBe(universal);
+      expect(install.args).toContain('--omit=dev');
+      const scope = 'opentui-assets/@opentui';
+      const sourceEntries = readdirSync(
+        path.join(rootDir, 'dist', scope),
+      ).sort();
+      const expectedEntries =
+        target === 'darwin-x64' || target === 'win32-x64'
+          ? ['core', `core-${target}`]
+          : sourceEntries;
+      expect(readdirSync(path.join(bundled, scope)).sort()).toEqual(
+        expectedEntries,
+      );
+      expect(sourceEntries).toHaveLength(6);
+      for (const key of OPENTUI_COMMON_ASSETS) {
+        expect(
+          readFileSync(path.join(bundled, 'opentui-assets', key), 'utf8'),
+        ).toBe(key);
+      }
+      expect(
+        readFileSync(
+          path.join(bundled, 'node_modules/existing-runtime/index.js'),
+          'utf8',
+        ),
+      ).toBe('keep-existing-dependency');
+    },
+  );
 
   it('omits browser MCP install hooks and deps from the prepared dist package', () => {
     const rootDir = createFixtureRoot();
@@ -1590,7 +1820,19 @@ describe('package asset scripts', () => {
     return rootDir;
   }
 
+  function createOpenTuiArtifacts(rootDir) {
+    for (const key of [
+      ...OPENTUI_COMMON_ASSETS,
+      ...Object.entries(NPM_OPENTUI_NATIVE_ASSETS).map(
+        ([name, library]) => `${name}/${library}`,
+      ),
+    ]) {
+      writeFile(rootDir, `dist/opentui-assets/${key}`, key);
+    }
+  }
+
   function createBundleArtifacts(rootDir) {
+    createOpenTuiArtifacts(rootDir);
     writeFile(rootDir, 'dist/mem0/main.js', '');
     writeFile(rootDir, 'dist/mem0/write-confirmation.js', '');
     for (const file of [

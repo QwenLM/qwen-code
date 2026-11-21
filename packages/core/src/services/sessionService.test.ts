@@ -58,6 +58,10 @@ import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
+import {
+  deleteSessionGoalSidecar,
+  moveSessionGoalSidecar,
+} from './session-goal-sidecar.js';
 import { SessionWriterLostError } from './session-writer-lease.js';
 import {
   content,
@@ -84,6 +88,13 @@ vi.mock('../utils/jsonl-utils.js');
 vi.mock('./session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./session-pr-service.js')>()),
   moveSessionPrSidecar: vi.fn().mockResolvedValue(undefined),
+}));
+// Same rationale: the goal move does real fs/promises I/O this mocked-fs
+// suite cannot host; its semantics are pinned in session-goal-sidecar.test.ts.
+vi.mock('./session-goal-sidecar.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-goal-sidecar.js')>()),
+  moveSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+  deleteSessionGoalSidecar: vi.fn(() => Promise.resolve()),
 }));
 
 type Line = Record<string, unknown>;
@@ -496,6 +507,8 @@ describe('SessionService', () => {
     vi.mocked(readRuntimeStatus).mockResolvedValue({
       schemaVersion: 1,
       pid: 123,
+      procStart: null,
+      pidNs: null,
       sessionId,
       workDir,
       hostname: 'host',
@@ -1040,7 +1053,12 @@ describe('SessionService', () => {
       expect(result.items[0].sessionId).toBe(sessionIdC); // newest
       expect(result.items[1].sessionId).toBe(sessionIdB);
       expect(result.hasMore).toBe(true);
-      expect(result.nextCursor).toBeDefined();
+      // The boundary mtime is unique here, so this pins the published format:
+      // a bare numeric mtime satisfies every shape-agnostic cursor assertion
+      // in this suite while breaking the documented cursor.
+      expect(result.nextCursor).toMatch(
+        /^\d+(\.\d+)?\|[0-9a-f-]{32,36}\.jsonl$/,
+      );
     });
 
     it('should paginate with cursor parameter', async () => {
@@ -1056,6 +1074,40 @@ describe('SessionService', () => {
       expect(result.items).toHaveLength(1);
       expect(result.items[0].sessionId).toBe(sessionIdA);
       expect(result.hasMore).toBe(false);
+    });
+
+    it('should return every session once when all files share an mtime', async () => {
+      // A tie group larger than one page must not be dropped at the page
+      // boundary: the cursor has to carry the ordering tie-break, not just
+      // the timestamp (bulk copies, restores and coarse-timestamp
+      // filesystems all produce equal mtimes).
+      const ids = Array.from({ length: 25 }, (_, index) =>
+        (index + 1).toString(16).padStart(32, '0'),
+      );
+      // readdir order is not name order (ext4 returns hash order), so hand the
+      // files over reversed: only the sort's tie-break can restore the order
+      // the cursor filter assumes.
+      listIds(...ids.slice().reverse());
+      byMtime({}, Date.now());
+      vi.mocked(jsonl.readLines).mockImplementation(async (filePath) => [
+        {
+          ...recordA1,
+          sessionId: filePath.toString().match(/([0-9a-f]{32})\.jsonl/)![1],
+        },
+      ]);
+
+      const seen: string[] = [];
+      let cursor: number | string | undefined;
+      for (let page = 0; page < 10; page++) {
+        const result = await sessionService.listSessions({ cursor, size: 5 });
+        seen.push(...result.items.map((item) => item.sessionId));
+        if (!result.hasMore) break;
+        cursor = result.nextCursor;
+        expect(cursor).toBeDefined();
+      }
+
+      expect(seen).toHaveLength(ids.length);
+      expect(new Set(seen).size).toBe(ids.length);
     });
 
     it('should skip files from different projects', async () => {
@@ -1580,7 +1632,9 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(7);
+      // One fence check per cleanup step: main's goal + artifact-summary
+      // sidecars (10) plus this PR's branch sidecar removal (1) → 11.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(11);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,
       });
@@ -1700,6 +1754,10 @@ describe('SessionService', () => {
       [
         'should remove pr sidecars in both states when removing a session',
         '.pr.json',
+      ],
+      [
+        'should remove goal sidecars in both states when removing a session',
+        '.goal.json',
       ],
       [
         'should remove prompt ledger sidecars in both archive states',
@@ -1830,13 +1888,19 @@ describe('SessionService', () => {
       existsFor(
         `${sessionIdA}.worktree.json`,
         `${sessionIdA}.pr.json`,
+        `${sessionIdA}.goal.json`,
         `${sessionIdA}.ledger.jsonl`,
       );
       const removeOrganizationSpy = spyOrganizationRemove().mockResolvedValue();
 
       await sessionService.cleanupRemovedSessionState(sessionIdA);
 
-      for (const sidecar of ['.worktree.json', '.pr.json', '.ledger.jsonl']) {
+      for (const sidecar of [
+        '.worktree.json',
+        '.pr.json',
+        '.goal.json',
+        '.ledger.jsonl',
+      ]) {
         expect(unlinkSyncSpy).toHaveBeenCalledWith(
           expect.stringContaining(`${sessionIdA}${sidecar}`),
         );
@@ -1976,6 +2040,78 @@ describe('SessionService', () => {
         ),
       ).toBe(true);
     },
+    movesGoalSidecar: async (kind: MoveKind) => {
+      const m = seeded(kind);
+
+      const result = await m.run();
+
+      expect(result.moved).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(moveSessionGoalSidecar).toHaveBeenCalledWith(
+        m.from('.goal.json'),
+        m.to('.goal.json'),
+      );
+    },
+    warnsOnGoalSidecarFailure: async (kind: MoveKind) => {
+      const m = seeded(kind);
+      vi.mocked(moveSessionGoalSidecar).mockRejectedValueOnce(
+        new Error('goal move failed'),
+      );
+      const { service, warnings } = withWarnings();
+
+      const result = await m.run(undefined, service);
+
+      expect(result.moved).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(
+        warnings.some((message) =>
+          message.includes('failed to move goal sidecar'),
+        ),
+      ).toBe(true);
+    },
+    reconcilesGoalSidecarOnConflict: async (kind: MoveKind) => {
+      const toArchive = kind === 'archive';
+      const keptGoal = toArchive
+        ? `/chats/archive/${sessionIdA}.goal.json`
+        : `/chats/${sessionIdA}.goal.json`;
+      const droppedGoal = toArchive
+        ? `/chats/${sessionIdA}.goal.json`
+        : `/chats/archive/${sessionIdA}.goal.json`;
+
+      // Kept projection present: the dropped lineage is deleted, never
+      // renamed over the survivor (which would show the deleted transcript's
+      // Goal).
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(moveSessionGoalSidecar).mockClear();
+      vi.mocked(deleteSessionGoalSidecar).mockClear();
+      existsFor(keptGoal);
+
+      const keptResult = await mirror(kind).run({ resolveConflicts: true });
+
+      expect(keptResult.resolvedConflicts).toEqual([sessionIdA]);
+      expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(droppedGoal),
+      );
+      expect(moveSessionGoalSidecar).not.toHaveBeenCalled();
+
+      // Kept projection absent: the dropped projection is discarded too, NOT
+      // adopted. Absence is a value here (the survivor's goal may be cleared),
+      // so adopting the dropped lineage would resurrect a goal the kept
+      // transcript no longer records — and an archived survivor never
+      // re-projects to repair it.
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(moveSessionGoalSidecar).mockClear();
+      vi.mocked(deleteSessionGoalSidecar).mockClear();
+      existsSyncSpy.mockReturnValue(false);
+
+      const absentResult = await mirror(kind).run({ resolveConflicts: true });
+
+      expect(absentResult.resolvedConflicts).toEqual([sessionIdA]);
+      expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(droppedGoal),
+      );
+      expect(moveSessionGoalSidecar).not.toHaveBeenCalled();
+    },
     movesKnownLocation: async (kind: MoveKind) => {
       const m = seeded(kind);
 
@@ -2032,7 +2168,9 @@ describe('SessionService', () => {
         errors: [],
       });
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(3);
+      // The goal sidecar move added one fence check to the conflict path (5);
+      // this PR's separate branch-sidecar reconcile try adds one more → 6.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(6);
     },
     warnsOnWorktreeSidecarFailure: async (kind: MoveKind) => {
       const m = seeded(kind, '.worktree.json');
@@ -2178,6 +2316,15 @@ describe('SessionService', () => {
 
     it('should warn but still archive when the pr sidecar move fails', () =>
       mirrored.warnsOnPrSidecarFailure('archive'));
+
+    it('should move the goal sidecar into the archive directory', () =>
+      mirrored.movesGoalSidecar('archive'));
+
+    it('should warn but still archive when the goal sidecar move fails', () =>
+      mirrored.warnsOnGoalSidecarFailure('archive'));
+
+    it('should let the kept goal sidecar win on an archive conflict', () =>
+      mirrored.reconcilesGoalSidecarOnConflict('archive'));
 
     const bothPrSidecarsExist = () => {
       archive.seed();
@@ -2381,6 +2528,15 @@ describe('SessionService', () => {
 
     it('should warn but still unarchive when the pr sidecar move fails', () =>
       mirrored.warnsOnPrSidecarFailure('unarchive'));
+
+    it('should move the goal sidecar back to the active directory', () =>
+      mirrored.movesGoalSidecar('unarchive'));
+
+    it('should warn but still unarchive when the goal sidecar move fails', () =>
+      mirrored.warnsOnGoalSidecarFailure('unarchive'));
+
+    it('should let the kept goal sidecar win on an unarchive conflict', () =>
+      mirrored.reconcilesGoalSidecarOnConflict('unarchive'));
 
     it('should unarchive known archived sessions', () =>
       mirrored.movesKnownLocation('unarchive'));
@@ -3267,9 +3423,13 @@ describe('SessionService', () => {
         message: userText('backend task'),
       };
 
-      expect(historyOf([realtimeUser, realtimeAssistant, backendUser])).toEqual(
-        [backendUser.message],
-      );
+      const history = historyOf([realtimeUser, realtimeAssistant, backendUser]);
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
+        backendUser.message,
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:backend-user',
+      ]);
     });
 
     it('does not deep-clone stored messages when rebuilding resume API history', () => {
@@ -3298,7 +3458,14 @@ describe('SessionService', () => {
       const history = historyOf([recordA1, toolResult], '2024-01-01T00:02:00Z');
 
       expect(structuredCloneSpy).not.toHaveBeenCalled();
-      expect(history).toEqual([recordA1.message, toolResult.message]);
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
+        recordA1.message,
+        toolResult.message,
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:a1',
+        undefined,
+      ]);
       expect(history[1]).not.toBe(toolResult.message);
       expect(history[1].parts).not.toBe(toolResult.message!.parts);
       const response = history[1].parts![0] as {
@@ -3344,10 +3511,15 @@ describe('SessionService', () => {
         '2024-01-01T00:03:00Z',
       );
 
-      expect(history).toEqual([
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
         recordA1.message,
         assistantWithToolCall.message,
         merged(toolResult, midTurnUserMessage),
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:a1',
+        undefined,
+        undefined,
       ]);
     });
 
@@ -3373,11 +3545,17 @@ describe('SessionService', () => {
         '2024-01-02T04:00:00Z',
       );
 
-      expect(history).toEqual([
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
         userText('summary'),
         modelText('Got it. Thanks for the additional context!'),
         recordB2.message,
         postCompressionRecord.message,
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        undefined,
+        undefined,
+        undefined,
+        'legacy-record:c2',
       ]);
     });
 
@@ -3464,6 +3642,65 @@ describe('SessionService', () => {
         { text: 'deep thinking', thought: true },
         { text: 'final answer' },
       ]);
+    });
+  });
+
+  describe('readGeneratedUiStates', () => {
+    const [sessionId] = realDiskIds;
+    const cardId = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+    const prompt = msgLine(sessionId, 'prompt', null, 'user', 0, 'hello');
+    const answer = (uuid: string, parentUuid: string) =>
+      msgLine(sessionId, uuid, parentUuid, 'assistant', 2, 'answer');
+    const save = (parentUuid: string, revision: number, value: string) =>
+      sysLine(
+        sessionId,
+        `save-${revision}`,
+        parentUuid,
+        'generated_ui_state',
+        1,
+        { version: 1, cardId, revision, value },
+      );
+
+    it.each([
+      ['missing parent', [answer('answer', 'missing')]],
+      ['parent cycle', [answer('answer', 'answer')]],
+      [
+        'conflicting parents',
+        [answer('answer', 'prompt'), answer('answer', 'missing')],
+      ],
+    ])(
+      'reports an active transcript with %s as unavailable',
+      async (_, tail) => {
+        vi.mocked(jsonl.readLines).mockResolvedValueOnce([
+          prompt,
+          save('prompt', 1, 'retained'),
+          ...tail,
+        ]);
+
+        await expect(
+          sessionService.readGeneratedUiStates(sessionId),
+        ).resolves.toEqual({ unavailable: true });
+      },
+    );
+
+    it('restores state after a rewind despite broken abandoned ancestry', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValueOnce([
+        prompt,
+        save('prompt', 1, 'retained'),
+        answer('abandoned', 'missing'),
+        answer('abandoned', 'another-missing'),
+        save('abandoned', 2, 'abandoned'),
+        sysLine(sessionId, 'rewind', 'prompt', 'rewind', 3, {
+          truncatedCount: 1,
+        }),
+      ]);
+
+      await expect(
+        sessionService.readGeneratedUiStates(sessionId),
+      ).resolves.toEqual({
+        states: new Map([[cardId, { revision: 1, value: 'retained' }]]),
+        maxRevision: 2,
+      });
     });
   });
 
@@ -3608,6 +3845,70 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('carries Generated UI view state saved on the copied branch', async () => {
+      const card = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+      const state = (revision: number, value: string) => ({
+        version: 1,
+        cardId: card,
+        revision,
+        value,
+      });
+      const file = transcriptPath(oldId);
+      fs.mkdirSync(chatsDir(), { recursive: true });
+      writeJsonl(file, [
+        msg('u1', null, 'user', 0, 'hello', {
+          provenance: 'real_user',
+          cwd,
+        }),
+        msg('abandoned', 'u1', 'assistant', 1, 'old answer', { cwd }),
+        sys(
+          'state-abandoned',
+          'abandoned',
+          'generated_ui_state',
+          2,
+          state(2, 'abandoned'),
+        ),
+        msg('u2', 'u1', 'assistant', 3, 'hi', {
+          provenance: 'assistant_output',
+          cwd,
+        }),
+        sys('state-kept', 'u2', 'generated_ui_state', 4, state(1, 'kept')),
+      ]);
+      expect(await service.readGeneratedUiStates(oldId)).toEqual({
+        states: new Map([[card, { revision: 1, value: 'kept' }]]),
+        maxRevision: 2,
+      });
+
+      const result = await fork();
+      const written = readJsonl(result.filePath);
+      expect(written.map((record) => record['uuid'])).toEqual([
+        'u1',
+        'u2',
+        'state-kept',
+      ]);
+      expect(written[2]).toMatchObject({ parentUuid: 'u2', sessionId: newId });
+      expect(await service.readGeneratedUiStates(newId)).toEqual({
+        states: new Map([[card, { revision: 1, value: 'kept' }]]),
+        maxRevision: 1,
+      });
+
+      expect(await service.readGeneratedUiStates(nestedId)).toEqual({
+        states: new Map(),
+        maxRevision: 0,
+      });
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+      vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+        actualJsonl.readLinesWithIntegrity,
+      );
+      fs.unlinkSync(file);
+      fs.mkdirSync(file);
+      await expect(service.readGeneratedUiStates(oldId)).resolves.toEqual({
+        unavailable: true,
+      });
+    });
+
     it('copies the selected branch approval state into a fork', async () => {
       const { file, lines } = seedSession();
       lines[1]!['parentUuid'] = 'approval-yolo';
@@ -3746,32 +4047,45 @@ describe('SessionService', () => {
       );
     });
 
-    it('remaps lifecycle ownership into the fork without changing execution identity', async () => {
-      seedSession([
-        sys('lifecycle-1', 'u2', 'ui_telemetry', 2, {
-          uiEvent: {
-            'event.name': 'request_lifecycle',
-            v: 1,
-            kind: 'request',
-            executionId: 'execution-1',
-            sessionId: oldId,
-            promptId: `${oldId}#Explore#0`,
-            model: 'model',
-            startedAt: 10,
-            phase: 'started',
-          },
-        }),
-      ]);
-      const result = await fork();
-      const telemetry = readJsonl(result.filePath).find(
-        (record) => record.subtype === 'ui_telemetry',
-      );
-      expect(telemetry.systemPayload.uiEvent).toMatchObject({
-        sessionId: newId,
-        promptId: `${newId}#Explore#0`,
-        executionId: 'execution-1',
-      });
-    });
+    it.each(['request_lifecycle', 'hook_lifecycle'])(
+      'remaps %s ownership into the fork without changing execution identity',
+      async (eventName) => {
+        seedSession([
+          sys('lifecycle-1', 'u2', 'ui_telemetry', 2, {
+            uiEvent: {
+              'event.name': eventName,
+              v: 1,
+              kind: eventName === 'hook_lifecycle' ? 'hook' : 'request',
+              ...(eventName === 'hook_lifecycle'
+                ? {
+                    runtimeId: 'runtime',
+                    agentId: null,
+                    eventName: 'Stop',
+                    hookType: 'command',
+                    source: 'project',
+                    name: 'safe',
+                  }
+                : {}),
+              executionId: 'execution-1',
+              sessionId: oldId,
+              promptId: `${oldId}#Explore#0`,
+              model: 'model',
+              startedAt: 10,
+              phase: 'started',
+            },
+          }),
+        ]);
+        const result = await fork();
+        const telemetry = readJsonl(result.filePath).find(
+          (record) => record.subtype === 'ui_telemetry',
+        );
+        expect(telemetry.systemPayload.uiEvent).toMatchObject({
+          sessionId: newId,
+          promptId: `${newId}#Explore#0`,
+          executionId: 'execution-1',
+        });
+      },
+    );
 
     it('remaps tool lifecycle owner without inventing a prompt id', async () => {
       const event = {

@@ -444,14 +444,18 @@ impl Drop for Lease {
             restore_front_if_raised(self.pid, self.front);
         }
         watch_order_after_action(self.pid, self.front, !self.above_before, self.epoch);
-        let mut st = lock();
-        if let Some((leases, until, _)) = st.guarded.get_mut(&self.pid) {
-            *leases = leases.saturating_sub(1);
-            *until = Instant::now() + TAIL;
-        }
-        drop(st);
-        schedule_idle_teardown();
+        release_guard(self.pid);
     }
+}
+
+fn release_guard(pid: i32) {
+    let mut st = lock();
+    if let Some((leases, until, _)) = st.guarded.get_mut(&pid) {
+        *leases = leases.saturating_sub(1);
+        *until = Instant::now() + TAIL;
+    }
+    drop(st);
+    schedule_idle_teardown();
 }
 
 /// Guard the user's key focus while the driver acts on `target_pid` in the
@@ -485,16 +489,15 @@ pub fn protect(target_pid: i32) -> Option<Lease> {
         entry.1 = Instant::now() + TAIL;
         entry.2 = epoch;
     }
-    let lease = Lease {
-        pid: target_pid,
-        front,
-        above_before: target_above_front(target_pid, front),
-        epoch: crate::window_change_detector::intentional_epoch(),
-    };
+    let above_before = target_above_front(target_pid, front);
+    let epoch = crate::window_change_detector::intentional_epoch();
     // Do not touch key focus here. This runs before every background action
     // while the user may be typing, and any key event that reaches
     // WindowServer while focus is away from their app is lost.
     if !ensure_tap(front) {
+        // No action ran: roll back registration without the Lease's focus
+        // restoration, whose hardware-state query can block in SkyLight.
+        release_guard(target_pid);
         return None;
     }
     // Arming this tap does not move key focus either. Without it, the
@@ -502,7 +505,12 @@ pub fn protect(target_pid: i32) -> Option<Lease> {
     if !ensure_target_tap(target_pid) {
         tracing::warn!(target_pid, "key-focus guard: target event tap unavailable");
     }
-    Some(lease)
+    Some(Lease {
+        pid: target_pid,
+        front,
+        above_before,
+        epoch,
+    })
 }
 
 /// Whether key-focus thefts by `pid` are background menu thefts to release.
@@ -787,6 +795,37 @@ mod tests {
     use super::*;
 
     const OWN: i32 = 100;
+
+    #[test]
+    fn failed_arming_releases_only_its_registration_and_retains_the_tail() {
+        let pid = -21001;
+        let other = -21002;
+        let before = Instant::now();
+        {
+            let mut st = lock();
+            st.guarded.insert(pid, (2, before, 19));
+            st.guarded.insert(other, (1, before, 23));
+        }
+
+        release_guard(pid);
+        {
+            let st = lock();
+            let &(leases, until, epoch) = st.guarded.get(&pid).unwrap();
+            assert_eq!(leases, 1);
+            assert_eq!(epoch, 19);
+            assert!(until >= before + TAIL);
+            assert_eq!(st.guarded.get(&other), Some(&(1, before, 23)));
+        }
+
+        release_guard(pid);
+        let mut st = lock();
+        let &(leases, until, epoch) = st.guarded.get(&pid).unwrap();
+        assert_eq!(leases, 0);
+        assert!(guard_applies(leases, until, epoch, Instant::now(), epoch));
+        assert_eq!(st.guarded.get(&other), Some(&(1, before, 23)));
+        st.guarded.remove(&pid);
+        st.guarded.remove(&other);
+    }
 
     #[test]
     fn a_guarded_target_theft_is_released_and_swallowed() {
