@@ -39,6 +39,16 @@ const repo = path.dirname(path.dirname(script));
 const SETUP_TIMEOUT_MS = 60_000;
 const WORKER_TIMEOUT_MS = 540_000;
 const CI_TIMEOUT_MS = 2 * WORKER_TIMEOUT_MS + SETUP_TIMEOUT_MS;
+// A self-hosted runner operated from a qwen session inherits its stamps:
+// CLI_VERSION and QWEN_CODE_RELAUNCH_ARGS hijack the production wrapper's
+// --version fast path, and NODE_OPTIONS/BUN_OPTIONS inject preloads. Every
+// environment this script builds starts without them.
+const SESSION_STAMP_ENV = [
+  'NODE_OPTIONS',
+  'BUN_OPTIONS',
+  'CLI_VERSION',
+  'QWEN_CODE_RELAUNCH_ARGS',
+];
 const sha = (file) =>
   createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const run = (bin, args, options = {}) => {
@@ -126,18 +136,7 @@ async function worker(root, node, bun, expectedHost) {
     QWEN_UPDATE_TEST_ENV: 'preserved',
   });
   delete process.env.NODE_DISABLE_COMPILE_CACHE;
-  // A self-hosted runner operated from a qwen session inherits its stamps:
-  // CLI_VERSION and QWEN_CODE_RELAUNCH_ARGS hijack the production wrapper's
-  // --version fast path and NODE_OPTIONS/BUN_OPTIONS inject preloads, so the
-  // probes below would measure the outer session instead of the fixture.
-  // The ambient control already strips these keys per probe.
-  for (const key of [
-    'NODE_OPTIONS',
-    'BUN_OPTIONS',
-    'CLI_VERSION',
-    'QWEN_CODE_RELAUNCH_ARGS',
-  ])
-    delete process.env[key];
+  for (const key of SESSION_STAMP_ENV) delete process.env[key];
   // Observe allocations before importing the real built module. Bun 1.3.14
   // does not synchronize named builtin bindings; only claim zero allocations
   // on a host whose successful update passes the positive control below.
@@ -668,13 +667,6 @@ async function worker(root, node, bun, expectedHost) {
           phase = `${runtime}/${mode}/ambient/${actualVersion}`;
           const legStarted = performance.now();
           const controlEnv = { ...process.env };
-          for (const key of Object.keys(controlEnv))
-            if (
-              /^(NODE_OPTIONS|BUN_OPTIONS|CLI_VERSION|QWEN_CODE_RELAUNCH_ARGS)$/i.test(
-                key,
-              )
-            )
-              delete controlEnv[key];
           assert.equal(
             run(binaries[runtime], [launcher, '--version'], {
               env: controlEnv,
@@ -1128,8 +1120,7 @@ if (process.argv[2] === '--ci') {
       NODE_EXTRA_CA_CERTS: path.join(root, 'cert.pem'),
     };
     delete env.NODE_TLS_REJECT_UNAUTHORIZED;
-    for (const key of Object.keys(env))
-      if (/^(NODE_OPTIONS|BUN_OPTIONS)$/i.test(key)) delete env[key];
+    for (const key of SESSION_STAMP_ENV) delete env[key];
     for (const [host, bin] of [
       ['node', node],
       ['bun', bun],

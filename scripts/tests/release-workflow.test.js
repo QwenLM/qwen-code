@@ -4027,17 +4027,38 @@ esac`,
   it('isolates the standalone runtime worker from inherited session stamps', () => {
     const source = readFileSync('scripts/test-standalone-runtimes.mjs', 'utf8');
     // A self-hosted runner operated from a qwen session inherits its env
-    // stamps: CLI_VERSION and QWEN_CODE_RELAUNCH_ARGS answer --version for
-    // the fixture through the production wrapper, failing the metadata-only
-    // positive control of the release's quality_scripts job (#17966). The
-    // worker must drop them, with the preload injectors, before any probe
-    // runs; the setup slice ends at the updater module import, ahead of the
-    // first probe.
-    const setup = source.slice(
-      source.indexOf('async function worker('),
-      source.indexOf('const modulePath = path.join('),
+    // stamps: CLI_VERSION and QWEN_CODE_RELAUNCH_ARGS answer --version for the
+    // fixture through the production wrapper, and NODE_OPTIONS/BUN_OPTIONS
+    // inject preloads. The worker must drop them before any probe runs; the
+    // setup slice ends at the updater module import, ahead of the first probe.
+    const start = source.indexOf('async function worker(');
+    const end = source.indexOf('const modulePath = path.join(', start);
+    expect(start, 'worker entry point not found').toBeGreaterThanOrEqual(0);
+    expect(end, 'setup slice must end at the updater import').toBeGreaterThan(
+      start,
     );
+    const setup = source.slice(start, end);
     expect(setup).toMatch(
+      /for \(const key of SESSION_STAMP_ENV\) delete process\.env\[key\];/,
+    );
+    // One list feeds every environment the script builds — the worker's own
+    // and the one the parent hands the spawn — so neither can drift apart.
+    expect(source).toMatch(
+      /const SESSION_STAMP_ENV = \[\s*'NODE_OPTIONS',\s*'BUN_OPTIONS',\s*'CLI_VERSION',\s*'QWEN_CODE_RELAUNCH_ARGS',?\s*\];/,
+    );
+    expect(
+      source.match(
+        /for \(const key of SESSION_STAMP_ENV\) delete (?:process\.env|env)\[key\];/g,
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('isolates the scripts unit suite from inherited session stamps', () => {
+    // test:scripts runs this suite in the same job, right after the standalone
+    // regression, so the same stamps reach it: cli-entry.test.js imports the
+    // production wrapper, whose --version fast path would load a scripts/cli.js
+    // that does not exist.
+    expect(readFileSync('scripts/tests/test-setup.ts', 'utf8')).toMatch(
       /for \(const key of \[\s*'NODE_OPTIONS',\s*'BUN_OPTIONS',\s*'CLI_VERSION',\s*'QWEN_CODE_RELAUNCH_ARGS',?\s*\]\)\s*delete process\.env\[key\];/,
     );
   });
