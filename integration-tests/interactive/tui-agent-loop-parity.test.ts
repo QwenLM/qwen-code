@@ -158,9 +158,14 @@ const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
 
 /**
  * The helper gate's ceiling. Past it the fake server answers 500 and the
- * CLI's retry adds a request the strict parity count rejects.
+ * CLI's retry adds a request the strict parity count rejects. The enclosing
+ * waits (TURN_BUDGET) must stay strictly above this ceiling so the gate, not
+ * the harness, is the first deadline a stalled leader reaches.
  */
 const HELPER_GATE_BUDGET = 90_000;
+
+/** Above the gate, under the SDK's 120 s request timeout (DEFAULT_TIMEOUT). */
+const TURN_BUDGET = HELPER_GATE_BUDGET + 15_000;
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
@@ -802,7 +807,7 @@ describeTui(SUITE, () => {
             (request) => request.transport.closedAt !== undefined,
           ),
         'model requests complete',
-        90_000,
+        TURN_BUDGET,
         () => session!.viewport(),
       );
       await session!.idle(2_000, 90_000);
@@ -901,7 +906,7 @@ describeTui(SUITE, () => {
           (scenario.sideRequests === undefined ||
             sideCount() >= scenario.sideRequests),
         'the session starts its later turns',
-        90_000,
+        TURN_BUDGET,
         () => session!.viewport(),
       );
       await turnEnds(scenario.requests);
@@ -1525,6 +1530,7 @@ describeTui(SUITE, () => {
   // a mutation of the constant from moving the gate and this test together.
   it('gives the helper gate the cross-turn budget', async () => {
     expect(HELPER_GATE_BUDGET).toBe(90_000);
+    expect(TURN_BUDGET).toBeGreaterThan(HELPER_GATE_BUDGET);
     const scenario = allScenarios.find(
       (candidate) =>
         candidate.name === 'a teammate report that starts a teammate turn',
