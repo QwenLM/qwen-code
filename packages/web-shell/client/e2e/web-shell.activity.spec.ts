@@ -1,4 +1,10 @@
-import { expect, test, type Page, type TestInfo } from '@playwright/test';
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type TestInfo,
+} from '@playwright/test';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
@@ -19,6 +25,11 @@ function row(page: Page, sessionId: string, cwd = primary) {
     .locator(
       `[data-activity-key=${JSON.stringify(JSON.stringify([cwd, sessionId]))}]`,
     );
+}
+
+async function openMoreMenu(row: Locator) {
+  await row.hover();
+  await row.getByRole('button', { name: 'More actions', exact: true }).click();
 }
 
 async function activityFixture(
@@ -482,21 +493,24 @@ test('activity rows share hover details, scoped pin actions and the normal sessi
   await secondaryRow.locator('[data-web-shell-session-title]').hover();
   await expect(details).toContainText(secondary);
   await expect(details).not.toContainText(primary);
-  await secondaryRow.getByRole('button', { name: 'Pin', exact: true }).click();
+  await openMoreMenu(secondaryRow);
+  await page.getByRole('menuitem', { name: 'Pin', exact: true }).click();
   await expect.poll(() => fixture.organizationWrites.length).toBe(1);
   expect(decodeURIComponent(fixture.organizationWrites[0]!.path)).toContain(
     secondary,
   );
   expect(fixture.organizationWrites[0]!.body).toEqual({ isPinned: true });
+  await openMoreMenu(secondaryRow);
   await expect(
-    secondaryRow.getByRole('button', { name: 'Unpin', exact: true }),
+    page.getByRole('menuitem', { name: 'Unpin', exact: true }),
   ).toBeVisible();
+  await page.keyboard.press('Escape');
+  await openMoreMenu(primaryRow);
   await expect(
-    primaryRow.getByRole('button', { name: 'Pin', exact: true }),
-  ).toBeAttached();
-  await secondaryRow
-    .getByRole('button', { name: 'More actions', exact: true })
-    .click();
+    page.getByRole('menuitem', { name: 'Pin', exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press('Escape');
+  await openMoreMenu(secondaryRow);
   await expect(
     page.getByRole('menuitem', { name: 'Archive', exact: true }),
   ).toBeVisible();
@@ -510,11 +524,13 @@ test('activity rows share hover details, scoped pin actions and the normal sessi
     .locator('[data-web-shell-session-title]')
     .filter({ hasText: /^unread-result$/ })
     .locator('xpath=ancestor::*[@role="button"][1]')
-    .filter({ has: page.getByRole('button', { name: 'Unpin', exact: true }) })
     .first();
   await ordinaryPinned.hover();
+  await ordinaryPinned
+    .getByRole('button', { name: 'More actions', exact: true })
+    .click();
   await expect(
-    ordinaryPinned.getByRole('button', { name: 'Unpin', exact: true }),
+    page.getByRole('menuitem', { name: 'Unpin', exact: true }),
   ).toBeVisible();
 });
 

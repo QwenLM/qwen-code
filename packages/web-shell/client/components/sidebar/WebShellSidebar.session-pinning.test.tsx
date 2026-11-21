@@ -14,6 +14,8 @@ import {
   sidebarSessionPage,
   useSidebarSessionCatalogQuery,
 } from '../../test/sidebarHarness';
+import { TOUCH_COMPOSER_QUERY } from '../../hooks/useIsTouchComposer';
+import { WebShellPortalRootContext } from '../../portalRoot';
 
 const mocks = createSidebarMocks({
   colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
@@ -122,6 +124,7 @@ const organizationCapabilities = {
 
 let root: Root;
 let container: HTMLDivElement;
+let portalHostForCleanup: HTMLElement | undefined;
 
 function renderSidebar(
   props: {
@@ -129,27 +132,30 @@ function renderSidebar(
     sessionActions?: React.ComponentProps<
       typeof WebShellSidebar
     >['sessionActions'];
+    portalRoot?: HTMLElement | null;
   } = {},
 ): void {
   const onError = props.onError ?? (() => {});
   act(() => {
     root.render(
-      <I18nProvider language="en">
-        <WebShellSidebar
-          collapsed={false}
-          onCollapsedChange={() => {}}
-          onOpenSettings={() => {}}
-          onOpenDaemonStatus={() => {}}
-          onOpenScheduledTasks={() => {}}
-          onOpenGoals={() => {}}
-          onOpenSessions={() => {}}
-          onOpenSplitView={() => {}}
-          onNewSession={() => false}
-          onLoadSession={loadSession}
-          onError={onError}
-          sessionActions={props.sessionActions}
-        />
-      </I18nProvider>,
+      <WebShellPortalRootContext.Provider value={props.portalRoot ?? null}>
+        <I18nProvider language="en">
+          <WebShellSidebar
+            collapsed={false}
+            onCollapsedChange={() => {}}
+            onOpenSettings={() => {}}
+            onOpenDaemonStatus={() => {}}
+            onOpenScheduledTasks={() => {}}
+            onOpenGoals={() => {}}
+            onOpenSessions={() => {}}
+            onOpenSplitView={() => {}}
+            onNewSession={() => false}
+            onLoadSession={loadSession}
+            onError={onError}
+            sessionActions={props.sessionActions ?? { inlineItems: ['pin'] }}
+          />
+        </I18nProvider>
+      </WebShellPortalRootContext.Provider>,
     );
   });
 }
@@ -243,6 +249,8 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root.unmount());
+  portalHostForCleanup?.remove();
+  portalHostForCleanup = undefined;
   container.remove();
   window.localStorage.clear();
 });
@@ -972,6 +980,64 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
 
     expect(pinnedListTitles()).toEqual(['Only pinned']);
   });
+});
+
+it('restores More focus after Escape with a shadow portal', async () => {
+  active.sessions = [
+    makeSession('group-shadow', { displayName: 'Shadow group' }),
+  ];
+  active.data = active.sessions;
+  workspaceActions.listSessionGroups.mockResolvedValue({
+    groups: [],
+    colorOptions: ['red'],
+  });
+  portalHostForCleanup = document.createElement('div');
+  const portalRoot = portalHostForCleanup.attachShadow({ mode: 'open' });
+  portalRoot.appendChild(document.createElement('div'));
+  document.body.appendChild(portalHostForCleanup);
+  renderSidebar({
+    portalRoot: portalRoot.firstElementChild as HTMLElement,
+  });
+  await flushSidebar();
+  const more = container.querySelector<HTMLButtonElement>(
+    '[aria-label="More actions"]',
+  );
+  expect(more).not.toBeNull();
+  await act(async () => click(more!, true));
+  const portalMenu = portalRoot.querySelector('[role="menu"]');
+  expect(portalMenu).not.toBeNull();
+  const group = Array.from(
+    portalMenu!.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).find((item) => item.textContent === 'Group');
+  expect(group).not.toBeUndefined();
+  await act(async () => click(group!, true));
+  await flushSidebar();
+  expect(
+    container.querySelector('[data-web-shell-session-group-menu]'),
+  ).not.toBeNull();
+  const selected = container.querySelector<HTMLButtonElement>(
+    '[data-web-shell-session-group-menu] [role="menuitemradio"]',
+  );
+  expect(selected).not.toBeNull();
+  await act(async () => {
+    await vi.waitFor(() => {
+      expect(document.activeElement).toBe(selected);
+    });
+  });
+  await act(async () => {
+    selected!.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+  await flushSidebar();
+  expect(
+    container.querySelector('[data-web-shell-session-group-menu]'),
+  ).toBeNull();
+  expect(document.activeElement).toBe(more);
 });
 
 describe('WebShellSidebar pinned group members (issue #10391)', () => {
@@ -1877,7 +1943,7 @@ describe('WebShellSidebar PR badge rows', () => {
     return slot;
   }
 
-  it('keeps the hover actions width reserved on rows that show a PR badge', async () => {
+  it('reserves the default dropdown width on rows that show a PR badge', async () => {
     active.sessions = [
       makeSession('with-pr', {
         displayName: 'With PR',
@@ -1891,15 +1957,14 @@ describe('WebShellSidebar PR badge rows', () => {
     ];
     active.data = active.sessions;
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: [] } });
     await flushSidebar();
 
-    // Revealing Pin + More on hover must not slide the badge under the
-    // pointer, so the slot already holds both buttons' width at rest.
+    // The default More button must not slide the badge under the pointer.
     const withPr = metaSlotFor('With PR');
     expect(withPr.className).toMatch(/sessionMetaSlotReserved/);
     expect(withPr.style.getPropertyValue('--session-actions-width')).toBe(
-      '52px',
+      '26px',
     );
     // A filtered binding renders no badge, so there is nothing to hold still.
     expect(metaSlotFor('Unsafe PR').className).not.toMatch(
@@ -1908,6 +1973,110 @@ describe('WebShellSidebar PR badge rows', () => {
     expect(metaSlotFor('Plain session').className).not.toMatch(
       /sessionMetaSlotReserved/,
     );
+  });
+
+  it('follows pointer media changes with explicit inline actions', async () => {
+    let coarse = false;
+    const listeners = new Set<(event: MediaQueryListEvent) => void>();
+    const coarseMedia = vi
+      .spyOn(window, 'matchMedia')
+      .mockImplementation((query) => {
+        const matches = query === TOUCH_COMPOSER_QUERY && coarse;
+        return {
+          matches,
+          media: query,
+          addEventListener: (
+            type: string,
+            listener: (event: MediaQueryListEvent) => void,
+          ) => {
+            if (query === TOUCH_COMPOSER_QUERY && type === 'change')
+              listeners.add(listener);
+          },
+          removeEventListener: (
+            type: string,
+            listener: (event: MediaQueryListEvent) => void,
+          ) => {
+            if (query === TOUCH_COMPOSER_QUERY && type === 'change')
+              listeners.delete(listener);
+          },
+        } as MediaQueryList;
+      });
+    const setCoarse = async (matches: boolean) => {
+      coarse = matches;
+      await act(async () => {
+        for (const listener of listeners)
+          listener({ matches } as MediaQueryListEvent);
+      });
+    };
+    try {
+      active.sessions = [
+        makeSession('coarse-actions', { displayName: 'Coarse actions' }),
+      ];
+      active.data = active.sessions;
+      renderSidebar({ sessionActions: { inlineItems: ['pin'] } });
+      await flushSidebar();
+
+      const slot = metaSlotFor('Coarse actions');
+      const row = slot.closest('[role="button"]');
+      expect(row?.querySelector('button[aria-label="Pin"]')).not.toBeNull();
+      expect(slot.style.getPropertyValue('--session-actions-width')).toBe(
+        '52px',
+      );
+
+      await setCoarse(true);
+      expect(row?.querySelector('button[aria-label="Pin"]')).toBeNull();
+      expect(slot.style.getPropertyValue('--session-actions-width')).toBe(
+        '26px',
+      );
+
+      // Fine pointers preserve an explicitly configured inline action again.
+      await setCoarse(false);
+      expect(row?.querySelector('button[aria-label="Pin"]')).not.toBeNull();
+
+      await setCoarse(true);
+      const more = row?.querySelector<HTMLButtonElement>(
+        'button[aria-label="More actions"]',
+      );
+      await act(async () => click(more!, true));
+      const pin = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((item) => item.textContent?.trim() === 'Pin');
+      expect(pin).toBeDefined();
+    } finally {
+      coarseMedia.mockRestore();
+    }
+  });
+
+  it('keeps plain-title double-click rename while excluding PR controls', async () => {
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'With PR',
+        prs: [{ number: 14990, url: 'https://github.com/o/r/pull/14990' }],
+      }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'session-a';
+    renderSidebar({ sessionActions: { inlineItems: [] } });
+    await flushSidebar();
+
+    const pr = container.querySelector(
+      'a[href="https://github.com/o/r/pull/14990"]',
+    );
+    expect(pr).not.toBeNull();
+    await act(async () => {
+      pr?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    expect(
+      container.querySelector('input[aria-label="Rename: With PR"]'),
+    ).toBeNull();
+
+    const title = container.querySelector('[data-web-shell-session-title]');
+    await act(async () => {
+      title?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    expect(
+      container.querySelector('input[aria-label="Rename: With PR"]'),
+    ).not.toBeNull();
   });
 
   it('reserves nothing on a row without actions', async () => {
