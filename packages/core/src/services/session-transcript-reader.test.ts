@@ -3932,14 +3932,17 @@ describe('SessionTranscriptReader', () => {
     const filePath = await writeRecords(
       linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
     );
+    // Pin the mtime and restore it after the truncation: a same-millisecond
+    // truncation keeps the mtime on fast filesystems, so the reclaim must
+    // come from the current-file-length clause, not temporal order.
+    await pinMtime(filePath);
     await reader.readPage(sessionId, { limit: 1 });
     const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
-    // Truncate at a record boundary (mtime advances): the old longer prefix
-    // is strictly older, and its frozen cursors are rejected by the size
-    // guard, so it is unreachable dead weight in the shrink direction.
+    const frozen = await fs.stat(filePath);
     const raw = await fs.readFile(filePath, 'utf8');
     const lines = raw.trimEnd().split('\n');
     await fs.writeFile(filePath, lines.slice(0, 10).join('\n') + '\n');
+    await fs.utimes(filePath, frozen.atime, frozen.mtime);
     setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 1);
     const builds = countBuilds(filePath);
     await reader.readPage(sessionId, { limit: 1 });
@@ -3948,6 +3951,84 @@ describe('SessionTranscriptReader', () => {
     const after = getSessionTranscriptIndexCacheStatsForTest();
     expect(after.entries).toBe(1);
     expect(after.byteSize).toBeLessThan(oldBytes);
+  });
+
+  it('evicts a truncated longer prefix at advanced mtime to admit the live snapshot', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    await pinMtime(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    const raw = await fs.readFile(filePath, 'utf8');
+    const lines = raw.trimEnd().split('\n');
+    await fs.writeFile(filePath, lines.slice(0, 10).join('\n') + '\n');
+    await fs.utimes(filePath, frozen.atime, new Date(frozen.mtimeMs + 60000));
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 1);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+  });
+
+  it('evicts a backup replacement that restored an older mtime', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    await pinMtime(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    // Grown replacement at a new inode whose backup mtime is older than
+    // the original: neither temporal order nor the size/mtime clauses can
+    // see it (the entry is smaller than the current file and older-mtime
+    // comparisons point the wrong way); only the identity clause can.
+    const raw = await fs.readFile(filePath, 'utf8');
+    const grown =
+      raw +
+      JSON.stringify(record('u21', 'large-19', 'replacement extra')) +
+      '\n';
+    const tempPath = `${filePath}.replacement`;
+    await fs.writeFile(tempPath, grown, 'utf8');
+    await fs.utimes(tempPath, frozen.atime, new Date(frozen.mtimeMs - 60000));
+    await fs.rename(tempPath, filePath);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 2048);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+  });
+
+  it('evicts an equal-size rewrite whose mtime moved backwards', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    await pinMtime(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    const raw = await fs.readFile(filePath, 'utf8');
+    const replaced = raw.replace(
+      '"text":"large transcript 5"',
+      '"text":"LARGE transcript 5"',
+    );
+    await fs.writeFile(filePath, replaced, 'utf8');
+    await fs.utimes(filePath, frozen.atime, new Date(frozen.mtimeMs - 60000));
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 1);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
   });
 
   it('evicts a superseded shared-class prefix of the same file', async () => {

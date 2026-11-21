@@ -2001,6 +2001,7 @@ function cacheAdditionFitsClassBudget(
     value.snapshotSize,
     value.lastUpdated,
     value.fileIdentity,
+    value.snapshotSize,
     oversized,
   );
   if (classTotal - reclaimable + added > classBudget) return false;
@@ -2009,6 +2010,7 @@ function cacheAdditionFitsClassBudget(
     value.snapshotSize,
     value.lastUpdated,
     value.fileIdentity,
+    value.snapshotSize,
     oversized,
   );
   return true;
@@ -2071,36 +2073,46 @@ function pruneCacheByteBudget(oversizedClass: boolean): void {
   }
 }
 
-// A snapshot of the same file that the incoming one supersedes. The order
-// is temporal, not by size: a strictly older snapshot is reclaimable in
-// either size direction (a smaller prefix left by an append, or a longer
-// prefix of a shortened transcript whose frozen cursors the size guard
-// rejects), while a frozen-prefix read must never reclaim the live newer
-// index. At equal mtime only a smaller entry is reclaimable (the incoming
-// larger one is the live append); a larger entry at equal mtime is the
-// live index a frozen-prefix read must leave alone. Equal-size,
-// equal-mtime entries at a different identity are orphans an equal-size
-// replacement left unreachable on every read path (the identity check
-// and hasSnapshotSignature reject them).
+// A snapshot of the same file that the incoming one supersedes, or that
+// the current file state has left unreachable. Unreachable entries are
+// reclaimable regardless of temporal order: a changed identity (the
+// identity guard rejects their cursors, even when a backup restored an
+// older mtime), a length beyond the current file (the size guard rejects
+// them, even when a same-millisecond truncation kept the mtime), or an
+// equal size at a different mtime (the mtime guard rejects them). The
+// incoming identity equals the current file identity at every call site
+// (the readPage identity guard enforces it for frozen reads; the offer
+// and accounting doors verify the snapshot unchanged), so it stands in
+// for the current identity. Temporal order covers the append case: a
+// strictly older snapshot, or a same-mtime smaller prefix, is reclaimable
+// fit-before-evict. A frozen-prefix read never reclaims the live newer
+// index: its identity equals the current file and its length does not
+// exceed it.
 function isSupersededSnapshot(
   value: TranscriptIndex,
   filePath: string,
   snapshotSize: number,
   lastUpdated: string,
   fileIdentity: SessionTranscriptFileIdentity,
+  currentSnapshotSize: number,
 ): boolean {
   if (value.filePath !== filePath) return false;
-  // ISO-8601 UTC strings compare chronologically.
-  if (value.lastUpdated < lastUpdated) return true;
-  if (value.lastUpdated === lastUpdated && value.snapshotSize < snapshotSize) {
+  if (
+    value.fileIdentity.dev !== fileIdentity.dev ||
+    value.fileIdentity.ino !== fileIdentity.ino
+  ) {
     return true;
   }
-  return (
+  if (value.snapshotSize > currentSnapshotSize) return true;
+  if (
     value.snapshotSize === snapshotSize &&
-    value.lastUpdated === lastUpdated &&
-    (value.fileIdentity.dev !== fileIdentity.dev ||
-      value.fileIdentity.ino !== fileIdentity.ino)
-  );
+    value.lastUpdated !== lastUpdated
+  ) {
+    return true;
+  }
+  // ISO-8601 UTC strings compare chronologically.
+  if (value.lastUpdated < lastUpdated) return true;
+  return value.lastUpdated === lastUpdated && value.snapshotSize < snapshotSize;
 }
 
 // The bytes evictSupersededSnapshots would free, so admission can check the
@@ -2110,6 +2122,7 @@ function supersededSnapshotBytes(
   snapshotSize: number,
   lastUpdated: string,
   fileIdentity: SessionTranscriptFileIdentity,
+  currentSnapshotSize: number,
   oversizedClass: boolean,
 ): number {
   const sharedBudget = getIndexCacheMaxBytes();
@@ -2125,6 +2138,7 @@ function supersededSnapshotBytes(
         snapshotSize,
         lastUpdated,
         fileIdentity,
+        currentSnapshotSize,
       )
     ) {
       bytes += entry.byteSize;
@@ -2149,6 +2163,7 @@ function evictSupersededSnapshots(
   snapshotSize: number,
   lastUpdated: string,
   fileIdentity: SessionTranscriptFileIdentity,
+  currentSnapshotSize: number,
   oversizedClass: boolean,
 ): boolean {
   const sharedBudget = getIndexCacheMaxBytes();
@@ -2164,6 +2179,7 @@ function evictSupersededSnapshots(
         snapshotSize,
         lastUpdated,
         fileIdentity,
+        currentSnapshotSize,
       )
     ) {
       continue;
@@ -2830,11 +2846,15 @@ async function getCachedIndex(params: {
       // Evict superseded prefixes only when the new snapshot fits after the
       // reclaim; otherwise the eviction would force their still-readable
       // frozen cursors to rebuild for an admission that is refused anyway.
+      // The current file length decides whether a longer cached prefix is
+      // unreachable (a same-millisecond truncation keeps the mtime).
+      const currentSnapshotSize = (await fsp.stat(params.filePath)).size;
       const reclaimable = supersededSnapshotBytes(
         params.filePath,
         params.snapshotSize,
         params.lastUpdated,
         params.fileIdentity,
+        currentSnapshotSize,
         oversized,
       );
       if (
@@ -2854,6 +2874,7 @@ async function getCachedIndex(params: {
         params.snapshotSize,
         params.lastUpdated,
         params.fileIdentity,
+        currentSnapshotSize,
         oversized,
       );
     }
@@ -3092,6 +3113,7 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
       index.snapshotSize,
       index.lastUpdated,
       index.fileIdentity,
+      index.snapshotSize,
       oversized,
     );
     const reclaimableOtherClass = countFull
@@ -3100,6 +3122,7 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
           index.snapshotSize,
           index.lastUpdated,
           index.fileIdentity,
+          index.snapshotSize,
           !oversized,
         )
       : 0;
@@ -3120,6 +3143,7 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
       index.snapshotSize,
       index.lastUpdated,
       index.fileIdentity,
+      index.snapshotSize,
       oversized,
     );
     if (countFull && reclaimable === 0) {
@@ -3128,6 +3152,7 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
         index.snapshotSize,
         index.lastUpdated,
         index.fileIdentity,
+        index.snapshotSize,
         !oversized,
       );
     }
