@@ -118,7 +118,10 @@ describe('bundled pkgdiet skill', () => {
       'require a restart before the guardrail is used',
     );
     expect(normalizedBody).toContain(
-      'explicit non-project `cwd` outside the project workspace',
+      'existing absolute non-project `cwd` outside the project workspace containing no `$`, backtick, quote',
+    );
+    expect(normalizedBody).toContain(
+      'If `cwd` contains any rejected characters (such as `$(` or `` ` ``), is relative, or does not exist',
     );
 
     expect(normalizedBody).toContain('$QWEN_HOME/settings.json');
@@ -127,7 +130,7 @@ describe('bundled pkgdiet skill', () => {
       'record its full configuration object verbatim',
     );
 
-    // Normalized registry check in evaluator's non-project cwd (R7-2)
+    // Normalized registry check in evaluator's non-project cwd (R7-2, R10-1, R10-3)
     expect(normalizedBody).toContain(
       "Check the active npm registry in the evaluator's non-project cwd",
     );
@@ -135,23 +138,35 @@ describe('bundled pkgdiet skill', () => {
       "Determine the evaluator's non-project `cwd`",
     );
     expect(normalizedBody).toContain(
-      'In that evaluator `cwd`, run `npm config get registry` (e.g. `(cd "<cwd>" && npm config get registry)`)',
+      'Validate `cwd` before use: it must be an existing absolute path containing no `$`, backtick, quote, or newline; if `cwd` contains any rejected characters (such as `$(`), treat it as an allowlist mismatch, report the entry, and stop',
+    );
+    expect(normalizedBody).toContain(
+      "Run the probe without shell interpolation: run `npm config ls -l --json` (or `npm config get registry`) with the shell tool's directory set to that evaluator `cwd`",
+    );
+    expect(normalizedBody).toContain(
+      "cd -- '<cwd>' && npm config get registry",
     );
     expect(normalizedBody).toContain('npm config get registry');
     expect(normalizedBody).toContain(
       'If the command exits non-zero, report that npm could not be executed to inspect the registry in the evaluator `cwd`, and stop',
     );
     expect(normalizedBody).toContain(
-      'Normalize the registry URL by stripping any trailing slash: the normalized output must be `https://registry.npmjs.org`',
+      'Extended registry probe: normalize the default registry URL by stripping any trailing slash',
     );
     expect(normalizedBody).toContain('https://registry.npmjs.org');
+    expect(normalizedBody).toContain(
+      'verify from the configuration that no scoped registry mapping (`@<scope>:registry`, such as `@pkgdiet:registry`) points elsewhere, and no `cafile` or `ca` override is configured',
+    );
     expect(normalizedBody).toContain(
       'identity mismatch rather than a residual risk',
     );
 
-    // Registration in a single write with cwd (R7-3)
+    // Registration in a single write with cwd (R7-3, R10-1)
     expect(normalizedBody).toContain(
       'write `mcpServers.pkgdiet` in a single write with `command: "npx"`, `args: ["-y", "pkgdiet@2.0.0", "mcp"]`, and `cwd`',
+    );
+    expect(normalizedBody).toContain(
+      'existing absolute directory outside the workspace containing no `$`, backtick, quote, or newline',
     );
     expect(normalizedBody).toContain(
       'A single write ensures file-watcher reconciliation never sees a cwd-less entry spawned from the project directory',
@@ -282,8 +297,11 @@ describe('bundled pkgdiet skill', () => {
       'committed cache must be removed before proceeding',
     );
 
-    // Registry redirects (including ~/.npmrc) and rewritten local resolution (R6-2)
+    // Registry redirects (including ~/.npmrc, userconfig, global) and rewritten local resolution (R6-2)
     expect(normalizedBody).toContain('~/.npmrc');
+    expect(normalizedBody).toContain('NPM_CONFIG_USERCONFIG');
+    expect(normalizedBody).toContain('--userconfig');
+    expect(normalizedBody).toContain('global npmrc');
     expect(normalizedBody).toContain('.yarnrc.yml');
     expect(normalizedBody).toContain('bunfig.toml');
     expect(normalizedBody).toContain('node_modules/.bin');
@@ -298,10 +316,19 @@ describe('bundled pkgdiet skill', () => {
       'For a `package.json` script, read the script body and gate any registry-fetching command inside it; otherwise treat the command as a registry fetch and run the check',
     );
 
-    // Concrete name resolution & scaffolder mapping (R7-4)
+    // Concrete name resolution & scaffolder mapping (R7-4, R10-2)
     expect(normalizedBody).toContain('cannot be resolved');
     expect(normalizedBody).toContain(
       'For scaffolder commands (`npm create <name>`, `npm init <name>`, `pnpm create <name>`, `yarn create <name>`, `bun create <name>`), the package fetched and executed from the registry is `create-<name>` (or `@scope/create-<name>` if scoped); check that `create-<name>` package, not `<name>`',
+    );
+    expect(normalizedBody).toContain(
+      'For `npx -p <pkg>` / `npx --package=<pkg>` / `npm exec --package=<pkg>`, the package fetched and executed is `<pkg>`: check `<pkg>`, and check both when the executed command name differs',
+    );
+    expect(normalizedBody).toContain(
+      'After expanding the command, resolve each added dependency to the artifact it installs: if its specifier is not a plain semver range on the bare registry name — such as an `npm:` alias',
+    );
+    expect(normalizedBody).toContain(
+      'or if `overrides` or `resolutions` redirect it, treat the verdict as not applicable, do not run the command',
     );
     expect(normalizedBody).toContain(
       'If the mapping is ambiguous, do not run the command',
@@ -328,6 +355,8 @@ describe('bundled pkgdiet skill', () => {
       'If verdict is BLOCK or missing, do not install',
     );
     expect(normalizedBody).toContain('Bound suggestions to at most 1 hop');
+    expect(body).toContain('### Substitutes and Alternatives\n');
+    expect(body).not.toContain('### Substitutes and Alternatives###');
 
     expect(normalizedBody).toContain(
       'If the question cannot be shown, do not install and stop',
