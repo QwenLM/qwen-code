@@ -683,9 +683,12 @@ describe('managed DingTalk adapter inbound', () => {
       );
     expect(refusalLines()).toHaveLength(1);
     // Neither half of the payload may reach the operator log: the webhook is a
-    // bearer capability and the text is user content.
-    expect(refusalLines()[0]).not.toContain('session=');
-    expect(refusalLines()[0]).not.toContain('hello agent');
+    // bearer capability and the text is user content. Scope this to the whole
+    // captured log, not the refusal line alone — an echo added to an adjacent
+    // line on the same path (the persist-failure arm, a new stall diagnostic)
+    // would otherwise ship green.
+    expect(lines.join('\n')).not.toContain('session=');
+    expect(lines.join('\n')).not.toContain('hello agent');
     // The claim is gone, so a later tick never re-drives it.
     await adapter.tick();
     expect(plane.submitAttempts()).toBe(1);
@@ -704,6 +707,10 @@ describe('managed DingTalk adapter inbound', () => {
     expect(plane.submit.map((event) => event.platformEventId)).toEqual([
       'dingtalk:msg-fine',
     ]);
+    // Re-check across every line the whole flow emitted, including the
+    // redelivery tick and the recovery tick above.
+    expect(lines.join('\n')).not.toContain('session=');
+    expect(lines.join('\n')).not.toContain('hello agent');
     await adapter.disconnect();
   });
 
