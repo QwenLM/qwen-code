@@ -160,6 +160,7 @@ import { isLocalDaemon, isPageOriginDaemon } from '../../config/daemon';
 import { sessionMatchesSource as matchesSessionSource } from './sessionSearch';
 import { SessionSearchDialog } from './SessionSearchDialog';
 import { useLivePresence } from '../../live/live-presence';
+import { isCoarsePointerDevice } from '../../hooks/useIsTouchComposer';
 import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
 import { hasVisibleGoal } from '../GoalStatusStrip';
 import { SessionGoalMarker } from '../SessionGoalMarker';
@@ -477,6 +478,7 @@ export interface WebShellSidebarSessionActionsOptions {
   items?: readonly WebShellSidebarSessionActionItem[];
   /**
    * Which items appear as inline buttons on standard session rows (on hover).
+   * Coarse-pointer devices keep these actions in the dropdown instead.
    * Defaults to ['pin'];
    * archive stays in the dropdown so a stray click on the hover slot cannot
    * archive a session.
@@ -1414,12 +1416,15 @@ export function WebShellSidebar({
     () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
     [sessionActionsOptions?.items],
   );
+  const compactSessionRows = isCoarsePointerDevice();
   const inlineActionItems = useMemo(
     () =>
-      new Set(
-        sessionActionsOptions?.inlineItems ?? DEFAULT_INLINE_ACTION_ITEMS,
+      new Set<WebShellSidebarSessionInlineActionItem>(
+        compactSessionRows
+          ? []
+          : (sessionActionsOptions?.inlineItems ?? DEFAULT_INLINE_ACTION_ITEMS),
       ),
-    [sessionActionsOptions?.inlineItems],
+    [compactSessionRows, sessionActionsOptions?.inlineItems],
   );
   const shouldRenderBrand =
     branding !== false && !(mobileOpen && branding?.hideWhenCompact);
@@ -5555,7 +5560,9 @@ export function WebShellSidebar({
           <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
         </span>
       ) : null;
-      const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
+      const prBadge = (
+        <SessionPrBadge prs={session.prs ?? []} compact={compactSessionRows} />
+      );
       // Completed goals render no marker, matching the Goals listings' filter.
       const hasGoalMarker = hasVisibleGoal(session.goal);
       // Archived rows do not open on click, so their marker is a pure
@@ -6435,6 +6442,7 @@ export function WebShellSidebar({
       saveRename,
       sessionActionItems,
       inlineActionItems,
+      compactSessionRows,
       livePresence,
       startRename,
       splitSessionIds,

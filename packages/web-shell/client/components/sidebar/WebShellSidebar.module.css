@@ -117,12 +117,12 @@
      otherwise overflow a host narrower than that (e.g. a 250px embed). */
   width: clamp(
     min(var(--web-shell-sidebar-min-width, 220px), 100%),
-    calc(var(--web-shell-sidebar-container-width, 100vw) * 0.7),
+    calc(var(--web-shell-sidebar-container-width, 100vw) * 0.85),
     var(--web-shell-sidebar-max-width, 420px)
   );
   min-width: clamp(
     min(var(--web-shell-sidebar-min-width, 220px), 100%),
-    calc(var(--web-shell-sidebar-container-width, 100vw) * 0.7),
+    calc(var(--web-shell-sidebar-container-width, 100vw) * 0.85),
     var(--web-shell-sidebar-max-width, 420px)
   );
 }
