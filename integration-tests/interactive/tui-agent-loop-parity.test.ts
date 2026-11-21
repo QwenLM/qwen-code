@@ -159,8 +159,9 @@ const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
 /**
  * The helper gate's ceiling. Past it the fake server answers 500 and the
  * CLI's retry adds a request the strict parity count rejects. The enclosing
- * waits (TURN_BUDGET) must stay strictly above this ceiling so the gate, not
- * the harness, is the first deadline a stalled leader reaches.
+ * waits (TURN_BUDGET) must stay strictly above this ceiling so a leader slow
+ * to record its waiting answer reaches the gate, not the harness, first; a
+ * leader stalled before that answer is sent never enters the gate.
  */
 const HELPER_GATE_BUDGET = 90_000;
 
