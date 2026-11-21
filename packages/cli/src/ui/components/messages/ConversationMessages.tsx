@@ -157,7 +157,7 @@ const PrefixedTextMessage: React.FC<PrefixedTextMessageProps> = ({
           {prefix}
         </Text>
       </Box>
-      <Box flexGrow={1} width={textWidth}>
+      <Box flexGrow={1} maxWidth={textWidth}>
         <Text wrap="wrap" color={textColor}>
           {text}
         </Text>

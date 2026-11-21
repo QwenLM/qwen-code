@@ -586,7 +586,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       } else {
         // Not a table, treat as regular text
         addContentBlock(
-          <Box key={key} width={blockWidth}>
+          <Box key={key} maxWidth={blockWidth}>
             <Text wrap="wrap">
               <RenderInline
                 text={line}
@@ -663,7 +663,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       // Process current line as normal
       if (line.trim().length > 0) {
         addContentBlock(
-          <Box key={key} width={blockWidth}>
+          <Box key={key} maxWidth={blockWidth}>
             <Text wrap="wrap">
               <RenderInline
                 text={line}
@@ -751,7 +751,12 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           );
           break;
       }
-      if (headerNode) addContentBlock(<Box key={key}>{headerNode}</Box>);
+      if (headerNode)
+        addContentBlock(
+          <Box key={key} maxWidth={blockWidth}>
+            {headerNode}
+          </Box>,
+        );
     } else if (ulMatch) {
       const leadingWhitespace = ulMatch[1];
       const marker = ulMatch[2];
@@ -794,7 +799,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         }
       } else {
         addContentBlock(
-          <Box key={key} width={blockWidth}>
+          <Box key={key} maxWidth={blockWidth}>
             <Text wrap="wrap" color={textColor}>
               <RenderInline
                 text={line}
