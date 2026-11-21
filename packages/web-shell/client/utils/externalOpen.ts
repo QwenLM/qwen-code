@@ -13,7 +13,12 @@ type TauriInvoke = (
 
 const EXTERNAL_OPEN_SCHEMES = /^(https?:|mailto:)/i;
 
-function tauriInvoke(): TauriInvoke | undefined {
+/**
+ * The Tauri command bridge, when the Web Shell runs inside the packaged desktop
+ * window. Shared with other shell-state helpers so the `__TAURI__` shape is
+ * read in one place.
+ */
+export function invokeDesktop(): TauriInvoke | undefined {
   if (typeof window === 'undefined') return undefined;
   const core = (window as { __TAURI__?: { core?: { invoke?: unknown } } })
     .__TAURI__?.core;
@@ -24,7 +29,7 @@ function tauriInvoke(): TauriInvoke | undefined {
 
 /** True when the Web Shell runs inside the packaged Tauri desktop window. */
 export function isDesktopShell(): boolean {
-  return tauriInvoke() !== undefined;
+  return invokeDesktop() !== undefined;
 }
 
 export function isExternalOpenUrl(url: string | undefined): boolean {
@@ -36,7 +41,7 @@ export function isExternalOpenUrl(url: string | undefined): boolean {
  * callers can surface a visible error instead of swallowing the click.
  */
 export async function openExternalUrl(url: string): Promise<void> {
-  const invoke = tauriInvoke();
+  const invoke = invokeDesktop();
   if (!invoke) throw new Error('The desktop URL opener is unavailable.');
   if (!isExternalOpenUrl(url)) {
     throw new Error('Only http, https, and mailto URLs can be opened.');

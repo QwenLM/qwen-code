@@ -42,7 +42,7 @@ The daemon log is written to `~/Library/Logs/com.alibaba.qwen-code/desktop-runti
 tail -f ~/Library/Logs/com.alibaba.qwen-code/desktop-runtime.log
 ```
 
-The desktop state (saved workspace, window position, zoom factor) is stored in `~/Library/Application Support/com.alibaba.qwen-code/desktop-state.json`.
+The desktop state (saved workspace, window position, zoom factor, and the Web Shell's saved-connection and workspace-host catalogs) is stored in `~/Library/Application Support/com.alibaba.qwen-code/desktop-state.json`.
 
 ### WebView DevTools
 
