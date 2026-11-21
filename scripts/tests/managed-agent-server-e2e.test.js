@@ -23,21 +23,27 @@ import {
   forEachChild,
   isArrayLiteralExpression,
   isArrowFunction,
+  isAsExpression,
   isBinaryExpression,
+  isBindingElement,
   isCallExpression,
-  isDeleteExpression,
-  isElementAccessExpression,
+  isConstructorDeclaration,
   isFunctionDeclaration,
   isFunctionExpression,
+  isGetAccessorDeclaration,
+  isElementAccessExpression,
   isIdentifier,
   isIfStatement,
+  isMethodDeclaration,
+  isNonNullExpression,
   isNoSubstitutionTemplateLiteral,
-  isObjectLiteralExpression,
+  isParenthesizedExpression,
   isPropertyAccessExpression,
   isPropertyAssignment,
+  isSatisfiesExpression,
+  isSetAccessorDeclaration,
   isShorthandPropertyAssignment,
   isSpreadAssignment,
-  isSpreadElement,
   isStringLiteral,
   isVariableDeclaration,
   isVariableStatement,
@@ -46,6 +52,7 @@ import {
   transpileModule,
 } from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
+import { fakeToolCall } from '../../integration-tests/fake-openai-server.js';
 import { QWEN_SERVER_TOKEN_ENV } from '../../packages/cli/src/serve/channel-worker-env.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from '../../packages/cli/src/serve/hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from '../../packages/cli/src/serve/hosted-harness-profile.js';
@@ -111,41 +118,8 @@ const fencedShellBlocks = (text) =>
     ...text.matchAll(/```[ \t]*(?:bash|sh|shell|console|zsh)\n([\s\S]*?)```/g),
   ].map((match) => match[1]);
 
-// AST inventory of the loop fakes' classifier answer wiring: the provenance of
-// each `blockProperties` binding, the `blockAnswer` bindings initialised from
-// classifierBlockAnswer, the `!== undefined` gates, every call to the helper
-// with its argument, every respond_in_schema answer site and tool-name site
-// (string or template literal, any call id), every construction site of a
-// `{ shouldBlock: false }` allow with its enclosing function, and every write
-// to the decision or its input — any assignment operator (`??=` fires exactly
-// when the decision is undefined), a member write, a delete, or an in-place
-// Object.assign/defineProperty. Structure, not token counts: the parser cannot
-// see comments, so prose naming a binding moves nothing. Tool-name sites carry
-// their fake-model callback so loopClassifierScope can confine the loop pin to
-// the loop fakes and leave an unrelated arm's respond_in_schema answer alone.
-// A Map, not an object literal: an ordinary object would resolve keys like
-// `constructor` or `toString` to prototype functions and then throw on `.has`.
-const IN_PLACE_WRITERS = new Map([
-  ['Object', new Set(['assign', 'defineProperty', 'defineProperties'])],
-  ['Reflect', new Set(['set', 'defineProperty'])],
-]);
-
-// Expression wrappers that leave an assignment target the same target:
-// `(blockProperties) = …` and `(blockProperties as any) = …` hid the binding
-// behind a node the direct resolver does not recognise. This is the set the
-// parser accepts on the left of an assignment, measured rather than assumed:
-// `blockProperties! = …` and `(blockProperties satisfies any) = …` parse too,
-// while `<any>blockProperties = …` is a parse error and cannot occur. All four
-// carry the wrapped expression on `.expression`.
-const TARGET_WRAPPERS = new Set([
-  SyntaxKind.ParenthesizedExpression,
-  SyntaxKind.AsExpression,
-  SyntaxKind.NonNullExpression,
-  SyntaxKind.SatisfiesExpression,
-]);
-
 // The literal text of a string or untagged template node, or undefined. One
-// extractor shared by both AST scanners below: a key, a tool name and a call id
+// extractor shared by the AST helpers below: a key, a tool name and a call id
 // all mean the same thing whether they are spelled as a string or a template,
 // and two copies of this predicate drifted apart once already.
 const literalText = (node) =>
@@ -154,385 +128,415 @@ const literalText = (node) =>
     ? node.text
     : undefined;
 
-const loopClassifierWiring = (text) => {
+// The classifier delegation, as placement. The decision itself is executed
+// elsewhere; what is pinned here is only where the delegation sits and that
+// nothing answers beside it. Five review rounds measured that every data-flow
+// clause layered on top of this — provenance through rebinds and shadows, gate
+// recognition, fall-through tracking — grew a fresh evasion and a fresh false
+// red for each one closed, because it is hand-written semantic analysis over an
+// unbounded rewrite space. Those checks are retired by decision, not by
+// oversight: the design record enumerates what this pin deliberately does not
+// cover, and which of those the packaged arms were measured to catch.
+//
+// Placement has ONE notion of arm. A fake's arm is read at its
+// `startFakeOpenAIServer` call site, a delegation's arm comes from the fake it
+// sits in, and both inventories are filtered by that set in a second pass —
+// reading the arm at the callback's declaration, or keeping two different
+// notions for fakes and delegations, is what priced correct rewrites as defects.
+const classifierDelegation = (text) => {
   const file = createSourceFile('runner.ts', text, ScriptTarget.Latest, true);
-  // Every initializer ever bound to a name, collected before the main walk so
-  // a helper call resolves to what its argument was bound to regardless of
-  // source order. The fabrication check keys on those initializers, not on the
-  // binding's spelling: a legitimate arm may name its binding anything, and
-  // requiring one canonical name reddened exactly such an arm. The map is
-  // scope-insensitive, so it keeps EVERY initializer a name was given rather
-  // than the last one: same-named bindings in different scopes then fail
-  // closed instead of silently resolving to whichever was collected last.
-  const bindingInitializers = new Map();
-  const collectBindings = (node) => {
-    if (
-      isVariableDeclaration(node) &&
-      isIdentifier(node.name) &&
-      node.initializer !== undefined
-    ) {
-      const seen = bindingInitializers.get(node.name.text) ?? new Set();
-      seen.add(node.initializer.getText(file));
-      bindingInitializers.set(node.name.text, seen);
-    }
-    forEachChild(node, collectBindings);
-  };
-  collectBindings(file);
-  const definitions = [];
-  const declarations = [];
-  const gates = [];
-  const answers = [];
-  const allowSites = [];
-  const reassignments = [];
-  const helperCalls = [];
-  const schemaNameSites = [];
-  const dynamicToolNames = [];
-  const handBuiltToolCalls = [];
-  // An alias of the decision or its input carries the same value, so a write
-  // through it is the same in-place mutation. The set grows as aliases are
-  // declared, which covers chains of any length in source order.
-  const decisionBindings = new Set(['blockAnswer', 'blockProperties']);
-  const enclosingFunction = (node) => {
+  const isFn = (node) =>
+    isFunctionDeclaration(node) ||
+    isFunctionExpression(node) ||
+    isArrowFunction(node) ||
+    isMethodDeclaration(node) ||
+    isGetAccessorDeclaration(node) ||
+    isSetAccessorDeclaration(node) ||
+    isConstructorDeclaration(node);
+  const enclosingFn = (node) => {
     for (let current = node.parent; current; current = current.parent) {
-      if (isFunctionDeclaration(current)) {
-        return current.name?.text ?? '(anonymous)';
-      }
-      if (isFunctionExpression(current) || isArrowFunction(current)) {
-        return '(anonymous)';
-      }
+      if (isFn(current)) return current;
     }
-    return '(top-level)';
+    return undefined;
   };
-  // The fake-model callback a node sits in: the function handed to
-  // startFakeOpenAIServer, keyed by its position (-1 outside any callback).
-  const fakeCallback = (node) => {
-    for (let current = node; current; current = current.parent) {
-      if (
-        (isArrowFunction(current) || isFunctionExpression(current)) &&
-        current.parent !== undefined &&
-        isCallExpression(current.parent) &&
-        isIdentifier(current.parent.expression) &&
-        current.parent.expression.text === 'startFakeOpenAIServer'
-      ) {
-        return current.pos;
-      }
-    }
-    return -1;
-  };
-  // The binding a write targets, whether the whole binding or one of its
-  // members: an element write on the input re-creates the mis-answer without
-  // touching any identifier the other inventories record.
-  const writtenBinding = (node) => {
-    if (isIdentifier(node)) {
-      return decisionBindings.has(node.text) ? node.text : undefined;
-    }
-    if (
-      (isElementAccessExpression(node) || isPropertyAccessExpression(node)) &&
-      isIdentifier(node.expression) &&
-      decisionBindings.has(node.expression.text)
+  const unwrap = (node) => {
+    let current = node;
+    while (
+      current !== undefined &&
+      (isParenthesizedExpression(current) ||
+        isAsExpression(current) ||
+        isNonNullExpression(current) ||
+        isSatisfiesExpression(current))
     ) {
-      return node.expression.text;
+      current = current.expression;
+    }
+    return current;
+  };
+  // Every declaration of a name counts, with an initializer or not: a bare
+  // `let toolCalls;` elsewhere still makes the name ambiguous, and an
+  // acceptance must not guess which binding a lookup happened to find.
+  const declarations = new Map();
+  const collectDeclarations = (node) => {
+    if (isVariableDeclaration(node) && isIdentifier(node.name)) {
+      const name = node.name.text;
+      const seen = declarations.get(name);
+      declarations.set(name, {
+        count: (seen?.count ?? 0) + 1,
+        initializer: seen === undefined ? node.initializer : undefined,
+      });
+    }
+    forEachChild(node, collectDeclarations);
+  };
+  // Follows an identifier chain, so a shorthand of a hoisted alias of an array
+  // resolves to the array. Ambiguous or cyclic names resolve to nothing.
+  const resolve = (node) => {
+    const seen = new Set();
+    let current = unwrap(node);
+    while (current !== undefined && isIdentifier(current)) {
+      if (seen.has(current.text)) return undefined;
+      seen.add(current.text);
+      const entry = declarations.get(current.text);
+      if (entry === undefined || entry.count !== 1) return undefined;
+      current = unwrap(entry.initializer);
+    }
+    return current;
+  };
+  // An arm flag is a boolean local tested directly or against a literal
+  // boolean. Nothing inside a larger expression is credited as a flag.
+  const flagName = (test) => {
+    const inner = unwrap(test);
+    if (inner === undefined) return undefined;
+    if (isIdentifier(inner)) return inner.text;
+    if (
+      isBinaryExpression(inner) &&
+      (inner.operatorToken.kind === SyntaxKind.EqualsEqualsEqualsToken ||
+        inner.operatorToken.kind === SyntaxKind.ExclamationEqualsEqualsToken)
+    ) {
+      for (const [a, b] of [
+        [inner.left, inner.right],
+        [inner.right, inner.left],
+      ]) {
+        const id = unwrap(a);
+        const lit = unwrap(b);
+        if (
+          id !== undefined &&
+          isIdentifier(id) &&
+          lit !== undefined &&
+          (lit.kind === SyntaxKind.TrueKeyword ||
+            lit.kind === SyntaxKind.FalseKeyword)
+        ) {
+          return id.text;
+        }
+      }
     }
     return undefined;
   };
-  // A destructuring assignment rebinds the input without any identifier the
-  // direct resolver recognises on the left: `[blockProperties] = [fabricated]`
-  // or `({ x: blockProperties.shouldBlock } = …)`. Walk the pattern's leaves.
-  // A rest element is a leaf too: `[...blockProperties] = …` and
-  // `({ ...blockProperties } = …)` write INTO the existing binding rather than
-  // declaring a new one, so skipping them let an in-place write evade every
-  // write inventory.
-  // Kept separate from writtenBinding so an in-place writer's first argument
-  // (a value, not a target) is never read as a pattern.
-  const assignmentTarget = (node) => {
-    if (TARGET_WRAPPERS.has(node.kind)) {
-      return assignmentTarget(node.expression);
-    }
-    const direct = writtenBinding(node);
-    if (direct !== undefined) return direct;
-    if (isSpreadElement(node)) {
-      return assignmentTarget(node.expression);
-    }
-    if (isArrayLiteralExpression(node)) {
-      for (const element of node.elements) {
-        const hit = assignmentTarget(element);
-        if (hit !== undefined) return hit;
+  const enclosingFlags = (node) => {
+    const names = [];
+    for (let current = node?.parent; current; current = current.parent) {
+      if (isIfStatement(current)) {
+        const name = flagName(current.expression);
+        if (name !== undefined) names.push(name);
       }
     }
-    if (isObjectLiteralExpression(node)) {
-      for (const property of node.properties) {
-        const target = isShorthandPropertyAssignment(property)
-          ? property.name
-          : isPropertyAssignment(property)
-            ? property.initializer
-            : isSpreadAssignment(property)
-              ? property.expression
-              : undefined;
-        if (target === undefined) continue;
-        const hit = assignmentTarget(target);
-        if (hit !== undefined) return hit;
+    return names;
+  };
+  const nearestFlag = (node) => enclosingFlags(node)[0];
+  // A fake's arm is read where it is STARTED, so a callback declared above the
+  // flag and passed inside the block still belongs to that arm.
+  const fakeArm = new Map();
+  const fakeFlags = new Map();
+  const collectFakes = (node) => {
+    if (
+      isCallExpression(node) &&
+      isIdentifier(node.expression) &&
+      node.expression.text === 'startFakeOpenAIServer'
+    ) {
+      const fn = resolve(node.arguments[0]);
+      if (fn !== undefined && isFn(fn)) {
+        fakeArm.set(fn, nearestFlag(node));
+        fakeFlags.set(fn, enclosingFlags(node));
+      }
+    }
+    forEachChild(node, collectFakes);
+  };
+  // The fake a node sits in. The chain continues through arrows and function
+  // expressions and declarations; a class member is a separate callable that
+  // something must invoke, so it does not credit the fake.
+  const fakeOf = (node) => {
+    for (let fn = enclosingFn(node); fn !== undefined; fn = enclosingFn(fn)) {
+      if (fakeArm.has(fn)) return fn;
+      if (
+        isMethodDeclaration(fn) ||
+        isGetAccessorDeclaration(fn) ||
+        isSetAccessorDeclaration(fn) ||
+        isConstructorDeclaration(fn)
+      ) {
+        return undefined;
       }
     }
     return undefined;
+  };
+  // Only the binding element that binds the `body` property names the request;
+  // a sibling field of the same handler context does not.
+  const bodyNames = (fn) => {
+    const names = new Set();
+    const param = fn?.parameters?.[0];
+    if (param === undefined) return names;
+    const walk = (node) => {
+      if (isBindingElement(node) && isIdentifier(node.name)) {
+        const property = node.propertyName ?? node.name;
+        if (isIdentifier(property) && property.text === 'body') {
+          names.add(node.name.text);
+        }
+      }
+      forEachChild(node, walk);
+    };
+    walk(param.name);
+    return names;
+  };
+  const isFakeToolCall = (node) =>
+    isCallExpression(node) &&
+    isIdentifier(node.expression) &&
+    node.expression.text === 'fakeToolCall';
+  const MUTATORS = new Set([
+    'push',
+    'unshift',
+    'splice',
+    'fill',
+    'sort',
+    'reverse',
+    'copyWithin',
+  ]);
+  const IN_PLACE = new Set([
+    'assign',
+    'defineProperty',
+    'defineProperties',
+    'set',
+  ]);
+  const isToolCallsMember = (node) =>
+    (isPropertyAccessExpression(node) && node.name.text === 'toolCalls') ||
+    (isElementAccessExpression(node) &&
+      literalText(node.argumentExpression) === 'toolCalls');
+  const mentionsToolCallsMember = (node) => {
+    let found = false;
+    const walk = (child) => {
+      if (isToolCallsMember(child)) found = true;
+      forEachChild(child, walk);
+    };
+    if (node !== undefined) walk(node);
+    return found;
+  };
+  // An element-access key the inventory cannot read is as unattributable as a
+  // computed property key, so both fail closed.
+  const unreadableMemberKey = (node) => {
+    let found = false;
+    const walk = (child) => {
+      if (
+        isElementAccessExpression(child) &&
+        literalText(child.argumentExpression) === undefined
+      ) {
+        found = true;
+      }
+      forEachChild(child, walk);
+    };
+    if (node !== undefined) walk(node);
+    return found;
+  };
+  const calls = [];
+  const answers = [];
+  const sites = [];
+  const record = (clause, node, fake) => {
+    answers.push({ clause, fake });
+    sites.push({
+      clause,
+      line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
+      text: node.getText(file).slice(0, 80),
+    });
   };
   const visit = (node) => {
-    if (literalText(node) === 'respond_in_schema') {
-      schemaNameSites.push({ callback: fakeCallback(node) });
-    }
-    if (
-      isVariableDeclaration(node) &&
-      isIdentifier(node.name) &&
-      node.initializer !== undefined
-    ) {
-      if (node.name.text === 'blockProperties') {
-        definitions.push({
-          callback: fakeCallback(node),
-          text: node.initializer.getText(file),
-        });
-      }
-      if (
-        isIdentifier(node.initializer) &&
-        decisionBindings.has(node.initializer.text)
-      ) {
-        decisionBindings.add(node.name.text);
-      }
-      if (
-        node.name.text === 'blockAnswer' &&
-        isCallExpression(node.initializer) &&
-        isIdentifier(node.initializer.expression) &&
-        node.initializer.expression.text === 'classifierBlockAnswer'
-      ) {
-        declarations.push({
-          callback: fakeCallback(node),
-          text: node.initializer.arguments[0]?.getText(file),
-        });
-      }
-    }
-    // Every helper call, with its argument: a sibling that re-derives the
-    // allow from a fabricated schema is a third call, not a new binding.
     if (
       isCallExpression(node) &&
       isIdentifier(node.expression) &&
-      node.expression.text === 'classifierBlockAnswer'
+      node.expression.text === 'loopClassifierResponse'
     ) {
+      const fake = fakeOf(node);
       const arg = node.arguments[0];
-      helperCalls.push({
-        callback: fakeCallback(node),
-        text: arg?.getText(file),
-        // What the argument was bound to. An identifier resolves to every
-        // initializer its name was given; anything else (an inline object, a
-        // computed expression) stands for itself, and an unbound name resolves
-        // to a marker — all of which must equal the lookup to pass.
-        argInitializers: isIdentifier(arg)
-          ? [...(bindingInitializers.get(arg.text) ?? new Set(['<unbound>']))]
-          : [arg?.getText(file)],
+      calls.push({
+        callId: literalText(node.arguments[1]),
+        fn: fake === undefined ? -1 : fake.pos,
+        fake: fake !== undefined,
+        arm: fake === undefined ? undefined : fakeArm.get(fake),
+        // A flag around the delegation itself that disagrees with its fake's
+        // arm means this arm's fake never runs it.
+        gated: (() => {
+          const near = nearestFlag(node);
+          const own = fake === undefined ? undefined : fakeArm.get(fake);
+          return near !== undefined && own !== undefined && near !== own;
+        })(),
+        bodyNamed: isIdentifier(arg) && bodyNames(fake).has(arg.text),
       });
     }
-    if (
-      isBinaryExpression(node) &&
-      node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
-      node.operatorToken.kind <= SyntaxKind.LastAssignment &&
-      assignmentTarget(node.left) !== undefined
-    ) {
-      reassignments.push({
-        callback: fakeCallback(node),
-        text: node.getText(file),
-      });
-    }
-    if (
-      isDeleteExpression(node) &&
-      writtenBinding(node.expression) !== undefined
-    ) {
-      reassignments.push({
-        callback: fakeCallback(node),
-        text: node.getText(file),
-      });
-    }
-    // A for-of / for-in initializer is an assignment target too: the loop
-    // writes each element or key into it, so `for (blockProperties of …)`
-    // mutates the input without any assignment operator. A declaration
-    // initializer (`for (const x of …)`) resolves to no tracked binding.
-    if (
-      (node.kind === SyntaxKind.ForOfStatement ||
-        node.kind === SyntaxKind.ForInStatement) &&
-      assignmentTarget(node.initializer) !== undefined
-    ) {
-      reassignments.push({
-        callback: fakeCallback(node),
-        text: node.getText(file),
-      });
-    }
-    if (
-      isCallExpression(node) &&
-      isPropertyAccessExpression(node.expression) &&
-      isIdentifier(node.expression.expression) &&
-      IN_PLACE_WRITERS.get(node.expression.expression.text)?.has(
-        node.expression.name.text,
-      ) &&
-      node.arguments.length > 0 &&
-      writtenBinding(node.arguments[0]) !== undefined
-    ) {
-      reassignments.push({
-        callback: fakeCallback(node),
-        text: node.getText(file),
-      });
-    }
-    // A tool call assembled without fakeToolCall is invisible to the answer
-    // and tool-name inventories, so record every such element of a toolCalls
-    // array; the loop pin requires none. A source that is not an inline array
-    // literal cannot be enumerated at all — `const calls = [ …hand-built… ];
-    // return { toolCalls: calls }` hid every element — so the site itself is
-    // recorded and the pin requires an inline array.
-    if (
-      (isPropertyAssignment(node) || isShorthandPropertyAssignment(node)) &&
-      // A quoted key is the same property: `{ 'toolCalls': [ …hand-built… ] }`
-      // escaped an identifier-only match, exactly as a quoted allow key did.
-      (isIdentifier(node.name) ? node.name.text : literalText(node.name)) ===
-        'toolCalls'
-    ) {
-      const callback = fakeCallback(node);
-      // A shorthand (`return { toolCalls }`) is a binding reference, so it is
-      // the same non-enumerable site as `{ toolCalls: calls }`; keying on
-      // isPropertyAssignment alone let it escape every loop-scoped inventory.
-      // It carries no `initializer`, so the array test must not be reached.
+    const fake = fakeOf(node);
+    if (fake !== undefined) {
+      const assigned =
+        isBinaryExpression(node) &&
+        node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
+        node.operatorToken.kind <= SyntaxKind.LastAssignment;
       if (
-        isShorthandPropertyAssignment(node) ||
-        !isArrayLiteralExpression(node.initializer)
+        assigned &&
+        (mentionsToolCallsMember(node.left) || unreadableMemberKey(node.left))
       ) {
-        handBuiltToolCalls.push({ callback, text: node.getText(file) });
-      } else {
-        for (const element of node.initializer.elements) {
-          const isFakeCall =
-            isCallExpression(element) &&
-            isIdentifier(element.expression) &&
-            element.expression.text === 'fakeToolCall';
-          if (!isFakeCall) {
-            handBuiltToolCalls.push({ callback, text: element.getText(file) });
+        record('no-loop-hand-built', node, fake);
+      }
+      // A call on a toolCalls member only counts when it mutates: reading
+      // `.filter(...)` or `.length` builds no answer.
+      if (
+        isCallExpression(node) &&
+        isPropertyAccessExpression(node.expression) &&
+        MUTATORS.has(node.expression.name.text) &&
+        mentionsToolCallsMember(node.expression.expression)
+      ) {
+        record('no-loop-hand-built', node, fake);
+      }
+      // In-place writers reach the member through an argument, not a receiver.
+      if (
+        isCallExpression(node) &&
+        isPropertyAccessExpression(node.expression) &&
+        IN_PLACE.has(node.expression.name.text) &&
+        node.arguments.some(
+          (a) => literalText(a) === 'toolCalls' || mentionsToolCallsMember(a),
+        )
+      ) {
+        record('no-loop-hand-built', node, fake);
+      }
+      if (isSpreadAssignment(node)) {
+        record('no-loop-hand-built', node, fake);
+      }
+      if (
+        isFakeToolCall(node) &&
+        literalText(node.arguments[0]) === 'respond_in_schema'
+      ) {
+        record('no-loop-answer-site', node, fake);
+      }
+      if (isPropertyAssignment(node) || isShorthandPropertyAssignment(node)) {
+        const key = isIdentifier(node.name)
+          ? node.name.text
+          : literalText(node.name);
+        if (key === undefined) {
+          record('no-loop-hand-built', node, fake);
+        } else if (key === 'toolCalls') {
+          const declared = isShorthandPropertyAssignment(node)
+            ? node.name
+            : node.initializer;
+          const source =
+            declared !== undefined && isIdentifier(declared)
+              ? resolve(declared)
+              : declared;
+          if (source === undefined || !isArrayLiteralExpression(source)) {
+            record('no-loop-hand-built', node, fake);
+          } else {
+            for (const element of source.elements) {
+              if (
+                !isFakeToolCall(element) ||
+                literalText(element.arguments[0]) === undefined
+              ) {
+                record('no-loop-hand-built', element, fake);
+              } else if (
+                literalText(element.arguments[0]) === 'respond_in_schema'
+              ) {
+                // A hoisted allow is the same answer as an inline one.
+                record('no-loop-answer-site', element, fake);
+              }
+            }
           }
         }
-      }
-    }
-    if (isObjectLiteralExpression(node)) {
-      for (const property of node.properties) {
-        const isShorthand = isShorthandPropertyAssignment(property);
-        if (
-          (isPropertyAssignment(property) || isShorthand) &&
-          // A quoted key is the same property: `{ 'shouldBlock': false }` was
-          // invisible to an identifier-only match, so an inline allow could be
-          // built outside the helper without moving this inventory.
-          (isIdentifier(property.name)
-            ? property.name.text
-            : literalText(property.name)) === 'shouldBlock'
-        ) {
-          // Requiring the literal `false` at the property missed two spellings
-          // of the same allow: `{ shouldBlock }` with `const shouldBlock =
-          // false`, and `{ 'shouldBlock': flag }` with `const flag = false`.
-          // A shorthand's value is a binding reference, so it is recorded
-          // unconditionally: the inventory cannot tell a shorthand allow from
-          // a shorthand schema, and the pin requires the one construction site
-          // to sit inside the helper. An explicit key counts when its value is
-          // `false` or a binding ever initialised to `false`.
-          const value = isShorthand ? property.name : property.initializer;
-          if (
-            isShorthand ||
-            value.kind === SyntaxKind.FalseKeyword ||
-            (isIdentifier(value) &&
-              bindingInitializers.get(value.text)?.has('false'))
-          ) {
-            allowSites.push(enclosingFunction(node));
-          }
-        }
-      }
-    }
-    if (
-      isIfStatement(node) &&
-      isBinaryExpression(node.expression) &&
-      node.expression.operatorToken.kind ===
-        SyntaxKind.ExclamationEqualsEqualsToken &&
-      isIdentifier(node.expression.left) &&
-      node.expression.left.text === 'blockAnswer' &&
-      isIdentifier(node.expression.right) &&
-      node.expression.right.text === 'undefined'
-    ) {
-      gates.push({
-        callback: fakeCallback(node),
-        text: node.expression.getText(file),
-      });
-    }
-    if (
-      isCallExpression(node) &&
-      isIdentifier(node.expression) &&
-      node.expression.text === 'fakeToolCall' &&
-      node.arguments.length >= 1
-    ) {
-      const callback = fakeCallback(node);
-      const tool = literalText(node.arguments[0]);
-      if (tool === undefined) {
-        // A computed tool name hides the answer from every name-based
-        // inventory, so it is recorded rather than silently skipped — at any
-        // arity, since a two-argument call hides it just as well.
-        dynamicToolNames.push({ callback });
-      } else if (tool === 'respond_in_schema' && node.arguments.length === 3) {
-        const answer = node.arguments[1];
-        const callId = node.arguments[2];
-        answers.push({
-          callback,
-          callId: literalText(callId) ?? callId.getText(file),
-          answer: answer.getText(file),
-          isGatedBinding: isIdentifier(answer) && answer.text === 'blockAnswer',
-        });
       }
     }
     forEachChild(node, visit);
   };
+  collectDeclarations(file);
+  collectFakes(file);
   visit(file);
-  return {
-    definitions,
-    declarations,
-    gates,
-    answers,
-    allowSites,
-    reassignments,
-    helperCalls,
-    schemaNameSites,
-    dynamicToolNames,
-    handBuiltToolCalls,
+  // The arms are the flags of the fakes that actually delegate. Filtering by
+  // that set keeps the durable-failover fake out of both inventories.
+  const armNames = new Set(
+    calls.map((call) => call.arm).filter((arm) => arm !== undefined),
+  );
+  const fakeArms = [...fakeArm.values()].filter(
+    (arm) => arm !== undefined && armNames.has(arm),
+  );
+  const inArm = (hit) => {
+    const arm = fakeArm.get(hit.fake);
+    return arm !== undefined && armNames.has(arm);
   };
-};
-
-// The loop callbacks are the ones answering a loop classifier call id. Every
-// inventory is confined to them, so an unrelated fake callback that reuses the
-// helper or the same binding names cannot redden a loop pin, while a sibling
-// inside a loop callback still moves that callback's counts. `allowSites` is
-// deliberately file-wide: the one legitimate construction site is inside
-// classifierBlockAnswer, which lives outside every fake callback.
-const loopClassifierScope = (wiring) => {
-  const loopIds = ['loop-classifier', 'loop-fire-classifier'];
-  const callbacks = [
-    ...new Set(
-      wiring.answers
-        .filter((site) => loopIds.includes(site.callId))
-        .map((site) => site.callback),
+  // A fake started under two different arm flags is nested inside the other
+  // arm, so it never runs when only its own flag is set. A wrapper flag that
+  // no delegation reports is not an arm and does not count.
+  const nestedFakes = [...fakeFlags.values()].filter(
+    (flags) => new Set(flags.filter((f) => armNames.has(f))).size > 1,
+  );
+  return {
+    calls,
+    fakeArms,
+    loopAnswerSites: answers.filter(
+      (a) => a.clause === 'no-loop-answer-site' && inArm(a),
     ),
-  ];
-  const inScope = (entry) => callbacks.includes(entry.callback);
-  const texts = (entries) => entries.filter(inScope).map((entry) => entry.text);
-  return {
-    callbacks,
-    definitions: texts(wiring.definitions),
-    declarations: texts(wiring.declarations),
-    gates: texts(wiring.gates),
-    helperCalls: texts(wiring.helperCalls),
-    reassignments: texts(wiring.reassignments),
-    answers: wiring.answers.filter(inScope),
-    schemaNameSites: wiring.schemaNameSites.filter(inScope),
-    dynamicToolNames: wiring.dynamicToolNames.filter(inScope),
-    handBuiltToolCalls: wiring.handBuiltToolCalls.filter(inScope),
-    allowSites: wiring.allowSites,
+    loopHandBuilt: answers.filter(
+      (a) => a.clause === 'no-loop-hand-built' && inArm(a),
+    ),
+    nestedFakes,
+    sites,
   };
 };
 
-// The minted-id call sites and their loud-failure fallbacks, as structure: a
+// The pin's judgement, named clause by clause so one predicate serves both the
+// real-source pin and the hostile-source control — two copies of this logic
+// would drift, and the control is what proves each clause load-bearing.
+const delegationViolations = (delegation) => {
+  const violations = [];
+  const ids = delegation.calls.map((call) => call.callId);
+  // A set, not source order: swapping the two arm blocks is behaviour-preserving.
+  if (
+    ids.length !== 2 ||
+    [...ids].sort().join() !== 'loop-classifier,loop-fire-classifier'
+  ) {
+    violations.push('call-ids');
+  }
+  if (new Set(delegation.calls.map((call) => call.fn)).size !== 2) {
+    violations.push('distinct-callbacks');
+  }
+  // One delegation per arm, and each delegation must belong to the arm its own
+  // fake runs under: a flag around the delegation that disagrees with its fake
+  // means that arm never delegates.
+  if (
+    delegation.calls.some((call) => !call.fake || call.gated) ||
+    new Set(delegation.calls.map((call) => call.arm)).size !== 2 ||
+    delegation.calls.some((call) => call.arm === undefined)
+  ) {
+    violations.push('arm-scoping');
+  }
+  // One fake per arm: a second fake under the same flag would let a delegation
+  // sit in the durable failover server while borrowing the arm. The set is what
+  // catches the nested form, where a bare count passes.
+  if (
+    delegation.fakeArms.length !== 2 ||
+    new Set(delegation.fakeArms).size !== 2 ||
+    delegation.nestedFakes.length > 0
+  ) {
+    violations.push('one-fake-per-arm');
+  }
+  if (delegation.calls.some((call) => !call.bodyNamed)) {
+    violations.push('argument-provenance');
+  }
+  if (delegation.loopAnswerSites.length > 0) {
+    violations.push('no-loop-answer-site');
+  }
+  if (delegation.loopHandBuilt.length > 0) {
+    violations.push('no-loop-hand-built');
+  }
+  return [...new Set(violations)];
+}; // The minted-id call sites and their loud-failure fallbacks, as structure: a
 // raw-text match over the whole runner is satisfied by a commented-out copy or
 // a duplicate in another arm, neither of which wires anything. The parser
 // cannot see comments, and each site carries the binding it initializes and
@@ -3964,92 +3968,19 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toMatch(/const unionMarker = 'LoopWakeup';/);
     expect(source).toMatch(/managed-loop-skill-\$\{variant\}\.json/);
     expect(source).toMatch(/Loop sidecar discriminators drifted/);
-    // The classifier answer matches the block schema, not the tool name, so
-    // other structured side queries are not mis-answered with an invalid
-    // allow. The decision lives in the executable classifierBlockAnswer
-    // helper (exercised below against block and non-block schemas); its
-    // wiring is pinned structurally rather than by source spelling, so a
-    // comment naming a binding cannot redden it and a fallback written after
-    // the gate cannot hide in a token count.
-    const wiring = loopClassifierWiring(source);
-    const scope = loopClassifierScope(wiring);
-    // Both fakes bind the decision from the helper, passing the schema's own
-    // properties — never a fabricated block schema.
-    expect(scope.declarations).toEqual(['blockProperties', 'blockProperties']);
-    // Every helper call passes the looked-up properties: a sibling that
-    // re-derives the allow from a fabricated schema is a third call.
-    expect(scope.helperCalls).toEqual(['blockProperties', 'blockProperties']);
-    // Both fakes gate on the decision being defined; widening the gate to
-    // `blockProperties !== undefined` would answer non-block side queries.
-    expect(scope.gates).toHaveLength(2);
-    // The provenance the comment above claims: each arm's schema properties
-    // come from the respond_in_schema tool lookup, never a fabricated object
-    // that would make every side query look like the block schema.
-    expect(scope.definitions).toEqual([
-      'schemaTool?.function?.parameters?.properties',
-      'schemaTool?.function?.parameters?.properties',
-    ]);
-    // Exactly two loop callbacks, one answer site each, and each answer is the
-    // gated binding under its own call id. A sibling inside a loop callback
-    // adds a site whatever its call id or tool-name spelling; an unrelated
-    // arm's respond_in_schema answer is out of scope and moves nothing here.
-    expect(scope.callbacks).toHaveLength(2);
-    expect(scope.answers.map((site) => site.callId).sort()).toEqual([
-      'loop-classifier',
-      'loop-fire-classifier',
-    ]);
-    for (const callback of scope.callbacks) {
-      const sites = scope.answers.filter((site) => site.callback === callback);
-      expect(sites).toHaveLength(1);
-      expect(sites[0].isGatedBinding, sites[0].answer).toBe(true);
-      // One gate per callback, not two somewhere: a total count let one arm
-      // carry both gates while the other answered ungated. scope.gates is
-      // already mapped to text, so the per-callback count reads the inventory.
-      expect(
-        wiring.gates.filter((gate) => gate.callback === callback),
-      ).toHaveLength(1);
-      // The tool name appears twice per loop callback: the schema-tool lookup
-      // and the answer. A hand-built tool call, or a template-literal name,
-      // adds a site; a computed name is recorded separately and must be absent.
-      expect(
-        scope.schemaNameSites.filter((site) => site.callback === callback),
-      ).toHaveLength(2);
-    }
-    expect(scope.dynamicToolNames).toEqual([]);
-    // Every tool call the loop fakes emit goes through fakeToolCall: an
-    // element assembled by hand is invisible to the answer and tool-name
-    // inventories whatever its name spells, so none is allowed.
-    expect(scope.handBuiltToolCalls).toEqual([]);
-    // The allow is constructed exactly once, inside the helper; an inline
-    // `{ shouldBlock: false }` on either answer path reddens here, and so does
-    // the same allow spelled without the literal — `{ shouldBlock }`, or
-    // `{ 'shouldBlock': flag }` with the binding initialised to `false`. This
-    // one inventory is file-wide by design: the helper is outside every
-    // callback.
-    expect(scope.allowSites).toEqual(['classifierBlockAnswer']);
-    // Neither the decision nor its input is ever written after the lookup: no
-    // assignment operator (`??=` included), no member write, no delete and no
-    // in-place Object.assign / Reflect.set — each would smuggle an allow past
-    // the gate while every identifier stayed intact.
-    expect(scope.reassignments).toEqual([]);
-    // The direct-fabrication route is closed file-wide too. A sibling hoisted
-    // into a module-level function and returned as a whole response answers a
-    // foreign side-query call id from outside every loop callback, so no
-    // loop-scoped inventory sees it. Anywhere in the runner, every helper call
-    // must take a binding whose initializer IS the lookup — resolved through
-    // the binding, not matched on its name, so a legitimate arm that names its
-    // binding differently passes while a fabricated schema reddens whether it
-    // is passed inline or bound first. Sets, not counts, so a new arm adds no
-    // member. Fabricating the `schemaTool` lookup one level up still spells
-    // the initializer canonically and is measured to survive — the same
-    // unbounded spelling family, whose durable fix is the executed seam
-    // tracked in #17673, not another inventory.
-    expect([
-      ...new Set(wiring.helperCalls.flatMap((call) => call.argInitializers)),
-    ]).toEqual(['schemaTool?.function?.parameters?.properties']);
-    expect([
-      ...new Set(wiring.definitions.map((definition) => definition.text)),
-    ]).toEqual(['schemaTool?.function?.parameters?.properties']);
+    // The classifier decision is executed, not inventoried: the whole
+    // lookup → narrowing → gate → answer lives in loopClassifierResponse and
+    // is driven against hostile bodies below. What remains structural is the
+    // delegation, judged by one predicate that the hostile-source control
+    // below proves clause by clause — the unbounded spelling family lived
+    // inside the decision, and it is gone with the scanner.
+    const delegation = classifierDelegation(source);
+    expect(
+      delegationViolations(delegation),
+      delegation.sites
+        .map((s) => `${s.clause} @ runner:${s.line} — ${s.text}`)
+        .join('\n'),
+    ).toEqual([]);
     // The create -> list lifecycle claim: cron_list must echo the created
     // prompt; a mere tool result must not pass.
     expect(source).toMatch(/includes\('\/loop check the deploy'\)/);
@@ -4142,284 +4073,674 @@ describe('managed-agent-server e2e runner', () => {
     expect(classifierBlockAnswer({})).toBeUndefined();
   });
 
-  // The wiring scanner and its loop scoping are executed against hostile fakes
-  // so neither can be vacuous: a fabricated provenance, an in-place member
-  // write, an Object.assign, a delete, Reflect.set and Object.defineProperties
-  // on the input, a write through an alias of it, a `??=` rewrite of the
-  // decision, an inline allow, a computed tool name, a hand-built tool call,
-  // and a template-literal sibling answering from a fabricated schema must
-  // each move an inventory — while prose naming the bindings moves none, and
-  // an unrelated arm's respond_in_schema answer stays out of the loop scope.
-  it('executes the classifier wiring scanner against hostile rewiring', () => {
-    const fakeCallback = (lines) =>
-      [
-        'fake = await startFakeOpenAIServer(({ body }) => {',
-        ...lines,
-        '});',
-      ].join('\n');
-    const loopFake = fakeCallback([
-      '// blockAnswer blockProperties — shouldBlock: false, respond_in_schema in prose',
-      "const schemaTool = tools.find((tool) => tool.function?.name === 'respond_in_schema');",
-      "const blockProperties = schemaTool ? { shouldBlock: { type: 'boolean' } } : undefined;",
-      "if (blockProperties !== undefined) blockProperties['shouldBlock'] = { type: 'boolean' };",
-      "Object.assign(blockProperties, { shouldBlock: { type: 'boolean' } });",
-      'delete blockProperties.shouldBlock;',
-      "Reflect.set(blockProperties, 'shouldBlock', { type: 'boolean' });",
-      "Object.defineProperties(blockProperties, { shouldBlock: { value: { type: 'boolean' } } });",
-      'const propsAlias = blockProperties;',
-      "propsAlias['shouldBlock'] = { type: 'boolean' };",
-      // A destructuring assignment rebinds the input with no identifier on the
-      // left, and the defineProperty pair writes it in place without an
-      // assignment operator at all.
-      "[blockProperties] = [{ shouldBlock: { type: 'boolean' } }];",
-      // The object-pattern arm, in both property and shorthand form: the first
-      // writes a member through the pattern, the second rebinds the input.
-      "({ x: blockProperties.shouldBlock } = { x: { type: 'boolean' } });",
-      '({ blockProperties } = { blockProperties: undefined });',
-      // A rest element writes INTO the existing binding rather than declaring
-      // a new one, in both pattern kinds.
-      "[...blockProperties] = [{ shouldBlock: { type: 'boolean' } }];",
-      "({ ...blockProperties } = { shouldBlock: { type: 'boolean' } });",
-      // A wrapper leaves the target the same target, and a for-of / for-in
-      // initializer is written by the loop without any assignment operator.
-      // The written value is schema-shaped, not `false`, so these isolate the
-      // write inventory without also constructing an inline allow.
-      "(blockProperties) = { shouldBlock: { type: 'boolean' } };",
-      "(blockProperties as any) = { shouldBlock: { type: 'boolean' } };",
-      "blockProperties! = { shouldBlock: { type: 'boolean' } };",
-      "(blockProperties satisfies any) = { shouldBlock: { type: 'boolean' } };",
-      "for (blockProperties of [{ shouldBlock: { type: 'boolean' } }]) {}",
-      "for (blockProperties in { shouldBlock: { type: 'boolean' } }) {}",
-      'for (blockProperties.shouldBlock of [false]) {}',
-      "Object.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } });",
-      "Reflect.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } });",
-      // A receiver that resolves to a prototype function must not crash the
-      // writer lookup, and is not a writer of the decision input.
-      'toString.assign(blockProperties, {});',
-      'let blockAnswer = classifierBlockAnswer(blockProperties);',
-      'blockAnswer ??= { shouldBlock: false };',
-      'if (blockAnswer !== undefined) {',
-      "  return { toolCalls: [fakeToolCall('respond_in_schema', blockAnswer, 'loop-classifier')] };",
-      '}',
-      "return { toolCalls: [fakeToolCall(['respond', 'in', 'schema'].join('_'), blockAnswer, 'loop-fire-computed')] };",
-      "return { toolCalls: [fakeToolCall(['respond', 'in', 'schema'].join('_'), blockAnswer)] };",
-      "return { toolCalls: [{ id: 'hb', type: 'function', function: { name: ['respond', 'in', 'schema'].join('_'), arguments: '{}' } }] };",
-      "return { toolCalls: [fakeToolCall(`respond_in_schema`, classifierBlockAnswer({ shouldBlock: { type: 'boolean' } }), 'loop-fire-sibling')] };",
-      // A quoted allow key is the same property as an identifier one.
-      "return { toolCalls: [fakeToolCall('respond_in_schema', { 'shouldBlock': false }, 'loop-fire-quoted')] };",
-      // The same allow built without spelling `false` at the property: a
-      // shorthand key, and a quoted key whose value is a binding bound to it.
-      'const shouldBlock = false;',
-      'const shorthandAllow = { shouldBlock };',
-      'const flag = false;',
-      "const boundAllow = { 'shouldBlock': flag };",
-      // A toolCalls source that is not an inline array cannot be enumerated.
-      "const hoistedCalls = [{ id: 'hb2', type: 'function', function: { name: 'respond_in_schema', arguments: '{}' } }];",
-      'return { toolCalls: hoistedCalls };',
-      // A quoted toolCalls key is the same property as an identifier one.
-      "return { 'toolCalls': [{ id: 'hb4', type: 'function', function: { name: 'respond_in_schema', arguments: '{}' } }] };",
-      // A shorthand key is the same property, and its value is a binding
-      // reference, so it is non-enumerable exactly like the hoisted source.
-      'const toolCalls = hoistedCalls;',
-      'return { toolCalls };',
-      'if (body.sideQuery === true) return sideQueryResponse();',
-    ]);
-    // A legitimate arm that names its binding differently but does the same
-    // lookup and the same gating. The fabrication check resolves through the
-    // binding, so this must add no member to the file-wide initializer set —
-    // keying on the binding's spelling reddened exactly this arm.
-    const renamedArm = fakeCallback([
-      "const schemaTool = tools.find((tool) => tool.function?.name === 'respond_in_schema');",
-      'const schemaProps = schemaTool?.function?.parameters?.properties;',
-      'const decided = classifierBlockAnswer(schemaProps);',
-      'if (decided !== undefined) {',
-      "  return { toolCalls: [fakeToolCall('respond_in_schema', decided, 'renamed-arm')] };",
-      '}',
-      "return { content: 'fixture' };",
-    ]);
-    // A sibling hoisted out of every callback: it fabricates its own schema,
-    // derives the allow through the helper and returns a WHOLE response under
-    // a foreign call id, so the loop callback holds no toolCalls array and no
-    // loop-scoped inventory sees any of it.
-    const hoistedResponse = [
-      'function sideQueryResponse() {',
-      "  const props = { shouldBlock: { type: 'boolean' } };",
-      '  const answer = classifierBlockAnswer(props);',
-      "  return { toolCalls: [fakeToolCall('respond_in_schema', answer, 'title')] };",
-      '}',
-    ].join('\n');
-    // An unrelated arm that reuses the helper, the same binding names and the
-    // same tool name: none of it may reach a loop-scoped inventory.
-    const unrelatedFake = fakeCallback([
-      "const schemaTool = tools.find((tool) => tool.function?.name === 'respond_in_schema');",
-      'const blockProperties = schemaTool?.function?.parameters?.properties;',
-      'const blockAnswer = classifierBlockAnswer(blockProperties);',
-      'if (blockAnswer !== undefined) {',
-      "  return { toolCalls: [fakeToolCall('respond_in_schema', blockAnswer, 'other-arm')] };",
-      '}',
-      "return { toolCalls: [fakeToolCall('respond_in_schema', { title: 'x' }, 'other-arm')] };",
-      // The same three shapes the loop pin forbids, in an arm that is out of
-      // scope: a write to the input, a computed tool name and a hand-built
-      // element. Each must reach the file-wide inventory and none the scoped
-      // one, which is what witnesses the scoping of these three inventories.
-      "blockProperties['shouldBlock'] = { type: 'boolean' };",
-      "return { toolCalls: [fakeToolCall(['respond', 'in', 'schema'].join('_'), blockAnswer, 'other-arm')] };",
-      "return { toolCalls: [{ id: 'hb3', type: 'function', function: { name: 'respond_in_schema', arguments: '{}' } }] };",
-    ]);
-    const wiring = loopClassifierWiring(
-      [hoistedResponse, loopFake, unrelatedFake, renamedArm].join('\n'),
-    );
-    const scope = loopClassifierScope(wiring);
-    // The comment names both bindings and spells the allow literal and the
-    // tool name; none of it reaches an inventory.
-    expect(scope.definitions).toEqual([
-      "schemaTool ? { shouldBlock: { type: 'boolean' } } : undefined",
-    ]);
-    expect(scope.declarations).toEqual(['blockProperties']);
-    expect(scope.gates).toHaveLength(1);
-    // Four inline allows: the `??=` rewrite, the quoted-key one, the shorthand
-    // key and the quoted key whose value is a binding initialised to `false`.
-    // A quoted key is the same property, so all four are attributed to the
-    // same function; neither of the last two spells `false` at the property.
-    expect(scope.allowSites).toEqual([
-      '(anonymous)',
-      '(anonymous)',
-      '(anonymous)',
-      '(anonymous)',
-    ]);
-    // Every write form is recorded: the member write, the in-place calls, the
-    // delete, the alias write, every destructuring pattern (array, object
-    // property, object shorthand, and both rest forms), the nullish assignment,
-    // a parenthesized or cast target, and a for-of / for-in initializer — none
-    // of them rebinds an identifier the direct way.
-    expect(scope.reassignments).toEqual([
-      "blockProperties['shouldBlock'] = { type: 'boolean' }",
-      "Object.assign(blockProperties, { shouldBlock: { type: 'boolean' } })",
-      'delete blockProperties.shouldBlock',
-      "Reflect.set(blockProperties, 'shouldBlock', { type: 'boolean' })",
-      "Object.defineProperties(blockProperties, { shouldBlock: { value: { type: 'boolean' } } })",
-      "propsAlias['shouldBlock'] = { type: 'boolean' }",
-      "[blockProperties] = [{ shouldBlock: { type: 'boolean' } }]",
-      "{ x: blockProperties.shouldBlock } = { x: { type: 'boolean' } }",
-      '{ blockProperties } = { blockProperties: undefined }',
-      "[...blockProperties] = [{ shouldBlock: { type: 'boolean' } }]",
-      "{ ...blockProperties } = { shouldBlock: { type: 'boolean' } }",
-      "(blockProperties) = { shouldBlock: { type: 'boolean' } }",
-      "(blockProperties as any) = { shouldBlock: { type: 'boolean' } }",
-      "blockProperties! = { shouldBlock: { type: 'boolean' } }",
-      "(blockProperties satisfies any) = { shouldBlock: { type: 'boolean' } }",
-      "for (blockProperties of [{ shouldBlock: { type: 'boolean' } }]) {}",
-      "for (blockProperties in { shouldBlock: { type: 'boolean' } }) {}",
-      'for (blockProperties.shouldBlock of [false]) {}',
-      "Object.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } })",
-      "Reflect.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } })",
-      'blockAnswer ??= { shouldBlock: false }',
-    ]);
-    // The sibling's fabricated schema is a second helper call, visible even
-    // though the allow itself is still built inside the helper.
-    expect(scope.helperCalls).toEqual([
-      'blockProperties',
-      "{ shouldBlock: { type: 'boolean' } }",
-    ]);
-    // Seven answer sites exist, but only the loop callback is in scope: the
-    // unrelated arm reuses the helper, the binding names and the tool name,
-    // and none of it may redden a loop pin.
-    expect(wiring.answers).toHaveLength(7);
-    expect(scope.callbacks).toHaveLength(1);
-    expect(scope.answers).toHaveLength(3);
-    expect(wiring.definitions).toHaveLength(2);
-    expect(wiring.declarations).toHaveLength(2);
-    // The gate inventory keys on the canonical decision name, so the renamed
-    // arm's gate on its own name is not counted; its helper call still is,
-    // which is what the fabrication resolution below exercises.
-    expect(wiring.gates).toHaveLength(2);
-    expect(wiring.helperCalls).toHaveLength(5);
-    // The hoisted sibling is provably outside the loop scope — its fabricated
-    // argument reaches the file-wide inventory only, which is why the pin
-    // asserts the fabrication sets file-wide and not per callback.
-    expect(wiring.helperCalls.map((call) => call.text)).toContain('props');
-    expect(scope.helperCalls).not.toContain('props');
-    // The fabrication check resolves through the binding, so the renamed arm
-    // contributes the lookup and adds no member; only the hoisted fabrication
-    // is a second member. Keying on the binding's spelling instead would have
-    // listed 'schemaProps' as a third member and reddened a legitimate arm.
-    const renamedCall = wiring.helperCalls.find(
-      (call) => call.text === 'schemaProps',
-    );
-    expect(renamedCall.argInitializers).toEqual([
-      'schemaTool?.function?.parameters?.properties',
-    ]);
-    const initializerUnion = [
-      ...new Set(wiring.helperCalls.flatMap((call) => call.argInitializers)),
-    ];
-    // Three members: the inline fabrication, the loop fake's own fabricated
-    // conditional provenance, and the lookup. The renamed arm resolves to the
-    // lookup, so its binding name is NOT a member — which is the whole point.
-    expect(initializerUnion.sort()).toEqual(
-      [
-        "{ shouldBlock: { type: 'boolean' } }",
-        "schemaTool ? { shouldBlock: { type: 'boolean' } } : undefined",
-        'schemaTool?.function?.parameters?.properties',
-      ].sort(),
-    );
-    expect(initializerUnion).not.toContain('schemaProps');
-    expect(initializerUnion).not.toContain('props');
-    expect(scope.answers.map((site) => site.callId)).not.toContain('title');
-    expect(scope.answers[0].isGatedBinding).toBe(true);
-    // The template-literal sibling is detected: it is neither the gated
-    // binding nor an allowed call id, and its tool name still counts.
-    expect(scope.answers[1].callId).toBe('loop-fire-sibling');
-    expect(scope.answers[1].isGatedBinding).toBe(false);
-    // The quoted-key allow answers under its own call id and is not the gated
-    // binding, so it is visible as an answer as well as a construction site.
-    expect(scope.answers[2].callId).toBe('loop-fire-quoted');
-    expect(scope.answers[2].isGatedBinding).toBe(false);
-    expect(scope.schemaNameSites).toHaveLength(6);
-    expect(wiring.schemaNameSites).toHaveLength(13);
-    // A computed tool name hides the answer from every name-based inventory,
-    // so it is recorded on its own and the loop pin requires none — at three
-    // arguments and at two, since arity does not make the name any less hidden.
-    expect(scope.dynamicToolNames).toHaveLength(2);
-    // A tool call assembled without fakeToolCall is recorded whatever its
-    // name spells, including a computed one, whether the toolCalls key is an
-    // identifier, quoted or shorthand, and so is a toolCalls source that is
-    // not an inline array (its elements cannot be enumerated at all) — a
-    // shorthand's value is a binding reference, so it is one of those.
-    expect(scope.handBuiltToolCalls).toHaveLength(4);
-    expect(wiring.handBuiltToolCalls).toHaveLength(5);
-    // The scoping of these three inventories is witnessed, not assumed: the
-    // unrelated arm carries a write, a computed name and a hand-built element,
-    // each of which reaches the file-wide inventory and none the loop scope.
-    expect(wiring.reassignments.length).toBe(scope.reassignments.length + 1);
-    expect(wiring.dynamicToolNames.length).toBe(
-      scope.dynamicToolNames.length + 1,
-    );
-    expect(wiring.handBuiltToolCalls.length).toBe(
-      scope.handBuiltToolCalls.length + 1,
-    );
-    expect(
-      wiring.reassignments.filter(
-        (entry) => !scope.callbacks.includes(entry.callback),
+  // The whole classifier decision is executed against hostile bodies: lookup,
+  // narrowing, gate and answer site are one pure function, so a fabricated
+  // schema, an additive fallback, a dropped gate or a wrong call id reddens a
+  // direction here. No inventory of spellings is involved, which is what ends
+  // the evasion family the retired scanner kept chasing.
+  it('executes the loop classifier response against hostile bodies', () => {
+    const { loopClassifierResponse } = load(
+      ['classifierBlockAnswer', 'loopClassifierResponse'],
+      'loopClassifierResponse',
+      'fakeToolCall',
+    )(fakeToolCall);
+    const schemaBody = (properties) => ({
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'respond_in_schema',
+            parameters: { type: 'object', properties },
+          },
+        },
+      ],
+    });
+    // The whole response, so the tool name, the call id and the payload are
+    // pinned as one mapping rather than as separate counts. The payload is
+    // compared parsed: `fakeToolCall` serialises it, and comparing the string
+    // would pin the answer's key insertion order rather than its value.
+    const expectResponse = (actual, callId, answer) => {
+      expect(actual).toEqual({
+        toolCalls: [
+          {
+            id: callId,
+            type: 'function',
+            function: {
+              name: 'respond_in_schema',
+              arguments: expect.any(String),
+            },
+          },
+        ],
+      });
+      expect(JSON.parse(actual.toolCalls[0].function.arguments)).toEqual(
+        answer,
+      );
+    };
+    const stage1 = { shouldBlock: { type: 'boolean' } };
+    const stage2 = {
+      shouldBlock: { type: 'boolean' },
+      thinking: { type: 'string' },
+      reason: { type: 'string' },
+    };
+    for (const callId of ['loop-classifier', 'loop-fire-classifier']) {
+      expectResponse(
+        loopClassifierResponse(schemaBody(stage1), callId),
+        callId,
+        { shouldBlock: false },
+      );
+      expectResponse(
+        loopClassifierResponse(schemaBody(stage2), callId),
+        callId,
+        { shouldBlock: false, thinking: '', reason: '' },
+      );
+      // Non-block side queries also emit respond_in_schema and must fall
+      // through, never be answered with a schema-invalid allow.
+      for (const properties of [
+        { title: { type: 'string' } },
+        { toolUseSummary: { type: 'string' } },
+        { nextSpeaker: { type: 'string' } },
+        {},
+      ]) {
+        expect(
+          loopClassifierResponse(schemaBody(properties), callId),
+          JSON.stringify(properties),
+        ).toBeUndefined();
+      }
+    }
+    // Absent, non-array and malformed tools fall through rather than throw.
+    for (const body of [
+      {},
+      { tools: null },
+      { tools: 'respond_in_schema' },
+      { tools: [42, 'x', {}] },
+      { tools: [null] },
+      { tools: [undefined] },
+      { tools: [{ function: null }] },
+      { tools: [{ function: { name: 'respond_in_schema' } }] },
+      // A non-object `properties` must fall through, not throw in the `in` check.
+      ...[null, 'x', 42].map((properties) => ({
+        tools: [
+          {
+            function: {
+              name: 'respond_in_schema',
+              parameters: { properties },
+            },
+          },
+        ],
+      })),
+      {
+        tools: [
+          {
+            function: {
+              name: 'something_else',
+              parameters: { properties: stage1 },
+            },
+          },
+        ],
+      },
+    ]) {
+      expect(
+        loopClassifierResponse(body, 'loop-classifier'),
+        JSON.stringify(body),
+      ).toBeUndefined();
+    }
+    // A malformed element must not lose the allow for a block schema behind it.
+    expectResponse(
+      loopClassifierResponse(
+        { tools: [null, schemaBody(stage1).tools[0]] },
+        'loop-classifier',
       ),
-    ).toHaveLength(1);
+      'loop-classifier',
+      { shouldBlock: false },
+    );
+    // Several schema tools: the first match wins, so a later block schema does
+    // not rescue an earlier non-block one. Documented by assertion, not prose.
+    expect(
+      loopClassifierResponse(
+        {
+          tools: [
+            {
+              function: {
+                name: 'respond_in_schema',
+                parameters: { properties: { title: { type: 'string' } } },
+              },
+            },
+            {
+              function: {
+                name: 'respond_in_schema',
+                parameters: { properties: stage1 },
+              },
+            },
+          ],
+        },
+        'loop-classifier',
+      ),
+    ).toBeUndefined();
   });
 
-  // The unconditional shorthand rule needs a source of its own: the control
-  // above binds `shouldBlock` to `false` elsewhere and the initializer map is
-  // scope-insensitive, so a parameter-bound shorthand there resolves through
-  // that binding — deleting the rule survived unwitnessed until this source
-  // existed. The second assertion is the negative control for the widening: a
-  // schema is not an allow, so an object-valued key must stay out.
-  it('records a shorthand allow site with no false initializer anywhere', () => {
-    const wiring = loopClassifierWiring(
-      'function allow(shouldBlock) { return { shouldBlock }; }',
+  // The delegation predicate is executed against hostile sources, so each of
+  // its clauses is witnessed rather than assumed: on the committed runner every
+  // clause is satisfied by both the strong and the weak form, so weakening one
+  // would otherwise stay green. Every hostile shape below was measured to pass
+  // the weaker predicate it replaces, and the positive controls are rewrites
+  // that must stay green. The pin judges placement only; the data-flow shapes
+  // earlier rounds pinned here are covered by the packaged arms instead.
+  it('executes the delegation predicate against hostile wiring', () => {
+    const decision = [
+      "function classifierBlockAnswer(p) { return p && 'shouldBlock' in p ? { shouldBlock: false } : undefined; }",
+      "function loopClassifierResponse(body, callId) { const t = (body.tools || []).find((x) => x?.function?.name === 'respond_in_schema'); const a = classifierBlockAnswer(t?.function?.parameters?.properties); if (a === undefined) return undefined; return { toolCalls: [fakeToolCall('respond_in_schema', a, callId)] }; }",
+    ].join('\n');
+    // The arm flag is what separates the runner's three identically spelled
+    // fakes, so the fixtures carry it too.
+    const arm = (flag, lines) =>
+      'if (' +
+      flag +
+      ') {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+      lines +
+      '\n});\n}';
+    const skill = (lines) => arm('loopSkill', lines);
+    const fire = (lines) => arm('loopFire', lines);
+    const delegates = (id) =>
+      "const classified = loopClassifierResponse(body, '" +
+      id +
+      "');\nif (classified !== undefined) return classified;";
+    const SKILL = delegates('loop-classifier');
+    const FIRE = delegates('loop-fire-classifier');
+    const good = [decision, skill(SKILL), fire(FIRE)].join('\n');
+    const withSkill = (lines) =>
+      [decision, skill(lines), fire(FIRE)].join('\n');
+    const HAND =
+      "{ id: 'x', type: 'function', function: { name: 'respond_in_schema', arguments: '{\"shouldBlock\":false}' } }";
+    const answer = (element) =>
+      withSkill(
+        SKILL + "\nif (body['x']) return { toolCalls: [" + element + '] };',
+      );
+    // Baseline: the committed shape is accepted, so a clause below cannot be
+    // satisfied by a fixture that is broken for some unrelated reason.
+    expect(delegationViolations(classifierDelegation(good))).toEqual([]);
+    const cases = [
+      // A non-literal call id cannot be attributed to an arm.
+      [
+        'call-ids',
+        withSkill(
+          'const classified = loopClassifierResponse(body, someId);\nif (classified !== undefined) return classified;',
+        ),
+      ],
+      // Both arms passing one id leaves the two answers indistinguishable.
+      ['call-ids', [decision, skill(SKILL), fire(SKILL)].join('\n')],
+      // Both delegations served by ONE fake, the sibling arm's fake silent.
+      [
+        'distinct-callbacks',
+        [decision, skill(SKILL + '\n' + FIRE), fire('')].join('\n'),
+      ],
+      // Delegations left in dead top-level helpers: nothing is wired.
+      [
+        'arm-scoping',
+        [
+          decision,
+          'function unusedSkill() {\n' + SKILL + '\n}',
+          'function unusedFire() {\n' + FIRE + '\n}',
+          skill(''),
+          fire(''),
+        ].join('\n'),
+      ],
+      // The skill delegation parked in the durable failover fake, which has
+      // no arm flag: the skill arm itself answers nothing.
+      [
+        'arm-scoping',
+        [
+          decision,
+          'fake = await startFakeOpenAIServer(({ body }) => {\n' +
+            SKILL +
+            '\n});',
+          skill(''),
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // The same, with the failover fake wrapped in the arm's flag so it
+      // borrows the arm: the arm now holds two fakes.
+      [
+        'one-fake-per-arm',
+        [
+          decision,
+          'if (loopSkill) {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+            SKILL +
+            '\n});\n}',
+          skill(''),
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // Both delegations inside the fire arm, each in its own callback.
+      [
+        'arm-scoping',
+        [
+          decision,
+          skill(''),
+          'if (loopFire) {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+            SKILL +
+            '\n});\nfake2 = await startFakeOpenAIServer(({ body }) => {\n' +
+            FIRE +
+            '\n});\n}',
+        ].join('\n'),
+      ],
+      // A delegation parked in a dead class member inside the callback: the
+      // member is a function boundary, so the callback never delegates.
+      ['arm-scoping', withSkill('class K { m() { ' + SKILL + ' } }\nvoid K;')],
+      [
+        'arm-scoping',
+        withSkill('class K { get m() { ' + SKILL + ' } }\nvoid K;'),
+      ],
+      [
+        'arm-scoping',
+        withSkill('class K { constructor() { ' + SKILL + ' } }\nvoid K;'),
+      ],
+      // A setter is a function boundary too; its body cannot return a value,
+      // so the parked delegation here discards the call instead.
+      [
+        'arm-scoping',
+        withSkill(
+          "class K { set m(v) { loopClassifierResponse(body, 'loop-classifier'); } }\nvoid K;",
+        ),
+      ],
+      // The delegation gated by the SIBLING arm's flag inside this arm's fake:
+      // it only runs when the other arm is on, so this arm does not delegate.
+      ['arm-scoping', withSkill('if (loopFire) {\n' + SKILL + '\n}')],
+      // A fabricated body: the decision is fed a block schema of the arm's
+      // own making, so every structured side query gets an allow.
+      [
+        'argument-provenance',
+        withSkill(
+          "const classified = loopClassifierResponse({ tools: [{ function: { name: 'respond_in_schema', parameters: { properties: { shouldBlock: { type: 'boolean' } } } } }] }, 'loop-classifier');\nif (classified !== undefined) return classified;",
+        ),
+      ],
+      // Some other binding than the callback's own request body.
+      ['argument-provenance', withSkill(SKILL.replace('(body,', '(payload,'))],
+      // A bypass sibling answers non-block side queries with an allow.
+      [
+        'no-loop-answer-site',
+        answer(
+          "fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')",
+        ),
+      ],
+      // The same bypass one closure down, which a direct-body scan misses.
+      [
+        'no-loop-answer-site',
+        withSkill(
+          SKILL +
+            "\nconst bypass = () => ({ toolCalls: [fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')] });\nif (body['x']) return bypass();",
+        ),
+      ],
+      // The same bypass hand-built, which no fakeToolCall count can see.
+      [
+        'no-loop-hand-built',
+        answer(
+          "{ id: 'x', type: 'function', function: { name: 'respond_in_schema', arguments: '{\"shouldBlock\":false}' } }",
+        ),
+      ],
+      // A toolCalls source that is not an inline array cannot be enumerated.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst forged = [{ id: 'x' }];\nif (body['x']) return { toolCalls: forged };",
+        ),
+      ],
+      // Shorthand form of the same non-inline source.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst toolCalls = [{ id: 'x' }];\nif (body['x']) return { toolCalls };",
+        ),
+      ],
+      // A hoisted source that resolves to something other than an array: the
+      // hoist acceptance must not turn an unenumerable answer into a pass.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst forged = buildCalls();\nif (body['x']) return { toolCalls: forged };",
+        ),
+      ],
+      // A computed tool name is as unattributable as a hand-built element.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst name = 'respond_in_schema';\nif (body['x']) return { toolCalls: [fakeToolCall(name, { shouldBlock: false }, 'x')] };",
+        ),
+      ],
+      // A key the inventory cannot read is failed closed, not skipped.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nif (body['x']) return { ['tool' + 'Calls']: [" +
+            HAND +
+            '] };',
+        ),
+      ],
+      // The answer built after construction: assigned, indexed, or pushed.
+      ...[
+        "const answer = { content: 'f' };\nanswer.toolCalls = [" + HAND + '];',
+        "const answer = { toolCalls: [fakeToolCall('cron_list', {}, 'c')] };\nanswer.toolCalls[0] = " +
+          HAND +
+          ';',
+        "const answer = { toolCalls: [fakeToolCall('cron_list', {}, 'c')] };\nanswer.toolCalls.push(" +
+          HAND +
+          ');',
+      ].map((write) => [
+        'no-loop-hand-built',
+        withSkill(SKILL + '\n' + write + "\nif (body['x']) return answer;"),
+      ]),
+      // Two fakes under ONE arm's flag, each holding one delegation: the count
+      // is satisfied and only the set distinguishes this from two arms.
+      [
+        'one-fake-per-arm',
+        [
+          decision,
+          skill(SKILL),
+          'if (loopSkill) {\nfake2 = await startFakeOpenAIServer(({ body }) => {\n' +
+            FIRE +
+            '\n});\n}',
+        ].join('\n'),
+      ],
+      // The fire arm's whole block nested inside the skill arm: it is never
+      // reached when only the fire flag is set.
+      [
+        'one-fake-per-arm',
+        [
+          decision,
+          skill(SKILL),
+          'if (loopSkill) {\n' + fire(FIRE) + '\n}',
+        ].join('\n'),
+      ],
+      // A delegation whose own flag disagrees with its fake's arm: that arm's
+      // fake never runs it, so the arm answers nothing.
+      [
+        'arm-scoping',
+        [
+          decision,
+          skill(''),
+          'if (loopFire) {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+            'const skillRespond = () => {\nif (loopSkill) {\n' +
+            SKILL +
+            '\n}\n};\nvoid skillRespond;\n' +
+            'const fireRespond = () => {\n' +
+            FIRE +
+            '\n};\nvoid fireRespond;\n});\n}',
+        ].join('\n'),
+      ],
+      // A sibling field of the same handler context is not the request body.
+      [
+        'argument-provenance',
+        [
+          decision,
+          'if (loopSkill) {\nfake = await startFakeOpenAIServer(({ body, requestIndex }) => {\n' +
+            SKILL.replace('(body,', '(requestIndex,') +
+            '\n});\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // A bare redeclaration elsewhere makes the name ambiguous, so the
+      // shorthand must not resolve to the one array that happens to be found.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst toolCalls = [fakeToolCall('cron_list', {}, 'c')];\n{ let toolCalls; toolCalls = [" +
+            HAND +
+            "];\nif (body['x']) return { toolCalls }; }",
+        ),
+      ],
+      // An indexed write through a computed key is as unattributable as a
+      // computed property key.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst KEY = 'toolCalls';\nconst answer = { content: 'f' };\nanswer[KEY] = [" +
+            HAND +
+            "];\nif (body['x']) return answer;",
+        ),
+      ],
+      // In-place writers reach the member through an argument, not a receiver.
+      ...[
+        "Reflect.set(answer, 'toolCalls', [" + HAND + ']);',
+        "Object.defineProperty(answer, 'toolCalls', { value: [" +
+          HAND +
+          '] });',
+      ].map((write) => [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst answer = { content: 'f' };\n" +
+            write +
+            "\nif (body['x']) return answer;",
+        ),
+      ]),
+      // An allow hoisted outside the fake is the same answer as an inline one.
+      [
+        'no-loop-answer-site',
+        [
+          decision,
+          "const bypassCalls = [fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')];",
+          skill(SKILL + "\nif (body['x']) return { toolCalls: bypassCalls };"),
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // A spread carries properties the inventory cannot enumerate.
+      [
+        'no-loop-hand-built',
+        [
+          decision,
+          'const FORGED = { toolCalls: [' + HAND + '] };',
+          skill(SKILL + "\nif (body['x']) return { ...FORGED };"),
+          fire(FIRE),
+        ].join('\n'),
+      ],
+    ];
+    for (const [clause, source] of cases) {
+      expect(
+        delegationViolations(classifierDelegation(source)),
+        clause,
+      ).toContain(clause);
+    }
+    // Each hit must carry its site, or a red on the real runner names a clause
+    // and leaves 7,900 lines to bisect. Two different constructs that trip the
+    // same clause must be distinguishable.
+    const located = (lines) =>
+      classifierDelegation(withSkill(SKILL + '\n' + lines)).sites;
+    const nonArray = located(
+      "const forged = buildCalls();\nif (body['x']) return { toolCalls: forged };",
     );
-    expect(wiring.allowSites).toEqual(['allow']);
-    expect(
-      loopClassifierWiring(
-        "const schema = { shouldBlock: { type: 'boolean' } };",
-      ).allowSites,
-    ).toEqual([]);
+    const computedKey = located(
+      "if (body['x']) return { ['tool' + 'Calls']: [" + HAND + '] };',
+    );
+    for (const sites of [nonArray, computedKey]) {
+      expect(sites.length).toBeGreaterThan(0);
+      for (const site of sites) {
+        expect(site.clause).toBe('no-loop-hand-built');
+        expect(site.line).toBeGreaterThan(0);
+        expect(site.text.length).toBeGreaterThan(0);
+      }
+    }
+    expect(nonArray[0].line).not.toBe(computedKey[0].line);
+    expect(nonArray[0].text).not.toBe(computedKey[0].text);
+    // Behaviour-preserving rewrites of the same wiring must stay green.
+    const equivalent = [
+      // The fire arm placed before the skill arm.
+      ['arm order', [decision, fire(FIRE), skill(SKILL)].join('\n')],
+      // The two ids exchanged between the arms; nothing else reads them.
+      ['ids exchanged', [decision, skill(FIRE), fire(SKILL)].join('\n')],
+      // Every spelling of the gate: the pin no longer judges the gate at all,
+      // so none of these can be priced as a defect.
+      ...[
+        'if (classified !== undefined) return classified;',
+        'if (classified === undefined) { void 0; } else { return classified; }',
+        'if (classified) return classified;',
+        'if (classified != null) return classified;',
+        "if (typeof classified !== 'undefined') return classified;",
+        'if (Boolean(classified)) return classified;',
+      ].map((gate) => [
+        'gate spelling',
+        withSkill(
+          "const classified = loopClassifierResponse(body, 'loop-classifier');\n" +
+            gate,
+        ),
+      ]),
+      // The decision itself spelled as an arrow const.
+      [
+        'arrow-const decision',
+        [
+          decision.replace(
+            'function loopClassifierResponse(body, callId) {',
+            'const loopClassifierResponse = (body, callId) => {',
+          ),
+          skill(SKILL),
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // A legitimate third fake answering a title side query outside the loop
+      // arms: the inventory is confined to the loop fakes.
+      [
+        'third arm',
+        good +
+          '\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+          "return { toolCalls: [fakeToolCall('respond_in_schema', { title: 't' }, 'other-title')] };\n});",
+      ],
+      // A legitimate cron answer inside a loop arm: judged per element.
+      [
+        'cron answer',
+        withSkill(
+          SKILL +
+            "\nif (body['x']) return { toolCalls: [fakeToolCall('cron_list', {}, 'loop-cron-list')] };",
+        ),
+      ],
+      // The same cron answer hoisted into a named array: same emitted bytes.
+      [
+        'hoisted cron array',
+        withSkill(
+          SKILL +
+            "\nconst cronListCalls = [fakeToolCall('cron_list', {}, 'loop-cron-list')];\nif (body['x']) return { toolCalls: cronListCalls };",
+        ),
+      ],
+      // Both arm flags renamed: they are module locals, not a contract.
+      [
+        'renamed arm flags',
+        [decision, arm('skillArm', SKILL), arm('fireArm', FIRE)].join('\n'),
+      ],
+      // The request binding renamed with the delegation that reads it.
+      [
+        'renamed request binding',
+        [
+          decision,
+          'if (loopSkill) {\nfake = await startFakeOpenAIServer(({ body: req }) => {\n' +
+            SKILL.replace('(body,', '(req,') +
+            '\n});\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // The delegation wrapped in a closure the callback declares.
+      [
+        'closure-wrapped delegation',
+        withSkill(
+          "const respond = () => loopClassifierResponse(body, 'loop-classifier');\nconst classified = respond();\nif (classified !== undefined) return classified;",
+        ),
+      ],
+      // The arm callback hoisted into a named binding and passed by reference.
+      [
+        'named hoisted callback',
+        [
+          decision,
+          'if (loopSkill) {\nconst skillFake = ({ body }) => {\n' +
+            SKILL +
+            '\n};\nfake = await startFakeOpenAIServer(skillFake);\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // Both arm blocks wrapped in one more flag: the wrapper is not an arm,
+      // because no delegation reports it.
+      [
+        'extra wrapper flag',
+        [
+          decision,
+          'if (loopArm) {\n' + skill(SKILL) + '\n' + fire(FIRE) + '\n}',
+        ].join('\n'),
+      ],
+      // A by-reference callback declared ABOVE the flag: the arm is read where
+      // the fake is started, not where the callback is written.
+      [
+        'callback declared above the flag',
+        [
+          decision,
+          'const skillFake = ({ body }) => {\n' + SKILL + '\n};',
+          'if (loopSkill) {\nfake = await startFakeOpenAIServer(skillFake);\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // A named function declaration is the same closure as an arrow here.
+      [
+        'function-declaration closure',
+        withSkill(
+          'function respond() {\n' +
+            SKILL +
+            '\n}\nconst classified2 = respond();\nvoid classified2;',
+        ),
+      ],
+      // The flag tested against a literal boolean is the same flag.
+      [
+        'comparison-spelled guard',
+        [
+          decision,
+          'if (loopSkill === true) {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+            SKILL +
+            '\n});\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // A shorthand of a hoisted alias of the cron array: same emitted bytes.
+      [
+        'shorthand hoist',
+        withSkill(
+          SKILL +
+            "\nconst cronListCalls = [fakeToolCall('cron_list', {}, 'loop-cron-list')];\nconst toolCalls = cronListCalls;\nif (body['x']) return { toolCalls };",
+        ),
+      ],
+      // Reading a toolCalls member builds no answer.
+      [
+        'read-only member call',
+        withSkill(
+          SKILL +
+            "\nconst ids = history.toolCalls.filter((c) => c.id === 'loop-create');\nvoid ids;",
+        ),
+      ],
+      // A fake under a flag that no delegation reports is not a loop arm, so
+      // its answers are outside this pin's reach — the durable-failover shape.
+      [
+        'hand-built under a non-arm flag',
+        good +
+          '\nif (durableFailover) {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+          "if (body['x']) return { toolCalls: [" +
+          HAND +
+          '] };\n});\n}',
+      ],
+      // A hand-built element in a fake with no arm flag is outside this pin's
+      // reach, exactly as the not-covered table says.
+      [
+        'hand-built in an unflagged fake',
+        good +
+          '\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+          "if (body['x']) return { toolCalls: [" +
+          HAND +
+          '] };\n});',
+      ],
+    ];
+    for (const [label, source] of equivalent) {
+      expect(delegationViolations(classifierDelegation(source)), label).toEqual(
+        [],
+      );
+    }
   });
 
   // The fake-side minted-id extraction is executed, not counted as source

@@ -1,0 +1,148 @@
+# Managed /loop 分类器：执行判定，而非扫描它
+
+- 状态：提案
+- 日期：2026-11-20
+- 关联：[延后评审钉子](2026-11-17-managed-loop-deferred-pins.zh-CN.md)（#17594，已合入）、跟踪 issue #17673 第 1 项
+- English version: [2026-11-20-managed-loop-classifier-executed-seam.md](2026-11-20-managed-loop-classifier-executed-seam.md)
+
+## 问题陈述
+
+managed-agent E2E runner 在每个 fake 模型回调内部回答 `cron_create` 的准入侧查询。接缝画在 `blockProperties`：schema 查找、收窄、门与 answer 站点全部内联在 fake 里，故快速测试唯一能断言的是它们的**形态**。一个手写 AST 扫描器为该形态做库存，而 #17594 的十四轮评审大部分花在「新实测出一个兄弟形状绕过扫描器之后再扩展扫描器」上。
+
+该 evasion 面按构造就是无界的。任何「写同一个值、或发同一个答案，但不按扫描器寻找的拼写来写」的方式都能击败它。第 13、14 轮实测出八个这样的兄弟并逐个关闭——shorthand 的 `toolCalls` 键、shorthand 的 allow 键、值为「曾初始化为 `false` 的绑定」的 allow、rest 解构写入、带括号与带类型转换的赋值目标、for-of / for-in 初始化器——而每次关闭都是又一份以另一种拼写为键的库存。残留已有记录：以 `!true` 或 `Boolean(false)` 算出的 allow 不拼写 `false`，任何拼写库存都看不见它。
+
+同一根因还带来两项代价。两条臂携带**除 call id 外逐字节相同的判定块**，故对一条臂的修复可能静默漏掉另一条。而扫描器自身的「非空转」必须靠一个敌意控制来证明，该控制已长到 21 种写入形态、5 个 allow 站点、7 个 answer 站点、13 个工具名站点与 5 次 helper 调用——这份夹具的唯一用途就是显示扫描器没有闲着。
+
+## 现状
+
+在 `768cad5fcc` 上实测：
+
+| 站点                                                          | 作用                                                                                                                                                                                                               |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `scripts/run-managed-agent-server-e2e.ts:2718`                | `classifierBlockAnswer(blockProperties)`——已是顶层纯函数、已被元测试执行。收窄 block schema：阶段 1 给出 `{ shouldBlock: false }`，阶段 2 追加 `thinking`/`reason`，非 block schema 给出 `undefined`。             |
+| 同文件 `:3068`–`:3092`                                        | skill 臂的内联判定：tools 提取 → `respond_in_schema` 查找 → `blockProperties` → helper → `!== undefined` 门 → `{ toolCalls: [fakeToolCall('respond_in_schema', blockAnswer, 'loop-classifier')] }`，否则继续往下。 |
+| 同文件 `:3167`–`:3191`                                        | fire 臂的内联判定——除 call id `'loop-fire-classifier'` 外完全相同。                                                                                                                                                |
+| `integration-tests/fake-openai-server.ts:115`                 | `fakeToolCall(name, args, id)` → `{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }`。第三参即 tool-call id。                                                                          |
+| `scripts/tests/managed-agent-server-e2e.test.js:710` / `:741` | `extracted(names)` 从 runner 切出**顶层**声明并转译；`load(names, returns, ...params)` 构造注入依赖的 `new Function`。这是既有的执行机制，`:4096` 已用它执行 `classifierBlockAnswer`。                             |
+| 同文件 `:157` / `:509`                                        | `loopClassifierWiring` / `loopClassifierScope`——扫描器及其 loop 回调域限定，产出十份库存。                                                                                                                         |
+| 同文件 `:3890`                                                | 钉测试。既断言这十份分类器库存，**也**断言无关契约（arm 终端、body 域、caller-import 标记、sidecar 判别、union 标记）。                                                                                            |
+| 同文件 `:4153` / `:4413`                                      | 被执行的敌意控制与隔离 allow 站点用例——两者都只为证明扫描器非空转而存在。                                                                                                                                          |
+
+扫描器在本元测试之外没有消费者；其它引用只有 #17594 的历史设计记录。
+
+## 拟议改动
+
+### Runner：一个被执行的判定，两条委托的臂
+
+在 `classifierBlockAnswer` 旁新增顶层纯函数：
+
+`loopClassifierResponse(body, callId)` 对 block-schema 侧查询返回整个 fake 响应，请求不是该查询时返回 `undefined`。它执行 tools 提取、`respond_in_schema` 查找、properties 读取、经 `classifierBlockAnswer` 的收窄与门，并用 `fakeToolCall` 构造响应。两个 fake 把各自的内联块替换为委托：函数结果有定义就返回它，否则完全按今天的方式继续往下。
+
+该函数为顶层，故既有 `extracted`/`load` 机制无需改动即可触达；`fakeToolCall` 作为依赖注入，与 `waitUntil` 注入 `inspect` 的方式相同。
+
+### 元测试：执行判定，退役形态库存
+
+新增一个被执行的测试，用敌意 body 驱动 `loopClassifierResponse`，断言**整个响应**——工具名、call id 与 arguments 载荷一起——或 `undefined`。敌意方向：阶段 1 与阶段 2 的 block schema；三种非 block 侧查询（title、tool-use summary、next speaker）；缺失、非数组与畸形的 `tools`；名字不是 `respond_in_schema` 的 schema 工具；多个 schema 工具而非 block schema 排在 block schema 之前，故首匹配胜出、后面的 block schema 不会补救；畸形的 `tools` 元素与非对象的 `properties`，必须落穿而非抛错；以及两个 call id，使一条臂无法在另一条的 id 下作答。
+
+退役 `loopClassifierWiring`、`loopClassifierScope`、写入者名集与目标包装集、钉测试里的十条分类器断言、敌意控制与隔离 allow 站点用例。保留钉测试中一切与分类器判定无关的内容，并保留独立的 minted-id 面（`mintedIdWiring`、`mintedScheduleId`、fake-createdId 钉）不动。
+
+以一条小的**落位**钉取代被退役的库存，由一个逐子句命名的判据裁定，并由一个敌意源控制逐子句执行见证。它只检查委托落在哪里、以及旁边没有别的东西在作答——七条子句，不做数据流分析：
+
+- 两次委托，各传一个**字面量** call id，id 按**集合**比较；
+- 两次委托位于**互异**的回调；
+- 每次委托都在 `startFakeOpenAIServer` 回调内，两条 loop 臂各一次，以臂 flag 而非 id 为键；
+- **每条臂恰一个 fake**，故第二个包在同一 flag 里的 fake 不能把臂借给停在 durable failover server 里的委托；
+- 首参是回调自身的 `body` 参数；
+- 在 loop 臂的 fake 内——**包括它声明的任何闭包**——不得有 `respond_in_schema` 应答，也不得有「不是带字面量工具名的 `fakeToolCall`」的 `toolCalls` 元素。库存按**元素**而非按属性裁定，因为两条臂都为 cron 夹具合法地构造 `toolCalls`。
+
+落位是**解析**出来的、不是匹配拼写，而且只有**一套「臂」的定义**。fake 的臂在其 `startFakeOpenAIServer` **调用点**读取，故声明在 flag 之上、在块内按引用传入的回调仍属于该臂。委托的臂取自**它所在的 fake**；若围绕委托的 flag 与该 fake 的臂不一致，说明该臂根本不会执行它。两份库存都在**第二遍**按「确实委托了的臂集合」过滤，durable-failover fake 因此被排除。臂 flag 是直接测试、**或与字面布尔比较**的布尔局部量；没有委托报告的包装 flag 不算臂。
+
+其余也一律解析：按**引用**传入的 fake 解析到其声明；请求绑定只取绑定 **`body` 属性**的那个 binding element，同一 handler context 的兄弟字段不算；包在**闭包**里的委托——箭头、函数表达式或具名声明——仍属其 fake，类成员不算；**提升**的应答数组沿标识符链跟随，任何有超过一处声明的名字（**有无初始化式都算**）解析为空，而不是瞎猜。
+
+应答库存对无法枚举者一律 fail-closed：读不出的属性键**或下标键**、spread 赋值、以及构造之后才建起来的应答——赋值、按下标写、经**变异方法** push、或由原地写入器（`Object.assign`、`defineProperty`、`Reflect.set`）经实参触达成员。对 `toolCalls` 成员的**只读**调用不构造应答，故不判红。提到 fake 之外的 allow 与内联的是同一个应答。
+
+### 该钉有意不覆盖的部分
+
+三轮评审量出了「让快速结构钉去判数据流」会发生什么。第 1 轮找出六种形状，第 2 轮在第 1 轮刚加的子句里又找出六种，第 3 轮在第 2 轮刚加的子句里再找出十一种——每关闭一个就长出一个新绕过和一个新误红，因为用 AST 识别 provenance、门、重写与 fall-through，就是对无界改写空间做手写语义分析。那正是本 PR 要为判定终结的同一台跑步机，只是上移了一层。
+
+因此数据流子句是**按决定退役**的，以下内容明确不由快速钉覆盖。每一项在退役前都用已提交判据实测读作 `[]`，故没有一项是静默缺口：
+
+| 不覆盖                         | 实测形状举例                                                                                   |
+| ------------------------------ | ---------------------------------------------------------------------------------------------- |
+| 结果是否被返回                 | 臂绑定了判定却把结果丢弃                                                                       |
+| 门的存在、拼写与极性           | `if (classified === undefined) return classified;`、`undefined === classified`、从错误分支返回 |
+| 对绑定名的重写                 | `classified = undefined`、解构、for-of、`++`、`delete`、`Object.assign`                        |
+| 门之后的 fall-through          | `return classified;`、`return classified ?? fixture;`、直接返回调用                            |
+| 超出参数名本身的来源           | 调用前 `body` 被重写或遮蔽                                                                     |
+| 绑定名的别名                   | `const alias = classified; return alias;`                                                      |
+| 由回调调用的 helper 构造的应答 | `return bypass(body);`——调用点没有 `toolCalls` 属性                                            |
+| loop 臂之外的 fake 里的应答    | durable-failover fake 用 loop call id 作答                                                     |
+| 请求 body 的 schema 被写入     | 臂在委托前把 `shouldBlock` 写进 `body.tools[0]…properties`                                     |
+
+**这些里哪些真被打包臂抓住，是实测的、不是假定的。** 只改 skill 臂的委托，「丢弃判定结果」与「吞掉 fall-through」各自让打包 skill 臂失败（`Cron schedule admission denied: Classifier stage 1 unavailable` 与 `Managed Turn terminal event did not become ready`），而已提交的委托通过。有两行**未经臂验证**：委托前写入请求 body 的 schema 已跑过打包 skill 臂，结果是**通过**（rc=0、modelRounds 6、cronCreate true）；而 durable-failover fake 里的应答根本不在 skill 臂的执行路径上。这两项今天两条通道都不覆盖，如实单列，不并入「臂兜底」的说法。要闭合 body 写入那条需要别名追踪——写入落在由 `body` 派生的绑定上、而非 `body` 本身——那正是本钉已停止判定的数据流家族。
+
+快速钉是对落位的廉价冒烟检查；它不是判定的第二份副本，也不是打包臂的替代品。
+
+## 关键设计决策
+
+- **一个按 call id 参数化的函数，而非两份副本。** 两个块除 id 外已经相同；复制它们正是「修复到达一条臂而漏掉另一条」的成因。参数化还让「一条臂在另一条的 id 下作答」成为被执行测试可断言的方向。
+- **返回整个响应，而非只返回 answer。** 只断言 answer 会让工具名与 call id 无钉，而分别钉它们又会重演分散断言此前暴露过的映射弱点。对响应做一次深比较即钉住映射。
+- **保留落位钉，去掉判定库存与数据流子句。** 快速套件跑不了打包臂，故「fake 确实从正确的位置委托了」需要一条廉价断言。无界家族住在判定**内部**，执行判定把这一家族直接消除。随后三轮评审表明：用 AST 去判接线的**数据流**，等于把同一家族上移一层重新踏入，故该钉止步于落位，行为归打包臂。
+- **退役扫描器，而非留作「第二意见」。** 一个行为两套守卫会互相漂移，而扫描器的维护成本正是本次要移除的东西。其历史记录留在 #17594 设计文档里。
+- **`undefined` 保持其确切含义。** 它表示「不是 block 侧查询，继续走 fake 的其余部分」。委托不得把它转成响应，也不得吞掉继续往下的路径。该不变式由被执行的判定测试与打包臂承担；快速钉不再声称检查它。
+
+## 三轮评审，以及它们指向哪里
+
+下面每个形状都在动手之前，用当时已提交的判据在真实 runner 文本上实测过。已提交的 runner 始终读作 `[]`。
+
+**第 1 轮**（PR 上的 bot 评审）在第一版替换钉里找出六条：漏判手搭与计算名应答、伪造 body 实参、重写写入、类成员内的 return、停在别条臂 fake 里的委托、被吞掉的 fall-through；同时把六种保行为改写判红——臂块顺序、id 互换、nullish 兜底返回、倒置的 undefined 门、箭头常量判定、以及合法第三个 fake 应答 title 查询。
+
+**第 2 轮**（17 agent 本地评审）在修正后的钉里又找出六条：十一种非裸写入拼写、被别的绑定的门豁免的 return、被重写或遮蔽的 `body`、被判成缺陷的五种等价门拼写、别名，以及——按打包臂证据推翻的——第 1 轮对直接返回的接受，该形式无论裸写还是加 `??` 兜底都让 skill 臂失败。
+
+**第 3 轮**（17 agent 本地评审）在**那些**子句里再找出十一条：`delete` 与原地 API 写入、返回别的绑定的第二个门、被嵌套 `if` 借走的臂 flag、绑定名的块级遮蔽、交换律的 `undefined === classified`、被判成缺陷的非包围 `body` 遮蔽、从错误分支返回、以及在下一层闭包里构造的应答。零 Critical；无方向审计直接点破了成因——接线钉已变成对无界改写空间的手写语义分析。
+
+第 3 轮里有两种形状属于落位缺陷而非数据流，已在缩小后的钉里修复：被借走的臂 flag（现为 `one-fake-per-arm`，臂按回调键控）与下一层闭包里的应答（库存现在遍历每一层外层函数）。其余即上面列出的已退役数据流检查。
+
+第 3 轮之后由维护者拍板：停止让钉继续长大，把它缩到落位。两项实测支撑该决定：钉已长到约 370 行 AST 分析，守的却是两行委托；且每一轮的修复都生出了下一轮的发现。**行数按版本分别标注，因为第 4 轮又把它撑回去了**：`classifierDelegation` 加 `delegationViolations` 在第 3 轮提交 `d1ebe200b2` 上是 165 行（141 非注释），第 4 轮后 301 行（254），第 5 轮后**交付版 431 行（389 非注释）**。**因此交付版的钉比它替换掉的约 370 行扫描器更大。** 第 4、5 轮的增长都花在消除落位子句的误红与闭合绕过上；缩减最初的成本论据已不成立，「是否还保留这条钉」应按这个数字重新评估，而不是按第 3 轮那个。扫描耗时**不承重**：单独跑 `classifierDelegation` 七次，本机中位 92.7 ms、区间 81.6–174.5 ms，离散过大，故只把行数当作成本引用。
+
+此前有一条变异存活，已归因而非掩盖：要求门分支内每条 return「读取该绑定且不得读别的」没有隔离夹具，因为它会误红 `return classified ?? other`——门内的死兜底。它被移除，而不是用硬造的夹具去佐证一条会把正确改写判成缺陷的规则。那正是第 3 轮在更大尺度上确认的同一信号。
+
+## 评审第 4 轮：落位也犯了同样的拼写毛病
+
+对缩小后的钉再做一次评审，返回 0 Critical、6 条 Suggestion。其中两条针对记录本身而非判据：一条正向对照列了记录判定为破坏行为的形状；一处拼接产生的收尾花括号吞掉了下一个测试的起始注释。一条针对被执行测试：把 payload 当预序列化 JSON 字符串比较，钉住的是答案的**键插入顺序**，故把 `classifierBlockAnswer` 的三个键换个顺序就会让保行为改写变红；现在 payload 解析后再比较。
+
+另外三条量出落位子句里的五种绕过与五种误红，十种全部先复现。五种误红——臂 flag 改名、请求绑定改名、提升的 cron 数组、闭包包裹的委托、按引用传入的回调——**已全部消除**，因为落位改为解析而非匹配。绕过闭合了六种：计算式 `toolCalls` 键、三种构造后成员写入、同一臂 flag 下两个 fake、fire 块嵌在 skill 臂内。其余两种已补进上面的「不覆盖」表。body 写入那条随后跑了打包 skill 臂，结果**通过**，故记为两条通道都不覆盖，而非「臂兜底」；要闭合它需要别名追踪，属已退役的数据流家族。
+
+有一处早先的归因是错的，在此更正：第 3 轮把 fake 臂多重集当作「arm-scoping 的第二份副本」删掉了。第 4 轮「同一 flag 下两个 fake」的形状表明它不是——两次委托的臂可以看着正确，而两个 fake 的臂并不正确。该检查已恢复，并以该形状作为其隔离夹具。
+
+## 评审第 5 轮：统一「臂」的定义
+
+第 5 轮返回 0 Critical、5 条 Suggestion。其中三条针对记录与诊断而非判据：一处注释仍在论证删掉记录已恢复的 fake 臂集合检查；行数与耗时口径描述的是第 3 轮的钉而非交付版；变红只报子句名、没有文件/行号/源文本，相对本改动删除的扫描器是退步。现在每次命中都带行号与文本，钉把它们作为断言消息传入。
+
+另外两条把 R2-1/R2-2 延续下来，共七种绕过与七种误红。十四种全部先复现，而它们有**同一个根因**：钉保留了两套臂定义——委托取最近 flag、fake 取最外层——且在遍历过程中就过滤库存，那时臂集合还不存在。把臂统一到 fake 的调用点、并把过滤移到第二遍，一次消除了全部七种误红；其余绕过由上面列出的解析逐项闭合。十四种都成了提交夹具（七敌意、七正控制），已提交 runner 仍读 `[]`。
+
+## 涉及文件
+
+| 文件                                                                            | 改动                                                                                                        |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `scripts/run-managed-agent-server-e2e.ts`                                       | 新增 `loopClassifierResponse`；两个 fake 委托给它                                                           |
+| `scripts/tests/managed-agent-server-e2e.test.js`                                | 新增被执行的判定测试；有界委托钉；退役扫描器、其两个辅助集合、十条分类器断言、敌意控制与隔离 allow 站点用例 |
+| `docs/design/2026-11-20-managed-loop-classifier-executed-seam.md` / `.zh-CN.md` | 本记录                                                                                                      |
+
+不改任何生产运行时模块、契约、sidecar 或 Java 文件。runner 属 E2E 基础设施。
+
+## 范围边界
+
+只做 #17673 第 1 项。第 2–6 项（派生退化阈值、跨语言 fixture 绑定、形态无关的 Java 路由断言、唯一导出的 Parsing 语法、机读 creator 声明）不动，minted-id 面与同一测试里所有非分类器钉也不动。打包臂作为验证重跑，不被修改。
+
+## 验证
+
+本改动只涉及测试基础设施，故承重证据是：被执行的判定测试在变异下对每个敌意方向打红（additive fallback、伪造 schema、错误 call id、去掉门）；委托钉的每条子句在「单独删掉它」或「把它收窄回去」时打红，接受等价改写的那些子句也一样；退役那些库存不削弱任何存活钉子；以及重建后两条打包臂仍通过，fire 臂的 scheduled/fired/completed 见证完好。
+
+落位钉的子句逐条见证，而非整块见证：整条删除可能被兄弟子句杀掉，而对它做一处记号的收窄却仍能全绿。
+
+当快速通道的判定与评审者关于行为的主张相左时，由打包臂裁决。第 2 轮正是这样推翻了第 1 轮的一项接受；收口决定也用同一方式论证：只改 skill 臂的委托，「丢弃判定结果」与「吞掉 fall-through」各自让打包臂失败，而已提交的委托通过。每次跑臂后 runner 均字节还原。
+
+## 开放问题
+
+无阻塞项。函数留在 runner 而非移到共享模块，因为 `extracted` 从该文件切顶层声明，移走会需要一个新的 loader 而无收益。
