@@ -50,20 +50,67 @@ export function command(
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      if (code === 0 && outputSize <= 4 * 1024 * 1024)
-        resolveCommand(
-          binary ? Buffer.concat(output) : Buffer.concat(output).toString(),
-        );
-      else {
-        const status = Number(stderr.match(/HTTP (\d{3})/)?.[1] || 0);
-        const error = new Error(
-          `${program} failed (exit ${code}${status ? `, HTTP ${status}` : ''})`,
-        );
-        error.status = status;
-        error.exitCode = code;
-        error.stderr = stderr.slice(0, 8192);
-        reject(error);
+      const stdout = Buffer.concat(output);
+      const text = binary ? '' : stdout.toString();
+      const response = args.includes('--include')
+        ? /^HTTP\/[\d.]+ (\d{3})[^\r\n]*\r?\n((?:[^\r\n]+\r?\n)*)\r?\n/.exec(
+            text,
+          )
+        : null;
+      if (code === 0 && outputSize <= 4 * 1024 * 1024) {
+        resolveCommand(binary ? stdout : text.slice(response?.[0].length ?? 0));
+        return;
       }
+      const status = Number(
+        response?.[1] ?? stderr.match(/HTTP (\d{3})/)?.[1] ?? 0,
+      );
+      const error = new Error(
+        `${program} failed (exit ${code}${status ? `, HTTP ${status}` : ''})`,
+      );
+      error.status = status;
+      error.exitCode = code;
+      error.stderr = stderr.slice(0, 8192);
+      if (response && (status === 403 || status === 429)) {
+        const headers = new Map(
+          response[2]
+            .trim()
+            .split(/\r?\n/)
+            .map((line) => {
+              const colon = line.indexOf(':');
+              return [
+                line.slice(0, colon).toLowerCase(),
+                line.slice(colon + 1).trim(),
+              ];
+            }),
+        );
+        const retryAfter = headers.get('retry-after');
+        const reset = headers.get('x-ratelimit-reset');
+        const exhausted = headers.get('x-ratelimit-remaining') === '0';
+        error.rateLimited =
+          status === 429 ||
+          exhausted ||
+          retryAfter !== undefined ||
+          /rate limit|abuse detection/i.test(stderr);
+        const now = Date.now();
+        const retryAfterAt = /^\d+$/.test(retryAfter ?? '')
+          ? now + Number(retryAfter) * 1000
+          : 0;
+        const resetAt =
+          exhausted && /^\d+$/.test(reset ?? '') ? Number(reset) * 1000 : 0;
+        // The primary quota resets hourly. Allow clock skew, but reject values
+        // too far away to be this window (such as epoch milliseconds).
+        const resetTooFar = resetAt > now + 7_200_000;
+        if (resetTooFar) error.ignoredRateLimitReset = true;
+        const retryAt = Math.max(
+          Number.isSafeInteger(retryAfterAt) ? retryAfterAt : 0,
+          resetTooFar ? 0 : resetAt,
+        );
+        if (retryAt > now) error.retryAt = retryAt;
+        if (!error.rateLimited)
+          error.message =
+            'GitHub runner registration permission denied (HTTP 403)';
+      }
+      reject(error);
     });
     child.stdin.on('error', () => {});
     child.stdin.end(input);
@@ -188,25 +235,22 @@ export function createManager(config, dependencies = {}) {
   const lockPath = join(stateDir, 'manager.lock');
   const slotPath = (slot) => join(stateDir, `slot-${slot}.json`);
   const log = (message) => console.log(`[${config.poolId}] ${message}`);
-  // Time-based, not retry-count-based: with jittered exponential backoff a
-  // retry count no longer maps to a fixed wall-clock delay. Half an hour is
-  // long enough that a pool-wide rate-limit storm — every slot backing off on
-  // the same 300 s ceiling — does not put one alert per slot in the journal at
-  // once, and short enough that a genuinely wedged slot is still surfaced
-  // within a shift.
+  // Time-based, not retry-count-based: neither jittered backoff nor a GitHub
+  // retry deadline maps a retry count to a fixed wall-clock delay.
   const stallAlertMs = (config.stallAlertSeconds ?? 1800) * 1000;
   // A backoff sleep must stay interruptible: the service gives the manager
-  // TimeoutStopSec to exit, and an unsliced five-minute sleep would have
+  // TimeoutStopSec to exit, and an unsliced long sleep would have
   // systemd SIGKILL it mid-cycle. Wake at least once a second and cut the
   // sleep short once stop() sets the stopping flag. The flag alone bounds
   // the overshoot to one 1 s slice; a stopAt term here would also make the
   // loop skip every slice when shutdownGraceSeconds is 0.
-  const interruptibleWait = async (ms) => {
+  const interruptibleWait = async (ms, onTick) => {
     let remaining = ms;
     while (!stopping && remaining > 0) {
       const chunk = Math.min(1000, remaining);
       await wait(chunk);
       remaining -= chunk;
+      if (!stopping) onTick?.();
     }
   };
   // Draining is a shutdown-only cost, so a five-second poll per slot is
@@ -775,6 +819,7 @@ export function createManager(config, dependencies = {}) {
       result = parseJson(
         await gh(
           [
+            '--include',
             '-X',
             'POST',
             `/repos/${config.repo}/actions/runners/generate-jitconfig`,
@@ -793,6 +838,16 @@ export function createManager(config, dependencies = {}) {
       // escaped error is what the retry loop reads its backoff ladder from, so
       // a cleanup failure must not downgrade a rate-limited request to the
       // ordinary ladder.
+      if (error.rateLimited !== undefined) {
+        // This registration was refused before creating a runner, and this
+        // cycle already reconciled the slot. Avoid another API call for cleanup.
+        await rm(slotPath(slot), { force: true }).catch((cleanupError) => {
+          log(
+            `slot ${slot}: cleanup after a rejected JIT request also failed (${cleanupError.message})`,
+          );
+        });
+        throw error;
+      }
       const rateLimited = error.status === 403 || error.status === 429;
       try {
         if (error.status >= 400 && error.status < 500 && error.status !== 408) {
@@ -1157,19 +1212,46 @@ export function createManager(config, dependencies = {}) {
               // still escalates instead of restarting from the base delay.
               consecutiveFailures += 1;
               const isRateLimited =
-                error.status === 403 || error.status === 429;
-              const delay = backoffDelay(consecutiveFailures, isRateLimited);
-              if (!stallAlerted && Date.now() - stalledSince >= stallAlertMs) {
+                error.rateLimited ??
+                (error.status === 403 || error.status === 429);
+              const remaining = Math.max(0, (error.retryAt ?? 0) - Date.now());
+              // Slots share a deadline. Spread requests after it so even the
+              // earliest retry cannot run before GitHub allows it.
+              const delay =
+                error.retryAt !== undefined
+                  ? remaining +
+                    Math.floor(
+                      Math.random() *
+                        Math.min(30_000, Math.max(5_000, remaining / 10)),
+                    )
+                  : backoffDelay(consecutiveFailures, isRateLimited);
+              const reportStall = () => {
+                if (stallAlerted) return false;
+                const stalledFor = Date.now() - stalledSince;
+                if (stalledFor < stallAlertMs) return false;
                 stallAlerted = true;
+                const detail =
+                  error.retryAt === undefined
+                    ? 'this slot is backing off before retrying'
+                    : 'this slot is waiting to retry after a GitHub rate limit';
                 log(
-                  `STALL ALERT slot ${slot}: no runner replenished for ${Math.round((Date.now() - stalledSince) / 1000)}s across ${failures} consecutive identical failures ` +
-                    `(${error.message}); this slot serves no jobs until it is reconciled`,
+                  `STALL ALERT slot ${slot}: no runner replenished for ${Math.round(stalledFor / 1000)}s across ${failures} consecutive identical failures ` +
+                    `(${error.message}); ${detail}`,
                 );
-              } else
+                return true;
+              };
+              if (error.ignoredRateLimitReset)
                 log(
-                  `slot ${slot}: ${error.message}; retrying in ${Math.round(delay / 1000)}s without replenishing`,
+                  `slot ${slot}: ignored X-RateLimit-Reset more than 2 hours away`,
                 );
-              await interruptibleWait(delay);
+              if (!reportStall())
+                log(
+                  `slot ${slot}: ${error.message}; ${error.rateLimited === false ? 'check runner administration permissions and restart if the token changes; next attempt' : 'retrying'} in ${Math.round(delay / 1000)}s without replenishing`,
+                );
+              await interruptibleWait(
+                delay,
+                error.retryAt === undefined ? undefined : reportStall,
+              );
             }
           }
         }),

@@ -1177,6 +1177,27 @@ test('does not expose malformed GitHub responses in errors', async (t) => {
   );
 });
 
+test('JIT registration still consumes the body when response headers are included', async (t) => {
+  const f = await fixture(t);
+  const manager = createManager(f.config, {
+    command: async (program, args, options) => {
+      const output = await f.command(program, args, options);
+      if (!args.includes('--include')) return output;
+      const response = `HTTP/2.0 201 Created\nContent-Type: application/json\r\n\r\n${output}`;
+      return runCommand(process.execPath, [
+        '-e',
+        'process.stdout.write(process.argv[1]);',
+        '--',
+        response,
+        ...args,
+      ]);
+    },
+    sleep: f.sleep,
+  });
+  await manager.cycle(1);
+  assert.ok(f.calls.some(({ args }) => args[0] === 'start'));
+});
+
 test('HTTP 429 rejection does not leave uncertain state and the next cycle can retry', async (t) => {
   const f = await fixture(t);
   const fakeGh = join(f.config.stateDir, 'gh');
@@ -2306,6 +2327,262 @@ async function stallHarness(t, { random = 0 } = {}) {
     alerts: () => messages.filter((message) => message.includes('STALL ALERT')),
   };
 }
+
+test('runner registration retries honor GitHub response headers', async (t) => {
+  const cases = [
+    {
+      name: 'waits for the primary quota reset',
+      status: 403,
+      reason: 'Forbidden',
+      headers: 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1090',
+      minDelay: 90_000,
+      maxDelay: 91_000,
+    },
+    {
+      name: 'caps the spread after a long deadline',
+      status: 429,
+      reason: 'Too Many Requests',
+      headers: 'Retry-After: 400',
+      random: 0.5,
+      minDelay: 415_000,
+      maxDelay: 415_000,
+    },
+    {
+      name: 'spreads retries past a shared primary reset',
+      status: 403,
+      reason: 'API rate limit exceeded',
+      headers: 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1090',
+      random: 0.5,
+      minDelay: 93_000,
+      maxDelay: 99_000,
+    },
+    {
+      name: 'spreads retries after a short secondary limit',
+      status: 429,
+      reason: 'You have exceeded a secondary rate limit',
+      headers: 'Retry-After: 4',
+      random: 0.75,
+      minDelay: 7_000,
+      maxDelay: 9_000,
+    },
+    {
+      name: 'honors the secondary limit Retry-After',
+      status: 429,
+      reason: 'You have exceeded a secondary rate limit',
+      headers: 'Retry-After: 75',
+      minDelay: 75_000,
+      maxDelay: 76_000,
+    },
+    {
+      name: 'uses Retry-After as rate-limit evidence on a 403',
+      status: 403,
+      reason: 'Forbidden',
+      headers: 'Retry-After: 75\r\nX-RateLimit-Remaining: 42',
+      minDelay: 75_000,
+      maxDelay: 76_000,
+    },
+    {
+      name: 'honors the later of Retry-After and primary reset',
+      status: 403,
+      reason: 'API rate limit exceeded',
+      headers:
+        'Retry-After: 10\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1090',
+      minDelay: 90_000,
+      maxDelay: 91_000,
+    },
+    {
+      name: 'uses backoff when an exhausted bucket has a stale reset time',
+      status: 403,
+      reason: 'API rate limit exceeded',
+      headers: 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 999',
+      minDelay: 15_000,
+      maxDelay: 30_000,
+    },
+    {
+      name: 'keeps rate-limit backoff without a retry deadline',
+      status: 403,
+      reason: 'You have exceeded a secondary rate limit',
+      headers: 'X-RateLimit-Remaining: 42',
+      minDelay: 15_000,
+      maxDelay: 30_000,
+    },
+    {
+      name: 'ignores a reset timestamp expressed in milliseconds',
+      status: 403,
+      reason: 'API rate limit exceeded',
+      headers: 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1090000',
+      minDelay: 15_000,
+      maxDelay: 30_000,
+      resetIgnored: true,
+    },
+    {
+      name: 'honors Retry-After alongside a malformed primary reset',
+      status: 403,
+      reason: 'API rate limit exceeded',
+      headers:
+        'Retry-After: 4\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1090000',
+      minDelay: 4_000,
+      maxDelay: 5_000,
+      resetIgnored: true,
+    },
+    {
+      name: 'keeps rate-limit backoff for a bare 429',
+      status: 429,
+      reason: 'Too Many Requests',
+      headers: 'Content-Type: application/json',
+      minDelay: 15_000,
+      maxDelay: 30_000,
+    },
+    {
+      name: 'identifies a permission denial despite normal quota headers',
+      status: 403,
+      reason: 'Resource not accessible by integration',
+      headers: 'X-RateLimit-Remaining: 42\r\nX-RateLimit-Reset: 1090',
+      minDelay: 5_000,
+      maxDelay: 10_000,
+      permission: true,
+    },
+  ];
+  for (const {
+    name,
+    status,
+    reason,
+    headers,
+    random,
+    minDelay,
+    maxDelay,
+    permission,
+    resetIgnored,
+  } of cases) {
+    await t.test(name, async (t) => {
+      const { f, clock, messages } = await stallHarness(t, { random });
+      const requests = [];
+      const attempts = [];
+      const command = async (program, args, options) => {
+        if (program === 'gh') requests.push(clock.now);
+        if (
+          program !== 'gh' ||
+          !args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+        )
+          return f.command(program, args, options);
+        attempts.push(clock.now);
+        if (attempts.length === 2) manager.stop();
+        const response = `HTTP/2.0 ${status}\n${headers}\r\n\r\n`;
+        return runCommand(process.execPath, [
+          '-e',
+          'process.stdout.write(process.argv[1]); process.stderr.write(process.argv[2]); process.exitCode = 1;',
+          '--',
+          args.includes('--include') ? response : '',
+          `gh: ${reason} (HTTP ${status})\n`,
+          ...args,
+        ]);
+      };
+      const manager = createManager(f.config, {
+        command,
+        sleep: async (ms) => {
+          clock.now += ms;
+          if (clock.now - attempts[0] > maxDelay + 5000) manager.stop();
+        },
+      });
+      await manager.start();
+      assert.equal(attempts.length, 2);
+      const delay = attempts[1] - attempts[0];
+      assert.ok(
+        delay >= minDelay && delay <= maxDelay,
+        `next registration was attempted after ${delay / 1000}s`,
+      );
+      assert.deepEqual(requests, attempts, 'no cleanup request after refusal');
+      assert.equal(
+        messages.some((message) =>
+          message.includes('ignored X-RateLimit-Reset'),
+        ),
+        resetIgnored ?? false,
+      );
+      if (permission)
+        assert.match(
+          messages.join('\n'),
+          /registration permission denied \(HTTP 403\); check runner administration permissions and restart/,
+        );
+      else
+        assert.ok(
+          !messages.some((message) => message.includes('permission denied')),
+        );
+    });
+  }
+});
+
+test('a runner alerts during the retry deadline wait without retrying early', async (t) => {
+  const { f, alerts, clock, messages } = await stallHarness(t);
+  const startedAt = clock.now;
+  const attempts = [];
+  const alertTimes = [];
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 10 },
+    {
+      command: async (program, args, options) => {
+        if (program === 'docker' && args[0] === 'start') manager.stop();
+        if (
+          program === 'gh' &&
+          args.some((arg) => arg.endsWith('/generate-jitconfig'))
+        ) {
+          attempts.push(clock.now - startedAt);
+          if (attempts.length === 1) {
+            return runCommand(process.execPath, [
+              '-e',
+              'process.stdout.write("HTTP/2.0 429\\nRetry-After: 60\\r\\n\\r\\n"); process.exitCode = 1;',
+              '--',
+              ...args,
+            ]);
+          }
+        }
+        return f.command(program, args, options);
+      },
+      sleep: async (ms) => {
+        if (alerts().length > alertTimes.length)
+          alertTimes.push(clock.now - startedAt);
+        clock.now += ms;
+        if (clock.now - startedAt > 65_000) manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  assert.deepEqual(attempts, [0, 60_000]);
+  assert.ok(messages.some((message) => message.includes('started runner')));
+  assert.deepEqual(alertTimes, [10_000]);
+  assert.equal(alerts().length, 1);
+  assert.match(
+    alerts()[0],
+    /for 10s across 1 consecutive identical failures.*waiting to retry after a GitHub rate limit/,
+  );
+});
+
+test('a failed removal of refused slot state preserves the registration error', async (t) => {
+  const { f, clock, messages } = await stallHarness(t);
+  const slotState = join(f.config.stateDir, 'slot-1.json');
+  const refusal = Object.assign(new Error('gh failed (exit 1, HTTP 403)'), {
+    status: 403,
+    rateLimited: true,
+    retryAt: clock.now + 75_000,
+  });
+  let githubCalls = 0;
+  const command = async (program, args, options) => {
+    if (program !== 'gh') return f.command(program, args, options);
+    githubCalls += 1;
+    assert.ok(
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+    );
+    await rm(slotState);
+    await mkdir(slotState);
+    throw refusal;
+  };
+  const manager = createManager(f.config, { command });
+  await assert.rejects(manager.cycle(1), (error) => error === refusal);
+  assert.equal(githubCalls, 1);
+  assert.match(
+    messages.join('\n'),
+    /cleanup after a rejected JIT request also failed/,
+  );
+});
 
 async function stallThresholdRun(t, { rateLimited, config }) {
   const { f, alerts, clock, messages } = await stallHarness(t);
