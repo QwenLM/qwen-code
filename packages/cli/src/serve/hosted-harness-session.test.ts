@@ -47231,23 +47231,33 @@ describe('idle suspension', () => {
 
   it('an admitted mutation resets the idle timer', async () => {
     const server = await app(false, undefined, true, { idleSuspendMs: 1000 });
-    const clientId = await createIdleSession(server);
-    await sleep(600);
-    await headers(supertest(server).post(`/session/${SESSION_ID}/title`))
-      .set('X-Qwen-Client-Id', clientId)
-      .send({ title: 'still here' })
-      .expect(200);
-    // Past the original deadline (1000ms + ≤10% jitter), before the one
-    // the title re-armed (≥1600ms from the create). The wide ratio keeps
-    // the assertion meaningful on a loaded shard without racing it.
-    await sleep(600);
-    expect((await statusOf(server, clientId)).status).toBe(200);
-    await vi.waitFor(
-      async () => {
-        expect((await statusOf(server, clientId)).status).toBe(404);
-      },
-      { timeout: 5000 },
-    );
+    // Fake idle clock: under shard contention a real sleep can stretch past
+    // the re-armed deadline and race the still-resident check. Only
+    // setTimeout is faked; the mutation and teardown still do real I/O.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const clientId = await createIdleSession(server);
+      await vi.advanceTimersByTimeAsync(600);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/title`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ title: 'still here' })
+        .expect(200);
+      // Past the original deadline (1000ms + ≤10% jitter), before the one
+      // the title re-armed (≥1600ms from the create).
+      await vi.advanceTimersByTimeAsync(600);
+      expect((await statusOf(server, clientId)).status).toBe(200);
+      // Past the re-armed deadline (≤1700ms from the create); vi.waitFor
+      // polls on real timers so the teardown's I/O can settle.
+      await vi.advanceTimersByTimeAsync(600);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a resident-reuse load resets the idle clock', async () => {
