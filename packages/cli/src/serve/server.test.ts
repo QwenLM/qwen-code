@@ -597,6 +597,7 @@ function fakeDaemonLog(): DaemonLogger {
     warn: vi.fn(),
     error: vi.fn(),
     raw: vi.fn(),
+    setPort: vi.fn(),
     getLogPath: () => '',
     getDaemonId: () => 'test-daemon',
     getStatus: () => ({
@@ -715,6 +716,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_sub_session_send',
   'session_prompt',
   'session_turn_status',
+  'session_turn_feedback',
   'session_attachments',
   'session_attachment_chunk_upload',
   'session_attachment_list',
@@ -822,6 +824,8 @@ const EXPECTED_STAGE1_FEATURES = [
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
   'session_recap',
+  // `POST /session/:id/mod-row` asks the session's Mods for a row.
+  'session_mod_rows',
   // Side question (/btw) against the session's conversation context.
   'session_btw',
   // Issue #4175 PR 21 — auth device-flow surface advertised unconditionally.
@@ -859,6 +863,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_archived_session_export',
   'workspace_session_live_state',
   'workspace_session_live_state_batch',
+  'restart_recovery',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
@@ -946,6 +951,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
       f !== 'session_recap' &&
+      f !== 'session_mod_rows' &&
       f !== 'session_generation' &&
       f !== 'workspace_generation' &&
       f !== 'session_btw' &&
@@ -976,6 +982,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_archived_session_export' &&
       f !== 'workspace_session_live_state' &&
       f !== 'workspace_session_live_state_batch' &&
+      f !== 'restart_recovery' &&
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
@@ -1001,6 +1008,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_git_check_ignore',
   'workspace_mcp_restart',
   'session_recap',
+  'session_mod_rows',
   'session_generation',
   'workspace_generation',
   'session_btw',
@@ -1062,6 +1070,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_archived_session_export',
   'workspace_session_live_state',
   'workspace_session_live_state_batch',
+  'restart_recovery',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
@@ -1299,6 +1308,7 @@ interface FakeBridgeOpts {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ) => Promise<{ sessionId: string; recap: string | null }>;
+  askSessionModRowImpl?: AcpSessionBridge['askSessionModRow'];
   generateSessionContentImpl?: NonNullable<
     AcpSessionBridge['generateSessionContent']
   >;
@@ -1606,6 +1616,11 @@ interface FakeBridge extends AcpSessionBridge {
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
   }>;
+  feedbackCalls: Array<{
+    sessionId: string;
+    req: Parameters<AcpSessionBridge['rateSessionTurn']>[1];
+    context?: BridgeClientRequestContext;
+  }>;
   setConfigOptionCalls: Array<{
     sessionId: string;
     req: Parameters<AcpSessionBridge['setSessionConfigOption']>[1];
@@ -1630,6 +1645,11 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   generateSessionRecapCalls: Array<{
     sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  askSessionModRowCalls: Array<{
+    sessionId: string;
+    row: { component: string; props: Record<string, unknown> };
     context?: BridgeClientRequestContext;
   }>;
   generateSessionContentCalls: Array<{
@@ -1818,6 +1838,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const feedbackCalls: FakeBridge['feedbackCalls'] = [];
   const setConfigOptionCalls: FakeBridge['setConfigOptionCalls'] = [];
   const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
     [];
@@ -2300,6 +2321,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId,
       recap: 'Default fake recap.',
     }));
+  const askSessionModRowCalls: FakeBridge['askSessionModRowCalls'] = [];
+  const askSessionModRowImpl: AcpSessionBridge['askSessionModRow'] =
+    opts.askSessionModRowImpl ?? (async () => ({ status: 'unhooked' }));
   const generateSessionContentCalls: FakeBridge['generateSessionContentCalls'] =
     [];
   const generateSessionContentImpl =
@@ -2517,11 +2541,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     continueSessionContexts,
     sessionHooksCalls,
     setModelCalls,
+    feedbackCalls,
     setConfigOptionCalls,
     setLanguageCalls,
     setApprovalModeCalls,
     shellCalls,
     generateSessionRecapCalls,
+    askSessionModRowCalls,
     generateSessionContentCalls,
     generateSessionBtwCalls,
     forkCalls,
@@ -2931,6 +2957,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
     },
+    async rateSessionTurn(sessionId, req, context) {
+      feedbackCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return { recorded: true };
+    },
     async setSessionConfigOption(sessionId, req, context) {
       setConfigOptionCalls.push({
         sessionId,
@@ -2962,6 +2992,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return generateSessionRecapImpl(sessionId, context);
+    },
+    async askSessionModRow(sessionId, row, context) {
+      askSessionModRowCalls.push({
+        sessionId,
+        row,
+        ...(context ? { context } : {}),
+      });
+      return askSessionModRowImpl(sessionId, row, context);
     },
     generateSessionContent(sessionId, prompt, signal, context) {
       generateSessionContentCalls.push({
@@ -17474,6 +17512,84 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/load and /resume', () => {
+    it('gzip-compresses large load responses when the client negotiates it (#6181)', async () => {
+      // Transcript-shaped replay: highly repetitive JSON past the 1 KiB
+      // compression threshold, like a real multi-megabyte session load.
+      const compactedReplay = Array.from({ length: 200 }, (_, i) => ({
+        id: i + 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'gzip-large',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'assistant message chunk with repeated transcript prose '.repeat(
+                4,
+              ),
+            },
+          },
+        },
+      }));
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: req.clientId ?? 'client-load',
+          state: {},
+          hasActivePrompt: false,
+          compactedReplay,
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      // `Accept-Encoding: identity` is set explicitly: superagent injects a
+      // default `Accept-Encoding: gzip, deflate` when the header is absent,
+      // which would negotiate compression on the "uncompressed" control
+      // request.
+      const identityRes = await request(app)
+        .post('/session/gzip-large/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Accept-Encoding', 'identity')
+        .send({});
+      expect(identityRes.status).toBe(200);
+      expect(identityRes.headers['content-encoding']).toBeUndefined();
+      const identityBytes = Buffer.byteLength(JSON.stringify(identityRes.body));
+
+      const gzipRes = await request(app)
+        .post('/session/gzip-large/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Accept-Encoding', 'gzip, deflate, br')
+        .send({})
+        .buffer(true)
+        .parse((response, callback) => {
+          const chunks: Buffer[] = [];
+          response.on('data', (chunk) => chunks.push(chunk));
+          response.on('end', () => callback(null, Buffer.concat(chunks)));
+        });
+      expect(gzipRes.status).toBe(200);
+      expect(gzipRes.headers['content-encoding']).toBe('gzip');
+      expect(String(gzipRes.headers['vary']).toLowerCase()).toContain(
+        'accept-encoding',
+      );
+      // superagent transparently inflates the gzip layer before the parse
+      // callback runs, so res.body is the decoded JSON bytes; the wire size
+      // is carried by the rewritten Content-Length header.
+      expect(gzipRes.body.byteLength).toBe(identityBytes);
+      expect(Number(gzipRes.headers['content-length'])).toBeLessThan(
+        identityBytes / 2,
+      );
+      expect(JSON.parse(gzipRes.body.toString('utf8'))).toEqual(
+        identityRes.body,
+      );
+    });
+
     it('reports resume as unsupported for virtual subagent sessions', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -28978,6 +29094,68 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /session/:id/mod-row', () => {
+    const row = {
+      component: 'AssistantMessage',
+      props: { text: 'Hello', isFirstOfReply: true },
+    };
+
+    it("answers with the session's Mods and passes the client on", async () => {
+      const bridge = fakeBridge({
+        askSessionModRowImpl: async () => ({
+          status: 'answered',
+          props: { text: '你好', isFirstOfReply: true },
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/mod-row')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send(row);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        status: 'answered',
+        props: { text: '你好', isFirstOfReply: true },
+      });
+      expect(bridge.askSessionModRowCalls).toEqual([
+        { sessionId: 'session-A', row, context: { clientId: 'client-1' } },
+      ]);
+    });
+
+    it.each([
+      {},
+      { component: '', props: {} },
+      { component: 'AssistantMessage' },
+      { component: 'AssistantMessage', props: 'text' },
+    ])('400 for a row without a component and props: %j', async (body) => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/mod-row')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_mod_row');
+      expect(bridge.askSessionModRowCalls).toHaveLength(0);
+    });
+
+    it('404 for a session that is not live', async () => {
+      const bridge = fakeBridge({
+        askSessionModRowImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/missing/mod-row')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(row);
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
   describe('POST /session/:id/recap (#4175 follow-up)', () => {
     it('200 with the recap on success and forwards no body', async () => {
       const bridge = fakeBridge({
@@ -30337,6 +30515,7 @@ describe('createServeApp', () => {
           JSON.parse(await fsp.readFile(sidecarPath, 'utf8')),
         ).toMatchObject({
           workspaceCwd: repo,
+          carriedFrom: realpathSync(repo),
           worktreeBranch: '',
           originalHeadCommit: baseCommit,
           worktreeBase: baseCommit,
@@ -30474,6 +30653,25 @@ describe('createServeApp', () => {
             return null;
           }
         };
+        await fsp.writeFile(
+          path.join(siblingPath, 'session-carry.txt'),
+          'sibling-carry\n',
+        );
+        const routedCarryEntry = {
+          path: 'session-carry.txt',
+          hash: (
+            await execFileAsync(
+              'git',
+              ['hash-object', '--no-filters', '--', 'session-carry.txt'],
+              { cwd: siblingPath },
+            )
+          ).stdout.trim(),
+          executable:
+            ((await fsp.stat(path.join(siblingPath, 'session-carry.txt')))
+              .mode &
+              0o100) !==
+            0,
+        };
         const createWorktreeCalls: unknown[][] = [];
         mockWt.impl = (cwd?: string) => ({
           isGitRepository: async () => true,
@@ -30499,6 +30697,7 @@ describe('createServeApp', () => {
             return {
               success: true,
               worktree: { slug, path: worktreePath, branch: '' },
+              carriedEntries: [routedCarryEntry],
             };
           },
         });
@@ -30574,6 +30773,8 @@ describe('createServeApp', () => {
         expect(sidecar.originalHeadCommit).toBe(rootHead);
         expect(sidecar.worktreeBase).toBe(siblingHead);
         expect(sidecar.originalCwd).toBe(repo);
+        expect(sidecar.carriedFrom).toBe(realpathSync(siblingPath));
+        expect(sidecar.carriedEntries).toEqual([routedCarryEntry]);
       } finally {
         mockWt.impl = undefined;
         mockWt.readSidecar = undefined;
@@ -38547,6 +38748,28 @@ describe('createServeApp', () => {
       expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
         displayName: 'My Session',
       });
+    });
+
+    it('routes an initial title through the conditional metadata update', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440321';
+      const initializeSessionTitle = vi.fn(() => ({ displayName: 'Manual' }));
+      const bridge = Object.assign(fakeBridge(), { initializeSessionTitle });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).patch(`/session/${sessionId}/metadata`),
+      )
+        .set('X-Qwen-Client-Id', 'web-client')
+        .send({ initialDisplayName: 'First prompt' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ sessionId, displayName: 'Manual' });
+      expect(initializeSessionTitle).toHaveBeenCalledExactlyOnceWith(
+        sessionId,
+        'First prompt',
+        { clientId: 'web-client' },
+      );
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
     });
 
     it('fails closed before updating metadata in a non-trusted embed', async () => {
@@ -51501,8 +51724,12 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
     };
   }
 
-  async function openInitializedWs(port: number): Promise<WebSocket> {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/acp`);
+  async function openInitializedWs(
+    port: number,
+    url = `ws://127.0.0.1:${port}/acp`,
+    headers?: Record<string, string>,
+  ): Promise<WebSocket> {
+    const ws = new WebSocket(url, headers ? { headers } : undefined);
     await new Promise<void>((resolve, reject) => {
       ws.on('error', reject);
       ws.on('open', () =>
@@ -51774,19 +52001,89 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       lanBase: `http://${lanStatus.address}:${lanStatus.port}`,
       lanAuth: { Authorization: `Bearer ${pairingSecret}` },
       restore: async () => {
-        await service.disable().catch(() => {});
+        // Restore spies before awaiting disable: a wedged disable() must not
+        // keep the module-level mocks installed for the rest of the file.
         selectSpy.mockRestore();
         listSpy.mockRestore();
         sleepSpy.mockRestore();
+        await service.disable().catch(() => {});
       },
     };
   }
 
-  it('clamps the pairing listener independently of the primary listener', async () => {
-    // runQwenServe always boots its own logger, so the access-log
-    // attribution is asserted against the real log file (review R3-5).
+  // Remote-access twin of the pairing fixture (issue #17712): pin the
+  // interface list to loopback, enable through the real management routes,
+  // and reveal the remote bearer so the test drives the actual listener.
+  async function enableRemoteAccessListener(
+    opts: { maxConnections?: number; maxSseConnections?: number },
+    deps?: { daemonLogBaseDir?: string },
+  ) {
+    const interfacesSpy = vi.spyOn(os, 'networkInterfaces').mockReturnValue({
+      test: [
+        {
+          address: '127.0.0.1',
+          family: 'IPv4',
+          internal: false,
+          netmask: '255.0.0.0',
+          mac: '00:00:00:00:00:00',
+          cidr: '127.0.0.1/8',
+        },
+      ],
+    });
+    let daemonHandle: RunHandle | undefined;
+    try {
+      daemonHandle = await runQwenServe(
+        { ...baseOpts, port: 0, ...opts },
+        { bridge: parkedBridge(), ...deps },
+      );
+      await daemonHandle.runtimeReady;
+      const primaryPort = (daemonHandle.server.address() as AddressInfo).port;
+      const manage = (action: string, body: object = {}) =>
+        fetch(`http://127.0.0.1:${primaryPort}/remote-access/${action}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      const enabled = (await (await manage('enable', { port: 0 })).json()) as {
+        active?: boolean;
+        url?: string;
+      };
+      if (!enabled.active || !enabled.url) {
+        throw new Error('remote access listener did not activate');
+      }
+      const revealed = (await (await manage('reveal')).json()) as {
+        token?: string;
+      };
+      if (!revealed.token) throw new Error('remote access token not revealed');
+      return {
+        handle: daemonHandle,
+        primaryPort,
+        lanBase: enabled.url,
+        lanAuth: { Authorization: `Bearer ${revealed.token}` },
+        restore: () => {
+          interfacesSpy.mockRestore();
+        },
+      };
+    } catch (error) {
+      // A failed boot/enable must not leak the interfaces spy into the
+      // rest of the file.
+      interfacesSpy.mockRestore();
+      await daemonHandle?.close().catch(() => {});
+      throw error;
+    }
+  }
+
+  async function expectPairingListenerClamp(
+    kind: 'local-control' | 'remote-access',
+  ): Promise<void> {
+    // runQwenServe always boots its own logger, so access-log attribution is
+    // asserted against the real log file for both listener kinds.
     const logDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sse-clamp-log-'));
-    const pair = await enablePairingListener(
+    const enableListener =
+      kind === 'local-control'
+        ? enablePairingListener
+        : enableRemoteAccessListener;
+    const pair = await enableListener(
       { maxConnections: 256 },
       { daemonLogBaseDir: logDir },
     );
@@ -51799,14 +52096,14 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       // 51 = floor(64 × 0.8): the pairing listener's own headroom clamp.
       const lanStreams: Response[] = [];
       for (let i = 0; i < 51; i++) {
-        const res = await fetch(`${lanBase}/session/sess-lan-${i}/events`, {
+        const res = await fetch(`${lanBase}/session/sess-${kind}-${i}/events`, {
           headers: lanAuth,
         });
         expect(res.status).toBe(200);
         lanStreams.push(res);
       }
       const overflow = await fetch(
-        `${lanBase}/session/sess-lan-overflow/events`,
+        `${lanBase}/session/sess-${kind}-overflow/events`,
         { headers: lanAuth },
       );
       expect(overflow.status).toBe(503);
@@ -51819,10 +52116,8 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
         limit: 51,
         active: 51,
         scope: 'listener',
-        listener: 'local-control',
+        listener: kind,
       });
-      // The listener-scope refusal must attribute its own scope in the
-      // access log, not the daemon's (review R3-5).
       await vi.waitFor(
         async () => {
           const entries = await fsp.readdir(logDir, { recursive: true });
@@ -51836,13 +52131,14 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
         { timeout: 5_000 },
       );
 
-      // The primary listener still admits: its clamp is independent and the
-      // aggregate (204) is far from reached.
+      // The primary listener and LAN short requests retain their headroom.
       const primaryStream = await fetch(
-        `http://127.0.0.1:${primaryPort}/session/sess-primary/events`,
+        `http://127.0.0.1:${primaryPort}/session/sess-${kind}-primary/events`,
       );
       expect(primaryStream.status).toBe(200);
-
+      expect(
+        (await fetch(`${lanBase}/health`, { headers: lanAuth })).status,
+      ).toBe(200);
       const status = await statusOf(primaryPort);
       expect(status.limits.maxSseConnectionsPerListener).toEqual({
         primary: 204,
@@ -51851,13 +52147,21 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       });
       expect(status.runtime.transport.streamOccupancy.byListener).toEqual({
         primary: before.byListener.primary + 1,
-        'local-control': before.byListener['local-control'] + 51,
-        'remote-access': before.byListener['remote-access'],
+        'local-control':
+          before.byListener['local-control'] +
+          (kind === 'local-control' ? 51 : 0),
+        'remote-access':
+          before.byListener['remote-access'] +
+          (kind === 'remote-access' ? 51 : 0),
       });
-      // LAN short requests keep their headroom while the SSE fleet is clamped.
-      expect(
-        (await fetch(`${lanBase}/health`, { headers: lanAuth })).status,
-      ).toBe(200);
+      const deep = (await (
+        await fetch(`${lanBase}/health?deep=1`, { headers: lanAuth })
+      ).json()) as {
+        listenerConnectedClients: number;
+        listenerConnectedClientsMax: number | null;
+      };
+      expect(deep.listenerConnectedClients).toBe(51);
+      expect(deep.listenerConnectedClientsMax).toBe(51);
 
       for (const stream of lanStreams) await stream.body!.cancel();
       await primaryStream.body!.cancel();
@@ -51871,11 +52175,181 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       await pair.restore();
       // The logger appends by path, so removing its log dir while the daemon
       // still drains recreates daemon.log and the parent rmdir hits ENOTEMPTY.
-      await pair.handle.close();
+      await handle?.close();
       handle = undefined;
-      await fsp.rm(logDir, { recursive: true, force: true });
+      await fsp.rm(logDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 100,
+      });
     }
+  }
+
+  it('clamps the remote-access listener independently of the primary listener (issue #17712)', async () => {
+    await expectPairingListenerClamp('remote-access');
   }, 30_000);
+
+  it('shutdown force-closes counted non-REST streams and releases their slots (issue #17712)', async () => {
+    // The reaper stays REST-only by decision; the bound for the other
+    // surfaces is their lifecycle plus the listener close force-close.
+    // Pin that open generation/ACP streams neither hang shutdown nor leak
+    // their shared slots.
+    const before = getSseOccupancy();
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const generation = await fetch(
+      `http://127.0.0.1:${port}/session/sess-shutdown/generate`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'hello' }),
+      },
+    );
+    expect(generation.status).toBe(200);
+    const connId = await acpInitialize(port);
+    const acpSse = await fetch(`http://127.0.0.1:${port}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+      },
+    });
+    expect(acpSse.status).toBe(200);
+    const ws = await openInitializedWs(port);
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total + 3);
+      },
+      { timeout: 5_000 },
+    );
+    await handle.close();
+    handle = undefined;
+    ws.close();
+    // Releases ride socket 'close' events, which land a tick after the
+    // listener close confirms; the pin is that they all land.
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total);
+      },
+      { timeout: 5_000 },
+    );
+  }, 20_000);
+
+  it('shutdown reclaims an upgraded ACP socket whose peer never answers close (issue #17712)', async () => {
+    // closeAllConnections() does not reach upgraded sockets; without the
+    // lifecycle force timer destroying them, a non-reading WS peer makes
+    // handle.close() reject with "did not confirm shutdown" (review R1-1).
+    const before = getSseOccupancy();
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const clientSocket = await new Promise<import('node:net').Socket>(
+      (resolve, reject) => {
+        const req = httpRequest({
+          hostname: '127.0.0.1',
+          port,
+          path: '/acp',
+          headers: {
+            Connection: 'Upgrade',
+            Upgrade: 'websocket',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version': '13',
+          },
+        });
+        req.on('upgrade', (_res, socket) => resolve(socket));
+        req.on('error', reject);
+        req.end();
+      },
+    );
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().bySurface.acpWs).toBe(
+          before.bySurface.acpWs + 1,
+        );
+      },
+      { timeout: 5_000 },
+    );
+    // The peer never reads and never answers the close frame.
+    await handle.close();
+    handle = undefined;
+    clientSocket.destroy();
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total);
+      },
+      { timeout: 5_000 },
+    );
+  }, 20_000);
+
+  it('clamps the pairing listener independently of the primary listener', async () => {
+    await expectPairingListenerClamp('local-control');
+  }, 30_000);
+
+  it('disable releases pairing-listener slots over a non-answering upgraded peer (issue #17712)', async () => {
+    // The local-control service pin asserts disable() settlement only; this
+    // pin asserts the counted LAN slot returns to baseline on disable over a
+    // non-answering upgraded peer. The ws detach terminates the client here;
+    // the tracked-destroy loop is the backstop for upgrades no ws server owns
+    // (witnessed by the service-level raw-upgrade pin, not by this one).
+    const pair = await enablePairingListener({ maxConnections: 256 });
+    handle = pair.handle;
+    const { lanBase, lanAuth } = pair;
+    const lanPort = Number(new URL(lanBase).port);
+    const before = getSseOccupancy();
+    let ws: WebSocket | undefined;
+    try {
+      ws = await openInitializedWs(
+        lanPort,
+        `${lanBase.replace('http:', 'ws:')}/acp`,
+        lanAuth,
+      );
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().byListener['local-control']).toBe(
+            before.byListener['local-control'] + 1,
+          );
+        },
+        { timeout: 5_000 },
+      );
+      const service = handle.getLocalControl();
+      if (!service) throw new Error('local control service unavailable');
+      let timer: NodeJS.Timeout | undefined;
+      const bounded = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                'disable() did not resolve over a non-answering upgraded peer',
+              ),
+            ),
+          5_000,
+        );
+      });
+      await Promise.race([service.disable(), bounded]);
+      clearTimeout(timer);
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().total).toBe(before.total);
+        },
+        { timeout: 5_000 },
+      );
+    } finally {
+      ws?.close();
+      // Bounded: on a mutant that wedges disable(), an unbounded await here
+      // would mask the explicit race rejection with a test timeout.
+      await Promise.race([
+        pair.restore(),
+        new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+      ]).catch(() => undefined);
+      await handle?.close();
+      handle = undefined;
+    }
+  }, 20_000);
 
   it('releases the slot when a client aborts inside the subscription handshake window', async () => {
     // The REST route counts late (after the async subscription handshake).
@@ -52012,7 +52486,9 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       const chunk = await reader.read();
       if (chunk.done) break;
       buffer += decoder.decode(chunk.value, { stream: true });
-      for (const frame of buffer.split('\n\n')) {
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) {
         const dataLine = frame
           .split('\n')
           .find((line) => line.startsWith('data: '));

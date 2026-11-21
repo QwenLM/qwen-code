@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { PendingAsyncOutput } from './types.js';
+import {
+  MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+  type PendingAsyncOutput,
+} from './types.js';
 
 /**
  * Reserved tag wrapping background (async) hook output when it is delivered
@@ -16,6 +19,32 @@ import type { PendingAsyncOutput } from './types.js';
  */
 export const ASYNC_HOOK_CONTEXT_OPEN = '<qwen:async-hook-context>';
 export const ASYNC_HOOK_CONTEXT_CLOSE = '</qwen:async-hook-context>';
+
+/**
+ * Upper bound on the joined async block. Aliased to the user-prompt-expansion
+ * additional-context cap so the two stay in lockstep. The registry accumulates
+ * every completion with no total limit, so a verbose hook (or many completions)
+ * could otherwise append megabytes to the request and to the side query that
+ * reuses it.
+ */
+export const MAX_ASYNC_HOOK_CONTEXT_LENGTH =
+  MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH;
+
+/**
+ * Marks a context half that was cut to fit the bound, so a truncated block does
+ * not read as complete. Mirrors `TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE`; room for
+ * it is reserved inside the bound.
+ */
+export const ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE =
+  '\n[async hook context truncated]';
+
+/**
+ * Marks a message half that was cut to fit the bound. Distinct from the context
+ * notice so a message-only block does not announce a context truncation that
+ * never happened, and a squeezed message cut is not left unmarked.
+ */
+export const ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE =
+  '\n[async hook message truncated]';
 
 export function wrapAsyncHookContext(context: string): string {
   return `${ASYNC_HOOK_CONTEXT_OPEN}\n${context}\n${ASYNC_HOOK_CONTEXT_CLOSE}`;
@@ -44,30 +73,145 @@ export function isAsyncHookContextPartText(text: string): boolean {
 }
 
 /**
+ * Cut `text` to at most `length` UTF-16 units without leaving a partial
+ * `<`/`>` escape entity at the cut and without splitting an astral character
+ * (back off an orphaned high surrogate, as `safePrefix` does for tool hook
+ * context). The entity strip runs first: it shortens the prefix, so checking
+ * the surrogate before it could miss a high surrogate the strip re-exposes.
+ */
+function safeCut(text: string, length: number): string {
+  if (length <= 0) return '';
+  if (length >= text.length) return text;
+  const stripped = text.slice(0, length).replace(/&(?:lt?|gt?)?$/, '');
+  const end = /[\uD800-\uDBFF]$/.test(stripped)
+    ? stripped.length - 1
+    : stripped.length;
+  return stripped.slice(0, end);
+}
+
+/**
+ * Bound one half of the block to `budget` characters, reserving room inside the
+ * budget for the truncation notice when the half is cut (mirroring
+ * `boundToolHookContext`).
+ */
+function boundHalf(
+  text: string,
+  budget: number,
+  notice: string = ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE,
+): string {
+  if (!text || budget <= 0) return '';
+  if (text.length <= budget) return text;
+  if (budget <= notice.length) {
+    return safeCut(text, budget);
+  }
+  return safeCut(text, budget - notice.length) + notice;
+}
+
+/**
  * Render pending async output as model-facing text: the additional contexts
  * verbatim, then the notification messages labeled by type and hook. `<`/`>`
- * are escaped so hook output cannot forge the closing tag. Returns null when
- * there is nothing to deliver.
+ * are escaped so hook output cannot forge the closing tag. The joined block is
+ * bounded by `MAX_ASYNC_HOOK_CONTEXT_LENGTH`. Notification messages take
+ * priority over a verbose context tail: the drain is get-and-clear, so a notice
+ * displaced by the cut would be lost forever. Returns null when there is
+ * nothing to deliver.
  */
 export function formatAsyncHookOutput(
   output: PendingAsyncOutput,
 ): string | null {
   const escape = (text: string) =>
     text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const blocks: string[] = [];
+  const contextBlocks: string[] = [];
   for (const context of output.contexts) {
     if (context.trim()) {
-      blocks.push(escape(context));
+      contextBlocks.push(escape(context));
     }
   }
+  const messageBlocks: string[] = [];
   for (const message of output.messages) {
     if (message.message.trim()) {
-      blocks.push(
+      messageBlocks.push(
         escape(`[${message.type}] ${message.hookName}: ${message.message}`),
       );
     }
   }
-  return blocks.length > 0 ? blocks.join('\n\n') : null;
+  if (contextBlocks.length === 0 && messageBlocks.length === 0) {
+    return null;
+  }
+  const joinedContext = contextBlocks.join('\n\n');
+  const messageText = messageBlocks.join('\n\n');
+  // A message-only block past the cap is bounded on its own and marked with the
+  // message notice (there is no context half to name); with a context present,
+  // fall through so the squeeze branch below keeps the displaced context marked
+  // rather than dropping it unmarked.
+  if (messageText.length >= MAX_ASYNC_HOOK_CONTEXT_LENGTH && !joinedContext) {
+    return boundHalf(
+      messageText,
+      MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+      ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE,
+    );
+  }
+  const separator = messageText && joinedContext ? '\n\n' : '';
+  const contextBudget =
+    MAX_ASYNC_HOOK_CONTEXT_LENGTH - messageText.length - separator.length;
+  let contextText: string;
+  let messages = messageText;
+  if (
+    joinedContext.length > contextBudget &&
+    contextBudget <= ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE.length
+  ) {
+    // The context must be cut, but its budget cannot fit the truncation
+    // notice; an unmarked fragment would read as complete. Keep the cut marked
+    // by reserving the notice's room from the message side. The message half is
+    // itself cut to make that room, so it is bounded with the message notice —
+    // otherwise its tail would drop unmarked. (Diverges from
+    // boundToolHookContext, whose budget is caller-chosen rather than squeezed
+    // by a sibling half.)
+    const keepContext = Math.max(contextBudget, 0);
+    messages = boundHalf(
+      messageText,
+      MAX_ASYNC_HOOK_CONTEXT_LENGTH -
+        separator.length -
+        ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE.length -
+        keepContext,
+      ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE,
+    );
+    contextText =
+      safeCut(joinedContext, keepContext) +
+      ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE;
+  } else {
+    contextText = boundHalf(joinedContext, contextBudget);
+  }
+  return [contextText, messages].filter(Boolean).join('\n\n');
+}
+
+/**
+ * Provenance stamp on the parts this module builds. History carries no
+ * hook-origin field, and a caller-authored part can reproduce the envelope
+ * shape byte-for-byte, so shape alone cannot prove a block came from a hook
+ * (the same rationale as the UserPromptSubmit receipt). The symbol is
+ * module-private: transcript records, ACP prompt blocks, and model output
+ * cannot carry it. The Retry recovery re-attaches only stamped parts and
+ * leaves a shape-matched but unstamped part in the caller's entry as text.
+ * Parts are carried by reference through the in-memory push/strip, so the
+ * stamp survives there; it does not survive serialization (the retention is
+ * in-memory only).
+ */
+const asyncHookContextProvenance = Symbol('asyncHookContextProvenance');
+
+function stampAsyncHookContextPart(
+  text: string,
+): { text: string } & Record<symbol, unknown> {
+  return { text, [asyncHookContextProvenance]: true };
+}
+
+/** Whether a part was built (stamped) by this module, not caller-authored. */
+export function isStampedAsyncHookContextPart(part: unknown): boolean {
+  return (
+    typeof part === 'object' &&
+    part !== null &&
+    (part as Record<symbol, unknown>)[asyncHookContextProvenance] === true
+  );
 }
 
 /**
@@ -91,7 +235,67 @@ export function drainAsyncHookContextPart(
   if (context === null) {
     return null;
   }
-  return { text: wrapAsyncHookContext(context) };
+  return stampAsyncHookContextPart(wrapAsyncHookContext(context));
+}
+
+/**
+ * Merge several already-wrapped async envelopes into a single bounded envelope.
+ * The drain re-attaches blocks a prior send retained; without a combined bound,
+ * repeated pre-push exits would accumulate one envelope per attempt on a single
+ * request. The bodies are joined and re-cut to `MAX_ASYNC_HOOK_CONTEXT_LENGTH`,
+ * so the aggregate stays bounded while a lone block (already within the cap)
+ * passes through byte-identical. Returns null when no body survives.
+ */
+export function mergeAsyncHookContextParts(
+  parts: ReadonlyArray<{ text: string }>,
+): { text: string } | null {
+  const prefix = `${ASYNC_HOOK_CONTEXT_OPEN}\n`;
+  const suffix = `\n${ASYNC_HOOK_CONTEXT_CLOSE}`;
+  const bodies: string[] = [];
+  for (const { text } of parts) {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith(prefix) || !trimmed.endsWith(suffix)) continue;
+    const body = trimmed.slice(prefix.length, -suffix.length);
+    if (body.trim()) bodies.push(body);
+  }
+  if (bodies.length === 0) return null;
+  const joinedRaw = bodies.join('\n\n');
+  // Only truncate on real overflow: a merge that fits the cap must pass
+  // through whole (the registry is get-and-clear, so a needless cut is a
+  // permanent loss). A lone within-cap block stays byte-identical.
+  if (joinedRaw.length <= MAX_ASYNC_HOOK_CONTEXT_LENGTH) {
+    return stampAsyncHookContextPart(wrapAsyncHookContext(joinedRaw));
+  }
+  // Overflow: water-fill the budget — a short body consumes only its own
+  // length and the remainder goes to the long ones — so an older retained
+  // block cannot crowd out the fresh drain, and budget the separators too.
+  // Keep each cut marked with the notice its body already carries, so a
+  // message-only body does not claim a context truncation that never happened.
+  const cut = (body: string, budget: number) =>
+    boundHalf(
+      body,
+      budget,
+      body.trimEnd().endsWith(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE)
+        ? ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE
+        : ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE,
+    );
+  let budget = Math.max(
+    MAX_ASYNC_HOOK_CONTEXT_LENGTH - 2 * (bodies.length - 1),
+    0,
+  );
+  const order = bodies
+    .map((_, i) => i)
+    .sort((a, b) => bodies[a].length - bodies[b].length);
+  const alloc = new Array<number>(bodies.length).fill(0);
+  let remaining = bodies.length;
+  for (const i of order) {
+    const share = Math.floor(budget / remaining);
+    alloc[i] = Math.min(bodies[i].length, share);
+    budget -= alloc[i];
+    remaining -= 1;
+  }
+  const joined = bodies.map((body, i) => cut(body, alloc[i])).join('\n\n');
+  return stampAsyncHookContextPart(wrapAsyncHookContext(joined));
 }
 
 /**

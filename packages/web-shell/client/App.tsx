@@ -1,4 +1,8 @@
 import { randomUUID } from './utils/random-uuid.js';
+import {
+  extractVisionTimeout,
+  parseVisionTimeoutMs,
+} from './vision-timeout-command.js';
 import { useWorkspaceFileChanges } from './components/artifacts/useWorkspaceFileChanges';
 import {
   filterWorkspaceFileChanges,
@@ -187,7 +191,10 @@ import {
 } from './utils/taskActivity';
 import type { VoiceModelOption } from './voice/voiceModels';
 import {
+  QUALIFIED_CORE_FEATURE,
+  WORKSPACE_SETTINGS_FEATURE,
   loadVoiceStatus,
+  qualifiedWorkspaceClient,
   resolveVoiceWorkspaceTarget,
   setVoiceModelSetting,
   supportsVoiceModelSettings,
@@ -316,6 +323,7 @@ import {
   DaemonStatusDialog,
 } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
+import { RestartRecoveryPanel } from './components/RestartRecoveryPanel';
 import { createTrajectoryPageLoader } from './trajectory/transcriptPageLoader';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { WorkspaceLocation } from './components/workspaces/WorkspaceLocation';
@@ -505,10 +513,11 @@ import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
-  getTranslator,
+  type getTranslator,
   languageSettingToWebShellLanguage,
   languageLabel,
   normalizeLanguage,
+  useTranslator,
   WEB_SHELL_LANGUAGES,
   type WebShellLanguage,
 } from './i18n';
@@ -1629,6 +1638,8 @@ export interface WebShellProps {
   allowedApprovalModes?: readonly WebShellApprovalMode[];
   /** Composer presentation shared by the main chat, split panes, and side tasks. */
   composerVariant?: 'default' | 'simple';
+  /** Show the composer focus glow and typing animation. Defaults to true. */
+  composerGlowEnabled?: boolean;
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -1808,6 +1819,8 @@ export interface WebShellProps {
   markdownTableMode?: MarkdownTableMode;
   /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
   virtualScrollThreshold?: number;
+  /** Extra transcript rows to render on each side of the viewport when virtualized. Defaults to 15. */
+  overscan?: number;
   /** 会话消息数超过此阈值时显示搜索入口，默认 10。 */
   conversationSearchThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
@@ -3707,6 +3720,12 @@ function readScopedModelSetting(
   return scope === 'user' ? setting.values.user : setting.values.workspace;
 }
 
+function isVisionBridgeSetting(
+  key: string,
+): key is 'visionModel' | 'visionBridgeTimeoutMs' {
+  return key === 'visionModel' || key === 'visionBridgeTimeoutMs';
+}
+
 export function App({
   onRefreshModels,
   askUserFreeTextLabel,
@@ -3792,6 +3811,7 @@ export function App({
   hostOwnsAddMenu = false,
   allowedApprovalModes: allowedApprovalModesProp,
   composerVariant = 'default',
+  composerGlowEnabled,
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -3809,6 +3829,7 @@ export function App({
   collapseCompletedTurns = true,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
+  overscan,
   conversationSearchThreshold = 10,
   markdown,
   loadingPhrases,
@@ -3895,7 +3916,7 @@ export function App({
         ? getInitialLanguage()
         : normalizeLanguage(providedLanguage),
   );
-  const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
+  const t = useTranslator(selectedLanguage);
   const syncNotificationLanguage =
     useBrowserNotificationSettings()?.syncLanguage;
   useLayoutEffect(() => {
@@ -4130,6 +4151,41 @@ export function App({
 
   const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
   const hostOwnsArtifactPreview = Boolean(onRightPanelOpen);
+  const connection = useConnection();
+  const standalone = useContext(StandaloneContext);
+  const sessionActions = useActions();
+  // Standalone opt-in for the per-turn marks: the entry has no session
+  // client, so the app wires the telemetry notification itself, gated by
+  // the daemon capability. A host-provided option always wins.
+  const effectiveAssistantFeedback = useMemo<
+    WebShellAssistantFeedbackOptions | undefined
+  >(() => {
+    if (assistantFeedback !== undefined) return assistantFeedback;
+    if (!standalone) return undefined;
+    if (!connection.capabilities?.features.includes('session_turn_feedback'))
+      return undefined;
+    return {
+      onRate: (info) => {
+        if (info.rating === null) return;
+        // Split panes inherit this option but own a different session; a
+        // mark must never be recorded under a session that did not admit
+        // its turn. Pane marks stay local-only until dispatch can reach
+        // the pane's own session client.
+        if (
+          info.sessionId !== undefined &&
+          info.sessionId !== connection.sessionId
+        )
+          return;
+        void sessionActions.rateAssistantTurn(info.promptId, info.rating);
+      },
+    };
+  }, [
+    assistantFeedback,
+    standalone,
+    connection.capabilities,
+    connection.sessionId,
+    sessionActions,
+  ]);
   const customization = useMemo(
     () => ({
       onRefreshModels,
@@ -4141,6 +4197,7 @@ export function App({
       askUserFreeTextLabel,
       composerTagIcons,
       composerVariant,
+      composerGlowEnabled,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
@@ -4155,7 +4212,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
-      assistantFeedback,
+      assistantFeedback: effectiveAssistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -4168,6 +4225,7 @@ export function App({
       compactThinking,
       collapseCompletedTurns,
       markdownTableMode,
+      overscan,
       markdown,
       loadingPhrases,
       fileUploadEnabled,
@@ -4184,6 +4242,7 @@ export function App({
       askUserFreeTextLabel,
       composerTagIcons,
       composerVariant,
+      composerGlowEnabled,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
@@ -4198,7 +4257,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
-      assistantFeedback,
+      effectiveAssistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -4211,6 +4270,7 @@ export function App({
       compactThinking,
       collapseCompletedTurns,
       markdownTableMode,
+      overscan,
       markdown,
       loadingPhrases,
       fileUploadEnabled,
@@ -4229,9 +4289,7 @@ export function App({
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot({
     structuralOnly: true,
   });
-  const connection = useConnection();
   const modelRefresh = useModelRefresh(onRefreshModels);
-  const standalone = useContext(StandaloneContext);
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
     connection.workspaceCwd,
@@ -4394,6 +4452,31 @@ export function App({
   const ordinaryWorkspaces = useMemo(
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
+  );
+  const recoveryWorkspaceCwds = useMemo(
+    () =>
+      ordinaryWorkspaces
+        .filter(
+          (entry) => !lockedWorkspaceCwd || entry.cwd === lockedWorkspaceCwd,
+        )
+        .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
+        .map((entry) => entry.cwd),
+    [lockedWorkspaceCwd, ordinaryWorkspaces],
+  );
+  const recoveryWorkspaceLabels = useMemo(
+    () =>
+      new Map(
+        disambiguateWorkspaceLabels(
+          recoveryWorkspaceCwds.map((cwd) => ({
+            cwd,
+            label: workspaceLabelForCwd(
+              cwd,
+              workspace.capabilities?.workspaces,
+            ),
+          })),
+        ).map(({ cwd, label }) => [cwd, label]),
+      ),
+    [recoveryWorkspaceCwds, workspace.capabilities?.workspaces],
   );
   // Daemon-authoritative "turn is running" signal for the connected session:
   // keeps the conversation indicator (and its cancel affordances) alive
@@ -4584,7 +4667,6 @@ export function App({
         : ordinaryWorkspaces,
     [lockedWorkspaceCwd, ordinaryWorkspaces],
   );
-  const sessionActions = useActions();
   const {
     intent: capacityRecovery,
     offer: offerCapacityRecovery,
@@ -13056,7 +13138,11 @@ export function App({
                 ? { name: gitModeIntentRef.current.name }
                 : undefined,
             sessionSourceType: sessionSourceTypeRef.current,
-            onSessionCreated: async (sessionId, detachedSession) => {
+            onSessionCreated: async (
+              sessionId,
+              detachedSession,
+              createdSession,
+            ) => {
               // A detached creation never bound the connection: rename
               // through the created client, not the current-session action.
               const rename = (displayName: string) =>
@@ -13079,27 +13165,14 @@ export function App({
                 } catch {
                   pendingManualTitleRef.current = undefined;
                 }
-              } else if (initialTitle) {
-                // Name the new session from its first prompt before the row
-                // is first rendered, so it never shows the session-id
-                // fallback. Best-effort: on failure the daemon's first-prompt
-                // label still names it.
-                try {
-                  await rename(initialTitle);
-                  if (catalogWorkspaceCwd) {
-                    sessionCatalogController.renamed(
-                      catalogWorkspaceCwd,
-                      sessionId,
-                      initialTitle,
-                    );
-                  }
-                } catch {
-                  // Fall back to the first-prompt label.
-                }
+              } else if (initialTitle && createdSession.updateMetadata) {
+                // The catalog already has a provisional title. Reconcile
+                // through daemon events and reads, since a manual rename can
+                // land while this request is still in flight.
+                void createdSession
+                  .updateMetadata({ initialDisplayName: initialTitle })
+                  .catch(() => {});
               }
-              // Start the first catalog read only after the rename (or the
-              // carry) settled, so the row's first publish already carries
-              // the name instead of the session-id prefix.
               if (catalogWorkspaceCwd) {
                 sessionCatalogController.sessionCreated(
                   catalogWorkspaceCwd,
@@ -14282,13 +14355,18 @@ export function App({
     (!mainVoiceTarget?.cwd || mainVoiceTarget.cwd === connection.workspaceCwd)
       ? workspaceEventSignals?.settingsVersion
       : undefined;
+  const qualifiedSettingsSupported = [
+    QUALIFIED_CORE_FEATURE,
+    WORKSPACE_SETTINGS_FEATURE,
+  ].every((feature) => workspace.capabilities?.features?.includes(feature));
   const {
     descriptor: qualifiedVoiceSetting,
-    reload: reloadQualifiedVoiceSettings,
+    status: qualifiedWorkspaceSettings,
+    reload: reloadQualifiedWorkspaceSettings,
   } = useVoiceWorkspaceSettings(
     workspace.client,
     mainVoiceTarget,
-    voiceModelSettingsSupported && mainView !== 'split',
+    qualifiedSettingsSupported && mainView !== 'split',
     JSON.stringify([
       voiceUserRevision,
       mainVoiceStatusRevision.workspace,
@@ -15486,43 +15564,89 @@ export function App({
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
-      await reloadQualifiedVoiceSettings();
+      await reloadQualifiedWorkspaceSettings();
     }
     return status;
   }, [
     mainVoiceTarget?.route,
-    reloadQualifiedVoiceSettings,
+    reloadQualifiedWorkspaceSettings,
     reloadWorkspaceSettings,
   ]);
   const targetedWorkspaceSettings = useMemo(() => {
-    const withoutVoice = workspaceSettings.filter(
-      (setting) => setting.key !== 'voiceModel',
-    );
-    if (mainView === 'split') return withoutVoice;
-    if (mainVoiceTarget?.route === 'legacy-primary') return workspaceSettings;
-    if (!voiceModelSettingsSupported || !qualifiedVoiceSetting) {
-      return withoutVoice;
+    if (mainView !== 'split' && mainVoiceTarget?.route === 'legacy-primary') {
+      return workspaceSettings;
     }
-    const voiceIndex = workspaceSettings.findIndex(
-      (setting) => setting.key === 'voiceModel',
+    const settings = workspaceSettings.filter(
+      (setting) =>
+        setting.key !== 'voiceModel' &&
+        (!isVisionBridgeSetting(setting.key) ||
+          (sessionIsStandalone && setting.key === 'visionModel')),
     );
-    if (voiceIndex < 0) {
-      return [...withoutVoice, qualifiedVoiceSetting];
+    if (mainView === 'split') return settings;
+    if (sessionIsStandalone) {
+      const timeout = workspaceSettings.find(
+        (setting) => setting.key === 'visionBridgeTimeoutMs',
+      );
+      if (timeout) {
+        const { user } = timeout.values;
+        settings.push({ ...timeout, values: { user, effective: user } });
+      }
+      return settings;
     }
-    return workspaceSettings.map((setting) =>
-      setting.key === 'voiceModel' ? qualifiedVoiceSetting : setting,
+    if (voiceModelSettingsSupported && qualifiedVoiceSetting) {
+      settings.push(qualifiedVoiceSetting);
+    }
+    settings.push(
+      ...(qualifiedWorkspaceSettings?.settings.filter((setting) =>
+        isVisionBridgeSetting(setting.key),
+      ) ?? []),
     );
+    return settings;
   }, [
     mainView,
     mainVoiceTarget?.route,
     qualifiedVoiceSetting,
+    qualifiedWorkspaceSettings,
+    sessionIsStandalone,
     voiceModelSettingsSupported,
     workspaceSettings,
   ]);
+  const writeVisionSetting = useCallback(
+    async (
+      scope: 'workspace' | 'user',
+      key: 'visionModel' | 'visionBridgeTimeoutMs',
+      value: unknown,
+    ) => {
+      if (
+        scope === 'user' ||
+        mainVoiceTarget?.route === 'legacy-primary' ||
+        // Standalone Settings exposes the primary's workspace model picker.
+        (sessionIsStandalone && key === 'visionModel')
+      ) {
+        return setWorkspaceSetting(scope, key, value);
+      }
+      const client =
+        mainVoiceTarget &&
+        qualifiedWorkspaceClient(workspace.client, mainVoiceTarget);
+      if (!client) throw new Error(t('session.workspaceActionUnavailable'));
+      return client.setWorkspaceSetting('workspace', key, value);
+    },
+    [
+      mainVoiceTarget,
+      sessionIsStandalone,
+      setWorkspaceSetting,
+      t,
+      workspace.client,
+    ],
+  );
   const targetedWorkspaceSettingsState = {
     ...workspaceSettingsState,
     settings: targetedWorkspaceSettings,
     reload: reloadTargetedWorkspaceSettings,
+    setValue: (scope: 'workspace' | 'user', key: string, value: unknown) =>
+      isVisionBridgeSetting(key)
+        ? writeVisionSetting(scope, key, value)
+        : setWorkspaceSetting(scope, key, value),
     liveSetup: liveSidebarEnabled ? undefined : liveSetup,
   };
   const themeSetting = workspaceSettings.find(
@@ -15544,7 +15668,9 @@ export function App({
   })();
   const currentVisionModel = (() => {
     const value = readScopedModelSetting(
-      workspaceSettings,
+      modelSettingScope === 'user'
+        ? workspaceSettings
+        : targetedWorkspaceSettings,
       modelSettingScope,
       'visionModel',
     );
@@ -15692,7 +15818,7 @@ export function App({
         if (target.route === 'legacy-primary') {
           await reloadWorkspaceSettings().catch(() => undefined);
         } else {
-          await reloadQualifiedVoiceSettings().catch(() => undefined);
+          await reloadQualifiedWorkspaceSettings().catch(() => undefined);
         }
         throw error;
       }
@@ -15700,13 +15826,13 @@ export function App({
       if (target.route === 'legacy-primary') {
         await reloadWorkspaceSettings().catch(() => undefined);
       } else {
-        await reloadQualifiedVoiceSettings().catch(() => undefined);
+        await reloadQualifiedWorkspaceSettings().catch(() => undefined);
       }
     },
     [
       bumpVoiceRevision,
       mainVoiceTarget,
-      reloadQualifiedVoiceSettings,
+      reloadQualifiedWorkspaceSettings,
       reloadWorkspaceSettings,
       setWorkspaceSetting,
       workspace.capabilities?.features,
@@ -16724,6 +16850,8 @@ export function App({
           sessionId,
           displayName,
         );
+      } else if (connection.sessionContext?.kind === 'standalone') {
+        setStandaloneSessionsReloadToken((value) => value + 1);
       }
     }
     dispatchSessionChangeRef.current?.({
@@ -20447,7 +20575,18 @@ export function App({
             return true;
           }
           if (cmd === 'model') {
-            const modelArg = text.slice(match[0].length).trim();
+            const {
+              modelArg,
+              timeout: visionTimeout,
+              invalidOption,
+            } = extractVisionTimeout(text.slice(match[0].length).trim());
+            if (invalidOption) {
+              pushToast(
+                'error',
+                t('model.invalidOption', { option: invalidOption }),
+              );
+              return true;
+            }
             if (
               !workspaceContextActive &&
               /^(?:--fast|--voice|--vision)(?:\s|$)/.test(modelArg)
@@ -20486,21 +20625,66 @@ export function App({
               );
               return true;
             }
-            if (modelArg === '--vision') {
+            if (modelArg === '--vision' && visionTimeout === undefined) {
               if (settingsDialogKeyRef.current === 'visionModel') {
                 settingsDialogKeyRef.current = undefined;
               }
               setModelDialogMode('vision');
               return true;
             }
-            if (modelArg.startsWith('--vision ')) {
-              const visionModelId = modelArg.replace(/^--vision\s+/, '');
-              setWorkspaceSetting(
-                'workspace',
-                'visionModel',
-                visionModelId,
-              ).catch((error: unknown) =>
-                reportError(error, t('model.setVision')),
+            if (/^--vision(?:\s|$)/.test(modelArg)) {
+              const visionModelId = modelArg.replace(/^--vision\s*/, '').trim();
+              const timeoutMs =
+                visionTimeout === undefined
+                  ? undefined
+                  : parseVisionTimeoutMs(visionTimeout);
+              if (visionTimeout !== undefined && timeoutMs === undefined) {
+                pushToast(
+                  'error',
+                  t('model.invalidVisionTimeout', { value: visionTimeout }),
+                );
+                return true;
+              }
+              const update = async () => {
+                if (timeoutMs === undefined) {
+                  await writeVisionSetting(
+                    'workspace',
+                    'visionModel',
+                    visionModelId,
+                  );
+                } else if (!visionModelId) {
+                  await writeVisionSetting(
+                    'workspace',
+                    'visionBridgeTimeoutMs',
+                    timeoutMs,
+                  );
+                } else {
+                  const cwd = mainVoiceTarget?.cwd;
+                  if (!cwd)
+                    throw new Error(t('session.workspaceActionUnavailable'));
+                  const client =
+                    qualifiedWorkspaceClient(
+                      workspace.client,
+                      mainVoiceTarget,
+                    ) ?? workspace.client.workspaceByCwd(cwd);
+                  await client.setVisionBridgeSettings(
+                    visionModelId,
+                    timeoutMs,
+                  );
+                }
+                if (mainVoiceTarget?.route === 'workspace-qualified') {
+                  await reloadQualifiedWorkspaceSettings();
+                }
+              };
+              void update().catch((error: unknown) =>
+                reportError(
+                  error,
+                  t(
+                    timeoutMs === undefined
+                      ? 'model.setVision'
+                      : 'model.setVisionTimeout',
+                  ),
+                ),
               );
               return true;
             }
@@ -21389,9 +21573,11 @@ export function App({
       selectedLanguage,
       setPendingModel,
       selectWelcomeModel,
-      setWorkspaceSetting,
       openVoiceModelPicker,
       writeVoiceModelForTarget,
+      writeVisionSetting,
+      mainVoiceTarget,
+      reloadQualifiedWorkspaceSettings,
       showContextUsage,
       t,
       workspaceActions,
@@ -22270,13 +22456,14 @@ export function App({
       standaloneDirectoryErrorCode === 'working_directory_missing' ||
       standaloneDirectoryErrorCode === 'working_directory_compromised',
   );
-  const isDisabled =
-    sessionWriteBlocked ||
+  const composerInputDisabled =
+    rewindSyncBlocked ||
     standaloneInteractionBlocked ||
     shouldDisableComposerInput({
       pendingApproval: pendingApproval !== null,
       isPreparingPrompt,
     });
+  const isDisabled = sessionWriteBlocked || composerInputDisabled;
   const retryableTurnErrorIdentity = retryableTurnErrorIdentityRef.current;
   const showCurrentRetryHint = Boolean(
     showRetryHint &&
@@ -22769,9 +22956,9 @@ export function App({
       // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
       // Core's resolveVisionModelSelection() expects `authType:modelId`.
       const encoded = encodeVisionModelForSetting(modelId);
-      setWorkspaceSetting(modelSettingScope, 'visionModel', encoded)
+      writeVisionSetting(modelSettingScope, 'visionModel', encoded)
         .then(() => {
-          void reloadWorkspaceSettings().catch((error: unknown) => {
+          void reloadTargetedWorkspaceSettings().catch((error: unknown) => {
             console.warn(
               '[web-shell] failed to reload settings after vision-model save',
               error,
@@ -22783,8 +22970,8 @@ export function App({
     [
       modelSettingScope,
       reportError,
-      setWorkspaceSetting,
-      reloadWorkspaceSettings,
+      writeVisionSetting,
+      reloadTargetedWorkspaceSettings,
       t,
       projectFeaturesAvailable,
     ],
@@ -23268,6 +23455,7 @@ export function App({
   const submitAgentChat = agentChatEntry.submit;
   const submitComposerInput = useCallback(
     (...args: Parameters<typeof handleEditorSubmit>) => {
+      if (sessionWriteBlockedRef.current) return false;
       if (
         !collaborationAvailable ||
         (sendCommandAvailable && /^\/send(?:\s|$)/i.test(args[0]))
@@ -23707,28 +23895,31 @@ export function App({
     const syncVariables = () => {
       frameId = null;
       const computedStyle = getComputedStyle(root);
-      const nextNames = new Set<string>();
+      const nextVariables = new Map<string, string>();
+      // Read the live computed style before any portal writes can invalidate it.
+      const propertyCount = computedStyle.length;
+      for (let index = 0; index < propertyCount; index += 1) {
+        const name = computedStyle[index];
+        if (!name.startsWith('--')) continue;
+        nextVariables.set(name, computedStyle.getPropertyValue(name));
+      }
       portalRoot.dataset.webShellShadcn = '';
       portalRoot.classList.toggle(
         'dark',
         selectedTheme === WebShellThemeId.Dark,
       );
       portalRoot.lang = selectedLanguage;
-      for (let index = 0; index < computedStyle.length; index += 1) {
-        const name = computedStyle[index];
-        if (!name.startsWith('--')) continue;
-        nextNames.add(name);
-        const value = computedStyle.getPropertyValue(name);
+      for (const [name, value] of nextVariables) {
         portalRoot.style.setProperty(name, value);
         portalHost?.style.setProperty(name, value);
       }
       for (const name of portalRootVariableNamesRef.current) {
-        if (!nextNames.has(name)) {
+        if (!nextVariables.has(name)) {
           portalRoot.style.removeProperty(name);
           portalHost?.style.removeProperty(name);
         }
       }
-      portalRootVariableNamesRef.current = nextNames;
+      portalRootVariableNamesRef.current = new Set(nextVariables.keys());
     };
     const scheduleSync = () => {
       if (frameId === null) frameId = requestAnimationFrame(syncVariables);
@@ -24588,6 +24779,19 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
+                  sessionHeader={
+                    <RestartRecoveryPanel
+                      client={workspace.client}
+                      available={daemonAvailable}
+                      supported={
+                        connection.capabilities?.features?.includes(
+                          'restart_recovery',
+                        ) ?? false
+                      }
+                      workspaceCwds={recoveryWorkspaceCwds}
+                      workspaceLabels={recoveryWorkspaceLabels}
+                    />
+                  }
                   collapsed={sidebarCollapsedEffective}
                   layout={sidebarRailEnabled ? 'rail' : 'single'}
                   containerWidth={sidebarLayoutWidth}
@@ -27029,12 +27233,13 @@ export function App({
                           cancelArmed={cancelArmed}
                           disabled={
                             (collaborationAvailable && agentChatEntry.pending) ||
-                            isDisabled ||
+                            composerInputDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
                             approvalOverlayActive ||
                             unknownPromptAdmission?.payloadAvailable === true
                           }
+                          submitDisabled={sessionWriteBlocked}
                           commands={commands}
                           skills={composerSkills}
                           onSkillsOpenChange={

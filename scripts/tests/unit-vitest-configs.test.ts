@@ -25,6 +25,7 @@ import feishuConfig from '../../packages/channels/feishu/vitest.config.js';
 import genericWebhookConfig from '../../packages/channels/generic-webhook/vitest.config.js';
 import githubConfig from '../../packages/channels/github/vitest.config.js';
 import gitlabConfig from '../../packages/channels/gitlab/vitest.config.js';
+import msteamsConfig from '../../packages/channels/msteams/vitest.config.js';
 import qqbotConfig from '../../packages/channels/qqbot/vitest.config.js';
 import telegramConfig from '../../packages/channels/telegram/vitest.config.js';
 import wecomConfig from '../../packages/channels/wecom/vitest.config.js';
@@ -116,6 +117,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/channels/generic-webhook': genericWebhookConfig,
   'packages/channels/github': githubConfig,
   'packages/channels/gitlab': gitlabConfig,
+  'packages/channels/msteams': msteamsConfig,
   'packages/channels/qqbot': qqbotConfig,
   'packages/channels/telegram': telegramConfig,
   'packages/channels/wecom': wecomConfig,
@@ -320,6 +322,8 @@ const configModules: Record<
     import('../../packages/channels/github/vitest.config.js'),
   'packages/channels/gitlab': () =>
     import('../../packages/channels/gitlab/vitest.config.js'),
+  'packages/channels/msteams': () =>
+    import('../../packages/channels/msteams/vitest.config.js'),
   'packages/channels/qqbot': () =>
     import('../../packages/channels/qqbot/vitest.config.js'),
   'packages/channels/telegram': () =>
@@ -410,6 +414,7 @@ describe('shared-pool test timeout', () => {
     'packages/network-policy',
     'packages/channels/github',
     'packages/channels/gitlab',
+    'packages/channels/msteams',
     'packages/channels/qqbot',
     'packages/channels/telegram',
     'packages/channels/wecom',

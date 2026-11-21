@@ -82,7 +82,7 @@ public final class JdbcExternalWorkspaceOwnership {
         try (var statement = connection.prepareStatement("SELECT * FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
             statement.setString(1, registration.ownerKey());
             try (var row = statement.executeQuery()) {
-                if (!row.next() || !registration.ownerKey().equals(row.getString("physical_key"))
+                if (!row.next() || !registration.ownerKey().equals(row.getString("storage_key"))
                         || !registration.storageKind().equals(
                                 row.getString("storage_kind"))
                         || !tenant.equals(row.getString("tenant_id")) || !storage.equals(row.getString("storage_id"))

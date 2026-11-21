@@ -71,6 +71,7 @@ public final class PublicationJournalFixture {
     public long revision;
     public long sequence;
     public String commitDigest;
+    private String journalWorkspaceId = "workspace-1";
     /** The attested external Shell binding, when this is that placement. */
     public RuntimeBindingRecord externalBinding;
     /** The operator's storage revision; the producer must offer this one. */
@@ -206,6 +207,7 @@ public final class PublicationJournalFixture {
      * reads back. Every placement lane needs exactly this chain.
      */
     private void journalEvidence(String workspaceId, boolean diagnostics) {
+        journalWorkspaceId = workspaceId;
         binding = JSON.createObjectNode()
                 .put("publication", ToolPublicationContract.PROTOCOL)
                 .put("publicationId", "pub-1").put("turnId", "turn-1")
@@ -439,7 +441,7 @@ public final class PublicationJournalFixture {
             String checkpointId, String contentDigest) {
         String nextDigest = events == 0 ? null : digest(records);
         var request = new ManagedSessionStoreModels.CommitTransactionRequest(
-                "workspace-1", "writer-1", 1, revision, sequence,
+                journalWorkspaceId, "writer-1", 1, revision, sequence,
                 "transaction-" + revision, operation, "command-" + revision,
                 contentDigest, events == 0 ? 0 : sequence + 1,
                 sequence + events, events, nextDigest, commitDigest,

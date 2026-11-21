@@ -4883,6 +4883,19 @@ jobs:
             echo "::warning::Chromium unavailable (system deps or browser download failed); the verification agent will produce a text-only report."
           fi
 
+      - name: 'Prepare verify scratch directory'
+        id: 'verify_scratch'
+        if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
+        run: |-
+          set -euo pipefail
+          # A runner executes one job at a time. Reclaim only this lane's
+          # scratch namespace from an interrupted earlier round; never widen
+          # this sweep to the shared OS temp directory.
+          rm -rf -- "${RUNNER_TEMP:?}"/qwen-verify-scratch.* 2>/dev/null || true
+          scratch=$(mktemp -d "${RUNNER_TEMP:?}/qwen-verify-scratch.XXXXXXXX")
+          chown node:node "$scratch"
+          echo "dir=$scratch" >> "$GITHUB_OUTPUT"
+
       - name: 'Run verification agent'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
         id: 'run'
@@ -4897,6 +4910,7 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.pr.outputs.pr_number }}'
           REPOSITORY: '${{ github.repository }}'
+          VERIFY_SCRATCH: '${{ steps.verify_scratch.outputs.dir }}'
         run: |-
           set -euo pipefail
           if ! command -v qwen >/dev/null 2>&1; then
@@ -5320,6 +5334,7 @@ jobs:
             "CI=${CI:-true}"
             "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
             "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+            "TMPDIR=$VERIFY_SCRATCH"
             "GITHUB_TOKEN="
             "GH_TOKEN="
             "OPENAI_API_KEY=$PROXY_TOKEN"
@@ -5371,6 +5386,7 @@ jobs:
           set +e
           timeout --kill-after=10s "${AGENT_BUDGET_M}m" runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
             --prompt "/verify-pr ${PR_NUMBER} --repo ${REPOSITORY}" \
+            --append-system-prompt "Store all temporary verification clones, A/B worktrees, install trees, and test files under TMPDIR=${VERIFY_SCRATCH}. Use mktemp -d inside that directory; do not create hardcoded /tmp paths for verification. Pass this directory requirement to every subagent. Keep final verification artifacts in their canonical workspace paths so they are collected before scratch cleanup." \
             --output-format stream-json \
             | tee "$RUNNER_TEMP/verify-results/output.jsonl"
           # Snapshot BOTH stages: a full/unwritable results volume fails tee
@@ -5759,6 +5775,15 @@ jobs:
           # are unchanged.
           path: '/flake-gate/upload/'
           retention-days: 7
+
+      - name: 'Clean verify scratch directory'
+        if: "always() && steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -uo pipefail
+          # Includes this round's directory and anything left by an
+          # interrupted round. The suffix glob is deliberately confined to
+          # RUNNER_TEMP and to directories owned by the verify lane.
+          rm -rf -- "${RUNNER_TEMP:?}"/qwen-verify-scratch.* 2>/dev/null || true
 
       - name: 'Clean up runner workspace'
         # Mirror the stale-state cleanup at the start of the job, but at the

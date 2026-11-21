@@ -76,7 +76,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.networknt.schema.ValidationMessage;
+import com.networknt.schema.Error;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -1496,11 +1496,22 @@ class ManagedAgentApiContractTest {
                 """
                 {"sessionId":"%s","operationId":"%s"}
                 """.formatted(webSessionId, webCloseId));
-        exchange(drift, "archiveWebShellSession", 202,
+        String webArchiveId = json(exchange(drift, "archiveWebShellSession", 202,
                 post(WEB_SHELL + "/sessions/archive").header(TENANT, tenant),
                 """
                 {"sessionId":"%s","idempotencyKey":"contract-web-archive"}
-                """.formatted(webSessionId));
+                """.formatted(webSessionId))).get("operationId").asText();
+        awaitOperation(tenant, webSessionId, webArchiveId);
+        assertThat(json(exchange(drift, "webShellGetSession", 200,
+                post(WEB_SHELL + "/sessions/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\"}".formatted(webSessionId)))
+                        .get("status").asText()).isEqualTo("archived");
+        JsonNode archivedExport = json(exchange(drift, "webShellExportSession", 200,
+                post(WEB_SHELL + "/sessions/export/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"limit\":1}".formatted(webSessionId)));
+        assertThat(archivedExport.path("items").size()).isEqualTo(1);
+        assertThat(archivedExport.at("/items/0/sessionId").asText()).isEqualTo(webSessionId);
+        assertThat(archivedExport.at("/items/0/itemId").asText()).isNotEmpty();
         exchange(drift, "archiveWebShellSession", 404,
                 post(WEB_SHELL + "/sessions/archive")
                         .header(TENANT, otherTenant),
@@ -1866,6 +1877,7 @@ class ManagedAgentApiContractTest {
         exchange(drift, "webShellCommandUserMessages", 404,
                 post(WEB_SHELL + "/user-messages/command").header(TENANT, tenant).principal(actor(tenant)),
                 "{\"sessionId\":\"missing\",\"idempotencyKey\":\"queue-missing\",\"command\":{\"action\":\"resume\"}}");
+        seedDegradedExtensionConfiguration(workspaceTenant, publicBoundId);
         exchangeExtensions(drift, workspaceTenant, actor, publicBoundId);
         exchange(drift, "webShellSessionWorktreeOptions", 200,
                 post(WEB_SHELL + "/workspaces/worktrees/options").header(TENANT, workspaceTenant).principal(actor),
@@ -2406,16 +2418,15 @@ class ManagedAgentApiContractTest {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
         byte[] body = json.getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key,"
-                + " session_scope_key, tenant_id, workspace_id, session_id,"
+                + " tenant_id, workspace_id, session_id,"
                 + " resource_id, kind, schema_version, byte_length, sha256,"
                 + " storage_kind, inline_bytes, publish_command_id, state,"
-                + " gmt_create) VALUES (?, ?, ?, 'workspace-contract', ?, ?,"
+                + " gmt_create) VALUES (?, ?, 'workspace-contract', ?, ?,"
                 + " 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?,"
                 + " 'command', 'REFERENCED', "
                 + com.alibaba.qwen.code.runtimebroker.managedschema
                         .ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId),
-                scope, tenant, sessionId, resourceId, body.length,
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId), tenant, sessionId, resourceId, body.length,
                 org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
                 body);
     }
@@ -2431,16 +2442,15 @@ class ManagedAgentApiContractTest {
             throws Exception {
         String recordKey = "c".repeat(64);
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, runtime_state,"
                         + " delivery_target, delivery_state, gmt_create,"
-                        + " started_at) VALUES (?, ?, ?, 'workspace-contract',"
+                        + " started_at) VALUES (?, ?, 'workspace-contract',"
                         + " ?, 'child_run', 'run-contract', ?, 1,"
                         + " 'resource-run-contract', 'child_agent', 'running',"
                         + " 'ready', 'session', 'planned', 1, 2)",
-                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
                 recordKey, tenant, sessionId, "d".repeat(64));
         // #13746 F2: the run's committed record names its child Session,
         // and both task views carry that link inside their schemas.
@@ -2562,8 +2572,7 @@ class ManagedAgentApiContractTest {
         // H4f-b: a workflow task serves the same cancel on both surfaces,
         // and its view advertises the action.
         String workflowKey = "e".repeat(64);
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'child_run', 'run-contract-wf', ?, 1, 'resource-run-contract-wf', 'workflow', 'running', 'ready', 'session', 'planned', 1, 2)",
-                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, 'workspace-contract', ?, 'child_run', 'run-contract-wf', ?, 1, 'resource-run-contract-wf', 'workflow', 'running', 'ready', 'session', 'planned', 1, 2)",
                 workflowKey, tenant, sessionId, "f".repeat(64));
         childRunResource(tenant, sessionId, "resource-run-contract-wf",
                 "{\"kind\":\"workflow\",\"childSessionId\":null}");
@@ -2619,8 +2628,7 @@ class ManagedAgentApiContractTest {
                 + " WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_kind = 'TASK_CANCEL'"
                 + " AND state IN ('PENDING', 'RUNNING')", tenant, sessionId);
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'automation_run', 'arun-contract', ?, 2, 'resource-automation-contract', 'automation_run', 'running', 'ready', 'session', 'planned', 1, 2)",
-                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, 'workspace-contract', ?, 'automation_run', 'arun-contract', ?, 2, 'resource-automation-contract', 'automation_run', 'running', 'ready', 'session', 'planned', 1, 2)",
                 automationKey, tenant, sessionId, "2".repeat(64));
         childRunResource(tenant, sessionId, "resource-automation-contract",
                 "{\"scheduleId\":\"asch_" + "1".repeat(32)
@@ -3698,7 +3706,9 @@ class ManagedAgentApiContractTest {
             AuthenticatedTenantActor actor, String sessionId) throws Exception {
         String base = "/v1/agents/workspaces/ws-default/extensions";
         String id = "ext_11111111-1111-4111-8111-111111111111";
-        String operation = "11111111-1111-4111-8111-111111111111";
+        // Must stay unknown to the seeded configuration, whose fixture command
+        // carries the 11111111 operationId.
+        String operation = "22222222-2222-4222-8222-222222222222";
         String digest = "a".repeat(64);
         String encodedManifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(("{\"schemaVersion\":1,\"compilerVersion\":1,"
                 + "\"name\":\"fixture\",\"version\":\"1\",\"target\":{\"platform\":\"linux\",\"arch\":\"x64\"},\"components\":[\"skills\"]}")
@@ -3742,7 +3752,9 @@ class ManagedAgentApiContractTest {
                 .header(IDEMPOTENCY_KEY, "extension-publish-web").param("workspaceId", "ws-default").param("packageDigest", digest).param("manifest", encodedManifest)
                 .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
         String session = "/v1/agents/sessions/" + sessionId + "/extensions";
-        exchange(drift, "getSessionExtensionConfiguration", 200, get(session).header(TENANT, tenant).principal(actor), null);
+        String degradedSnapshot = exchange(drift, "getSessionExtensionConfiguration", 200, get(session).header(TENANT, tenant).principal(actor), null);
+        assertThat(json(degradedSnapshot).path("degradedComponents").path(id).toString()).isEqualTo("[\"hooks\"]");
+        assertThat(json(degradedSnapshot).path("extensions").get(0).path("extensionId").asText()).isEqualTo(id);
         exchange(drift, "applySessionExtensionConfiguration", 409, post(session).header(TENANT, tenant).principal(actor)
                 .header(IDEMPOTENCY_KEY, "extension-apply"), "{\"expectedConfigRevision\":0,\"extensions\":[]}");
         exchange(drift, "getSessionExtensionOperation", 404, get(session + "/operations/" + operation).header(TENANT, tenant).principal(actor), null);
@@ -3750,7 +3762,8 @@ class ManagedAgentApiContractTest {
         exchange(drift, "recoverPreviousSessionExtensions", 409, post(session + "/operations/" + operation + "/recover-previous").header(TENANT, tenant).principal(actor), null);
         String query = "{\"sessionId\":\"" + sessionId + "\"";
         String control = query + ",\"operationId\":\"" + operation + "\"}";
-        exchange(drift, "webShellSessionExtensionsQuery", 200, post(WEB_SHELL + "/session-extensions/query").header(TENANT, tenant).principal(actor), query + "}");
+        String webSnapshot = exchange(drift, "webShellSessionExtensionsQuery", 200, post(WEB_SHELL + "/session-extensions/query").header(TENANT, tenant).principal(actor), query + "}");
+        assertThat(json(webSnapshot).path("degradedComponents").path(id).toString()).isEqualTo("[\"hooks\"]");
         exchange(drift, "webShellSessionExtensionsSubmit", 409, post(WEB_SHELL + "/session-extensions/submit").header(TENANT, tenant).principal(actor),
                 query + ",\"idempotencyKey\":\"extension-apply-web\",\"command\":{\"expectedConfigRevision\":0,\"extensions\":[]}}");
         exchange(drift, "webShellSessionExtensionsContinue", 409, post(WEB_SHELL + "/session-extensions/continue").header(TENANT, tenant).principal(actor), control);
@@ -3792,6 +3805,102 @@ class ManagedAgentApiContractTest {
         exchange(drift, "webShellRuntimeSkillSnapshot", 401, post(WEB_SHELL + "/session-extensions/skills/snapshot").header(TENANT, tenant), query + "}");
         exchange(drift, "webShellRuntimeSkillImports", 401, post(WEB_SHELL + "/session-extensions/skills/imports").header(TENANT, tenant),
                 query + ",\"idempotencyKey\":\"skill-import\"}");
+    }
+
+    /**
+     * Commits an active extension configuration whose single package reports
+     * its hook component as degraded, so the management snapshot exchanges
+     * schema-validate the additive degradedComponents map against the closed
+     * published schema.
+     */
+    private void seedDegradedExtensionConfiguration(String tenant, String sessionId) throws Exception {
+        ExtensionRecordJournal journal = new ExtensionRecordJournal(
+                sessionStore, tenant, "ws-default", sessionId).open();
+        byte[] partBytes = "{\"skills\":[]}".getBytes(StandardCharsets.UTF_8);
+        var part = new ManagedSessionStoreModels.CommitResource("degraded-part", "managed-extension-contributions-part", 1,
+                partBytes.length, DigestUtils.sha256Hex(partBytes), java.util.Base64.getEncoder().encodeToString(partBytes));
+        ObjectNode manifest = objectMapper.createObjectNode().put("kind", "managed-extension-contributions")
+                .put("formatVersion", 1).put("byteLength", partBytes.length).put("digest", part.digest());
+        manifest.putArray("parts").addObject().put("resourceId", part.resourceId()).put("kind", part.kind())
+                .put("schemaVersion", 1).put("byteLength", part.byteLength()).put("digest", part.digest());
+        byte[] manifestBytes = ExtensionRecordJournal.bytes(manifest);
+        var contributions = new ManagedSessionStoreModels.CommitResource("degraded-contributions", "managed-extension-contributions", 1,
+                manifestBytes.length, DigestUtils.sha256Hex(manifestBytes), java.util.Base64.getEncoder().encodeToString(manifestBytes));
+        String extensionId = "ext_11111111-1111-4111-8111-111111111111";
+        ObjectNode bundle = objectMapper.createObjectNode().put("kind", "managed-extension-config-bundle")
+                .put("formatVersion", 1).put("configRevision", 4);
+        ObjectNode pkg = bundle.putArray("packages").addObject();
+        pkg.putObject("pin").put("extensionId", extensionId).put("packageRevision", 1).put("packageDigest", "a".repeat(64));
+        pkg.put("assetRoot", "extension://" + extensionId + "/");
+        pkg.putObject("contributionsRef").put("resourceId", contributions.resourceId()).put("kind", contributions.kind())
+                .put("schemaVersion", 1).put("byteLength", contributions.byteLength()).put("digest", contributions.digest());
+        pkg.putArray("degradedComponents").add("hooks");
+        byte[] bundleBytes = ExtensionRecordJournal.bytes(bundle);
+        var bundleResource = new ManagedSessionStoreModels.CommitResource("degraded-bundle", "managed-extension-config-bundle", 1,
+                bundleBytes.length, DigestUtils.sha256Hex(bundleBytes), java.util.Base64.getEncoder().encodeToString(bundleBytes));
+        ObjectNode bundleRef = objectMapper.createObjectNode().put("resourceId", bundleResource.resourceId())
+                .put("kind", bundleResource.kind()).put("schemaVersion", 1)
+                .put("byteLength", bundleResource.byteLength()).put("digest", bundleResource.digest());
+        List<ManagedSessionStoreModels.CommitResource> resources = new ArrayList<>();
+        for (String id : List.of("root", "hstage", "rstage", "henable", "renable")) {
+            resources.add(new ManagedSessionStoreModels.CommitResource(id, "managed-test", 1, 2, DigestUtils.sha256Hex("{}"),
+                    java.util.Base64.getEncoder().encodeToString("{}".getBytes(StandardCharsets.UTF_8))));
+        }
+        resources.addAll(List.of(bundleResource, contributions, part));
+        ObjectNode preparing = degradedConfigPhase("nullable_preparing", 1, null);
+        commitDegradedConfigPhase(journal, tenant, sessionId, preparing, false, resources);
+        ObjectNode prepared = (ObjectNode) degradedConfigPhase("prepared", 2, preparing).set("bundleRef", bundleRef);
+        commitDegradedConfigPhase(journal, tenant, sessionId, prepared, false, resources);
+        ObjectNode committed = (ObjectNode) degradedConfigPhase("prepared", 3, prepared).put("phase", "committed")
+                .set("bundleRef", bundleRef);
+        commitDegradedConfigPhase(journal, tenant, sessionId, committed, true, resources);
+        ObjectNode active = (ObjectNode) degradedConfigPhase("active", 4, committed).set("bundleRef", bundleRef);
+        commitDegradedConfigPhase(journal, tenant, sessionId, active, false, resources);
+    }
+
+    private ObjectNode degradedConfigPhase(String name, long revision, JsonNode previous) throws Exception {
+        ObjectNode body = ManagedConfigInstallContractTest.record(ManagedConfigInstallContractTest.content(name), revision);
+        if (previous != null) {
+            byte[] bytes = ExtensionRecordJournal.bytes(previous);
+            body.putObject("previousRecordRef").put("resourceId", ExtensionRecordJournal.resourceId(bytes))
+                    .put("kind", "managed-config_install").put("schemaVersion", 1)
+                    .put("byteLength", bytes.length).put("digest", DigestUtils.sha256Hex(bytes));
+        }
+        for (String field : List.of("rootSnapshotRef", "bundleRef")) {
+            if (!body.path(field).isNull()) {
+                ((ObjectNode) body.path(field)).put("digest", DigestUtils.sha256Hex("{}"));
+            }
+        }
+        for (String field : List.of("stageAckRefs", "enableAckRefs")) {
+            for (JsonNode ref : body.path(field)) {
+                ((ObjectNode) ref).put("digest", DigestUtils.sha256Hex("{}"));
+            }
+        }
+        return body;
+    }
+
+    private void commitDegradedConfigPhase(ExtensionRecordJournal journal, String tenant, String sessionId,
+            ObjectNode body, boolean binding, List<ManagedSessionStoreModels.CommitResource> resources) {
+        String operation = body.path("operationId").asText();
+        var request = journal.request("commitDomainRecord", operation + ":phase:" + body.path("revision").asLong(),
+                ExtensionRecordJournal.bytes(body), 1000,
+                event -> ((ObjectNode) event.path("payload")).put("operationId", operation), records -> {
+                    if (!binding) {
+                        return records;
+                    }
+                    ObjectNode event = objectMapper.createObjectNode().put("v", 1)
+                            .put("sequence", journal.committedSequence() + 2)
+                            .put("eventId", "config-bound:" + body.path("revision").asLong())
+                            .put("kind", "config.bound").put("occurredAt", 1000);
+                    event.putObject("sessionKey").put("tenantId", tenant).put("workspaceId", "ws-default").put("sessionId", sessionId);
+                    ObjectNode payload = event.putObject("payload").put("revision", body.path("configRevision").asLong());
+                    payload.putNull("previousRevision").set("bundleRef", body.get("bundleRef"));
+                    payload.set("rootSnapshotRef", body.get("rootSnapshotRef"));
+                    int cut = records.indexOf('\n') + 1;
+                    return records.substring(0, cut) + ExtensionRecordJournal.line(sessionId, "managed_session_event_v1", event) + records.substring(cut);
+                }, binding ? 1 : 0, "config_install", resources);
+        journal.commit(request);
+        journal.committed(request);
     }
 
     private String exchange(Map<String, String> drift, String operationId,
@@ -4106,8 +4215,8 @@ class ManagedAgentApiContractTest {
     }
 
     private static void collect(Map<String, String> drift, String label,
-            Set<ValidationMessage> messages) {
-        for (ValidationMessage message : messages) {
+            List<Error> messages) {
+        for (Error message : messages) {
             String location = message.getInstanceLocation().toString()
                     .replaceAll("/\\d+(?=/|$)", "/*");
             if (location.isEmpty()) {
@@ -4115,7 +4224,7 @@ class ManagedAgentApiContractTest {
             }
             String property = message.getProperty() == null ? ""
                     : " " + message.getProperty();
-            drift.put(label + ": " + location + " " + message.getType()
+            drift.put(label + ": " + location + " " + message.getKeyword()
                     + property, message.getMessage());
         }
     }

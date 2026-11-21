@@ -452,10 +452,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (WorkspaceToolProfiles.isExternal(profile)) {
                 return isWorkspaceFilesAvailable() && supportsSavedLifecycle(profile);
             }
-            return WorkspaceToolProfiles.FILES.equals(profile)
-                    ? isWorkspaceFilesAvailable() && client().capabilities().getLifecycleProtocolVersion() == 1
-                    : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
-                            && client().capabilities().getLifecycleV2Profiles().contains(profile);
+            // D3: ordinary files joins the v2 profiles, keeping its availability
+            // gate; external-files stays on the saved v1 path above.
+            if (WorkspaceToolProfiles.FILES.equals(profile) && !isWorkspaceFilesAvailable()) {
+                return false;
+            }
+            return WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
+                    && client().capabilities().getLifecycleV2Profiles().contains(profile);
         } catch (DaemonException
                 | IllegalStateException unavailable) {
             return false;
@@ -825,7 +828,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public boolean supportsPublicChildAgents() {
         try {
-            return poolEndpoint == null && feature(HarnessFeature.PUBLIC_CHILD_AGENTS)
+            // D5′: a pooled worker that advertises the feature admits children
+            // too; the capability negotiation, not the deployment shape, gates.
+            return feature(HarnessFeature.PUBLIC_CHILD_AGENTS)
                     && supportsLifecycle(WorkspaceToolProfiles.SHELL);
         } catch (RuntimeException unavailable) {
             return false;
@@ -2535,16 +2540,31 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         "byteLength", copied.byteLength(), "digest", copied.digest()));
     }
 
-    private boolean publicChildLaunchAvailable(SessionRecord session) {
+    private boolean publicChildCapabilityAdmitted(SessionRecord session) {
         return session.publicChildAgentsVersion() == 1 && settings.admitsPublicChildAgents()
-                && supportsPublicChildAgents()
+                && supportsPublicChildAgents();
+    }
+
+    private boolean publicChildLaunchAvailable(SessionRecord session) {
+        // Only a root launches children; the depth-1 child's own launch gate
+        // stays closed even though it keeps the admitted execution surface.
+        return publicChildCapabilityAdmitted(session)
                 && sessions.findChildLineage(session.tenantId(), session.sessionId()) == null;
     }
 
     private boolean foregroundOnly(SessionRecord session) {
+        // D5′: an admitted public child Session (persisted version 1) keeps its
+        // background surface on SSH — roots and depth-1 children alike. The
+        // worker refuses a version-1 attach that carries foregroundOnly:true,
+        // so this follows the persisted capability, NOT the mutable
+        // workspace-child-agents-enabled switch: toggling that switch stops new
+        // launches (publicChildLaunchAvailable) but must not strand an already
+        // admitted Session's attach surface.
+        //
+        // The external foreground-Shell lane has no background surface at all,
+        // so its Sessions stay foreground-only whatever their child version.
         return WorkspaceToolProfiles.isExternalShell(session.toolProfile())
-                || sshWorkspace(session) && !(session.publicChildAgentsVersion() == 1
-                && settings.getExtensions().isEnabled() && settings.getManagedExtensions().isEnabled());
+                || sshWorkspace(session) && session.publicChildAgentsVersion() != 1;
     }
 
     private boolean sshWorkspace(SessionRecord session) {
@@ -2729,12 +2749,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
      * G3: instead of pinning every bound Session to one dead Harness
      * process, a live control plane adopts the next generation. The next
      * {@link #client()} call renegotiates, so a capability change fails
-     * closed at the boundary instead of masking it. The connector monitor
-     * only guards the client handoff and never wraps the map churn (a
+     * closed at the boundary instead of masking it. The clientLock only
+     * guards the client handoff and never wraps the map churn (a
      * {@code ConcurrentHashMap.computeIfAbsent} bin lock is held across an
-     * in-flight load, so clearing maps under the monitor would invert the
-     * lock order and could deadlock). The handoff does build the
-     * replacement under the monitor, so a renegotiation blocks other
+     * in-flight load, so clearing maps under the lock would invert the
+     * lock order and could deadlock). {@link #client()} builds the
+     * replacement under the same lock, so a renegotiation blocks other
      * Sessions' attaches for at most its connect + request timeouts —
      * bounded, unlike the in-flight load it replaced.
      * <p>
@@ -2753,7 +2773,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         HostedHarnessClient stale = null;
         boolean dropped = false;
-        synchronized (this) {
+        // client() and close() hand the client over under the same lock, so
+        // an adoption and a close never both take and close one client.
+        clientLock.lock();
+        try {
             HostedHarnessClient current = client;
             if (current == null) {
                 return;
@@ -2764,10 +2787,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 stale = current;
                 dropped = true;
             }
+        } finally {
+            clientLock.unlock();
         }
-        // No map work under the monitor: a computeIfAbsent bin lock is
+        // No map work under the clientLock: a computeIfAbsent bin lock is
         // held across an in-flight load elsewhere, so touching either map
-        // while holding `this` inverts the lock order. Evicting by boot
+        // while holding it inverts the lock order. Evicting by boot
         // identity instead of clearing also keeps whatever a concurrent
         // rebuild already minted under the generation now serving, and
         // dropping the markers of evicted entries keeps the two maps in

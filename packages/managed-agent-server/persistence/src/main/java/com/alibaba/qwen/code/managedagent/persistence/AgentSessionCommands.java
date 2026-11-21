@@ -87,10 +87,13 @@ final class AgentSessionCommands {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             SessionPrincipal principal, String actorId) {
-        // No tenant guard: the Session lock comes first (ordering against
-        // lifecycle begin and migration fencing), so this transaction's
-        // snapshot follows it and nothing later takes the guard.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        // A per-turn admission takes no tenant guard. The Session row orders it
+        // against lifecycle begin, requireOpen's locking reads of this storage's
+        // alias (fence) and directory rows order it against migration fence
+        // installation and physical fencing, and nothing later in this
+        // transaction takes the guard. The Session lock comes first, so this
+        // transaction's snapshot is taken after it.
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         sessionPolicies.requirePublicChildImmutable(session);
         if (session.workspace() == null) {
             requireWriteAuthority(tenantId, sessionId, principal, actorId);
@@ -204,7 +207,7 @@ final class AgentSessionCommands {
     private Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, SessionPrincipal principal, String actorId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             requireWriteAuthority(tenantId, sessionId, principal, actorId);
         }
@@ -315,7 +318,7 @@ final class AgentSessionCommands {
         // No tenant guard, as in changeSessionModel: settlement writes no delivery row, so no
         // operation range is locked. The Session lock comes first, so the replay probe's snapshot
         // follows it; a racing Session reusing the key loses on the receipt's unique key.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent() && sessionId.equals(previous.get().sessionId())) {
             requireMutationReceiptGrant(tenantId, session, previous.get(), actorId, principal);
@@ -357,7 +360,7 @@ final class AgentSessionCommands {
         // read that misses gap-locks the tenant-shared receipt index, and concurrent admissions
         // of different keys would deadlock inserting into that gap. A racing Session reusing the
         // tenant-scoped key loses on the receipt's unique key instead (see insertCommand below).
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             if (principal != null) {
                 ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId, principal);
@@ -490,7 +493,7 @@ final class AgentSessionCommands {
     SessionRecord completeSessionMutation(String tenantId,
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -540,11 +543,13 @@ final class AgentSessionCommands {
                         "metadata", Map.of("title", title));
             }
             // An archived Session was closed first, so it stays closed.
-            case UNARCHIVE -> jdbc.update("UPDATE ma_session SET"
-                            + " status = 'CLOSED', gmt_modified = ?, version ="
-                            + " version + 1 WHERE tenant_id = ? AND"
-                            + " session_id = ?",
-                    now, tenantId, sessionId);
+            case UNARCHIVE -> {
+                jdbc.update("UPDATE ma_session SET"
+                                + " status = 'CLOSED', gmt_modified = ?, version ="
+                                + " version + 1 WHERE tenant_id = ? AND" + " session_id = ?",
+                        now, tenantId, sessionId);
+                JdbcManagedUserMessageStore.retireQueued(jdbc, tenantId, sessionId);
+            }
         }
         jdbc.update(
                 "UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ? WHERE"
@@ -559,7 +564,6 @@ final class AgentSessionCommands {
 
     void abandonSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         // Keep the digest and receipt for replay and concurrent completion.
         // A completed outcome must never be overwritten by a failing sibling.
         jdbc.update("UPDATE ma_request_receipt SET state = 'FAILED',"
@@ -590,15 +594,14 @@ final class AgentSessionCommands {
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
                 scope, target, operationId);
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
+                "INSERT INTO ma_operation (operation_key, scope_key,"
                     + " target_kind, target_key, target_id, phase, request_json,"
                     + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
                     + " actor_key, idempotency_key, request_digest, state, admission_stage,"
                     + " delivery_state, session_status_before, available_at, gmt_create,"
-                    + " gmt_modified) VALUES (?, ?, ?, 'TURN', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
+                    + " gmt_modified) VALUES (?, ?, 'TURN', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
                     + " ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?)",
                 operationKey,
-                scope,
                 scope,
                 target,
                 turnId,
@@ -870,7 +873,7 @@ final class AgentSessionCommands {
 
     // Automation-verb session boot-id bind (#14548); fill only when still empty.
     void bindSessionHarness(String tenantId, String sessionId, String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (harnessBootId.equals(session.harnessBootId())) {
             return;
         }

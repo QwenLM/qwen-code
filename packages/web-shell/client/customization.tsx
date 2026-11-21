@@ -776,6 +776,7 @@ export interface WebShellCustomization {
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
   composerVariant?: 'default' | 'simple';
+  composerGlowEnabled?: boolean;
   /**
    * Built-in / host @ mention providers. Split-view panes share this context
    * so they match the main composer without ChatPane prop drilling.
@@ -849,6 +850,7 @@ export interface WebShellCustomization {
    * expanded. Defaults to enabled when unset.
    */
   collapseCompletedTurns?: boolean;
+  overscan?: number;
   markdownTableMode?: MarkdownTableMode;
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;
