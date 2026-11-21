@@ -37,6 +37,27 @@ function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
   return container;
 }
 
+it.each([
+  ['en', 'Started a new context from local notes'],
+  ['zh-CN', '已从本地笔记开始新上下文'],
+] as const)('renders notes rollovers in %s', (language, text) => {
+  const container = render(
+    <SystemMessage
+      content="Context compressed"
+      variant="info"
+      source="context_compression"
+      data={{
+        phase: 'done',
+        strategy: 'notes',
+        originalTokenCount: 1200,
+        newTokenCount: 450,
+      }}
+    />,
+    language,
+  );
+  expect(container.textContent).toContain(text);
+});
+
 describe('SystemMessage — prompt_cancelled marker', () => {
   it('uses shared quota copy in the Chinese Desktop and VS Code message component', () => {
     const container = render(

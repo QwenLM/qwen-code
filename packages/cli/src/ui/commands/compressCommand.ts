@@ -131,10 +131,11 @@ export const compressCommand: SlashCommand = {
           yield {
             messageType: 'info' as const,
             content:
-              `Context compressed (${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
+              `${compressed.strategy === 'notes' ? 'Started a new context from local notes' : 'Context compressed'} (${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
               (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
             contextCompression: {
               phase: 'done' as const,
+              ...(compressed.strategy ? { strategy: compressed.strategy } : {}),
               originalTokenCount: compressed.originalTokenCount,
               newTokenCount: compressed.newTokenCount,
               // An omitted flag travels as `false`, which is how the daemon's
@@ -215,6 +216,7 @@ export const compressCommand: SlashCommand = {
               newTokenCount: compressed.newTokenCount,
               compressionStatus: compressed.compressionStatus,
               compressionKind: 'summarize',
+              ...(compressed.strategy ? { strategy: compressed.strategy } : {}),
               originalTokenCountIsEstimated:
                 compressed.originalTokenCountIsEstimated,
               newTokenCountIsEstimated: compressed.newTokenCountIsEstimated,

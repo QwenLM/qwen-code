@@ -118,6 +118,7 @@ export interface IndividualToolCallDisplay {
 }
 
 export interface CompressionProps {
+  strategy?: 'summary' | 'notes';
   isPending: boolean;
   originalTokenCount: number | null;
   newTokenCount: number | null;
@@ -161,6 +162,7 @@ export type ContextCompressionMeta =
     }
   | {
       phase: 'done';
+      strategy?: 'summary' | 'notes';
       originalTokenCount: number;
       newTokenCount: number;
       originalTokenCountIsEstimated?: boolean;

@@ -355,6 +355,27 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
   describe('previously dropped core events', () => {
     // ink parity: useGeminiStream's handleChatCompressionEvent adds a
     // `type: 'info'` history item (InfoMessage row) for auto-compact.
+    it('identifies a notes rollover without claiming a summary was generated', () => {
+      const map = createEventMapper({ getModelName: () => 'qwen3-max' });
+      const out = map({
+        type: 'chat_compressed',
+        value: {
+          strategy: 'notes',
+          originalTokenCount: 1200,
+          newTokenCount: 300,
+          originalTokenCountIsEstimated: true,
+          newTokenCountIsEstimated: false,
+        },
+      } as unknown as AnyEv);
+      expect(out).toEqual([
+        { type: 'retry-countdown-clear' },
+        {
+          type: 'info',
+          text: 'Started a new context from local notes (~1200 to 300 tokens). Earlier evidence remains available in session history.',
+        },
+      ]);
+    });
+
     it('maps chat_compressed to an info notice with token counts', () => {
       const map = createEventMapper({ getModelName: () => 'qwen3-max' });
       const out = map({

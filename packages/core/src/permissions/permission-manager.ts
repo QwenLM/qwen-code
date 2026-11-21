@@ -889,6 +889,10 @@ export class PermissionManager {
       canonicalName === ToolNames.STRUCTURED_OUTPUT ||
       PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) ||
       canonicalName === ToolNames.TASK_STOP ||
+      canonicalName === ToolNames.SESSION_NOTES ||
+      canonicalName === ToolNames.SESSION_HISTORY ||
+      canonicalName === ToolNames.GET_CONTEXT_REMAINING ||
+      canonicalName === ToolNames.NEW_CONTEXT ||
       canonicalName === ToolNames.TOOL_CALL ||
       canonicalName === ToolNames.TOOL_SEARCH ||
       canonicalName.startsWith('mcp__') ||

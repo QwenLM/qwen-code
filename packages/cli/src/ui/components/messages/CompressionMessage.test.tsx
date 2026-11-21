@@ -35,6 +35,23 @@ describe('<CompressionMessage />', () => {
   });
 
   describe('normal compression (successful token reduction)', () => {
+    it('identifies a context restored from notes and preserves estimated counts', () => {
+      const { lastFrame } = render(
+        <CompressionMessage
+          {...createCompressionProps({
+            strategy: 'notes',
+            originalTokenCount: 10000,
+            newTokenCount: 500,
+            newTokenCountIsEstimated: true,
+          })}
+        />,
+      );
+
+      expect(lastFrame()).toContain(
+        'Started a new context from local notes: 10000 to ~500 tokens.',
+      );
+    });
+
     it('renders success message when tokens are reduced', () => {
       const props = createCompressionProps({
         isPending: false,
