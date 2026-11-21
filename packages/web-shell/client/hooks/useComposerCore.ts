@@ -1079,11 +1079,12 @@ export function computeCaretTarget(
   direction: 'up' | 'down' | 'right',
   lineStarts: number[] = logicalLineStarts(text),
   preferredColumn?: number,
+  selectionDirection?: HTMLTextAreaElement['selectionDirection'],
 ): number {
   if (direction === 'right') {
     return start === end ? nextGraphemeBoundary(text, end) : end;
   }
-  const caret = end;
+  const caret = selectionDirection === 'backward' ? start : end;
   const index = lineIndexAt(lineStarts, caret);
   const column =
     preferredColumn ?? caretGraphemeColumn(text, caret, lineStarts);
@@ -5152,10 +5153,11 @@ export function useComposerCore(
       // move clears it above and must not write the pre-move column back.
       // At a wrap boundary the anchor is the line the last vertical move
       // landed on, not the line of the character after the caret.
+      const caret = el.selectionDirection === 'backward' ? start : end;
       const anchor =
         verticalLayoutKeyRef.current === touchLayoutFingerprint(el)
-          ? (verticalLineStartRef.current ?? end)
-          : end;
+          ? (verticalLineStartRef.current ?? caret)
+          : caret;
       const lineStarts = visualLineStartsAround(el, text, anchor);
       const column =
         verticalColumnRef.current ??
@@ -5172,6 +5174,7 @@ export function useComposerCore(
         key,
         lineStarts,
         column,
+        el.selectionDirection,
       );
       verticalColumnRef.current = column;
       // A soft-wrap clamp can equal the next line's start; lineIndexAt(target)

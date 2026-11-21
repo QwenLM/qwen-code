@@ -1462,6 +1462,21 @@ describe('touch editing-row keys', () => {
     });
   });
 
+  it('moves from the active end of a backward selection', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('aa\nbbb\ncc');
+    const el = textarea();
+    el.setSelectionRange(1, 5, 'backward');
+    act(() => latest!.pressEditingKey('up'));
+    expect([el.selectionStart, el.selectionEnd]).toEqual([0, 0]);
+
+    el.setSelectionRange(1, 5, 'backward');
+    el.dispatchEvent(new Event('select', { bubbles: true }));
+    act(() => latest!.pressEditingKey('down'));
+    expect([el.selectionStart, el.selectionEnd]).toEqual([4, 4]);
+  });
+
   it('does nothing while an IME composition is active', async () => {
     mockTouchDevice();
     await mount();
@@ -1478,6 +1493,22 @@ describe('touch editing-row keys', () => {
     act(() => latest!.setComposing(false));
     act(() => latest!.pressEditingKey('right'));
     expect(textarea().selectionStart).toBe(3);
+  });
+
+  it('resets the preferred column on selection in the expanded textarea', async () => {
+    mockTouchDevice();
+    await mount({ expanded: true });
+    typeText('aaaa\nbb\ncccc');
+    const el = document.querySelector<HTMLTextAreaElement>(
+      'textarea[data-expanded]',
+    )!;
+    el.setSelectionRange(12, 12);
+    act(() => latest!.pressEditingKey('up'));
+    expect(el.selectionStart).toBe(7);
+    el.setSelectionRange(6, 6);
+    document.dispatchEvent(new Event('selectionchange'));
+    act(() => latest!.pressEditingKey('up'));
+    expect(el.selectionStart).toBe(1);
   });
 
   it('holds the preferred column across a vertical run until reset', async () => {
@@ -1517,6 +1548,7 @@ describe('touch editing-row keys', () => {
     await mount();
     typeText('a'.repeat(24));
     const el = textarea();
+    el.style.border = '0';
     let width = 300;
     Object.defineProperty(el, 'clientWidth', {
       configurable: true,
@@ -1542,6 +1574,16 @@ describe('touch editing-row keys', () => {
       width = 150;
       act(() => latest!.pressEditingKey('down'));
       expect(el.selectionStart).toBe(24);
+      expect(
+        document.querySelector<HTMLElement>('[data-web-shell-caret-mirror]')!
+          .style.width,
+      ).toBe('150px');
+      act(() => {
+        el.setSelectionRange(12, 12);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+      act(() => latest!.pressEditingKey('up'));
+      expect(el.selectionStart).toBe(9);
     } finally {
       rectSpy.mockRestore();
     }

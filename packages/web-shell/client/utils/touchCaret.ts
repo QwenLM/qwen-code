@@ -144,6 +144,7 @@ const MIRRORED_STYLE_PROPERTIES = [
   'wordSpacing',
   'lineHeight',
   'tabSize',
+  'textIndent',
   'paddingTop',
   'paddingRight',
   'paddingBottom',
@@ -154,10 +155,36 @@ const MIRRORED_STYLE_PROPERTIES = [
   'borderLeftWidth',
 ] as const;
 
+function measureTouchClientWidth(el: HTMLTextAreaElement): number {
+  const style = window.getComputedStyle(el);
+  const layoutWidth = Number.parseFloat(style.width);
+  // Computed width belongs to layout, not the transformed painted rect.
+  if (!Number.isFinite(layoutWidth)) return el.clientWidth;
+  const borderWidth =
+    (parseFloat(style.borderLeftWidth) || 0) +
+    (parseFloat(style.borderRightWidth) || 0);
+  const scrollbarWidth = Math.max(
+    0,
+    el.offsetWidth - el.clientWidth - borderWidth,
+  );
+  const paddingWidth =
+    style.boxSizing === 'content-box'
+      ? (parseFloat(style.paddingLeft) || 0) +
+        (parseFloat(style.paddingRight) || 0)
+      : 0;
+  // content-box width already excludes a native scrollbar track.
+  return Math.max(
+    0,
+    layoutWidth +
+      paddingWidth -
+      (style.boxSizing === 'border-box' ? borderWidth + scrollbarWidth : 0),
+  );
+}
+
 export function touchLayoutFingerprint(el: HTMLTextAreaElement): string {
   const style = window.getComputedStyle(el);
   return JSON.stringify([
-    el.clientWidth,
+    measureTouchClientWidth(el),
     ...MIRRORED_STYLE_PROPERTIES.map((property) => style[property]),
     document.fonts?.status ?? '',
   ]);
@@ -174,7 +201,7 @@ const mirrorCache = new WeakMap<HTMLTextAreaElement, MirrorCache>();
  * per-grapheme rect loop, which would block the key handler on long drafts.
  */
 function getMirror(el: HTMLTextAreaElement, text: string): MirrorCache | null {
-  const width = el.clientWidth;
+  const width = measureTouchClientWidth(el);
   if (typeof document === 'undefined' || width <= 0) return null;
   const fingerprint = touchLayoutFingerprint(el);
   const cached = mirrorCache.get(el);
@@ -236,7 +263,8 @@ function topAt(cache: MirrorCache, text: string, offset: number): number {
   if (cache.node.length === 0) return 0;
   let o = offset;
   if (o >= text.length) o = cache.node.length - 1;
-  else if (text[o] === '\n' && o > 0) o = o - 1;
+  // A consecutive newline owns an empty row; do not measure the prior row.
+  else if (text[o] === '\n' && o > 0 && text[o - 1] !== '\n') o = o - 1;
   // Character rect, not a collapsed caret: a collapsed range at a wrap
   // boundary reports the previous line's end (upstream affinity).
   const range = document.createRange();

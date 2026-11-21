@@ -36,9 +36,34 @@ describe('touch editing-key caret targets', () => {
     expect(computeCaretTarget('a\n\nb', 3, 3, 'up')).toBe(2);
   });
 
-  it('moves from the selection head (end), not its anchor, when active', () => {
+  it('moves from the forward selection head (end), not its anchor', () => {
     expect(computeCaretTarget('aa\nbbb\ncc', 1, 5, 'up')).toBe(2);
     expect(computeCaretTarget('aa\nbbb\ncc', 1, 5, 'down')).toBe(9);
+  });
+
+  it('uses the active start of a backward selection for vertical moves', () => {
+    expect(
+      computeCaretTarget(
+        'aa\nbbb\ncc',
+        1,
+        5,
+        'up',
+        undefined,
+        undefined,
+        'backward',
+      ),
+    ).toBe(0);
+    expect(
+      computeCaretTarget(
+        'aa\nbbb\ncc',
+        1,
+        5,
+        'down',
+        undefined,
+        undefined,
+        'backward',
+      ),
+    ).toBe(4);
   });
 
   it('steps a whole grapheme so inserting never splits a surrogate pair', () => {

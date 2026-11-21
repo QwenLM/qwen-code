@@ -6,12 +6,16 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { discardMirror, visualLineStartsAround } from './touchCaret';
+import {
+  discardMirror,
+  touchLayoutFingerprint,
+  visualLineStartsAround,
+} from './touchCaret';
 
-function host(): HTMLTextAreaElement {
+function host(width = 300): HTMLTextAreaElement {
   const el = document.createElement('textarea');
   Object.defineProperty(el, 'clientWidth', {
-    value: 300,
+    value: width,
     configurable: true,
   });
   document.body.appendChild(el);
@@ -66,6 +70,104 @@ describe('touch caret mirror lifecycle', () => {
       } else {
         Reflect.deleteProperty(document, 'fonts');
       }
+    }
+  });
+
+  it('uses fractional widths for measurement and cache invalidation', () => {
+    const el = host(100);
+    el.style.border = '0';
+    el.style.width = '99.6px';
+    let width = 99.6;
+    Object.defineProperty(el, 'offsetWidth', {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(el, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ width }),
+    });
+    try {
+      expect(getComputedStyle(el).width).toBe('99.6px');
+      const initialFingerprint = touchLayoutFingerprint(el);
+      visualLineStartsAround(el, 'a'.repeat(150), 5);
+      width = 99.2;
+      el.style.width = '99.2px';
+      expect(touchLayoutFingerprint(el)).not.toBe(initialFingerprint);
+      visualLineStartsAround(el, 'a'.repeat(150), 5);
+      const mirror = document.querySelector<HTMLElement>(
+        '[data-web-shell-caret-mirror]',
+      );
+      expect(mirror).not.toBeNull();
+      expect(parseFloat(mirror!.style.width)).toBeCloseTo(99.2, 8);
+    } finally {
+      discardMirror(el);
+      el.remove();
+    }
+  });
+
+  it('uses layout width instead of the transformed painted rect', () => {
+    const el = host(100);
+    el.style.width = '100px';
+    el.style.border = '0';
+    Object.defineProperty(el, 'offsetWidth', {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(el, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ width: 95 }),
+    });
+    try {
+      visualLineStartsAround(el, 'a'.repeat(80), 5);
+      const mirror = document.querySelector<HTMLElement>(
+        '[data-web-shell-caret-mirror]',
+      );
+      expect(mirror?.style.width).toBe('100px');
+    } finally {
+      discardMirror(el);
+      el.remove();
+    }
+  });
+
+  it('does not subtract a native scrollbar twice from content-box widths', () => {
+    const el = host(85);
+    el.style.width = '85px';
+    el.style.boxSizing = 'content-box';
+    el.style.padding = '0';
+    el.style.border = '0';
+    Object.defineProperty(el, 'offsetWidth', {
+      value: 100,
+      configurable: true,
+    });
+    try {
+      expect(getComputedStyle(el).width).toBe('85px');
+      visualLineStartsAround(el, 'a'.repeat(80), 5);
+      visualLineStartsAround(el, 'a'.repeat(80), 5);
+      const mirror = document.querySelector<HTMLElement>(
+        '[data-web-shell-caret-mirror]',
+      );
+      expect(mirror?.style.width).toBe('85px');
+    } finally {
+      discardMirror(el);
+      el.remove();
+    }
+  });
+
+  it('copies text indentation and includes it in the layout fingerprint', () => {
+    const el = host();
+    el.style.textIndent = '30px';
+    const initialFingerprint = touchLayoutFingerprint(el);
+    el.style.textIndent = '48px';
+    try {
+      expect(touchLayoutFingerprint(el)).not.toBe(initialFingerprint);
+      visualLineStartsAround(el, 'word '.repeat(30), 5);
+      const mirror = document.querySelector<HTMLElement>(
+        '[data-web-shell-caret-mirror]',
+      );
+      expect(mirror?.style.textIndent).toBe('48px');
+    } finally {
+      discardMirror(el);
+      el.remove();
     }
   });
 

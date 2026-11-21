@@ -2,7 +2,7 @@
 
 [English](web-shell-mobile-followup-acceptance.md) | [简体中文](web-shell-mobile-followup-acceptance.zh-CN.md)
 
-状态:已实现于 `feat/web-shell-mobile-followup-acceptance`(PR #17918),2026-11-20 经多轮评审修订(Tab 键 → 动作词键 → 单 chip 建议条 → 光标/斜杠键排 → 240px 换行修复 → 字素/视觉行光标、列保持与滚动揭示 → 有界镜像测量、折行行尾字素钳制、仅垂直写列、展开对话框 surface、忽略不聚焦)。
+状态:已实现于 `feat/web-shell-mobile-followup-acceptance`(PR #17918),2026-11-20–21 经多轮评审修订(Tab 键 → 动作词键 → 单 chip 建议条 → 光标/斜杠键排 → 240px 换行修复 → 字素/视觉行光标、列保持与滚动揭示 → 有界镜像测量、折行行尾字素钳制、仅垂直写列、展开对话框 surface、忽略不聚焦)。
 
 ## 问题
 
@@ -22,6 +22,8 @@
 
 对抗审计后的精化:镜像缓存与垂直锚点共用布局 fingerprint(client 宽度、复制到镜像的字体/间距指标、padding、边框宽度及字体就绪状态),宽度或字体/边框改变时不再复用陈旧视觉行。普通与展开 textarea 的 callback ref 都保留供既有 focus/blur 调用使用的 `.current`,同时在各自节点替换或卸载时立即丢弃镜像和宿主的强引用。右移字素仍不枚举视觉行;滚动揭示会按需做有界镜像测量,因为真实 Chromium 对照已证明仅调用原生 `setSelectionRange` 不保证露出远端光标。只给镜像 border-box 外宽补左右边框,给揭示坐标补顶部 padding,保证末行进入滚动窗口。没有 `Intl.Segmenter` 时,高代理只与真正的低代理配对。
 
+后续布局审计又补了多项窄范围正确性约束。纵向移动以选区活动端为准：反向选区从 `selectionStart` 起算，正向或未指明方向的选区仍取原来的末尾，水平移动不变。镜像与缓存指纹采用计算样式中的布局宽度，并按盒模型与原生滚动条轨道校正，而不是使用受 transform 影响的绘制矩形宽度。无法按数值解析布局宽度时退回未缩放的 `clientWidth`，在展开对话框缩放等绘制变换下保持布局语义。空行起始偏移处的换行符保留自身行用于滚动揭示，不再回退到上一行行顶；逻辑行行尾换行符仍按上一行的亲和性测量视觉行。盒模型换算时，border-box 宽度先减去边框，content-box 的宽度则补回 padding，避免重复计入边框。`text-indent` 也纳入同一个镜像样式/指纹属性表；小数布局变化会替换唯一镜像，不复用旧几何。原生像素目标列与触屏字素列仍明确区分：在实测缩进夹具中，原生可落到偏移 13，而触屏按字素列选择偏移 10，二者都指向预期的下一条视觉行。滚动条轨道只在 border-box 中扣除；content-box 的计算宽度已由平台扣除轨道，只补回 padding，不重复扣减。桌面 Chromium 的 15px 原生滚动条对照覆盖两种盒模型。
+
 可见性:触摸后端已挂载、建议可见、草稿为空、composer 未禁用。开始打字即隐藏,与桌面 ghost 的前缀规则精神一致,同时保证触摸面不干扰草稿。chip 可见时触摸 textarea 保持普通占位符,建议文字只出现在一个 surface 上;早先一版曾同时留在 placeholder 里,造成同屏重复。全屏展开对话框是 chip-only 规则的唯一例外:chip 条只渲染在行内输入框,故对话框打开且草稿为空时,由对话框 textarea 的 placeholder 与 aria-label 承载建议(草稿非空后还原普通占位符),保证任何布局下建议都恰好出现在一个 surface 上。桌面仍保留空输入 placeholder、前缀 ghost 补全的渲染。
 
 接受调用 `onAcceptFollowup('tab')` 且不带 `skipOnAccept`,复用宿主现成的 `onAccept → insertText` 接线:填入 textarea 并请求 focus。焦点时序:composer 外层点击处理先在手势内同步聚焦 textarea;宿主 accept 再经 `queueMicrotask` 延迟插入并在插入后再次请求 focus。真 iOS 上延迟插入的 focus 请求可能落在 tap 手势之外、键盘可能不弹——真 iOS 键盘行为未验证、属范围外。忽略调用 `onDismissFollowup` 并阻止点击冒泡,外层聚焦处理不再执行:未聚焦状态下点忽略后 textarea 保持未聚焦、「收起键盘」控件不出现,保留既有 ignored 遥测。不新增数据通路:daemon sidechannel、controller、insertText 触摸分支均原样复用。
@@ -39,11 +41,11 @@
 ## 验证
 
 - `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):27/27 通过——chip 填入不发送、忽略、未聚焦时忽略不拉焦点、空输入直发、打字隐藏、前缀补全、编辑行不带 follow-up 专用键而 chip 接受(default 变体)、chip 可见时 placeholder 保持普通文案(单 surface)、空草稿展开对话框由 placeholder 承载建议、光标上/下/右移动、字素安全右移加斜杠不拆 emoji、上移到折行行尾保持 emoji 完整且与原生等价、150 连续字符软折行草稿上上/下与原生方向键落在同一光标、水平后下移重算列而非回写旧列、50k 草稿右/上按键 <200ms 且不重测全篇、编辑间镜像唯一且清空即弃、下键落到空行并继续、连按上键越过折行边界与原生一致、光标/忽略图标与兄弟 18px 几何一致、短中间行的连续垂直移动保持目标列、长草稿滚回高度上限窗口、→ 接受可见建议、前缀草稿下右键标签/接受同步与完全匹配落到光标移动、字面斜杠插入、CDP 驱动的 IME 组合期间按键让路、390px 同行/240px 自占行且无横向溢出,以及两条 zh-CN 用例钉住本地化 chip 文本、忽略标签与光标键标签并截中文 UI 图。27 例中 25 例带 `@smoke`(仅 CDP-IME 与 50k 计时除外),可移植验收用例在两引擎的 PR 门控 smoke 车道上运行,不再只由定时 browser-regression 覆盖;zh 用例传 `?language=`,由 App 的 `getInitialLanguage` 直接读取;spec 把取证截图写入其 test-results 输出目录。
-- `client/e2e/web-shell.touch-caret-issue-17918.mobile.spec.ts` 覆盖 5 个光标连续性用例，以及字体/word-spacing 变化后的布局 fingerprint、左右边框与原生方向键一致、顶部 padding 的滚动揭示、展开宿主清理，另有 Chromium 原生对照证明右键为何仍需有界揭示。11 个中 10 个带 `@smoke`;原生滚动对照不进入该 grep。
-- 两个 Playwright spec 合计在 mobile-Chromium 下验证 **38/38**:原 27 项基础用例加 11 项光标用例;35 项携带 `@smoke` 进入可移植 smoke 集合,另外 3 项为计时、CDP-IME 与原生滚动对照。
-- `ChatEditor.test.tsx` mobile composer actions:单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)、accept/dismiss 接线、忽略不调用外层聚焦、composition 与选区重置接线、编辑键接线与 → 的动态 aria-label(含完全匹配判据);`useComposerCore.test.ts` 钉字素/视觉行光标计算、折行行尾钳制与目标列保持;`useComposerCore.mobile.dom.test.tsx` 对真实钩子钉完全匹配接受门、前缀接受、IME 让路、列保持与用户跳选区重置及水平后重算、滚动揭示;`utils/touchCaret.test.ts` 钉镜像唯一生命周期,`App.css.test.ts` 钉常驻/hover 背景 token 在两主题块均声明;六个文件(含 `i18n.test.ts`)508/508 通过。
+- `client/e2e/web-shell.touch-caret-issue-17918.mobile.spec.ts` 覆盖 5 个光标连续性用例，以及字体/word-spacing 变化后的布局 fingerprint、左右边框与原生方向键一致、顶部 padding 的滚动揭示、展开宿主清理与选区复位、反向选区活动端、小数宽度匹配与缓存失效、text-indent 匹配（含原生像素目标列对照）、布局宽度不随绘制缩放而改变、受限滚动视口内连续 Down 到空行时的揭示（保留换行亲和性）、含 15px 原生滚动条轨道的 border-box/content-box 几何匹配、连续空行揭示，另有 Chromium 原生对照证明右键为何仍需有界揭示。18 个中 16 个带 `@smoke`;原生滚动条的两种盒模型对照与 Chromium 原生滚动对照不进入该 grep。
+- 两个 Playwright spec 合计在 mobile-Chromium 下验证 **45/45**:原 27 项基础用例加 18 项光标用例;41 项携带 `@smoke` 进入可移植 smoke 集合,另外 4 项为计时、CDP-IME 与两类原生滚动对照。
+- `ChatEditor.test.tsx` mobile composer actions:单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)、accept/dismiss 接线、忽略不调用外层聚焦、composition 与选区重置接线、编辑键接线与 → 的动态 aria-label(含完全匹配判据);`useComposerCore.test.ts` 钉字素/视觉行光标计算、折行行尾钳制、目标列保持以及正/反向选区活动端;`useComposerCore.mobile.dom.test.tsx` 对真实钩子钉完全匹配接受门、前缀接受、IME 让路、反向选区活动端、展开态选区复位、列保持与用户跳选区重置及水平后重算、滚动揭示;`utils/touchCaret.test.ts` 钉镜像唯一生命周期、小数宽度精度、缓存失效、布局宽度与绘制变换的区分及 text-indent 复制/指纹,`App.css.test.ts` 收集常驻/hover 规则的全部声明值，并钉住 color、background、边框主题 token 在两主题块均声明;六个文件(含 `i18n.test.ts`)515/515 通过。上述布局夹具区分字素列与原生像素目标列,并在字体回退影响原生折行时钉住明确安装的字体族,不宣称任意 generic font 等价。
 - web-shell `tsc --noEmit` 与改动文件 ESLint:干净。
-- 未覆盖:mobile-webkit / iOS 真机(本机缺 WebKit 运行库);软键盘弹起时新增行的高度挤压;iPad 外接键盘 Tab/→ 接受(后置)。
+- 未覆盖:mobile-webkit / iOS 真机(本机缺 WebKit 运行库);软键盘弹起时新增行的高度挤压;iPad 外接键盘 Tab/→ 接受(后置);展开对话框缩放动画中实际手指操作;generic 字体选择与本机原生排版一致性(本机 generic `monospace` 与明确字体族产生了不同的原生折行,新增宽度/缩进夹具固定明确安装的字体族)。
 
 ## 待定问题
 
