@@ -5572,15 +5572,6 @@ export class Session implements SessionContext {
       cancelReason === 'user'
         ? USER_CANCEL_ABORT_REASON
         : SESSION_DISPOSE_ABORT_REASON;
-    if (this.closeAbortReason === SESSION_DISPOSE_ABORT_REASON) {
-      // The close cancels the in-flight turn, and the settlement that follows
-      // would durably end it as `cancelled`. Restart recovery re-opens that
-      // turn from the unanswered prompt, so the cancel stays out of the
-      // transcript; peer reports still land.
-      this.releaseTurnRecordWithholding ??= this.config
-        .getChatRecordingService()
-        ?.withholdTurnRecords();
-    }
 
     let resolveGate!: () => void;
     const completion = new Promise<void>((resolve) => {
@@ -6390,6 +6381,16 @@ export class Session implements SessionContext {
     this.todoStopGuard.suspend();
     const abortReason =
       this.#classifyPromptCancelAbortReason(requestedAbortReason);
+    if (abortReason === SESSION_DISPOSE_ABORT_REASON) {
+      // A disposal cancel durably ends the turn as `cancelled`, and restart
+      // recovery re-opens it from the unanswered prompt, so the cancel stays
+      // out of the transcript. Installing here rather than in `beginClose()`
+      // keeps `session/load` and `session/cd` intact: both take the close gate
+      // as a mutex and let the running turn settle, whose records are real.
+      this.releaseTurnRecordWithholding ??= this.config
+        .getChatRecordingService()
+        ?.withholdTurnRecords();
+    }
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(abortReason);
     }
