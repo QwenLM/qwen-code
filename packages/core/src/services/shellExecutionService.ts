@@ -164,10 +164,11 @@ export type ShellAbortReason =
   | { kind: 'cancel' }
   | {
       kind: 'background';
-      /** The `bg_<8 hex>` id the background entry takes. */
       shellId?: string;
       /** Moved so that a message from the user could reach the model. */
       forUserMessage?: boolean;
+      /** Called once the promoted process is registered and can be stopped. */
+      onRegistered?: (shellId: string) => void;
     };
 
 /**

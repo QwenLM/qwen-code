@@ -94,7 +94,7 @@ import {
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   getStartupContextLength,
   isWrappedSystemReminderPart,
@@ -634,12 +634,11 @@ const MID_TURN_SEND_NOW_ABORT_REASON = USER_MESSAGE_INTERRUPT_ABORT_REASON;
 interface MovableShell {
   /** The turn whose tool batch runs the shell. */
   turn: AbortSignal;
-  promote: AbortController;
+  promote?: AbortController;
   /** Resolves once the shell's tool call settles. */
   settled: Promise<void>;
   settle(): void;
-  /** Set once the shell was moved to the background. */
-  shellId?: string;
+  move?: { shellId?: string; stopRequested?: true };
 }
 /** The failure a Goal turn stopped by loop protection pauses with. */
 const GOAL_LOOP_STOP_FAILURE = 'loop detected';
@@ -2760,6 +2759,7 @@ function isCallerCausedModelRefusal(error: Error): boolean {
 export class Session implements SessionContext {
   private readonly mcpAppCalls = new Map<string, AbortController>();
   private pendingPrompt: AbortController | null = null;
+  private pendingPromptAdmissionSignal: AbortSignal | undefined;
   private readonly userPromptCancellations = new WeakMap<AbortSignal, number>();
   private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
@@ -4106,7 +4106,7 @@ export class Session implements SessionContext {
    */
   sendMidTurnInputNow(): void {
     const pending = this.pendingPrompt;
-    if (!pending) return;
+    if (!pending || pending.signal.aborted) return;
     this.midTurnSendNowFor = pending.signal;
     this.pullForOpenResponse?.();
     // A running foreground shell keeps running in the background, and its
@@ -4141,9 +4141,17 @@ export class Session implements SessionContext {
   #trackMovableShell(
     callId: string,
     turn: AbortSignal,
-    promote: AbortController,
+    promote: AbortController | undefined,
   ): void {
-    if (this.movableShells.get(callId)?.promote === promote) return;
+    const shell = this.movableShells.get(callId);
+    if (!promote) {
+      if (shell?.turn === turn) {
+        shell.promote = undefined;
+        if (!shell.move) this.#settleMovableShell(callId);
+      }
+      return;
+    }
+    if (shell?.promote === promote) return;
     let settle!: () => void;
     const settled = new Promise<void>((resolve) => (settle = resolve));
     this.movableShells.set(callId, { turn, promote, settled, settle });
@@ -4169,8 +4177,10 @@ export class Session implements SessionContext {
     const moving: MovableShell[] = [];
     for (const shell of this.movableShells.values()) {
       if (shell.turn !== turn) continue;
-      if (!shell.promote.signal.aborted) {
-        shell.shellId = `bg_${randomBytes(4).toString('hex')}`;
+      const promote = shell.promote;
+      if (!shell.move && promote && !promote.signal.aborted) {
+        const move: NonNullable<MovableShell['move']> = {};
+        shell.move = move;
         if (this.shellsMovedFor?.turn !== turn) {
           this.shellsMovedFor = { turn, shells: [] };
           turn.addEventListener(
@@ -4184,13 +4194,18 @@ export class Session implements SessionContext {
           );
         }
         this.shellsMovedFor.shells.push(shell);
-        shell.promote.abort({
+        promote.abort({
           kind: 'background',
-          shellId: shell.shellId,
           forUserMessage: true,
+          onRegistered: (shellId) => {
+            move.shellId = shellId;
+            if (move.stopRequested) {
+              this.config.getBackgroundShellRegistry().requestCancel(shellId);
+            }
+          },
         } satisfies ShellAbortReason);
       }
-      if (shell.shellId) moving.push(shell);
+      if (shell.move) moving.push(shell);
     }
     return moving;
   }
@@ -4201,10 +4216,17 @@ export class Session implements SessionContext {
     const moved = this.shellsMovedFor;
     if (moved?.turn !== turn) return;
     this.shellsMovedFor = undefined;
-    const registry = this.config.getBackgroundShellRegistry();
     for (const shell of moved.shells) {
-      // The background entry exists once the tool call settles.
-      void shell.settled.then(() => registry.requestCancel(shell.shellId!));
+      this.#stopMovedShell(shell);
+    }
+  }
+
+  #stopMovedShell(shell: MovableShell | undefined): void {
+    const move = shell?.move;
+    if (!move || move.stopRequested) return;
+    move.stopRequested = true;
+    if (move.shellId) {
+      this.config.getBackgroundShellRegistry().requestCancel(move.shellId);
     }
   }
 
@@ -5705,6 +5727,7 @@ export class Session implements SessionContext {
     this.requestLifecycleExecutions.clear();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
+    this.pendingPromptAdmissionSignal = undefined;
     this.resolveCloseGate?.();
     this.resolveCloseGate = null;
     this.closeGateCompletion = null;
@@ -6161,6 +6184,12 @@ export class Session implements SessionContext {
       !this.userPromptCancellations.has(controller.signal)
     ) {
       this.userPromptCancellations.set(controller.signal, Date.now());
+      if (
+        this.pendingPrompt &&
+        this.pendingPromptAdmissionSignal === controller.signal
+      ) {
+        this.#stopShellsMovedFor(this.pendingPrompt.signal);
+      }
     }
     controller.abort(reason);
   }
@@ -6210,8 +6239,12 @@ export class Session implements SessionContext {
     }
 
     if (this.pendingPrompt) {
+      if (abortReason === USER_CANCEL_ABORT_REASON) {
+        this.#stopShellsMovedFor(this.pendingPrompt.signal);
+      }
       this.pendingPrompt.abort(abortReason);
       this.pendingPrompt = null;
+      this.pendingPromptAdmissionSignal = undefined;
     }
 
     for (const turn of queuedGoalTurns) {
@@ -6642,11 +6675,15 @@ export class Session implements SessionContext {
       if (admissionCancellation.aborted) cancelPendingSend();
     }
     this.pendingPrompt = pendingSend;
+    this.pendingPromptAdmissionSignal = admissionCancellation;
     const releasePendingSend = () => {
       admissionCancellation?.removeEventListener('abort', cancelPendingSend);
       pendingSend.signal.removeEventListener('abort', recordCancellation);
       if (this.midTurnSendNowFor === pendingSend.signal) {
         this.midTurnSendNowFor = undefined;
+      }
+      if (this.shellsMovedFor?.turn === pendingSend.signal) {
+        this.shellsMovedFor = undefined;
       }
       if (this.pendingPrompt === pendingSend) {
         if (
@@ -6656,6 +6693,7 @@ export class Session implements SessionContext {
           this.#waitForMidTurnHandoff();
         }
         this.pendingPrompt = null;
+        this.pendingPromptAdmissionSignal = undefined;
         if (!scheduledGoalTurn)
           this.lastCompletedRpcPromptId = invocationContext?.promptId;
         clearTimeout(this.notificationAdmissionRetry);
@@ -16548,16 +16586,19 @@ export class Session implements SessionContext {
     todoWorkChainContext.enterWith(
       this.config.getActiveTodoWorkChainOwner(promptId),
     );
-    let settledCalls = 0;
-    this.openToolCalls = () => requests.length - settledCalls;
+    const openCalls = new Set(requests.map(({ callId }) => callId));
+    this.openToolCalls = () => openCalls.size;
     const batch = await runAcpToolBatch(this.#toolBatchHost(), {
       requests,
       loop,
       signal: abortSignal,
       onShellMovable: (callId, promote) =>
         this.#trackMovableShell(callId, abortSignal, promote),
-      onCallSettled: (callId) => {
-        settledCalls += 1;
+      onCallSettled: (callId, status) => {
+        if (!openCalls.delete(callId)) return;
+        if (status !== 'success') {
+          this.#stopMovedShell(this.movableShells.get(callId));
+        }
         this.#settleMovableShell(callId);
       },
       onFullTurnModel,
@@ -17254,9 +17295,11 @@ export class Session implements SessionContext {
         );
       }
     };
-    // Calls run in order, so the calls from the running one on are open.
+    const runnableCalls = planModeEntryBoundary
+      ? [planModeEntryBoundary]
+      : executableCalls;
     let runningCall = 0;
-    this.openToolCalls = () => dedupedFunctionCalls.length - runningCall;
+    this.openToolCalls = () => runnableCalls.length - runningCall;
     const memoryWriteCandidates: MemoryWriteCandidate[] = [];
     const collectMemoryWriteCandidates = (result: RunToolResult): void => {
       if (result.memoryWriteCandidates) {
@@ -17488,7 +17531,7 @@ export class Session implements SessionContext {
           }
         } else {
           for (const fc of batch.calls) {
-            runningCall = dedupedFunctionCalls.indexOf(fc);
+            runningCall = runnableCalls.indexOf(fc);
             const r = await this.runTool(
               abortSignal,
               promptId,
@@ -20468,6 +20511,7 @@ export class Session implements SessionContext {
 
             // If hook indicates to stop, return an error response
             if (postHookResult.shouldStop) {
+              this.#stopMovedShell(this.movableShells.get(callId));
               const stopMessage =
                 postHookResult.stopReason ||
                 'Execution stopped by PostToolUse hook';

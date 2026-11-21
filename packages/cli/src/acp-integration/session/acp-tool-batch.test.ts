@@ -481,7 +481,7 @@ describe('runAcpToolBatch', () => {
     expect(result.stopAfterPermissionCancel).toBe(false);
   });
 
-  it('hands a running shell to the session and reports each call that settles', async () => {
+  it('reports promotion and settlement only for top-level calls', async () => {
     const shell: ToolCallRequestInfo = {
       ...read,
       callId: 'call_shell',
@@ -489,6 +489,11 @@ describe('runAcpToolBatch', () => {
       args: { command: 'npm test' },
     };
     const promote = new AbortController();
+    const nestedShell = {
+      ...shell,
+      callId: 'call_exec:code:1',
+      parentCallId: 'call_exec',
+    };
     const onShellMovable = vi.fn();
     const onCallSettled = vi.fn();
     batch.run = async (shared) => {
@@ -497,7 +502,7 @@ describe('runAcpToolBatch', () => {
         { status: 'executing', request: read, invocation },
         { status: 'executing', request: shell, invocation },
       ]);
-      expect(onShellMovable).not.toHaveBeenCalled();
+      expect(onShellMovable.mock.calls).toEqual([[shell.callId, undefined]]);
       onToolCallsUpdate([
         { status: 'executing', request: read, invocation },
         {
@@ -506,8 +511,27 @@ describe('runAcpToolBatch', () => {
           invocation,
           promoteAbortController: promote,
         },
+        {
+          status: 'executing',
+          request: nestedShell,
+          invocation,
+          promoteAbortController: new AbortController(),
+        },
       ]);
-      expect(onShellMovable).toHaveBeenCalledWith(shell.callId, promote);
+      expect(onShellMovable.mock.calls).toEqual([
+        [shell.callId, undefined],
+        [shell.callId, promote],
+      ]);
+      expect(onCallSettled).not.toHaveBeenCalled();
+      onToolCallsUpdate([
+        { status: 'executing', request: shell, invocation },
+        {
+          status: 'success',
+          request: nestedShell,
+          response: response(nestedShell),
+        },
+      ]);
+      expect(onShellMovable).toHaveBeenLastCalledWith(shell.callId, undefined);
       expect(onCallSettled).not.toHaveBeenCalled();
       onToolCallsUpdate([
         { status: 'success', request: read, response: response(read) },
@@ -527,7 +551,10 @@ describe('runAcpToolBatch', () => {
       onCallSettled,
     });
 
-    expect(onCallSettled.mock.calls).toEqual([[read.callId], [shell.callId]]);
+    expect(onCallSettled.mock.calls).toEqual([
+      [read.callId, 'success'],
+      [shell.callId, 'success'],
+    ]);
   });
 
   it('asks the client for an approval and answers the scheduler', async () => {
@@ -738,6 +765,7 @@ describe('runAcpToolBatch', () => {
   });
 
   it('reports a replayed call as failed', async () => {
+    const onCallSettled = vi.fn();
     batch.run = async (shared) => {
       shared.onToolResult({
         ...executed(read),
@@ -752,9 +780,11 @@ describe('runAcpToolBatch', () => {
       loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
+      onCallSettled,
     });
 
     expect(events()).toEqual([['result', false]]);
+    expect(onCallSettled).toHaveBeenCalledExactlyOnceWith(read.callId, 'error');
   });
 
   it('forwards shell heartbeats of a running call', async () => {

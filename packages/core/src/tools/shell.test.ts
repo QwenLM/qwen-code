@@ -4177,7 +4177,7 @@ describe('ShellTool', () => {
         });
         await Promise.resolve();
         await Promise.resolve();
-        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+        expect(setPromoteAbortController).not.toHaveBeenCalled();
 
         await vi.advanceTimersByTimeAsync(5_000);
         expect(updateOutputMock).not.toHaveBeenCalled();
@@ -5622,7 +5622,10 @@ describe('ShellTool', () => {
         resolveShellExecution({ pid: 12345 });
         await promise;
 
-        expect(setPromoteAc).toHaveBeenCalledTimes(1);
+        expect(setPromoteAc.mock.calls).toEqual([
+          [expect.any(AbortController)],
+          [undefined],
+        ]);
         const passedAc = setPromoteAc.mock.calls[0][0] as AbortController;
         expect(passedAc).toBeInstanceOf(AbortController);
 
@@ -5692,13 +5695,16 @@ describe('ShellTool', () => {
         expect(result.error).toBeUndefined();
       });
 
-      it('takes the requested id and says why when moved for a user message', async () => {
+      it('reports the registered id and says why when moved for a user message', async () => {
         const { promise, setPromoteAc } = executeWithPromote(build('npm test'));
+        const onRegistered = vi.fn((shellId: string) =>
+          expect(shellId).toBe(registeredEntry().shellId),
+        );
         await vi.waitFor(() => expect(setPromoteAc).toHaveBeenCalledTimes(1));
         (setPromoteAc.mock.calls[0][0] as AbortController).abort({
           kind: 'background',
-          shellId: 'bg_0123abcd',
           forUserMessage: true,
+          onRegistered,
         });
         resolveShellExecution({
           output: '',
@@ -5710,10 +5716,11 @@ describe('ShellTool', () => {
         });
         const result = await promise;
 
-        expect(registeredEntry().shellId).toBe('bg_0123abcd');
+        const { shellId } = registeredEntry();
+        expect(onRegistered).toHaveBeenCalledExactlyOnceWith(shellId);
         expectText(result.llmContent, [
-          'Foreground command "npm test" was moved to the background as bg_0123abcd, without being interrupted, so that a message from the user could reach you. The user\'s message follows.',
-          "task_stop({ task_id: 'bg_0123abcd' })",
+          `Foreground command "npm test" was moved to the background as ${shellId}, without being interrupted, so that a message from the user could reach you. The user's message follows.`,
+          `task_stop({ task_id: '${shellId}' })`,
         ]);
       });
 

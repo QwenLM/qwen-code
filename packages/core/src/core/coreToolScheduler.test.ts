@@ -16134,7 +16134,7 @@ describe('CoreToolScheduler activation wiring', () => {
 });
 
 describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => {
-  it('stashes promoteAbortController on the executing tool call when shell.ts fires the callback', async () => {
+  it('publishes the foreground process and clears it when the shell releases it', async () => {
     // PR-3's Ctrl+B keybind aborts the executing shell call's
     // `promoteAbortController`; if the scheduler stops populating it the keybind
     // silently breaks, which direct ShellToolInvocation tests cannot see.
@@ -16144,14 +16144,16 @@ describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => 
         _signal: AbortSignal,
         _updateOutput?: (output: ToolResultDisplay) => void,
         _shellExecutionConfig?: ShellExecutionConfig,
-        _setPidCallback?: (pid: number) => void,
-        setPromoteAbortControllerCallback?: (ac: AbortController) => void,
+        setPidCallback?: (pid: number) => void,
+        setPromoteAbortControllerCallback?: (
+          ac: AbortController | undefined,
+        ) => void,
       ): Promise<ToolResult> {
-        // Like foreground shell.ts: fire the callback right after spawn, then
-        // (here, immediately) complete with a benign success.
         const ac = new AbortController();
         exposedAc = ac;
+        setPidCallback?.(12345);
         setPromoteAbortControllerCallback?.(ac);
+        setPromoteAbortControllerCallback?.(undefined);
         return textResult('ok');
       }
     }
@@ -16193,16 +16195,20 @@ describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => 
 
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
 
-    // Update ordering varies, but at SOME point while 'executing' the field must
-    // be populated, or PR-3's Ctrl+B keybind has nothing to abort.
-    const sawPromoteAcWhileExecuting = reportedCalls(onToolCallsUpdate).some(
-      (tc) =>
-        tc.request.callId === 'shell-1' &&
-        tc.status === 'executing' &&
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (tc as any).promoteAbortController === exposedAc,
+    const executing = reportedCalls(onToolCallsUpdate).filter(
+      (call) =>
+        call.request.callId === 'shell-1' && call.status === 'executing',
     );
-    expect(sawPromoteAcWhileExecuting).toBe(true);
+    expect(executing).toContainEqual(
+      expect.objectContaining({
+        pid: 12345,
+        promoteAbortController: exposedAc,
+      }),
+    );
+    expect(executing.at(-1)).toMatchObject({
+      pid: undefined,
+      promoteAbortController: undefined,
+    });
   });
 });
 

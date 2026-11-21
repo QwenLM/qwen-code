@@ -6470,10 +6470,16 @@ export class CoreToolScheduler {
         // Stash the promote AbortController on the executing tool call so
         // a UI surface (Ctrl+B keybind) can find the foreground shell's
         // promote trigger by callId.
-        const setPromoteAbortControllerCallback = (ac: AbortController) => {
+        const setPromoteAbortControllerCallback = (
+          ac: AbortController | undefined,
+        ) => {
           this.toolCalls = this.toolCalls.map((tc) =>
             tc.request.callId === callId && tc.status === 'executing'
-              ? { ...tc, promoteAbortController: ac }
+              ? {
+                  ...tc,
+                  promoteAbortController: ac,
+                  ...(ac === undefined && { pid: undefined }),
+                }
               : tc,
           );
           this.notifyToolCallsUpdate();

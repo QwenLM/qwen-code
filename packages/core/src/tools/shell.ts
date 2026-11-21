@@ -3495,7 +3495,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     shellExecutionConfig?: ShellExecutionConfig,
     setPidCallback?: (pid: number) => void,
-    setPromoteAbortControllerCallback?: (ac: AbortController) => void,
+    setPromoteAbortControllerCallback?: (
+      ac: AbortController | undefined,
+    ) => void,
     canPromoteForegroundShell?: () => boolean,
     rawCapture?: ShellRawCaptureSink,
   ): Promise<ToolResult> {
@@ -3996,12 +3998,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     if (pid && setPidCallback) {
       setPidCallback(pid);
     }
-    // Hand the promote controller up to the scheduler so a future UI
-    // surface (PR-3 Ctrl+B keybind) can find it and trigger promote.
-    // Done unconditionally — the caller can ignore it if they don't
-    // implement promote yet, but exposing it now means PR-3 doesn't
-    // need to revisit shell.ts.
-    setPromoteAbortControllerCallback?.(promoteAbortController);
+    const exposePromotion = pid !== undefined && !combinedSignal.aborted;
+    if (exposePromotion) {
+      setPromoteAbortControllerCallback?.(promoteAbortController);
+    }
     armTimeoutWarning();
 
     // Bracket the execution-handle → settle wall-clock so the result builder below
@@ -4068,6 +4068,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       cancelTimeoutWarning();
       cancelHeartbeat();
       combinedSignal.removeEventListener('abort', onAbort);
+      if (exposePromotion) setPromoteAbortControllerCallback?.(undefined);
     }
 
     // Background-promote path: the user pressed Ctrl+B (PR-3 wires the
@@ -4897,12 +4898,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const promoteReason = abortController.signal.reason as
       | Partial<Extract<ShellAbortReason, { kind: 'background' }>>
       | undefined;
-    const requestedShellId = promoteReason?.shellId;
-    const shellId =
-      typeof requestedShellId === 'string' &&
-      /^bg_[0-9a-f]{8}$/.test(requestedShellId)
-        ? requestedShellId
-        : `bg_${crypto.randomBytes(4).toString('hex')}`;
+    const shellId = `bg_${crypto.randomBytes(4).toString('hex')}`;
     const outputPath = path.join(outputDir, `shell-${shellId}.output`);
     // PR-2.5: open an append-mode write stream so the initial snapshot
     // AND post-promote bytes from the still-running child both land in
@@ -5366,6 +5362,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       promoteArtifacts.settleQueued = null;
       promoteArtifacts.onSettleWired(queued);
     }
+    promoteReason?.onRegistered?.(shellId);
     // When the settle was already queued (a fast-settling promoted
     // command), the registration probe kicked off above is in flight —
     // await it so the exemption is in place by the time the ToolResult
