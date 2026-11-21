@@ -6,11 +6,18 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionReposit
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import javax.sql.DataSource;
 
 import java.lang.reflect.Proxy;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -29,6 +36,132 @@ public class RuntimeMaintenanceRecoveryTest {
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         verifyBatches(new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
                 new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source), UUID.randomUUID().toString());
+    }
+
+    @org.junit.jupiter.api.Test
+    void recoveryCandidatesSkipHistoryAndPreserveGlobalBinaryCursors() throws Exception {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:recovery-candidates-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        verifyRecoveryCandidates(source);
+    }
+
+    public static void verifyRecoveryCandidates(DataSource source) throws Exception {
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var jdbc = new JdbcTemplate(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
+        var first = new Fixture(bindings, sessions, executions, "first-tenant").binding;
+        var second = new Fixture(bindings, sessions, executions, "second-tenant").binding;
+        var candidates = Map.of(
+                first.getBindingId(), RuntimeBindingRecord.State.READY,
+                second.getBindingId(), RuntimeBindingRecord.State.READY,
+                "A-candidate", RuntimeBindingRecord.State.LOST,
+                "a-candidate", RuntimeBindingRecord.State.DRAINING,
+                "Z-candidate", RuntimeBindingRecord.State.PROVISIONING,
+                "z-candidate", RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+        var expected = candidates.keySet().stream().sorted().toList();
+        try (var connection = source.getConnection();
+                var insert = connection.prepareStatement(
+                        "INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id,"
+                                + " workspace_id, workspace_generation, canonical_cwd, capability_digest,"
+                                + " isolation_class, isolation_key, provisioner_kind, storage_id,"
+                                + " runtime_generation, binding_state, resource_handle_version, resource_handle_json,"
+                                + " attestation_generation, is_drain_requested, operation_generation, record_version,"
+                                + " last_active_at) SELECT ?, request_key, scope_key, tenant_id, workspace_id,"
+                                + " workspace_generation, canonical_cwd, capability_digest, isolation_class,"
+                                + " isolation_key, provisioner_kind, storage_id, ?, ?, ?,"
+                                + " CASE WHEN ? IS NULL THEN NULL ELSE resource_handle_json END, 0, FALSE, 0, 0,"
+                                + " last_active_at FROM ma_runtime_binding WHERE binding_id = ?")) {
+            long generation = first.getGeneration();
+            for (var candidate : candidates.entrySet()) {
+                if (candidate.getValue() != RuntimeBindingRecord.State.READY) {
+                    addRecoveryRow(insert, first.getBindingId(), candidate.getKey(), ++generation,
+                            candidate.getValue().name(), 2);
+                }
+            }
+            var historyStates = List.of("FAILED", "RELEASED", "OPERATOR_RECOVERY", "PROVISIONING", "PROVISIONING");
+            for (int index = 0; index < 5000; index++) {
+                int kind = index % historyStates.size();
+                Integer version = kind == 4 ? null : Integer.valueOf(kind == 3 ? 1 : 2);
+                addRecoveryRow(insert, first.getBindingId(), (index % 2 == 0 ? "0" : "zz") + "-history-" + index,
+                        ++generation, historyStates.get(kind), version);
+                if ((index + 1) % 500 == 0) {
+                    insert.executeBatch();
+                }
+            }
+        }
+        assertEquals(5006L, jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding", Long.class));
+        assertEquals(1000L, jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_runtime_binding WHERE resource_handle_version IS NULL", Long.class));
+        var page = bindings.findRecoveryCandidates("local-process", null, 100);
+        assertEquals(expected, page.stream().map(RuntimeBindingRecord::getBindingId).toList());
+        assertEquals(expected.stream().map(candidates::get).toList(),
+                page.stream().map(RuntimeBindingRecord::getState).toList());
+        assertTrue(bindings.findRecoveryCandidates("unsupported-provider", null, 100).isEmpty());
+        assertEquals(expected.subList(0, 1), recoveryIds(bindings, null, 1));
+        assertEquals(expected.subList(1, expected.size()), recoveryIds(bindings, expected.getFirst(), 100));
+        assertEquals(List.of(), recoveryIds(bindings, expected.getLast(), 100));
+        assertEquals(expected.stream().filter(id -> id.compareTo("A-candidate") > 0).toList(),
+                recoveryIds(bindings, "A-candidate", 100));
+        assertEquals(expected.stream().filter(id -> id.compareTo("a-candidate") > 0).toList(),
+                recoveryIds(bindings, "a-candidate", 100));
+        String cursor = null;
+        for (int offset = 0; offset < expected.size(); offset += 2) {
+            var batch = recoveryIds(bindings, cursor, 2);
+            assertEquals(expected.subList(offset, Math.min(offset + 2, expected.size())), batch);
+            cursor = batch.getLast();
+        }
+        assertTrue(recoveryIds(bindings, cursor, 2).isEmpty());
+
+        String target = "a-candidate";
+        long generation = bindings.findById(target).getGeneration();
+        String operationKey = "f".repeat(64);
+        jdbc.update("INSERT INTO ma_operation (operation_key, operation_id, scope_key, operation_kind, tenant_id,"
+                        + " target_kind, target_key, target_id, target_revision, state, phase, request_digest, request_json,"
+                        + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'WORKSPACE_OPERATOR_RECOVERY', ?, 'RUNTIME_BINDING',"
+                        + " ?, ?, ?, 'DRAINING', 'DRAINING', ?, '{}', 1, 1)",
+                operationKey, "recovery".getBytes(StandardCharsets.UTF_8), "a".repeat(64),
+                first.getRequest().getScope().getTenantId().getBytes(StandardCharsets.UTF_8), "b".repeat(64),
+                target.getBytes(StandardCharsets.UTF_8), generation, "c".repeat(64));
+        var withoutTarget = expected.stream().filter(id -> !id.equals(target)).toList();
+        assertEquals(withoutTarget, recoveryIds(bindings, null, 100));
+        int targetIndex = expected.indexOf(target);
+        assertEquals(List.of(expected.get(targetIndex + 1)),
+                recoveryIds(bindings, expected.get(targetIndex - 1), 1));
+        jdbc.update("UPDATE ma_operation SET target_revision = ? WHERE operation_key = ?", generation + 1, operationKey);
+        assertEquals(expected, recoveryIds(bindings, null, 100));
+        jdbc.update("UPDATE ma_operation SET target_revision = ?, state = 'FAILED' WHERE operation_key = ?",
+                generation, operationKey);
+        assertEquals(withoutTarget, recoveryIds(bindings, null, 100));
+        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED' WHERE operation_key = ?", operationKey);
+        assertEquals(expected, recoveryIds(bindings, null, 100));
+        jdbc.update("UPDATE ma_operation SET state = 'DRAINING', operation_kind = 'WORKSPACE_RETIREMENT'"
+                + " WHERE operation_key = ?", operationKey);
+        assertEquals(expected, recoveryIds(bindings, null, 100));
+        jdbc.update("UPDATE ma_runtime_binding SET binding_state = 'RELEASED' WHERE binding_id = ?",
+                target.getBytes(StandardCharsets.UTF_8));
+        assertEquals(withoutTarget, recoveryIds(bindings, null, 100));
+        jdbc.update("UPDATE ma_runtime_binding SET binding_state = 'DRAINING' WHERE binding_id = ?",
+                target.getBytes(StandardCharsets.UTF_8));
+        assertEquals(expected, recoveryIds(bindings, null, 100));
+    }
+
+    private static void addRecoveryRow(PreparedStatement insert, String seed, String id, long generation,
+            String state, Integer handleVersion) throws SQLException {
+        insert.setBytes(1, id.getBytes(StandardCharsets.UTF_8));
+        insert.setLong(2, generation);
+        insert.setString(3, state);
+        insert.setObject(4, handleVersion, java.sql.Types.INTEGER);
+        insert.setObject(5, handleVersion, java.sql.Types.INTEGER);
+        insert.setBytes(6, seed.getBytes(StandardCharsets.UTF_8));
+        insert.addBatch();
+    }
+
+    private static List<String> recoveryIds(RuntimeBindingRepository bindings, String cursor, int limit) {
+        return bindings.findRecoveryCandidates("local-process", cursor, limit).stream()
+                .map(RuntimeBindingRecord::getBindingId).toList();
     }
 
     public static void verifyBatches(RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,

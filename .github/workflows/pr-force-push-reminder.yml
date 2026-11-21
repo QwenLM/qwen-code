@@ -53,7 +53,7 @@ jobs:
             // be reminded.
             const sender = context.payload.sender;
             const KNOWN_AUTOMATION = new Set([
-              'qwen-code-ci-bot',
+              'qwen-code-review-bot',
               'qwen-code-dev-bot',
               'github-actions',
               'github-actions[bot]',
