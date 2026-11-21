@@ -525,6 +525,296 @@ describe('configCommand', () => {
       });
     });
 
+    it('masks sensitive values nested in an object read by its parent key', async () => {
+      const { ctx } = createMockContext({
+        security: {
+          auth: {
+            selectedType: 'openai',
+            apiKey: 'sk-demo-1234567890',
+            baseUrl: 'https://llm.example.com/v1',
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'security.auth')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'security.auth = {"selectedType":"openai","apiKey":"sk-d****","baseUrl":"http****"}',
+      });
+      expect(await configCommand.action!(ctx, 'security')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'security = {"auth":{"selectedType":"openai","apiKey":"sk-d****","baseUrl":"http****"}}',
+      });
+    });
+
+    it('masks every value in nested env and header maps', async () => {
+      const { ctx } = createMockContext({
+        mcpServers: {
+          gh: {
+            command: 'npx',
+            env: { GITHUB_TOKEN: 'ghp_liveSecret' },
+            headers: {
+              Authorization: 'Bearer sk-live-123',
+              'X-Auth-Token': 'tok_live',
+            },
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"gh":{"command":"npx","env":{"GITHUB_TOKEN":"ghp_****"},"headers":{"Authorization":"Bear****","X-Auth-Token":"tok_****"}}}',
+      });
+    });
+
+    it('keeps a map entry whose name looks sensitive and shows *Env variable names', async () => {
+      const { ctx } = createMockContext({
+        mcpServers: {
+          'corp-proxy': {
+            command: 'npx',
+            credentialEnv: 'MEM0_API_KEY',
+            apiKey: 'sk-demo-1234567890',
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"corp-proxy":{"command":"npx","credentialEnv":"MEM0_API_KEY","apiKey":"sk-d****"}}',
+      });
+    });
+
+    it('masks every value of the top-level env setting', async () => {
+      const { ctx } = createMockContext({
+        env: {
+          GITHUB_TOKEN: 'ghp_liveSecret',
+          NPM_TOKEN: 'npm_abc',
+          OPENAI_API_KEY: '',
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'env')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'env = {"GITHUB_TOKEN":"ghp_****","NPM_TOKEN":"npm_****","OPENAI_API_KEY":"(empty)"}',
+      });
+    });
+
+    it('masks every leaf beneath a sensitive-named object or array', async () => {
+      const { ctx } = createMockContext({
+        mcpServers: {
+          db: {
+            command: 'npx',
+            credentials: {
+              user: 'admin',
+              db: { value: 'hunter2-super-secret' },
+            },
+            apiKeys: ['sk-live-aaaa', 'sk-live-bbbb'],
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"db":{"command":"npx","credentials":{"user":"admi****","db":{"value":"hunt****"}},"apiKeys":["sk-l****","sk-l****"]}}',
+      });
+    });
+
+    it('keeps null, number and boolean leaves under a masked key', async () => {
+      const { ctx } = createMockContext({
+        security: { auth: { selectedType: 'openai', apiKey: null } },
+        mcpServers: {
+          db: {
+            command: 'npx',
+            credentials: {
+              user: 'admin',
+              retries: 3,
+              enabled: true,
+              missing: null,
+            },
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'security')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'security = {"auth":{"selectedType":"openai","apiKey":null}}',
+      });
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"db":{"command":"npx","credentials":{"user":"admi****","retries":3,"enabled":true,"missing":null}}}',
+      });
+    });
+
+    it('keeps user-named entries of other free-form maps readable', async () => {
+      const { ctx } = createMockContext({
+        providerProtocol: { 'corp-proxy': 'openai' },
+        pluginConfigs: {
+          'secret-scan': { toolDialect: 'claude', options: { level: 'high' } },
+        },
+        ui: { customThemes: { 'Secret Garden': { background: '#000000' } } },
+      });
+
+      expect(await configCommand.action!(ctx, 'providerProtocol')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'providerProtocol = {"corp-proxy":"openai"}',
+      });
+      expect(await configCommand.action!(ctx, 'pluginConfigs')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'pluginConfigs = {"secret-scan":{"toolDialect":"claude","options":{"level":"high"}}}',
+      });
+      expect(await configCommand.action!(ctx, 'ui.customThemes')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'ui.customThemes = {"Secret Garden":{"background":"#000000"}}',
+      });
+    });
+
+    it('masks customHeaders, scalar and empty credential map values', async () => {
+      const { ctx } = createMockContext({
+        modelProviders: {
+          'corp-proxy': [
+            {
+              envKey: 'OPENAI_API_KEY',
+              generationConfig: {
+                customHeaders: { Authorization: 'Bearer sk-live-123' },
+              },
+            },
+          ],
+        },
+        mcpServers: {
+          gh: { command: 'npx', env: 'GITHUB_TOKEN' },
+          gl: { command: 'npx', env: { OPENAI_API_KEY: '' } },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'modelProviders')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'modelProviders = {"corp-proxy":[{"envKey":"OPENAI_API_KEY","generationConfig":{"customHeaders":{"Authorization":"Bear****"}}}]}',
+      });
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"gh":{"command":"npx","env":"GITH****"},"gl":{"command":"npx","env":{"OPENAI_API_KEY":"(empty)"}}}',
+      });
+    });
+
+    it('masks channel webhook URLs and AES keys but keeps their type', async () => {
+      const { ctx } = createMockContext({
+        channels: {
+          'ops-webhook': {
+            type: 'dingtalk-webhook',
+            webhookUrl:
+              'https://oapi.dingtalk.com/robot/send?access_token=live-secret',
+          },
+          wecom: { type: 'wecom', encodingAESKey: 'AAAAbbbbCCCC' },
+          support: {
+            type: 'feishu',
+            webhookPort: 8080,
+            verificationToken: 'verify-tok-123456',
+            encryptKey: 'hmac-key-abcdef',
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'channels')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'channels = {"ops-webhook":{"type":"dingtalk-webhook","webhookUrl":"http****"},"wecom":{"type":"wecom","encodingAESKey":"AAAA****"},"support":{"type":"feishu","webhookPort":8080,"verificationToken":"veri****","encryptKey":"hmac****"}}',
+      });
+    });
+
+    it('keeps token budget settings readable', async () => {
+      const { ctx } = createMockContext({
+        model: { sessionTokenLimit: 1000, goalTokenBudget: 2000 },
+      });
+
+      expect(await configCommand.action!(ctx, 'model')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'model = {"sessionTokenLimit":1000,"goalTokenBudget":2000}',
+      });
+      expect(
+        await configCommand.action!(ctx, 'model.sessionTokenLimit'),
+      ).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('model.sessionTokenLimit = 1000'),
+      });
+    });
+
+    it('keeps an MCP server named headers readable but masks its headers field', async () => {
+      const { ctx } = createMockContext({
+        mcpServers: {
+          headers: { command: 'npx', url: 'http://localhost:3000' },
+          gh: {
+            command: 'npx',
+            headers: { Authorization: 'Bearer sk-live-123' },
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"headers":{"command":"npx","url":"http://localhost:3000"},"gh":{"command":"npx","headers":{"Authorization":"Bear****"}}}',
+      });
+    });
+
+    it('masks credential maps of an MCP server named like a free-form map', async () => {
+      const { ctx } = createMockContext({
+        mcpServers: {
+          channels: {
+            command: 'npx',
+            headers: { Authorization: 'Bearer sk-live-123' },
+            env: { GITHUB_TOKEN: 'ghp_live' },
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"channels":{"command":"npx","headers":{"Authorization":"Bear****"},"env":{"GITHUB_TOKEN":"ghp_****"}}}',
+      });
+    });
+
+    it('shows an *Env variable name read directly', async () => {
+      const { ctx } = createMockContext({
+        omni: { delivery: { upload: { apiKeyEnv: 'DASHSCOPE_API_KEY' } } },
+      });
+
+      expect(
+        await configCommand.action!(ctx, 'omni.delivery.upload.apiKeyEnv'),
+      ).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'omni.delivery.upload.apiKeyEnv = DASHSCOPE_API_KEY',
+      });
+    });
+
     it('masks sensitive value in write confirmation message', async () => {
       const { ctx } = createMockContext({});
       const result = await configCommand.action!(

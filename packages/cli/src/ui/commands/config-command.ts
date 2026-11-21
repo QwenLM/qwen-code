@@ -33,11 +33,30 @@ const SENSITIVE_KEY_PATTERNS = [
   /password/i,
   /credential/i,
   /private[_-]?key/i,
+  /aes.?key/i,
+  /token$/i,
+  /encrypt.*key/i,
 ];
 
-const SENSITIVE_URL_PATTERNS = [/baseurl/i, /base_url/i, /proxy/i];
+const SENSITIVE_URL_PATTERNS = [/baseurl/i, /base_url/i, /proxy/i, /webhook/i];
+
+const CREDENTIAL_MAP_KEYS = new Set(['env', 'headers', 'customHeaders']);
+
+// Settings paths of maps keyed by user-chosen names, e.g. an MCP server
+// called "corp-proxy".
+const FREE_FORM_MAP_PATHS = new Set([
+  'mcpServers',
+  'channels',
+  'modelProviders',
+  'providerProtocol',
+  'pluginConfigs',
+  'modelPricing',
+  'ui.customThemes',
+]);
 
 function isSensitiveKey(key: string): boolean {
+  // `*Env` keys hold the name of a variable rather than the secret.
+  if (key.endsWith('Env')) return false;
   return (
     SENSITIVE_KEY_PATTERNS.some((p) => p.test(key)) ||
     SENSITIVE_URL_PATTERNS.some((p) => p.test(key))
@@ -187,10 +206,39 @@ function coerceValue(
   }
 }
 
-function formatValue(value: unknown): string {
+function maskTree(
+  value: unknown,
+  key: string,
+  path: string,
+  maskAll = false,
+  isEntryName = false,
+): unknown {
+  // Entries of env/header maps are named by the user, so mask every value.
+  // The name of an entry placed directly in a free-form map (even one called
+  // "headers") is never sensitive; fields inside that entry still are.
+  const sensitive =
+    !isEntryName && (CREDENTIAL_MAP_KEYS.has(key) || isSensitiveKey(key));
+  if (value === null || typeof value !== 'object') {
+    // Only strings hold secrets; null/number/boolean keep their type.
+    return (maskAll || sensitive) && typeof value === 'string'
+      ? maskValue(value)
+      : value;
+  }
+  // A sensitive container masks every leaf.
+  const maskLeaves = maskAll || sensitive;
+  const mask = (k: string, v: unknown) =>
+    maskTree(v, k, `${path}.${k}`, maskLeaves, FREE_FORM_MAP_PATHS.has(path));
+  return Array.isArray(value)
+    ? value.map((v, i) => mask(String(i), v))
+    : Object.fromEntries(
+        Object.entries(value).map(([k, v]) => [k, mask(k, v)]),
+      );
+}
+
+function formatValue(value: unknown, key = ''): string {
   if (value === undefined) return t('(not set)');
   if (typeof value === 'string') return value || t('(empty)');
-  return JSON.stringify(value);
+  return JSON.stringify(maskTree(value, key.split('.').pop()!, key));
 }
 
 function padRight(str: string, len: number): string {
@@ -291,7 +339,7 @@ export const configCommand: SlashCommand = {
     if (isToggle && def.type !== 'boolean') {
       const display = isSensitiveKey(key)
         ? maskValue(currentValue)
-        : formatValue(currentValue);
+        : formatValue(currentValue, key);
       return {
         type: 'message',
         messageType: 'info',
