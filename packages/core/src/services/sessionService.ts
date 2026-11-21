@@ -3551,7 +3551,18 @@ export class SessionService {
               identity.filePath,
             );
             complete &&= parsed.complete;
-            records.push(...parsed.records);
+            for (const record of parsed.records) {
+              if (
+                !parsed.complete &&
+                record?.uuid &&
+                (record.parentUuid
+                  ? !records.some((r) => r.uuid === record.parentUuid)
+                  : records.length > 0)
+              ) {
+                continue;
+              }
+              records.push(record);
+            }
           }
         } finally {
           lines.close();

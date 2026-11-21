@@ -873,6 +873,16 @@ describe('agent-transcript', () => {
         'salvaged-uuid-123',
       );
     });
+
+    it('skips salvaged suffix record when its parentUuid is not in the file', () => {
+      const records = write([], { initialUserPrompt: 'initial prompt' });
+      const tornLine =
+        '\n{"backgroundTurn":{"taskId":"task-1","sess{"uuid":"salvaged-orphan","parentUuid":"missing-parent-123","type":"system","messageId":"m1"}';
+      fs.appendFileSync(jsonlPath, tornLine);
+
+      // Falls back to earlier complete record because salvaged orphan's parent is missing
+      expect(readLastTranscriptRecordUuidSync(jsonlPath)).toBe(records[0].uuid);
+    });
   });
 
   describe('normalizeResumedAgentDepth', () => {

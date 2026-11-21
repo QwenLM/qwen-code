@@ -141,12 +141,19 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
   let lastNonWs = '';
   let candidateSuffixStarts: number[] = [];
 
+  const recordCandidate = (offset: number) => {
+    if (candidateSuffixStarts.length >= 64) {
+      candidateSuffixStarts.shift();
+    }
+    candidateSuffixStarts.push(offset);
+  };
+
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (escape) {
       escape = false;
-      if (c === '{' && i > 0 && candidateSuffixStarts.length < 64) {
-        candidateSuffixStarts.push(i);
+      if (c === '{' && i > 0) {
+        recordCandidate(i);
       }
       continue;
     }
@@ -156,8 +163,8 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
       } else if (c === '"') {
         inString = false;
         lastNonWs = '"';
-      } else if (c === '{' && i > 0 && candidateSuffixStarts.length < 64) {
-        candidateSuffixStarts.push(i);
+      } else if (c === '{' && i > 0) {
+        recordCandidate(i);
       }
       continue;
     }
@@ -172,10 +179,9 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
         depth === 0 &&
         lastNonWs !== '[' &&
         lastNonWs !== ',' &&
-        lastNonWs !== ':' &&
-        candidateSuffixStarts.length < 64
+        lastNonWs !== ':'
       ) {
-        candidateSuffixStarts.push(i);
+        recordCandidate(i);
       }
       if (depth === 0) start = i;
       depth++;
@@ -219,7 +225,7 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
   // attempt candidates from the last consumed position forward to reach
   // the record's start brace directly. Attempts are bounded to keep recovery
   // linear even on brace-dense unclosed strings.
-  const MAX_SUFFIX_ATTEMPTS = 16;
+  const MAX_SUFFIX_ATTEMPTS = 64;
   let attempts = 0;
   for (
     let idx = 0;
@@ -303,6 +309,28 @@ export function parseLineTolerant<T>(line: string, filePath: string): T[] {
   return parseLineTolerantWithIntegrity<T>(line, filePath).records;
 }
 
+function isOrphanTranscriptSalvage(
+  obj: unknown,
+  knownUuids: Set<string>,
+  hasPriorRecords: boolean,
+): boolean {
+  if (
+    typeof obj === 'object' &&
+    obj !== null &&
+    'uuid' in obj &&
+    typeof (obj as { uuid: unknown }).uuid === 'string'
+  ) {
+    const parentUuid = (obj as { parentUuid?: unknown }).parentUuid;
+    if (typeof parentUuid === 'string') {
+      return !knownUuids.has(parentUuid);
+    }
+    if (hasPriorRecords && (parentUuid === null || parentUuid === undefined)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function closeLineReader(
   rl: readline.Interface | undefined,
   fileStream: fs.ReadStream | undefined,
@@ -338,6 +366,7 @@ async function readLinesWithIntegrityInternal<T = unknown>(
     });
 
     const results: T[] = [];
+    const knownUuids = new Set<string>();
     let complete = true;
     let scannedLines = 0;
     for await (const line of rl) {
@@ -354,6 +383,20 @@ async function readLinesWithIntegrityInternal<T = unknown>(
       complete &&= parsed.complete;
       for (const obj of parsed.records) {
         if (budget === 'records' && results.length >= count) break;
+        if (
+          !parsed.complete &&
+          isOrphanTranscriptSalvage(obj, knownUuids, results.length > 0)
+        ) {
+          continue;
+        }
+        if (
+          typeof obj === 'object' &&
+          obj !== null &&
+          'uuid' in obj &&
+          typeof (obj as { uuid: unknown }).uuid === 'string'
+        ) {
+          knownUuids.add((obj as { uuid: string }).uuid);
+        }
         results.push(obj);
       }
       if (
@@ -425,12 +468,29 @@ export async function read<T = unknown>(
     });
 
     const results: T[] = [];
+    const knownUuids = new Set<string>();
     for await (const line of rl) {
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
       const parsed = parseLineTolerantWithIntegrity<T>(trimmed, filePath);
       if (!parsed.complete) options.onIncompleteRead?.();
-      for (const obj of parsed.records) results.push(obj);
+      for (const obj of parsed.records) {
+        if (
+          !parsed.complete &&
+          isOrphanTranscriptSalvage(obj, knownUuids, results.length > 0)
+        ) {
+          continue;
+        }
+        if (
+          typeof obj === 'object' &&
+          obj !== null &&
+          'uuid' in obj &&
+          typeof (obj as { uuid: unknown }).uuid === 'string'
+        ) {
+          knownUuids.add((obj as { uuid: string }).uuid);
+        }
+        results.push(obj);
+      }
     }
 
     return results;

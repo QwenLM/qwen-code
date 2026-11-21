@@ -351,7 +351,7 @@ describe('_recoverObjectsFromLine', () => {
       const result = _recoverObjectsFromLine(braceDenseLine);
       expect(result).toEqual([]);
       // Must not re-parse for every brace in the line (at most bounded attempts)
-      expect(parseSpy.mock.calls.length).toBeLessThanOrEqual(16);
+      expect(parseSpy.mock.calls.length).toBeLessThanOrEqual(64);
     } finally {
       parseSpy.mockRestore();
     }
@@ -362,6 +362,13 @@ describe('_recoverObjectsFromLine', () => {
     const items = Array.from({ length: 20 }, (_, i) => ({ i }));
     const suffixRecord = { uuid: 'c2fdde8f', type: 'turn', items };
     const line = '{"backgroundTurn":{"sess' + JSON.stringify(suffixRecord);
+    expect(_recoverObjectsFromLine(line)).toEqual([suffixRecord]);
+  });
+
+  it('salvages complete suffix record when torn prefix contains more than 64 braces', () => {
+    const items = Array.from({ length: 20 }, (_, i) => ({ i }));
+    const suffixRecord = { uuid: 'c2fdde8f', type: 'turn', items };
+    const line = '{"torn":"' + '{'.repeat(100) + JSON.stringify(suffixRecord);
     expect(_recoverObjectsFromLine(line)).toEqual([suffixRecord]);
   });
 
@@ -376,7 +383,7 @@ describe('_recoverObjectsFromLine', () => {
   it('canStartRecoveredSuffix accepts brace after backslash in string', () => {
     const line =
       '{"type":"user","content":"path C:\\\\{"type":"custom_title","customTitle":"B"}';
-    expect(canStartRecoveredSuffix(line, 34)).toBe(true);
+    expect(canStartRecoveredSuffix(line, 35)).toBe(true);
   });
 
   it('rejects fieldless empty object {} from torn string content', () => {
@@ -1799,6 +1806,41 @@ describe('writeLine / writeLineSync / write', () => {
     expect(fs.statSync(file).size).toBe(0);
     expect(await read(file)).toEqual([]);
     expect(exists(file)).toBe(false);
+  });
+
+  it('does not salvage orphan record whose parentUuid was torn and missing from file', async () => {
+    // Witness R4-1: u1(root) / a1(parent u1) / <torn u2 mid-string glued with complete a2; a2.parentUuid = u2>
+    const file = tmpFile(
+      '{"uuid":"u1","parentUuid":null,"type":"user"}\n' +
+        '{"uuid":"a1","parentUuid":"u1","type":"assistant"}\n' +
+        '{"uuid":"u2","content":"torn mid-str{"uuid":"a2","parentUuid":"u2","type":"assistant"}',
+    );
+
+    const records = await read<{ uuid?: string }>(file);
+    expect(records.map((r) => r.uuid)).toEqual(['u1', 'a1']);
+  });
+
+  it('salvages complete sibling whose parentUuid resolves to an earlier record in the file', async () => {
+    // Issue #17747: sibling whose parent resolves in file closes the parent-chain gap
+    const file = tmpFile(
+      '{"uuid":"u1","parentUuid":null,"type":"user"}\n' +
+        '{"uuid":"a1","parentUuid":"u1","type":"assistant"}\n' +
+        '{"backgroundTurn":{"sess{"uuid":"a2","parentUuid":"a1","type":"assistant"}',
+    );
+
+    const records = await read<{ uuid?: string }>(file);
+    expect(records.map((r) => r.uuid)).toEqual(['u1', 'a1', 'a2']);
+  });
+
+  it('does not salvage sibling carrying parentUuid: null when earlier records exist', async () => {
+    const file = tmpFile(
+      '{"uuid":"u1","parentUuid":null,"type":"user"}\n' +
+        '{"uuid":"a1","parentUuid":"u1","type":"assistant"}\n' +
+        '{"torn_prefix":"unclosed{"uuid":"b1","parentUuid":null,"type":"assistant"}',
+    );
+
+    const records = await read<{ uuid?: string }>(file);
+    expect(records.map((r) => r.uuid)).toEqual(['u1', 'a1']);
   });
 
   it('write() creates parent dirs when missing', () => {
