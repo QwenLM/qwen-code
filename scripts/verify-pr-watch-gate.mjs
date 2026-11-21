@@ -21,7 +21,7 @@
  * Usage:
  *   node verify-pr-watch-gate.mjs <pr> --repo <owner>/<repo> [--cli <qwen>]
  *   node verify-pr-watch-gate.mjs <pr> --check [--claim] [--state-root <dir>]
- *   node verify-pr-watch-gate.mjs <pr> --release [--reset-cursor] [--state-root <dir>]
+ *   node verify-pr-watch-gate.mjs <pr> --release [--reset-cursor] [--repo <owner>/<repo>] [--state-root <dir>]
  *
  * `--check` exits 3 when another consumer owns the PR; `--claim` reserves it.
  */
@@ -32,23 +32,54 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntryPoint } from './lib/entry-point.js';
-import { recordDelivery } from './verify-pr-watch-state.mjs';
+import {
+  readState,
+  recordDelivery,
+  statePath,
+} from './verify-pr-watch-state.mjs';
 
 export { isEntryPoint } from './lib/entry-point.js';
 
 const SCRIPT_CLONE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-function isGitWorktree(dir) {
+function resolveMainWorktree(dir) {
+  const result = spawnSync('git', ['worktree', 'list', '--porcelain'], {
+    cwd: dir,
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) return null;
+  const first = result.stdout
+    .split('\n')
+    .find((line) => line.startsWith('worktree '));
+  return first ? first.slice('worktree '.length).trim() : null;
+}
+
+function checkProbeWorktree(dir) {
+  if (!dir) return { ok: false, mainRoot: null };
+  const mainRoot = resolveMainWorktree(dir);
+  if (!mainRoot) return { ok: false, mainRoot: null };
+  try {
+    return {
+      ok: realpathSync(dir) === realpathSync(mainRoot),
+      mainRoot,
+    };
+  } catch {
+    return { ok: false, mainRoot };
+  }
+}
+
+function sameRepo(a, b) {
   return (
-    spawnSync('git', ['-C', dir, 'rev-parse', '--git-dir'], {
-      encoding: 'utf8',
-    }).status === 0
+    typeof a === 'string' &&
+    typeof b === 'string' &&
+    a.trim().toLowerCase() === b.trim().toLowerCase()
   );
 }
 
@@ -118,11 +149,11 @@ export function resolveDeliveryRoot(
   if (stateRoot) {
     return { root: resolve(stateRoot), reason: null };
   }
-  const scriptRoot = mainWorktree(scriptClone);
-  if (isGitWorktree(scriptRoot)) {
+  const scriptRoot = resolveMainWorktree(scriptClone);
+  if (scriptRoot) {
     return { root: scriptRoot, reason: null };
   }
-  return { root: null, reason: `${scriptRoot} is not a git worktree` };
+  return { root: null, reason: `${scriptClone} is not a git worktree` };
 }
 
 /**
@@ -261,10 +292,11 @@ export function releaseOwnership(stateRoot, prNumber) {
  * `verify-pr` watch can be stopped cleanly or migrated/re-created in place.
  * Unlinks the cursor before releasing the claim so an unlink failure keeps
  * ownership intact for retry, reads the cursor's last `headSha` before
- * unlinking, and refuses when an `autofix-pr` prepared state file exists or
- * when a gate cursor exists without a `verify-pr` claim.
+ * unlinking, and refuses when an `autofix-pr` prepared state file exists,
+ * when a gate cursor exists without a `verify-pr` claim, or when the cursor's
+ * or watch state's repository identity disagrees with `--repo` / recorded state.
  */
-export function resetWatchCursor(stateRoot, prNumber) {
+export function resetWatchCursor(stateRoot, prNumber, repo = null) {
   const tmp = join(stateRoot, '.qwen', 'tmp');
   const [gateName, stateName] = ownedStateFiles(prNumber);
   const gateFile = join(tmp, gateName);
@@ -285,15 +317,54 @@ export function resetWatchCursor(stateRoot, prNumber) {
     };
   }
   let cursorHead = null;
+  let cursorRepo = null;
   try {
     if (lstatSync(gateFile, { throwIfNoEntry: false })?.isFile()) {
       const parsed = JSON.parse(readFileSync(gateFile, 'utf8'));
       if (typeof parsed?.headSha === 'string' && parsed.headSha.trim() !== '') {
         cursorHead = parsed.headSha.trim();
       }
+      if (
+        typeof parsed?.owner === 'string' &&
+        parsed.owner.trim() !== '' &&
+        typeof parsed?.repo === 'string' &&
+        parsed.repo.trim() !== ''
+      ) {
+        cursorRepo = `${parsed.owner.trim()}/${parsed.repo.trim()}`;
+      }
     }
   } catch {
-    // Missing or unreadable cursor still proceeds to unlink; omit head note.
+    // Missing or unreadable cursor still proceeds to unlink; omit head/repo note.
+  }
+  const callerRepo =
+    typeof repo === 'string' && repo.trim() !== '' ? repo.trim() : null;
+  let stateRepo = null;
+  try {
+    const state = readState(stateRoot, prNumber);
+    if (typeof state?.repo === 'string' && state.repo.trim() !== '') {
+      stateRepo = state.repo.trim();
+    }
+  } catch {
+    // Corrupt watch-state file must not crash cursor reset; fall back to callerRepo alone.
+  }
+  const expectedRepo = callerRepo ?? stateRepo;
+  if (cursorRepo && expectedRepo && !sameRepo(cursorRepo, expectedRepo)) {
+    return {
+      ok: false,
+      reason: 'repo-mismatch',
+      conflict: gateFile,
+      recordedRepo: cursorRepo,
+      expectedRepo,
+    };
+  }
+  if (callerRepo && stateRepo && !sameRepo(callerRepo, stateRepo)) {
+    return {
+      ok: false,
+      reason: 'repo-mismatch',
+      conflict: statePath(stateRoot, prNumber),
+      recordedRepo: stateRepo,
+      expectedRepo: callerRepo,
+    };
   }
   let cursorRemoved = false;
   try {
@@ -323,15 +394,7 @@ export function checkConflicts(stateRoot, prNumber) {
 
 /** The clone's main worktree, which is where the probe keeps its cursor. */
 export function mainWorktree(cwd = process.cwd()) {
-  const result = spawnSync('git', ['worktree', 'list', '--porcelain'], {
-    cwd,
-    encoding: 'utf8',
-  });
-  if (result.status !== 0) return cwd;
-  const first = result.stdout
-    .split('\n')
-    .find((line) => line.startsWith('worktree '));
-  return first ? first.slice('worktree '.length).trim() : cwd;
+  return resolveMainWorktree(cwd) ?? cwd;
 }
 
 function parseArgs(argv) {
@@ -432,14 +495,16 @@ function main() {
 
   if (args.release) {
     if (args.resetCursor) {
-      const res = resetWatchCursor(root, args.pr);
+      const res = resetWatchCursor(root, args.pr, args.repo);
       if (!res.ok) {
         const detail =
           res.reason === 'autofix-state'
             ? `PR ${args.pr} has prepared autofix-pr state (${res.conflict}); refusing to reset another consumer's cursor (run plain --release to drop only this watch's claim)`
-            : res.reason === 'cursor-unlink-failed'
-              ? `PR ${args.pr} failed to remove probe cursor (${res.conflict}): ${res.error}`
-              : `PR ${args.pr} has a probe cursor (${res.conflict}) with no verify-pr claim; refusing to reset a cursor this watch did not claim (if a prior plain --release orphaned it, confirm no autofix-pr watch is active and remove ${res.conflict} manually)`;
+            : res.reason === 'repo-mismatch'
+              ? `PR ${args.pr} belongs to ${res.recordedRepo}, not ${res.expectedRepo} (${res.conflict}); refusing to reset another repository's cursor (run plain --release to drop only this watch's claim)`
+              : res.reason === 'cursor-unlink-failed'
+                ? `PR ${args.pr} failed to remove probe cursor (${res.conflict}): ${res.error}`
+                : `PR ${args.pr} has a probe cursor (${res.conflict}) with no verify-pr claim; refusing to reset a cursor this watch did not claim (if a prior plain --release orphaned it, confirm no autofix-pr watch is active and remove ${res.conflict} manually)`;
         process.stderr.write(`verify-pr watch: ${detail}\n`);
         process.exit(3);
       }
@@ -490,10 +555,15 @@ function main() {
     );
     process.exit(2);
   }
-  if (!delivery.root || !isGitWorktree(delivery.root)) {
-    const detail = delivery.reason ?? `${delivery.root} is not a git worktree`;
+  const probeRoot = checkProbeWorktree(delivery.root);
+  if (!probeRoot.ok) {
+    const detail =
+      delivery.reason ??
+      (probeRoot.mainRoot
+        ? `${delivery.root} is not the repository's main git worktree (main worktree is ${probeRoot.mainRoot})`
+        : `${delivery.root} is not a git worktree`);
     process.stderr.write(
-      `verify-pr watch: ${detail}; refusing to run probe without a git worktree root (run the helper from the trusted clone or pass --state-root <trusted main worktree>)\n`,
+      `verify-pr watch: ${detail}; refusing to run probe without the repository's main git worktree root (run the helper from the trusted clone or pass --state-root <trusted main worktree>)\n`,
     );
     process.exit(2);
   }

@@ -39,9 +39,11 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
 - Task shape: cron every 2 minutes; gate = `node
 <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli
 <absolute qwen>`; `recurring: true`, `durable: true`, `sessionMode:
-"current"`. The wrapper verifies a git worktree root before spawning the
-  probe (refusing with exit 2 without spawning when a non-worktree copy runs
-  outside a clone or when `--state-root` is not a git worktree, never falling
+"current"`. The wrapper proves that the resolved delivery root is the
+  repository's **main** git worktree top (via `git worktree list --porcelain`
+  realpath equality) before spawning the probe (refusing with exit 2 without
+  spawning when a non-worktree copy runs outside a clone or when `--state-root`
+  is non-git, a worktree subdirectory, or a linked worktree, never falling
   back to `cwd`), aligns the probe child's `cwd` to that resolved root (so
   cursor, claim, and state share the same tree), forwards only `resync` (head
   moved) and `stop`, and pre-records a delivered `resync` `headSha` into
@@ -182,7 +184,17 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   blocking marker may belong to a different head than the one being
   started: recovery releases the head the refusal names. `--restart --head <oid> [--from-round <r>] --round <r+1>`
   atomically replaces a dead round's in-flight marker under one lock acquisition (preserving other deferred heads — including a force-pushed-back head redelivered at its preserved lower `seq` — and other `retiredSeqs` tombstones, while rejecting any `--round <= entry.round`) without an unregistered gap. This mirrors the
-  gate's recovery for a dead claim, and `--release --reset-cursor` unlinks the probe cursor before releasing ownership — reporting its last `headSha`, and refusing with exit 3 while pointing the caller at plain `--release` when `autofix-pr` state exists — when stopping cleanly or migrating an existing watch; all gate verbs (and probe child `cwd`) resolve the default root from the script's own clone rather than the caller's cwd (requiring an absolute `--state-root`; exiting 2 outside a git worktree on `--check`/`--release` and on any probe tick without a git worktree root, while explicit `--state-root` continues to accept any directory for `--check`/`--release`).
+  gate's recovery for a dead claim, and `--release --reset-cursor [--repo <owner>/<repo>]`
+  unlinks the probe cursor before releasing ownership — reporting its last
+  `headSha`, and refusing with exit 3 while pointing the caller at plain
+  `--release` when `autofix-pr` state exists or when the cursor's `owner/repo`
+  or recorded watch-state `repo` disagrees with `--repo` / recorded state —
+  when stopping cleanly or migrating an existing watch; all gate verbs (and probe
+  child `cwd`) resolve the default root from the script's own clone rather than
+  the caller's cwd (requiring an absolute `--state-root`; exiting 2 outside a
+  git worktree on `--check`/`--release` and on any probe tick whose root is not
+  the repository's main git worktree top, while explicit `--state-root` continues
+  to accept any directory for `--check`/`--release`).
 
 ## Design decisions
 

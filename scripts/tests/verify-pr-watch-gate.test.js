@@ -36,6 +36,7 @@ import {
 } from '../../scripts/verify-pr-watch-gate.mjs';
 import {
   readState,
+  recordDelivery,
   startRound,
   statePath,
 } from '../../scripts/verify-pr-watch-state.mjs';
@@ -710,35 +711,94 @@ exit 3
       expect(failed.stdout).toBe('');
       expect(existsSync(statePath(failRoot, 123))).toBe(false);
 
-      // Probe tick refuses non-git --state-root with exit 2 without spawning
-      // the probe, while --check --claim still accepts an explicit directory.
+      // R5-1: probe ticks require the repository's *main* git worktree top, so
+      // non-git roots, worktree subdirectories, linked worktrees, and `.git`
+      // dirs all refuse with exit 2 without spawning the probe — while
+      // --check / --release still accept explicit non-main directories.
       const nonGitStateRoot = makeRoot();
-      const ranMarker = join(nonGitStateRoot, 'probe-ran');
-      const markerCli = join(callerCwd, 'marker-qwen');
+      const mainRepo = makeRoot();
+      expect(spawnSync('git', ['init', mainRepo], { env: gitEnv }).status).toBe(
+        0,
+      );
+      const repoScriptsDir = join(mainRepo, 'scripts');
+      mkdirSync(repoScriptsDir, { recursive: true });
+      writeFileSync(join(repoScriptsDir, 'placeholder.txt'), 'ok\n');
+      expect(
+        spawnSync('git', ['-C', mainRepo, 'add', '.'], { env: gitEnv }).status,
+      ).toBe(0);
+      expect(
+        spawnSync(
+          'git',
+          [
+            '-C',
+            mainRepo,
+            '-c',
+            'user.email=test@example.com',
+            '-c',
+            'user.name=Test',
+            'commit',
+            '-m',
+            'init',
+          ],
+          { env: gitEnv },
+        ).status,
+      ).toBe(0);
+      const linkedStateWt = makeRoot();
+      rmSync(linkedStateWt, { recursive: true, force: true });
+      expect(
+        spawnSync(
+          'git',
+          ['-C', mainRepo, 'worktree', 'add', linkedStateWt, '-b', 'wt-check'],
+          { env: gitEnv },
+        ).status,
+      ).toBe(0);
+
+      const guardPwdLog = join(callerCwd, 'guard-pwd.txt');
+      const guardCli = join(callerCwd, 'guard-qwen');
       writeFileSync(
-        markerCli,
+        guardCli,
         `#!/usr/bin/env bash
-touch '${ranMarker}'
+pwd -P > '${guardPwdLog}'
+main_wt="$(git worktree list --porcelain | sed -n 's/^worktree //p' | head -n 1)"
+mkdir -p "$main_wt/.qwen/tmp"
+printf '{"headSha":"${HEAD}"}' > "$main_wt/.qwen/tmp/${gateName}"
+printf '%s\\n' '${moved}'
 `,
         { mode: 0o755 },
       );
-      const nonGitProbe = spawnSync(
-        process.execPath,
-        [
-          GATE_SCRIPT,
-          '123',
-          '--repo',
-          'QwenLM/qwen-code',
-          '--cli',
-          markerCli,
-          '--state-root',
-          nonGitStateRoot,
-        ],
-        { cwd: callerCwd, encoding: 'utf8' },
-      );
-      expect(nonGitProbe.status).toBe(2);
-      expect(nonGitProbe.stderr).toContain('is not a git worktree');
-      expect(existsSync(ranMarker)).toBe(false);
+
+      for (const badStateRoot of [
+        nonGitStateRoot,
+        repoScriptsDir,
+        linkedStateWt,
+        join(mainRepo, '.git'),
+      ]) {
+        const res = spawnSync(
+          process.execPath,
+          [
+            GATE_SCRIPT,
+            '123',
+            '--repo',
+            'QwenLM/qwen-code',
+            '--cli',
+            guardCli,
+            '--state-root',
+            badStateRoot,
+          ],
+          { cwd: callerCwd, encoding: 'utf8' },
+        );
+        expect(res.status, badStateRoot).toBe(2);
+        expect(res.stdout, badStateRoot).toBe('');
+        expect(res.stderr, badStateRoot).toContain('main git worktree');
+        if (badStateRoot !== nonGitStateRoot) {
+          expect(res.stderr, badStateRoot).toContain(realpathSync(mainRepo));
+        }
+        expect(existsSync(guardPwdLog)).toBe(false);
+        expect(existsSync(join(mainRepo, '.qwen', 'tmp', gateName))).toBe(
+          false,
+        );
+      }
+
       expect(
         runGateCli([
           '123',
@@ -746,6 +806,15 @@ touch '${ranMarker}'
           '--claim',
           '--state-root',
           nonGitStateRoot,
+        ]).status,
+      ).toBe(0);
+      expect(
+        runGateCli([
+          '123',
+          '--check',
+          '--claim',
+          '--state-root',
+          repoScriptsDir,
         ]).status,
       ).toBe(0);
     },
@@ -905,5 +974,148 @@ describe('resetWatchCursor and --release --reset-cursor', () => {
       expect(existsSync(ownershipPath(root, 123))).toBe(false);
       expect(existsSync(gateFile)).toBe(false);
     }
+  });
+
+  it('refuses --release --reset-cursor when cursor or watch-state repo mismatches caller or state', () => {
+    const HEAD = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+    const [gateName] = ownedStateFiles(123);
+    const cursorPayload = JSON.stringify({
+      version: 1,
+      host: 'github.com',
+      owner: 'acme',
+      repo: 'widgets',
+      prNumber: 123,
+      headSha: 'deadbeef1234',
+    });
+    const setupCase = ({
+      cursor = cursorPayload,
+      stateRepo = null,
+      stateRaw = null,
+    } = {}) => {
+      const root = makeRoot();
+      claimOwnership(root, 123);
+      const gateFile = join(root, '.qwen', 'tmp', gateName);
+      writeFileSync(gateFile, cursor);
+      if (stateRepo)
+        recordDelivery(root, { pr: 123, head: HEAD, repo: stateRepo });
+      if (stateRaw !== null) writeFileSync(statePath(root, 123), stateRaw);
+      return { root, gateFile, ownerFile: ownershipPath(root, 123) };
+    };
+
+    // Case 1: explicit --repo disagrees with cursor owner/repo -> exit 3, preserves both cursor & claim.
+    const c1 = setupCase();
+    const explicitMismatch = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--repo',
+      'other/repo',
+      '--state-root',
+      c1.root,
+    ]);
+    expect(explicitMismatch.status).toBe(3);
+    expect(explicitMismatch.stderr).toContain('acme/widgets');
+    expect(explicitMismatch.stderr).toContain('other/repo');
+    expect(explicitMismatch.stderr).toContain('plain --release');
+    expect(readFileSync(c1.gateFile, 'utf8')).toBe(cursorPayload);
+    expect(existsSync(c1.ownerFile)).toBe(true);
+
+    // Case 2: omitted --repo disagrees via recorded watch-state repo -> exit 3, preserves both.
+    const c2 = setupCase({ stateRepo: 'other/repo' });
+    const omittedMismatch = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--state-root',
+      c2.root,
+    ]);
+    expect(omittedMismatch.status).toBe(3);
+    expect(omittedMismatch.stderr).toContain('acme/widgets');
+    expect(omittedMismatch.stderr).toContain('other/repo');
+    expect(omittedMismatch.stderr).toContain('plain --release');
+    expect(readFileSync(c2.gateFile, 'utf8')).toBe(cursorPayload);
+    expect(existsSync(c2.ownerFile)).toBe(true);
+
+    // Case 3: matching --repo (case-insensitive) cleanly removes cursor & claim.
+    const c3 = setupCase();
+    const matchExplicit = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--repo',
+      'Acme/Widgets',
+      '--state-root',
+      c3.root,
+    ]);
+    expect(matchExplicit.status).toBe(0);
+    expect(matchExplicit.stderr).toContain(
+      'removed probe cursor (last head deadbeef1234)',
+    );
+    expect(existsSync(c3.gateFile)).toBe(false);
+    expect(existsSync(c3.ownerFile)).toBe(false);
+
+    // Case 4: omitted --repo with matching watch-state repo cleanly removes cursor & claim.
+    const c4 = setupCase({ stateRepo: 'acme/widgets' });
+    const matchState = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--state-root',
+      c4.root,
+    ]);
+    expect(matchState.status).toBe(0);
+    expect(matchState.stderr).toContain(
+      'removed probe cursor (last head deadbeef1234)',
+    );
+    expect(existsSync(c4.gateFile)).toBe(false);
+    expect(existsSync(c4.ownerFile)).toBe(false);
+
+    // Case 5: minimal cursor (no owner/repo) + watch-state repo + conflicting caller --repo -> exit 3.
+    const c5 = setupCase({
+      cursor: '{"headSha":"abc1234"}',
+      stateRepo: 'acme/widgets',
+    });
+    const minimalMismatch = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--repo',
+      'other/repo',
+      '--state-root',
+      c5.root,
+    ]);
+    expect(minimalMismatch.status).toBe(3);
+    expect(minimalMismatch.stderr).toContain('acme/widgets');
+    expect(minimalMismatch.stderr).toContain('other/repo');
+    expect(existsSync(c5.gateFile)).toBe(true);
+    expect(existsSync(c5.ownerFile)).toBe(true);
+
+    // Case 6: corrupt watch-state JSON does not crash cursor reset; cursor repo check still runs.
+    const c6 = setupCase({ stateRaw: '{broken' });
+    const corruptMismatch = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--repo',
+      'other/repo',
+      '--state-root',
+      c6.root,
+    ]);
+    expect(corruptMismatch.status).toBe(3);
+    expect(existsSync(c6.gateFile)).toBe(true);
+    expect(existsSync(c6.ownerFile)).toBe(true);
+
+    const corruptMatch = runGateCli([
+      '123',
+      '--release',
+      '--reset-cursor',
+      '--repo',
+      'acme/widgets',
+      '--state-root',
+      c6.root,
+    ]);
+    expect(corruptMatch.status).toBe(0);
+    expect(existsSync(c6.gateFile)).toBe(false);
+    expect(existsSync(c6.ownerFile)).toBe(false);
   });
 });

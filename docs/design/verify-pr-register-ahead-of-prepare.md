@@ -248,11 +248,13 @@ existing dead-round recovery (`--release` for a round that died after
   dead-round replacement requiring a strictly higher `--round`).
 - `scripts/verify-pr-watch-gate.mjs` — later #17371 follow-up adds
   `deliverGateOutput` + `resolveDeliveryRoot` (pre-records `resync` `headSha`
-  from the script's git worktree without cwd fallback before stdout emission,
-  spawns the probe child with `cwd` aligned to that resolved root, requires an
-  absolute `--state-root`, and fails open on state lock/corrupt/repo errors) and
-  `resetWatchCursor` (`--release --reset-cursor`, cursor-first unlink with
-  `headSha` reporting and ownership/`autofix-pr` guards).
+  from the script's main git worktree without cwd fallback before stdout
+  emission, requires the resolved probe root to match the repository's main
+  git worktree top before spawning the probe child with `cwd` aligned to it,
+  requires an absolute `--state-root`, and fails open on state
+  lock/corrupt/repo errors) and `resetWatchCursor` (`--release --reset-cursor
+[--repo <owner>/<repo>]`, cursor-first unlink with `headSha` reporting and
+  ownership/`autofix-pr`/repository-identity guards).
 - `scripts/verify-capture.mjs` — opt-in `--allow-cwd-modules` fallback when
   `@xterm/headless` or `sharp` is absent next to the script (refuses `cwd`
   resolution by default so isolated `/trusted-scripts` copies never execute
@@ -291,38 +293,43 @@ existing dead-round recovery (`--release` for a round that died after
   formerly tracked in #17371 are addressed as follows (residual 1 is narrowed
   rather than completely closed):
   1. `scripts/verify-pr-watch-gate.mjs` (`deliverGateOutput` + `resolveDeliveryRoot`
-     → `recordDelivery` in `scripts/verify-pr-watch-state.mjs`) requires a proven
-     git worktree root before spawning the probe child (refusing with exit 2 and
-     never spawning inside caller `cwd` when the default copy has no git
-     worktree root — e.g. `/trusted-scripts` — or when an explicit
-     `--state-root` is not a git worktree), aligns the probe child's `cwd` to
-     that resolved worktree root (so cursor, claim, and state share the same
-     tree), and pre-records a delivered `resync` `headSha` into `deferredHeads`
-     before writing stdout to wake the model (`startRound` promotes that entry
-     at its preserved `seq`). Because the probe writes its gate cursor before
-     exiting to `deliverGateOutput`, this **narrows** the silent-drop window to
-     the probe-cursor-write → pre-record hop rather than closing it outright
-     (full closure requires writing the marker before the cursor advances). By
-     design, `deliverGateOutput` itself stays **fail-open** so a transient state
-     failure never suppresses an already-consumed cursor event: when the state
-     lock is held, on a `repo` mismatch, on a corrupt state file, or when
-     `deliverGateOutput` is invoked with no state root, it logs a warning on
-     stderr and still emits the event unrecorded.
-  2. `scripts/verify-pr-watch-gate.mjs --release --reset-cursor`
+     → `recordDelivery` in `scripts/verify-pr-watch-state.mjs`) proves the
+     resolved root is the repository's **main** git worktree top (realpath
+     match against the first `git worktree list --porcelain` entry) before
+     spawning the probe child — refusing with exit 2 and never spawning inside
+     caller `cwd` when the default copy has no git worktree root (e.g.
+     `/trusted-scripts`) or when an explicit `--state-root` is non-git, a
+     worktree subdirectory, or a linked worktree — aligns the probe child's
+     `cwd` to that resolved main worktree (so cursor, claim, and state share the
+     same tree), and pre-records a delivered `resync` `headSha` into
+     `deferredHeads` before writing stdout to wake the model (`startRound`
+     promotes that entry at its preserved `seq`). Because the probe writes its
+     gate cursor before exiting to `deliverGateOutput`, this **narrows** the
+     silent-drop window to the probe-cursor-write → pre-record hop rather than
+     closing it outright (full closure requires writing the marker before the
+     cursor advances). By design, `deliverGateOutput` itself stays **fail-open**
+     so a transient state failure never suppresses an already-consumed cursor
+     event: when the state lock is held, on a `repo` mismatch, on a corrupt
+     state file, or when `deliverGateOutput` is invoked with no state root, it
+     logs a warning on stderr and still emits the event unrecorded.
+  2. `scripts/verify-pr-watch-gate.mjs --release --reset-cursor [--repo <owner>/<repo>]`
      (`resetWatchCursor`) reads and reports the probe cursor's last `headSha`,
      unlinks `autofix-pr-<n>-gate.json` **before** removing the `verify-pr`
      ownership claim (so a failed unlink preserves ownership for retry), and
      refuses with exit 3 whenever `autofix-pr-<n>-state.json` exists — pointing
      the caller at plain `--release` to drop only `verify-pr`'s claim while
-     preserving the shared cursor for `autofix-pr` — or when the cursor lacks a
-     `verify-pr` claim, enabling clean stop teardown and in-place migration of
-     existing `verify-pr` watches without allowing cross-consumer cursor removal.
-     All gate verbs (`--check`/`--claim`/`--release`/`--release --reset-cursor`,
-     the probe spawn `cwd`, and pre-delivery) resolve their default root from
+     preserving the shared cursor for `autofix-pr` — when the cursor's
+     `owner/repo` or recorded watch-state `repo` disagrees with `--repo` or
+     recorded state (pointing to plain `--release` and leaving both cursor and
+     claim intact), or when the cursor lacks a `verify-pr` claim, enabling
+     clean stop teardown and in-place migration of existing `verify-pr` watches
+     without allowing cross-consumer or cross-repository cursor removal. All
+     gate verbs (`--check`/`--claim`/`--release`/`--release --reset-cursor`, the
+     probe spawn `cwd`, and pre-delivery) resolve their default root from
      `SCRIPT_CLONE`'s main git worktree rather than `process.cwd()` (requiring an
-     absolute `--state-root`; exiting 2 outside a git worktree on `--check`,
-     `--release`, and probe ticks while `--check`/`--release` continue to accept
-     any explicit directory).
+     absolute `--state-root`; exiting 2 outside a git worktree on `--check` and
+     `--release` while continuing to accept any explicit directory for them, and
+     exiting 2 on any probe tick whose root is not the main git worktree top).
   3. `scripts/verify-pr-watch-state.mjs --restart --head <oid> [--from-round <r>] --round <r+1>`
      (`restartRound`) atomically replaces a dead round's in-flight marker under
      one state lock, preserves other deferred heads (including a force-pushed-back
