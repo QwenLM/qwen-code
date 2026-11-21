@@ -1442,6 +1442,49 @@ describe('buildShellExecWarnings', () => {
 });
 
 describe('splitCommands', () => {
+  it('keeps commands visible when arithmetic syntax falls back to substitution', () => {
+    const commands = splitCommands(
+      'echo $((1); cd /outside; git reset --hard)',
+    );
+
+    expect(commands).toHaveLength(3);
+    expect(commands[1]).toBe('cd /outside');
+    expect(commands[2]).toContain('git reset --hard');
+  });
+
+  it('does not carry an unclosed arithmetic frame across a comment newline', () => {
+    expect(splitCommands('echo done # $((1)\ngit reset --hard')).toEqual([
+      'echo done # $((1)',
+      'git reset --hard',
+    ]);
+  });
+
+  it('keeps closed multiline literal arithmetic together', () => {
+    expect(splitCommands('echo $((1 +\n2))')).toEqual(['echo $((1 +\n2))']);
+  });
+
+  it.each(["echo $'It\\'s done'", "echo $'a\\'|b'"])(
+    'respects ANSI-C quote boundaries: %s',
+    (command) => {
+      expect(splitCommands(`${command}; git status`)).toEqual([
+        command,
+        'git status',
+      ]);
+    },
+  );
+
+  it.each([
+    'echo $(( (1) | 2 ))',
+    'echo $(( ((1) | 2) & 3 ))',
+    'echo "$(echo $(( (1) | 2 )))"',
+  ])('keeps arithmetic parentheses inside one segment: %s', (expression) => {
+    expect(splitCommands(`${expression} | cat; git status`)).toEqual([
+      expression,
+      'cat',
+      'git status',
+    ]);
+  });
+
   // The segments this returns decide which sub-commands the shell tool asks
   // about and which one it reads for git attribution, so a command that goes
   // missing here goes missing from those too.
