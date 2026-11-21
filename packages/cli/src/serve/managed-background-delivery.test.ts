@@ -630,7 +630,10 @@ it('re-attaches before draining staged deliveries without gaps or duplicate comm
   // Entry 1 lands directly on the first Harness publisher (generation 1).
   await sink.write('stdout', Buffer.from('direct-1\n'));
   await sink.finish('stdout', true);
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  // The direct push is an HTTP round trip plus a journal commit: wait for
+  // its watermark instead of a fixed sleep a loaded runner can outrun.
+  for (let waited = 0; waited < 5_000 && sink.run.lastApplied < 1; waited += 10)
+    await new Promise((resolve) => setTimeout(resolve, 10));
   expect(sink.run.lastApplied).toBe(1);
 
   // Suspend: detach generation 1 and close the first Harness publisher.

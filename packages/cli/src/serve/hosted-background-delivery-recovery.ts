@@ -133,6 +133,43 @@ function isUnmountedStageRoute(cause: unknown): boolean {
 }
 
 /**
+ * Phase 3b (§4.9): waits for in-flight pushes, then detaches each Runtime
+ * Session's publisher through the Broker with the Harness's final applied
+ * watermark. The Broker deletes staged rows up to that point in the same
+ * transaction and the worker switches the run to held, so no separate
+ * ack-then-detach race exists. A refused detach fails the teardown: the
+ * admission check is what keeps an incapable worker out of this path.
+ */
+export async function detachBackgroundPublishers(
+  input: BackgroundDeliveryRecoveryInput,
+): Promise<void> {
+  const publisher = input.lane.publisher;
+  if (!publisher) return;
+  await publisher.quiesce();
+  const unsettled = new Set(
+    collectKnownRuns(input.managed)
+      .filter((run) => !run.settled)
+      .map((run) => run.executionCallId),
+  );
+  if (unsettled.size === 0) return;
+  const runtimeSessionIds = await resolveUnsettledRuntimeSessions(
+    input.managed,
+    unsettled,
+  );
+  if (runtimeSessionIds.size === 0) return;
+  const writer = await input.writerOwner.owner();
+  const appliedThrough = publisher.appliedWatermarks();
+  const sessionKey = input.managed.authority.sessionHeader.sessionKey;
+  for (const runtimeSessionId of runtimeSessionIds) {
+    await new HostedWorkspaceBroker(
+      input.brokerOptions,
+      sessionKey,
+      runtimeSessionId,
+    ).detachPublisher(writer.writerGeneration, appliedThrough);
+  }
+}
+
+/**
  * Phase 3b (§4.6): re-attaches the fresh Harness publisher on each Runtime
  * Session owning an unsettled background run, then drains and acknowledges
  * staged deliveries from the Broker while holding live worker pushes behind

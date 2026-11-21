@@ -218,17 +218,30 @@ public final class ManagedSessionStoreModels {
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
             boolean replayed, boolean activationLeaseRenewal, ActivationLease activationLease,
-            boolean wakeDispatch) {
+            boolean wakeDispatch, boolean runtimeObservation) {
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
                 boolean activationLeaseRenewal, ActivationLease activationLease) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
-                    activationEpoch, replayed, activationLeaseRenewal, activationLease, false);
+                    activationEpoch, replayed, activationLeaseRenewal, activationLease, false, false);
+        }
+        public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
+                long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
+                boolean activationLeaseRenewal, ActivationLease activationLease, boolean wakeDispatch) {
+            this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
+                    activationEpoch, replayed, activationLeaseRenewal, activationLease, wakeDispatch, false);
         }
         /** Advertises that this control plane consumes seal-time wake stamps. */
         public WriterGrant withWakeDispatch() {
             return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
-                    lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease, true);
+                    lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
+                    true, runtimeObservation);
+        }
+        /** Advertises that a background Session may suspend behind the pull. */
+        public WriterGrant withRuntimeObservation() {
+            return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
+                    lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
+                    wakeDispatch, true);
         }
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed) {

@@ -1397,6 +1397,22 @@ export class HostedShellPublisher {
     return manifest.revision >= revision;
   }
 
+  /**
+   * Waits for the deliveries already in flight without closing the listener,
+   * so a suspension detach can carry the final applied watermark (§4.9).
+   * Deliberately one bounded round, not a wait for silence: a loud Shell
+   * keeps pushing while it is attached, and a push that lands after this
+   * snapshot is either applied before the close or refused and re-sent.
+   */
+  async quiesce(): Promise<void> {
+    await Promise.allSettled([...this.operations]);
+    await Promise.allSettled(
+      [...this.captures.values()].map(
+        (entry) => entry.background?.redriveInFlight,
+      ),
+    );
+  }
+
   close(): Promise<void> {
     return (this.closePromise ??= this.drain());
   }

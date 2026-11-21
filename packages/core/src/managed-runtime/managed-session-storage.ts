@@ -111,6 +111,12 @@ export interface ManagedSessionWakeStamp {
   readonly pending: boolean;
   /** When the earliest deliverable wake input is due; 0 when one is due now. */
   readonly dueAt: number;
+  /**
+   * Whether every unsettled run and owed cleanup of this prefix is a verified
+   * background hold. Only the writer can run that per-run evidence check, so
+   * the seal certifies it for the control plane's recovery view.
+   */
+  readonly backgroundHeld?: boolean;
 }
 
 /**

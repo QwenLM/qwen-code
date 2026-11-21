@@ -361,6 +361,13 @@ export interface HostedShellTurnOptions {
   // The embedded wake scheduler's tip: a notification input committed
   // under its observation revision asks the pump to deliver it.
   monitorWakeKick?: () => void;
+  /**
+   * Bindings whose worker took over the background capture, keyed
+   * `bindingId@generation`. A suspension may only exempt a run whose
+   * binding is here: an older worker cannot answer the pull, so its Session
+   * stays resident rather than fail a detach at teardown.
+   */
+  observationBindings?: Set<string>;
 }
 
 /**
@@ -6334,6 +6341,12 @@ export class HostedWorkspaceToolTurn {
           runtimeBindingId: saved.runtimeBindingId,
           generation: saved.bindingGeneration,
         };
+        const observationLane = this.backgroundLane ?? this.shell;
+        if (this.workerOwnsObservation && observationLane) {
+          (observationLane.observationBindings ??= new Set()).add(
+            `${saved.runtimeBindingId}@${saved.bindingGeneration}`,
+          );
+        }
         if (request.background)
           await this.childRuns!.dispatchStarted(executionCallId, runtime);
         if (request.monitoring)
