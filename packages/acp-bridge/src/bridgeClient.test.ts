@@ -5890,7 +5890,9 @@ describe('background execution ownership', () => {
         title: 'Write report',
         kind: 'edit',
       },
-      options: [{ optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' }],
+      options: [
+        { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+      ],
     });
 
     const record = records[0]!;
