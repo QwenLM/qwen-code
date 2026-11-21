@@ -138,14 +138,23 @@ Phase 3b server jar 在真实 daemon 拓扑里端到端启动。配方（全部�
 **启动见证尚未覆盖：** 挂起循环本身。两个发现界定它能在哪里跑：
 
 - **平台门（决定性）。** managed serve 用的 durable local-process provisioner（`QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=true`）是 **Linux-only**——`LocalRuntimeStore` 在非 Linux 抛 "Durable local-process mode requires Linux"，后台 Shell 还额外要求 delegated Linux cgroup v2 root（`RuntimeBrokerServiceTest` 断言此准入拒绝）。因此带真实后台进程的完整 资格 → 摘除 → 暂存唤醒 → 排空 循环**不能在 macOS 跑**；属 CI `hosted-harness-mysql` 车道（Linux）或 Linux 主机。上面的 macOS 启动见证只验证了控制面 + harness + Embedded Broker；真实进程采集/投递机制由 macOS 兼容的 `managed-background-delivery.process.test.ts`（直接 spawn、无 cgroup provisioner）另行覆盖。
-- **配置门。** `managed-local-serve.ts` 硬编码 `SPRING_APPLICATION_JSON`（内嵌存储、无 `runtime-observation` flag）并从环境剥离 `SPRING_*`/`QWEN_MANAGED_AGENT_*` 覆盖，因此不经代码改动无法经生产路径注入 flag 与 MySQL datasource。
+- **配置门（已用注入解决）。** `managed-local-serve.ts` 硬编码 `SPRING_APPLICATION_JSON` 并剥离 `SPRING_*`/`QWEN_MANAGED_AGENT_*`，但 **`JAVA_TOOL_OPTIONS` 能穿透**，JVM 将其作为系统属性（优先级高于 application JSON）。故无需改码即可注入：`JAVA_TOOL_OPTIONS="-Dqwen.managed-agent.extensions.enabled=true -Dqwen.managed-agent.runtime-observation.enabled=true -Dqwen.managed-agent.managed-extensions.enabled=true -Dqwen.managed-agent.managed-extensions.cache-directory=<绝对路径> -Dqwen.managed-agent.managed-extensions.cgroup-root=<已委派>"`。各 flag 逐级硬依赖（extensions → managed-extensions → 绝对 cache-directory → cgroup-root），缺一个 Spring 启动即报精确错误。
 
-完整 E2E 因此属**专用 Linux harness**（仿 `HostedHarnessMySqlIT` + `managed-local-serve.ts` 的新 MySQL IT）：以 `--qwen.managed-agent.runtime-observation.enabled=true` + MySQL + 启用 Broker 启动 Spring，拉起 harness + durable local-process worker，设 `QWEN_E2E_IDLE_SUSPEND_MS`（`hosted-harness-session.ts` 里缩短空闲阈值的测试钩子），驱动一个模型 stub turn 启动后台 Shell（`is_background`），然后断言：Session 挂起且进程仍在跑、恢复视图 `ready`；暂存行累积；暂存唤醒排空结算且不跑模型 turn。该 harness 是剩余的切片 3 投产门，且必须在 Linux 跑。
+### Linux 真实 daemon 见证（mingrong，2026-11-22）
+
+在 Linux 主机 `mingrong`（215.192.182.119，uid 63338）上，完整生产拓扑启动并挂起，已端到端验证：
+
+- **构建/部署：** checkout 克隆到 PR head；依赖用 standalone pnpm/npm wrapper + Aliyun npm mirror（系统 corepack 坏）；macOS 构建的 exec jar scp 过去（平台无关）；`npm run bundle` 出 `dist/cli.js`。
+- **cgroup 委派：** 顶层 `/sys/fs/cgroup/qwen-bg` 进程迁移失败（与 worker 会话 scope 的共同祖先是 root，非用户可写）。可用 root 在 **user slice 下**：`sudo chown 63338:63338 /sys/fs/cgroup/user.slice/user-63338.slice{,/cgroup.procs,/cgroup.subtree_control}`，再 `mkdir .../user-63338.slice/qwen-bg` + `echo "+cpu +memory +pids" > .../qwen-bg/cgroup.subtree_control`。此后迁入 `qwen-bg/<unit>` 成功（已验证）。`Delegate=yes` 不能经 `systemctl set-property` 运行时设置。
+- **启动 + 挂起：** 注入 flag + `QWEN_E2E_IDLE_SUSPEND_MS=3000` + `QWEN_MANAGED_RUNTIME_OBSERVATION=1` 后，daemon 启动（Embedded Broker listening、`Started ManagedAgentServerApplication`），WebShell 创建的 session 跑一个模型 stub turn，harness 日志 `Hosted Session <id> suspended idle.`——**真实 daemon 上见证挂起。**
+- **剩余阻塞（精确）：** 后台 Shell 工具被拒 _"Hosted Shell requires a foreground command… Background jobs and Monitor are unavailable"_。已定位：`backgroundShellAdmitted()`（`hosted-workspace-tool-turn.ts`）= `publication !== undefined && childRuns !== undefined && childRunAdmissionsEnabled()`。kind 门通过（`'shell'` 在冻结的 `MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS` 里）。缺口是 `session.publication`，仅当 session 有 hosted-workspace-shell `toolProfile` **且** `captureBytes !== undefined` **且** `!foregroundOnly` 时才接线（`hosted-harness-session.ts` ~7200）。`captureBytes` 来自 `/session` body 或 agent definition（`definition?.['captureBytes']`）；WebShell 创建的 session 两者皆无，故无 publication、故前台拒绝。闭合它需 runtime-observation 准入把 `captureBytes` 传进 WebShell session/definition——这是捕获「后台进程存活 + staging + drain」见证前的最后接线步。
+
+完整 E2E harness（仿 `HostedHarnessMySqlIT` + `managed-local-serve.ts` 的新 MySQL IT，或上述脚本化真实 daemon 驱动）必须在 Linux 跑；唯一开放项是 `captureBytes`/publication 准入接线。
 
 ### 剩余故障用例
 
 - **带在途 pull 的 re-attach/drain、挂起期间首条观测、detach→seal 窗口、挂起期间 monitor 策略停止、边界/水位线 wake、挂起资格矩阵、worker 丢失、跨 Broker 重启/副本围栏、删除挂起 Session** — Java 侧已由 H2 上的 `RuntimeStageStoreTest`、`RuntimeObservationPullerTest`、`WakeSealStampTest`、`SessionRecoveryServiceTest`、`HostedCleanupDebtStoreTest`、`RuntimeBrokerServiceTest` 覆盖，并已在真实 MySQL 8.4 上见证（见上）；各自仍需 daemon 级 E2E。
-- **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。daemon 启动见证已如上落地；剩余是启用 flag + MySQL 并驱动循环的专用 **Linux** harness（见上——durable local-process provisioner 是 Linux-only，故跑在 CI hosted 车道而非 macOS）。
+- **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。Linux 上 daemon 已带 flag 启动且**挂起已见证**（见上 Linux 真实 daemon 见证）；唯一开放项是让 WebShell session 准入后台 Shell 的 `captureBytes`/publication 接线，之后即可捕获「后台进程存活 + staging + drain」断言。Linux-only（durable local-process provisioner），故 CI hosted 车道或 Linux 主机。
 - **§7 度量 — Broker/daemon 半** — pull 成本/延迟（每 Broker 的 long-poll 连接数、每次空闲 pull 的 CPU、观测→wake→turn-start 与退出→结算时延）、挂起期间活跃输出下的 staging 行数/字节、静默加载的 drain 突发；这些确定 pull 等待（`pullWaitMs`，现 2,000）、staged-bytes 水位线（4 MiB）与硬上限（16 MiB）（§11 开放问题 1）。worker/applier 半已如上落地。
 
 ## 验证命令
