@@ -1583,6 +1583,7 @@ describe('LoggingContentGenerator', () => {
     const usageMetadata = usage(42, 17, 59, 0);
     setGenAiUsageProvenance(usageMetadata, {
       cachedInputTokensReported: false,
+      cacheCreationInputTokens: 256,
     });
     await runContent(
       resolving(
@@ -1597,6 +1598,7 @@ describe('LoggingContentGenerator', () => {
       inputTokens: 42,
       outputTokens: 17,
       cachedInputTokensReported: false,
+      cacheCreationInputTokens: 256,
     });
     expect(endMetadata!.durationMs).toBeGreaterThanOrEqual(0);
   });
@@ -1752,11 +1754,16 @@ describe('LoggingContentGenerator', () => {
 
   it('forwards usage attached to the final response after it was yielded', async () => {
     const response = resp('r1', 'a');
+    const usageMetadata = usage(100, 50);
+    setGenAiUsageProvenance(usageMetadata, {
+      cachedInputTokensReported: false,
+      cacheCreationInputTokens: 256,
+    });
     await runStream(
       resolving(
         (async function* () {
           yield response;
-          response.usageMetadata = usage(100, 50);
+          response.usageMetadata = usageMetadata;
         })(),
       ),
       'prompt-tok',
@@ -1766,6 +1773,7 @@ describe('LoggingContentGenerator', () => {
       success: true,
       inputTokens: 100,
       outputTokens: 50,
+      cacheCreationInputTokens: 256,
     });
     expect(lastFinalize()).toHaveBeenCalledWith(true);
   });

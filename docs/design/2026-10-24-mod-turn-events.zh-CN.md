@@ -102,7 +102,7 @@ hook 返回的 `{ text }` 与答案不同且不是空白时，这段文字显示
 
 - 回合事件只覆盖主循环，而且只覆盖由人提交的提示，不会出现 `agentId`。
 - `reason` 不会是 `refusal`。
-- `usage.cache_creation_input_tokens` 为 0，除非 provider 单独报告缓存写入（Anthropic 会报告）。
+- `usage.cache_creation_input_tokens` 为 0，除非 provider 单独报告缓存写入。Anthropic 的 `cache_creation_input_tokens` 会计入 prompt 总量；OpenAI Chat 的 `prompt_tokens_details.cache_write_tokens` 已包含在 `prompt_tokens` 内。两种情况下，`input_tokens` 都不包含已报告的缓存读取和缓存写入。
 - 按 JSON 计超过 128 KiB 的提示或答案，截断后才交给 hook，并带上 `isTextTruncated` 或 `isAnswerTruncated`。Claude Code 会完整传入。
 - headless 文本模式下，说明文字输出到 stderr。
 - 还没有 `$.prompt.submit`，所以 Mod 不能在 `$.turn.abort` 之后发送提示。

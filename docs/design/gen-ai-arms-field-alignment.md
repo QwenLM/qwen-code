@@ -215,8 +215,13 @@ descriptions and span errors retain their 1024-unit limits.
 
 Provider converters attach internal provenance to normalized Gemini usage
 objects with a `WeakMap`. It records whether a cache-read field was actually
-present and Anthropic cache-creation tokens. This preserves the public response
-JSON shape and lets garbage collection follow the normalized usage object.
+present and provider-reported cache-creation tokens. Anthropic
+`cache_creation_input_tokens` is summed into the prompt total alongside
+`input_tokens` and `cache_read_input_tokens`. OpenAI Chat
+`prompt_tokens_details.cache_write_tokens` is already a breakdown within
+`prompt_tokens`, so it is preserved without subtracting it from or adding it
+to the prompt total. This preserves the public response JSON shape and lets
+garbage collection follow the normalized usage object.
 
 When an OpenAI-compatible provider reports only `total_tokens`, the normalized
 total remains available to existing internal consumers, but no input/output
