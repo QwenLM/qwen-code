@@ -509,6 +509,42 @@ describe('session swap telemetry accounting (#9833)', () => {
     // A later failed swap of a THIRD session must not undo this commit.
   });
 
+  it('persists a skills-only run when a branch happens before any API response', async () => {
+    const { config } = await establishLiveSessionA(100);
+    uiTelemetryService.resetLiveMetrics();
+    uiTelemetryService.recordSkillInvocation('review', true, SESSION_A);
+
+    const { result } = renderHook(() =>
+      useBranchCommand({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        config: config as any,
+        settings: mockSettings,
+        historyManager: {
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          addItem: vi.fn(),
+        },
+        startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
+        clearPendingState: vi.fn(),
+        setSessionName: vi.fn(),
+        remount: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleBranch();
+    });
+
+    expect(persistSessionUsage).toHaveBeenCalledTimes(1);
+    const outgoing = vi.mocked(persistSessionUsage).mock.calls[0]?.[0];
+    expect(outgoing?.sessionId).toBe(SESSION_A);
+    expect(outgoing?.metrics.models).toEqual({});
+    expect(outgoing?.metrics.skills?.totalCalls).toBe(1);
+    expect(uiTelemetryService.getLiveMetrics().skills?.totalCalls).toBe(0);
+    expect(uiTelemetryService.getMetrics().skills?.totalCalls).toBe(1);
+  });
+
   it('a successful /resume separates the outgoing and incoming run records', async () => {
     const { config } = await establishLiveSessionA(100);
     sessionServiceMocks.sessions.set(SESSION_B, {
@@ -549,6 +585,9 @@ describe('session swap telemetry accounting (#9833)', () => {
     expect(incoming?.sessionId).toBe(SESSION_B);
     expect(incoming?.metrics.models['test-model']?.api.totalRequests).toBe(1);
     expect(incoming?.metrics.models['test-model']?.tokens.prompt).toBe(7);
+    expect(incoming?.startTime.getTime()).toBeGreaterThanOrEqual(
+      outgoing!.endTime.getTime(),
+    );
   });
 
   it('a failure after the UI re-key does not roll back or undo', async () => {

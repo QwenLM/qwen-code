@@ -24,8 +24,16 @@ vi.mock(
   }),
 );
 
-import { SessionService, uiTelemetryService } from '@qwen-code/qwen-code-core';
-import type { Config, ResumedSessionData } from '@qwen-code/qwen-code-core';
+import {
+  EVENT_API_RESPONSE,
+  SessionService,
+  uiTelemetryService,
+} from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ResumedSessionData,
+  UiEvent,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { ModSession } from '../../services/mod-session.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
@@ -46,6 +54,22 @@ function emptySession(): ResumedSessionData {
     },
     historyGaps: [],
   } as unknown as ResumedSessionData;
+}
+
+function liveApiResponse(inputTokens: number): UiEvent {
+  return {
+    'event.name': EVENT_API_RESPONSE,
+    'event.timestamp': new Date().toISOString(),
+    response_id: `outgoing-${inputTokens}`,
+    model: 'test-model',
+    duration_ms: 1,
+    input_token_count: inputTokens,
+    output_token_count: 0,
+    cached_content_token_count: 0,
+    thoughts_token_count: 0,
+    total_token_count: inputTokens,
+    prompt_id: 'outgoing-prompt',
+  } as UiEvent;
 }
 
 interface FakeConfigCalls {
@@ -182,6 +206,8 @@ describe('handleResumeSession', () => {
     vi.spyOn(SessionService.prototype, 'getSessionTitle').mockReturnValue(
       'Custom Title',
     );
+    persistUsageMock.mockClear();
+    uiTelemetryService.reset();
   });
 
   afterEach(() => {
@@ -191,10 +217,18 @@ describe('handleResumeSession', () => {
   it('swaps core before UI and replays the transcript', async () => {
     const { config, calls } = createFakeConfig();
     const host = createFakeHost(config);
+    uiTelemetryService.addEvent(liveApiResponse(5), 'old-session');
     const resetLive = vi.spyOn(uiTelemetryService, 'resetLiveMetrics');
     await handleResumeSession(host, 'target-session');
 
     expect(resetLive).toHaveBeenCalledOnce();
+    expect(persistUsageMock).toHaveBeenCalledTimes(1);
+    const outgoing = persistUsageMock.mock.calls[0]?.[0];
+    expect(outgoing?.sessionId).toBe('old-session');
+    expect(outgoing?.project).toBe('/tmp/fake-target');
+    expect(outgoing?.metrics.models['test-model']?.api.totalRequests).toBe(1);
+    expect(outgoing?.metrics.models['test-model']?.tokens.prompt).toBe(5);
+    expect(uiTelemetryService.getLiveMetrics().models).toEqual({});
 
     // Core swap: startNewSession(target, data) + turn boundaries + client.
     expect(calls.startNewSession[0]).toEqual([
@@ -248,6 +282,8 @@ describe('handleResumeSession', () => {
       failClientInitialize: true,
     });
     const host = createFakeHost(config);
+    uiTelemetryService.addEvent(liveApiResponse(7), 'old-session');
+    const resetLive = vi.spyOn(uiTelemetryService, 'resetLiveMetrics');
     const snapshot = {
       requested: true,
       recorded: true,
@@ -280,6 +316,11 @@ describe('handleResumeSession', () => {
       }),
       expect.any(Number),
     );
+    expect(persistUsageMock).not.toHaveBeenCalled();
+    expect(resetLive).not.toHaveBeenCalled();
+    expect(
+      uiTelemetryService.getLiveMetrics().models['test-model']?.tokens.prompt,
+    ).toBe(7);
   });
 
   it.each(['resume', 'branch'] as const)(
@@ -458,6 +499,11 @@ describe('handleResumeSession', () => {
 });
 
 describe('handleBranchSession', () => {
+  beforeEach(() => {
+    persistUsageMock.mockClear();
+    uiTelemetryService.reset();
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -485,11 +531,19 @@ describe('handleBranchSession', () => {
       config as unknown as { getSessionService: () => unknown }
     ).getSessionService = () => sessionService;
     const host = createFakeHost(config);
+    uiTelemetryService.addEvent(liveApiResponse(6), 'old-session');
     const resetLive = vi.spyOn(uiTelemetryService, 'resetLiveMetrics');
 
     await handleBranchSession(host, 'my-branch');
 
     expect(resetLive).toHaveBeenCalledOnce();
+    expect(persistUsageMock).toHaveBeenCalledTimes(1);
+    expect(persistUsageMock.mock.calls[0]?.[0]?.sessionId).toBe('old-session');
+    expect(
+      persistUsageMock.mock.calls[0]?.[0]?.metrics.models['test-model']?.tokens
+        .prompt,
+    ).toBe(6);
+    expect(uiTelemetryService.getLiveMetrics().models).toEqual({});
     expect(forkSession).toHaveBeenCalledWith('old-session', expect.any(String));
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),

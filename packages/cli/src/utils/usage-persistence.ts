@@ -11,9 +11,9 @@ import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTeleme
 function persistLiveUsage(config: Config, sessionId: string): void {
   try {
     const metrics = uiTelemetryService.getLiveMetrics();
-    const hasActivity = Object.values(metrics.models).some(
-      (m) => m.api.totalRequests > 0,
-    );
+    const hasActivity =
+      Object.values(metrics.models).some((m) => m.api.totalRequests > 0) ||
+      (metrics.skills?.totalCalls ?? 0) > 0;
     if (!hasActivity) return;
     persistSessionUsage({
       sessionId,

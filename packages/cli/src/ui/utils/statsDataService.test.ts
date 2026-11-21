@@ -312,7 +312,7 @@ describe('loadStatsData - new fields', () => {
     expect(result.delta).toBeNull();
   });
 
-  it('returns computed delta for range "today"', async () => {
+  it('does not compare a partial today with a completed yesterday', async () => {
     const now = new Date();
     const todayStart = new Date(
       now.getFullYear(),
@@ -364,11 +364,7 @@ describe('loadStatsData - new fields', () => {
 
     const result = await loadStatsData('today');
 
-    expect(result.delta).not.toBeNull();
-    // sessions: 1 today vs 1 yesterday => 0%
-    expect(result.delta!.sessions).toBeCloseTo(0);
-    // duration: 60000 vs 30000 => 100%
-    expect(result.delta!.duration).toBeCloseTo(100);
+    expect(result.delta).toBeNull();
   });
 
   it('computes efficiency fields correctly', async () => {
@@ -600,17 +596,25 @@ describe('loadStatsData — per-request ledger accounting', () => {
       makeRecord({ sessionId: 't', timestamp: todayTs }),
       makeRecord({ sessionId: 'y', timestamp: yesterdayTs }),
     ]);
-    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
-      new Map([
-        [dayKey(yesterdayTs), ledgerDay({ requests: 4, inputTokens: 1000 })],
-        [dayKey(todayTs), ledgerDay({ requests: 2, inputTokens: 330 })],
-      ]),
+    const previousTs = yesterdayTs - 12 * DAY;
+    const ledger: TokenUsageDailyByModel = new Map([
+      [dayKey(previousTs), ledgerDay({ requests: 4, inputTokens: 1000 })],
+      [dayKey(yesterdayTs), ledgerDay({ requests: 4, inputTokens: 1000 })],
+      [dayKey(todayTs), ledgerDay({ requests: 2, inputTokens: 330 })],
+    ]);
+    vi.mocked(loadLedgerOrEmpty).mockImplementation(
+      async (since) => new Map([...ledger].filter(([day]) => day >= since)),
     );
 
-    const result = await loadStatsData('today');
+    const result = await loadStatsData('week');
 
-    // (330 - 1000) / 1000, not against the records' 1550 for yesterday.
-    expect(result.delta?.tokens).toBeCloseTo(-67);
+    // Compare 1000 on yesterday with 1000 on the previous completed day;
+    // today's partial 330 belongs to the displayed totals, not the delta.
+    expect(result.delta?.tokens).toBeCloseTo(0);
+    expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledWith(
+      dayKey(new Date().setDate(new Date().getDate() - 14)),
+      expect.any(Map),
+    );
   });
 
   it('keeps record tokens for days the ledger does not cover', async () => {
@@ -707,15 +711,88 @@ describe('loadStatsData — per-request ledger accounting', () => {
         );
       }
       mockedLoadUsageHistory.mockResolvedValue([]);
-      vi.mocked(loadLedgerOrEmpty).mockResolvedValue(daily);
+      vi.mocked(loadLedgerOrEmpty).mockImplementation(
+        async (since) => new Map([...daily].filter(([day]) => day >= since)),
+      );
 
       const result = await loadStatsData(range);
+
+      expect(result.delta?.tokens).toBeCloseTo(0);
+      const previousStart = new Date();
+      previousStart.setDate(
+        previousStart.getDate() - (range === 'week' ? 14 : 60),
+      );
+      expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledWith(
+        dayKey(previousStart.getTime()),
+        expect.any(Map),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('excludes an unfinished day from both sides of the delta', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 20, 0, 30, 0));
+    try {
+      const daily: TokenUsageDailyByModel = new Map();
+      for (let i = 0; i < 30; i++) {
+        const day = new Date();
+        day.setDate(day.getDate() - i);
+        daily.set(
+          dayKey(day.getTime()),
+          ledgerDay({ requests: 1, inputTokens: 100 }),
+        );
+      }
+      // A large partial day must not contaminate a stable completed-day delta.
+      daily.set(
+        dayKey(Date.now()),
+        ledgerDay({ requests: 13, inputTokens: 10_000 }),
+      );
+      mockedLoadUsageHistory.mockResolvedValue([]);
+      vi.mocked(loadLedgerOrEmpty).mockResolvedValue(daily);
+
+      const result = await loadStatsData('week');
 
       expect(result.delta?.tokens).toBeCloseTo(0);
     } finally {
       vi.useRealTimers();
     }
   });
+
+  it.each([
+    [2026, 2, 12, 0, 30],
+    [2026, 10, 5, 23, 30],
+  ] as const)(
+    'keeps flat daily usage neutral across DST at %s-%s-%sT%s:%s',
+    async (year, month, day, hour, minute) => {
+      const originalTimezone = process.env['TZ'];
+      process.env['TZ'] = 'America/New_York';
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(year, month, day, hour, minute));
+      try {
+        const daily: TokenUsageDailyByModel = new Map();
+        for (let i = 0; i < 90; i++) {
+          const date = new Date();
+          date.setDate(date.getDate() - i);
+          daily.set(
+            dayKey(date.getTime()),
+            ledgerDay({ requests: 1, inputTokens: 100 }),
+          );
+        }
+        mockedLoadUsageHistory.mockResolvedValue([]);
+        vi.mocked(loadLedgerOrEmpty).mockResolvedValue(daily);
+
+        const result = await loadStatsData('week');
+
+        expect(result.delta?.tokens).toBeCloseTo(0);
+      } finally {
+        vi.useRealTimers();
+        if (originalTimezone === undefined) delete process.env['TZ'];
+        else process.env['TZ'] = originalTimezone;
+      }
+    },
+  );
 
   it('counts every session-granular field on the whole boundary day', async () => {
     vi.useFakeTimers();
@@ -766,11 +843,10 @@ describe('loadStatsData — per-request ledger accounting', () => {
 
     const result = await loadStatsData('week');
 
-    // Current is 1330 (the day before the window start is outside it);
-    // previous is 500. If the previous window also held the current start day
-    // it would be 1500 and the delta would read about -11%.
+    // Displayed current tokens stay 1330. The delta compares 1000 on complete
+    // current days against 500 previously, never including today's partial 330.
     expect(reportTokens(result.report)).toBe(1330);
-    expect(result.delta?.tokens).toBeCloseTo(166);
+    expect(result.delta?.tokens).toBeCloseTo(100);
   });
 
   it('builds the delta when only the ledger covers the previous window', async () => {
@@ -787,16 +863,19 @@ describe('loadStatsData — per-request ledger accounting', () => {
     mockedLoadUsageHistory.mockResolvedValue([
       makeRecord({ sessionId: 't', timestamp: todayTs }),
     ]);
-    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
-      new Map([
-        [dayKey(yesterdayTs), ledgerDay({ requests: 4, inputTokens: 1000 })],
-        [dayKey(todayTs), ledgerDay({ requests: 2, inputTokens: 330 })],
-      ]),
+    const previousTs = yesterdayTs - 12 * DAY;
+    const ledger: TokenUsageDailyByModel = new Map([
+      [dayKey(previousTs), ledgerDay({ requests: 4, inputTokens: 1000 })],
+      [dayKey(yesterdayTs), ledgerDay({ requests: 4, inputTokens: 1000 })],
+      [dayKey(todayTs), ledgerDay({ requests: 2, inputTokens: 330 })],
+    ]);
+    vi.mocked(loadLedgerOrEmpty).mockImplementation(
+      async (since) => new Map([...ledger].filter(([day]) => day >= since)),
     );
 
-    const result = await loadStatsData('today');
+    const result = await loadStatsData('week');
 
     expect(result.delta).not.toBeNull();
-    expect(result.delta?.tokens).toBeCloseTo(-67);
+    expect(result.delta?.tokens).toBeCloseTo(0);
   });
 });

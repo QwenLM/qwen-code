@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -429,6 +430,31 @@ describe('tokenUsageService', () => {
     expect(summary.totals.cachedTokens).toBe(5);
   });
 
+  it.each([
+    AuthType.USE_OPENAI,
+    AuthType.USE_OPENAI_RESPONSES,
+    AuthType.QWEN_OAUTH,
+  ])('does not add thoughts again for %s when total is missing', (authType) => {
+    const event = createEvent(
+      'model-a',
+      'prompt-1',
+      {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 200,
+        thoughtsTokenCount: 50,
+        totalTokenCount: 0,
+      },
+      { authType },
+    );
+
+    const record = apiResponseEventToTokenUsageRecord(fakeConfig(), event);
+
+    expect(record.outputTokens).toBe(200);
+    expect(record.thoughtsTokens).toBe(50);
+    expect(record.totalTokens).toBe(1200);
+    expect(record.inputTokens + record.outputTokens).toBe(record.totalTokens);
+  });
+
   it('uses cached tokens as fallback input when prompt tokens are missing', async () => {
     const config = fakeConfig();
 
@@ -640,6 +666,101 @@ describe('tokenUsageService', () => {
     });
     expect(table.get('2026-05-25')?.get('model-b')?.requests).toBe(1);
     expect(table.get('2026-05-24')?.get('model-a')?.totalTokens).toBe(10);
+  });
+
+  it('reuses completed-month aggregates across different start days', async () => {
+    const config = fakeConfig();
+    await recordUsage(config, 'past', 'p1', usage(100, 10, 110), {
+      timestamp: '2026-04-20T10:00:00.000Z',
+    });
+    await recordUsage(config, 'past', 'p2', usage(40, 8, 48), {
+      timestamp: '2026-04-10T10:00:00.000Z',
+    });
+    const readStream = vi.spyOn(fs, 'createReadStream');
+    const completedMonths = new Map();
+    const sum = (
+      daily: Awaited<ReturnType<typeof loadTokenUsageDailyByModel>>,
+    ) => {
+      let total = 0;
+      for (const models of daily.values()) {
+        for (const model of models.values()) total += model.totalTokens;
+      }
+      return total;
+    };
+
+    expect(
+      sum(await loadTokenUsageDailyByModel('2026-04-20', completedMonths)),
+    ).toBe(110);
+    expect(
+      sum(await loadTokenUsageDailyByModel('2026-04-01', completedMonths)),
+    ).toBe(158);
+    expect(readStream).toHaveBeenCalledOnce();
+    expect(completedMonths.has(getTokenUsageFilePath('2026-04'))).toBe(true);
+  });
+
+  it('does not reuse completed-month data across runtime directories', async () => {
+    const firstHome = tempDir;
+    const secondHome = await mkdtemp(
+      path.join(tmpdir(), 'qwen-token-other-home-'),
+    );
+    const completedMonths = new Map();
+    try {
+      await recordUsage(fakeConfig(), 'past', 'p1', usage(100, 10, 110), {
+        timestamp: '2026-04-20T10:00:00.000Z',
+      });
+      const first = await loadTokenUsageDailyByModel(
+        '2026-04-01',
+        completedMonths,
+      );
+      expect(first.get('2026-04-20')?.get('past')?.totalTokens).toBe(110);
+
+      process.env['QWEN_RUNTIME_DIR'] = secondHome;
+      Storage.setRuntimeBaseDir(secondHome);
+      const empty = await loadTokenUsageDailyByModel(
+        '2026-04-01',
+        completedMonths,
+      );
+      expect(empty.size).toBe(0);
+      await recordUsage(fakeConfig(), 'other', 'p2', usage(30, 5, 35), {
+        timestamp: '2026-04-20T12:00:00.000Z',
+      });
+      const second = await loadTokenUsageDailyByModel(
+        '2026-04-01',
+        completedMonths,
+      );
+      expect(second.get('2026-04-20')?.get('other')?.totalTokens).toBe(35);
+      expect(second.get('2026-04-20')?.has('past')).toBe(false);
+    } finally {
+      process.env['QWEN_RUNTIME_DIR'] = firstHome;
+      Storage.setRuntimeBaseDir(firstHome);
+      await rm(secondHome, { recursive: true, force: true });
+    }
+  });
+
+  it('always re-reads the current month after a real append', async () => {
+    const config = fakeConfig();
+    await recordUsage(config, 'current', 'p1', usage(20, 4, 24));
+    const readStream = vi.spyOn(fs, 'createReadStream');
+    const completedMonths = new Map();
+    const sum = (
+      daily: Awaited<ReturnType<typeof loadTokenUsageDailyByModel>>,
+    ) => {
+      let total = 0;
+      for (const models of daily.values()) {
+        for (const model of models.values()) total += model.totalTokens;
+      }
+      return total;
+    };
+
+    expect(
+      sum(await loadTokenUsageDailyByModel('2026-05-01', completedMonths)),
+    ).toBe(24);
+    await recordUsage(config, 'current', 'p2', usage(80, 20, 100));
+    expect(
+      sum(await loadTokenUsageDailyByModel('2026-05-01', completedMonths)),
+    ).toBe(124);
+    expect(readStream).toHaveBeenCalledTimes(2);
+    expect(completedMonths.size).toBe(0);
   });
 
   it('skips days and months before the requested start', async () => {

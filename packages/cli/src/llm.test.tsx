@@ -2935,7 +2935,16 @@ describe('llm.tsx main function', () => {
     );
 
     vi.mocked(cleanupModule.cleanupCheckpoints).mockResolvedValue(undefined);
-    vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => () => {});
+    const cleanupRegistrations: Array<{
+      handler: () => unknown;
+      options?: { first?: boolean };
+    }> = [];
+    vi.mocked(cleanupModule.registerCleanup).mockImplementation(
+      (handler, options) => {
+        cleanupRegistrations.push({ handler, options });
+        return () => {};
+      },
+    );
     const cleanupRegistrationStart = vi.mocked(cleanupModule.registerCleanup)
       .mock.calls.length;
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
@@ -3005,9 +3014,30 @@ describe('llm.tsx main function', () => {
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
       getOutputFormat: () => OutputFormat.TEXT,
+      shutdown: vi.fn(),
+      shutdownExecutionEnvironments: vi.fn(),
     } as unknown as Config;
 
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+
+    uiTelemetryService.reset();
+    uiTelemetryService.addEvent(
+      {
+        'event.name': EVENT_API_RESPONSE,
+        'event.timestamp': new Date().toISOString(),
+        response_id: 'validated-exit-response',
+        model: 'exit-model',
+        duration_ms: 1,
+        input_token_count: 5,
+        output_token_count: 0,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        total_token_count: 5,
+        prompt_id: 'validated-exit-prompt',
+      } as UiEvent,
+      'validated-exit',
+    );
+    mockPersistSessionUsage.mockClear();
 
     process.env['SANDBOX'] = '1';
     try {
@@ -3061,6 +3091,33 @@ describe('llm.tsx main function', () => {
       validatedConfig,
       settingsArg,
     );
+
+    // The usage hook must be registered with the actual startup client
+    // before both shutdown hooks. Direct helper tests cannot prove this wiring.
+    const usageIndex = cleanupRegistrations.findIndex(
+      (_, index) => cleanupRegistrations[index + 1]?.options?.first === true,
+    );
+    expect(usageIndex).toBeGreaterThanOrEqual(0);
+    const usageHandler = cleanupRegistrations[usageIndex]?.handler;
+    expect(usageHandler).toBeTypeOf('function');
+    await usageHandler?.();
+    expect(mockPersistSessionUsage).toHaveBeenCalledTimes(1);
+    const persistedExit = mockPersistSessionUsage.mock.calls[0]?.[0];
+    expect(persistedExit?.sessionId).toBe('test-session-id');
+    expect(persistedExit?.project).toBe('/');
+    expect(persistedExit?.metrics.models['exit-model']?.api.totalRequests).toBe(
+      1,
+    );
+    expect(persistedExit?.metrics.models['exit-model']?.tokens.prompt).toBe(5);
+    expect(configStub.shutdown).not.toHaveBeenCalled();
+    await cleanupRegistrations[usageIndex + 1]?.handler?.();
+    await cleanupRegistrations[usageIndex + 2]?.handler?.();
+    expect(configStub.shutdownExecutionEnvironments).toHaveBeenCalledOnce();
+    expect(configStub.shutdown).toHaveBeenCalledOnce();
+    expect(mockPersistSessionUsage.mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(configStub.shutdown).mock.invocationCallOrder[0]!,
+    );
+
     const housekeepingCleanup = vi.mocked(cleanupModule.registerCleanup).mock
       .calls[cleanupRegistrationStart]?.[0];
     expect(housekeepingCleanup).toBeTypeOf('function');

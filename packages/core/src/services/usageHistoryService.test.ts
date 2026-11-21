@@ -785,6 +785,18 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(3000);
   });
 
+  it('keeps adjacent runs, including a same-session resume in one millisecond', async () => {
+    seedPersisted([
+      runRec('sess-adjacent', 1000, t0, t0 + 60_000),
+      runRec('sess-adjacent', 2000, t0 + 60_000, t0 + 120_000),
+    ]);
+
+    const records = await loadUsageHistory();
+
+    expect(records).toHaveLength(2);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(3000);
+  });
+
   it('still collapses a run written twice (overlapping windows, last wins)', async () => {
     seedPersisted([
       runRec('sess-twice', 1000, t0, t0 + 60_000),
@@ -814,6 +826,30 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
 
     expect(records).toHaveLength(1);
     expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1600);
+  });
+
+  it('keeps whole-transcript rebuilds cumulative and collapses copies', async () => {
+    writeTranscript('repro-project', 'sess-rebuilt', {
+      cwd: '/repro/project',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens: 1000,
+      assistant: true,
+    });
+    writeTranscript('zzz-repro-project', 'sess-rebuilt', {
+      cwd: '/repro/project-other',
+      day: '2026-06-12',
+      durationMs: 1200,
+      tokens: 2000,
+      assistant: true,
+    });
+
+    const records = await loadUsageHistory();
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.runScoped).toBeUndefined();
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(1000);
   });
 
   it('prefers run-scoped runs over a cumulative record for the same session', async () => {

@@ -16,17 +16,20 @@ import {
   modelTokens,
   type AggregatedReport,
   type TimeRange,
+  type TokenUsageCompletedMonthCache,
   type TokenUsageDailyByModel,
   type UsageDayModelTable,
   type UsageSummaryRecord,
 } from '@qwen-code/qwen-code-core';
 
-/** Concurrent opens share reads; settled data is never reused across opens. */
+/** Pending opens coalesce; only immutable completed months are retained. */
 const pendingLedgerLoads = new Map<string, Promise<TokenUsageDailyByModel>>();
+const completedMonthCache: TokenUsageCompletedMonthCache = new Map();
 
-/** Test-only: forget pending reads between cases. */
+/** Test-only: forget pending reads and completed-month aggregates. */
 export function _resetStatsLedgerCacheForTest(): void {
   pendingLedgerLoads.clear();
+  completedMonthCache.clear();
 }
 
 function loadLedgerShared(
@@ -34,7 +37,10 @@ function loadLedgerShared(
 ): Promise<TokenUsageDailyByModel> {
   const pending = pendingLedgerLoads.get(sinceLocalDate);
   if (pending) return pending;
-  const promise = loadLedgerOrEmpty(sinceLocalDate).finally(() => {
+  const promise = loadLedgerOrEmpty(
+    sinceLocalDate,
+    completedMonthCache,
+  ).finally(() => {
     if (pendingLedgerLoads.get(sinceLocalDate) === promise) {
       pendingLedgerLoads.delete(sinceLocalDate);
     }
@@ -291,6 +297,21 @@ export function computeDelta(
   };
 }
 
+function addLocalDays(dateKey: string, days: number): string {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  const date = new Date(year, month - 1, day, 12);
+  date.setDate(date.getDate() + days);
+  return localDateKey(date.getTime());
+}
+
+function countLocalDays(startKey: string, endKey: string): number {
+  let count = 0;
+  for (let day = startKey; day <= endKey; day = addLocalDays(day, 1)) {
+    count++;
+  }
+  return count;
+}
+
 export async function loadStatsData(
   range: TimeRange,
   currentSession?: UsageSummaryRecord,
@@ -304,23 +325,17 @@ export async function loadStatsData(
   const { start, end } = getTimeRangeBounds(range);
   const currentStartKey = localDateKey(start.getTime());
   const currentEndKey = localDateKey(end.getTime());
-  const prevBounds = getPreviousRangeBounds(range);
-  let prevStartKey: string | undefined;
-  let prevEndKey: string | undefined;
-  if (prevBounds) {
-    const prevStart = new Date(prevBounds.start);
-    const prevEnd = new Date(prevBounds.end.getTime() - 1);
-    prevStartKey = localDateKey(prevStart.getTime());
-    prevEndKey = localDateKey(prevEnd.getTime());
-    if (prevEndKey === currentStartKey) {
-      // Keep both sides disjoint and the same length. Move the start too;
-      // shortening only the end made week compare 8 days against 7.
-      prevStart.setDate(prevStart.getDate() - 1);
-      prevEnd.setDate(prevEnd.getDate() - 1);
-      prevStartKey = localDateKey(prevStart.getTime());
-      prevEndKey = localDateKey(prevEnd.getTime());
-    }
-  }
+  const currentCompletedEndKey = addLocalDays(currentEndKey, -1);
+  const completedDays =
+    range === 'all'
+      ? 0
+      : countLocalDays(currentStartKey, currentCompletedEndKey);
+  const prevEndKey =
+    completedDays > 0 ? addLocalDays(currentStartKey, -1) : undefined;
+  const prevStartKey =
+    completedDays > 0
+      ? addLocalDays(prevEndKey!, -(completedDays - 1))
+      : undefined;
 
   // One accounting table for this surface and the daemon usage dashboard. The
   // ledger window has to reach back far enough for the previous range too, or
@@ -357,9 +372,25 @@ export async function loadStatsData(
       (day) => day >= prevStartKey && day <= prevEndKey,
     );
     if (prevFiltered.length > 0 || ledgerCoversPrev) {
+      // Compare only completed local days; never compare a partial today
+      // against full days or invent intraday data by scaling them.
+      const currentDeltaReport = aggregateUsage(
+        filterUsageRecordsByLocalDay(
+          records,
+          currentStartKey,
+          currentCompletedEndKey,
+        ),
+        'all',
+      );
       const previousReport = aggregateUsage(prevFiltered, 'all');
+      applyTokenWindow(
+        currentDeltaReport,
+        table,
+        currentStartKey,
+        currentCompletedEndKey,
+      );
       applyTokenWindow(previousReport, table, prevStartKey, prevEndKey);
-      delta = computeDelta(report, previousReport);
+      delta = computeDelta(currentDeltaReport, previousReport);
     }
   }
 

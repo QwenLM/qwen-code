@@ -810,7 +810,10 @@ function dedupBySessionId(records: UsageSummaryRecord[]): UsageSummaryRecord[] {
     for (const r of runs) {
       for (let i = kept.length - 1; i >= 0; i--) {
         const k = kept[i]!;
-        if (k.startTime <= r.timestamp && r.startTime <= k.timestamp) {
+        const overlaps = k.startTime < r.timestamp && r.startTime < k.timestamp;
+        const sameWindow =
+          k.startTime === r.startTime && k.timestamp === r.timestamp;
+        if (overlaps || sameWindow) {
           kept.splice(i, 1);
         }
       }

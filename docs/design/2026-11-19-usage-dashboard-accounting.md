@@ -179,8 +179,10 @@ by `/clear`, successful session switches and the process-exit cleanup.
 - `UiTelemetryReplaySnapshot` carries it, so an aborted swap restores it too and
   cannot leave the live counter inflated by an abandoned replay. The flush only
   occurs on success, never on those rollback paths.
-- A resume that makes no request of its own now fails the callers' `hasActivity`
-  check and writes no record at all, instead of an all-history one.
+- A resume with neither an API response nor a skill invocation fails the callers'
+  `hasActivity` check and writes no record, instead of an all-history one. A
+  skills-only branch also persists the skills it actually ran, even with no model
+  requests.
 
 **Not done: a per-local-day breakdown in `UsageSummaryRecord`.** It was the other
 half of the original Option B sketch. With the ledger supplying day attribution it
@@ -201,9 +203,11 @@ carry no marker — they are cumulative.
   what keeps existing history unchanged and keeps the #4994 duplicate protection.
 - **Any run-scoped record** -> keep the run-scoped ones, dropping every cumulative
   record for that id (a whole-transcript replay must not be added on top of
-  persisted runs). Among the runs, a record replaces the kept ones whose window it
-  overlaps and is otherwise added, so disjoint runs all survive while a run
-  written twice still collapses to the last.
+  persisted runs). Among the runs, windows are half-open: a new run starting
+  exactly when the previous one ended is retained, not deleted as an overlap.
+  Equal `[startTime, endTime)` windows are duplicates and still collapse to the
+  last, along with strictly overlapping ones. Adjacent runs written in the same
+  millisecond therefore all survive.
 
 The marker is an optional field, so every reader that filters `version === 1`
 keeps working and no migration is needed.
@@ -240,10 +244,12 @@ previous range too), builds the table, and replaces the report's `models`,
 `totalRequests` and `totalLatencyMs` for both the current and the previous window
 — otherwise the delta would compare a ledger-backed present against a
 record-backed past. Concurrent opens of the same start day share one pending
-read; settled data is not retained, because a settled 60-second cache would hide
-spend from a turn completed between two opens while its session-record copy is
-already suppressed by ledger coverage. Heatmap, tokens-per-day and streaks derive
-from the table.
+read. The TUI also supplies a cache of completed month aggregates to the ledger
+loader, so immutable historical months are not reparsed on every open. Current
+and future month files are always streamed afresh: no settled whole-window
+snapshot can hide a just-completed turn or an external process's new ledger row.
+The day/model table and subsequent report shapes are rebuilt on each load from
+those month aggregates. Heatmap, tokens-per-day and streaks derive from it.
 
 Stays on session records: `sessionCount`, `totalDurationMs`, tools, files, skills
 and **projects**, all selected by the same inclusive local-day keys as tokens.
@@ -289,18 +295,35 @@ than a fabricated attribution.
 - **One table, two surfaces.** Extracting the table build and window sum rather
   than reimplementing them for the TUI keeps a single accounting truth; the
   dashboard's frozen-ledger exactness was re-checked after the extraction.
-- **Equal, disjoint calendar-day comparison windows.** The previous-range bound
-  is exclusive, so its last local day is `localDateKey(end - 1)`. If that is also
-  the current first day, move **both** previous bounds back one calendar day
-  (`setDate`, not a fixed 24-hour subtraction). This avoids both overlapping
-  windows and the asymmetric alternative: moving only the end made `week`
-  compare eight current day buckets against seven previous ones (+14.29% for
-  flat daily usage) and `month` compare 31 against 30 (+3.33%). Flat 100-token
-  days now produce a 0% delta in both ranges.
+- **Compare completed local days only.** Token and session-record day buckets
+  contain no intraday breakdown, so a partial today cannot be compared fairly
+  with a full previous day. The delta therefore compares the completed prefix
+  of the current range with the same number of disjoint complete days before
+  that prefix, counted by calendar day at local noon rather than `N * 24h`.
+  Displayed totals still include the partial day; the percentage specifically
+  belongs to the completed-day comparison. Today has no completed day and
+  returns no delta rather than pretending the unfinished day is zero. Constant
+  100-token days yield 0% for week and month including 00:30 and DST transitions;
+  there is no invented intraday profile or multiplier derived from a dead field.
 
 ## Constraints
 
 - The dashboard path must not write to `~/.qwen`.
+- **Ledger scope is user-facing turns, not every model helper call.**
+  `logApiResponse` always feeds the live display, but intentionally excludes
+  `prompt_suggestion`, `forked_query`, `speculation` and `side-query:*` from the
+  persistent ledger and transcript telemetry, along with the other helper-call
+  paths gated before those stores. Those calls therefore remain in session/live
+  metrics but not in this daily/monthly accounting source; the figures are not
+  claimed to be an exhaustive bill including internal compaction, memory or
+  routing helpers. The boundary and any loss are deliberate and disclosed rather
+  than silently repaired everywhere.
+- **Missing provider totals follow auth semantics.** When a provider omits
+  `total_token_count`, `apiResponseEventToTokenUsageRecord` asks the shared
+  `outputIncludesThoughts` helper instead of unconditionally adding reasoning.
+  OpenAI chat completions, OpenAI Responses and Qwen OAuth already include
+  reasoning in output; Gemini-style providers keep it separate. The generic
+  fallback for unrecognized conventions remains unchanged.
 - Ledger writes are gated by `config.getUsageStatisticsEnabled()` and skip internal
   prompt ids (`loggers.ts`), so ledger coverage is not guaranteed.
 - Do not add project paths or content to ledger records.
@@ -333,17 +356,20 @@ than a fabricated attribution.
 - **Calendar-day windows now apply to every record-derived tile too.** Tokens,
   sessions, duration, tools, files and skills all include the whole boundary day;
   the TUI's previous comparison window is disjoint and has the same number of
-  days. The daemon's per-day `sessions` field remains an ended-run series, not an
-  assertion that all shown tokens belong to runs ending that same day.
+  completed days. The daemon's per-day `sessions` field remains an ended-run
+  series, not an assertion that all shown tokens belong to runs ending that
+  same day. The displayed Today counts still include an unfinished day, while a
+  comparison has no scope unless at least one prior local day is complete.
 - Records written before this change stay inflated, so other consumers of
   `loadUsageHistory` that this PR does not convert (for example the per-project
   token column and the pre-repair fallback window) still show the old numbers for
   that history. Only newly written records are correct.
-- **Fresh TUI reads trade latency for correctness.** The daemon still uses its
-  60-second source cache, but `/stats` cannot: reusing that cache can erase a just
-  completed run from both sources. Each TUI open therefore reparses its selected
-  ledger months, coalescing only concurrent opens, while the daemon's dominated
-  transcript load remains cached.
+- **Caching is limited to completed months.** The TUI immutably reuses old-month
+  aggregates to avoid reparsing hundreds of megabytes on every open, and coalesces
+  concurrent pending reads. The current month is always re-read, so a real-append
+  test sees the new tokens on the next open, and `_resetStatsLedgerCacheForTest`
+  clears the caller's completed-month cache in addition to pending reads. The
+  daemon retains its independent 60-second source cache.
 
 ## Validation plan
 

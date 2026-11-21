@@ -13,6 +13,7 @@ import {
 } from './usageHistoryService.js';
 import {
   loadTokenUsageDailyByModel,
+  type TokenUsageCompletedMonthCache,
   type TokenUsageDailyByModel,
   type TokenUsageDayModelTotals,
 } from './tokenUsageService.js';
@@ -441,9 +442,13 @@ export interface UsageDashboardSources {
  */
 export async function loadLedgerOrEmpty(
   sinceLocalDate: string,
+  completedMonthCache?: TokenUsageCompletedMonthCache,
 ): Promise<TokenUsageDailyByModel> {
   try {
-    return await loadTokenUsageDailyByModel(sinceLocalDate);
+    return await loadTokenUsageDailyByModel(
+      sinceLocalDate,
+      completedMonthCache,
+    );
   } catch (error) {
     debugLogger.warn(
       `usage ledger unreadable, falling back to session-record attribution: ${error}`,

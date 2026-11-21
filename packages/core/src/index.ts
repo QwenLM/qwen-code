@@ -495,6 +495,7 @@ export {
   recordTokenUsageFromApiResponseBestEffort,
 } from './services/tokenUsageService.js';
 export type {
+  TokenUsageCompletedMonthCache,
   TokenUsageDailyByModel,
   TokenUsageDayModelTotals,
   TokenUsageExportFormat,

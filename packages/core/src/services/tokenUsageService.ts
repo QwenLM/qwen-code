@@ -13,6 +13,7 @@ import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { ApiResponseEvent } from '../telemetry/types.js';
+import { outputIncludesThoughts } from '../telemetry/gen-ai-usage.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
 const debugLogger = createDebugLogger('TOKEN_USAGE');
@@ -226,7 +227,9 @@ function calculateTotalTokens(event: ApiResponseEvent): number {
   return (
     calculateInputTokens(event) +
     toNonNegativeInteger(event.output_token_count) +
-    toNonNegativeInteger(event.thoughts_token_count)
+    (outputIncludesThoughts(event.auth_type)
+      ? 0
+      : toNonNegativeInteger(event.thoughts_token_count))
   );
 }
 
@@ -325,6 +328,9 @@ export type TokenUsageDailyByModel = Map<
   Map<string, TokenUsageDayModelTotals>
 >;
 
+/** Completed-month daily aggregates, keyed by absolute ledger file path. */
+export type TokenUsageCompletedMonthCache = Map<string, TokenUsageDailyByModel>;
+
 async function accumulateMonthByDay(
   filePath: string,
   sinceLocalDate: string,
@@ -394,10 +400,12 @@ async function accumulateMonthByDay(
  *
  * A missing usage directory yields an empty table (usage statistics may be
  * disabled). Any other read error propagates: a partially read month would
- * silently understate the window.
+ * silently understate the window. A caller can reuse completed-month tables;
+ * the current and future month files are always re-read.
  */
 export async function loadTokenUsageDailyByModel(
   sinceLocalDate: string,
+  completedMonthCache?: TokenUsageCompletedMonthCache,
 ): Promise<TokenUsageDailyByModel> {
   const table: TokenUsageDailyByModel = new Map();
   const dir = usageDir();
@@ -409,13 +417,35 @@ export async function loadTokenUsageDailyByModel(
     throw error;
   }
   const sinceMonth = sinceLocalDate.slice(0, 7);
+  const currentMonth = getLocalDateParts(new Date()).month;
   for (const file of files.sort()) {
     if (!file.startsWith(FILE_PREFIX) || !file.endsWith(FILE_EXTENSION)) {
       continue;
     }
     const month = file.slice(FILE_PREFIX.length, -FILE_EXTENSION.length);
     if (!isValidMonth(month) || month < sinceMonth) continue;
-    await accumulateMonthByDay(path.join(dir, file), sinceLocalDate, table);
+    const filePath = path.join(dir, file);
+    if (completedMonthCache && month < currentMonth) {
+      let monthTable = completedMonthCache.get(filePath);
+      if (!monthTable) {
+        monthTable = new Map();
+        await accumulateMonthByDay(filePath, '', monthTable);
+        completedMonthCache.set(filePath, monthTable);
+      }
+      for (const [day, byModel] of monthTable) {
+        if (day < sinceLocalDate) continue;
+        let destination = table.get(day);
+        if (!destination) {
+          destination = new Map();
+          table.set(day, destination);
+        }
+        for (const [model, totals] of byModel) {
+          destination.set(model, { ...totals });
+        }
+      }
+    } else {
+      await accumulateMonthByDay(filePath, sinceLocalDate, table);
+    }
   }
   return table;
 }

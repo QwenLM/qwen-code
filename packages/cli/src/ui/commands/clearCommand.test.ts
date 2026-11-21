@@ -199,6 +199,7 @@ describe('clearCommand', () => {
 
     await clearCommand.action!(mockContext, '');
 
+    expect(core.persistSessionUsage).toHaveBeenCalledTimes(1);
     expect(core.persistSessionUsage).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId: 'test-session-id',
