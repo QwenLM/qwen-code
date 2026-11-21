@@ -428,6 +428,9 @@ const createInitialMetrics = (): SessionMetrics => ({
  */
 export interface UiTelemetryReplaySnapshot {
   readonly metrics: SessionMetrics;
+  readonly liveMetrics: SessionMetrics;
+  readonly sessionStartTime: Date;
+  readonly runStartTime: Date;
   readonly sessionId: string;
   /** Absent when the session had no bucket yet — restore removes it again. */
   readonly sessionMetrics: SessionMetrics | undefined;
@@ -454,15 +457,36 @@ export interface UiTelemetryReplaySnapshot {
 export class UiTelemetryService extends EventEmitter {
   static readonly #MAX_CLOSED_SESSIONS = 1000;
   #metrics: SessionMetrics = createInitialMetrics();
+  #liveMetrics: SessionMetrics = createInitialMetrics();
   #sessionMetrics: Map<string, SessionMetrics> = new Map();
   #sessionOutputBaselines: Map<string, number> = new Map();
   #closedSessions: Set<string> = new Set();
   #lastPromptTokenCount = 0;
   #lastCachedContentTokenCount = 0;
+  /** Display/session lifetime. Kept intact when a new run begins. */
   #sessionStartTime: Date = new Date();
+  /** Lifetime of the usage counters written for the active run. */
+  #runStartTime: Date = new Date();
 
   addEvent(event: UiEvent, sessionId?: string) {
+    this.#record(event, sessionId, true);
+  }
+
+  /**
+   * Accumulates a stored event that a resume replayed. It counts toward the
+   * display aggregate — a resumed session's `/stats` legitimately shows the
+   * conversation's history — but not toward {@link getLiveMetrics}, because
+   * those tokens were spent by an earlier run and were already persisted then.
+   * Billing them again is what made a seven-minute resume of a long
+   * conversation look like it spent the whole conversation's tokens.
+   */
+  addReplayedEvent(event: UiEvent, sessionId?: string) {
+    this.#record(event, sessionId, false);
+  }
+
+  #record(event: UiEvent, sessionId: string | undefined, live: boolean) {
     if (!this.#accumulateEvent(this.#metrics, event)) return;
+    if (live) this.#accumulateEvent(this.#liveMetrics, event);
 
     if (sessionId && !this.#closedSessions.has(sessionId)) {
       if (!this.#sessionMetrics.has(sessionId)) {
@@ -484,6 +508,21 @@ export class UiTelemetryService extends EventEmitter {
 
   getMetrics(): SessionMetrics {
     return this.#metrics;
+  }
+
+  /**
+   * Usage this process produced itself, excluding history a resume replayed.
+   * This is what cross-session usage history persists; with no replay it is
+   * field-for-field identical to {@link getMetrics}.
+   */
+  getLiveMetrics(): SessionMetrics {
+    return this.#liveMetrics;
+  }
+
+  /** Starts a new run without restarting the conversation's wall clock. */
+  resetLiveMetrics(): void {
+    this.#liveMetrics = createInitialMetrics();
+    this.#runStartTime = new Date();
   }
 
   getMetricsForSession(sessionId: string): SessionMetrics {
@@ -548,6 +587,9 @@ export class UiTelemetryService extends EventEmitter {
     sessionId?: string,
   ): void {
     this.#accumulateSkillInvocation(this.#metrics, skillName, success);
+    // Skill invocations are never replayed from a transcript, so every one of
+    // them belongs to this run and must reach the persisted counters too.
+    this.#accumulateSkillInvocation(this.#liveMetrics, skillName, success);
 
     if (sessionId && !this.#closedSessions.has(sessionId)) {
       if (!this.#sessionMetrics.has(sessionId)) {
@@ -580,6 +622,16 @@ export class UiTelemetryService extends EventEmitter {
 
   getSessionStartTime(): Date {
     return this.#sessionStartTime;
+  }
+
+  /** Clock for the displayed conversation, independent of the current run. */
+  setSessionStartTime(startTime: Date): void {
+    this.#sessionStartTime = new Date(startTime);
+  }
+
+  /** Start of the active run for persisted usage records, not the UI clock. */
+  getRunStartTime(): Date {
+    return this.#runStartTime;
   }
 
   getLastCachedContentTokenCount(): number {
@@ -620,6 +672,9 @@ export class UiTelemetryService extends EventEmitter {
       : undefined;
     return {
       metrics: cloneSessionMetrics(this.#metrics),
+      liveMetrics: cloneSessionMetrics(this.#liveMetrics),
+      sessionStartTime: new Date(this.#sessionStartTime),
+      runStartTime: new Date(this.#runStartTime),
       sessionId,
       sessionMetrics: sessionMetrics
         ? cloneSessionMetrics(sessionMetrics)
@@ -652,6 +707,9 @@ export class UiTelemetryService extends EventEmitter {
    */
   restoreFromReplaySnapshot(snapshot: UiTelemetryReplaySnapshot): void {
     this.#metrics = cloneSessionMetrics(snapshot.metrics);
+    this.#liveMetrics = cloneSessionMetrics(snapshot.liveMetrics);
+    this.#sessionStartTime = new Date(snapshot.sessionStartTime);
+    this.#runStartTime = new Date(snapshot.runStartTime);
     this.#restoreSessionState(
       snapshot.sessionId,
       snapshot.sessionMetrics,
@@ -704,12 +762,14 @@ export class UiTelemetryService extends EventEmitter {
    */
   reset(): void {
     this.#metrics = createInitialMetrics();
+    this.#liveMetrics = createInitialMetrics();
     this.#sessionMetrics.clear();
     this.#sessionOutputBaselines.clear();
     this.#closedSessions.clear();
     this.#lastPromptTokenCount = 0;
     this.#lastCachedContentTokenCount = 0;
     this.#sessionStartTime = new Date();
+    this.#runStartTime = new Date();
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,

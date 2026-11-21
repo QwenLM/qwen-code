@@ -415,7 +415,7 @@ const SessionStatsContext = createContext<SessionStatsContextValue | undefined>(
 
 const createDefaultStats = (sessionId: string = ''): SessionStatsState => ({
   sessionId,
-  sessionStartTime: new Date(),
+  sessionStartTime: uiTelemetryService.getSessionStartTime(),
   metrics: getMetricsForDisplay(sessionId),
   lastPromptTokenCount: 0,
   promptCount: 0,

@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type {
   UsageSummaryRecord,
   AggregatedReport,
+  TokenUsageDailyByModel,
 } from '@qwen-code/qwen-code-core';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -16,14 +17,22 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     loadUsageHistory: vi.fn(),
+    dedupBySessionId: vi.fn(actual.dedupBySessionId),
+    // Default: no ledger coverage, so records drive every field. Without this
+    // the real loader would read the developer's own ~/.qwen/usage.
+    loadLedgerOrEmpty: vi.fn(async () => new Map()),
   };
 });
 
-import { loadUsageHistory } from '@qwen-code/qwen-code-core';
+import {
+  dedupBySessionId,
+  loadUsageHistory,
+  loadLedgerOrEmpty,
+} from '@qwen-code/qwen-code-core';
 import {
   loadStatsData,
-  getPreviousRangeBounds,
   computeDelta,
+  _resetStatsLedgerCacheForTest,
 } from './statsDataService.js';
 
 const mockedLoadUsageHistory = vi.mocked(loadUsageHistory);
@@ -65,61 +74,6 @@ function makeRecord(
     ...overrides,
   };
 }
-
-describe('getPreviousRangeBounds', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-06-05T12:00:00Z'));
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('returns null for "all" range', () => {
-    expect(getPreviousRangeBounds('all')).toBeNull();
-  });
-
-  it('returns yesterday 00:00 to today 00:00 for "today"', () => {
-    const result = getPreviousRangeBounds('today');
-    expect(result).not.toBeNull();
-
-    const now = new Date();
-    const todayStart = new Date(
-      now.getFullYear(),
-      now.getMonth(),
-      now.getDate(),
-    );
-    const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000);
-
-    expect(result!.start.getTime()).toBe(yesterdayStart.getTime());
-    expect(result!.end.getTime()).toBe(todayStart.getTime());
-  });
-
-  it('returns 14 days ago to 7 days ago for "week"', () => {
-    const result = getPreviousRangeBounds('week');
-    expect(result).not.toBeNull();
-
-    const now = new Date();
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const fourteenDaysAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
-
-    expect(result!.start.getTime()).toBe(fourteenDaysAgo.getTime());
-    expect(result!.end.getTime()).toBe(sevenDaysAgo.getTime());
-  });
-
-  it('returns 60 days ago to 30 days ago for "month"', () => {
-    const result = getPreviousRangeBounds('month');
-    expect(result).not.toBeNull();
-
-    const now = new Date();
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
-
-    expect(result!.start.getTime()).toBe(sixtyDaysAgo.getTime());
-    expect(result!.end.getTime()).toBe(thirtyDaysAgo.getTime());
-  });
-});
 
 describe('computeDelta', () => {
   function makeReport(overrides?: Partial<AggregatedReport>): AggregatedReport {
@@ -294,6 +248,7 @@ describe('computeDelta', () => {
 describe('loadStatsData - new fields', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetStatsLedgerCacheForTest();
   });
 
   it('returns delta as null for range "all"', async () => {
@@ -306,7 +261,7 @@ describe('loadStatsData - new fields', () => {
     expect(result.delta).toBeNull();
   });
 
-  it('returns computed delta for range "today"', async () => {
+  it('does not compare a partial today with a completed yesterday', async () => {
     const now = new Date();
     const todayStart = new Date(
       now.getFullYear(),
@@ -358,11 +313,7 @@ describe('loadStatsData - new fields', () => {
 
     const result = await loadStatsData('today');
 
-    expect(result.delta).not.toBeNull();
-    // sessions: 1 today vs 1 yesterday => 0%
-    expect(result.delta!.sessions).toBeCloseTo(0);
-    // duration: 60000 vs 30000 => 100%
-    expect(result.delta!.duration).toBeCloseTo(100);
+    expect(result.delta).toBeNull();
   });
 
   it('computes efficiency fields correctly', async () => {
@@ -379,6 +330,9 @@ describe('loadStatsData - new fields', () => {
             cachedTokens: 500,
             thoughtsTokens: 0,
             totalTokens: 3000,
+            // metricsToUsageRecord always writes the per-model latency; the
+            // accounting table reads it there, not from the record total.
+            totalLatencyMs: 3000,
           },
         },
         tools: {
@@ -486,5 +440,686 @@ describe('loadStatsData - new fields', () => {
     const result = await loadStatsData('all');
 
     expect(result.toolLeaderboard.length).toBe(8);
+  });
+});
+
+describe('loadStatsData — per-request ledger accounting', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetStatsLedgerCacheForTest();
+  });
+
+  const dayKey = (ms: number) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const DAY = 24 * 60 * 60 * 1000;
+  const ledgerDay = (o: {
+    requests: number;
+    inputTokens: number;
+    outputTokens?: number;
+    cachedTokens?: number;
+    apiDurationMs?: number;
+  }) =>
+    new Map([
+      [
+        'qwen-max',
+        {
+          requests: o.requests,
+          inputTokens: o.inputTokens,
+          outputTokens: o.outputTokens ?? 0,
+          cachedTokens: o.cachedTokens ?? 0,
+          thoughtsTokens: 0,
+          totalTokens: o.inputTokens + (o.outputTokens ?? 0),
+          apiDurationMs: o.apiDurationMs ?? 0,
+        },
+      ],
+    ]);
+  const reportTokens = (r: AggregatedReport) =>
+    Object.values(r.models).reduce((s, m) => s + m.totalTokens, 0);
+
+  it('replaces a ledger-covered day instead of adding the record copy', async () => {
+    const now = Date.now();
+    mockedLoadUsageHistory.mockResolvedValue([makeRecord({ timestamp: now })]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
+      new Map([
+        [
+          dayKey(now),
+          ledgerDay({
+            requests: 2,
+            inputTokens: 300,
+            outputTokens: 30,
+            apiDurationMs: 400,
+          }),
+        ],
+      ]),
+    );
+
+    const result = await loadStatsData('today');
+
+    // 330, not the record's 1550 and not 1880.
+    expect(reportTokens(result.report)).toBe(330);
+    expect(result.report.totalRequests).toBe(2);
+    expect(result.report.totalLatencyMs).toBe(400);
+    expect(result.efficiency.avgLatencyMs).toBe(200);
+    // Session-granular fields the ledger cannot supply stay on the records.
+    expect(result.report.sessionCount).toBe(1);
+    expect(result.report.tools.totalCalls).toBe(5);
+    expect(result.report.files.linesAdded).toBe(20);
+    expect(result.report.projects[0]!.totalTokens).toBe(1550);
+  });
+
+  it('attributes tokens to the day each response happened', async () => {
+    const now = Date.now();
+    const yesterday = now - DAY;
+    mockedLoadUsageHistory.mockResolvedValue([makeRecord({ timestamp: now })]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
+      new Map([
+        [dayKey(yesterday), ledgerDay({ requests: 4, inputTokens: 1000 })],
+        [dayKey(now), ledgerDay({ requests: 2, inputTokens: 330 })],
+      ]),
+    );
+
+    const today = await loadStatsData('today');
+    expect(reportTokens(today.report)).toBe(330);
+
+    const week = await loadStatsData('week');
+    expect(reportTokens(week.report)).toBe(1330);
+    expect(week.heatmap[dayKey(yesterday)]).toBe(1000);
+    expect(week.heatmap[dayKey(now)]).toBe(330);
+    expect(
+      week.tokensPerDay.find((p) => p.date === dayKey(yesterday))?.tokens,
+    ).toBe(1000);
+  });
+
+  it('keeps only this run in a live current record and disjoint prior runs', async () => {
+    const now = Date.now();
+    const old = now - DAY;
+    const prior = makeRecord({
+      sessionId: 'session-same',
+      timestamp: old,
+      startTime: old - 60_000,
+      durationMs: 60_000,
+      runScoped: true,
+      models: {
+        'qwen-max': {
+          requests: 1,
+          inputTokens: 100_000,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 100_000,
+        },
+      },
+      skills: {
+        totalCalls: 3,
+        totalSuccess: 3,
+        totalFail: 0,
+        byName: { review: { count: 3, success: 3, fail: 0 } },
+      },
+    });
+    mockedLoadUsageHistory.mockResolvedValue([prior]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(new Map());
+    const current = makeRecord({
+      sessionId: 'session-same',
+      timestamp: now,
+      startTime: now - 1000,
+      durationMs: 0,
+      totalLatencyMs: 0,
+      runScoped: true,
+      models: {
+        'qwen-max': {
+          requests: 1,
+          inputTokens: 1,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 1,
+        },
+      },
+      tools: { totalCalls: 1, totalSuccess: 1, totalFail: 0, byName: {} },
+      files: { linesAdded: 0, linesRemoved: 0 },
+    });
+
+    const today = await loadStatsData('today', current);
+    expect(reportTokens(today.report)).toBe(1);
+    expect(today.report.sessionCount).toBe(1);
+    expect(today.report.skills.totalCalls).toBe(0);
+
+    const week = await loadStatsData('week', current);
+    expect(reportTokens(week.report)).toBe(100_001);
+    expect(week.report.sessionCount).toBe(2);
+    expect(week.report.skills.totalCalls).toBe(3);
+    expect(week.heatmap[dayKey(old)]).toBe(100_000);
+    expect(week.heatmap[dayKey(now)]).toBe(1);
+  });
+
+  it('merges only the current session group', async () => {
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(new Map());
+    const now = Date.now();
+    const old = makeRecord({
+      sessionId: 'current',
+      timestamp: now - DAY,
+      runScoped: true,
+      models: {
+        'qwen-max': {
+          requests: 1,
+          inputTokens: 100,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 100,
+        },
+      },
+    });
+    const otherSessions = Array.from({ length: 20 }, (_, index) =>
+      makeRecord({ sessionId: `other-${index}`, timestamp: now - DAY }),
+    );
+    mockedLoadUsageHistory.mockResolvedValue([old, ...otherSessions]);
+    const live = makeRecord({
+      sessionId: 'current',
+      timestamp: now,
+      runScoped: true,
+      models: {
+        'qwen-max': {
+          requests: 1,
+          inputTokens: 7,
+          outputTokens: 0,
+          cachedTokens: 0,
+          thoughtsTokens: 0,
+          totalTokens: 7,
+        },
+      },
+    });
+
+    const result = await loadStatsData('all', live);
+
+    expect(vi.mocked(dedupBySessionId).mock.calls).toHaveLength(1);
+    expect(vi.mocked(dedupBySessionId).mock.calls[0]![0]).toHaveLength(2);
+    expect(reportTokens(result.report)).toBe(31_107);
+  });
+
+  it('compares the delta against a ledger-backed previous window', async () => {
+    const now = new Date();
+    const todayStart = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    ).getTime();
+    const todayTs = Math.max(todayStart, now.getTime() - 1000);
+    const yesterdayTs = todayStart - 12 * 60 * 60 * 1000;
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({ sessionId: 't', timestamp: todayTs }),
+      makeRecord({ sessionId: 'y', timestamp: yesterdayTs }),
+    ]);
+    const ledger: TokenUsageDailyByModel = new Map();
+    for (let i = 0; i <= 14; i++) {
+      const day = new Date();
+      day.setDate(day.getDate() - i);
+      ledger.set(
+        dayKey(day.getTime()),
+        ledgerDay({ requests: 2, inputTokens: 100 }),
+      );
+    }
+    vi.mocked(loadLedgerOrEmpty).mockImplementation(
+      async (since) => new Map([...ledger].filter(([day]) => day >= since)),
+    );
+
+    const result = await loadStatsData('week');
+
+    // Both completed seven-day windows contain equal token totals;
+    // today's partial amount belongs to the display, not the delta.
+    expect(result.delta?.tokens).toBeCloseTo(0);
+    expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledWith(
+      dayKey(new Date().setDate(new Date().getDate() - 14)),
+      expect.any(Map),
+    );
+  });
+
+  it('keeps record tokens for days the ledger does not cover', async () => {
+    const now = Date.now();
+    const old = now - 40 * DAY;
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({ sessionId: 'old', timestamp: old }),
+    ]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
+      new Map([[dayKey(now), ledgerDay({ requests: 1, inputTokens: 70 })]]),
+    );
+
+    const result = await loadStatsData('all');
+
+    // The uncovered day keeps its record-derived tokens in the heatmap.
+    expect(result.heatmap[dayKey(old)]).toBe(1550);
+    expect(result.heatmap[dayKey(now)]).toBe(70);
+    expect(reportTokens(result.report)).toBe(1620);
+  });
+
+  it('coalesces concurrent reads but reloads on the next open', async () => {
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({ timestamp: Date.now() }),
+    ]);
+    let release!: (table: TokenUsageDailyByModel) => void;
+    const pending = new Promise<TokenUsageDailyByModel>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(loadLedgerOrEmpty).mockReturnValue(pending);
+
+    const first = loadStatsData('all');
+    const second = loadStatsData('all');
+    await vi.waitFor(() => {
+      expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledTimes(1);
+    });
+    release(new Map());
+    await Promise.all([first, second]);
+
+    await loadStatsData('all');
+    expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledTimes(2);
+  });
+
+  it('sees tokens added between opens without waiting for a TTL', async () => {
+    const now = Date.now();
+    const recordWithTokens = (tokens: number) =>
+      makeRecord({
+        timestamp: now,
+        startTime: now - 1000,
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: tokens,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: tokens,
+          },
+        },
+      });
+    mockedLoadUsageHistory.mockResolvedValue([]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValueOnce(
+      new Map([[dayKey(now), ledgerDay({ requests: 1, inputTokens: 100 })]]),
+    );
+    expect(
+      reportTokens(
+        (await loadStatsData('today', recordWithTokens(100))).report,
+      ),
+    ).toBe(100);
+
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValueOnce(
+      new Map([[dayKey(now), ledgerDay({ requests: 4, inputTokens: 400 })]]),
+    );
+    expect(
+      reportTokens(
+        (await loadStatsData('today', recordWithTokens(300))).report,
+      ),
+    ).toBe(400);
+  });
+
+  it.each([
+    { range: 'week' as const, days: 20 },
+    { range: 'month' as const, days: 70 },
+  ])('compares equal-length windows for $range', async ({ range, days }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 20, 12, 0, 0));
+    try {
+      const daily: TokenUsageDailyByModel = new Map();
+      for (let i = 0; i < days; i++) {
+        const day = new Date();
+        day.setDate(day.getDate() - i);
+        daily.set(
+          dayKey(day.getTime()),
+          ledgerDay({ requests: 1, inputTokens: 100 }),
+        );
+      }
+      mockedLoadUsageHistory.mockResolvedValue([]);
+      vi.mocked(loadLedgerOrEmpty).mockImplementation(
+        async (since) => new Map([...daily].filter(([day]) => day >= since)),
+      );
+
+      const result = await loadStatsData(range);
+
+      expect(result.delta?.tokens).toBeCloseTo(0);
+      const previousStart = new Date();
+      previousStart.setDate(
+        previousStart.getDate() - (range === 'week' ? 14 : 60),
+      );
+      expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledWith(
+        dayKey(previousStart.getTime()),
+        expect.any(Map),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('excludes an unfinished day from both sides of the delta', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 20, 0, 30, 0));
+    try {
+      const daily: TokenUsageDailyByModel = new Map();
+      for (let i = 0; i < 30; i++) {
+        const day = new Date();
+        day.setDate(day.getDate() - i);
+        daily.set(
+          dayKey(day.getTime()),
+          ledgerDay({ requests: 1, inputTokens: 100 }),
+        );
+      }
+      // A large partial day must not contaminate a stable completed-day delta.
+      daily.set(
+        dayKey(Date.now()),
+        ledgerDay({ requests: 13, inputTokens: 10_000 }),
+      );
+      mockedLoadUsageHistory.mockResolvedValue([]);
+      vi.mocked(loadLedgerOrEmpty).mockResolvedValue(daily);
+
+      const result = await loadStatsData('week');
+
+      expect(result.delta?.tokens).toBeCloseTo(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [2026, 2, 12, 0, 30],
+    [2026, 10, 5, 23, 30],
+  ] as const)(
+    'keeps flat daily usage neutral across DST at %s-%s-%sT%s:%s',
+    async (year, month, day, hour, minute) => {
+      const originalTimezone = process.env['TZ'];
+      process.env['TZ'] = 'America/New_York';
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(year, month, day, hour, minute));
+      try {
+        const daily: TokenUsageDailyByModel = new Map();
+        for (let i = 0; i < 90; i++) {
+          const date = new Date();
+          date.setDate(date.getDate() - i);
+          daily.set(
+            dayKey(date.getTime()),
+            ledgerDay({ requests: 1, inputTokens: 100 }),
+          );
+        }
+        mockedLoadUsageHistory.mockResolvedValue([]);
+        vi.mocked(loadLedgerOrEmpty).mockResolvedValue(daily);
+
+        const result = await loadStatsData('week');
+
+        expect(result.delta?.tokens).toBeCloseTo(0);
+      } finally {
+        vi.useRealTimers();
+        if (originalTimezone === undefined) delete process.env['TZ'];
+        else process.env['TZ'] = originalTimezone;
+      }
+    },
+  );
+
+  it('counts every session-granular field on the whole boundary day', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 20, 12, 0, 0));
+    try {
+      const boundary = new Date();
+      boundary.setDate(boundary.getDate() - 7);
+      boundary.setHours(0, 30, 0, 0);
+      const record = makeRecord({
+        timestamp: boundary.getTime(),
+        startTime: boundary.getTime() - 60_000,
+        durationMs: 60_000,
+      });
+      mockedLoadUsageHistory.mockResolvedValue([record]);
+      vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
+        new Map([
+          [
+            dayKey(boundary.getTime()),
+            ledgerDay({ requests: 1, inputTokens: 17_000_000 }),
+          ],
+        ]),
+      );
+
+      const result = await loadStatsData('week');
+
+      expect(reportTokens(result.report)).toBe(17_000_000);
+      expect(result.report.sessionCount).toBe(1);
+      expect(result.report.totalDurationMs).toBe(60_000);
+      expect(result.report.tools.totalCalls).toBe(5);
+      expect(result.report.files.linesAdded).toBe(20);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('compares sessions and duration only over completed local days', async () => {
+    const now = Date.now();
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({
+        sessionId: 'previous',
+        timestamp: now - 14 * DAY,
+        durationMs: 30_000,
+      }),
+      makeRecord({
+        sessionId: 'completed',
+        timestamp: now - DAY,
+        durationMs: 60_000,
+      }),
+      makeRecord({
+        sessionId: 'unfinished',
+        timestamp: now,
+        durationMs: 42_000,
+      }),
+    ]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(new Map());
+
+    const result = await loadStatsData('week');
+
+    expect(result.delta?.sessions).toBeCloseTo(0);
+    expect(result.delta?.duration).toBeCloseTo(100);
+    // Whole-week tiles include today's unfinished session, but the delta does not.
+    expect(result.report.sessionCount).toBe(2);
+    expect(result.report.totalDurationMs).toBe(102_000);
+  });
+
+  it('uses one record basis when a completed side lacks ledger coverage', async () => {
+    const now = Date.now();
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({
+        sessionId: 'previous',
+        timestamp: now - 14 * DAY,
+        durationMs: 30_000,
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: 500,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 500,
+          },
+        },
+      }),
+      makeRecord({ sessionId: 'today', timestamp: now }),
+    ]);
+    const currentDays: TokenUsageDailyByModel = new Map();
+    for (let i = 0; i < 8; i++) {
+      const day = new Date();
+      day.setDate(day.getDate() - i);
+      currentDays.set(
+        dayKey(day.getTime()),
+        ledgerDay({ requests: 1, inputTokens: 100 }),
+      );
+    }
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(currentDays);
+
+    const result = await loadStatsData('week');
+
+    // The ledger has 700 current tokens, but the records-only prior sum is
+    // zero and its token total is 500. An unfair ledger-vs-record delta
+    // would report growth instead of this same-basis -100%.
+    expect(result.delta?.tokens).toBeCloseTo(-100);
+    expect(result.delta?.sessions).toBeCloseTo(-100);
+    expect(result.delta?.duration).toBeCloseTo(-100);
+  });
+
+  it('uses records on both delta sides when current coverage is incomplete', async () => {
+    const now = Date.now();
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({
+        sessionId: 'previous',
+        timestamp: now - 14 * DAY,
+        durationMs: 30_000,
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: 500,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 500,
+          },
+        },
+      }),
+      makeRecord({
+        sessionId: 'yesterday',
+        timestamp: now - DAY,
+        durationMs: 30_000,
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: 300,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 300,
+          },
+        },
+      }),
+      makeRecord({ sessionId: 'today', timestamp: now }),
+    ]);
+    const ledger: TokenUsageDailyByModel = new Map();
+    for (let i = 8; i <= 14; i++) {
+      const day = new Date();
+      day.setDate(day.getDate() - i);
+      ledger.set(
+        dayKey(day.getTime()),
+        ledgerDay({ requests: 1, inputTokens: 500 }),
+      );
+    }
+    const yesterday = new Date(now - DAY);
+    ledger.set(
+      dayKey(yesterday.getTime()),
+      ledgerDay({ requests: 1, inputTokens: 1000 }),
+    );
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(ledger);
+
+    const result = await loadStatsData('week');
+
+    // The current model-bearing record makes sparse coverage insufficient,
+    // even though the previous ledger is complete. Compare 300 with 500 on
+    // the record basis, not 1000 with 3500 on a mixed token basis.
+    expect(result.delta?.tokens).toBeCloseTo(-40);
+    expect(result.delta?.sessions).toBeCloseTo(0);
+    expect(result.delta?.duration).toBeCloseTo(0);
+  });
+
+  it('computes a delta across sparse ledger-only completed windows', async () => {
+    mockedLoadUsageHistory.mockResolvedValue([]);
+    const now = Date.now();
+    const ledger: TokenUsageDailyByModel = new Map([
+      [dayKey(now - 2 * DAY), ledgerDay({ requests: 1, inputTokens: 200 })],
+      [dayKey(now - 10 * DAY), ledgerDay({ requests: 1, inputTokens: 100 })],
+    ]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(ledger);
+
+    const result = await loadStatsData('week');
+
+    expect(result.delta?.tokens).toBeCloseTo(100);
+    expect(reportTokens(result.report)).toBe(200);
+  });
+
+  it('keeps skill activity without creating a token streak', async () => {
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(new Map());
+    mockedLoadUsageHistory.mockResolvedValue([]);
+    const current = makeRecord({
+      sessionId: 'skills-only',
+      timestamp: Date.now(),
+      runScoped: true,
+      models: {},
+      skills: {
+        totalCalls: 1,
+        totalSuccess: 1,
+        totalFail: 0,
+        byName: { review: { count: 1, success: 1, fail: 0 } },
+      },
+    });
+
+    const result = await loadStatsData('today', current);
+
+    expect(result.report.skills?.totalCalls).toBe(1);
+    expect(result.currentStreak).toBe(0);
+    expect(result.longestStreak).toBe(0);
+  });
+
+  it('keeps the previous window disjoint from the current one', async () => {
+    const now = Date.now();
+    mockedLoadUsageHistory.mockResolvedValue([makeRecord({ timestamp: now })]);
+    const ledger: TokenUsageDailyByModel = new Map();
+    for (let i = 0; i < 8; i++) {
+      const day = new Date();
+      day.setDate(day.getDate() - i);
+      ledger.set(
+        dayKey(day.getTime()),
+        ledgerDay({
+          requests: i === 0 ? 2 : 4,
+          inputTokens: i === 0 ? 330 : 1000,
+        }),
+      );
+    }
+    for (let i = 8; i <= 14; i++) {
+      const day = new Date();
+      day.setDate(day.getDate() - i);
+      ledger.set(
+        dayKey(day.getTime()),
+        ledgerDay({ requests: 2, inputTokens: 500 }),
+      );
+    }
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(ledger);
+
+    const result = await loadStatsData('week');
+
+    // Displayed current tokens stay 7330 for seven completed days plus today.
+    // The delta compares 7000 completed tokens against 3500 previously,
+    // never including today's partial 330.
+    expect(reportTokens(result.report)).toBe(7330);
+    expect(result.delta?.tokens).toBeCloseTo(100);
+  });
+
+  it('builds the delta when only the ledger covers the previous window', async () => {
+    const now = new Date();
+    const todayStart = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    ).getTime();
+    const todayTs = Math.max(todayStart, now.getTime() - 1000);
+    // A run killed before exit writes no record, so the previous window exists
+    // only in the ledger.
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({ sessionId: 't', timestamp: todayTs }),
+    ]);
+    const ledger: TokenUsageDailyByModel = new Map();
+    for (let i = 0; i <= 14; i++) {
+      const day = new Date();
+      day.setDate(day.getDate() - i);
+      ledger.set(
+        dayKey(day.getTime()),
+        ledgerDay({ requests: 2, inputTokens: 100 }),
+      );
+    }
+    vi.mocked(loadLedgerOrEmpty).mockImplementation(
+      async (since) => new Map([...ledger].filter(([day]) => day >= since)),
+    );
+
+    const result = await loadStatsData('week');
+
+    expect(result.delta).not.toBeNull();
+    expect(result.delta?.tokens).toBeCloseTo(0);
   });
 });

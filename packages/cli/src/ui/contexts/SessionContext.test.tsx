@@ -233,6 +233,31 @@ describe('SessionStatsContext', () => {
     uiTelemetryService.reset();
   });
 
+  it('preserves the conversation clock when a new run starts', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-05T00:00:00Z'));
+    uiTelemetryService.reset();
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    const sessionStart = uiTelemetryService.getSessionStartTime();
+
+    try {
+      vi.setSystemTime(new Date('2026-06-05T00:01:00Z'));
+      act(() => {
+        uiTelemetryService.resetLiveMetrics();
+        result.current.startNewSession('resumed');
+      });
+
+      expect(result.current.stats.sessionStartTime).toEqual(sessionStart);
+      expect(result.current.stats.sessionId).toBe('resumed');
+    } finally {
+      unmount();
+      vi.useRealTimers();
+      uiTelemetryService.reset();
+    }
+  });
+
   it('should update when skill metrics are mutated in place', () => {
     uiTelemetryService.reset();
     const contextRef: MutableRefObject<

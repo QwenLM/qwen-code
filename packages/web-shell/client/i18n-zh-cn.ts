@@ -1840,7 +1840,7 @@ export const ZH: Messages = {
   'daemon.usage.dailyTokensTitle': 'Tokens',
   'daemon.usage.dailyTokensSub': '每日 token 总量',
   'daemon.usage.dailySessionsTitle': '会话',
-  'daemon.usage.dailySessionsSub': '每日活跃会话数',
+  'daemon.usage.dailySessionsSub': '每日结束运行数',
   'delete.cannotCurrent': '当前会话正在运行，无法删除。',
   'delete.action': '删除',
   'delete.deleted': '会话已删除。',

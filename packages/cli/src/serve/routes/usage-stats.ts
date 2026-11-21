@@ -8,27 +8,27 @@
  * Read-only usage-dashboard surface behind the Web Shell Daemon Status
  * "统计 / Usage" tab. Serves the selected range's (`today`/`week`/`month`)
  * flattened token totals plus a trailing per-day heatmap, computed by core's
- * `buildUsageDashboard` from the local usage history (global `~/.qwen`,
- * cross-project). Uses `loadUsageHistoryWithLive`, which unions the durable
- * `usage_record.jsonl` (written only by the TUI `/clear` path) with a replay of
- * recent transcripts — so daemon / Web Shell sessions and any in-progress
- * session are counted here, unlike the TUI `/stats` view. The load is
- * read-only (never writes `~/.qwen`).
+ * `buildUsageDashboard` from two local sources (global `~/.qwen`, cross-project):
+ * the per-request token ledger, which places every response on the local day it
+ * happened, and the session history (`usage_record.jsonl` unioned with a replay
+ * of recent transcripts) for sessions, tool calls, changed lines and skills. A
+ * day the ledger covers replaces that day's session-record tokens rather than
+ * adding to them. The load is read-only (never writes `~/.qwen`).
  *
  * Open GET (no `mutate` gate), consistent with `GET /daemon/status` and
  * `GET /scheduled-tasks`: it exposes only aggregate local usage counts.
  *
- * The heavy step — `loadUsageHistoryWithLive` can replay recent transcripts —
- * is cached once (range-independent), so toggling Today/7D/30D re-aggregates
- * cheaply from a single disk read instead of re-loading per range, and
- * concurrent requests coalesce onto the in-flight load.
+ * The heavy step — the session history can replay recent transcripts — is
+ * cached once (range-independent, and covering the widest heatmap window), so
+ * toggling Today/7D/30D re-aggregates cheaply from a single disk read instead of
+ * re-loading per range, and concurrent requests coalesce onto the in-flight load.
  */
 
 import type { Application } from 'express';
 import {
   buildUsageDashboard,
-  loadUsageHistoryWithLive,
-  type UsageSummaryRecord,
+  loadUsageDashboardSources,
+  type UsageDashboardSources,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
@@ -43,9 +43,9 @@ const USAGE_RANGES = ['today', 'week', 'month'] as const;
 type UsageRange = (typeof USAGE_RANGES)[number];
 
 export interface RegisterUsageStatsRoutesDeps {
-  /** Injectable for tests; defaults to core's disk-backed history loader. */
-  loadHistory?: () => Promise<UsageSummaryRecord[]>;
-  /** Coalescing/refresh window for the cached history. Defaults to 60s. */
+  /** Injectable for tests; defaults to core's disk-backed source loader. */
+  loadSources?: () => Promise<UsageDashboardSources>;
+  /** Coalescing/refresh window for the cached sources. Defaults to 60s. */
   cacheTtlMs?: number;
 }
 
@@ -70,28 +70,28 @@ export function registerUsageStatsRoutes(
   app: Application,
   deps: RegisterUsageStatsRoutesDeps = {},
 ): void {
-  const loadHistory = deps.loadHistory ?? (() => loadUsageHistoryWithLive());
+  const loadSources = deps.loadSources ?? (() => loadUsageDashboardSources());
   const ttlMs = deps.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
 
-  // Closure-scoped, range-independent history cache (one daemon per process).
+  // Closure-scoped, range-independent source cache (one daemon per process).
   // A pending load is always reused regardless of age, so concurrent requests
   // share one load even when it runs longer than the TTL (the slow transcript-
   // replay path). The TTL window only starts once the load settles; a rejected
   // load clears the cache so the next request retries (and is consumed here so
   // a failed load never surfaces as an unhandled rejection).
-  interface HistoryCache {
-    promise: Promise<UsageSummaryRecord[]>;
+  interface SourcesCache {
+    promise: Promise<UsageDashboardSources>;
     settledAt: number | null;
   }
-  let cache: HistoryCache | null = null;
+  let cache: SourcesCache | null = null;
 
-  const getRecords = (): Promise<UsageSummaryRecord[]> => {
+  const getSources = (): Promise<UsageDashboardSources> => {
     const now = Date.now();
     const fresh =
       cache !== null &&
       (cache.settledAt === null || now - cache.settledAt < ttlMs);
     if (!fresh) {
-      const entry: HistoryCache = { promise: loadHistory(), settledAt: null };
+      const entry: SourcesCache = { promise: loadSources(), settledAt: null };
       cache = entry;
       entry.promise.then(
         () => {
@@ -109,8 +109,12 @@ export function registerUsageStatsRoutes(
     const range = parseRange(req.query['range']);
     const heatmapDays = parseHeatmapDays(req.query['heatmapDays']);
     try {
-      const records = await getRecords();
-      const dashboard = buildUsageDashboard(records, { range, heatmapDays });
+      const { records, ledgerDaily } = await getSources();
+      const dashboard = buildUsageDashboard(
+        records,
+        { range, heatmapDays },
+        ledgerDaily,
+      );
       res.status(200).json(dashboard);
     } catch (err) {
       writeStderrLine(

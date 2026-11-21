@@ -6206,7 +6206,7 @@ export function replayUiTelemetryFromConversation(
       uiEvent['event.name'] !== 'tool_lifecycle' &&
       uiEvent['event.name'] !== 'hook_lifecycle'
     ) {
-      uiTelemetryService.addEvent(uiEvent as UiEvent, sessionId);
+      uiTelemetryService.addReplayedEvent(uiEvent as UiEvent, sessionId);
     }
   }
 

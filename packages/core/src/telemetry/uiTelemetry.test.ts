@@ -1781,3 +1781,111 @@ describe('UiTelemetryService.getTotalOutputTokens', () => {
     },
   );
 });
+
+describe('UiTelemetryService live usage accounting', () => {
+  let service: UiTelemetryService;
+  const requests = (m: ReturnType<UiTelemetryService['getMetrics']>) =>
+    Object.values(m.models).reduce((sum, x) => sum + x.api.totalRequests, 0);
+  const prompt = (m: ReturnType<UiTelemetryService['getMetrics']>) =>
+    Object.values(m.models).reduce((sum, x) => sum + x.tokens.prompt, 0);
+
+  beforeEach(() => {
+    service = new UiTelemetryService();
+  });
+
+  it('keeps replayed history in the display aggregate but out of live usage', () => {
+    service.addReplayedEvent(apiResponse('m', 10, [100, 10, 110, 0, 0]), 's');
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 's');
+
+    expect(requests(service.getMetrics())).toBe(2);
+    expect(prompt(service.getMetrics())).toBe(105);
+    expect(requests(service.getLiveMetrics())).toBe(1);
+    expect(prompt(service.getLiveMetrics())).toBe(5);
+    // The session bucket still carries the whole conversation for /stats.
+    expect(requests(service.getMetricsForSession('s'))).toBe(2);
+  });
+
+  it('matches the display aggregate field-for-field when nothing was replayed', () => {
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 's');
+    service.addEvent(apiError('m', 3, 'boom'), 's');
+    service.addEvent(toolEvent(fakeToolEvent('read_file', true, 100)), 's');
+    // Skills reach the metrics through their own entry point, not #record, and
+    // are never replayed — they must land in the persisted counters too.
+    service.recordSkillInvocation('review', true, 's');
+
+    expect(service.getLiveMetrics()).toEqual(service.getMetrics());
+    expect(service.getLiveMetrics().skills?.totalCalls).toBe(1);
+    expect(service.getLiveMetrics().skills?.byName['review']).toEqual({
+      count: 1,
+      success: 1,
+      fail: 0,
+    });
+  });
+
+  it('clears live usage on reset', () => {
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 's');
+    service.reset();
+
+    expect(requests(service.getLiveMetrics())).toBe(0);
+    expect(requests(service.getMetrics())).toBe(0);
+  });
+
+  it('resets a completed run and its start time without clearing the display', () => {
+    service.addReplayedEvent(apiResponse('m', 10, [100, 10, 110, 0, 0]), 'b');
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 'b');
+    const previousStart = service.getSessionStartTime().getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(previousStart + 60_000);
+    try {
+      service.resetLiveMetrics();
+
+      expect(requests(service.getLiveMetrics())).toBe(0);
+      expect(requests(service.getMetrics())).toBe(2);
+      expect(prompt(service.getMetrics())).toBe(105);
+      expect(requests(service.getMetricsForSession('b'))).toBe(2);
+      expect(service.getSessionStartTime().getTime()).toBe(previousStart);
+      expect(service.getRunStartTime().getTime()).toBe(previousStart + 60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    vi.useFakeTimers();
+    vi.setSystemTime(previousStart + 120_000);
+    try {
+      service.reset();
+      expect(service.getSessionStartTime().getTime()).toBe(
+        previousStart + 120_000,
+      );
+      expect(service.getRunStartTime().getTime()).toBe(previousStart + 120_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores live usage when an abandoned swap is undone', () => {
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 'a');
+    const snapshot = service.snapshotForReplay('b', 'a');
+    vi.useFakeTimers();
+    vi.advanceTimersByTime(60_000);
+    service.resetLiveMetrics();
+    service.setSessionStartTime(
+      new Date(snapshot.sessionStartTime.getTime() + 60_000),
+    );
+    try {
+      // The abandoned swap replays history and accrues a live turn of its own.
+      service.addReplayedEvent(apiResponse('m', 10, [900, 9, 909, 0, 0]), 'b');
+      service.addEvent(apiResponse('m', 10, [7, 1, 8, 0, 0]), 'b');
+      expect(prompt(service.getLiveMetrics())).toBe(7);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(prompt(service.getLiveMetrics())).toBe(5);
+      expect(prompt(service.getMetrics())).toBe(5);
+      expect(service.getRunStartTime()).toEqual(snapshot.runStartTime);
+      expect(service.getRunStartTime()).not.toBe(snapshot.runStartTime);
+      expect(service.getSessionStartTime()).toEqual(snapshot.sessionStartTime);
+      expect(service.getSessionStartTime()).not.toBe(snapshot.sessionStartTime);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

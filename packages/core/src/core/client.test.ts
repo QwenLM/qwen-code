@@ -357,7 +357,9 @@ const mockUiTelemetryService = vi.hoisted(() => ({
   setLastCachedContentTokenCount: vi.fn(),
   reset: vi.fn(),
   resetSession: vi.fn(),
+  setSessionStartTime: vi.fn(),
   addEvent: vi.fn(),
+  addReplayedEvent: vi.fn(),
 }));
 const mockLogMemoryRecallDelivery = vi.hoisted(() => vi.fn());
 const mockInteractionTelemetry = vi.hoisted(() => ({
@@ -1237,6 +1239,23 @@ describe('Gemini Client (client.ts)', () => {
       return { freshClient, firstChat };
     };
 
+    it('binds the clock to the resumed conversation after successful initialization', async () => {
+      const data = resumedSession([])!;
+      const start = '2020-02-03T04:05:06.000Z';
+      data.conversation.startTime = start;
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue(data);
+      mockUiTelemetryService.setSessionStartTime.mockClear();
+
+      await initializedClient();
+
+      expect(mockUiTelemetryService.setSessionStartTime).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockUiTelemetryService.setSessionStartTime).toHaveBeenCalledWith(
+        new Date(start),
+      );
+    });
+
     it('keeps the restored tool boundary through startup reminder refresh', async () => {
       const result = content('user', fnResponse('update_goal', {}, 'ended'));
       restoreFromRuntime({
@@ -1319,9 +1338,11 @@ describe('Gemini Client (client.ts)', () => {
       expect(
         mockConfig.getToolRegistry().syncReviewedDeclarations,
       ).toHaveBeenCalledWith(apiHistory);
-      const { resetSession, addEvent } = uiTelemetryService;
+      const { resetSession, addReplayedEvent } = uiTelemetryService;
       expect(resetSession).toHaveBeenCalledWith('test-session-id');
-      expect(addEvent).toHaveBeenCalledWith(uiEvent, 'test-session-id');
+      // Projected history is replayed, so it must not reach the live counters
+      // that cross-session usage persists.
+      expect(addReplayedEvent).toHaveBeenCalledWith(uiEvent, 'test-session-id');
       expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
       expect(skill.restoreLoadedSkillsFromHistory).toHaveBeenCalledWith(
         apiHistory,

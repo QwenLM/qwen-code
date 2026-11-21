@@ -15,6 +15,7 @@ import {
   persistSessionUsage,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
+import { hasRunActivity } from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
 import {
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
@@ -79,16 +80,14 @@ export const clearCommand: SlashCommand = {
       config.getBackgroundShellRegistry().abortAll();
       resetBackgroundStateForSessionSwitch(config);
 
-      // Persist current session's usage before resetting metrics
-      const metrics = uiTelemetryService.getMetrics();
-      const hasActivity = Object.values(metrics.models).some(
-        (m) => m.api.totalRequests > 0,
-      );
-      if (hasActivity) {
+      // Persist this run's usage before resetting metrics. Replayed history
+      // belongs to the run that spent it, which already persisted its own.
+      const metrics = uiTelemetryService.getLiveMetrics();
+      if (hasRunActivity(metrics)) {
         try {
           persistSessionUsage({
             sessionId: config.getSessionId(),
-            startTime: context.session.stats.sessionStartTime ?? new Date(),
+            startTime: uiTelemetryService.getRunStartTime(),
             endTime: new Date(),
             project: config.getProjectRoot(),
             metrics,
