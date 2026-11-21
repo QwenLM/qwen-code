@@ -79,6 +79,12 @@ import type {
   SessionArtifactSnapshotRecordPayload,
 } from './session-artifact-persistence.js';
 import {
+  acquireSessionArchiveWriteLock,
+  assertSessionArchiveGeneration,
+  readSessionArchiveGeneration,
+  withSessionArchiveWriteLockSync,
+} from './session-archive-write-fence.js';
+import {
   SessionTranscriptChangedError,
   SessionWriterLostError,
   SessionWriterUnavailableError,
@@ -1215,6 +1221,7 @@ export type ChatRecordingFailureListener = (
 interface StrictRecordAppendOptions {
   updateActiveTail?: boolean;
   expectedBranchGeneration?: number;
+  afterWrite?: (legacyConversationFile?: string) => void;
 }
 
 interface BufferedRecordAppend {
@@ -1303,6 +1310,7 @@ export class ChatRecordingService {
   private turnDaemonPromptIds: Array<string | undefined> = [];
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
+  private legacyArchiveGeneration?: { filePath: string; value?: string };
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
   private pinnedSessionId: string | undefined;
   private state:
@@ -1451,6 +1459,7 @@ export class ChatRecordingService {
     } else {
       this.state = 'active';
       this.acceptingWrites = true;
+      if (restoreState || resumed) this.captureLegacyArchiveGeneration();
       if (restoreState) {
         this.restoreProjectedState(restoreState);
       } else {
@@ -1520,34 +1529,83 @@ export class ChatRecordingService {
     return chatsDir;
   }
 
-  private ensureConversationFile(): string {
-    if (this.cachedConversationFile) return this.cachedConversationFile;
-    const conversationFile = path.join(
-      this.ensureChatsDir(),
+  private captureLegacyArchiveGeneration() {
+    const filePath = path.join(
+      this.config.storage.getProjectDir(),
+      'chats',
       `${this.getSessionId()}.jsonl`,
     );
+    if (this.legacyArchiveGeneration?.filePath !== filePath) {
+      this.legacyArchiveGeneration = {
+        filePath,
+        value: readSessionArchiveGeneration(filePath),
+      };
+    }
+    return this.legacyArchiveGeneration;
+  }
+
+  private ensureConversationFile(): string {
+    if (this.cachedConversationFile) return this.cachedConversationFile;
+    this.ensureChatsDir();
+    const { filePath, value } = this.captureLegacyArchiveGeneration();
+    // The async writer validates the archive epoch before writing. Only
+    // creation needs the lock here; an existing file needs no mutation.
+    if (!fs.existsSync(filePath)) {
+      try {
+        withSessionArchiveWriteLockSync(filePath, () => {
+          assertSessionArchiveGeneration(filePath, value);
+          this.createConversationFile(filePath);
+        });
+      } catch (error) {
+        if (error instanceof SessionTranscriptChangedError) {
+          throw this.enterWriteFailure(error, this.getSessionId());
+        }
+        if ((error as NodeJS.ErrnoException).code !== 'ELOCKED') throw error;
+        // Another writer is initializing, or maintenance is in progress.
+        // Defer the create to the queued write's async lock instead of
+        // dropping the first record on otherwise healthy contention.
+        return filePath;
+      }
+    }
+    this.cacheConversationFile(filePath);
+    return filePath;
+  }
+
+  private createConversationFile(filePath: string): void {
     try {
-      fs.writeFileSync(conversationFile, '', { flag: 'wx', encoding: 'utf8' });
+      fs.writeFileSync(filePath, '', { flag: 'wx', encoding: 'utf8' });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(
-          `Failed to create conversation file at ${conversationFile}: ${message}`,
+          `Failed to create conversation file at ${filePath}: ${message}`,
         );
       }
     }
-    if (isManagedExecutionTranscriptSync(conversationFile)) {
+  }
+
+  private cacheConversationFile(filePath: string): void {
+    if (isManagedExecutionTranscriptSync(filePath)) {
       throw new SessionExecutionEngineError(
         this.getSessionId(),
         'belongs to managed, cannot record with legacy',
       );
     }
-    this.cachedConversationFile = conversationFile;
-    return conversationFile;
+    // A Config storage rotation may have happened while this write queued.
+    if (this.legacyArchiveGeneration?.filePath === filePath) {
+      this.cachedConversationFile = filePath;
+    }
   }
 
-  private titleSidecarPath(): string {
-    return sessionTitleSidecarPath(this.ensureChatsDir(), this.getSessionId());
+  private titleSidecarPath(legacyConversationFile?: string): string {
+    return sessionTitleSidecarPath(
+      legacyConversationFile
+        ? path.dirname(legacyConversationFile)
+        : this.ensureChatsDir(),
+      legacyConversationFile
+        ? path.basename(legacyConversationFile, '.jsonl')
+        : this.getSessionId(),
+    );
   }
 
   private artifactSummarySidecarPath(): string {
@@ -1566,23 +1624,31 @@ export class ChatRecordingService {
   private persistListTitle(
     displayName: string,
     source: 'manual' | 'auto' | 'prompt',
+    legacyConversationFile?: string,
   ): void {
     if (this.managedSink) return;
     try {
-      writeSessionTitleSidecar(this.titleSidecarPath(), displayName, source);
+      writeSessionTitleSidecar(
+        this.titleSidecarPath(legacyConversationFile),
+        displayName,
+        source,
+      );
     } catch {
       // Best-effort: a missing sidecar must never fail a rename.
     }
   }
 
-  private persistPromptDerivedTitle(record: ChatRecord): void {
+  private persistPromptDerivedTitle(
+    record: ChatRecord,
+    legacyConversationFile?: string,
+  ): void {
     if (this.managedSink) return;
     // The projected restore carries no record stream, so the session's first
     // prompt is unknown. Inventing a label from a later prompt would name the
     // session after the wrong turn as soon as its transcript loses its head.
     if (this.firstPromptUnknown) return;
     try {
-      const sidecarPath = this.titleSidecarPath();
+      const sidecarPath = this.titleSidecarPath(legacyConversationFile);
       // Any persisted label wins: a later prompt must not replace the first
       // prompt's label, a rename, or an auto title. This also lets an
       // image-only first prompt leave the slot open for the next text prompt.
@@ -1609,32 +1675,42 @@ export class ChatRecordingService {
   private seedTitleSidecar(promptDisplayText?: string): void {
     if (this.managedSink) return;
     try {
-      const sidecarPath = this.titleSidecarPath();
-      const existing = readSessionTitleSidecar(sidecarPath);
-      const customTitle = this.currentCustomTitle?.trim();
-      if (customTitle) {
-        const source = this.currentTitleSource ?? 'manual';
-        if (
-          existing?.source === source &&
-          existing.displayName === customTitle
-        ) {
-          return;
-        }
-        writeSessionTitleSidecar(sidecarPath, customTitle, source);
-        return;
+      if (this.writerLeaseRequired) {
+        this.seedTitleSidecarWhileOwned(promptDisplayText);
+      } else {
+        const { filePath, value } = this.captureLegacyArchiveGeneration();
+        if (!fs.existsSync(filePath)) return;
+        withSessionArchiveWriteLockSync(filePath, () => {
+          assertSessionArchiveGeneration(filePath, value);
+          this.seedTitleSidecarWhileOwned(promptDisplayText);
+        });
       }
-      // An explicit name already on disk outranks a prompt-derived guess.
-      if (existing && existing.source !== 'prompt') return;
-      const prompt = promptDisplayText?.trim();
-      if (!prompt) return;
-      const label = truncateTitleForList(prompt);
-      if (existing?.source === 'prompt' && existing.displayName === label) {
-        return;
-      }
-      writeSessionTitleSidecar(sidecarPath, label, 'prompt');
     } catch {
       // Best-effort: a missing sidecar is a label gap, not a resume failure.
     }
+  }
+
+  private seedTitleSidecarWhileOwned(promptDisplayText?: string): void {
+    const sidecarPath = this.titleSidecarPath();
+    const existing = readSessionTitleSidecar(sidecarPath);
+    const customTitle = this.currentCustomTitle?.trim();
+    if (customTitle) {
+      const source = this.currentTitleSource ?? 'manual';
+      if (existing?.source === source && existing.displayName === customTitle) {
+        return;
+      }
+      writeSessionTitleSidecar(sidecarPath, customTitle, source);
+      return;
+    }
+    // An explicit name already on disk outranks a prompt-derived guess.
+    if (existing && existing.source !== 'prompt') return;
+    const prompt = promptDisplayText?.trim();
+    if (!prompt) return;
+    const label = truncateTitleForList(prompt);
+    if (existing?.source === 'prompt' && existing.displayName === label) {
+      return;
+    }
+    writeSessionTitleSidecar(sidecarPath, label, 'prompt');
   }
 
   private restoreSessionState(
@@ -1961,7 +2037,9 @@ export class ChatRecordingService {
     record: ChatRecord,
     legacyConversationFile?: string,
     updateActiveTail = true,
+    afterWrite?: StrictRecordAppendOptions['afterWrite'],
   ): Promise<void> {
+    const generation = this.legacyArchiveGeneration?.value;
     const promptTime = userPromptTimestamp(record);
     const changesPromptTime =
       promptTime !== undefined || record.subtype === 'rewind';
@@ -1977,10 +2055,26 @@ export class ChatRecordingService {
         } else if (lease) {
           await lease.appendJsonLine(record);
         } else if (!this.writerLeaseRequired && legacyConversationFile) {
-          await jsonl.writeLine(legacyConversationFile, record);
+          const lock = await acquireSessionArchiveWriteLock(
+            legacyConversationFile,
+          );
+          try {
+            lock.assertHeld();
+            assertSessionArchiveGeneration(legacyConversationFile, generation);
+            if (this.cachedConversationFile !== legacyConversationFile) {
+              this.createConversationFile(legacyConversationFile);
+              this.cacheConversationFile(legacyConversationFile);
+            }
+            await jsonl.writeLine(legacyConversationFile, record);
+            lock.assertHeld();
+            afterWrite?.(legacyConversationFile);
+          } finally {
+            await lock.release();
+          }
         } else {
           throw new SessionWriterUnavailableError();
         }
+        if (managedSink || lease) afterWrite?.();
         if (updateActiveTail) {
           this.lastPersistedRecordUuid = record.uuid;
         }
@@ -2006,7 +2100,7 @@ export class ChatRecordingService {
    */
   private appendRecord(
     record: ChatRecord,
-    options?: { updateActiveTail?: boolean },
+    options?: StrictRecordAppendOptions,
   ): void {
     if (this.writeFailure || !this.acceptingWrites || this.state !== 'active')
       return;
@@ -2030,7 +2124,12 @@ export class ChatRecordingService {
       this.lastRecordUuid = record.uuid;
       this.updateActiveBranch(record);
     }
-    this.enqueueRecordWrite(record, legacyConversationFile, updateActiveTail);
+    this.enqueueRecordWrite(
+      record,
+      legacyConversationFile,
+      updateActiveTail,
+      options?.afterWrite,
+    );
     this.updateMetadataAnchorTracking(record);
   }
 
@@ -2075,6 +2174,7 @@ export class ChatRecordingService {
       record,
       legacyConversationFile,
       updateActiveTail,
+      options?.afterWrite,
     );
     // Keep anchor accounting in logical queue order, matching appendRecord.
     // Once accepted, a failed write permanently stops this recorder, so no
@@ -2358,15 +2458,35 @@ export class ChatRecordingService {
         'This session storage does not support message deletion',
       );
     const sessionId = this.getSessionId();
+    const transcriptPath = this.ensureConversationFile();
+    const generation = this.legacyArchiveGeneration?.value;
     const lease = await SessionWriterLease.acquire({
       runtimeBaseDir: this.config.storage.getRuntimeBaseDir(),
       processKind: 'acp',
       sessionId,
-      transcriptPath: this.ensureConversationFile(),
+      transcriptPath,
       qwenVersion: this.config.getCliVersion(),
     });
+    try {
+      // Same order as daemon archive: lifetime ownership before the short
+      // pathname guard. A stale legacy recorder cannot regain authority by
+      // taking a lease for a restored transcript.
+      const lock = await acquireSessionArchiveWriteLock(transcriptPath);
+      try {
+        lock.assertHeld();
+        assertSessionArchiveGeneration(transcriptPath, generation);
+        await lease.assertOwnedAndUnchanged();
+      } finally {
+        await lock.release();
+      }
+    } catch (error) {
+      await lease.release();
+      if (error instanceof SessionTranscriptChangedError) {
+        throw this.enterWriteFailure(error, sessionId, 'lease_promotion');
+      }
+      throw error;
+    }
     this.binding = { sessionId, lease };
-    await lease.assertOwnedAndUnchanged();
     return lease;
   }
 
@@ -2837,12 +2957,10 @@ export class ChatRecordingService {
       if (turnId) this.pendingHookTurnParents.delete(turnId);
       this.turnPromptIds.push(turnId);
       this.turnDaemonPromptIds.push(record.daemonPromptId);
-      this.appendRecord(record);
-      // The sidecar write is best-effort and runs after the transcript
-      // append, so an unwritable label path can never drop the message. It
-      // only fills a missing label: a persisted prompt or custom title is
-      // never replaced by a later prompt.
-      this.persistPromptDerivedTitle(record);
+      this.appendRecord(record, {
+        afterWrite: (filePath) =>
+          this.persistPromptDerivedTitle(record, filePath),
+      });
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
     }
@@ -4208,13 +4326,13 @@ export class ChatRecordingService {
 
       // A Managed log keeps a title as metadata that its projection does not
       // replay, so the title must not become the parent of the next record.
-      await this.appendRecordStrict(
-        record,
-        this.managedSink ? { updateActiveTail: false } : undefined,
-      );
+      await this.appendRecordStrict(record, {
+        updateActiveTail: !this.managedSink,
+        afterWrite: (filePath) =>
+          this.persistListTitle(customTitle, titleSource, filePath),
+      });
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
-      this.persistListTitle(customTitle, titleSource);
       if (notify) {
         try {
           this.titleRecordedCallback?.(
