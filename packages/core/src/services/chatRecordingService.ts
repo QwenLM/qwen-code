@@ -4659,17 +4659,14 @@ export class ChatRecordingService {
   }
 
   /**
-   * Append the settled outcome of a turn. Best-effort by design: a
-   * recording failure must never break turn settlement, so this uses the
-   * non-strict append path (inactive/failed writers skip silently).
-   */
-  /**
    * Withholds assistant turns and turn results until the returned release
    * runs. A session close cancels its in-flight turn; that cancel must not
    * reach the transcript, because the restart recovery re-opens the turn from
    * the unanswered prompt rather than resuming a `cancelled` terminal.
    * Notifications and every other record type still land, so the close can
    * flush peer reports after the cancel settles.
+   *
+   * The release is not reference counted: the caller owns one handle.
    */
   withholdTurnRecords(): () => void {
     this.turnRecordsWithheld = true;
@@ -4678,6 +4675,11 @@ export class ChatRecordingService {
     };
   }
 
+  /**
+   * Append the settled outcome of a turn. Best-effort by design: a
+   * recording failure must never break turn settlement, so this uses the
+   * non-strict append path (inactive/failed writers skip silently).
+   */
   recordTurnResult(payload: TurnResultRecordPayload, promptId?: string): void {
     if (this.turnRecordsWithheld) return;
     if (!isTurnResultRecordPayload(payload)) {
