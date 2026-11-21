@@ -303,7 +303,7 @@ final class AgentMessageProjection {
     /** Advances only through readable message coverage, retaining active-Turn evidence. */
     ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
             long floorSequence) {
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        storeRows.requireSessionForUpdate(tenantId, sessionId);
         ReplayWindow window = findReplayWindow(tenantId, sessionId);
         long floor = Math.min(floorSequence, window.snapshotThroughSequence());
         Long activeStart =
@@ -343,7 +343,7 @@ final class AgentMessageProjection {
 
     MaterializationResult materializeNextBatch(String tenantId,
             String sessionId, int limit) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         Long covered = jdbc.queryForObject(
                         "SELECT covered_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
                             + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"

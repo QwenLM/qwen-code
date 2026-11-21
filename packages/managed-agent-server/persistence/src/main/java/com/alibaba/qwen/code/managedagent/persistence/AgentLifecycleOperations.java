@@ -104,7 +104,7 @@ final class AgentLifecycleOperations {
             String sessionId, OperationKind kind, String actorDigest,
             String idempotencyKey, String requestDigest) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        if (storeRows.requireLegacySessionForUpdate(tenantId, sessionId).workspace() != null) {
+        if (storeRows.requireSessionForUpdate(tenantId, sessionId).workspace() != null) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, null, false);
@@ -133,7 +133,7 @@ final class AgentLifecycleOperations {
 
     SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId, String actorId, String scopedKey, String requestDigest) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         requireWorkspaceCreator(session, actorId);
         String namespace = "UNARCHIVE_WORKSPACE_SESSION";
         // Replay first, like every other mutation path: a recorded success
@@ -180,6 +180,7 @@ final class AgentLifecycleOperations {
                 SessionMutationEvents.mutationSource(namespace, scopedKey, "requested"), now);
         jdbc.update("UPDATE ma_session SET status = 'CLOSED', gmt_modified = ?, version = version + 1"
                 + " WHERE tenant_id = ? AND session_id = ?", now, tenantId, sessionId);
+        JdbcManagedUserMessageStore.retireQueued(jdbc, tenantId, sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null, "session.unarchived", data, false,
                 SessionMutationEvents.mutationSource(namespace, scopedKey, "completed"), now);
         return new SessionMutation(storeRows.requireSessionForUpdate(tenantId, sessionId), false);
@@ -326,7 +327,7 @@ final class AgentLifecycleOperations {
                         .isPresent()) {
             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         }
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !trustedChildClose) {
             requireWorkspaceCreator(session, actorId);
         }
@@ -536,6 +537,7 @@ final class AgentLifecycleOperations {
                         + " tenant_id = ? AND session_id = ?",
                 archive ? "ARCHIVED" : LifecycleOperationNames.pendingStatus(kind), now, tenantId,
                 sessionId);
+        JdbcManagedUserMessageStore.retireQueued(jdbc, tenantId, sessionId);
         ManagedSideQueryStore.cancelSession(jdbc, tenantId, sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null,
                 archive ? LifecycleOperationNames.completedEvent(kind) : LifecycleOperationNames.requestedEvent(kind), data,
@@ -626,7 +628,7 @@ final class AgentLifecycleOperations {
         if (target.kind() == OperationKind.DELETE && !WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
         }
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion()) && target.kind() == OperationKind.DELETE) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
         }
@@ -686,6 +688,7 @@ final class AgentLifecycleOperations {
                             + " tenant_id = ? AND session_id = ?",
                     now, now, tenantId, sessionId);
         }
+        JdbcManagedUserMessageStore.retireQueued(jdbc, tenantId, sessionId);
         jdbc.update(
                 "UPDATE ma_operation SET failure_code = NULL, phase = 'COMPLETED', state ="
                     + " 'COMPLETED', admission_stage = ?, delivery_state = 'CONFIRMED', receipt_id"

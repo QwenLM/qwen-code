@@ -54,6 +54,7 @@ const ON_BY_DEFAULT: ReadonlySet<AgentLoopSurface> = new Set([
   'headless',
   'acp',
   'ink',
+  'opentui',
   'agent-core',
 ]);
 import { Storage } from './storage.js';
@@ -2773,6 +2774,17 @@ describe('Server Config (config.ts)', () => {
       ${'accepts the maximum supported integer timeout'} | ${{ visionBridgeTimeoutMs: 2_147_483_647 }}            | ${2_147_483_647}
     `('%s', ({ params, expected }) => {
       expect(makeConfig(params).getVisionBridgeTimeoutMs()).toBe(expected);
+    });
+
+    it('updates at runtime and applies the same validation', () => {
+      const config = makeConfig({ visionBridgeTimeoutMs: 120_000 });
+      config.setVisionBridgeTimeoutMs(60_000);
+      expect(config.getVisionBridgeTimeoutMs()).toBe(60_000);
+      config.setVisionBridgeTimeoutMs(2_147_483_648);
+      expect(config.getVisionBridgeTimeoutMs()).toBeUndefined();
+      config.setVisionBridgeTimeoutMs(45_000);
+      config.setVisionBridgeTimeoutMs(undefined);
+      expect(config.getVisionBridgeTimeoutMs()).toBeUndefined();
     });
   });
 
@@ -7551,7 +7563,7 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to on for headless, ACP, the Ink TUI and AgentCore and off for every other surface', () => {
+      it('defaults to on for headless, ACP, both TUIs and AgentCore and off for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(
             ON_BY_DEFAULT.has(surface),
@@ -7559,7 +7571,7 @@ describe('Server Config (config.ts)', () => {
         }
       });
 
-      it.each(['headless', 'acp', 'ink', 'agent-core'] as const)(
+      it.each(['headless', 'acp', 'ink', 'opentui', 'agent-core'] as const)(
         'keeps %s on its own loop when the setting is false',
         (surface) => {
           expect(
@@ -7570,7 +7582,7 @@ describe('Server Config (config.ts)', () => {
         },
       );
 
-      it.each(['headless', 'acp', 'ink', 'agent-core'] as const)(
+      it.each(['headless', 'acp', 'ink', 'opentui', 'agent-core'] as const)(
         'keeps %s on its own loop when the environment turns it off',
         (surface) => {
           vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', `${surface}=0`);
@@ -7612,21 +7624,21 @@ describe('Server Config (config.ts)', () => {
       });
 
       it('forces only the surfaces named in an env list', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'acp=1,ink=0');
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'acp=0,ink=0');
         const config = makeConfig();
-        expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(false);
         expect(config.isUnifiedAgentLoopEnabled('ink')).toBe(false);
-        // An unnamed surface falls back to its default, on for headless.
+        // Unnamed surfaces fall back to their own defaults.
         expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
-        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('hosted')).toBe(false);
       });
 
       it('resolves each surface independently', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'opentui');
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'speculation');
         const config = makeConfig();
-        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(true);
         expect(config.isUnifiedAgentLoopEnabled('hosted')).toBe(false);
-        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(false);
       });
     });
 
@@ -7649,22 +7661,22 @@ describe('Server Config (config.ts)', () => {
         // table is flipped — re-merging the two tables reds this case.
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
-        UNIFIED_SURFACE_DEFAULTS.opentui = true;
+        UNIFIED_SURFACE_DEFAULTS.speculation = true;
         const config = makeConfig();
-        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
-        expect(config.isEventBusAgentLoopEnabled('opentui')).toBe(
-          savedEventBus.opentui,
+        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('speculation')).toBe(
+          savedEventBus.speculation,
         );
       });
 
       it('flipping an event-bus surface default does not flip the unified default', () => {
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
-        EVENT_BUS_SURFACE_DEFAULTS.opentui = true;
+        EVENT_BUS_SURFACE_DEFAULTS.speculation = true;
         const config = makeConfig();
-        expect(config.isEventBusAgentLoopEnabled('opentui')).toBe(true);
-        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(
-          savedUnified.opentui,
+        expect(config.isEventBusAgentLoopEnabled('speculation')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(
+          savedUnified.speculation,
         );
       });
     });
@@ -7676,7 +7688,7 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to shared for headless, ACP, the Ink TUI and AgentCore and legacy for every other surface', () => {
+      it('defaults to shared for headless, ACP, both TUIs and AgentCore and legacy for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().getAgentLoopPath(surface)).toBe(
             ON_BY_DEFAULT.has(surface) ? 'shared' : 'legacy',

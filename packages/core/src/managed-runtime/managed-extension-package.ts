@@ -18,6 +18,10 @@ import type { OperationGrant } from './managed-extension-record.js';
 // effective bundle - widest ids, revisions and digests, plus 32 package views,
 // 32 prepared pins and 16 base pins - stays inside the 64 KiB inline bound. The
 // bundle carries the retained array once, from independentMcpSelections.
+// Fully-optioned package pins (settingsRevision) plus per-package degradation
+// can push the synthetic worst case past the bound; the publish-time capacity
+// guard rejects that corner fail-closed, and the reachable content-only shape
+// (empty effective MCP list) stays inside - pinned by the byte-boundary test.
 export const MAX_MCP_SELECTION_ENTRIES = 96;
 
 export interface ManagedExtensionCommandControl {
@@ -74,6 +78,7 @@ export interface ManagedExtensionPackageView {
   readonly pin: ManagedExtensionPin;
   readonly assetRoot: string;
   readonly contributionsRef: ManagedSessionDurableRef;
+  readonly degradedComponents?: ReadonlyArray<'mcp' | 'hooks'>;
 }
 
 export interface ManagedExtensionEffectiveBundle {
@@ -95,6 +100,7 @@ export interface ManagedExtensionPreparedPackage {
   readonly pin: ManagedExtensionPin;
   readonly assetRoot: string;
   readonly contributions: ManagedPackageContributions;
+  readonly degradedComponents?: ReadonlyArray<'mcp' | 'hooks'>;
 }
 
 export interface ManagedExtensionPrepareResult {
@@ -185,7 +191,12 @@ export function parseManagedExtensionEffectiveBundle(
   const packages = bundle['packages'].map(
     (value): ManagedExtensionPackageView => {
       const entry = object(value, 'package view');
-      keys(entry, ['pin', 'assetRoot', 'contributionsRef'], [], 'package view');
+      keys(
+        entry,
+        ['pin', 'assetRoot', 'contributionsRef'],
+        ['degradedComponents'],
+        'package view',
+      );
       const pin = parseManagedExtensionPin(entry['pin']);
       if (entry['assetRoot'] !== `extension://${pin.extensionId}/`)
         invalid('package asset root');
@@ -198,7 +209,13 @@ export function parseManagedExtensionEffectiveBundle(
         contributionsRef.schemaVersion !== 1
       )
         invalid('package contributions');
-      return { pin, assetRoot: entry['assetRoot'] as string, contributionsRef };
+      const degraded = degradedComponents(entry['degradedComponents']);
+      return {
+        pin,
+        assetRoot: entry['assetRoot'] as string,
+        contributionsRef,
+        ...(degraded.length ? { degradedComponents: degraded } : {}),
+      };
     },
   );
   if (
@@ -400,6 +417,22 @@ function mcpChange(value: unknown): ManagedExtensionMcpChange {
     expectedRevision: change['expectedRevision'] as number,
     servers,
   };
+}
+
+function degradedComponents(value: unknown): ReadonlyArray<'mcp' | 'hooks'> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 2) invalid('package degradation');
+  const declared = new Set<unknown>(value);
+  if (
+    declared.size !== value.length ||
+    [...declared].some(
+      (component) => component !== 'mcp' && component !== 'hooks',
+    )
+  )
+    invalid('package degradation');
+  return (['mcp', 'hooks'] as const).filter((component) =>
+    declared.has(component),
+  );
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
