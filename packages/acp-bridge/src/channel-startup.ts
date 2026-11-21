@@ -38,6 +38,7 @@ import {
   startChannelLivenessMonitor,
   type ChannelLivenessFailure,
 } from './channel-liveness.js';
+import { sampleChannelProcess } from './channel-process-sample.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import { withTimeout } from './with-timeout.js';
 import { writeStderrLine } from './internal/stderrLine.js';
@@ -418,13 +419,34 @@ export function createChannelStartup({
       const failChannelLiveness = (error: ChannelLivenessFailure) => {
         if (info.isDying || !channelLifecycle.has(info)) return;
         markTransportFailed(error);
+        const evidence = error.evidence;
+        const sample = evidence?.lastSample;
         telemetry.event('channel.liveness_failed', {
           'qwen-code.daemon.acp_channel.id': info.id,
           'qwen-code.daemon.channel.session_count': sessionCount(info),
           'qwen-code.daemon.channel.transport_error_code': error.code,
+          ...(evidence
+            ? {
+                'qwen-code.daemon.channel.liveness.pid': info.channel.pid,
+                'qwen-code.daemon.channel.liveness.state': sample?.state,
+                'qwen-code.daemon.channel.liveness.wchan': sample?.wchan,
+                'qwen-code.daemon.channel.liveness.cpu_delta_ticks':
+                  evidence.lastCpuDeltaTicks,
+                'qwen-code.daemon.channel.liveness.busy_extensions':
+                  evidence.busyExtensions,
+                'qwen-code.daemon.channel.liveness.consecutive_timeouts':
+                  evidence.consecutiveTimeouts,
+                'qwen-code.daemon.channel.liveness.rss_bytes': sample?.rssBytes,
+              }
+            : {}),
         });
+        // SIGKILL destroys the scene; the evidence must land in the log
+        // before the kill so the next incident is triageable.
+        const evidenceSuffix = evidence
+          ? ` pid=${info.channel.pid ?? '?'} state=${sample?.state ?? '?'} wchan=${sample?.wchan || '?'} cpuDelta=${evidence.lastCpuDeltaTicks ?? '?'} busy=${evidence.busyExtensions} timeouts=${evidence.consecutiveTimeouts} rssMB=${sample ? Math.round(sample.rssBytes / 1048576) : '?'}`
+          : '';
         writeStderrLine(
-          `qwen serve: channel liveness failed (${error.code}); killing channel`,
+          `qwen serve: channel liveness failed (${error.code})${evidenceSuffix}; killing channel`,
         );
         if (info.channel.transportGuard) {
           info.channel.transportGuard.fail(error);
@@ -438,6 +460,12 @@ export function createChannelStartup({
             v: CHANNEL_LIVENESS_VERSION,
             nonce,
           }),
+        sampleProcess: () => sampleChannelProcess(info.channel.pid),
+        onBusyExtension: ({ extension, limit, cpuDeltaTicks }) => {
+          writeStderrLine(
+            `qwen serve: channel liveness probe timed out but agent pid=${info.channel.pid ?? '?'} consumed CPU (${cpuDeltaTicks} ticks); extending grace ${extension}/${limit}`,
+          );
+        },
         onFailure: failChannelLiveness,
         isActive: () =>
           channelLifecycle.currentFor(engine) === info &&

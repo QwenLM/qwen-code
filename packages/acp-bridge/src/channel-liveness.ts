@@ -6,22 +6,50 @@
 
 import { performance } from 'node:perf_hooks';
 import { CHANNEL_LIVENESS_VERSION } from './bridgeTypes.js';
+import type { ChannelProcessSample } from './channel-process-sample.js';
 import { raceLongLived } from './race-long-lived.js';
 
 export const CHANNEL_LIVENESS_INTERVAL_MS = 15_000;
 export const CHANNEL_LIVENESS_PROBE_TIMEOUT_MS = 10_000;
 export const CHANNEL_LIVENESS_FAILURE_THRESHOLD = 2;
 export const CHANNEL_LIVENESS_TIMER_LATE_TOLERANCE_MS = 1_000;
+/**
+ * CPU-advancing timeouts accumulated since the last successful probe that
+ * are tolerated before the channel is failed anyway. A busy agent (GC
+ * pause, heavy synchronous work, scheduling delay) is not a dead agent,
+ * but an agent stuck in a busy loop consumes CPU forever — the grace must
+ * stay bounded so its sessions are still torn down and recovered.
+ */
+export const CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT = 6;
 
 export const CHANNEL_LIVENESS_TIMEOUT_CODE = 'acp_channel_liveness_timeout';
 export const CHANNEL_LIVENESS_PROTOCOL_ERROR_CODE =
   'acp_channel_liveness_protocol_error';
+
+/**
+ * Process state captured at failure time, before the SIGKILL destroys the
+ * scene. `lastCpuDeltaTicks` is the CPU progress across the final probe
+ * window; `undefined` means no trustworthy sample pair was available.
+ */
+export interface ChannelLivenessEvidence {
+  lastSample?: ChannelProcessSample;
+  lastCpuDeltaTicks?: number;
+  consecutiveTimeouts: number;
+  busyExtensions: number;
+}
+
+export interface ChannelLivenessBusyExtension {
+  extension: number;
+  limit: number;
+  cpuDeltaTicks: number;
+}
 
 export class ChannelLivenessFailure extends Error {
   constructor(
     readonly code:
       | typeof CHANNEL_LIVENESS_TIMEOUT_CODE
       | typeof CHANNEL_LIVENESS_PROTOCOL_ERROR_CODE,
+    readonly evidence?: ChannelLivenessEvidence,
   ) {
     super(
       code === CHANNEL_LIVENESS_TIMEOUT_CODE
@@ -37,6 +65,14 @@ interface ChannelLivenessMonitorOptions {
   onFailure(error: ChannelLivenessFailure): void;
   isActive(): boolean;
   now?: () => number;
+  /**
+   * Best-effort process snapshot, called at probe start and again on an
+   * on-time timeout. When both snapshots exist and CPU ticks advanced, the
+   * timeout is charged as a bounded busy extension instead of a failure
+   * strike. Omitted or `undefined` results keep the original accounting.
+   */
+  sampleProcess?: () => ChannelProcessSample | undefined;
+  onBusyExtension?: (info: ChannelLivenessBusyExtension) => void;
 }
 
 export interface ChannelLivenessMonitor {
@@ -67,6 +103,7 @@ export function startChannelLivenessMonitor(
   let stopped = false;
   let timer: NodeJS.Timeout | undefined;
   let consecutiveTimeouts = 0;
+  let busyExtensions = 0;
   let nextNonce = 0;
   let resolveStopped!: (outcome: ProbeOutcome) => void;
   const stoppedOutcome = new Promise<ProbeOutcome>((resolve) => {
@@ -94,6 +131,7 @@ export function startChannelLivenessMonitor(
     if (!isActive()) return;
     const nonce = nextNonce;
     nextNonce = nonce === Number.MAX_SAFE_INTEGER ? 0 : Math.max(0, nonce + 1);
+    const baselineSample = options.sampleProcess?.();
     const response = Promise.resolve()
       .then(() => options.probe(nonce))
       .then<ProbeOutcome, ProbeOutcome>(
@@ -123,29 +161,68 @@ export function startChannelLivenessMonitor(
       if (outcome.kind === 'stopped' || !isActive()) return;
       if (outcome.kind !== 'local_delay') break;
       consecutiveTimeouts = 0;
+      busyExtensions = 0;
     }
 
     if (outcome.kind === 'response') {
       if (!isValidResponse(outcome.response, nonce)) {
-        fail(new ChannelLivenessFailure(CHANNEL_LIVENESS_PROTOCOL_ERROR_CODE));
+        fail(
+          new ChannelLivenessFailure(CHANNEL_LIVENESS_PROTOCOL_ERROR_CODE, {
+            lastSample: options.sampleProcess?.(),
+            consecutiveTimeouts,
+            busyExtensions,
+          }),
+        );
         return;
       }
       consecutiveTimeouts = 0;
+      busyExtensions = 0;
       schedule(CHANNEL_LIVENESS_INTERVAL_MS);
       return;
     }
     if (outcome.kind === 'rejected') {
       await Promise.resolve();
-      fail(new ChannelLivenessFailure(CHANNEL_LIVENESS_PROTOCOL_ERROR_CODE));
+      fail(
+        new ChannelLivenessFailure(CHANNEL_LIVENESS_PROTOCOL_ERROR_CODE, {
+          lastSample: options.sampleProcess?.(),
+          consecutiveTimeouts,
+          busyExtensions,
+        }),
+      );
       return;
     }
 
-    consecutiveTimeouts++;
-    if (consecutiveTimeouts >= CHANNEL_LIVENESS_FAILURE_THRESHOLD) {
-      fail(new ChannelLivenessFailure(CHANNEL_LIVENESS_TIMEOUT_CODE));
-      return;
+    const afterSample = options.sampleProcess?.();
+    const cpuDeltaTicks =
+      baselineSample && afterSample
+        ? afterSample.cpuTicks - baselineSample.cpuTicks
+        : undefined;
+    if (cpuDeltaTicks !== undefined && cpuDeltaTicks > 0) {
+      busyExtensions++;
+      if (busyExtensions < CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT) {
+        options.onBusyExtension?.({
+          extension: busyExtensions,
+          limit: CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT,
+          cpuDeltaTicks,
+        });
+        void runProbe();
+        return;
+      }
+    } else {
+      consecutiveTimeouts++;
+      if (consecutiveTimeouts < CHANNEL_LIVENESS_FAILURE_THRESHOLD) {
+        void runProbe();
+        return;
+      }
     }
-    void runProbe();
+    fail(
+      new ChannelLivenessFailure(CHANNEL_LIVENESS_TIMEOUT_CODE, {
+        lastSample: afterSample,
+        lastCpuDeltaTicks: cpuDeltaTicks,
+        consecutiveTimeouts,
+        busyExtensions,
+      }),
+    );
   };
 
   function schedule(delayMs: number): void {
@@ -156,6 +233,7 @@ export function startChannelLivenessMonitor(
       if (!isActive()) return;
       if (timerWasLate(expectedAt)) {
         consecutiveTimeouts = 0;
+        busyExtensions = 0;
         schedule(CHANNEL_LIVENESS_INTERVAL_MS);
         return;
       }
