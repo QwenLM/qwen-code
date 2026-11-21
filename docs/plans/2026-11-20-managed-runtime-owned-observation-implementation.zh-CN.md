@@ -45,18 +45,22 @@
 - **wake 与 seal 围栏 + delete/retirement 清理 — 已落地（提交 `84ab21559a`）。** `JournalWriterLifecycle.sealWriter` 在 `hasWakeWorthyRow` 为真时保留 `is_wake_pending = TRUE` 与 `wake_retry_at <= now`，排空后仍正常清除 `is_wake_pending`；`JdbcWakeRecoveryStore.hasPendingInput` 对暂存唤醒行短路跳过 journal proof，`recordPending(candidate, false)` 带 `NOT EXISTS (... is_wake_worthy = 1)` 守卫。`ToolPublicationRetentionStore.retire` 清除唤醒提示，`ManagedSessionRetirementStore` 删除 `ma_runtime_stage` 行与 `RUNTIME_STAGE` ref；退役后到达的尾随 `stageBatch` 跳过暂存但仍结算 `:process`。
 - **re-attach-then-drain 与持久化 Broker adoption — 已落地（提交 `6d38181b06`、`98d4d66744`）。** `HostedShellPublisher` 对 `output`/`observation`/`terminal` 重放幂等，并在 `reattachAndDrainBackgroundDeliveries`（`hosted-background-delivery-recovery.ts`，于 `hosted-harness-session.ts` 的 `retryHostedCleanup` 之前接入）执行期间通过 `deliveryGate` 暂住实时 worker 推送，先重挂 publisher，再经 `/harness-sessions/{id}/staged-deliveries/list` 按序排空提交、经 `/staged-deliveries/acknowledge` 删除暂存并播种 `observedRuns` 水位。`RuntimeObservationCoordinator.requireOrAdoptReadySession` 跨 Broker 重启与多副本领养持久化 binding/Session，覆盖 publisher 安装/摘除、后台观测/取消（`stopBackgroundProcess`）与 Monitor 控制。验证：TS `managed-background-delivery.test.ts` 7/7、`managed-runtime-worker-routes.test.ts` 26/26、`hosted-shell-publisher.background.test.ts` 26/26、`managed-context-worker.test.ts` 814/814、`cli` build+eslint 0；Java `RuntimeStageStoreTest` 4/4、`RuntimeObservationPullerTest` 1/1、`RuntimeBrokerHttpServerTest` 40/40、`WakeRecoveryStoreTest` 29/29、`WakeSealStampTest` 8/8、`ClassSizeRatchetTest`/`ModuleArchitectureTest`/`SurfaceRegistryGateTest` + 双 Checkstyle 全绿。
 
-## 切片 3 — 后台挂起（未动）
+## 切片 3 — 后台挂起（已落地、已验证；生产默认关闭）
 
-设计 §4.8–§4.11。已映射的触点：
+设计 §4.8–§4.11。落地于提交 `f9e5fc0d94`（Java）与 `b920907f61`（TS + grant）：
 
-- **资格**：逐 run 经 `hasBackgroundHoldEvidence`（`hosted-turn-cleanup.ts:242`）豁免 `suspensionLiveWork` 的后台项（`hosted-harness-session.ts:5059,5063,5075-5088`）；准入时（绝不在 teardown）要求 binding worker advertise `runtime-observation/1`。其余仍阻塞。
-- **seal 证书**：挂起 seal 的 `wake` 增加 `backgroundHeld:true`；新 head 列 `wake_seal_background` 在 writer 围栏/revision 检查下写入；任何 writer acquisition 清除。恢复 `ready` 臂仅在 `wake_seal_revision = journal_revision AND wake_seal_background` 时接受未结算 `runtime_state`/`HOSTED_CLEANUP`。`HostedCleanupRetryCoordinator.java:128` 跳过此类 head 的 debt。
-- **probe-only release**：两条挂起 drain 路径（`hosted-harness-session.ts:5170,5172`）跑 probe-only；`held` 仅在确认为当前 binding+generation 的后台执行时计为成功；前台 debt 仍失败。后台-only hold 保留 mount（`RuntimeExecutionRecovery.java:370-394` 容忍）。
-- **带最终确认的 detach**：publisher 步骤等待在途推送，经 Broker detach 并携带最终 `appliedThrough`；Broker 在同一事务删除至该点的 staged 行；worker 转 held。
-- **reclamation 守卫**：`reclaimParkedMcp` 在 `transport.reclaimMcp` 前检查活跃后台执行，拒绝且不关闭连接（`RuntimeBrokerService.java:587`）；移除附带的结算 sweep。
-- **drain-only 退出 wake**：terminal 条目标记 wake；加载 drain staging 并结算 run，不提交任何 input（无模型 turn）；若无其他 pending 则重新 seal/挂起。
-- **delete 清理**：已在切片 2 落地（提交 `84ab21559a`）；切片 3 按需衔接挂起态摘除/回收路径。
-- **发布门**：setting `qwen.managed-agent.runtime-observation.enabled`（默认关）在 writer grant 中 beside `wakeDispatch` advertise 为 `runtimeObservation`；worker capability；逐 run 证据。一旦挂起，pull 不论 setting 均运行。
+- **资格 — 已落地。** `backgroundSuspensionCertificate`（`hosted-turn-cleanup.ts`）仅在「每个未结算 run 都是带 start receipt、`running`/`waiting` + `running_attached`、且其 binding 的 worker 已接管采集（`HostedShellTurnOptions.observationBindings`，键 `bindingId@generation`，在 `dispatchStarted` 处登记）的 shell/monitor hold」且「每个 owed cleanup descriptor 都通过既有 `hasBackgroundHoldEvidence`」时，豁免 `suspensionLiveWork` 的四个后台项（owed cleanup、`heldRuntimeTurns`、活跃 monitor loop、未结算 `child_run`/`monitor_run`）。`child_agent`/workflow run、`runtime_lost`、旧 generation、不支持的 worker 一律保持常驻。证书在每轮资格检查重新推导；两轮之间豁免失效则回退本次尝试。
+- **seal 证书 — 已落地。** 新增 `ma_session_head.wake_seal_background`（含 boolean CHECK 与 projection 列），由 `sealWriter` 在与 stamp 相同的 writer 围栏与 revision 校验下写入，任何 writer acquisition 清除；`WakeStamp.backgroundHeld`（TS `ManagedSessionWakeStamp.backgroundHeld`）承载。恢复 `ready` 臂在该 sealed revision 上经 `hasUnsettledWork(..., backgroundCertified)` 读取，此时仅未结算 Turn 仍阻塞；`JdbcHostedCleanupDebtStore.OWED` 跳过此类 head 的 debt，不再为其重新加载。
+- **probe-only release — 已落地。** 两条挂起路径均传 `probeOnly`：`releaseLeaseNow` 不 drain 释放并把 Broker 确认的 `held` 视为成功，`retryHostedCleanup` 不带 `drain: true` 对账。前台 debt 仍使 teardown 失败；close 保留其终止并排空路径。
+- **带最终确认的 detach — 已落地。** `HostedShellPublisher.quiesce()` 只等一轮有界的在途推送（绝不等「静默」——活跃 Shell 会持续推送），随后 `detachBackgroundPublishers` 对每个 lane 的 publisher 经 `/tool-sessions/{id}/publisher/detach` 携带 `appliedThrough` 摘除；Broker 在摘除事务内删除至该点的暂存行，worker 转 held。本地监听仍关闭，因为该常驻正在退出。
+- **reclamation 守卫 — 已落地。** `reclaimParkedMcp` 在 `transport.reclaimMcp` 之前，只要该 binding+generation+Runtime Session 仍有活跃执行行即拒绝，因此活跃后台工作下不会关闭任何连接；附带的结算 sweep 已移除（由 pull 结算已结束的 run）。
+- **drain-only 退出 wake — 已落地（切片 2 + 既有 idle 挂起）。** terminal 条目标记 wake，加载排空并结算且不提交任何 input，idle 计时器重新 seal；不为其跑模型 turn。
+- **delete 清理 — 已在切片 2 落地**（`84ab21559a`）。
+- **发布门 — 已落地，默认关闭。** `qwen.managed-agent.runtime-observation.enabled`（默认 false）在 writer grant 中 beside `wakeDispatch` advertise 为 `runtimeObservation`（`WriterGrant.withRuntimeObservation`、`supportsRuntimeObservation()`）；worker capability 即上述逐 binding 登记。一旦 Session 挂起，pull 与 staging 不论 setting 均运行。
+
+验证：Java `WakeSealStampTest` 12/12、`SessionRecoveryServiceTest` 67/67、`HostedCleanupDebtStoreTest` 7/7、`RuntimeBrokerServiceTest` 214/214、`ManagedSessionStoreIntegrationTest` 16/16、`WorkspaceRecoveryStoreTest` 33/33、`StoreLockTraceTest` 16/16、`ManagedSchemaTest` 27/27、surface/架构/尺寸门 + 双 Checkstyle 全绿。TS `hosted-turn-cleanup.test.ts` 33/33（新增 4 个证书用例）、`hosted-session-suspension.test.ts` + `managed-background-delivery.test.ts` + `hosted-shell-publisher.background.test.ts` 合计 89/89、core store 246/246、core+cli 构建与 ESLint 干净。
+
+**切片 3 投产前仍剩：** 真实 worker 上的端到端挂起 E2E（经 daemon 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环），与 MySQL 8.4 故障矩阵一并属切片 4 验收。
 
 ## 切片 4 — 验收与度量（未动）
 
