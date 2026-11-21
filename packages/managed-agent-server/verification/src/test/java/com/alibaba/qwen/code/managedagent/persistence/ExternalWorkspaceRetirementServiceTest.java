@@ -236,11 +236,11 @@ class ExternalWorkspaceRetirementServiceTest {
                 .isEqualTo(RuntimeBindingRecord.State.RELEASED);
         assertThat(jdbc.queryForMap("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
                 + " FROM ma_storage_owner").values()).containsOnlyNulls();
-        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, physical_key, mount_root, mount_revision"
+        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, storage_key, mount_root, mount_revision"
                 + " FROM ma_storage_owner")).isEqualTo(Map.of(
                         "tenant_id", owner.get("tenant_id"),
                         "storage_id", owner.get("storage_id"),
-                        "physical_key", owner.get("physical_key"),
+                        "storage_key", owner.get("storage_key"),
                         "mount_root", owner.get("mount_root"),
                         "mount_revision", owner.get("mount_revision")));
         assertThat(executions.findByIdempotencyKey("tool-key").getState())
@@ -481,9 +481,9 @@ class ExternalWorkspaceRetirementServiceTest {
 
     @Test
     void terminalFailedOperationWithBlockedDeliveryDoesNotFenceRetirement() {
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind,"
                 + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', 'FAILED', 'FAILED', 'BLOCKED', 1, 1)",
                 "a".repeat(64), "b".repeat(64), "turn-op".getBytes(),
                 "tenant".getBytes(), "c".repeat(64));
@@ -520,9 +520,9 @@ class ExternalWorkspaceRetirementServiceTest {
     @ParameterizedTest
     @ValueSource(strings = {"READY", "SUCCEEDED", "RETURNED", "SUPPRESSED", "REMOVED"})
     void permanentSuccessOperationDoesNotFenceRetirement(String state) {
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind,"
                 + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'TOOL_RESULT_PROJECTION', ?, 'user-session', 'SESSION', ?,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', ?, ?, 'DONE', 1, 1)",
                 (state + "-key").repeat(10).substring(0, 64), "b".repeat(64),
                 (state + "-op").getBytes(StandardCharsets.UTF_8),
@@ -537,9 +537,9 @@ class ExternalWorkspaceRetirementServiceTest {
 
     @Test
     void aPendingOperationStillFencesRetirement() {
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind,"
                 + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', 'PENDING', 'PENDING', 'PENDING', 1, 1)",
                 "d".repeat(64), "e".repeat(64), "pending-op".getBytes(StandardCharsets.UTF_8),
                 "tenant".getBytes(StandardCharsets.UTF_8), "f".repeat(64));
@@ -556,21 +556,20 @@ class ExternalWorkspaceRetirementServiceTest {
         // approval was decided. None of that is live work: the operation fence
         // proves the named operation terminal, so the head shape must not
         // fence retirement of the lost Worker.
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind,"
                 + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'RENAME', ?, 'user-session', 'SESSION', ?,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'RENAME', ?, 'user-session', 'SESSION', ?,"
                 + " 'digest', '{}', 'SUPERSEDED', 'COMPLETED', 'BLOCKED', 1, 1)",
                 "d".repeat(64), "e".repeat(64), "settled-drain-op".getBytes(StandardCharsets.UTF_8),
                 "tenant".getBytes(StandardCharsets.UTF_8), "f".repeat(64));
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, session_id, harness_session_id,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id,"
                 + " head_kind, phase, operation_id, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, 'user-session', 'user-session', 'HARNESS', 'DRAINING', ?, 1, 1)",
-                "1".repeat(64), "2".repeat(64), "tenant".getBytes(StandardCharsets.UTF_8),
+                + " VALUES (?, 'user-session', 'user-session', 'HARNESS', 'DRAINING', ?, 1, 1)",
+                "tenant".getBytes(StandardCharsets.UTF_8),
                 "settled-drain-op".getBytes(StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, session_id,"
                 + " domain, record_id, revision, gmt_create, record_kind, state, action_id, action_version, options_json)"
-                + " VALUES (?, ?, ?, 'user-session', 'action', 'action', 1, 1, 'ACTION', 'decided', 'action', 1, '{}')",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "user-session"),
+                + " VALUES (?, ?, 'user-session', 'action', 'action', 1, 1, 'ACTION', 'decided', 'action', 1, '{}')",
                 "3".repeat(64), "tenant".getBytes(StandardCharsets.UTF_8));
 
         var receipt = service.retire(request, this::terminated);

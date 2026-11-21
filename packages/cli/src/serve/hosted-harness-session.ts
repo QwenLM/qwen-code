@@ -1370,11 +1370,25 @@ function harnessAuthorizationDetail(
     : `${authorization.reason}: ${sanitizeDaemonLogLine(authorization.message)}`;
 }
 
+/** The fence codes a close in flight raises under either lifecycle
+ * protocol: the v1 lifecycle fence or the v2 claim fence (files-on-v2).
+ * Shared by ordinaryAuthorizationError and the children/operations claim
+ * gate so the two cannot drift apart. */
+function isLifecycleFenceRemoteCode(code: unknown): boolean {
+  return (
+    code === 'managed_session_lifecycle_active' ||
+    code === 'workspace_lifecycle_claim_fenced'
+  );
+}
+
 function ordinaryAuthorizationError(res: Response, cause: unknown): void {
+  // A close in flight fences ordinary admission under either protocol:
+  // the v1 lifecycle fence or the v2 claim fence (files-on-v2). Both are
+  // conflicts that retry cannot clear until the close finishes.
   if (
     cause instanceof ManagedSessionStoreHttpError &&
     cause.status === 409 &&
-    cause.remoteCode === 'managed_session_lifecycle_active'
+    isLifecycleFenceRemoteCode(cause.remoteCode)
   )
     return error(res, 409, 'hosted_lifecycle_operation_active');
   error(res, 503, 'hosted_execution_authorization_unavailable');
@@ -1655,6 +1669,69 @@ async function attemptedPendingWakeInput(session: HostedSession) {
   return (
     pending.find((input) => wakeHasPriorAttempt(projected, input.turnId)) ??
     pending[0]
+  );
+}
+
+/** H4f × H4d-b: a stopped run's message inputs never start a turn; the
+ * relay's stop settles them. */
+function isStoppedMessage(
+  session: Pick<HostedSession, 'messagesStopped'>,
+  source: string | undefined,
+): boolean {
+  return (
+    session.messagesStopped === true && source === SESSION_MESSAGE_INPUT_SOURCE
+  );
+}
+
+/**
+ * The wake pump's pick over the committed prefix: the first deliverable wake
+ * input due at `now` and the earliest future notBefore it skips. Deferral is
+ * per input, not head-of-line.
+ */
+function pickWakeInputs(
+  session: HostedSession,
+  now: number,
+): { first?: PendingSessionInput; earliestDeferred?: number } {
+  const authority = session.managed.authority;
+  let first: PendingSessionInput | undefined;
+  let earliestDeferred: number | undefined;
+  for (const input of pendingSessionInputs(
+    authority.eventsInSequenceRange(1, authority.committedSequence),
+  )) {
+    if (
+      !isWakeInputSource(input.source) ||
+      isStoppedMessage(session, input.source)
+    ) {
+      continue;
+    }
+    if (input.notBefore !== null && input.notBefore > now) {
+      if (earliestDeferred === undefined || input.notBefore < earliestDeferred)
+        earliestDeferred = input.notBefore;
+      continue;
+    }
+    first ??= input;
+  }
+  return { first, earliestDeferred };
+}
+
+/**
+ * Where the control plane delivers wake inputs at their due time, it owns
+ * only deferred, unattempted ones. A due input is the pump's to run now, a
+ * stopped run's message waits for the relay's stop, and an attempted or
+ * non-wake input keeps its existing recovery.
+ */
+export function wakeDispatchOwnsInput(
+  session: Pick<HostedSession, 'messagesStopped'>,
+  input: PendingSessionInput,
+  projected: ReadonlyArray<{ readonly daemonPromptId?: string }>,
+  now: number,
+): boolean {
+  return (
+    isWakeInputSource(input.source) &&
+    !isStoppedMessage(session, input.source) &&
+    input.notBefore !== null &&
+    input.notBefore > now &&
+    !wakeHasPriorAttempt(projected, input.turnId)
   );
 }
 
@@ -5053,15 +5130,22 @@ export function registerHostedHarnessSessionRoutes(
     };
     const outcome = await runSuspensionAttempt(suspension, {
       pendingInputs: async () => {
-        const pending =
-          pendingSessionInputs(
-            session.managed.authority.eventsInSequenceRange(
-              1,
-              session.managed.authority.committedSequence,
-            ),
-          ).length > 0;
-        if (!marked && pending) suspensionStats.eligibilityFailures += 1;
-        return pending;
+        const pending = pendingSessionInputs(
+          session.managed.authority.eventsInSequenceRange(
+            1,
+            session.managed.authority.committedSequence,
+          ),
+        );
+        let blocked = pending.length > 0;
+        if (blocked && session.stores?.supportsWakeDispatch?.()) {
+          const projected = await session.managed.sink.project();
+          const now = Date.now();
+          blocked = pending.some(
+            (input) => !wakeDispatchOwnsInput(session, input, projected, now),
+          );
+        }
+        if (!marked && blocked) suspensionStats.eligibilityFailures += 1;
+        return blocked;
       },
       markClosing: (attemptStart) => {
         if (
@@ -5120,8 +5204,24 @@ export function registerHostedHarnessSessionRoutes(
             // it, so waiting from within would deadlock.
             await session.managed.stopRenewal();
             await session.managed.releaseActivation();
-            // The memoized seal: a retry reconciles this same seal.
-            await session.managed.authority.close();
+            // The memoized seal: a retry reconciles this same seal. The wake
+            // stamp is what the pump would pick from the prefix this seal
+            // closes, recomputed on every retry.
+            let wake: { pending: boolean; dueAt: number } | undefined;
+            if (session.stores?.supportsWakeDispatch?.()) {
+              const { first, earliestDeferred } = pickWakeInputs(
+                session,
+                Date.now(),
+              );
+              wake =
+                first !== undefined
+                  ? { pending: true, dueAt: 0 }
+                  : {
+                      pending: earliestDeferred !== undefined,
+                      dueAt: earliestDeferred ?? 0,
+                    };
+            }
+            await session.managed.authority.close(wake);
             done.writer = true;
           }
           // Only after every step confirmed: stopLocal fences the seal
@@ -7724,11 +7824,6 @@ export function registerHostedHarnessSessionRoutes(
             wakeAftermathInFlight = false;
           }
         });
-        // H4f × H4d-b: a stopped run's message inputs never start a turn;
-        // the relay's stop settles them.
-        const stoppedMessage = (source: string | undefined) =>
-          session.messagesStopped === true &&
-          source === SESSION_MESSAGE_INPUT_SOURCE;
         // The earliest future notBefore among the wake inputs the pick
         // below skips as not yet due. The pump's deferUntil reads the value
         // this same journal pass computed, so deferral costs no second read.
@@ -7738,32 +7833,10 @@ export function registerHostedHarnessSessionRoutes(
             // The whole committed prefix, not a bounded page: a notification
             // input lands late in the log, and a default-sized read would
             // hide every one of them once the Session passes that page.
-            const authority = session.managed.authority;
-            const now = Date.now();
-            let first: PendingSessionInput | undefined;
-            let earliestDeferred: number | undefined;
-            for (const input of pendingSessionInputs(
-              authority.eventsInSequenceRange(1, authority.committedSequence),
-            )) {
-              if (
-                !isWakeInputSource(input.source) ||
-                stoppedMessage(input.source)
-              ) {
-                continue;
-              }
-              if (input.notBefore !== null && input.notBefore > now) {
-                // Not yet due: defer this input without parking a due one
-                // behind it — deferral is per input, not head-of-line.
-                if (
-                  earliestDeferred === undefined ||
-                  input.notBefore < earliestDeferred
-                ) {
-                  earliestDeferred = input.notBefore;
-                }
-                continue;
-              }
-              if (first === undefined) first = input;
-            }
+            const { first, earliestDeferred } = pickWakeInputs(
+              session,
+              Date.now(),
+            );
             deferredUntil = earliestDeferred;
             if (first === undefined) return undefined;
             if (isHostedWakeContinuationId(first.turnId)) {
@@ -7838,7 +7911,7 @@ export function registerHostedHarnessSessionRoutes(
                   ? session.loops.expandFireText(turnId, text)
                   : Promise.resolve({ text, expanded: false }),
               busy: wakeBusy,
-              held: (turn) => stoppedMessage(turn.source),
+              held: (turn) => isStoppedMessage(session, turn.source),
               cancelled: async (turn) =>
                 (turn.source === AUTOMATION_INPUT_SOURCE &&
                   session.automations?.cancelRequested(turn.turnId) === true) ||
@@ -9081,7 +9154,7 @@ export function registerHostedHarnessSessionRoutes(
           req.path === '/children/operations' &&
           cause instanceof ManagedSessionStoreHttpError &&
           cause.status === 409 &&
-          cause.remoteCode === 'managed_session_lifecycle_active'
+          isLifecycleFenceRemoteCode(cause.remoteCode)
         ) {
           // Closing work means lifecycle admission, so the parent's own
           // child cleanup presents the matching lifecycle claim instead:
@@ -10178,7 +10251,7 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_turn_active');
     if (action !== 'register')
       return error(res, 400, 'invalid_client_files_action');
-    // A foregroundOnly, memory-only (no toolProfile), or external-files Session
+    // A foregroundOnly, memory-only (no toolProfile), or external Session
     // never declares a client-files catalog — the Turn drops the lane or the
     // external branch never calls clientFilesDeclarations — so registering a
     // relay client would hold a connection for tools no Turn hands out while
@@ -10187,7 +10260,7 @@ export function registerHostedHarnessSessionRoutes(
     if (
       session.foregroundOnly ||
       !session.toolProfile ||
-      session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+      isHostedWorkspaceExternalProfile(session.toolProfile)
     )
       return error(res, 409, 'hosted_client_files_profile_unsupported');
     const serverId = body?.['serverId'];

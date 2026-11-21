@@ -278,11 +278,11 @@ remote191 上指定的公开 files/close E2E（`ExternalPublicFilesE2E`，随第
 
 ### 边界
 
-新增一个独立档案 `hosted-workspace-external-shell/1`，声明 `read_file`、`write_file`、`edit`、`glob`，以及**仅前台**的 `run_shell_command`。它绝不是 `hosted-workspace-external-files/1` 的重新解释：那个档案继续拒绝所有 Shell 调用，两者也不共用 part/handle 版本。
+新增一个独立档案 `hosted-workspace-external-shell/1`，声明 `read_file`、`write_file`、`edit`、`glob`，以及**仅前台**的 `run_shell_command`。它绝不是 `hosted-workspace-external-files/1` 的重新解释：那个档案继续拒绝所有 Shell 调用，两者靠各自的 capability digest 区分，也不共用 part/handle 版本。
 
 它的 capability 是自己的：`sha256("managed-workspace-execution/1;external-shell/1")`，与 terminal capability 一样从规范字符串派生，两侧钉同一个 hex。它的 resource-handle 版本是 **2**，与 files 档案的 **1** 区分开；启动恢复同时接受 1 和 2，这样本切片之前准入的 worker 代次仍可恢复，而新供给一律写 2，`validateHandle` 精确比对。
 
-准入要求：选中的 kind 是 `external-workspace`、session 隔离、持久化的已登记外部存储（临时 sandbox 目录直接拒绝——它拿不出 drain 证明）、显式预留 `captureBytes`，以及协商到位的 feature token。它由自己的开关控制——`QWEN_MANAGED_AGENT_EXTERNAL_WORKSPACE_SHELL_ENABLED`，默认 **false**——与 files 开关相互独立，因此打开 files 绝不会顺带打开 Shell。
+准入要求：选中的 kind 是 `external-workspace`、session 隔离、持久化的已登记外部存储（临时 sandbox 目录直接拒绝——它拿不出 drain 证明）、显式预留 `captureBytes`，以及协商到位的 feature token。它由自己的开关控制——`QWEN_MANAGED_AGENT_EXTERNAL_WORKSPACE_SHELL_ENABLED`，默认 **false**——与 files 开关相互独立，因此打开 files 绝不会顺带打开 Shell。`QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED` 是本地 `hosted-workspace-shell/1` 的开关，不控制该档案。
 
 本档案上仍然关闭的能力：后台 Shell（`is_background`）、`monitor`、`web_fetch`、skills、hooks/extensions、MCP、子 agent/workspace/snapshot、teams、messages、session commands、plan mode、rewind、memory、automations、channels。Harness 在 Session 准入处拒绝，Broker 在每次 dispatch 再拒一次，worker 自己的前台 ledger 门第三次拒绝。这三道拒绝刻意相互独立：任何一道单独成立就能让这个 placement 保持诚实。
 
@@ -339,8 +339,9 @@ worker 的 status 同时也是本通道长命令唯一的结果来路：它自�
 
 - dispatch 通道的时序，以及 cancel 与 reconciliation 两道 fence。
 - 关闭/恢复这几条跑在真实 JDBC 仓储上，H2 与一次性 **MySQL 8.4** 数据库各跑一遍：Shell 在飞时关闭、`LOST` worker 不构成充分证明、丢失恢复的 abandon、worker 换代、重启恢复。
-- capture 协议的 worker 那一半**对真实 worker 进程、走真 HTTP**，并通过真实带 attest 的 transport 驱动：`begin` 按 execution 幂等、每个块都被读取并确认直到它自己那个空 EOF、空 stderr 同样由 EOF 界定、多块 capture 不丢不乱序、`renew` 只把 horizon 往前推、EOF 未确认时 drained stop 拒绝、`pending` 绝不被当成空块、外来 lease 或过期 incarnation 根本到不了 capture。
+- capture 协议的 worker 那一半**对真实 worker 进程、走真 HTTP**，并通过真实带 attest 的 transport 驱动：`begin` 按 execution 幂等、每个块都被读取并确认直到它自己那个空 EOF、空 stderr 同样由 EOF 界定、多块 capture 不丢不乱序（含跨块边界的多字节字符）、`renew` 只把 horizon 往前推并让通道活过原 lease、经传输层封闭体校验的 drained stop 在 EOF 未确认时拒绝、`pending` 绝不被当成空块也不推进游标、外来 lease 或过期 incarnation 根本到不了 capture。
+- producer 端到端**基于 H2 上的真实控制面 publication 存储**，完整预留链先提交：worker capture 变成已完成、可回读的 publication，重建的 manifest 由 store 自己的 `validateFinished` 证明忠实；多块 capture 逐段发布；续期后的 grant 延长同一 channel；失败退出码作为结果自身的 outcome 发布；不完整 capture 在搬运任何块之前被拒；超出预留字节的 capture 拒绝而不是发布短流；worker 消失或外来 lease 绝不会完成 publication。
 
 每道 fence、每条 wire 规则都用对应用例做过变异验证。整个模块的 Checkstyle 门禁通过。
 
-仍未运行：SpotBugs、TypeScript 消费方测试、MySQL 上的真实并发归属，以及完整的 `mysql-integration` 与 Hosted/fault profile（这些由 CI 负责）。worker 替身实现的是已发布 worker 的通道规则，但它**不是**那个已发布的 worker：两半还没有在同一棵进程树里对跑过。producer 往控制面存储写入的那一段也仍未端到端验证——它需要完整的预留链，所以协议用例是直接驱动 Broker 的复制游标，而不是经由 `ToolPublicationDataStore`。真实 provider 验收、UI 验证、人工评审与部署门禁全部待定。本节记录的是实现边界与上述证据，不是完整验收。
+仍未运行：SpotBugs、TypeScript 消费方测试、MySQL 上的真实并发归属，以及完整的 `mysql-integration` 与 Hosted/fault profile（这些由 CI 负责）。worker 替身实现的是已发布 worker 的通道规则，但它**不是**那个已发布的 worker：两半还没有在同一棵进程树里对跑过。真实 provider 验收、UI 验证、人工评审与部署门禁全部待定。本节记录的是实现边界与上述证据，不是完整验收。

@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.ParkedMcpOwners;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,11 +41,11 @@ class JdbcParkedMcpOwnersTest {
 
     private void head(String state, long sealedForMillis) {
         long now = System.currentTimeMillis();
-        jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, tenant_key, harness_key,"
-                + " head_kind, state, storage_version, writer_generation, journal_revision, committed_sequence,"
-                + " activation_epoch, gmt_create, gmt_modified) VALUES (?, 'session', 'session', ?, ?,"
-                + " 'MANAGED_SESSION', ?, 1, 1, 0, 0, 0, ?, ?)",
-                TENANT, RuntimeAdmissionFences.harnessDrainKey(TENANT), RuntimeAdmissionFences.harnessDrainKey("session"),
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, "
+                + " head_kind, state, writer_generation, journal_revision, committed_sequence,"
+                + " activation_epoch, gmt_create, gmt_modified) VALUES (?, 'session', 'session',"
+                + " 'MANAGED_SESSION', ?, 1, 0, 0, 0, ?, ?)",
+                TENANT,
                 state, now, now - sealedForMillis);
     }
 

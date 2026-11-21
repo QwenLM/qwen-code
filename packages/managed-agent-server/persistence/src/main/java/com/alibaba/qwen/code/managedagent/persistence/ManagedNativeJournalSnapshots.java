@@ -77,7 +77,7 @@ public class ManagedNativeJournalSnapshots {
     public record Manifest(String format, String payloadFormat, String tenantId, String workspaceId,
             String sessionId, String snapshotId, long coveredJournalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch, String latestCheckpointResourceId,
-            int storageVersion, long pageCount, long resourceCount, String lastPageDigest) { }
+            long pageCount, long resourceCount, String lastPageDigest) { }
 
     public record Descriptor(Manifest snapshot, ToolResultResourceRef manifest, boolean replayed) { }
 
@@ -181,11 +181,11 @@ public class ManagedNativeJournalSnapshots {
                 && Objects.equals(commit, head.lastCommitDigest())
                 && Objects.equals(checkpoint, head.latestCheckpointResourceId()), "managed_session_journal_corrupt");
         long resourceCount = jdbc.queryForObject("SELECT COUNT(DISTINCT resource_key) FROM ma_resource_ref"
-                + " WHERE session_scope_key = ? AND owner_kind = 'JOURNAL' AND owner_key = ?"
-                + " AND owner_revision = journal_revision AND journal_revision <= ?", Long.class, scope, scope, revision);
+                + " WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'JOURNAL' AND owner_key = ?"
+                + " AND owner_revision = journal_revision AND journal_revision <= ?", Long.class, tenant, session, scope, revision);
         Manifest manifest = new Manifest(FORMAT, PAYLOAD_FORMAT, tenant, request.workspaceId(), session,
                 request.snapshotId(), revision, sequence, commit, activation, checkpoint,
-                head.storageVersion(), revision, resourceCount, previousPage);
+                revision, resourceCount, previousPage);
         byte[] manifestBytes = encode(manifest);
         String id = manifestId(scope, request.snapshotId());
         StoredResource stored = new StoredResource(id, MANIFEST_KIND, 1, manifestBytes.length,
@@ -197,16 +197,17 @@ public class ManagedNativeJournalSnapshots {
         require(current.journalRevision() == request.expectedJournalRevision()
                 && current.committedSequence() == request.expectedCommittedSequence()
                 && Objects.equals(current.lastCommitDigest(), request.expectedLastCommitDigest()), "managed_session_head_conflict");
-        String copy = "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
+        String copy = "INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision,"
                 + " resource_key, tenant_id, workspace_id, session_id, resource_id, journal_revision, gmt_create)"
-                + " SELECT ?, 'NATIVE_SNAPSHOT', ?, ?, resource_key, ?, ?, ?, resource_id, MIN(journal_revision), "
-                + ManagedSchemaTime.SQL_NOW + " FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'JOURNAL'"
+                + " SELECT 'NATIVE_SNAPSHOT', ?, ?, resource_key, ?, ?, ?, resource_id, MIN(journal_revision), "
+                + ManagedSchemaTime.SQL_NOW + " FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'JOURNAL'"
                 + " AND owner_key = ? AND owner_revision = journal_revision AND journal_revision <= ?"
                 + " GROUP BY resource_key, resource_id";
         // This setter bypasses schema coercion; binary identities are bound explicitly.
         var arguments = new org.springframework.jdbc.core.ArgumentPreparedStatementSetter(new Object[] {
-                scope, owner, revision, ManagedSchemaKeys.identity(tenant), ManagedSchemaKeys.identity(request.workspaceId()),
-                ManagedSchemaKeys.identity(session), scope, scope, revision
+                owner, revision, ManagedSchemaKeys.identity(tenant), ManagedSchemaKeys.identity(request.workspaceId()),
+                ManagedSchemaKeys.identity(session), ManagedSchemaKeys.identity(tenant), ManagedSchemaKeys.identity(session),
+                scope, revision
         });
         int copied = jdbc.update(copy, statement -> {
             statement.setQueryTimeout(2);
@@ -227,18 +228,18 @@ public class ManagedNativeJournalSnapshots {
             return null;
         }
         var candidates = jdbc.query("SELECT owner_key, owner_revision FROM ma_resource_ref"
-                + " WHERE session_scope_key = ? AND owner_kind = 'NATIVE_SNAPSHOT' AND owner_revision <= ?"
-                + " GROUP BY owner_key, owner_revision ORDER BY owner_revision DESC, owner_key LIMIT 1",
+                + " WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'NATIVE_SNAPSHOT' AND owner_revision <= ?"
+                + " ORDER BY owner_revision DESC, owner_key LIMIT 1",
                 (row, index) -> new Candidate(row.getString(1), row.getLong(2)),
-                ManagedSessionStore.sessionScopeKey(tenant, session), frozen.journalRevision());
+                tenant, session, frozen.journalRevision());
         if (candidates.isEmpty()) {
             return null;
         }
         Candidate selected = candidates.getFirst();
         var roots = jdbc.queryForList("SELECT r.resource_id FROM ma_resource_ref f"
-                + " JOIN ma_resource r ON r.resource_key = f.resource_key WHERE f.session_scope_key = ?"
+                + " JOIN ma_resource r ON r.resource_key = f.resource_key WHERE f.tenant_id = ? AND f.session_id = ?"
                 + " AND f.owner_kind = 'NATIVE_SNAPSHOT' AND f.owner_key = ? AND f.owner_revision = ? AND r.kind = ?",
-                String.class, ManagedSessionStore.sessionScopeKey(tenant, session), selected.ownerKey(),
+                String.class, tenant, session, selected.ownerKey(),
                 selected.coverage(), MANIFEST_KIND);
         require(roots.size() == 1, "managed_session_snapshot_corrupt");
         String root = roots.getFirst();
@@ -249,8 +250,7 @@ public class ManagedNativeJournalSnapshots {
                 && selected.ownerKey().equals(ownerKey(ManagedSessionStore.sessionScopeKey(tenant, session), manifest.snapshotId()))
                 && selected.coverage() == descriptor.snapshot().coveredJournalRevision()
                 && descriptor.snapshot().committedSequence() <= frozen.committedSequence()
-                && descriptor.snapshot().activationEpoch() <= frozen.activationEpoch()
-                && descriptor.snapshot().storageVersion() <= frozen.storageVersion(), "managed_session_snapshot_corrupt");
+                && descriptor.snapshot().activationEpoch() <= frozen.activationEpoch(), "managed_session_snapshot_corrupt");
         require(sessions.restore(tenant, workspace, session, token).writerGeneration() == frozen.writerGeneration(),
                 "managed_session_writer_conflict");
         String id = descriptor.snapshot().snapshotId();
@@ -315,10 +315,10 @@ public class ManagedNativeJournalSnapshots {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String owner = ownerKey(scope, id);
         List<String> roots = jdbc.queryForList("SELECT f.resource_id FROM ma_resource_ref f JOIN ma_resource r"
-                + " ON r.resource_key = f.resource_key WHERE f.session_scope_key = ? AND f.owner_kind = ?"
-                + " AND f.owner_key = ? AND r.kind = ?", String.class, scope, OWNER, owner, MANIFEST_KIND);
+                + " ON r.resource_key = f.resource_key WHERE f.tenant_id = ? AND f.session_id = ? AND f.owner_kind = ?"
+                + " AND f.owner_key = ? AND r.kind = ?", String.class, tenant, session, OWNER, owner, MANIFEST_KIND);
         if (roots.isEmpty()) {
-            require(pinCount(scope, owner, null) == 0, "managed_session_snapshot_corrupt");
+            require(pinCount(tenant, session, owner, null) == 0, "managed_session_snapshot_corrupt");
             return null;
         }
         require(roots.size() == 1, "managed_session_snapshot_corrupt");
@@ -331,16 +331,16 @@ public class ManagedNativeJournalSnapshots {
                 && session.equals(manifest.sessionId()) && id.equals(manifest.snapshotId())
                 && manifest.coveredJournalRevision() > 0 && manifest.pageCount() == manifest.coveredJournalRevision()
                 && manifest.resourceCount() >= 0
-                && pinCount(scope, owner, manifest.coveredJournalRevision())
+                && pinCount(tenant, session, owner, manifest.coveredJournalRevision())
                     == manifest.pageCount() + manifest.resourceCount() + 1, "managed_session_snapshot_corrupt");
         return new Descriptor(manifest, ref(root), false);
     }
 
     private List<CommitResource> census(String tenant, String workspace, String session, String token, long revision) {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        List<String> ids = jdbc.queryForList("SELECT resource_id FROM ma_resource_ref WHERE session_scope_key = ?"
+        List<String> ids = jdbc.queryForList("SELECT resource_id FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
                 + " AND owner_kind = 'JOURNAL' AND owner_key = ? AND owner_revision = ?"
-                + " AND journal_revision = ? ORDER BY resource_id", String.class, scope, scope, revision, revision);
+                + " AND journal_revision = ? ORDER BY resource_id", String.class, tenant, session, scope, revision, revision);
         require(ids.size() <= ManagedSessionStoreModels.MAX_RESOURCES_PER_TRANSACTION, "managed_session_journal_corrupt");
         List<CommitResource> result = new ArrayList<>();
         for (String id : ids) {
@@ -446,14 +446,14 @@ public class ManagedNativeJournalSnapshots {
             String id = next.path("resourceId").asText();
             String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
             Long pinned = building
-                    ? jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ?"
+                    ? jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
                             + " AND owner_kind = 'JOURNAL' AND owner_key = ? AND owner_revision = journal_revision"
                             + " AND resource_id = ? AND journal_revision > 0 AND journal_revision <= ?",
-                            Long.class, scope, scope, id, revision)
-                    : jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ?"
+                            Long.class, tenant, session, scope, id, revision)
+                    : jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
                             + " AND owner_kind = ? AND owner_key = ? AND owner_revision = ? AND resource_id = ?"
                             + " AND journal_revision > 0 AND journal_revision <= ?", Long.class,
-                            scope, OWNER, owner, coverage, id, revision);
+                            tenant, session, OWNER, owner, coverage, id, revision);
             require(pinned != null && (building ? pinned > 0 : pinned == 1), "managed_session_snapshot_resource_missing");
             StoredResource resource = resource(tenant, workspace, session, id, token);
             require(resource.kind().equals(next.path("kind").asText())
@@ -492,9 +492,9 @@ public class ManagedNativeJournalSnapshots {
     private StoredResource pageResource(String tenant, String workspace, String session, String token,
             String scope, String owner, long coverage, long revision) {
         List<String> ids = jdbc.queryForList("SELECT f.resource_id FROM ma_resource_ref f JOIN ma_resource r"
-                + " ON r.resource_key = f.resource_key WHERE f.session_scope_key = ? AND f.owner_kind = ?"
+                + " ON r.resource_key = f.resource_key WHERE f.tenant_id = ? AND f.session_id = ? AND f.owner_kind = ?"
                 + " AND f.owner_key = ? AND f.owner_revision = ? AND f.journal_revision = ? AND r.kind = ?",
-                String.class, scope, OWNER, owner, coverage, revision, PAGE_KIND);
+                String.class, tenant, session, OWNER, owner, coverage, revision, PAGE_KIND);
         require(ids.size() == 1, "managed_session_snapshot_corrupt");
         StoredResource resource = resource(tenant, workspace, session, ids.getFirst(), token);
         require(resource.byteLength() <= MAX_PAGE_BYTES && resource.schemaVersion() == 1
@@ -507,11 +507,11 @@ public class ManagedNativeJournalSnapshots {
         String id = kind + ":" + digest;
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String key = ManagedSessionStore.resourceKey(scope, id);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id,"
                     + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                    + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', "
+                    + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', "
                     + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key = resource_key",
-                key, scope, tenant, workspace, session, id, kind, bytes.length, digest, bytes);
+                key, tenant, workspace, session, id, kind, bytes.length, digest, bytes);
         var rows = jdbc.queryForList("SELECT kind, sha256, inline_bytes, state, schema_version, storage_kind"
                 + " FROM ma_resource WHERE resource_key = ?", key);
         require(rows.size() == 1 && kind.equals(rows.getFirst().get("kind"))
@@ -549,11 +549,11 @@ public class ManagedNativeJournalSnapshots {
         String key = ManagedSessionStore.resourceKey(scope, id);
         byte[] pending = "{}".getBytes(StandardCharsets.UTF_8);
         if (jdbc.queryForList("SELECT 1 FROM ma_resource WHERE resource_key = ? FOR UPDATE", Integer.class, key).isEmpty()) {
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+            jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id,"
                     + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                    + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', "
+                    + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', "
                     + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key = resource_key",
-                    key, scope, tenant, workspace, session, id, MANIFEST_KIND,
+                    key, tenant, workspace, session, id, MANIFEST_KIND,
                     pending.length, DigestUtils.sha256Hex(pending), pending);
         }
         var rows = jdbc.queryForList("SELECT tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
@@ -579,21 +579,22 @@ public class ManagedNativeJournalSnapshots {
     private void pin(String scope, String owner, long coverage, StoredResource resource, Long revision,
             String tenant, String workspace, String session) {
         String key = ManagedSessionStore.resourceKey(scope, resource.resourceId());
-        Long count = jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ?"
+        Long count = jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
                 + " AND owner_kind = ? AND owner_key = ? AND owner_revision = ? AND resource_key = ?",
-                Long.class, scope, OWNER, owner, coverage, key);
+                Long.class, tenant, session, OWNER, owner, coverage, key);
         if (Long.valueOf(0).equals(count)) {
-            jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key,"
+            jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key,"
                     + " tenant_id, workspace_id, session_id, resource_id, journal_revision, gmt_create)"
-                    + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                    scope, OWNER, owner, coverage, key, tenant, workspace, session, resource.resourceId(), revision);
+                    + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                    OWNER, owner, coverage, key, tenant, workspace, session, resource.resourceId(), revision);
         }
     }
 
-    private long pinCount(String scope, String owner, Long revision) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = ?"
+    private long pinCount(String tenant, String session, String owner, Long revision) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = ?"
                 + " AND owner_key = ?" + (revision == null ? "" : " AND owner_revision = ?"), Long.class,
-                revision == null ? new Object[] {scope, OWNER, owner} : new Object[] {scope, OWNER, owner, revision});
+                revision == null ? new Object[] {tenant, session, OWNER, owner}
+                        : new Object[] {tenant, session, OWNER, owner, revision});
     }
 
     private byte[] encode(Object value) {

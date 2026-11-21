@@ -1037,6 +1037,32 @@ public class ManagedAgentPropertiesTest {
     }
 
     @Test
+    public void publicChildrenAdmitAnSshBrokerWithNodesAndSessionIsolation() {
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getRuntimeBroker().setProvisioner("ssh-process");
+        // D5′: the SSH arm mirrors the sshFiles capability expression — a
+        // configured node and session isolation on both classes.
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().getSsh().setNodes(List.of(new SshRuntimeSettings.Node(
+                "remote", "Remote", "remote-host", "/node", "/cli.js", "/state",
+                List.of("/work"), 41270, "0.25.1", List.of())));
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getRuntimeBroker().setIsolationClass("workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setIsolationClass("session");
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        // durable-local-process belongs to the local arm only.
+        properties.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getRuntimeBroker().setProvisioner("external-scratch");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+    }
+
+    @Test
     public void publicChildEnvironmentOverrideDisablesTheShippedDefault() throws Exception {
         String key = "qwen.managed-agent.harness.workspace-child-agents-enabled";
         String variable = "QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED";

@@ -2737,6 +2737,107 @@ describe('qwen-triage verify workflow', () => {
   });
 });
 
+describe('qwen-triage verify scratch isolation (#17037)', () => {
+  const scriptFor = (stepName) => {
+    const source = stepIn('verify', stepName);
+    const match = source.match(/\n\s+run: \|-\n([\s\S]*)/);
+    expect(match, `${stepName} run script`).not.toBeNull();
+    return match[1]
+      .split('\n')
+      .map((line) => (line.startsWith('          ') ? line.slice(10) : line))
+      .join('\n');
+  };
+
+  it('passes a RUNNER_TEMP scratch directory through the isolated agent environment', () => {
+    const prepare = stepIn('verify', 'Prepare verify scratch directory');
+    const run = stepIn('verify', 'Run verification agent');
+    const cleanup = stepIn('verify', 'Clean verify scratch directory');
+
+    expect(prepare).toContain(
+      'scratch=$(mktemp -d "${RUNNER_TEMP:?}/qwen-verify-scratch.XXXXXXXX")',
+    );
+    expect(run).toContain(
+      "VERIFY_SCRATCH: '${{ steps.verify_scratch.outputs.dir }}'",
+    );
+    expect(run).toContain('"TMPDIR=$VERIFY_SCRATCH"');
+    expect(run).toContain(
+      'Store all temporary verification clones, A/B worktrees, install trees, and test files under TMPDIR=${VERIFY_SCRATCH}.',
+    );
+    expect(run).toContain('Pass this directory requirement to every subagent.');
+    expect(cleanup).toContain(
+      '"always() && steps.pr.outputs.decision == \'run\'"',
+    );
+    expect(cleanup).toContain(
+      'rm -rf -- "${RUNNER_TEMP:?}"/qwen-verify-scratch.*',
+    );
+    // Scratch cleanup must not relax the existing untrusted-worktree boundary.
+    expect(stepIn('verify', 'Clean up runner workspace')).toContain(
+      '"$WS_ABS"/tmp/*) git worktree remove --force',
+    );
+  });
+
+  it('reclaims prior and current scratch directories without touching neighbors', () => {
+    const root = mkdtempSync(join(tmpdir(), 'verify-scratch-workflow-'));
+    try {
+      const runnerTemp = join(root, 'runner-temp');
+      const output = join(root, 'github-output');
+      const stale = join(runnerTemp, 'qwen-verify-scratch.stale');
+      const unrelated = join(runnerTemp, 'unrelated');
+      const reviewScratch = join(runnerTemp, 'qwen-review-scratch.keep');
+      mkdirSync(stale, { recursive: true });
+      mkdirSync(unrelated);
+      mkdirSync(reviewScratch);
+      writeFileSync(join(stale, 'leftover'), 'stale');
+      writeFileSync(output, '');
+      const prepare = join(root, 'prepare.sh');
+      // The real step runs as root and hands the mint to the build user. The
+      // lifecycle under test does not depend on this host having a node user.
+      writeFileSync(
+        prepare,
+        `chown() { :; }\n${scriptFor('Prepare verify scratch directory')}`,
+      );
+      const prepared = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '-e', '-o', 'pipefail', prepare],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            RUNNER_TEMP: runnerTemp,
+            GITHUB_OUTPUT: output,
+          },
+        },
+      );
+      expect(prepared.status, prepared.stderr).toBe(0);
+      expect(existsSync(stale)).toBe(false);
+      expect(existsSync(unrelated)).toBe(true);
+      expect(existsSync(reviewScratch)).toBe(true);
+
+      const scratch = readFileSync(output, 'utf8').trim().replace(/^dir=/, '');
+      expect(scratch).toMatch(/^.*\/qwen-verify-scratch\.[a-zA-Z0-9]{8}$/);
+      expect(scratch.startsWith(`${runnerTemp}/`)).toBe(true);
+      expect(existsSync(scratch)).toBe(true);
+
+      const cleanup = join(root, 'cleanup.sh');
+      writeFileSync(cleanup, scriptFor('Clean verify scratch directory'));
+      const cleaned = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '-e', '-o', 'pipefail', cleanup],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, RUNNER_TEMP: runnerTemp },
+        },
+      );
+      expect(cleaned.status, cleaned.stderr).toBe(0);
+      expect(existsSync(scratch)).toBe(false);
+      expect(existsSync(unrelated)).toBe(true);
+      expect(existsSync(reviewScratch)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('qwen-triage verify hardening', () => {
   const verifyJob = job('verify');
 
@@ -6409,6 +6510,35 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     expect(targetedGates).toContain('is a semantic merge conflict');
     expect(targetedGates).toContain('`expected 112 to be 104`');
+
+    const webShellPath = '.qwen/skills/verify-pr/references/web-shell.md';
+    if (flat.includes('references/web-shell.md') || existsSync(webShellPath)) {
+      expect(flat).toContain('references/web-shell.md');
+      expect(flat).toContain(
+        "Verify the model's reply from backend assistant output",
+      );
+      expect(flat).toContain(
+        'Confirm turn completion from the backend terminal state for the prompt',
+      );
+      const webShell = readFileSync(webShellPath, 'utf8').replace(/\s+/g, ' ');
+      expect(webShell).toContain("page.route('**/capabilities'");
+      expect(webShell).toContain(
+        'Verify that no stale Finished badge appears for Home.',
+      );
+      expect(webShell).toContain(
+        '`storedKey: true`, `keyConfigured: true`, and `enabled: false`',
+      );
+      expect(webShell).toContain('Use the same isolated `QWEN_HOME`');
+      expect(webShell).toContain('qwen serve --channel my-plugin-test');
+      expect(webShell).toContain(
+        'the channel session appears in the intended workspace and that the reply reaches the sender',
+      );
+      expect(webShell).toContain('GET /session/<sessionId>/turns/<promptId>');
+      expect(webShell).toContain(
+        'Require the response to report `state: completed` for that prompt in that session.',
+      );
+      expect(webShell).toContain('`context.sessionId` and `request.model`');
+    }
 
     // The Android recipe lives in a reference file the restored .qwen tree
     // carries, so the pointer must resolve.

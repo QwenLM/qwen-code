@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalShellPublication;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
@@ -514,6 +515,8 @@ class RuntimeExecutionDispatcherTest {
         private final ToolExecutionRepository executions = mock(ToolExecutionRepository.class);
         private final RuntimeProvisioner provisioner = mock(RuntimeProvisioner.class);
         private final RuntimeTransport transport = mock(RuntimeTransport.class);
+        private final RuntimePublicationVerifier publicationVerifier =
+                mock(RuntimePublicationVerifier.class);
         private final RuntimeSessionRepository sessions = mock(RuntimeSessionRepository.class);
         private final RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
         private final ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
@@ -554,9 +557,44 @@ class RuntimeExecutionDispatcherTest {
             when(renewalScheduler.scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(),
                     eq(TimeUnit.MILLISECONDS))).thenAnswer(call -> renewal);
             dispatcher = new RuntimeExecutionDispatcher(registry, state, bindings, sessions, executions,
-                    provisioner, transport, mock(RuntimePublicationVerifier.class), "broker", LEASE,
+                    provisioner, transport, publicationVerifier, "broker", LEASE,
                     Duration.ofMinutes(30), Clock.fixed(Instant.parse("2026-11-01T00:00:00Z"), ZoneOffset.UTC),
                     scheduler, renewalScheduler, closed);
         }
     }
+
+    @Test
+    void anExternalShellDispatchPassesTheFilesGate() {
+        // The request gate in front of the files rule: an external Shell
+        // dispatch is not a file payload, so the guard on the same reference
+        // shape must refuse it for the Shell-lane reason alone.
+        var fixture = new Fixture();
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST, "session");
+        var request = new RuntimeProvisionRequest(scope, "harness", "external-workspace", "workspace");
+        when(fixture.binding.getRequest()).thenReturn(request);
+        when(fixture.binding.getBindingId()).thenReturn("binding");
+        when(fixture.binding.getGeneration()).thenReturn(1L);
+        when(fixture.prepared.isCancelRequested()).thenReturn(false);
+        // The test premise: the placement is admitted as an external Shell.
+        assertTrue(WorkspaceExecutionProfile.isExternalWorkspaceRequest(request),
+                "The request must be an external Workspace");
+        assertTrue(WorkspaceExecutionProfile.isExternalShellRequest(request),
+                "The request must be an external Shell");
+        // A Shell dispatch names run_shell_command, which the files rule used
+        // to refuse; without an admitted publication it is refused as Shell.
+        Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "turn",
+                "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+        when(fixture.prepared.getReference()).thenReturn(reference);
+        Map<String, Object> payload = Map.of("toolName", "run_shell_command",
+                "input", Map.of("command", "printf hi"));
+
+        var refused = assertThrows(RuntimeBrokerException.class,
+                () -> fixture.dispatcher.beginDispatch(fixture.context, fixture.prepared, payload, null));
+
+        assertEquals("runtime_payload_invalid", refused.getCode());
+        assertTrue(refused.getMessage().startsWith("External Shell requires"),
+                "The files rule must not answer an external Shell dispatch: " + refused.getMessage());
+    }
+
 }

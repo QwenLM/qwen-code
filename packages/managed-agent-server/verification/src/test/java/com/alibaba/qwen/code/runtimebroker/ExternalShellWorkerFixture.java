@@ -48,15 +48,21 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
     public record Copied(String bytes, List<Boolean> eofs) { }
 
     public final Process process;
+
+    // Process-side inspection may truncate or omit the original argument vector.
+    final List<String> launchCommand;
+
     public final RuntimeScope scope;
     public final RuntimeProvisionRequest request;
     public final RuntimeProvisionSeed seed;
     public final RuntimeLease lease;
     public final long revision;
 
-    private ExternalShellWorkerFixture(Process process, URI origin, RuntimeProvisionSeed seed,
-            RuntimeScope scope, RuntimeProvisionRequest request, long revision) {
+    private ExternalShellWorkerFixture(Process process, List<String> launchCommand,
+            URI origin, RuntimeProvisionSeed seed, RuntimeScope scope,
+            RuntimeProvisionRequest request, long revision) {
         this.process = process;
+        this.launchCommand = List.copyOf(launchCommand);
         this.seed = seed;
         this.scope = scope;
         this.request = request;
@@ -93,46 +99,71 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
         LocalProcessRuntimeProvisionerTest.requireNode();
         var script = Path.of("src/test/resources/external-shell-worker.mjs").toAbsolutePath();
         assumeTrue(Files.isRegularFile(script), "The worker stand-in is required");
-        var command = new ArrayList<>(List.of("node", script.toString(),
-                "--stdout=" + stdout, "--stderr=" + stderr));
-        command.addAll(List.of(extra));
-        var process = new ProcessBuilder(command).redirectErrorStream(false).start();
-        var scope = request.getScope();
-        var boot = new LinkedHashMap<String, Object>();
-        boot.put("type", "boot");
-        boot.put("version", 2);
-        boot.put("managedContext", "managed-context/1");
-        boot.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
-        boot.put("runtimeIncarnation", seed.getGatewayIncarnation());
-        boot.put("leaseId", seed.getLeaseId());
-        boot.put("epoch", seed.getEpoch());
-        boot.put("provisionRequestId", seed.getProvisionRequestId());
-        boot.put("token", seed.getToken());
-        boot.put("tenantId", scope.getTenantId());
-        boot.put("workspaceId", scope.getWorkspaceId());
-        boot.put("workspaceGeneration", scope.getWorkspaceGeneration());
-        boot.put("storageId", request.getStorageId());
-        boot.put("mountRoot", scope.getCanonicalCwd());
-        boot.put("capabilityDigest", scope.getCapabilityDigest());
-        boot.put("isolationClass", scope.getIsolationClass());
-        try (OutputStream stdin = process.getOutputStream()) {
-            stdin.write(JSON.writeValueAsBytes(boot));
-        }
-        var reader = new BufferedReader(new InputStreamReader(
-                process.getInputStream(), StandardCharsets.UTF_8));
-        var ready = reader.readLine();
-        if (ready == null) {
-            process.destroyForcibly();
-            throw new AssertionError("The worker never became ready");
-        }
+        var outputFiles = new ArrayList<Path>();
         try {
-            return new ExternalShellWorkerFixture(process,
-                    URI.create(JSON.readTree(ready).get("url").asText()),
-                    seed, scope, request, revision);
-        } catch (RuntimeException invalid) {
-            process.destroyForcibly();
-            throw invalid;
+            var stdoutArgument = "--stdout=" + stdout;
+            var stderrArgument = "--stderr=" + stderr;
+            // Large captures cannot be passed in a Windows command line.
+            if (stdout.length() > 8 * 1024) {
+                stdoutArgument = stageOutput(stdout, "stdout", outputFiles);
+            }
+            if (stderr.length() > 8 * 1024) {
+                stderrArgument = stageOutput(stderr, "stderr", outputFiles);
+            }
+            var command = new ArrayList<>(List.of("node", script.toString(),
+                    stdoutArgument, stderrArgument,
+                    "--storage-revision=" + revision));
+            command.addAll(List.of(extra));
+            var process = new ProcessBuilder(command).redirectErrorStream(false).start();
+            var scope = request.getScope();
+            var boot = new LinkedHashMap<String, Object>();
+            boot.put("type", "boot");
+            boot.put("version", 2);
+            boot.put("managedContext", "managed-context/1");
+            boot.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
+            boot.put("runtimeIncarnation", seed.getGatewayIncarnation());
+            boot.put("leaseId", seed.getLeaseId());
+            boot.put("epoch", seed.getEpoch());
+            boot.put("provisionRequestId", seed.getProvisionRequestId());
+            boot.put("token", seed.getToken());
+            boot.put("tenantId", scope.getTenantId());
+            boot.put("workspaceId", scope.getWorkspaceId());
+            boot.put("workspaceGeneration", scope.getWorkspaceGeneration());
+            boot.put("storageId", request.getStorageId());
+            boot.put("mountRoot", scope.getCanonicalCwd());
+            boot.put("capabilityDigest", scope.getCapabilityDigest());
+            boot.put("isolationClass", scope.getIsolationClass());
+            try (OutputStream stdin = process.getOutputStream()) {
+                stdin.write(JSON.writeValueAsBytes(boot));
+            }
+            var reader = new BufferedReader(new InputStreamReader(
+                    process.getInputStream(), StandardCharsets.UTF_8));
+            var ready = reader.readLine();
+            if (ready == null) {
+                process.destroyForcibly();
+                throw new AssertionError("The worker never became ready");
+            }
+            try {
+                return new ExternalShellWorkerFixture(process, command,
+                        URI.create(JSON.readTree(ready).get("url").asText()),
+                        seed, scope, request, revision);
+            } catch (RuntimeException invalid) {
+                process.destroyForcibly();
+                throw invalid;
+            }
+        } finally {
+            for (Path outputFile : outputFiles) {
+                Files.deleteIfExists(outputFile);
+            }
         }
+    }
+
+    private static String stageOutput(String output, String stream, List<Path> outputFiles)
+            throws IOException {
+        var file = Files.createTempFile("external-shell-worker-" + stream + "-", ".txt");
+        outputFiles.add(file);
+        Files.writeString(file, output, StandardCharsets.UTF_8);
+        return "--" + stream + "-file=" + file;
     }
 
     public HttpRuntimeTransport transport() {
@@ -165,7 +196,7 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
      * block digest and the EOF carrying no bytes.
      */
     public Copied copy(HttpRuntimeTransport transport, String channel, String stream) {
-        var bytes = new StringBuilder();
+        var bytes = new java.io.ByteArrayOutputStream();
         var eofs = new ArrayList<Boolean>();
         long acked = -1;
         for (long sequence = 0; sequence < 1024; sequence++) {
@@ -173,7 +204,9 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
                     channel, stream, sequence, acked).toCompletableFuture().join();
             assertEquals("ready", answer.get("state"));
             var block = (byte[]) answer.get("bytes");
-            bytes.append(new String(block, StandardCharsets.UTF_8));
+            // A multi-byte character may straddle a block boundary, so the
+            // bytes are accumulated raw and decoded once at the end.
+            bytes.writeBytes(block);
             boolean eof = (Boolean) answer.get("eof");
             eofs.add(eof);
             assertEquals(block.length == 0, eof, "Only the EOF carries no bytes");
@@ -183,7 +216,7 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
                 // to be acknowledged, and an EOF arrives as its own sequence.
                 transport.externalPublicationRead(lease, request, seed, revision,
                         channel, stream, sequence, sequence).toCompletableFuture().join();
-                return new Copied(bytes.toString(), eofs);
+                return new Copied(bytes.toString(StandardCharsets.UTF_8), eofs);
             }
             acked = sequence;
         }
@@ -191,8 +224,18 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
     }
 
     public String stopDrained(HttpRuntimeTransport transport) {
-        return post("stop-drained", Map.of("protocolVersion", 2, "channel", "all"), lease)
-                .get("state").asText();
+        try {
+            transport.stopExternalWorkspaceDrained(lease, request, seed, revision)
+                    .toCompletableFuture().join();
+            return "drained";
+        } catch (java.util.concurrent.CompletionException refused) {
+            if (refused.getCause() instanceof RuntimeBrokerException failure
+                    && failure.getStatusCode() == 503
+                    && "managed_runtime_unavailable".equals(failure.getCode())) {
+                return "undrained";
+            }
+            throw refused;
+        }
     }
 
     public List<JsonNode> routes(String route) {
@@ -208,6 +251,63 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
 
     /** A direct exchange, for the answers the transport deliberately drops. */
     public JsonNode post(String route, Map<String, Object> body, RuntimeLease used) {
+        var response = exchange(route, body, used);
+        assertEquals(200, response.statusCode(), response.body());
+        try {
+            return JSON.readTree(response.body());
+        } catch (IOException failure) {
+            throw new AssertionError("The worker exchange failed", failure);
+        }
+    }
+
+    /**
+     * A direct exchange that surfaces the worker's own refusal (status and
+     * closed body) instead of asserting 200, for the cursor rules the
+     * transport refuses locally before any request leaves this process.
+     */
+    public RuntimeBrokerException postRefused(String route, Map<String, Object> body,
+            RuntimeLease used) {
+        var response = exchange(route, body, used);
+        try {
+            var fields = JSON.readTree(response.body());
+            return new RuntimeBrokerException(response.statusCode(),
+                    fields.path("code").asText(), fields.path("error").asText(), false);
+        } catch (IOException failure) {
+            throw new AssertionError("The worker exchange failed", failure);
+        }
+    }
+
+    /**
+     * The worker's own answer to a begin this fixture holds the full capture
+     * shape for, including a refusal, for the identity fences the transport
+     * validates only on success.
+     */
+    public java.net.http.HttpResponse<String> beginRaw(Map<String, Object> reference,
+            Map<String, Object> capture, long expiresAt, String captureId) {
+        return exchange("begin", Map.of("protocolVersion", 2, "reference", reference,
+                "capture", capture, "expiresAt", expiresAt, "captureId", captureId), lease);
+    }
+
+    /**
+     * The stop-drained refusal the real transport throws, for cases that must
+     * prove the worker itself rejected the stop rather than merely answering
+     * undrained.
+     */
+    public RuntimeBrokerException stopDrainedRefusal(HttpRuntimeTransport transport) {
+        try {
+            transport.stopExternalWorkspaceDrained(lease, request, seed, revision)
+                    .toCompletableFuture().join();
+            throw new AssertionError("The drained stop was not refused");
+        } catch (java.util.concurrent.CompletionException refused) {
+            if (refused.getCause() instanceof RuntimeBrokerException failure) {
+                return failure;
+            }
+            throw refused;
+        }
+    }
+
+    private java.net.http.HttpResponse<String> exchange(String route, Map<String, Object> body,
+            RuntimeLease used) {
         try {
             var exchange = java.net.http.HttpRequest.newBuilder(
                             lease.getEndpoint().resolve(
@@ -223,10 +323,8 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
                     .POST(java.net.http.HttpRequest.BodyPublishers.ofByteArray(
                             JSON.writeValueAsBytes(body)))
                     .build();
-            var response = java.net.http.HttpClient.newHttpClient().send(exchange,
+            return java.net.http.HttpClient.newHttpClient().send(exchange,
                     java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            assertEquals(200, response.statusCode(), response.body());
-            return JSON.readTree(response.body());
         } catch (IOException failure) {
             throw new AssertionError("The worker exchange failed", failure);
         } catch (InterruptedException interrupted) {

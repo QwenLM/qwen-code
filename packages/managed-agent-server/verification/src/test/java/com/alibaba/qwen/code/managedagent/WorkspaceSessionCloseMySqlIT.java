@@ -80,10 +80,9 @@ class WorkspaceSessionCloseMySqlIT {
 
     private void seedAction(String tenant, String session, String action, String state, String options) {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,record_kind,"
+        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,record_kind,"
                         + "domain,record_id,action_id,revision,action_version,state,options_json,gmt_create,first_sequence)"
-                        + " VALUES (?,?,?,?,'ACTION','action',?,?,1,1,?,?,0,1)",
-                scope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "ACTION", action),
+                        + " VALUES (?,?,?,'ACTION','action',?,?,1,1,?,?,0,1)", com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "ACTION", action),
                 tenant, session, action, action, state, options);
     }
 

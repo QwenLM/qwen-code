@@ -113,7 +113,10 @@ it('refuses every closed option the external lanes cannot serve', () => {
     ).toBe(true);
   }
   expect(
-    hasHostedExternalExcludedOptions({}, HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE),
+    hasHostedExternalExcludedOptions(
+      {},
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+    ),
   ).toBe(false);
   expect(
     hasHostedExternalExcludedOptions(

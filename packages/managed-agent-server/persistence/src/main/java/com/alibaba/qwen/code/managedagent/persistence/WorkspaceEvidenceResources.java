@@ -29,12 +29,12 @@ final class WorkspaceEvidenceResources {
             return row.getBytes("inline_bytes");
         }, resourceKey);
         if (existing.isEmpty()) {
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, 'managed-workspace-proof', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                    resourceKey, scope, tenant, workspace, session, resourceId, bytes.length, digest, bytes, ownerKey);
+            jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, 'managed-workspace-proof', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
+                    resourceKey, tenant, workspace, session, resourceId, bytes.length, digest, bytes, ownerKey);
         } else if (existing.size() != 1 || !Arrays.equals(existing.getFirst(), bytes)) {
             throw new IllegalStateException("Workspace proof resource conflicts");
         }
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'OPERATION_WORK', ?, 1, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE owner_key = owner_key", scope, ownerKey, resourceKey, tenant, workspace, session, resourceId);
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES ('OPERATION_WORK', ?, 1, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE owner_key = owner_key", ownerKey, resourceKey, tenant, workspace, session, resourceId);
         return resourceKey;
     }
 

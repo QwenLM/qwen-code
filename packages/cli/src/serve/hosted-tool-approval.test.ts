@@ -119,7 +119,7 @@ describe('Hosted tool approval settings', () => {
     const options = parseHostedActionOptions(
       Buffer.from(
         JSON.stringify({
-          v: 1,
+          v: 3,
           requestId: 'request',
           turnId: 'turn',
           functionCallId: 'call',
