@@ -26,7 +26,7 @@
 - **usage 遥测**（qwen-logger RUM `properties.channel`）：`managed`——本设计新增的桶。
 - **DashScope 请求体 `metadata.channel`**（provider `buildMetadata`）：原始解析值，与既有取值同一透传契约；`managed` 现在会出现在该字段。
 - **`X-DashScope-Source-Config` 的 `t1` 标签**（`buildDashScopeSourceConfig`）：`desktop` → `qwen-code-desktop`；其余取值（含 `managed`、`daemon`）→ `qwen-code-cli`。本设计有意不扩展线上标签，平台枚举保持原样。
-- **会话导出元数据**（`Channel` 行）：导出 daemon 自身解析出的 channel，default profile 回退 `daemon`。导出路由不再硬编码 `daemon`，Hosted Harness 导出写 `managed`、桌面 shell 导出写 `desktop`。
+- **会话导出元数据**（`Channel` 行）：导出 daemon 自身解析出的 channel，default profile 回退 `daemon`。导出路由不再硬编码 `daemon`：桌面 shell daemon 导出 `desktop`、独立 daemon 导出 `daemon`。hosted-harness profile 的公共 API 由私有 managed 契约门禁，Managed 转录经控制面导出，不走该路由。
 
 因此扩展 channel 取值只改变这些面上的上报标签；没有任何控制流读取 channel。
 

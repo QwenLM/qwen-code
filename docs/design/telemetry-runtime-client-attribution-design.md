@@ -26,7 +26,7 @@ Reuse the existing `properties.channel` dimension; add no payload keys. `getChan
 - **Usage telemetry** (qwen-logger RUM `properties.channel`): `managed` — the new bucket this design adds.
 - **DashScope request body `metadata.channel`** (provider `buildMetadata`): the raw resolved value, the same pass-through contract as the existing values; `managed` now appears there.
 - **`X-DashScope-Source-Config` `t1` tag** (`buildDashScopeSourceConfig`): `desktop` → `qwen-code-desktop`; every other value, including `managed` and `daemon`, → `qwen-code-cli`. The wire tag is intentionally not extended by this design; the platform enum stays as-is.
-- **Session export metadata** (the `Channel` line): the exporting daemon's resolved channel, with `daemon` as the default-profile fallback. The export route no longer hardcodes `daemon`, so Hosted Harness exports say `managed` and desktop-shell exports say `desktop`.
+- **Session export metadata** (the `Channel` line): the exporting daemon's resolved channel, with `daemon` as the default-profile fallback. The export route no longer hardcodes `daemon`: desktop-shell daemons export `desktop` and independent daemons `daemon`. The hosted-harness profile gates its public API behind the private managed contract, so Managed transcripts are exported through the control plane rather than this route.
 
 Extending the channel values therefore changes reporting labels on these surfaces only; no control flow reads the channel.
 
