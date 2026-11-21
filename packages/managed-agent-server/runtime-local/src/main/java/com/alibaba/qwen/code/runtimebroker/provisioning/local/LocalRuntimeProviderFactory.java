@@ -187,8 +187,34 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                             ancestor + " is not searchable",
                             "grant execute access to the service account");
         }
-        return new Check("broker-state", Status.FAIL,
-                path + " is not a directory", "create it");
+        // Durable mode creates the directory owner-private (0700) on its first
+        // start, one level deep, and refuses a symlinked path.
+        Path parent = directory.getParent();
+        Path component = parent;
+        while (component != null) {
+            if (Files.isSymbolicLink(component)) {
+                return new Check("broker-state", Status.FAIL,
+                        component + " is a symlink",
+                        "point the state directory at a real path");
+            }
+            component = component.getParent();
+        }
+        if (parent == null || !Files.isDirectory(parent)) {
+            return new Check("broker-state", Status.FAIL,
+                    (parent == null ? path : parent.toString()) + " is not a directory",
+                    "create the parent directory");
+        }
+        if (!Files.isWritable(parent)) {
+            return new Check("broker-state", Status.FAIL,
+                    parent + " is not writable",
+                    "grant write access to the service account");
+        }
+        return searchable(parent)
+                ? new Check("broker-state", Status.PASS,
+                        path + " (created owner-private on the first start)", null)
+                : new Check("broker-state", Status.FAIL,
+                        parent + " is not searchable",
+                        "grant execute access to the service account");
     }
 
     private static boolean searchable(Path directory) {

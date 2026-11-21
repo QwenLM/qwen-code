@@ -6,10 +6,13 @@ import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Comparator;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -49,7 +52,7 @@ class LocalRuntimeProviderFactoryTest {
     }
 
     @Test
-    void preflightAcceptsAnAbsentStateDirectoryOnlyForTheEphemeralRuntime() {
+    void preflightAcceptsAnAbsentStateDirectoryOnlyWhenItsParentAllowsCreation() {
         var factory = new LocalRuntimeProviderFactory();
         var ephemeral = settings();
         ephemeral.getRuntimeBroker().setDurableLocalProcess(false);
@@ -64,6 +67,51 @@ class LocalRuntimeProviderFactoryTest {
                 .satisfies(check -> assertThat(check.status())
                         .isEqualTo(RuntimeProviderFactory.Status.FAIL));
         assertThat(temporary.resolve("not-created")).doesNotExist();
+    }
+
+    @Test
+    void preflightAcceptsAnAbsentDurableStateDirectoryItsStoreWillCreate()
+            throws Exception {
+        Path root = realTempDirectory("durable-state");
+        try {
+            var settings = settings();
+            settings.getRuntimeBroker()
+                    .setStateDirectory(root.resolve("state").toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status())
+                                .isEqualTo(RuntimeProviderFactory.Status.PASS);
+                        assertThat(check.detail()).contains("owner-private");
+                    });
+        } finally {
+            deleteRecursively(root);
+        }
+    }
+
+    @Test
+    void preflightRejectsAnAbsentDurableStateDirectoryBehindASymlink()
+            throws Exception {
+        assumeTrue(posix());
+        Path root = realTempDirectory("durable-link");
+        try {
+            Path real = Files.createDirectory(root.resolve("real"));
+            Path link = Files.createSymbolicLink(root.resolve("link"), real);
+            var settings = settings();
+            settings.getRuntimeBroker()
+                    .setStateDirectory(link.resolve("state").toString());
+            assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status())
+                                .isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                        assertThat(check.detail()).contains("is a symlink");
+                    });
+        } finally {
+            deleteRecursively(root);
+        }
     }
 
     @Test
@@ -83,7 +131,7 @@ class LocalRuntimeProviderFactoryTest {
 
     @Test
     void preflightRejectsAnEphemeralStateDirectoryBehindADanglingLink() throws Exception {
-        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"));
+        assumeTrue(posix());
         Path link = temporary.resolve("state");
         Files.createSymbolicLink(link, temporary.resolve("missing"));
         var ephemeral = settings();
@@ -100,7 +148,7 @@ class LocalRuntimeProviderFactoryTest {
 
     @Test
     void preflightRejectsAnEphemeralStateDirectoryWhoseAncestorIsNotWritable() throws Exception {
-        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"));
+        assumeTrue(posix());
         Path ancestor = Files.createDirectory(temporary.resolve("read-only"));
         var permissions = Files.getPosixFilePermissions(ancestor);
         Files.setPosixFilePermissions(ancestor, PosixFilePermissions.fromString("r-xr-xr-x"));
@@ -120,7 +168,7 @@ class LocalRuntimeProviderFactoryTest {
 
     @Test
     void preflightRejectsAnEphemeralStateDirectoryWhoseAncestorIsNotSearchable() throws Exception {
-        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"));
+        assumeTrue(posix());
         Path ancestor = Files.createDirectory(temporary.resolve("unsearchable"));
         var permissions = Files.getPosixFilePermissions(ancestor);
         Files.setPosixFilePermissions(ancestor, PosixFilePermissions.fromString("rw-------"));
@@ -135,6 +183,26 @@ class LocalRuntimeProviderFactoryTest {
                             .isEqualTo(RuntimeProviderFactory.Status.FAIL));
         } finally {
             Files.setPosixFilePermissions(ancestor, permissions);
+        }
+    }
+
+    private static boolean posix() {
+        return FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
+    }
+
+    private static Path realTempDirectory(String prefix) throws IOException {
+        Path base = Path.of(System.getProperty("java.io.tmpdir")).toRealPath();
+        return Files.createTempDirectory(base, prefix);
+    }
+
+    private static void deleteRecursively(Path root) throws IOException {
+        if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
+            return;
+        }
+        try (var paths = Files.walk(root)) {
+            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(path);
+            }
         }
     }
 

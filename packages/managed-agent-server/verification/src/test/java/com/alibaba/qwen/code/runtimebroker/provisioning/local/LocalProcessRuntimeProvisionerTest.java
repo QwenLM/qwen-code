@@ -214,6 +214,7 @@ public class LocalProcessRuntimeProvisionerTest {
         assumeTrue(Files.isRegularFile(script));
         Path root = Files.createTempDirectory("ephemeral-state");
         Path state = root.resolve("absent").resolve("state");
+        Set<Long> before = childPids();
         RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
                 "/runtime/workspace", DIGEST, "workspace");
         RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
@@ -230,6 +231,10 @@ public class LocalProcessRuntimeProvisionerTest {
                     .toCompletableFuture().get(30, TimeUnit.SECONDS);
             assertTrue(Files.isDirectory(state));
         } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
             deleteRecursively(root);
         }
     }
