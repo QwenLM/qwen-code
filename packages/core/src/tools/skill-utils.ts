@@ -351,11 +351,11 @@ export function canApplySkillSideEffects(
  * Caveat under an active `settings.tools.eager` allowlist (#9827): the grant
  * flips the runtime permission predicate, but it can never promote a deferred
  * tool into the eager model request — the registry is built once in
- * `Config.initialize`, so such a tool stays deferred (still registered and
- * loadable via `tool_search`). An eager-by-default tool omitted by
- * `tools.eager` needs its name added plus a restart; a tool deferred by
- * default needs `tools.visible` instead. `permissions.allow` itself never
- * gates registration (#10075).
+ * `Config.initialize`, so such a tool stays deferred. In direct mode,
+ * the bridge requires both `tool_search` and `tool_call`. An eager-by-default
+ * tool omitted by `tools.eager` needs its name added plus a restart; a tool
+ * deferred by default needs `tools.visible` instead. `permissions.allow`
+ * itself never gates registration (#10075).
  *
  * No-ops when there is no permission manager or nothing to grant.
  *

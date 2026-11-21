@@ -47,10 +47,11 @@ export interface SkillConfig {
    * This is an additive grant only: it never hides or restricts the tools the
    * model can see, and since #10075 `permissions.allow` no longer affects
    * registration at all. A tool the `settings.tools.eager` allowlist omits
-   * stays deferred — registered, inspectable via `tool_search`, invokable via
-   * `tool_call` — regardless of this grant. An eager-by-default tool omitted by `tools.eager` needs its
-   * name added plus a restart; a tool deferred by default needs
-   * `tools.visible` instead (#9827).
+   * stays deferred regardless of this grant. With the direct-mode bridge
+   * available, the model uses `tool_search` then `tool_call`. Code mode
+   * uses top-level `tool_search` then `exec`. To send its schema upfront, add an
+   * eager-by-default tool to `tools.eager` or a deferred-by-default tool
+   * to `tools.visible`, then restart (#9827).
    * Malformed entries are ignored. See `applySkillAllowedTools`.
    */
   allowedTools?: string[];

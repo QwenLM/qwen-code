@@ -354,7 +354,7 @@ export class PermissionManager {
           } (${droppedEntries.join(', ')}). ` +
             `The allowlist stays active with ${canonicalNames.length} entr${
               canonicalNames.length === 1 ? 'y' : 'ies'
-            }, so every other non-exempt tool is deferred to tool_search.`,
+            }. Other non-exempt tools are deferred. tools.visible can show deferred tools at startup.`,
         );
       }
       this.eagerToolAllowList = canonicalNames;
@@ -827,10 +827,9 @@ export class PermissionManager {
   /**
    * Determine whether a tool is callable in this session.
    *
-   * Returns `true` for `registered` AND `deferred` tools: a deferred tool
-   * is still registered — it is merely hidden from the eager model request
-   * and reachable via ToolSearch + ToolCall — so a call to it must flow
-   * through the normal approval evaluation, not a permission error (#10075). Only
+   * Returns `true` for `registered` and `deferred` tools. A deferred tool
+   * stays registered even when the discovery bridge is unavailable.
+   * Calls by name still go through normal approval evaluation (#10075). Only
    * `disabled` tools (whole-tool deny rule, or unlisted in the legacy
    * `coreTools` allowlist) return `false`.
    *
@@ -901,9 +900,8 @@ export class PermissionManager {
    *
    * While the `settings.tools.eager` allowlist is active (see
    * `isEagerToolAllowListActive`), a built-in tool not named in it is
-   * `deferred`, NOT `disabled`: it stays registered — listed in `/tools`,
-   * discoverable and callable through the ToolSearch + ToolCall bridge — but its schema is kept out
-   * of the eager model request, which is the #9827 guarantee. Call-time
+   * `deferred`: it stays registered and listed in `/tools`. The registry
+   * can still expose it at startup via `tools.visible` (#9827). Call-time
    * approval for such a tool falls back to the normal permission
    * evaluation (ask / approval-mode), so nothing loses capability
    * silently (#10075).
