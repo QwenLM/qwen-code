@@ -164,6 +164,9 @@ it('finishes within the EOF memory budget when a real runner is already draining
     finished = true;
   });
   try {
+    await vi.waitFor(() =>
+      expect(frames.some((frame) => frame.type === 'result')).toBe(true),
+    );
     await draining.promise;
     expect(client.sendMessageStream).toHaveBeenCalledOnce();
     expect(frames.filter((frame) => frame.type === 'result')).toEqual([
