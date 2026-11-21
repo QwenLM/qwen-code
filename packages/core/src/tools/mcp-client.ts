@@ -281,6 +281,130 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
 }
 
 /**
+ * A non-JSON-RPC body captured from a streamable-HTTP POST response.
+ *
+ * Some gateways answer a JSON-RPC POST with HTTP 200 + application/json and a
+ * proprietary error object (e.g. an auth rejection) instead of a JSON-RPC
+ * message or a 4xx status. The SDK parses that body with JSONRPCMessageSchema
+ * and surfaces a Zod `invalid_union` issue array that names none of the
+ * server's actual response. The ZodError carries no `input` (probed on zod
+ * 3.25.76 and 4.x), so the rejected body can only be recovered at the fetch
+ * boundary — see `createStreamableHttpCompatibilityFetch`.
+ */
+interface NonJsonRpcResponseCapture {
+  status: number;
+  contentType: string;
+  bodyExcerpt: string;
+}
+
+const nonJsonRpcResponseCaptures = new Map<string, NonJsonRpcResponseCapture>();
+// Bound the store so long-running sessions cycling many servers cannot grow
+// it without limit; entries are also overwritten per server and cleared at
+// the start of every POST.
+const NON_JSON_RPC_CAPTURE_MAX_ENTRIES = 64;
+
+function nonJsonRpcCaptureKey(
+  serverName: string,
+  serverConfig?: MCPServerConfig,
+): string {
+  return `${serverName}\u0000${serverConfig?.httpUrl ?? serverConfig?.url ?? ''}`;
+}
+
+/** Test-only: drop all captured non-JSON-RPC responses. */
+export function _resetNonJsonRpcCapturesForTest(): void {
+  nonJsonRpcResponseCaptures.clear();
+}
+
+function isZodParseError(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as { issues?: unknown; name?: unknown };
+  // `issues` is the durable check (the name can be lost across realm or
+  // bundling boundaries); it is present on both zod 3 and zod 4 errors.
+  return Array.isArray(record.issues) || record.name === 'ZodError';
+}
+
+/**
+ * Replace an opaque Zod parse failure with the server's actual response when
+ * the compatibility fetch captured a non-JSON-RPC body for this server.
+ * Returns the original error untouched when no capture applies, so success
+ * paths and unrelated failures keep their existing behavior.
+ */
+export function improveMcpNonJsonRpcError<T>(
+  serverName: string,
+  error: T,
+  serverConfig?: MCPServerConfig,
+): T | Error {
+  const capture = nonJsonRpcResponseCaptures.get(
+    nonJsonRpcCaptureKey(serverName, serverConfig),
+  );
+  if (!capture) return error;
+  // The SDK may wrap the parse failure; walk a depth-limited cause chain.
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current != null; depth++) {
+    if (isZodParseError(current)) {
+      return new Error(
+        `MCP server '${serverName}' returned a non-JSON-RPC response ` +
+          `(HTTP ${capture.status}, ${capture.contentType}): ` +
+          `${capture.bodyExcerpt} — the endpoint or its gateway rejected ` +
+          `the request; check credentials or retry later.`,
+        { cause: error },
+      );
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return error;
+}
+
+/**
+ * Record a bounded excerpt of a 2xx application/json POST body that is not a
+ * JSON-RPC message, so a later Zod parse failure can name the actual response.
+ * Reads from a clone (the SDK still consumes the original) with the same
+ * KB-scale bound and timeout as the GET-SSE fallback excerpt.
+ */
+async function captureNonJsonRpcResponse(
+  serverName: string,
+  serverConfig: MCPServerConfig | undefined,
+  response: Response,
+): Promise<void> {
+  if (response.status < 200 || response.status >= 300) return;
+  const contentType = response.headers.get('content-type') ?? '';
+  if (contentType.split(';')[0].trim().toLowerCase() !== 'application/json') {
+    return;
+  }
+  const excerpt = await readResponseBodyExcerpt(response);
+  if (!excerpt) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(excerpt);
+  } catch {
+    // Not JSON at all (or truncated past the excerpt bound) — the SDK's own
+    // error path names it; nothing to attribute here.
+    return;
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    'jsonrpc' in parsed
+  ) {
+    return;
+  }
+  const key = nonJsonRpcCaptureKey(serverName, serverConfig);
+  if (
+    nonJsonRpcResponseCaptures.size >= NON_JSON_RPC_CAPTURE_MAX_ENTRIES &&
+    !nonJsonRpcResponseCaptures.has(key)
+  ) {
+    const oldest = nonJsonRpcResponseCaptures.keys().next().value;
+    if (oldest !== undefined) nonJsonRpcResponseCaptures.delete(oldest);
+  }
+  nonJsonRpcResponseCaptures.set(key, {
+    status: response.status,
+    contentType,
+    bodyExcerpt: excerpt,
+  });
+}
+
+/**
  * Whether the Agent Plugin transport must refuse redirects: it may only reach
  * the address it was configured with, and a configured or bearer credential
  * makes a forwarded 30x a credential leak.
@@ -333,6 +457,17 @@ export function createStreamableHttpCompatibilityFetch(
     const effectiveInit = stopAgentPluginRedirect
       ? { ...init, redirect: 'manual' as const }
       : init;
+    const requestMethod = (
+      effectiveInit?.method ?? (input instanceof Request ? input.method : 'GET')
+    ).toUpperCase();
+    if (requestMethod === 'POST') {
+      // Clear any stale capture so a later, unrelated parse failure cannot be
+      // attributed to an earlier response: attribution requires the capture
+      // to come from the most recent POST.
+      nonJsonRpcResponseCaptures.delete(
+        nonJsonRpcCaptureKey(mcpServerName, mcpServerConfig),
+      );
+    }
     const response = await fetchFn(input, effectiveInit);
     if (
       response.status === 401 &&
@@ -349,6 +484,13 @@ export function createStreamableHttpCompatibilityFetch(
       !isStreamableHttpGetSseRequest(effectiveInit) ||
       !STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES.has(response.status)
     ) {
+      if (requestMethod === 'POST') {
+        await captureNonJsonRpcResponse(
+          mcpServerName,
+          mcpServerConfig,
+          response,
+        );
+      }
       return response;
     }
 
@@ -613,14 +755,19 @@ export class McpClient {
         // silent-drop block reads `lastTransportError` inline; setting
         // it ahead of `updateStatus` guarantees the field is populated
         // by the time the listener fires.
-        this.lastTransportError = error;
+        const surfacedError = improveMcpNonJsonRpcError(
+          this.serverName,
+          error,
+          this.serverConfig,
+        );
+        this.lastTransportError = surfacedError;
         // Use getErrorMessage (not `error.toString()`) so the underlying
         // syscall behind opaque wrappers like undici's `TypeError: fetch
         // failed` (e.g. `ECONNREFUSED`, a proxy `502`) is surfaced instead of
         // a bare "fetch failed". Critical for diagnosing local-server /
         // proxy connectivity issues.
         debugLogger.error(
-          `MCP ERROR (${this.serverName}): ${getErrorMessage(error)}`,
+          `MCP ERROR (${this.serverName}): ${getErrorMessage(surfacedError)}`,
         );
         this.updateStatus(MCPServerStatus.DISCONNECTED);
       };
@@ -676,10 +823,18 @@ export class McpClient {
       // Same guard as `updateStatus()`: a late rejection from a doomed
       // in-flight connect (server disabled/removed mid-connect) must not
       // resurrect a cause entry that `removeMCPServerStatus` already dropped.
+      const surfacedError = improveMcpNonJsonRpcError(
+        this.serverName,
+        error,
+        this.serverConfig,
+      );
       if (!this.isDisconnecting) {
-        recordMCPServerLastError(this.serverName, getErrorMessage(error));
+        recordMCPServerLastError(
+          this.serverName,
+          getErrorMessage(surfacedError),
+        );
       }
-      throw error;
+      throw surfacedError;
     }
   }
 
@@ -841,10 +996,18 @@ export class McpClient {
       // for best-effort discovery; keep the cause retrievable for status
       // consumers (issue #9944). Gated like the status write so a server
       // removed mid-discovery doesn't get an orphan cause entry resurrected.
+      const surfacedError = improveMcpNonJsonRpcError(
+        this.serverName,
+        error,
+        this.serverConfig,
+      );
       if (!this.isDisconnecting) {
-        recordMCPServerLastError(this.serverName, getErrorMessage(error));
+        recordMCPServerLastError(
+          this.serverName,
+          getErrorMessage(surfacedError),
+        );
       }
-      throw error;
+      throw surfacedError;
     }
   }
 
@@ -1550,7 +1713,14 @@ export async function connectAndDiscover(
       if (isBenignMcpMethodNotFound(error)) {
         return;
       }
-      debugLogger.error(`MCP ERROR (${mcpServerName}):`, error.toString());
+      debugLogger.error(
+        `MCP ERROR (${mcpServerName}):`,
+        improveMcpNonJsonRpcError(
+          mcpServerName,
+          error,
+          mcpServerConfig,
+        ).toString(),
+      );
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
     };
 
@@ -1599,7 +1769,7 @@ export async function connectAndDiscover(
     }
     debugLogger.error(
       `Error connecting to MCP server '${mcpServerName}': ${getErrorMessage(
-        error,
+        improveMcpNonJsonRpcError(mcpServerName, error, mcpServerConfig),
       )}`,
     );
     updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
@@ -2596,10 +2766,21 @@ export async function connectToMcpServer(
     } else {
       // Handle other connection errors
       // Create a concise error message
-      const errorMessage = (error as Error).message || String(error);
+      const surfacedError = improveMcpNonJsonRpcError(
+        mcpServerName,
+        error,
+        mcpServerConfig,
+      );
+      const errorMessage =
+        (surfacedError as Error).message || String(surfacedError);
+      // Classify on the ORIGINAL error, not the improved message: the improved
+      // message embeds the server-controlled captured body, which may itself
+      // mention ECONNREFUSED/ENOTFOUND (e.g. a gateway reporting an upstream
+      // failure as 200 + JSON). Genuine network failures never carry a capture
+      // (captures require a 2xx response), so their concise message is preserved.
+      const rawMessage = (error as Error)?.message ?? String(error);
       const isNetworkError =
-        errorMessage.includes('ENOTFOUND') ||
-        errorMessage.includes('ECONNREFUSED');
+        rawMessage.includes('ENOTFOUND') || rawMessage.includes('ECONNREFUSED');
 
       let conciseError: string;
       if (isNetworkError) {
