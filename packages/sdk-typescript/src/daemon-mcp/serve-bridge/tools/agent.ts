@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { tool } from '../../tool.js';
 import { formatJsonResult } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
-import { createPromptCollector } from '../sse.js';
+import { createPromptCollector, interruptPromptCollector } from '../sse.js';
 import { handler, resolveSessionId } from '../helpers.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -155,10 +155,7 @@ export function agentTools(state: BridgeState): any[] {
           /* best-effort */
         }
         // Resolve active collector so the prompt handler returns immediately
-        if (stream?.activeCollector) {
-          stream.activeCollector.interrupted = true;
-          stream.activeCollector.resolve();
-        }
+        interruptPromptCollector(stream?.activeCollector);
         return formatJsonResult({ ok: true, sessionId });
       }),
     ),
