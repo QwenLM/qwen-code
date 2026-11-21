@@ -145,8 +145,8 @@ public class JdbcSessionResourceObjects {
             throw JournalStoreRows.conflict("managed_session_resource_conflict",
                     "A resourceId was reused with different content metadata.");
         }
-        String objectKey = config.getOssKeyPrefix() + scope + "/" + request.resourceId() + "/"
-                + UUID.randomUUID();
+        String objectKey = config.getOssKeyPrefix() + tenantId + "/" + sessionId + "/"
+                + request.resourceId() + "/" + UUID.randomUUID();
         long now = System.currentTimeMillis();
         jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"

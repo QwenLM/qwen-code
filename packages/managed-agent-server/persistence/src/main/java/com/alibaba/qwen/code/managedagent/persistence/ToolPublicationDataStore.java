@@ -1087,7 +1087,7 @@ public final class ToolPublicationDataStore {
                     "Finished root changed");
             String resourceId = "result-" + hash(scope + ":" + publicationId + ":admission").substring(0, 32);
             String objectKey = bytes.length <= 64 * 1024 ? null
-                    : "managed-tool-results/" + scope + "/" + publicationId + "/" + hash("admission");
+                    : "managed-tool-results/" + ossScope(key) + "/" + publicationId + "/admission";
             List<Stored> stored = stored(scope, publicationId, "admission");
             if (stored.isEmpty()) {
                 long used = ((Number) publication.get("admission_used_bytes")).longValue();
@@ -1223,7 +1223,7 @@ public final class ToolPublicationDataStore {
                 "Publication cannot finish");
         String resourceId = "result-" + hash(scope + ":" + publicationId + ":terminal").substring(0, 32);
         String objectKey = length <= 64 * 1024 ? null
-                : "managed-tool-results/" + scope + "/" + publicationId + "/" + hash("terminal");
+                : "managed-tool-results/" + ossScope(key) + "/" + publicationId + "/terminal";
         String requestDigest = requestDigest("terminal", length, digest);
         List<Operation> prior = operation(scope, publicationId, operationId, true);
         if (!prior.isEmpty()) {
@@ -1714,7 +1714,7 @@ public final class ToolPublicationDataStore {
                 "managed_tool_publication_busy", "Publication is busy");
         String resourceId = kind == null ? null : "result-" + hash(scope + ":" + publicationId + ":" + slot).substring(0, 32);
         String objectKey = (kind != null && length <= 64 * 1024) ? null
-                : "managed-tool-results/" + scope + "/" + publicationId + "/" + hash(slot);
+                : "managed-tool-results/" + ossScope(key) + "/" + publicationId + "/" + slot;
         if (saved.isEmpty()) {
             String category = category(slot);
             long allocated = jdbc.queryForObject("SELECT " + category + "_bytes FROM ma_output_capture"
@@ -2383,6 +2383,10 @@ public final class ToolPublicationDataStore {
 
     static String scope(String tenant, String workspace, String session) {
         return hash(JSON.createArrayNode().add(tenant).add(workspace).add(session).toString());
+    }
+
+    private static String ossScope(JsonNode key) {
+        return text(key, "tenantId") + "/" + text(key, "workspaceId") + "/" + text(key, "sessionId");
     }
 
     private static String requestDigest(String slot, long length, String digest) {
