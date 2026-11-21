@@ -1409,6 +1409,29 @@ describe('LoggingContentGenerator', () => {
     expect(openaiError).toBeUndefined();
   });
 
+  it('logs the OpenAI fallback budget under max_completion_tokens for a GPT-5 model', async () => {
+    const generator = makeGenerator(
+      {
+        generate: resolving(
+          createResponse('resp-1', 'gpt-5.5', [{ text: 'ok' }], usage(3, 5)),
+        ),
+      },
+      { enableOpenAILogging: true, openAILoggingDir: 'logs' },
+      createConfig({ authType: AuthType.USE_ANTHROPIC }),
+    );
+    await generator.generateContent(
+      {
+        model: 'gpt-5.5',
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        config: { maxOutputTokens: 256 },
+      } as unknown as GenerateContentParameters,
+      'prompt-1',
+    );
+    const [openaiRequest] = openaiLogger().logInteraction.mock.calls[0];
+    expect(openaiRequest.max_completion_tokens).toBe(256);
+    expect(openaiRequest).not.toHaveProperty('max_tokens');
+  });
+
   /** Runs one call with `logPrompts` set; a stream is drained so response logging finalizes. */
   const runWithLogPrompts = async (stream: boolean, logPrompts: boolean) => {
     const marker = logPrompts ? 'KEEP' : 'SENSITIVE';

@@ -7,6 +7,10 @@
 import { createHash } from 'node:crypto';
 import { AuthType } from '../core/contentGenerator.js';
 import {
+  OUTPUT_BUDGET_KEYS,
+  outputBudgetWireKey,
+} from '../core/openaiContentGenerator/output-budget-key.js';
+import {
   resolveModelProtocol,
   tryResolveModelProtocol,
 } from '../models/modelRegistry.js';
@@ -106,6 +110,7 @@ function buildGenerationConfig(
 function buildAdvancedGenerationConfig(
   advCfg: ProviderSetupInputs['advancedConfig'] | undefined,
   protocol: AuthType,
+  modelId: string,
 ): ProviderModelConfig['generationConfig'] | undefined {
   const cfg: ProviderModelConfig['generationConfig'] = {};
   let hasAny = false;
@@ -132,7 +137,17 @@ function buildAdvancedGenerationConfig(
     hasAny = true;
   }
   if (advCfg?.maxTokens && advCfg.maxTokens > 0) {
-    cfg.samplingParams = { max_tokens: advCfg.maxTokens };
+    // On Chat Completions the budget has to travel under the key the model
+    // family accepts (GPT-5 / o-series reject `max_tokens`). The Responses
+    // wire and the other protocols read `max_tokens` and translate it.
+    const key =
+      protocol === AuthType.USE_OPENAI
+        ? outputBudgetWireKey(modelId)
+        : 'max_tokens';
+    cfg.samplingParams =
+      key === 'max_completion_tokens'
+        ? { max_completion_tokens: advCfg.maxTokens }
+        : { max_tokens: advCfg.maxTokens };
     hasAny = true;
   }
   return hasAny ? cfg : undefined;
@@ -214,6 +229,7 @@ function buildModelConfigs(
       const genConfig = buildAdvancedGenerationConfig(
         inputs.advancedConfig,
         protocol,
+        id,
       );
       return {
         id,
@@ -228,7 +244,7 @@ function buildModelConfigs(
     const advCfg = inputs.advancedConfig;
     const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
     models = inputs.modelIds.map((id) => {
-      const genConfig = buildAdvancedGenerationConfig(advCfg, protocol);
+      const genConfig = buildAdvancedGenerationConfig(advCfg, protocol, id);
       return {
         id,
         name: displayName(id),
@@ -408,6 +424,25 @@ export function buildInstallPlan(
       if (!existing) return model;
       const preservedGeneration = { ...existing.generationConfig };
       const advanced = inputs.advancedConfig;
+      // A new "Max output tokens" value replaces the old budget whatever key
+      // either travels under: the installer writes `max_completion_tokens`
+      // for GPT-5 / o-series ids on Chat Completions and `max_tokens`
+      // elsewhere, and an entry must never carry both (the endpoint rejects
+      // the pair). Other preserved samplingParams stay untouched.
+      const incomingSampling = model.generationConfig?.samplingParams;
+      if (
+        preservedGeneration.samplingParams &&
+        incomingSampling &&
+        OUTPUT_BUDGET_KEYS.some((key) => incomingSampling[key] !== undefined)
+      ) {
+        preservedGeneration.samplingParams = {
+          ...preservedGeneration.samplingParams,
+        };
+        for (const key of OUTPUT_BUDGET_KEYS)
+          delete preservedGeneration.samplingParams[key];
+        if (!Object.keys(preservedGeneration.samplingParams).length)
+          delete preservedGeneration.samplingParams;
+      }
       if (!config.models && advanced) {
         if (advanced.replaceExisting) {
           delete preservedGeneration.contextWindowSize;
@@ -415,7 +450,8 @@ export function buildInstallPlan(
             preservedGeneration.samplingParams = {
               ...preservedGeneration.samplingParams,
             };
-            delete preservedGeneration.samplingParams.max_tokens;
+            for (const key of OUTPUT_BUDGET_KEYS)
+              delete preservedGeneration.samplingParams[key];
             if (!Object.keys(preservedGeneration.samplingParams).length)
               delete preservedGeneration.samplingParams;
           }

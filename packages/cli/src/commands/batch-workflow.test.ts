@@ -1248,6 +1248,19 @@ describe('checkReadiness', () => {
     expect(h.out.join('\n')).toContain('max output provider default');
   });
 
+  it('reports a limit frozen under max_completion_tokens instead of "provider default"', async () => {
+    const h = (harness = setup());
+    h.deps.api = { ...h.api, probe: vi.fn(async () => undefined) };
+    h.deps.ep = {
+      ...h.deps.ep,
+      generationConfig: { samplingParams: { max_completion_tokens: 32000 } },
+    };
+    await checkReadiness(h.deps);
+    const text = h.out.join('\n');
+    expect(text).toMatch(/max output 32000 tokens/);
+    expect(text).not.toMatch(/provider default$/m);
+  });
+
   it('fails before any preparation when the route is unusable', async () => {
     const h = (harness = setup());
     h.deps.api = {
