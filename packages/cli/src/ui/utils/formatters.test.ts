@@ -215,6 +215,12 @@ describe('formatters', () => {
       expect(formatTokenCount(10000)).toBe('10k');
       expect(formatTokenCount(15000)).toBe('15k');
       expect(formatTokenCount(100000)).toBe('100k');
+      expect(formatTokenCount(999_999)).toBe('999k');
+    });
+
+    it('should display with m suffix for a million and above', () => {
+      expect(formatTokenCount(1_000_000)).toBe('1.0m');
+      expect(formatTokenCount(2_500_000)).toBe('2.5m');
     });
   });
 
