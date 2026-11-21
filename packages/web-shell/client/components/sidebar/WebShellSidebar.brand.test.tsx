@@ -116,13 +116,51 @@ function builtInMark(): Element | null {
   return container.querySelector('svg[data-testid="qwen-brand-mark"]');
 }
 
+function normalizedSvgAttributes(
+  element: Element | null | undefined,
+): Array<[string, string]> | undefined {
+  if (!element) return undefined;
+  return Array.from(
+    element.attributes,
+    ({ name, value }) => [name, value] as [string, string],
+  ).sort(([a], [b]) => a.localeCompare(b));
+}
+
+function expectCanonicalSvgChildren(
+  mark: Element | null,
+  canonicalRoot: Element,
+): void {
+  const expectedChildren = Array.from(canonicalRoot.children);
+  expect(expectedChildren).toHaveLength(3);
+  const actualChildren = Array.from(mark?.children ?? []);
+  expect(actualChildren).toHaveLength(expectedChildren.length);
+  actualChildren.forEach((child, index) => {
+    const expected = expectedChildren[index];
+    expect(child.localName).toBe(expected.localName);
+    expect(child.namespaceURI).toBe(expected.namespaceURI);
+    expect(normalizedSvgAttributes(child)).toEqual(
+      normalizedSvgAttributes(expected),
+    );
+    expect(child.children).toHaveLength(expected.children.length);
+  });
+}
+
 function expectCompactDarkMark(): void {
   const mark = builtInMark();
-  expect(mark?.getAttribute('viewBox')).toBe('0 0 24 24');
-  expect(mark?.getAttribute('fill')).toBe('currentColor');
-  expect(mark?.getAttribute('fill-rule')).toBe('evenodd');
-  expect(mark?.querySelectorAll('path')).toHaveLength(1);
-  expect(mark?.querySelector('path')?.getAttribute('d')).toBe(expectedDarkPath);
+  expect(mark?.namespaceURI).toBe('http://www.w3.org/2000/svg');
+  expect(normalizedSvgAttributes(mark)).toEqual([
+    ['aria-hidden', 'true'],
+    ['data-testid', 'qwen-brand-mark'],
+    ['fill', 'currentColor'],
+    ['fill-rule', 'evenodd'],
+    ['viewBox', '0 0 24 24'],
+  ]);
+  expect(mark?.children).toHaveLength(1);
+  const path = mark?.children[0];
+  expect(path?.localName).toBe('path');
+  expect(path?.namespaceURI).toBe('http://www.w3.org/2000/svg');
+  expect(normalizedSvgAttributes(path)).toEqual([['d', expectedDarkPath]]);
+  expect(path?.children).toHaveLength(0);
 }
 
 function expectOriginalLightMark(): void {
@@ -130,24 +168,14 @@ function expectOriginalLightMark(): void {
     canonicalLightSvg,
     'image/svg+xml',
   );
-  const expectedPaths = Array.from(
-    canonical.querySelectorAll('path'),
-    (path) => ({
-      fill: path.getAttribute('fill'),
-      d: path.getAttribute('d'),
-    }),
-  );
-  expect(expectedPaths).toHaveLength(3);
-
   const mark = builtInMark();
-  expect(mark?.getAttribute('viewBox')).toBe('17.5 27.7 135.6 135.6');
-  expect(mark?.getAttribute('fill')).toBeNull();
-  expect(
-    Array.from(mark?.querySelectorAll('path') ?? [], (path) => ({
-      fill: path.getAttribute('fill'),
-      d: path.getAttribute('d'),
-    })),
-  ).toEqual(expectedPaths);
+  expect(mark?.namespaceURI).toBe(canonical.documentElement.namespaceURI);
+  expect(normalizedSvgAttributes(mark)).toEqual([
+    ['aria-hidden', 'true'],
+    ['data-testid', 'qwen-brand-mark'],
+    ['viewBox', '17.5 27.7 135.6 135.6'],
+  ]);
+  expectCanonicalSvgChildren(mark, canonical.documentElement);
 }
 
 beforeEach(() => {
