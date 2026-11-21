@@ -31,6 +31,7 @@ async function activityFixture(
     extraRows?: number;
     noPreview?: boolean;
     waitForSecondaryUnread?: boolean;
+    secondaryResponseDelayMs?: number;
   } = {},
 ) {
   const now = Date.now();
@@ -114,11 +115,17 @@ async function activityFixture(
   const unavailable = new Set<string>(
     options.unavailableCwd ? [options.unavailableCwd] : [],
   );
+  const secondaryResponseDelayMs = options.secondaryResponseDelayMs ?? 0;
   let revision = 1;
   await page.route(/\/workspaces?\/[^/]+\/sessions(?:\?|$)/, async (route) => {
     const url = new URL(route.request().url());
     const cwd = decodeURIComponent(url.pathname.split('/')[2]!);
     catalogReads.push({ cwd, failed: unavailable.has(cwd) });
+    if (cwd === secondary && secondaryResponseDelayMs > 0) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, secondaryResponseDelayMs),
+      );
+    }
     if (unavailable.has(cwd)) {
       await route.fulfill({
         status: 503,
@@ -145,6 +152,11 @@ async function activityFixture(
       const cwd = decodeURIComponent(
         new URL(route.request().url()).pathname.split('/')[2]!,
       );
+      if (cwd === secondary && secondaryResponseDelayMs > 0) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, secondaryResponseDelayMs),
+        );
+      }
       await route.fulfill({
         json: {
           v: 1,
@@ -531,6 +543,7 @@ test('activity ranks attention, previews assistants and keeps source identities 
 }, testInfo) => {
   const fixture = await activityFixture(page, testInfo, {
     waitForSecondaryUnread: true,
+    secondaryResponseDelayMs: 1000,
   });
   await expect(
     page.locator('[data-web-shell-session-completed-unread]').first(),
@@ -592,11 +605,13 @@ test('activity clears shared in-memory unread state without writes and keeps the
 }, testInfo) => {
   const fixture = await activityFixture(page, testInfo, {
     waitForSecondaryUnread: true,
+    secondaryResponseDelayMs: 1000,
   });
   await openActivity(page);
   const priorityRows = page.locator(
     '[data-activity-section="priority"] [data-activity-key]',
   );
+  await expect(priorityRows).toHaveCount(8);
   const before = await priorityRows.evaluateAll((rows) =>
     rows.map((element) => element.getAttribute('data-activity-key')),
   );
