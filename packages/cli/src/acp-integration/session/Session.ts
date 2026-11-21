@@ -5686,7 +5686,8 @@ export class Session implements SessionContext {
    */
   #landUndrainedPeerNotifications(
     items: readonly QueuedBackgroundNotification[] = this.notificationQueue,
-  ): void {
+  ): ReadonlySet<QueuedBackgroundNotification> {
+    const tallied = new Set<QueuedBackgroundNotification>();
     const recording = this.config.getChatRecordingService();
     if (!recording) {
       for (const item of items) {
@@ -5695,8 +5696,9 @@ export class Session implements SessionContext {
           `Peer report lost: no recording service available for task=${item.taskId}`,
         );
         this.droppedNotifications.record(toAdmissibleNotification(item));
+        tallied.add(item);
       }
-      return;
+      return tallied;
     }
     for (const item of items) {
       if (item.producer !== 'teammate' || item.persisted) continue;
@@ -5723,6 +5725,7 @@ export class Session implements SessionContext {
       );
       item.persisted = true;
     }
+    return tallied;
   }
 
   /**
@@ -14726,8 +14729,11 @@ export class Session implements SessionContext {
             ? `Notification queue overflow: dropping related task=${item.taskId} kind=${item.kind} because all queued items are related`
             : `Notification queue overflow: dropping unrelated task=${item.taskId} kind=${item.kind} while automatic work is deferred`,
         );
-        this.#landUndrainedPeerNotifications([item]);
-        this.droppedNotifications.record(toAdmissibleNotification(item));
+        // The no-recorder landing arm already tallied this item; recording it
+        // again would report one lost report as two.
+        if (!this.#landUndrainedPeerNotifications([item]).has(item)) {
+          this.droppedNotifications.record(toAdmissibleNotification(item));
+        }
         return;
       }
       if (admission.action === 'push') break;

@@ -1969,6 +1969,65 @@ describe('Session', () => {
       session.dispose();
     });
 
+    it('counts an overflow-dropped teammate report once without a recorder', async () => {
+      // The no-recorder landing arm already tallies the loss, so the call site
+      // used to tally it again and one lost report rendered as two.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      session.beginClose();
+      const internals = session as unknown as {
+        todoStopGuardQueuedPromptPriority: boolean;
+        notificationQueue: Array<{
+          taskId: string;
+          kind: 'agent';
+          status: string;
+          modelText: string;
+          displayText: string;
+          continuesTodoStopGuardWorkChain: boolean;
+        }>;
+      };
+      internals.todoStopGuardQueuedPromptPriority = true;
+      for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+        internals.notificationQueue.push({
+          taskId: `related-${i}`,
+          kind: 'agent',
+          status: 'completed',
+          modelText: 'related result',
+          displayText: 'related result',
+          continuesTodoStopGuardWorkChain: true,
+        });
+      }
+
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      manager.leaderCallback?.('overflowed report', 'overflowed report', [
+        'security',
+      ]);
+      expect(internals.notificationQueue).toHaveLength(
+        MAX_BACKGROUND_NOTIFICATION_QUEUE,
+      );
+
+      await session.flushPendingPeerNotifications();
+      const summary = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([update]) => JSON.stringify(update))
+        .find((text) => text.includes('Dropped 1 background notification'));
+      expect(summary).toContain('1 teammate report');
+      expect(summary).not.toContain('2 teammate reports');
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).not.toHaveBeenCalled();
+      session.dispose();
+    });
+
     it('leaves cross-session peer messages to the close retraction', async () => {
       // `enqueuePeerMessage` records nothing while the message waits: the
       // transport owns that delivery, and the close retracts what is still
