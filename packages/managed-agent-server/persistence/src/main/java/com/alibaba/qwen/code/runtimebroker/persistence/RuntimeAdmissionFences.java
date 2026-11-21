@@ -105,24 +105,16 @@ public final class RuntimeAdmissionFences {
                 false);
     }
 
-    public static String harnessDrainKey(String value) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(value);
-    }
-
     static boolean hasHarnessDrain(Connection connection, String tenantId, String harnessSessionId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                         "SELECT tenant_id, harness_session_id, phase FROM ma_session_head WHERE"
-                                + " tenant_key = ? AND harness_key = ?")) {
-            statement.setString(1, harnessDrainKey(tenantId));
-            statement.setString(2, harnessDrainKey(harnessSessionId));
+                                + " tenant_id = ? AND harness_session_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
             try (ResultSet result = statement.executeQuery()) {
                 if (!result.next()) {
                     return false;
-                }
-                if (!tenantId.equals(result.getString("tenant_id"))
-                        || !harnessSessionId.equals(result.getString("harness_session_id"))) {
-                    throw new IllegalStateException("Harness drain hash collision");
                 }
                 return !"OPEN".equals(result.getString("phase"));
             }
@@ -144,9 +136,9 @@ public final class RuntimeAdmissionFences {
         try (PreparedStatement fence =
                 connection.prepareStatement(
                         "SELECT operation_id FROM ma_session_head"
-                                + " WHERE tenant_key = ? AND harness_key = ?")) {
-            fence.setString(1, harnessDrainKey(scope.getTenantId()));
-            fence.setString(2, harnessDrainKey(harnessSessionId));
+                                + " WHERE tenant_id = ? AND harness_session_id = ?")) {
+            JdbcRepositorySupport.setIdentity(fence, 1, scope.getTenantId());
+            JdbcRepositorySupport.setIdentity(fence, 2, harnessSessionId);
             try (ResultSet row = fence.executeQuery()) {
                 if (!row.next() || row.getString(1) == null) {
                     return false;
@@ -159,10 +151,10 @@ public final class RuntimeAdmissionFences {
                             + " JOIN ma_operation o ON o.operation_kind IN ('CLOSE',"
                             + " 'ARCHIVE', 'DELETE') AND o.tenant_id = f.tenant_id AND"
                             + " o.session_id = f.harness_session_id AND o.operation_id"
-                            + " = f.operation_id WHERE f.tenant_key = ? AND"
-                            + " f.harness_key = ?")) {
-            statement.setString(1, harnessDrainKey(scope.getTenantId()));
-            statement.setString(2, harnessDrainKey(harnessSessionId));
+                            + " = f.operation_id WHERE f.tenant_id = ? AND"
+                            + " f.harness_session_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()) {
                     throw admissionClosed();
@@ -237,19 +229,15 @@ public final class RuntimeAdmissionFences {
         try (PreparedStatement statement = connection.prepareStatement(
                         "SELECT tenant_id, harness_session_id, phase, operation_id,"
                                 + " claim_generation, claim_lease_until FROM ma_session_head WHERE"
-                                + " tenant_key = ? AND harness_key = ?" + claimLock)) {
-            statement.setString(1, harnessDrainKey(scope.getTenantId()));
-            statement.setString(2, harnessDrainKey(harnessSessionId));
+                                + " tenant_id = ? AND harness_session_id = ?" + claimLock)) {
+            JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()) {
                     if (authority != null) {
                         throw admissionClosed();
                     }
                     return;
-                }
-                if (!scope.getTenantId().equals(row.getString("tenant_id"))
-                        || !harnessSessionId.equals(row.getString("harness_session_id"))) {
-                    throw admissionClosed();
                 }
                 if ("OPEN".equals(row.getString("phase"))) {
                     if (authority != null) {
@@ -281,13 +269,11 @@ public final class RuntimeAdmissionFences {
     public static void beginHarnessLifecycle(Connection connection, String tenantId, String sessionId, String operationId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                        "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, operation_id, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'LIFECYCLE_ONLY', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN phase IS NULL OR phase <> 'LIFECYCLE_ONLY' OR operation_id IS NULL OR operation_id <> VALUES(operation_id) THEN VALUES(gmt_modified) ELSE gmt_modified END, phase = 'LIFECYCLE_ONLY', operation_id = VALUES(operation_id)")) {
-            statement.setString(1, harnessDrainKey(tenantId));
-            statement.setString(2, harnessDrainKey(sessionId));
-            JdbcRepositorySupport.setIdentity(statement, 3, tenantId);
-            JdbcRepositorySupport.setIdentity(statement, 4, sessionId);
-            JdbcRepositorySupport.setIdentity(statement, 5, sessionId);
-            JdbcRepositorySupport.setIdentity(statement, 6, operationId);
+                        "INSERT INTO ma_session_head (tenant_id, harness_session_id, session_id, head_kind, phase, operation_id, gmt_create, gmt_modified) VALUES (?, ?, ?, 'HARNESS', 'LIFECYCLE_ONLY', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN phase IS NULL OR phase <> 'LIFECYCLE_ONLY' OR operation_id IS NULL OR operation_id <> VALUES(operation_id) THEN VALUES(gmt_modified) ELSE gmt_modified END, phase = 'LIFECYCLE_ONLY', operation_id = VALUES(operation_id)")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
+            JdbcRepositorySupport.setIdentity(statement, 3, sessionId);
+            JdbcRepositorySupport.setIdentity(statement, 4, operationId);
             statement.executeUpdate();
         }
     }

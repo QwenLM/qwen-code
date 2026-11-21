@@ -152,10 +152,8 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
             lockSessionRoot(jdbc, tenant, session, timeoutSeconds);
             var heads = jdbc.query(
                     "SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
-                            + " tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id"
-                            + " = ? FOR UPDATE",
-                    boundedParameters(jdbc, timeoutSeconds, ManagedSchemaKeys.key(tenant),
-                            ManagedSchemaKeys.key(session), tenant, session),
+                            + " tenant_id = ? AND harness_session_id = ? FOR UPDATE",
+                    boundedParameters(jdbc, timeoutSeconds, tenant, session),
                     (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow));
             return heads.isEmpty() ? null : heads.getFirst();
         });
@@ -201,10 +199,8 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         }
         var heads =
                 jdbc.query(
-                        "SELECT state, recovery_status, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_active FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE",
+                        "SELECT state, recovery_status, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_active FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_id = ? AND harness_session_id = ? FOR UPDATE",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                        ManagedSchemaKeys.key(tenant),
-                        ManagedSchemaKeys.key(session),
                         tenant,
                         session);
         long time = now(jdbc);
@@ -228,9 +224,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 hash(tenant),
                 hash(session));
         jdbc.update(
-                "UPDATE ma_session_head SET state = 'DELETED', writer_id = NULL, writer_lease_until = NULL, lease_token_hash = NULL, latest_checkpoint_resource_id = NULL, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
-                ManagedSchemaKeys.key(tenant),
-                ManagedSchemaKeys.key(session),
+                "UPDATE ma_session_head SET state = 'DELETED', writer_id = NULL, writer_lease_until = NULL, lease_token_hash = NULL, latest_checkpoint_resource_id = NULL, gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_id = ? AND harness_session_id = ?",
                 tenant,
                 session);
         jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", retention_state = 'RETIRING' WHERE tenant_id = ?"
@@ -597,9 +591,8 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                                             OperationKind.OBJECT_PUT, scope, target, id);
                             long time = now(jdbc);
                             jdbc.update(
-                                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, session_id, workspace_id, target_kind, target_key, publication_id, request_digest, request_json, state, phase, claim_generation, gmt_create, gmt_modified) VALUES (?, ?, ?, 'OBJECT_PUT', ?, ?, ?, ?, 'RESOURCE', ?, ?, ?, ?, 'IN_FLIGHT', 'PUT', 1, ?, ?)",
+                                    "INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, session_id, workspace_id, target_kind, target_key, publication_id, request_digest, request_json, state, phase, claim_generation, gmt_create, gmt_modified) VALUES (?, ?, 'OBJECT_PUT', ?, ?, ?, ?, 'RESOURCE', ?, ?, ?, ?, 'IN_FLIGHT', 'PUT', 1, ?, ?)",
                                     originalKey,
-                                    ManagedSessionStore.sessionScopeKey(tenant, session),
                                     scope,
                                     id,
                                     tenant,

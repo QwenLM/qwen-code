@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.repository.TransportConsumerStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 
@@ -51,7 +50,7 @@ public class JdbcTransportConsumerStore
                         "SELECT s.status, h.workspace_id, h.state, h.committed_sequence,"
                             + " h.writer_lease_until, h.journal_revision, h.wake_seal_revision,"
                             + " h.is_wake_pending, h.wake_retry_at FROM ma_session s JOIN ma_session_head h ON"
-                            + " h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id ="
+                            + " h.tenant_id ="
                             + " s.tenant_id AND h.session_id = s.session_id AND h.head_kind ="
                             + " 'MANAGED_SESSION' WHERE s.tenant_id = ? AND s.session_id = ? AND"
                             + " s.session_kind = 'PUBLIC' AND s.retired_at IS NULL",
@@ -64,7 +63,7 @@ public class JdbcTransportConsumerStore
                                 .equals(result.getObject("wake_seal_revision", Long.class)),
                         result.getInt("is_wake_pending") != 0,
                         result.getLong("wake_retry_at")),
-                ManagedSchemaKeys.key(tenantId), ManagedSchemaKeys.key(sessionId), tenantId, sessionId);
+                tenantId, sessionId);
         if (rows.isEmpty()) {
             return Optional.empty();
         }
@@ -94,19 +93,14 @@ public class JdbcTransportConsumerStore
             List<String> chunk = sessionIds.subList(from,
                     Math.min(sessionIds.size(), from + HELD_CHUNK));
             List<Object> args = new ArrayList<>();
-            args.add(ManagedSchemaKeys.key(tenantId));
             args.add(tenantId);
             args.add(writerId);
-            chunk.stream().map(ManagedSchemaKeys::key).forEach(args::add);
             args.addAll(chunk);
             jdbc.query(
-                    "SELECT session_id, writer_lease_until FROM ma_session_head WHERE tenant_key ="
-                            + " ? AND tenant_id = ? AND head_kind = 'MANAGED_SESSION' AND state ="
-                            + " 'ACTIVE' AND writer_id = ? AND harness_key IN ("
+                    "SELECT session_id, writer_lease_until FROM ma_session_head WHERE"
+                            + " tenant_id = ? AND head_kind = 'MANAGED_SESSION' AND state ="
+                            + " 'ACTIVE' AND writer_id = ? AND harness_session_id IN ("
                             + String.join(", ", Collections.nCopies(chunk.size(), "?"))
-                            + ") AND session_id IN ("
-                            + String.join(", ",
-                                    Collections.nCopies(chunk.size(), "?"))
                             + ")",
                     (RowCallbackHandler) result -> {
                         Timestamp lease = ManagedSchemaTime.timestamp(result, "writer_lease_until");
@@ -159,13 +153,13 @@ public class JdbcTransportConsumerStore
     public Optional<String> workspaceOf(String tenantId, String sessionId) {
         List<Optional<String>> workspace = jdbc.query(
                         "SELECT COALESCE(s.workspace_id, h.workspace_id) FROM ma_session s LEFT"
-                            + " JOIN ma_session_head h ON h.tenant_key = ? AND h.harness_key = ?"
-                            + " AND h.tenant_id = s.tenant_id AND h.session_id = s.session_id AND"
+                            + " JOIN ma_session_head h ON"
+                            + " h.tenant_id = s.tenant_id AND h.session_id = s.session_id AND"
                             + " h.head_kind = 'MANAGED_SESSION' WHERE s.tenant_id = ? AND"
                             + " s.session_id = ? AND s.session_kind = 'PUBLIC' AND s.retired_at IS"
                             + " NULL",
                 (result, index) -> Optional.ofNullable(result.getString(1)),
-                ManagedSchemaKeys.key(tenantId), ManagedSchemaKeys.key(sessionId), tenantId, sessionId);
+                tenantId, sessionId);
         return workspace.isEmpty() ? Optional.empty() : workspace.getFirst();
     }
 
