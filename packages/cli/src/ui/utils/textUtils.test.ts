@@ -14,6 +14,7 @@ import {
   __getTextUtilsCacheSizes,
   clearStringWidthCache,
   clipToWidth,
+  clipToWidthFromEnd,
   escapeAnsiCtrlCodes,
   getCachedStringWidth,
   sanitizeFilenameForDisplay,
@@ -435,6 +436,34 @@ describe('textUtils', () => {
       // A double-width cell that would straddle the budget is dropped whole.
       expect(clipToWidth('目标配置参数设置', 9)).toBe('目标配置');
       expect(clipToWidth('ab目', 3)).toBe('ab');
+    });
+  });
+
+  describe('clipToWidthFromEnd', () => {
+    it('returns the full text when it fits the budget', () => {
+      expect(clipToWidthFromEnd('Color', 12)).toBe('Color');
+      expect(clipToWidthFromEnd('Color', 5)).toBe('Color');
+    });
+
+    it('keeps the tail when over budget, with no ellipsis', () => {
+      expect(clipToWidthFromEnd('Target config', 6)).toBe('config');
+    });
+
+    it('returns empty at a zero or negative budget', () => {
+      expect(clipToWidthFromEnd('Target config', 0)).toBe('');
+      expect(clipToWidthFromEnd('Target config', -3)).toBe('');
+    });
+
+    it('bounds CJK text by display width, not character count', () => {
+      const text = '目标配置参数设置';
+      // 8 double-width characters (16 cells). Each character is kept or dropped
+      // whole, so the tail is the longest suffix that fits the cell budget.
+      expect(clipToWidthFromEnd(text, 9)).toBe('参数设置');
+      expect(clipToWidthFromEnd(text, 10)).toBe('置参数设置');
+      expect(clipToWidthFromEnd(text, 13)).toBe('配置参数设置');
+      expect(clipToWidthFromEnd(text, 15)).toBe('标配置参数设置');
+      expect(clipToWidthFromEnd(text, 16)).toBe(text);
+      expect(clipToWidthFromEnd('ab目', 3)).toBe('b目');
     });
   });
 

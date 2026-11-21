@@ -12,6 +12,7 @@ import * as os from 'node:os';
 import * as nodePath from 'node:path';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -25,6 +26,11 @@ import type {
   RuleType,
 } from '@qwen-code/qwen-code-core/permissions/types.js';
 import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
+import {
+  SCOPE_LABEL_GAP,
+  permissionScopeItems,
+  scopeRowWidth,
+} from '../utils/permission-scope-row.js';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 
 // ---------------------------------------------------------------------------
@@ -48,34 +54,6 @@ type DialogView =
   | 'ws-dir-list' // workspace directory list
   | 'ws-add-dir-input' // text input for adding a directory
   | 'ws-remove-confirm'; // confirm directory removal
-
-// ---------------------------------------------------------------------------
-// Scope items (matches Claude Code screenshot layout)
-// ---------------------------------------------------------------------------
-
-interface PermScopeItem {
-  label: string;
-  description: string;
-  value: SettingScope;
-  key: string;
-}
-
-function getPermScopeItems(): PermScopeItem[] {
-  return [
-    {
-      label: t('Project settings'),
-      description: t('Checked in at .qwen/settings.json'),
-      value: SettingScope.Workspace,
-      key: 'project',
-    },
-    {
-      label: t('User settings'),
-      description: t('Saved in at ~/.qwen/settings.json'),
-      value: SettingScope.User,
-      key: 'user',
-    },
-  ];
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -151,6 +129,7 @@ export function PermissionsDialog({
   const config = useConfig();
   const settings = useSettings();
   const pm = config.getPermissionManager?.() as PermissionManager | null;
+  const { columns } = useTerminalSize();
 
   // --- Tab state ---
   const tabs = useMemo(() => getTabs(), []);
@@ -842,7 +821,14 @@ export function PermissionsDialog({
   }
 
   if (view === 'add-rule-scope') {
-    const scopeItems = getPermScopeItems();
+    // The dialog is mounted in the app's `min(columns - 4, 100)` content box
+    // and spends a border and a padding column on each side; the list then
+    // charges its cursor box and number gutter. Budget the row from that inner
+    // width, not from the terminal width, or a wide terminal over-budgets and
+    // the renderer clips the settings file name.
+    const scopeItems = permissionScopeItems(
+      scopeRowWidth(Math.min(columns - 4, 100) - 4, 2),
+    );
     return (
       <Box flexDirection="column">
         <Box
@@ -865,7 +851,7 @@ export function PermissionsDialog({
           <Text>{t('Where should this rule be saved?')}</Text>
           <RadioButtonSelect
             items={scopeItems.map((s) => ({
-              label: `${s.label}    ${s.description}`,
+              label: `${s.label}${' '.repeat(SCOPE_LABEL_GAP)}${s.description}`,
               value: s.value,
               key: s.key,
             }))}

@@ -146,6 +146,12 @@ describe('must-translate locale coverage', () => {
     );
   });
 
+  it('requires translation coverage for the permissions settings path row', () => {
+    expect(MUST_TRANSLATE_KEYS).toEqual(
+      expect.arrayContaining(['Saved in {{path}}']),
+    );
+  });
+
   it('requires translation coverage for /pr user-facing strings', () => {
     expect(MUST_TRANSLATE_KEYS).toEqual(
       expect.arrayContaining([...PR_COMMAND_REQUIRED_KEYS]),
