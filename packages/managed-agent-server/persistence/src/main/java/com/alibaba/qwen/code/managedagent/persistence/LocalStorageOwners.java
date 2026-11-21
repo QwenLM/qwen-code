@@ -165,9 +165,9 @@ final class LocalStorageOwners {
                 || !(alias.get("physical_key") instanceof String physical)) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, physical_key, storage_kind, mount_state FROM ma_storage_owner WHERE storage_key = ?"
+        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, storage_kind, mount_state FROM ma_storage_owner WHERE storage_key = ?"
                 + lock, physical);
-        if (owners.size() != 1 || !physical.equals(owners.getFirst().get("physical_key"))
+        if (owners.size() != 1 || !physical.equals(owners.getFirst().get("storage_key"))
                 || !"LOCAL".equals(owners.getFirst().get("storage_kind"))) {
             throw WorkspaceExecutionStore.unavailable();
         }

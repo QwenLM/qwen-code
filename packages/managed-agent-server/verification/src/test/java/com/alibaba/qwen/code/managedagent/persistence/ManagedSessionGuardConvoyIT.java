@@ -889,7 +889,7 @@ class ManagedSessionGuardConvoyIT {
         var fixture = new WorkspaceLifecycleStoreTest.Fixture(source);
         String operationId = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle(
                 "tenant", fixture.session, StoreModels.OperationKind.CLOSE, "owner", "a".repeat(64),
-                "close", "digest", true, 1).operation().operationId());
+                "close", "digest", true, 2).operation().operationId());
         var operation = fixture.transactions.execute(ignored -> fixture.store.claimOperation(
                 "tenant", fixture.session, operationId, "worker", Duration.ofMinutes(5)).orElseThrow());
         var effects = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(operation));

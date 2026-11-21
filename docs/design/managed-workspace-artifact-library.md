@@ -2,9 +2,15 @@
 
 [English](managed-workspace-artifact-library.md) | [简体中文](managed-workspace-artifact-library.zh-CN.md)
 
-Status: implemented in this change; locally verified (H2 and real MySQL 8.4
-integration, surface/contract/acceptance/parity gates, focused web-shell
-tests, build/typecheck/bundle). Full CI acceptance remains pending.
+Status: merged in #17728 (squash commit `3f7b6088d9`). Verified before merge:
+H2 and real MySQL 8.4 integration, surface/contract/acceptance/parity gates,
+focused web-shell tests, build/typecheck/bundle, a 22-mutation witness matrix,
+and a real Spring-boot + real-HTTP admission probe. ci.yml and the PR-event
+fast-tier Managed Agent gate were green on the final PR head; the
+approval-triggered full tier later failed this surface's index-access-path
+assertion — an unscoped JDBC metadata read that matched `ma_operation` in
+every database on CI's shared MySQL — addressed in #17893. Deferred
+test-hardening follow-ups are tracked in #17778.
 
 ## Problem and current state
 
