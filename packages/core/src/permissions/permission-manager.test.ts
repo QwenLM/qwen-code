@@ -3045,6 +3045,34 @@ describe('buildPermissionRules', () => {
       expect(reads('/Users/bob/.secrets')).toBe(false);
     });
 
+    // A UNC root already starts with two separators; stripping them and
+    // re-adding only the `//` grammar prefix persisted `//server/share/...`,
+    // which resolves to `/server/share/...` and never matches again.
+    it.each([
+      ['a network share', '\\\\server\\share'],
+      ['a WSL folder', '\\\\wsl.localhost\\Ubuntu'],
+    ])(
+      'Read rule for a UNC directory on %s matches files in it',
+      async (_label, root) => {
+        const rules = build({
+          toolName: 'glob',
+          filePath: `${root}\\proj`,
+        });
+        const parsed = parseRule(rules[0]!);
+        const reads = (filePath: string) =>
+          matchesPath(parsed, 'read_file', filePath, {
+            projectRoot: 'C:\\work',
+            cwd: 'C:\\work',
+          });
+        expect(reads(`${root}\\proj\\a.txt`)).toBe(true);
+        expect(reads(`${root}\\proj\\nested\\b.txt`)).toBe(true);
+        expect(reads(`${root}\\other\\a.txt`)).toBe(false);
+        expect(reads(`${root.replaceAll('\\', '/').slice(1)}/proj/a.txt`)).toBe(
+          false,
+        );
+      },
+    );
+
     it('Read rule also matches other read-family tools on the same path', async () => {
       const rules = build({
         toolName: 'grep_search',
