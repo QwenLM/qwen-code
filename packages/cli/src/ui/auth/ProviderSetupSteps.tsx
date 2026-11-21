@@ -316,7 +316,13 @@ function ModelIdsStep({
   );
   const [selectedRecommendationKeys, setSelectedRecommendationKeys] = useState(
     () =>
-      getRecommendedSelections(selectedModelIds, modelOptions, builtInModelIds),
+      getRecommendedSelections(
+        selectedModelIds,
+        modelOptions,
+        config.uiGroup === 'custom' && recommendationSource === 'provider'
+          ? modelOptions.map((model) => model.key)
+          : builtInModelIds,
+      ),
   );
   const [customModelIdsText, setCustomModelIdsText] = useState(() =>
     getCustomModelIdsText(
@@ -617,6 +623,12 @@ function DiscoveringModelIdsStep({
   } | null>(null);
   const baseUrl = flow.state.baseUrl;
   const apiKey = flow.state.apiKey;
+  const protocol =
+    flow.state.protocol === AuthType.USE_ANTHROPIC
+      ? 'anthropic'
+      : flow.state.wireApi === 'responses'
+        ? 'openai-responses'
+        : 'openai';
 
   useEffect(() => {
     const controller = new AbortController();
@@ -628,6 +640,8 @@ function DiscoveringModelIdsStep({
       apiKey,
       staticModels: builtInModels,
       signal: controller.signal,
+      protocol,
+      ...(config.uiGroup === 'custom' ? { maxRedirects: 0 } : {}),
     }).then((models) => {
       if (active) {
         setSnapshot({
@@ -641,7 +655,7 @@ function DiscoveringModelIdsStep({
       active = false;
       controller.abort();
     };
-  }, [apiKey, baseUrl, config.models]);
+  }, [apiKey, baseUrl, config.models, config.uiGroup, protocol]);
 
   if (!snapshot) {
     return (
@@ -958,7 +972,13 @@ export function ProviderSetupSteps({
       return <ApiKeyStep config={provider} flow={flow} />;
 
     case 'models':
-      if (provider.supportsModelDiscovery) {
+      if (
+        provider.supportsModelDiscovery ||
+        (provider.uiGroup === 'custom' &&
+          [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC].includes(
+            flow.state.protocol,
+          ))
+      ) {
         return <DiscoveringModelIdsStep config={provider} flow={flow} />;
       }
       return <ModelIdsStep config={provider} flow={flow} />;
