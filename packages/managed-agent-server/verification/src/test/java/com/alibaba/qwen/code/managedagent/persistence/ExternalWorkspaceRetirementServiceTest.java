@@ -562,13 +562,37 @@ class ExternalWorkspaceRetirementServiceTest {
                 .isEqualTo("ACTIVE");
     }
 
+    // The orphan-head fence: a head that still owns a Workspace member but has
+    // no `ma_session` row of its own can never be observed as idle, because
+    // nothing would remove it afterwards. The deleted-head narrowing above must
+    // not swallow it.
+    @Test
+    void orphanManagedSessionHeadFencesRetirement() {
+        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id, session_id,"
+                + " harness_session_id, head_kind, state, phase, writer_generation, journal_revision,"
+                + " committed_sequence, activation_epoch, compacted_through_revision, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, 'tenant', 'workspace', 'orphan-head', 'orphan-head', 'MANAGED_SESSION', 'DELETED',"
+                + " 'DRAINING', 1, 1, 1, 1, 1, 1, 1)",
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("tenant"),
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("orphan-head"));
+
+        assertThatThrownBy(() -> service.retire(request, this::terminated))
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("statusCode", 409)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
+        assertThat(bindings.findById(original.getBindingId()).getVersion())
+                .isEqualTo(original.getVersion());
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_workspace", String.class))
+                .isEqualTo("ACTIVE");
+    }
+
     private void reclaimDeletedHead(long compactedThroughRevision) {
         jdbc.update("UPDATE ma_session SET status = 'DELETED' WHERE tenant_id = ? AND session_id = ?",
                 "tenant", "user-session");
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id, session_id,"
                 + " harness_session_id, head_kind, state, phase, writer_generation, journal_revision,"
                 + " committed_sequence, activation_epoch, compacted_through_revision, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, 'tenant', 'user-session', 'user-session', 'MANAGED_SESSION', 'DELETED',"
+                + " VALUES (?, ?, 'tenant', 'workspace', 'user-session', 'user-session', 'MANAGED_SESSION', 'DELETED',"
                 + " 'DRAINING', 1, 5, 5, 1, ?, 1, 1)",
                 com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("tenant"),
                 com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("user-session"),
