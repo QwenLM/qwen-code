@@ -169,8 +169,9 @@ load, and no unarchive.
 
 ### Availability and content policy
 
-`reader.availability(artifacts)` runs once per page; the reader already groups
-by source session key, so a cross-session page batches correctly. When any row
+`reader.availability(artifacts)` reads receipts for a nonempty page in one SQL
+query. Each source session contributes its own scope, retirement check, and
+publication IDs. Results are matched by scope and publication ID. When any row
 is unavailable, the workspace read grant is re-checked once — the workspace
 analogue of the session page's `session()` re-check — and a lost grant answers
 `404 workspace_not_found` instead of silently serving the page.

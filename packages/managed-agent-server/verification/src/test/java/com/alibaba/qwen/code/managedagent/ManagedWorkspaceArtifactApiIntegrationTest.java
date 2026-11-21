@@ -25,8 +25,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -90,7 +93,7 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
             public boolean publishOriginal(String tenant, String workspace, String session) { return true; }
             public boolean publishPreview(String tenant, String workspace, String session) { return true; }
             public boolean readOriginal(String tenant, String actor, String workspace, String session) {
-                return "reader".equals(actor);
+                return "reader".equals(actor) && !"session-2".equals(session);
             }
         };
         mvc = mvc(new ManagedArtifactService(sessions, fixture.results(), fixture.reader(),
@@ -526,6 +529,40 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("workspace_not_found"));
         verify(registry, times(3)).canRead(TENANT, "reader", WORKSPACE);
+    }
+
+    @Test
+    void readsAvailabilityOnceAcrossSessionsThatShareAPublicationId() throws Exception {
+        String second = seedArtifactSession("session-2", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        String third = seedArtifactSession("session-3", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        String publicationId = fixture.results().findArtifact(TENANT, "session-1", stdout.path("id").asText())
+                .orElseThrow().publicationId();
+        String scope = DigestUtils.sha256Hex(
+                JSON.createArrayNode().add(TENANT).add(WORKSPACE).add("session-2").toString());
+        fixture.jdbc().update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, admission_resource_id,"
+                + " receipt_revision, receipt_sequence, is_quarantined)"
+                + " SELECT ?, tenant_key, tenant_id, workspace_id, ?, publication_id, execution_key, capture_id,"
+                + " binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes,"
+                + " producer_phase, admission_resource_id, receipt_revision, receipt_sequence, is_quarantined"
+                + " FROM ma_output_capture WHERE publication_id = ?",
+                scope, "session-2", publicationId);
+        var jdbc = spy(fixture.jdbc());
+        ReflectionTestUtils.setField(fixture.publications(), "jdbc", jdbc);
+
+        var response = page("reader", body(null, null));
+        assertThat(ids(response)).containsExactlyInAnyOrder(second, third,
+                stdout.path("id").asText(), stderr.path("id").asText());
+        for (var row : response.required("data")) {
+            var artifact = row.required("artifact");
+            boolean available = !third.equals(artifact.required("id").asText());
+            assertThat(artifact.required("availability").asText()).isEqualTo(available ? "available" : "unavailable");
+            assertThat(row.required("access").required("can_read_content").booleanValue())
+                    .isEqualTo("session-1".equals(artifact.required("session_id").asText()));
+        }
+        verify(jdbc).query(ArgumentMatchers.contains("FROM ma_output_capture"),
+                ArgumentMatchers.any(RowMapper.class), ArgumentMatchers.any(Object[].class));
     }
 
     @Test
