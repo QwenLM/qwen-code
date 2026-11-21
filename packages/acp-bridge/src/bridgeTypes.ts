@@ -1929,6 +1929,21 @@ export interface BridgeTurnStatus {
   originatorClientId?: string;
 }
 
+/** A per-turn satisfied/not-satisfied mark bound for telemetry. */
+export interface BridgeSessionFeedbackRequest {
+  /** The turn's admitted prompt id — the daemon's per-turn identity. */
+  promptId: string;
+  rating: 'up' | 'down';
+}
+
+export interface BridgeSessionFeedbackResult {
+  /**
+   * False when the session workspace's `ui.enableUserFeedback` setting
+   * suppresses collection; true once the event reached `logUserFeedback`.
+   */
+  recorded: boolean;
+}
+
 export interface BridgeDaemonStatusLimits {
   maxSessions: number | null;
   maxPendingPromptsPerSession: number | null;
@@ -3106,6 +3121,20 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     row: { component: string; props: Record<string, unknown> },
     context?: BridgeClientRequestContext,
   ): Promise<BridgeModRowAnswer>;
+
+  /**
+   * Record a per-turn satisfied/not-satisfied mark into the owning
+   * session's telemetry pipeline. Thin pass-through to
+   * `qwen/control/session/feedback`: the ACP child maps the rating onto
+   * `UserFeedbackRating` and calls `logUserFeedback` with its own session
+   * Config, so model and approval mode come from the session's authority,
+   * not the caller. Throws `SessionNotFoundError` for unknown ids.
+   */
+  rateSessionTurn(
+    sessionId: string,
+    req: BridgeSessionFeedbackRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeSessionFeedbackResult>;
 
   /**
    * Run a stateless, tool-free text generation request in the ACP child and
