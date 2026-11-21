@@ -42,7 +42,10 @@ export function createDaemonTranscriptStore(
   let notifyScheduled = false;
 
   const notify = () => {
-    for (const listener of listeners) {
+    // A callback may replace its subscription while handling an update.
+    // A live Set traversal would revisit it indefinitely after re-insertion.
+    for (const listener of [...listeners]) {
+      if (!listeners.has(listener)) continue;
       try {
         listener();
       } catch (error) {
