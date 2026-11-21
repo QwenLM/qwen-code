@@ -174,7 +174,10 @@ export const SERVE_STATUS_EXT_METHODS = {
 export const MOD_ROWS_CLIENT_CAPABILITY = 'qwen.modRows';
 
 /** The Mod row sites the Web Shell draws, which the bridge declares. */
-export const WEB_SHELL_MOD_ROW_SITES: readonly string[] = ['AssistantMessage'];
+export const WEB_SHELL_MOD_ROW_SITES: readonly string[] = [
+  'AssistantMessage',
+  'Thinking',
+];
 
 /**
  * A session's answer for one row: no hook hears its site, so the client asks
