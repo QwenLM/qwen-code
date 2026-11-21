@@ -1641,6 +1641,13 @@ export class DaemonSessionClient {
         },
         ...(epoch !== undefined ? { epoch } : {}),
         onEpoch: (learned) => {
+          if (
+            this.lastSeenEpoch !== undefined &&
+            this.lastSeenEpoch !== learned
+          ) {
+            // Event ids are only ordered within one bus epoch.
+            this.lastSeenEventId = 0;
+          }
           this.lastSeenEpoch = learned;
           callerOnEpoch?.(learned);
         },
