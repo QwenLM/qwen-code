@@ -286,17 +286,25 @@ function redactWeldedTokens(log) {
       // following selected line) and handles escapes (\\[^\n], so "C:\temp"
       // reaches its closing quote; a backslash before a line break must not
       // cross it). Unquoted values use a whitespace-bounded tempered token, but
-      // skip a value that is already the [redacted] placeholder followed by a
-      // structural delimiter: pass 1 redacted it, and re-running the greedy
-      // token would eat the rest of the JSON object (the failure payload).
-      // A fork's [redacted]secret is still redacted — more credential characters,
-      // not a delimiter, follow the placeholder.
+      // Do NOT infer completeness from the [redacted] placeholder: pass 1's
+      // value class stops INSIDE a credential at , } quote or a stripped control,
+      // so KEY=[redacted]<remainder> is produced by both a completed and a
+      // truncated redaction, and the character after the placeholder cannot tell
+      // them apart. Any value that already starts with [redacted] is therefore
+      // left exactly as pass 1 (base) left it — re-redacting it greedily deletes
+      // the failure payload, and skipping only on a delimiter ships a truncated
+      // secret tail. The repair redacts only values pass 1 missed (a control-split
+      // key), whose value is the secret itself, not the placeholder. A fork's
+      // [redacted]secret under a split key is left as base leaves it (a recorded
+      // base-equivalent limitation, not a new leak). The escape unit is tempered
+      // too, so a backslash directly before ##[error] cannot carry the value
+      // across the marker.
       .replace(
-        /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)(["'])((?:(?!##\[error\])(?:[^\\\n]|\\[^\n]))*?)\4/gi,
+        /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)(["'])((?:(?!##\[error\])(?:[^\\\n]|\\(?!##\[error\])[^\n]))*?)\4/gi,
         '$1$2$3[redacted]',
       )
       .replace(
-        /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?(?!\[redacted\](?=[,}"'\s]|$))(?:(?!##\[error\])[^\s])+["']?/gi,
+        /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?(?!\[redacted\])(?:(?!##\[error\])[^\s])+["']?/gi,
         '$1$2$3[redacted]',
       )
   );

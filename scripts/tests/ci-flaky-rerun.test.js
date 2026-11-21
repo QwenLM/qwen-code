@@ -1325,21 +1325,38 @@ describe('ci flaky rerun patrol', () => {
     expect(evidence).toContain('FAIL src/a.test.ts');
   });
 
-  it('redacts a credential the log hid behind a literal [redacted] prefix', () => {
-    // The value is a tempered token, not a class that excludes [ or ]: a value
-    // the log itself wrote as [redacted]… is still a value and gets redacted.
-    // With the keyword split, the first pass saw nothing and this pass is the
-    // only chance to scrub it.
-    for (const [line, secret] of [
-      ['##[error]API_KE\rY=[redacted]realsecretvalue123', 'realsecretvalue123'],
-      ['##[error]NPM_TO\rKEN=[redacted]abcdefghijklmno', 'abcdefghijklmno'],
-      ['##[error]Bea\rrer [redacted]realsecretvalue123', 'realsecretvalue123'],
-      ["##[error]API_KE\rY='[redacted]abcdefghijklmno'", 'abcdefghijklmno'],
+  it('does not infer redaction completeness from the [redacted] placeholder', () => {
+    // Pass 1's value class stops INSIDE a credential at , } quote or a stripped
+    // control, so KEY=[redacted]<remainder> comes from both a completed and a
+    // truncated redaction. The repair must not re-redact a [redacted]-prefixed
+    // value: greedily re-matching it deletes the failure payload, and skipping
+    // only on a delimiter ships a truncated secret tail. Such values are left as
+    // pass 1 (base) left them. (A fork's [redacted]secret under a split key is
+    // likewise left as base leaves it — a recorded base-equivalent limitation.)
+    for (const [line, payload] of [
+      [
+        '{"apiKey":"Ab\'c123","msg":"AssertionError: boom"}',
+        '"msg":"AssertionError: boom"',
+      ],
+      [
+        '##[error]{"authToken":"s3\r3cr3t","err":"TestFailed:suiteA"}',
+        '"err":"TestFailed:suiteA"',
+      ],
+      // A backslash directly before the marker must not carry the quoted value
+      // across it (the escape unit is tempered too).
+      [
+        '{"auth\rToken":"C:\\##[error]AssertionError: boom","err":"k"}',
+        '##[error]AssertionError: boom',
+      ],
     ]) {
       const evidence = skillLog(line);
-      expect(evidence, line).toContain('[redacted]');
-      expect(evidence, line).not.toContain(secret);
+      expect(evidence, line).toContain(payload);
     }
+    // The truncated unquoted value is left as base leaves it: the tail is not
+    // re-redacted, but nothing after it is deleted either.
+    expect(skillLog('##[error]API_PASSWORD=p,ssw0rd done')).toBe(
+      '##[error]API_PASSWORD=[redacted],ssw0rd done',
+    );
   });
 
   it('repairs every credential family a control byte split', () => {

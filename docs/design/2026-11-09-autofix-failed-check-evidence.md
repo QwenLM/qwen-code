@@ -161,14 +161,19 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    (the value must not match `\n`: selected lines are joined with `\n`, so an
    unclosed quote would otherwise swallow the following selected lines) and
    handles escapes (`"C:\temp"` reaches its closing quote; a backslash before a
-   line break does not cross it). An unquoted value that is already the
-   `[redacted]` placeholder followed by a structural delimiter (`,`, `}`, a
-   quote, whitespace, or end of line) is left alone: otherwise the repair pass
-   re-matches a control-free JSON line's already-redacted value and runs to the
-   end of the line, eating the rest of the object — the failure payload the
-   excerpt exists to show. A fork's `[redacted]secret` is still redacted because
-   credential characters, not a
-   delimiter, follow the placeholder. The `Bearer`
+   line break does not cross it, and the escape unit is itself tempered so a
+   backslash directly before `##[error]` cannot carry the value across the
+   marker). The repair does NOT infer completeness from the `[redacted]`
+   placeholder: pass 1's value class stops INSIDE a credential at `,`, `}`, a
+   quote, or a stripped control, so `KEY=[redacted]<remainder>` is produced by
+   both a completed and a truncated redaction, and the character after the
+   placeholder cannot tell them apart. Any value already starting with
+   `[redacted]` is therefore left exactly as pass 1 (base) left it — re-redacting
+   it greedily deletes the failure payload, and skipping only on a delimiter
+   ships a truncated secret tail. The repair redacts only values pass 1 missed (a
+   control-split key), whose value is the secret itself. A fork's
+   `[redacted]secret` under a split key is left as base leaves it — a recorded
+   base-equivalent limitation, not a new leak. The `Bearer`
    separator is horizontal whitespace, zero or more, so a control where the
    space was (`Bearer\rsecret` → `Bearersecret`) still redacts. The URL scheme
    is length-bounded rather than lookbehind-bounded — a lookbehind refuses a
