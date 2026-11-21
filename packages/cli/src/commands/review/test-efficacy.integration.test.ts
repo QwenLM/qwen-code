@@ -27,7 +27,7 @@ import {
   lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   runOneMutant,
@@ -43,6 +43,7 @@ import {
   plantRepository,
 } from './lib/test-utils.js';
 import { probeWorktreePath } from './lib/paths.js';
+import { shellQuotePath } from './lib/shell-quote.js';
 
 type Handler = (args: {
   report: string;
@@ -1892,6 +1893,71 @@ process.stdout.write(JSON.stringify({
     expect(JSON.stringify(out)).not.toContain('stale-tree sweep');
     expect(JSON.stringify(out)).toContain('filter.evil.smudge');
   });
+
+  it.each([true, false])(
+    'screens a destination-only conditional filter before probe checkout (repository-owned: %s)',
+    async (controlled) => {
+      const { wt, base } = scaffoldModifiedPr();
+      const canary = join(gitIsolation.home, 'destination-filter-ran');
+      const payload = join(
+        controlled ? repo : gitIsolation.home,
+        'destination-driver.cfg',
+      );
+      git(
+        repo,
+        'config',
+        '--file',
+        payload,
+        'filter.destination.smudge',
+        `touch ${shellQuotePath(canary)}; cat`,
+      );
+      if (controlled) git(repo, 'add', 'destination-driver.cfg');
+      const tree = probeWorktreePath(wt);
+      const common = git(repo, 'rev-parse', '--absolute-git-dir').trim();
+      git(
+        repo,
+        'config',
+        '--global',
+        `includeIf.gitdir:${common}/worktrees/${basename(tree)}.path`,
+        payload,
+      );
+      git(
+        repo,
+        'config',
+        'include.path',
+        join(gitIsolation.home, '.gitconfig'),
+      );
+      writeFileSync(
+        join(repo, '.git', 'info', 'attributes'),
+        '*.ts filter=destination\n',
+      );
+
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
+      expect.soft(existsSync(canary)).toBe(!controlled);
+      const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+      if (controlled) {
+        expect(out.probed).toEqual([
+          expect.objectContaining({
+            verdict: 'inconclusive',
+            reason: 'not-run',
+            detail: expect.stringContaining('filter.destination.smudge'),
+          }),
+        ]);
+        expect(existsSync(join(tree, 'packages/lib/src/f.ts'))).toBe(false);
+        git(tree, 'checkout', '--force', '--detach', 'HEAD');
+        expect(existsSync(canary)).toBe(true);
+      } else {
+        expect(out.probed).toEqual([
+          expect.objectContaining({ verdict: 'inert' }),
+        ]);
+      }
+    },
+  );
 
   it('runs no planted post-checkout hook when it CREATES the probe tree', async () => {
     // `worktree add` materialises every file, and a checkout that does so runs a
