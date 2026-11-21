@@ -268,10 +268,11 @@ already shipped with the package skipped — not an upcoming release version —
 and should not invent a second version line. The version probe runs once, in
 `prepare`: a stable release increments past a hand publish that landed before
 that probe, leaving the stray version on npm for good. Once the version is
-frozen a hand publish breaks the release instead — landing before the push
-guard refuses the release without a failure issue, and landing after it fails
-the publish step with part of the set already shipped. Future releases use
-trusted publishing and require no npm token.
+frozen, a hand publish before the push guard refuses the release without a
+failure issue. One after it does not: the publish step skips a version that
+already exists, and a package whose gate is off is never in the publish set —
+so the release completes and the stray version stays on npm. Future releases
+use trusted publishing and require no npm token.
 
 When a service fits `DialectV1`, its administrator writes and validates a local
 dialect file. When it does not fit, the service owner publishes a separate MCP

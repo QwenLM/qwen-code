@@ -98,9 +98,10 @@ to `true` (it defaults to off). Bootstrap at a version that has already shipped
 one, and do not invent a second version line. The version probe runs once, in
 `prepare`: a stable release increments past a hand publish that landed before
 that probe, leaving the stray version on npm for good. Once the version is
-frozen a hand publish breaks the release instead — landing before the push
-guard refuses the release without a failure issue, and landing after it fails
-the publish step with part of the set already shipped.
+frozen, a hand publish before the push guard refuses the release without a
+failure issue. One after it does not: the publish step skips a version that
+already exists, and a package whose gate is off is never in the publish set —
+so the release completes and the stray version stays on npm.
 
 `@qwen-code/channel-msteams` was bootstrap-published on 2026-11-20 and has been
 published by the release workflow since, so it is no longer awaiting a
