@@ -2216,6 +2216,12 @@ interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   channelWorkflowOrigin?: ChannelWorkflowOrigin;
   continuesTodoStopGuardWorkChain: boolean;
   persisted?: true;
+  /**
+   * Set once a no-recorder landing has counted this report as lost. The queue
+   * is landed again by `dispose()` after the pre-close flush, so without the
+   * mark one lost report is announced twice.
+   */
+  lossTallied?: boolean;
   turn?: BackgroundNotificationTurn;
   admissionRetries?: number;
   peer?: { sessionId: string; delivery: PeerQueuedDelivery };
@@ -5533,15 +5539,6 @@ export class Session implements SessionContext {
       cancelReason === 'user'
         ? USER_CANCEL_ABORT_REASON
         : SESSION_DISPOSE_ABORT_REASON;
-    if (this.closeAbortReason === SESSION_DISPOSE_ABORT_REASON) {
-      // The close cancels the in-flight turn, and the settlement that follows
-      // would durably end it as `cancelled`. Restart recovery re-opens that
-      // turn from the unanswered prompt, so the cancel stays out of the
-      // transcript; peer reports still land.
-      this.releaseTurnRecordWithholding ??= this.config
-        .getChatRecordingService()
-        ?.withholdTurnRecords();
-    }
 
     let resolveGate!: () => void;
     const completion = new Promise<void>((resolve) => {
@@ -5691,11 +5688,18 @@ export class Session implements SessionContext {
     const recording = this.config.getChatRecordingService();
     if (!recording) {
       for (const item of items) {
-        if (item.producer !== 'teammate' || item.persisted) continue;
+        if (
+          item.producer !== 'teammate' ||
+          item.persisted ||
+          item.lossTallied
+        ) {
+          continue;
+        }
         debugLogger.warn(
           `Peer report lost: no recording service available for task=${item.taskId}`,
         );
         this.droppedNotifications.record(toAdmissibleNotification(item));
+        item.lossTallied = true;
         tallied.add(item);
       }
       return tallied;
@@ -6316,6 +6320,16 @@ export class Session implements SessionContext {
     this.todoStopGuard.suspend();
     const abortReason =
       this.#classifyPromptCancelAbortReason(requestedAbortReason);
+    if (abortReason === SESSION_DISPOSE_ABORT_REASON) {
+      // A disposal cancel durably ends the turn as `cancelled`, and restart
+      // recovery re-opens it from the unanswered prompt, so the cancel stays
+      // out of the transcript. Installing here rather than in `beginClose()`
+      // keeps `session/load` and `session/cd` intact: both take the close gate
+      // as a mutex and let the running turn settle, whose records are real.
+      this.releaseTurnRecordWithholding ??= this.config
+        .getChatRecordingService()
+        ?.withholdTurnRecords();
+    }
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(abortReason);
     }

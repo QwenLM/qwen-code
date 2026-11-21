@@ -1332,20 +1332,56 @@ describe('Session', () => {
   });
 
   describe('turn record withholding', () => {
-    it('withholds a dispose-cancelled turn and releases it on rollback', () => {
+    it('withholds a turn a dispose close cancels and releases it on rollback', async () => {
       const releaseRecords = vi.fn();
       vi.mocked(mockChatRecordingService.withholdTurnRecords).mockReturnValue(
         releaseRecords,
       );
+      let firstChunk!: () => void;
+      const consumed = new Promise<void>((resolve) => {
+        firstChunk = resolve;
+      });
+      let releaseStream!: () => void;
+      const streamGate = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'working' },
+          } as const;
+          firstChunk();
+          await streamGate;
+        })(),
+      );
 
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await consumed;
       const release = session.beginClose();
+      await session.cancelPendingPrompt();
       expect(
         mockChatRecordingService.withholdTurnRecords,
       ).toHaveBeenCalledOnce();
       expect(releaseRecords).not.toHaveBeenCalled();
 
+      releaseStream();
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
       release();
       expect(releaseRecords).toHaveBeenCalledOnce();
+      session.dispose();
+    });
+
+    it('leaves a turn that settles inside a mutex-only close recorded', () => {
+      const release = session.beginClose();
+      expect(
+        mockChatRecordingService.withholdTurnRecords,
+      ).not.toHaveBeenCalled();
+      release();
+      session.dispose();
     });
 
     it('keeps a user cancel in the transcript', () => {
@@ -1354,6 +1390,7 @@ describe('Session', () => {
         mockChatRecordingService.withholdTurnRecords,
       ).not.toHaveBeenCalled();
       release();
+      session.dispose();
     });
 
     it('withholds when a session is disposed without a close gate', () => {
@@ -1967,6 +2004,49 @@ describe('Session', () => {
         }),
       );
       session.dispose();
+    });
+
+    it('announces a lost report once across the flush and dispose', async () => {
+      // The flush tallies the loss; `dispose()` lands the same queue again.
+      // Counting the item twice announced one lost report twice.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValue(
+        new Error('hold the peer turn open'),
+      );
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      session.beginClose();
+      manager.leaderCallback?.('undrained report', 'undrained report', [
+        'security',
+      ]);
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+
+      await session.flushPendingPeerNotifications();
+      session.dispose();
+
+      const summaryFrames = () =>
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([arg]) => arg)
+          .filter((arg) => {
+            const update = (arg as { update?: Record<string, unknown> }).update;
+            const content = update?.content as { text?: string } | undefined;
+            return (
+              update?.sessionUpdate === 'agent_message_chunk' &&
+              typeof content?.text === 'string' &&
+              content.text.includes('teammate report')
+            );
+          });
+      await vi.waitFor(() => expect(summaryFrames()).toHaveLength(1));
+      expect(summaryFrames()).toHaveLength(1);
     });
 
     it('counts an overflow-dropped teammate report once without a recorder', async () => {
