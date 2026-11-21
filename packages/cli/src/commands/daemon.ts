@@ -24,6 +24,11 @@ import {
   type DaemonDiscoveryEntry,
   type DaemonDiscoveryRecord,
 } from '../serve/daemon-discovery.js';
+import {
+  readDaemonOccupancy,
+  removeDaemonOccupancy,
+  type DaemonOccupancySample,
+} from '../serve/daemon-occupancy.js';
 import { isFullyQualifiedPath } from '../config/storage-paths-lite.js';
 import { isLoopbackBind } from '../serve/loopback-binds.js';
 import {
@@ -49,13 +54,15 @@ type DaemonHealth = 'running' | 'unreachable' | 'stale';
 
 interface DaemonStatusRow {
   entry: DaemonDiscoveryEntry;
-  health: DaemonHealth;
+  health: DaemonHealth | 'unchecked';
+  streamOccupancy?: DaemonOccupancySample | null;
 }
 
 interface StatusArgs {
   json?: boolean;
   prune?: boolean;
   detail?: boolean;
+  offline?: boolean;
 }
 
 type PartialMemory<T> = T extends object
@@ -976,12 +983,42 @@ async function handleStart(argv: StartArgs): Promise<void> {
   process.exitCode = 1;
 }
 
+function removeDaemonFiles(entry: DaemonDiscoveryEntry): boolean {
+  const { port, pid } = entry.record;
+  const dir = path.dirname(entry.path);
+  if (!removeDaemonDiscovery(port, { dir, expectedPid: pid })) return false;
+  removeDaemonOccupancy(entry);
+  removeDaemonToken(port, pid, dir);
+  return true;
+}
+
 async function handleStatus(argv: StatusArgs): Promise<void> {
+  const offline = argv.offline === true;
+  if (offline && (argv.detail === true || argv.prune === true)) {
+    throw new Error('--offline cannot be combined with --detail or --prune');
+  }
   ignoreBrokenPipe();
   const { entries, invalid } = readDaemonDiscoveries();
   let rows: DaemonStatusRow[] = [];
-  for (const entry of entries) {
-    rows.push({ entry, health: await probeHealth(entry.record) });
+  if (offline) {
+    const namespace = currentPidNamespace();
+    rows = entries.map((entry) => {
+      const { record } = entry;
+      const processGone =
+        pidResolvableHere(record, namespace) && !isProcessAlive(record.pid);
+      const sample = readDaemonOccupancy(entry);
+      return {
+        entry,
+        health: processGone ? 'stale' : 'unchecked',
+        streamOccupancy: sample
+          ? { ...sample, stale: sample.stale || processGone }
+          : null,
+      };
+    });
+  } else {
+    for (const entry of entries) {
+      rows.push({ entry, health: await probeHealth(entry.record) });
+    }
   }
 
   if (argv.prune === true) {
@@ -993,14 +1030,8 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
       }
       // A refused removal means the record is still there — a concurrent
       // instance republished it — so it stays listed under its own pid.
-      if (
-        !removeDaemonDiscovery(row.entry.record.port, {
-          expectedPid: row.entry.record.pid,
-        })
-      ) {
+      if (!removeDaemonFiles(row.entry)) {
         kept.push(row);
-      } else {
-        removeDaemonToken(row.entry.record.port, row.entry.record.pid);
       }
     }
     rows = kept;
@@ -1042,6 +1073,7 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
           ...(argv.detail === true
             ? { detail: details.get(row.entry.record.port) ?? null }
             : {}),
+          ...(offline ? { streamOccupancy: row.streamOccupancy } : {}),
           logPath: logPathFor(row.entry.record),
         }),
       );
@@ -1068,6 +1100,25 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
         `${formatDaemonAge(age(record.startedAt)).padEnd(6)}` +
         `${workspaces}  ${sanitize(record.url)}`,
     );
+    if (offline) {
+      const sample = row.streamOccupancy;
+      if (sample) {
+        writeStdoutLine(
+          `  Listener slots: ${sample.total} (as of ${sample.asOf}${sample.stale ? ', stale' : ''})`,
+        );
+        for (const [label, counts] of [
+          ['By surface', sample.bySurface],
+          ['By listener', sample.byListener],
+        ] as const) {
+          const breakdown = Object.entries(counts)
+            .map(([name, count]) => `${sanitize(name)}=${count}`)
+            .join(' ');
+          writeStdoutLine(`    ${label}: ${breakdown}`);
+        }
+      } else {
+        writeStdoutLine('  Listener slot occupancy unavailable');
+      }
+    }
   }
   if (argv.detail === true) {
     for (const row of rows) {
@@ -1230,9 +1281,7 @@ async function handleStop(argv: StopArgs): Promise<void> {
     const { record } = entry;
     const health = await probeHealth(record);
     if (health === 'stale') {
-      if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
-        removeDaemonToken(record.port, record.pid);
-      }
+      removeDaemonFiles(entry);
       writeStdoutLine(
         `qwen daemon: removed stale record for port ${record.port} (pid ${record.pid} is gone).`,
       );
@@ -1297,9 +1346,7 @@ async function handleStop(argv: StopArgs): Promise<void> {
     }
     const exited = await waitForExit(record.pid, STOP_TIMEOUT_MS);
     if (exited) {
-      if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
-        removeDaemonToken(record.port, record.pid);
-      }
+      removeDaemonFiles(entry);
       writeStdoutLine(
         `qwen daemon: ${
           process.platform === 'win32' ? 'hard-killed' : 'stopped'
@@ -1315,9 +1362,7 @@ async function handleStop(argv: StopArgs): Promise<void> {
       }
       const forced = await waitForExit(record.pid, STOP_TIMEOUT_MS);
       if (forced) {
-        if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
-          removeDaemonToken(record.port, record.pid);
-        }
+        removeDaemonFiles(entry);
         writeStdoutLine(
           `qwen daemon: force-stopped port ${record.port} (pid ${record.pid}).`,
         );
@@ -1827,6 +1872,11 @@ const statusCommand: CommandModule<unknown, StatusArgs> = {
         default: false,
         describe:
           'Fetch /daemon/status for version, uptime, active sessions, and issue count',
+      })
+      .option('offline', {
+        type: 'boolean',
+        default: false,
+        describe: 'Read local listener occupancy without contacting the daemon',
       }),
   handler: async (argv) => {
     await handleStatus(argv);
