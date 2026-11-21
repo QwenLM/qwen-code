@@ -157,13 +157,17 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    contains them (a password with `#`, a PEM body, a log-supplied
    `[redacted]realsecret…` prefix) ship its tail in clear, while tempering
    redacts the whole value and still stops before the marker. For the env/token
-   rule a QUOTED value is bounded by its matching closing quote, and an unquoted
-   value that is already the `[redacted]` placeholder followed by a structural
-   delimiter (`,`, `}`, a quote, whitespace, or end of line) is left alone:
-   otherwise the repair pass re-matches a control-free JSON line's
-   already-redacted value and runs to the end of the line, eating the rest of
-   the object — the failure payload the excerpt exists to show. A fork's
-   `[redacted]secret` is still redacted because credential characters, not a
+   rule a QUOTED value is bounded by its matching closing quote ON THE SAME LINE
+   (the value must not match `\n`: selected lines are joined with `\n`, so an
+   unclosed quote would otherwise swallow the following selected lines) and
+   handles escapes (`"C:\temp"` reaches its closing quote; a backslash before a
+   line break does not cross it). An unquoted value that is already the
+   `[redacted]` placeholder followed by a structural delimiter (`,`, `}`, a
+   quote, whitespace, or end of line) is left alone: otherwise the repair pass
+   re-matches a control-free JSON line's already-redacted value and runs to the
+   end of the line, eating the rest of the object — the failure payload the
+   excerpt exists to show. A fork's `[redacted]secret` is still redacted because
+   credential characters, not a
    delimiter, follow the placeholder. The `Bearer`
    separator is horizontal whitespace, zero or more, so a control where the
    space was (`Bearer\rsecret` → `Bearersecret`) still redacts. The URL scheme

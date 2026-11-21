@@ -1229,6 +1229,37 @@ describe('ci flaky rerun patrol', () => {
     }
   });
 
+  it('keeps the failure payload when a quoted value is unclosed across lines or carries an escape', () => {
+    // Regression: the quoted-value branch must bound its value on the SAME line
+    // and handle escapes. skillLog joins each contiguous run of selected lines
+    // with \n, so a value class that matches \n lets an unclosed quote swallow
+    // every following selected line; a value class that excludes \ lets an
+    // escaped value ("C:\temp") never reach its closing quote, and the greedy
+    // unquoted rule then eats the rest of the line. Both delete the failure
+    // evidence the excerpt is fetched for.
+    const multilineSplitKey =
+      'noise0\nnoise1\nNPM_TO\x0bKEN="ab\nFAIL src/a.test.ts > suite > case\nAssertionError: expected 1 to be 2\n    at Object.<anonymous> ("/build/a.ts":12:3)\nnoise8\nnoise9';
+    const multilineControlFree =
+      'noise0\nAPI_KEY="\nFAIL src/a.test.ts\nAssertionError: expected 1 to be 2\n    at x.ts:1:1\n"end"\nnoise9';
+    const escaped = '{"auth\rToken":"C:\\temp","err":"boom"}';
+    for (const [line, needles] of [
+      [
+        multilineSplitKey,
+        ['FAIL src/a.test.ts', 'AssertionError: expected 1 to be 2'],
+      ],
+      [
+        multilineControlFree,
+        ['FAIL src/a.test.ts', 'AssertionError: expected 1 to be 2'],
+      ],
+      [escaped, ['"err":"boom"']],
+    ]) {
+      const evidence = skillLog(line);
+      for (const needle of needles) expect(evidence, line).toContain(needle);
+    }
+    expect(skillLog(multilineSplitKey)).not.toContain('"ab');
+    expect(skillLog(escaped)).not.toContain('C:\\temp');
+  });
+
   it('keeps the failure line a welded URL userinfo would otherwise reach', () => {
     // The scheme rule's userinfo is a tempered token per @-segment: it runs to
     // the next whitespace or @ but never across the ##[error] marker. Two

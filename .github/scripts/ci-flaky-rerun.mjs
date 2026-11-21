@@ -280,14 +280,19 @@ function redactWeldedTokens(log) {
         '$1[redacted]@',
       )
       // Quoted values are bounded by their matching closing quote so a value does
-      // not run into the next JSON field. Unquoted values use a whitespace-bounded
-      // tempered token, but skip a value that is already the [redacted] placeholder
-      // followed by a structural delimiter: pass 1 redacted it, and re-running the
-      // greedy token would eat the rest of the JSON object (the failure payload).
+      // not run into the next JSON field. The value is bounded on the SAME line
+      // (it must not match \n: skillLog joins each contiguous run of selected
+      // lines with \n, so an unclosed quote would otherwise swallow every
+      // following selected line) and handles escapes (\\[^\n], so "C:\temp"
+      // reaches its closing quote; a backslash before a line break must not
+      // cross it). Unquoted values use a whitespace-bounded tempered token, but
+      // skip a value that is already the [redacted] placeholder followed by a
+      // structural delimiter: pass 1 redacted it, and re-running the greedy
+      // token would eat the rest of the JSON object (the failure payload).
       // A fork's [redacted]secret is still redacted — more credential characters,
       // not a delimiter, follow the placeholder.
       .replace(
-        /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)(["'])((?:(?!##\[error\])[^\\])*?)\4/gi,
+        /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)(["'])((?:(?!##\[error\])(?:[^\\\n]|\\[^\n]))*?)\4/gi,
         '$1$2$3[redacted]',
       )
       .replace(
