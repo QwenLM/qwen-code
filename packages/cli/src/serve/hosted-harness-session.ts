@@ -12108,27 +12108,16 @@ export function registerHostedHarnessSessionRoutes(
           break;
         }
         case 'answered': {
+          let parsedReply: SessionCommandReply;
           try {
-            await commands.answered(
-              commandId,
-              parseSessionCommandReply(body?.['reply']),
-            );
+            parsedReply = parseSessionCommandReply(body?.['reply']);
           } catch (cause) {
-            // A store-side append outcome is not the request's shape: let it
-            // reach the outer catch, which answers the retryable 503.
-            if (
-              cause instanceof ManagedSessionRecordError &&
-              !(cause instanceof ManagedSessionConflictError) &&
-              !(cause instanceof ManagedSessionStoreHttpError) &&
-              !(cause instanceof ManagedSessionStoreTransportError) &&
-              !(cause instanceof ManagedSessionWritesStoppedError) &&
-              !(cause instanceof ManagedSessionAppendUnsettledError) &&
-              !(cause instanceof ManagedSessionJournalFencedError)
-            ) {
+            if (cause instanceof ManagedSessionRecordError) {
               return error(res, 400, 'invalid_command_operation');
             }
             throw cause;
           }
+          await commands.answered(commandId, parsedReply);
           break;
         }
         case 'cancelled':
