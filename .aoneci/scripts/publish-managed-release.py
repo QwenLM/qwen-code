@@ -448,9 +448,9 @@ def main():
         print(f"verified release bundle {args.bundle_out}")
         return
 
-    server_key = f"managedagent/java/qwen-managed-agent-server-{args.release_id}.jar"
-    runtime_key = f"managedagent/runtime/{args.release_id}/qwen-runtime-{args.release_id}.tar.gz"
-    manifest_key = f"managedagent/releases/{args.release_id}/release-manifest.json"
+    server_key = f"dist/managedagent/java/qwen-managed-agent-server-{args.release_id}.jar"
+    runtime_key = f"dist/managedagent/runtime/{args.release_id}/qwen-runtime-{args.release_id}.tar.gz"
+    manifest_key = f"dist/managedagent/releases/{args.release_id}/release-manifest.json"
 
     require_maven_credentials()
 
