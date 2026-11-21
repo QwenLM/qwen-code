@@ -107,6 +107,15 @@ next increment (2f), so this slice is additive and renders nothing on its own.
   queued-prompt and goal facts.
 - **Managed adapter (slice 3)** and **ChatPane convergence (slice 4)** render through
   this same component.
+- **Session-scoped admission lock (2f, review R5-1).** The in-flight latch and the
+  unknown-admission lock are currently per-component state with no session owner; the
+  switch must scope them to the arming session (reset on a real session change, but not
+  across the `'' → id` allocation that a single submit can span), as `ChatPane`/`App`
+  already do.
+- **Shared admission-unknown frame (convergence, review R5-2).** The three hand-written
+  unknown-admission renderings (`App`, `ChatPane`, `ChatSurface`) should share a
+  presentational frame + copy (actions stay per-surface callbacks); the action sets may
+  legitimately differ.
 
 ## Constraints respected
 
