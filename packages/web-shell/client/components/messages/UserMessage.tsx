@@ -24,6 +24,10 @@ import {
   parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from '../../utils/composerTag';
+import {
+  isAutomaticTriggerSource,
+  isDetailFreeAutomaticEcho,
+} from '../../utils/automatic-trigger';
 import type {
   DaemonInputAnnotation,
   DaemonInputSourceAnnotation,
@@ -209,10 +213,7 @@ function AutomaticTriggerMessage({
   const documentMode = useTranscriptRenderMode() === 'document';
   const summary = content.replace(/\s+/g, ' ').trim();
   // These runtime echoes contain only a label, not the full modelText.
-  const hasDetails =
-    !/^(Autonomous loop tick|Loop tick — tasks from (project|home) loop\.md|Loop tick — loop\.md temporarily unavailable)$/.test(
-      content.trim(),
-    );
+  const hasDetails = !isDetailFreeAutomaticEcho(content);
   return (
     <div
       className={styles.scheduledTaskRun}
@@ -416,14 +417,14 @@ export const UserMessage = memo(function UserMessage({
     !scheduledTaskRun &&
     // A host-provided renderer owns the complete body, including any redaction.
     !renderUserMessageContent &&
-    (source === 'cron' || source === 'loop')
+    !parseUserMessageContent &&
+    isAutomaticTriggerSource(source)
       ? source
       : undefined;
-  const automaticInstructionsExpanded = automaticTriggerSource
-    ? documentMode
-      ? documentExpanded
-      : expanded
-    : true;
+  const automaticInstructionsExpanded =
+    !automaticTriggerSource ||
+    (!isDetailFreeAutomaticEcho(content) &&
+      (documentMode ? documentExpanded : expanded));
   const renderedContent = useMemo(() => {
     if (scheduledTaskRun) {
       return <ScheduledTaskRunMessage run={scheduledTaskRun} />;

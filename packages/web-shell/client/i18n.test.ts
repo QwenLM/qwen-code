@@ -992,6 +992,9 @@ describe('web-shell zh-TW locale', () => {
     ]) {
       expect(tw(key, { path: '/w' })).not.toBe(en(key, { path: '/w' }));
     }
+    expect(getTranslator('zh-CN')('userMessage.automatic.title')).toBe(
+      '自动触发',
+    );
     expect(ru('userMessage.automatic.title')).toBe(
       'Автоматическое срабатывание',
     );

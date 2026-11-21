@@ -7,6 +7,7 @@ import {
   reduceDaemonTranscriptEvents,
 } from '@qwen-code/sdk/daemon';
 import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
+import * as composerTag from '../../utils/composerTag';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
 import {
@@ -674,6 +675,34 @@ describe('UserMessage', () => {
     },
   );
 
+  it.each([false, true])(
+    'respects parser redaction for automatic input (document=%s)',
+    (documentMode) => {
+      const content = 'RAW-SECRET\nwith details';
+      const container = render(
+        <TranscriptRenderModeProvider
+          value={documentMode ? 'document' : 'interactive'}
+        >
+          <WebShellCustomizationProvider
+            value={{
+              parseUserMessageContent: () => [
+                { type: 'text' as const, text: '[redacted]' },
+              ],
+            }}
+          >
+            <UserMessage content={content} source="cron" />
+          </WebShellCustomizationProvider>
+        </TranscriptRenderModeProvider>,
+      );
+      expect(container.textContent).toBe('[redacted]');
+      expect(container.textContent).not.toContain('RAW-SECRET');
+      expect(container.querySelector('[title="RAW-SECRET"]')).toBeNull();
+      expect(
+        container.querySelector('[data-web-shell-automatic-trigger-message]'),
+      ).toBeNull();
+    },
+  );
+
   it('keeps attachments and the complete editor text for automatic input', () => {
     const content = '/loop full original instruction';
     const container = render(
@@ -753,6 +782,83 @@ describe('UserMessage', () => {
         '[data-web-shell-automatic-trigger-instructions]',
       ),
     ).toBeNull();
+  });
+
+  it('keeps readonly automatic instructions behind a disclosure', () => {
+    const content = 'readonly automatic prompt\nsecond line';
+    const container = render(
+      <TranscriptRenderModeProvider value="readonly">
+        <I18nProvider language="en">
+          <UserMessage content={content} source="cron" />
+        </I18nProvider>
+      </TranscriptRenderModeProvider>,
+    );
+    const card = container.querySelector(
+      '[data-web-shell-automatic-trigger-message]',
+    );
+    const toggle = card?.querySelector<HTMLButtonElement>('button');
+    expect(toggle?.textContent).toBe('Show more');
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      card?.querySelector('[data-web-shell-automatic-trigger-instructions]'),
+    ).toBeNull();
+    act(() => toggle?.click());
+    expect(
+      card?.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+  });
+
+  it('defers default parsing until automatic instructions are opened', () => {
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const content = '/loop inspect the queue\nsecond line';
+    const container = render(<UserMessage content={content} source="cron" />);
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(parse).not.toHaveBeenCalled();
+    act(() => toggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips document parsing for a detail-free runtime echo', () => {
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const container = render(
+      <TranscriptRenderModeProvider value="document">
+        <UserMessage content="Autonomous loop tick" source="loop" />
+      </TranscriptRenderModeProvider>,
+    );
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-message]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      ),
+    ).toBeNull();
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'Autonomous loop tick',
+    'Loop tick — tasks from project loop.md',
+    'Loop tick — tasks from home loop.md',
+    'Loop tick — loop.md temporarily unavailable',
+  ])('keeps instructions following the runtime echo %s', (echo) => {
+    const content = `${echo}\nreal trailing instruction`;
+    const container = render(
+      <TranscriptRenderModeProvider value="document">
+        <UserMessage content={content} source="loop" />
+      </TranscriptRenderModeProvider>,
+    );
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
   });
 
   it.each([

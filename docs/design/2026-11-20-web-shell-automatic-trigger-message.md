@@ -32,7 +32,7 @@ The existing `ScheduledTaskRunMessage` handles the structured prompt of an indep
 
 ### Message wiring
 
-`MessageItem` passes the existing `message.source` to `UserMessage`. The adapter and message comparator already preserve and compare it, so no data-model change is needed. The existing outer `MessageTimestamp` remains the only timestamp display and keeps its current meaning.
+`MessageItem` passes the existing `message.source` to `UserMessage`, and `MessageList` shares the same source predicate so its timeline cannot disagree with the body. The adapter and message comparator already preserve and compare it, so no data-model change is needed. The existing outer `MessageTimestamp` remains the only timestamp display and keeps its current meaning.
 
 ### Automatic-trigger presentation
 
@@ -49,9 +49,9 @@ Interactive and readonly views default to the compact summary. The existing Show
 
 Only the runtime's complete short echo forms—`Autonomous loop tick`, `Loop tick — tasks from project loop.md`, `Loop tick — tasks from home loop.md`, and `Loop tick — loop.md temporarily unavailable`—render as static compact cards with no disclosure. Those labels intentionally contain no full `modelText`. A real prompt or unrecognized future source label that merely shares the `Loop tick — ` prefix keeps its disclosure in interactive views and its complete text in exported documents; the matcher fails open.
 
-Document mode follows `TranscriptDocumentExpandedContext`, whose default is expanded, and exposes no interactive disclosure. Detailed content is included by default; a short echo needs no duplicate body.
+Document mode follows `TranscriptDocumentExpandedContext`, whose default is expanded, and exposes no interactive disclosure. Detailed content is included by default; a short echo needs no duplicate body and is rejected before the built-in parser is invoked.
 
-Rich content is constructed lazily on the built-in renderer path. A closed interactive disclosure does not invoke the default parser. Expansion constructs it once, and default-expanded document output still constructs it. When a host supplies `renderUserMessageContent`, the automatic-card variant is bypassed so the host's previous complete-content replacement or redaction contract remains authoritative; the raw summary is never reintroduced around that output.
+Rich content is constructed lazily on the built-in renderer path. A closed interactive disclosure does not invoke the default parser. Expansion constructs it once, and default-expanded document output still constructs it. When a host supplies `renderUserMessageContent` or `parseUserMessageContent`, the automatic-card variant is bypassed so the host's previous complete-content replacement or redaction contract remains authoritative; the raw summary is never reintroduced around that output.
 
 The existing bubble and selectors remain in place. A dedicated selector and `data-source` attribute identify the new presentation for browser tests. Images, files, retry affordances, and the inline editor stay in their current outer layout; editing continues to use the complete original text.
 
@@ -76,8 +76,10 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 
 ## Files affected
 
+- `packages/web-shell/client/utils/automatic-trigger.ts` and `.test.ts` — shared source and fail-open echo predicates.
+- `packages/web-shell/client/components/MessageList.tsx` — use that predicate for timeline classification.
 - `packages/web-shell/client/components/MessageItem.tsx` — pass source.
-- `packages/web-shell/client/components/messages/UserMessage.tsx` — select the compact variant and lazily construct details.
+- `packages/web-shell/client/components/messages/UserMessage.tsx` — select the compact variant, preserve host overrides, and lazily construct details.
 - `packages/web-shell/client/components/messages/UserMessage.module.css` — scoped card and disclosure styles.
 - `packages/web-shell/client/i18n.tsx`, `i18n-zh-cn.ts`, `i18n-zh-tw.ts`, and `i18n-ru-part5.ts` — labels for every supported catalog.
 - `packages/web-shell/client/i18n.test.ts` — localized catalog coverage.
@@ -90,7 +92,7 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 
 - Unit-test both `cron` and `loop`, ordinary/unknown sources, per-run priority, disclosure, short-echo suppression, lazy host rendering, attachments, editing, source-triggered reset, empty content, document expansion, and preservation of real `Loop tick — ` prefixed instructions in interactive and document views. Verify that the automatic-trigger title is localized for every supported catalog.
 - Verify that changing only the source on an existing `MessageItem` updates the forwarded props, and that an ordinary expanded message becomes compact when its source becomes automatic.
-- Run the focused Web Shell tests, package typecheck, lint and format checks, then the repository build and typecheck required by the contributor workflow. Rebuild `dist/transcript.js` and WebTemplates and verify the measured renderer is 2,151,654 bytes, below a 2,152,000-byte ceiling with a 346-byte local margin. Regression cases cover unrecognized `tasks from` source labels and exclusive host replacement/redaction rendering.
+- Run the focused Web Shell tests, package typecheck, lint and format checks, then the repository build and typecheck required by the contributor workflow. Rebuild `dist/transcript.js` and WebTemplates and verify the measured renderer is 2,151,698 bytes, below a 2,152,000-byte ceiling with a 302-byte local margin. Regression cases cover unrecognized `tasks from` source labels, exclusive host replacement/redaction rendering, readonly disclosure, and known echoes that require no document parser.
 - Run a Playwright scenario with the same cron, loop, ordinary, and per-run fixtures against the baseline and changed build. Capture compact and expanded states at desktop and mobile widths and assert no horizontal document overflow.
 - Keep model-facing JSONL content and replay source assertions as regression evidence; no production changes are expected in those layers.
 
