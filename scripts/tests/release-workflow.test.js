@@ -762,9 +762,10 @@ describe('release workflow', () => {
     { dryRun: 'false', optional: 'true', failure: '0', cliPublished: '0' },
     { dryRun: 'true', optional: 'true', failure: '0', cliPublished: '0' },
     { dryRun: 'false', optional: 'true', failure: '7', cliPublished: '1' },
-    // The flags diverge in production: audio-capture is ungated on QwenLM
-    // while Teams stays behind its bootstrap variable. Rows where they
-    // disagree in both directions pin each gate to its own variable.
+    // The flags diverged before the Teams bootstrap: audio-capture is
+    // ungated on QwenLM while Teams stays behind its bootstrap variable.
+    // Rows where they disagree in both directions pin each gate to its own
+    // variable.
     {
       dryRun: 'false',
       optional: 'false',
