@@ -1054,6 +1054,92 @@ math then literal: $x^2\$$`,
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
   });
 
+  it('should report no text to copy when the only AI turn calls a tool', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      { role: 'user', parts: [{ text: 'question' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'glob', args: { pattern: '*' } } }],
+      },
+    ]);
+
+    expect(await copyCommand.action(mockContext, '')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Last AI output contains no text to copy.',
+    });
+    expect(mockCopyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it('should validate N before the no-text check when no AI turn has text', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      { role: 'user', parts: [{ text: 'question' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'glob', args: {} } }],
+      },
+    ]);
+
+    expect(await copyCommand.action(mockContext, '0')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Message index must be a positive integer (1 = last AI message).',
+    });
+    expect(await copyCommand.action(mockContext, '3')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Only 0 AI messages with text in this session.',
+    });
+    // `/copy 1` is documented as equivalent to `/copy`.
+    for (const args of ['', '1']) {
+      expect(await copyCommand.action(mockContext, args)).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Last AI output contains no text to copy.',
+      });
+    }
+    expect(mockCopyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it('should not count a whitespace-only model turn as an AI message', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      { role: 'model', parts: [{ text: 'earlier reply' }] },
+      { role: 'user', parts: [{ text: 'question' }] },
+      {
+        role: 'model',
+        parts: [
+          { text: '\n' },
+          { functionCall: { name: 'glob', args: { pattern: '*' } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'glob', response: {} } }],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    expect(await copyCommand.action(mockContext, '')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Last output copied to the clipboard',
+    });
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('earlier reply');
+
+    expect(await copyCommand.action(mockContext, '2')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Only 1 AI message with text in this session.',
+    });
+  });
+
   it('should copy the Nth-last AI message with /copy N', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
@@ -1078,7 +1164,57 @@ math then literal: $x^2\$$`,
     });
   });
 
-  it('should label the error with AI message N when /copy N has no text', async () => {
+  it('should not count tool-call-only model turns toward /copy N', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    const history = [
+      { role: 'user', parts: [{ text: 'first question' }] },
+      {
+        role: 'model',
+        parts: [{ text: 'previous reply\n\n```ts\nconst one = 1;\n```' }],
+      },
+      { role: 'user', parts: [{ text: 'second question' }] },
+      {
+        role: 'model',
+        parts: [
+          { text: 'planning', thought: true },
+          { functionCall: { name: 'glob', args: { pattern: '*' } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'glob', response: {} } }],
+      },
+      { role: 'model', parts: [{ text: 'latest reply' }] },
+    ];
+
+    mockGetHistoryShallow.mockReturnValue(history);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    expect(await copyCommand.action(mockContext, '2')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'AI message 2 copied to the clipboard',
+    });
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith(
+      'previous reply\n\n```ts\nconst one = 1;\n```',
+    );
+
+    expect(await copyCommand.action(mockContext, '2 code')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Code block 1 copied to the clipboard',
+    });
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('const one = 1;');
+
+    expect(await copyCommand.action(mockContext, '3')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Only 2 AI messages with text in this session.',
+    });
+  });
+
+  it('should skip AI messages without text when counting /copy N', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
     const history = [
@@ -1094,9 +1230,78 @@ math then literal: $x^2\$$`,
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'AI message 2 contains no text to copy.',
+      content: 'Only 1 AI message with text in this session.',
     });
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it('should count a model turn with preamble text and a tool call', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    const history = [
+      { role: 'model', parts: [{ text: 'older reply' }] },
+      { role: 'user', parts: [{ text: 'question' }] },
+      {
+        role: 'model',
+        parts: [
+          { text: 'Let me check.' },
+          { functionCall: { name: 'glob', args: { pattern: '*' } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'glob', response: {} } }],
+      },
+      { role: 'model', parts: [{ text: 'final reply' }] },
+    ];
+
+    mockGetHistoryShallow.mockReturnValue(history);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    expect(await copyCommand.action(mockContext, '2')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'AI message 2 copied to the clipboard',
+    });
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('Let me check.');
+
+    expect(await copyCommand.action(mockContext, '3')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'AI message 3 copied to the clipboard',
+    });
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('older reply');
+
+    expect(await copyCommand.action(mockContext, '4')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Only 3 AI messages with text in this session.',
+    });
+  });
+
+  it('should copy the last reply with text when the newest turn only called a tool', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    // e.g. the turn was interrupted after the tool call, before any reply.
+    const history = [
+      { role: 'user', parts: [{ text: 'question' }] },
+      { role: 'model', parts: [{ text: 'earlier reply' }] },
+      { role: 'user', parts: [{ text: 'follow-up' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'glob', args: { pattern: '*' } } }],
+      },
+    ];
+
+    mockGetHistoryShallow.mockReturnValue(history);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    expect(await copyCommand.action(mockContext, '')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Last output copied to the clipboard',
+    });
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('earlier reply');
   });
 
   it('should label the error with AI message N when /copy N <selector> misses', async () => {
@@ -1284,7 +1489,7 @@ math then literal: $x^2\$$`,
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Only 1 AI message in this session.',
+      content: 'Only 1 AI message with text in this session.',
     });
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
   });
@@ -1303,7 +1508,7 @@ math then literal: $x^2\$$`,
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Only 3 AI messages in this session.',
+      content: 'Only 3 AI messages with text in this session.',
     });
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
   });

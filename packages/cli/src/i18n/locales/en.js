@@ -553,8 +553,8 @@ export default {
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
   'Connect an LLM provider': 'Connect an LLM provider',
-  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
-    'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest AI message with text, index = block number':
+    'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest AI message with text, index = block number',
   'Show working-tree change stats versus HEAD':
     'Show working-tree change stats versus HEAD',
   'Could not determine current working directory.':
