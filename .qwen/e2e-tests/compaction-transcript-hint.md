@@ -5,13 +5,18 @@ Issue: [#16437](https://github.com/QwenLM/qwen-code/issues/16437).
 1. In a local recording-enabled session, produce a distinctive error in an
    early model turn, then complete an unrelated later turn.
 2. Run `/compress`. Inspect the next model request: it should contain a
-   single lookup hint naming the active `.jsonl` before the resume instruction,
+   single lookup hint with the current transcript directory (`path`) and exact
+   JSONL basename (`glob`) before the resume instruction,
    but not contain the older error if the generated summary omitted it.
-3. Check that the existing `grep_search` tool can recover the error under the
-   existing access policy. Declining access must not be bypassed.
-4. After another Summary, the request should still contain only one hint.
-   The persisted checkpoint, a new recording-disabled chat, and a copied
-   summary used by a child chat must never supply the old path as a hint.
+3. Check the literal `grep_search` arguments: use the hinted directory for
+   `path`, the exact basename for `glob`, and a regex for the older error.
+   The existing tool should recover the error without matching a sibling
+   transcript. Declining access must not be bypassed.
+4. After startup context is restored, run another Summary. The previous hint
+   must be absent from the summarizer request even when the startup prelude and
+   Summary are merged in curated history. The resumed main request still has
+   just one current hint. The checkpoint and a copied Summary used by a
+   recorder-less chat must not supply either copy of the hint.
 
 The automated CLI witness uses a loopback mock provider and an isolated
 transcript, not production credentials or a real model.

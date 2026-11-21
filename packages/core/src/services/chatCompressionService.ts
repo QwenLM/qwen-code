@@ -886,6 +886,7 @@ export class ChatCompressionService {
       : [...sideQueryBase, ...visiblePendingHistory];
     const sideQueryHistory =
       withoutCompactionTranscriptHint(historyToSummarize);
+    const summaryHistoryChanged = historyToSummarize !== sideQueryHistory;
     const pendingToolResultTokenCount = estimateContentTokens(
       visiblePendingHistory,
       slimmingConfig.imageTokenEstimate,
@@ -1213,6 +1214,8 @@ export class ChatCompressionService {
       providerSupportsCacheSharing &&
       hasProviderTokenCount &&
       sharedRequestFits &&
+      // Removing the previous hint also changes this request's warmed prefix.
+      !summaryHistoryChanged &&
       // The shared request is built from the UNSLIMMED history. A
       // payload-overflow compaction exists because that exact payload was
       // just rejected at the gateway's byte limit — re-uploading it would
@@ -1233,7 +1236,9 @@ export class ChatCompressionService {
                 `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
                 `effectiveLimit=${reactiveContextCeiling}, window=${contextLimit}, ` +
                 `ceiling=${opts.observedServerCeiling ?? 'none'}`
-              : 'payload-overflow recovery ships the slimmed cold path only';
+              : summaryHistoryChanged
+                ? 'removed a prior transcript hint from the warmed prefix'
+                : 'payload-overflow recovery ships the slimmed cold path only';
       debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
     }
     if (canShareCache) {
@@ -1818,7 +1823,7 @@ export class ChatCompressionService {
             compressedHistoryTokenCount +
             compressionOutputTokenCount,
         );
-        if (historyToSummarize !== sideQueryHistory) {
+        if (summaryHistoryChanged) {
           // Provider usage excludes the old hint stripped from the side
           // query. It still lived in the original prompt token count.
           newTokenCount = Math.max(

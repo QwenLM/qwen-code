@@ -1279,7 +1279,8 @@ describe('composePostCompactHistory', () => {
 describe('postProcessSummary', () => {
   it('replaces copied hints and keeps the path on one exact, escaped line before the trailer', () => {
     const stale = buildCompactionTranscriptHint('/old/session.jsonl');
-    const path = '/new/space "quote"\n<line>\u2028/file.jsonl';
+    const directory = '/new/space "quote"\n<line>\u0085\u2028\u202e\u2066';
+    const path = directory + '/file.jsonl';
     const hint = buildCompactionTranscriptHint(path);
     const result = postProcessSummary(`Summary\n\n${stale}`, hint);
 
@@ -1287,10 +1288,13 @@ describe('postProcessSummary', () => {
     expect(
       lines.filter((line) => line.includes('<compaction-transcript-hint>')),
     ).toEqual([hint]);
-    const literal = /transcript: (".*")\. Search for specific/.exec(hint)?.[1];
-    expect(JSON.parse(literal!)).toBe(path);
+    const literal = /grep_search: (\{.*\})\. Supply a regex/.exec(hint)?.[1];
+    expect(JSON.parse(literal!)).toEqual({
+      path: directory,
+      glob: 'file.jsonl',
+    });
     expect(hint).not.toContain('<line>');
-    expect(hint).not.toContain('\u2028');
+    expect(hint).not.toMatch(/[\u0085\u2028\u202e\u2066]/);
     expect(lines.at(-1)).toMatch(/^Resume the prior task/);
     expect(postProcessSummary(`Summary\n\n${stale}`)).toBe(
       postProcessSummary('Summary'),

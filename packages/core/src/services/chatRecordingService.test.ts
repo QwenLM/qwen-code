@@ -314,6 +314,9 @@ describe('ChatRecordingService', () => {
       expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
       managed.mockReturnValue(undefined);
       expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
+      managed.mockReturnValue(false);
+      stat.mockReturnValue({ isFile: () => true, size: 0 } as fs.Stats);
+      expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
       stat.mockReturnValue({ isFile: () => false, size: 100 } as fs.Stats);
       expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
       stat.mockImplementation(() => {
@@ -322,6 +325,14 @@ describe('ChatRecordingService', () => {
       expect(await legacyRecorder.getExistingTranscriptPath()).toBeUndefined();
       expect(fs.mkdirSync).not.toHaveBeenCalled();
       expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('does not broaden the lookup for a glob metacharacter in a session ID', async () => {
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-*');
+      const recorder = new ChatRecordingService(mockConfig, undefined, false);
+      const stat = vi.spyOn(fs, 'lstatSync');
+      expect(await recorder.getExistingTranscriptPath()).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
     });
 
     it('does not point a rotated recorder at the new session', async () => {
@@ -716,11 +727,9 @@ describe('ChatRecordingService', () => {
     });
 
     it('persists the summary without its live transcript pointer', async () => {
-      const path = '/host/session.jsonl';
-      const liveSummary = postProcessSummary(
-        'Task summary',
-        buildCompactionTranscriptHint(path),
-      );
+      vi.mocked(path.basename).mockReturnValue('session.jsonl');
+      const hint = buildCompactionTranscriptHint('/host/session.jsonl');
+      const liveSummary = postProcessSummary('Task summary', hint);
       svc.recordChatCompression({
         info: {
           originalTokenCount: 10,
@@ -728,7 +737,10 @@ describe('ChatRecordingService', () => {
           compressionStatus: CompressionStatus.COMPRESSED,
         },
         compressedHistory: [
-          { role: 'user', parts: [{ text: liveSummary }] },
+          {
+            role: 'user',
+            parts: [{ text: 'Startup prelude' }, { text: liveSummary }],
+          },
           {
             role: 'model',
             parts: [{ text: 'Got it. Thanks for the additional context!' }],
@@ -736,14 +748,22 @@ describe('ChatRecordingService', () => {
         ],
       });
       const record = await flushed();
-      expect(JSON.stringify(record.systemPayload)).not.toContain(path);
+      const checkpoint = JSON.stringify(record.systemPayload);
+      expect(checkpoint).not.toContain('<compaction-transcript-hint>');
+      expect(checkpoint).not.toContain('/host');
+      expect(checkpoint).not.toContain('session.jsonl');
       expect(record.systemPayload).toMatchObject({
         compressedHistory: [
-          { parts: [{ text: postProcessSummary('Task summary') }] },
+          {
+            parts: [
+              { text: 'Startup prelude' },
+              { text: postProcessSummary('Task summary') },
+            ],
+          },
           {},
         ],
       });
-      expect(liveSummary).toContain(path);
+      expect(liveSummary).toContain(hint);
     });
 
     it('freezes compression snapshot containers against later live-history mutation', async () => {

@@ -337,10 +337,11 @@ describe('LlmChat', async () => {
 
   it('omits an inherited transcript hint in a chat without its recorder', () => {
     const hint = buildCompactionTranscriptHint('/parent/session.jsonl');
+    const summary = postProcessSummary('Earlier summary', hint);
     const parentHistory: Content[] = [
       {
         role: 'user',
-        parts: [{ text: postProcessSummary('Earlier summary', hint) }],
+        parts: [{ text: 'Startup prelude' }, { text: summary }],
       },
       {
         role: 'model',
@@ -353,11 +354,12 @@ describe('LlmChat', async () => {
     ];
     const child = new LlmChat(mockConfig, {}, parentHistory);
 
-    expect(child.getHistory()[0].parts?.[0].text).toBe(
-      postProcessSummary('Earlier summary'),
-    );
+    expect(child.getHistory()[0].parts).toEqual([
+      { text: 'Startup prelude' },
+      { text: postProcessSummary('Earlier summary') },
+    ]);
     expect(child.getHistory()[2]).toEqual(parentHistory[2]);
-    expect(parentHistory[0].parts?.[0].text).toContain('/parent/session.jsonl');
+    expect(parentHistory[0].parts?.[1].text).toBe(summary);
   });
 
   beforeEach(() => {

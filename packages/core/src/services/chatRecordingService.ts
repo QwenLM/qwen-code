@@ -1542,7 +1542,14 @@ export class ChatRecordingService {
       )
         return undefined;
       const filename = `${sessionId}.jsonl`;
-      if (path.basename(filename) !== filename) return undefined;
+      // An exact grep glob must remain a literal basename, even if an SDK
+      // caller bypassed CLI session ID validation.
+      if (
+        !/^[a-zA-Z0-9._-]+$/.test(sessionId) ||
+        path.basename(filename) !== filename
+      ) {
+        return undefined;
+      }
       const transcriptPath = path.join(
         this.config.storage.getProjectDir(),
         'chats',
