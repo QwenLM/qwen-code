@@ -549,14 +549,14 @@ test('navigates hidden tool and question approvals without answering them @smoke
   expect(daemon.permissionRequests()).toHaveLength(0);
   await page.screenshot({ path: testInfo.outputPath('split-pending.png') });
 
-  const reject = paneA.locator(
-    '[data-web-shell-permission-option][tabindex="0"]',
-  );
+  const reject = paneA.getByRole('button', { name: 'Reject', exact: true });
+  const allowOnce = paneA.getByRole('button', {
+    name: 'Yes, allow once',
+    exact: true,
+  });
   await reject.focus();
   await page.keyboard.press('ArrowDown');
-  await expect(
-    paneA.locator('[data-web-shell-permission-option]').nth(1),
-  ).toBeFocused();
+  await expect(allowOnce).toBeFocused();
   expect(daemon.permissionRequests()).toHaveLength(0);
 
   await daemon.sse.waitForConnection(SESSION_A);

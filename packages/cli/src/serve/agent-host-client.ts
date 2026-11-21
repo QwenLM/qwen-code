@@ -395,7 +395,8 @@ const MALFORMED_ENROLLMENT_SECRET = 'EMALFORMEDSECRET';
 function isEnrollmentRefusal(error: unknown): boolean {
   return (
     (error as { status?: number }).status === 401 &&
-    (error as Error).message === AGENT_HOST_ENROLLMENT_REFUSED
+    ((error as Error).message === AGENT_HOST_ENROLLMENT_REFUSED ||
+      (error as { enrollmentRefused?: unknown }).enrollmentRefused === true)
   );
 }
 
@@ -492,15 +493,21 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
   });
   const result = (await response.json().catch(() => ({}))) as {
     error?: string;
+    detail?: unknown;
     cancelled?: unknown;
   } & T;
   if (!response.ok) {
+    const enrollmentRefused =
+      response.status === 401 && result.error === AGENT_HOST_ENROLLMENT_REFUSED;
     throw Object.assign(
       new Error(
-        result.error ?? `Agent Host request failed (${response.status}).`,
+        enrollmentRefused && typeof result.detail === 'string'
+          ? result.detail
+          : (result.error ?? `Agent Host request failed (${response.status}).`),
       ),
       {
         status: response.status,
+        ...(enrollmentRefused ? { enrollmentRefused: true } : {}),
         ...(result.cancelled === true ? { cancelled: true } : {}),
       },
     );

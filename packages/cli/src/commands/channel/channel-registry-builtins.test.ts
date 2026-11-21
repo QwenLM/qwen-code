@@ -87,6 +87,7 @@ describe('built-in channel registry', () => {
       'wecom-webhook',
       'feishu',
       'feishu-webhook',
+      'generic-webhook',
       'qq',
       'github',
       'gitlab',

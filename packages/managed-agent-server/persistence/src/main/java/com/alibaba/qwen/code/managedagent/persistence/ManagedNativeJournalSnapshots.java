@@ -77,7 +77,7 @@ public class ManagedNativeJournalSnapshots {
     public record Manifest(String format, String payloadFormat, String tenantId, String workspaceId,
             String sessionId, String snapshotId, long coveredJournalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch, String latestCheckpointResourceId,
-            int storageVersion, long pageCount, long resourceCount, String lastPageDigest) { }
+            long pageCount, long resourceCount, String lastPageDigest) { }
 
     public record Descriptor(Manifest snapshot, ToolResultResourceRef manifest, boolean replayed) { }
 
@@ -185,7 +185,7 @@ public class ManagedNativeJournalSnapshots {
                 + " AND owner_revision = journal_revision AND journal_revision <= ?", Long.class, scope, scope, revision);
         Manifest manifest = new Manifest(FORMAT, PAYLOAD_FORMAT, tenant, request.workspaceId(), session,
                 request.snapshotId(), revision, sequence, commit, activation, checkpoint,
-                head.storageVersion(), revision, resourceCount, previousPage);
+                revision, resourceCount, previousPage);
         byte[] manifestBytes = encode(manifest);
         String id = manifestId(scope, request.snapshotId());
         StoredResource stored = new StoredResource(id, MANIFEST_KIND, 1, manifestBytes.length,
@@ -228,7 +228,7 @@ public class ManagedNativeJournalSnapshots {
         }
         var candidates = jdbc.query("SELECT owner_key, owner_revision FROM ma_resource_ref"
                 + " WHERE session_scope_key = ? AND owner_kind = 'NATIVE_SNAPSHOT' AND owner_revision <= ?"
-                + " GROUP BY owner_key, owner_revision ORDER BY owner_revision DESC, owner_key LIMIT 1",
+                + " ORDER BY owner_revision DESC, owner_key LIMIT 1",
                 (row, index) -> new Candidate(row.getString(1), row.getLong(2)),
                 ManagedSessionStore.sessionScopeKey(tenant, session), frozen.journalRevision());
         if (candidates.isEmpty()) {
@@ -249,8 +249,7 @@ public class ManagedNativeJournalSnapshots {
                 && selected.ownerKey().equals(ownerKey(ManagedSessionStore.sessionScopeKey(tenant, session), manifest.snapshotId()))
                 && selected.coverage() == descriptor.snapshot().coveredJournalRevision()
                 && descriptor.snapshot().committedSequence() <= frozen.committedSequence()
-                && descriptor.snapshot().activationEpoch() <= frozen.activationEpoch()
-                && descriptor.snapshot().storageVersion() <= frozen.storageVersion(), "managed_session_snapshot_corrupt");
+                && descriptor.snapshot().activationEpoch() <= frozen.activationEpoch(), "managed_session_snapshot_corrupt");
         require(sessions.restore(tenant, workspace, session, token).writerGeneration() == frozen.writerGeneration(),
                 "managed_session_writer_conflict");
         String id = descriptor.snapshot().snapshotId();

@@ -137,8 +137,8 @@ public final class WorkspaceRecoveryContract {
         try (var pool = Executors.newSingleThreadExecutor(); var connection = source.getConnection()) {
             connection.setAutoCommit(false);
             try (var lock = connection.prepareStatement("SELECT tenant_id FROM ma_tenant_guard"
-                    + " WHERE tenant_key = ? AND guard_domain = 'runtime_placement' FOR UPDATE")) {
-                lock.setString(1, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(fixture.tenant));
+                    + " WHERE tenant_id = ? AND guard_domain = 'runtime_placement' FOR UPDATE")) {
+                lock.setString(1, fixture.tenant);
                 try (var rows = lock.executeQuery()) {
                     assertThat(rows.next()).isTrue();
                 }

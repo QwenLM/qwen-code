@@ -28,7 +28,18 @@ final class ManagedSessionRetirementStore {
         if (roots.size() != 1 || roots.getFirst().get("retired_at") == null) {
             throw new IllegalStateException("Session has not been permanently retired");
         }
+        ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        var packs = jdbc.queryForList("SELECT pack_id FROM ma_journal_pack WHERE session_scope_key = ?"
+                + " AND state <> 'RETIRED' ORDER BY pack_id LIMIT ? FOR UPDATE", scope, limit);
+        for (var pack : packs) {
+            jdbc.update("UPDATE ma_journal_pack SET state = 'RETIRED', gmt_modified = "
+                    + ManagedSchemaTime.SQL_NOW + " WHERE pack_id = ? AND session_scope_key = ?",
+                    pack.get("pack_id"), scope);
+        }
+        if (!packs.isEmpty()) {
+            return true;
+        }
         var nativeSnapshots = jdbc.queryForList("SELECT owner_key, owner_revision, resource_key FROM ma_resource_ref"
                 + " WHERE session_scope_key = ? AND owner_kind = 'NATIVE_SNAPSHOT'"
                 + " ORDER BY owner_key, owner_revision, resource_key LIMIT ? FOR UPDATE", scope, limit);
@@ -108,12 +119,17 @@ final class ManagedSessionRetirementStore {
         }
         var records =
                 jdbc.queryForList(
-                        "SELECT record_key FROM ma_session_record WHERE session_scope_key = ?"
+                        "SELECT record_key, domain, record_id FROM ma_session_record WHERE session_scope_key = ?"
                                 + " ORDER BY record_key LIMIT ? FOR UPDATE",
                         scope,
                         limit);
         for (var row : records) {
             String key = (String) row.get("record_key");
+            if ("automation_run".equals(row.get("domain"))) {
+                jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = 0"
+                                + " WHERE tenant_id = ? AND run_id = ? AND session_id = ?",
+                        tenant, row.get("record_id"), session);
+            }
             release(jdbc, scope, "SESSION_RECORD", key);
             jdbc.update(
                     "DELETE FROM ma_session_record WHERE session_scope_key = ? AND record_key = ?",
@@ -146,11 +162,6 @@ final class ManagedSessionRetirementStore {
                     revision);
         }
         if (!revisions.isEmpty()) {
-            jdbc.update(
-                    "UPDATE ma_journal_pack SET state = 'RETIRED', gmt_modified = "
-                            + ManagedSchemaTime.SQL_NOW
-                            + " WHERE session_scope_key = ? AND state <> 'RETIRED'",
-                    scope);
             jdbc.update(
                     "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", compacted_through_revision = GREATEST(compacted_through_revision, ?) WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND state = 'DELETED'",
                     revisions.getLast(),
@@ -314,6 +325,9 @@ final class ManagedSessionRetirementStore {
                 + " AND owner_kind = 'NATIVE_SNAPSHOT' LIMIT 1", ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
             throw new IllegalStateException("Native snapshot collection is incomplete");
         }
+        if (hasJournalPacks(jdbc, ManagedSessionStore.sessionScopeKey(tenant, session))) {
+            throw new IllegalStateException("Session journal pack collection is incomplete");
+        }
         var operations =
                 jdbc.queryForList(
                         "SELECT tenant_id, session_id, session_scope_key, state FROM ma_operation"
@@ -335,6 +349,10 @@ final class ManagedSessionRetirementStore {
                 != 1) {
             throw new IllegalStateException("Session retirement identity changed");
         }
+    }
+
+    static boolean hasJournalPacks(JdbcTemplate jdbc, String scope) {
+        return !jdbc.queryForList("SELECT pack_id FROM ma_journal_pack WHERE session_scope_key = ? LIMIT 1", scope).isEmpty();
     }
 
     private static void release(JdbcTemplate jdbc, String scope, String kind, String owner) {

@@ -2,7 +2,12 @@
 
 [English](2026-11-15-early-session-artifact-entry.md) | [简体中文](2026-11-15-early-session-artifact-entry.zh-CN.md)
 
-Status: implemented (scope A); scope B proposed.
+Status: implemented (scopes A and B). Scope B shipped in
+[session-list artifact summary](2026-11-17-session-list-artifact-summary.md).
+The header entry's _destination_ is superseded: it now opens the right panel's
+artifacts list tab instead of the environment panel's artifacts section — see
+[artifacts entry opens the right panel](2026-11-18-artifacts-entry-opens-right-panel.md).
+The load-embedded artifact list and the session-list summary remain as designed.
 
 ## Problem statement
 
@@ -62,7 +67,8 @@ Relevant baseline behavior (before this change):
 - Session summaries already carry derived per-session data (`prs`), hydrated
   best-effort from a sidecar in
   `packages/cli/src/serve/routes/session.ts` — a precedent for metadata
-  enrichment, reserved for the follow-up (scope B).
+  enrichment that scope B later reused
+  ([session-list artifact summary](2026-11-17-session-list-artifact-summary.md)).
 - Chat header items are declared by `WebShellChatHeaderItem`
   (`packages/web-shell/client/customization.tsx`), defaulted in
   `DEFAULT_CHAT_HEADER_ITEMS` and consumed in `packages/web-shell/client/App.tsx`
@@ -80,12 +86,15 @@ Relevant baseline behavior (before this change):
 
 ## Non-goals / scope boundaries
 
-- Scope A only: embed the artifact list in the `/load` (and `/resume`) response.
-  Scope B (artifact summary in the session-list metadata for click-time display)
-  is a follow-up and is not implemented here.
+- This design covers scope A only: embed the artifact list in the `/load` (and
+  `/resume`) response. Scope B (artifact summary in the session-list metadata
+  for click-time display) shipped separately in
+  [session-list artifact summary](2026-11-17-session-list-artifact-summary.md).
 - The per-turn `TurnOutputs` chips are unchanged; they still wait for the replay.
 - No change to the artifact panel's live-update path (`artifactsVersion` events).
-- No new artifact storage format or sidecar.
+- No new artifact storage format or sidecar in scope A; scope B adds the
+  derived `.artifacts.json` summary sidecar described in
+  [session-list artifact summary](2026-11-17-session-list-artifact-summary.md).
 
 ## Proposed solution
 
@@ -148,7 +157,10 @@ Relevant baseline behavior (before this change):
 
 - **Embed the list, not just a count.** The list is small (a few KB) and already
   restored in memory; carrying it lets the artifact cache be seeded so the panel
-  opened from the button is populated immediately, and it sets up scope B.
+  opened from the button is populated immediately. Scope B later reused this
+  header entry and added a sidecar-derived count for the window before the load
+  response — the scope-A cache is empty at click time by construction, and once
+  the list lands the header still prefers it.
 - **No workspace status refresh on the load path.** The cheap accessor avoids
   stat/hash work so `/load` is not slowed. Status accuracy is restored by the
   existing gated fetch shortly after.
@@ -214,13 +226,16 @@ Relevant baseline behavior (before this change):
 
 - On a cold session with artifacts, the header artifact entry is visible before
   the conversation body first paint, with the correct count.
-- Clicking the entry opens the environment panel's artifacts section populated
-  with the session's artifacts.
+- Clicking the entry opens the artifacts surface populated with the session's
+  artifacts. Originally the environment panel's artifacts section; superseded by
+  the right panel's artifacts list tab (see
+  [artifacts entry opens the right panel](2026-11-18-artifacts-entry-opens-right-panel.md)).
 - `/load` server-side duration does not regress.
 - Older daemons (no field) behave exactly as today.
 - Build, typecheck, and focused unit tests pass.
 
 ## Open questions
 
-- Scope B follow-up: artifact-summary sidecar for click-time display in the
-  session list.
+- None remaining. The scope B follow-up (artifact-summary sidecar for
+  click-time display in the session list) is implemented in
+  [session-list artifact summary](2026-11-17-session-list-artifact-summary.md).

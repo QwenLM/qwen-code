@@ -108,27 +108,44 @@ function isSafeRangeRef(ref: string): boolean {
 }
 
 /**
- * The git log range that yields the commit-fallback window: commits a bound PR
- * does not cover. With a known PR head, only commits after it are loose (the
- * PR units already show the rest); without one, the session's base branch (or
- * HEAD's recent history) bounds the window.
+ * Mirror of the daemon's `isSafeSingleRef` predicate (no range): a ref used as
+ * an exclusion must not smuggle a flag, a second revision (`..`), or a leading
+ * `^` (git's negation, which `--not` XORs into an inclusion). Used to gate the
+ * base branch added to the exclusion set so an unsafe branch name narrows nothing
+ * rather than refusing the whole fetch.
+ */
+export function isSafeSingleRef(ref: string): boolean {
+  return (
+    !ref.startsWith('-') &&
+    !ref.startsWith('^') &&
+    !ref.includes('..') &&
+    /^[A-Za-z0-9_./~^-]+$/.test(ref)
+  );
+}
+
+/**
+ * The git log range that yields the commit-fallback window: the session's
+ * commits since its start, before reachability exclusion drops the ones a
+ * bound PR covers. The boundary is the session's immutable start commit
+ * (branch base or worktree base tip); failing that, its base branch.
  *
- * Returns a range string, or one of two distinct sentinels: `undefined` means
- * "no baseline — walk HEAD's recent history" (an omitted range), while `null`
- * means "refuse the fallback". A base branch git permits but the daemon's
- * whitelist rejects (e.g. `feat@2026`) would be dropped server-side into an
- * unscoped walk that re-lists pre-session history, so it must skip the fetch
- * entirely (`null`), not fall through to the omitted-range path. The literal
+ * Returns a range string, or one of two suppress sentinels: `null` when a ref
+ * git permits but the daemon's whitelist rejects (e.g. `feat@2026`) — composing
+ * it would be dropped server-side into an unscoped walk — and `undefined` when
+ * no trustworthy boundary exists (no start commit and no base branch). Both
+ * suppress the fetch; the overview never walks HEAD unscoped, which would
+ * re-list pre-session history as this session's loose work. The literal
  * `'HEAD'` is the daemon's detached-HEAD sentinel (session.ts treats it the
- * same way), not a baseline: composing `HEAD..HEAD` would be always-empty and
- * silently render a committing session as having no loose commits, so it maps
- * to the no-baseline walk instead.
+ * same way), not a baseline: `HEAD..HEAD` would be always-empty, so it maps to
+ * `undefined` rather than a range.
  */
 export function commitFallbackRange(
-  latestPrHeadSha: string | undefined,
+  startCommit: string | undefined,
   baseBranch: string | undefined,
 ): string | null | undefined {
-  if (latestPrHeadSha) return `${latestPrHeadSha}..HEAD`;
+  if (startCommit) {
+    return isSafeRangeRef(startCommit) ? `${startCommit}..HEAD` : null;
+  }
   if (baseBranch && baseBranch !== 'HEAD') {
     return isSafeRangeRef(baseBranch) ? `${baseBranch}..HEAD` : null;
   }

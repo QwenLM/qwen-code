@@ -20,6 +20,7 @@ import {
   type DaemonStartupSnapshot,
   parseDaemonStatusDetail,
 } from '../daemon-status.js';
+import type { StreamOccupancySnapshot } from '../sse-occupancy.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
 import type { ServeOptions } from '../types.js';
 import type { ChannelWorkerSnapshot } from '../channel-worker-supervisor.js';
@@ -43,6 +44,7 @@ interface RegisterDaemonStatusRoutesDeps {
   getAcpHandle: () => AcpHttpHandle | undefined;
   getRateLimiter: () => RateLimiterInstance | undefined;
   getRestSseActive: () => number;
+  getStreamOccupancy: () => StreamOccupancySnapshot;
   currentServeFeatures: () => ReturnType<
     typeof import('../capabilities.js').getAdvertisedServeFeatures
   >;
@@ -88,6 +90,7 @@ export function registerDaemonStatusRoutes(
           acpHandle: deps.getAcpHandle(),
           rateLimiter: deps.getRateLimiter(),
           getRestSseActive: deps.getRestSseActive,
+          getStreamOccupancy: deps.getStreamOccupancy,
           features: deps.currentServeFeatures(),
           protocolVersions: getServeProtocolVersions(),
           supportedDeviceFlowProviders: deps.getSupportedDeviceFlowProviders(),

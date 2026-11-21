@@ -24,6 +24,22 @@ import type { TurnOutputScheduledTask } from './TurnOutputs';
 const mockDocxRender = vi.hoisted(() => vi.fn());
 vi.mock('docx-preview', () => ({ renderAsync: mockDocxRender }));
 
+vi.mock('./WorkspacePdfRangePreview', () => ({
+  default: function MockWorkspacePdfRangePreview({
+    initialStat,
+    onOpenFull,
+  }: {
+    initialStat: { sizeBytes: number };
+    onOpenFull: () => void;
+  }) {
+    return (
+      <button data-pdf-size={initialStat.sizeBytes} onClick={onOpenFull}>
+        Open full PDF
+      </button>
+    );
+  },
+}));
+
 const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
   URL,
   'createObjectURL',
@@ -575,6 +591,105 @@ describe('ArtifactPanel context usage tabs', () => {
     expect(
       container.querySelector('button[title="Context Usage"]'),
     ).not.toBeNull();
+  });
+});
+
+describe('ArtifactPanel artifacts list tab', () => {
+  function renderPanel(props: {
+    artifacts: readonly DaemonSessionArtifact[];
+    sessionArtifacts?: readonly DaemonSessionArtifact[];
+    onOpenArtifact?: (artifactId: string) => void;
+    loading?: boolean;
+  }) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={props.artifacts}
+            sessionArtifacts={props.sessionArtifacts}
+            onOpenArtifact={props.onOpenArtifact}
+            loading={props.loading}
+            tabs={[
+              {
+                id: 'artifacts:s1',
+                kind: 'artifacts',
+                title: 'Artifacts',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="artifacts:s1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  const artifact = {
+    id: 'a1',
+    kind: 'document',
+    title: 'Quarterly report',
+    workspacePath: 'reports/report.md',
+  } as unknown as DaemonSessionArtifact;
+
+  it('renders the session artifact list and opens a clicked artifact', () => {
+    const onOpenArtifact = vi.fn();
+    const container = renderPanel({ artifacts: [artifact], onOpenArtifact });
+
+    const list = container.querySelector('[data-testid="artifacts-list"]');
+    expect(list).not.toBeNull();
+    expect(container.textContent).toContain('report.md');
+    const row = list!.querySelector<HTMLButtonElement>('button');
+    act(() => row?.click());
+    expect(onOpenArtifact).toHaveBeenCalledWith('a1');
+  });
+
+  it('shows the empty state when the session has no artifacts', () => {
+    const container = renderPanel({ artifacts: [] });
+    expect(
+      container.querySelector('[data-testid="artifacts-list-empty"]'),
+    ).not.toBeNull();
+  });
+
+  it('shows a skeleton while artifacts load', () => {
+    const container = renderPanel({ artifacts: [artifact], loading: true });
+    expect(
+      container.querySelector('[data-testid="artifacts-list-skeleton"]'),
+    ).not.toBeNull();
+  });
+
+  it('shows the package icon on the artifacts tab in the tab bar', () => {
+    const container = renderPanel({ artifacts: [artifact] });
+    const tab = container.querySelector('[role="tab"][title="Artifacts"]');
+    expect(tab).not.toBeNull();
+    expect(tab!.querySelector('.lucide-package')).not.toBeNull();
+  });
+
+  it('lists only the session artifacts, matching the header count, not pane extras', () => {
+    const paneExtra = {
+      ...artifact,
+      id: 'pane-extra',
+      workspacePath: 'pane.html',
+    };
+    const container = renderPanel({
+      artifacts: [artifact, paneExtra],
+      sessionArtifacts: [artifact],
+    });
+    expect(
+      container.querySelectorAll('[data-testid="artifacts-list"] li'),
+    ).toHaveLength(1);
+    expect(container.textContent).toContain('report.md');
+    expect(container.textContent).not.toContain('pane.html');
   });
 });
 
@@ -5894,9 +6009,82 @@ describe('ArtifactPanel binary document previews', () => {
       patch.workspacePath ?? 'reports/Report.PDF',
       { offset: 0, maxBytes: 256 * 1024 },
     );
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(2);
     const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
     expect(blob.type).toBe('application/pdf');
     expect(Buffer.from(await blob.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('only loads a large PDF into the native viewer after it is requested', async () => {
+    const sizeBytes = 4 * 1024 * 1024;
+    const fixture = Buffer.alloc(sizeBytes);
+    bytes.copy(fixture);
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readFileBytes.mockImplementation(
+      async (
+        _path: string,
+        { offset, maxBytes }: { offset: number; maxBytes: number },
+      ) => {
+        const chunk = fixture.subarray(offset, offset + maxBytes);
+        return {
+          contentBase64: chunk.toString('base64'),
+          offset,
+          returnedBytes: chunk.length,
+          sizeBytes,
+        };
+      },
+    );
+    const { root, container } = mountPdf();
+    const artifact = pdfArtifact();
+    act(() => root.render(artifactPanel(artifact)));
+    await vi.waitFor(async () => {
+      await flushPreview();
+      expect(container.querySelector('[data-pdf-size]')?.textContent).toBe(
+        'Open full PDF',
+      );
+    });
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    expect(container.querySelector('iframe')).toBeNull();
+
+    const updatedHeader = '%PDF-1.6';
+    fixture.write(updatedHeader);
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes,
+      modifiedMs: 2,
+    });
+    act(() =>
+      container.querySelector<HTMLButtonElement>('[data-pdf-size]')!.click(),
+    );
+    await flush();
+    expect(container.querySelector('[data-pdf-size]')).toBeNull();
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe(
+      'blob:pdf-preview',
+    );
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(3);
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(16);
+    const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
+    expect(blob.size).toBe(sizeBytes);
+    expect(await blob.slice(0, updatedHeader.length).text()).toBe(
+      updatedHeader,
+    );
+
+    act(() =>
+      root.render(
+        artifactPanel({ ...artifact, updatedAt: '2026-10-20T00:00:00Z' }),
+      ),
+    );
+    await flush();
+    expect(container.querySelector('[data-pdf-size]')).not.toBeNull();
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(4);
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(16);
   });
 
   it.each(['missing', 'expired'])(
@@ -6157,5 +6345,194 @@ describe('ArtifactPanel binary document previews', () => {
     const download = container.querySelector<HTMLAnchorElement>('a[download]');
     expect(download?.getAttribute('href')).toBe('blob:pdf-preview');
     expect(download?.download).toBe('Report.PDF');
+  });
+});
+
+describe('ArtifactPanel task explanation', () => {
+  const task: DaemonSessionShellTaskStatus = {
+    kind: 'shell',
+    id: 'shell-1',
+    label: 'npm run dev',
+    description: 'npm run dev',
+    status: 'running',
+    startTime: 1_000,
+    runtimeMs: 5_000,
+    command: 'npm run dev',
+    cwd: '/work/project',
+  };
+
+  type ExplainPanelProps = {
+    explainTask?: DaemonSessionShellTaskStatus | null;
+    onExplainTask?: (task: DaemonSessionShellTaskStatus) => void;
+    taskExplanation?: {
+      messageId: string;
+      taskId: string;
+      question: string;
+      answer: string;
+      isPending: boolean;
+    } | null;
+  };
+
+  function renderExplainPanel(props: ExplainPanelProps) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    mockActions.getTaskRuntime.mockImplementation(() => new Promise(() => {}));
+    const element = (p: ExplainPanelProps) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            { id: 'shell:shell-1', kind: 'shell', title: task.command, task },
+          ]}
+          activeTabId="shell:shell-1"
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+          explainTask={p.explainTask === undefined ? task : p.explainTask}
+          onExplainTask={p.onExplainTask}
+          taskExplanation={p.taskExplanation}
+        />
+      </I18nProvider>
+    );
+    act(() => {
+      root.render(element(props));
+    });
+    return {
+      container,
+      root,
+      rerender: (p: ExplainPanelProps) =>
+        act(() => {
+          root.render(element(p));
+        }),
+    };
+  }
+
+  it('offers a header "?" that asks about the active task', () => {
+    const onExplainTask = vi.fn();
+    const { container } = renderExplainPanel({ onExplainTask });
+    const explain = container.querySelector<HTMLButtonElement>(
+      '[data-testid="artifact-panel-explain"]',
+    );
+    expect(explain).not.toBeNull();
+    expect(explain?.getAttribute('aria-label')).toBe(
+      'Explain task: npm run dev',
+    );
+    act(() => explain?.click());
+    expect(onExplainTask).toHaveBeenCalledExactlyOnceWith(task);
+  });
+
+  it('renders no "?" without an explainable task', () => {
+    const { container } = renderExplainPanel({
+      explainTask: null,
+      onExplainTask: vi.fn(),
+    });
+    expect(
+      container.querySelector('[data-testid="artifact-panel-explain"]'),
+    ).toBeNull();
+  });
+
+  it('mirrors the explanation in place when it matches the active task', () => {
+    const { container, rerender } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm1',
+        taskId: 'shell-1',
+        question: 'Explain what this task is doing: npm run dev',
+        answer: 'It runs the dev server.',
+        isPending: false,
+      },
+    });
+    const block = container.querySelector(
+      '[data-testid="artifact-panel-explanation"]',
+    );
+    expect(block).not.toBeNull();
+    expect(block?.textContent).toContain(
+      'Explain what this task is doing: npm run dev',
+    );
+    expect(block?.textContent).toContain('It runs the dev server.');
+    // A button-triggered explanation is not a typed /btw command.
+    expect(block?.textContent).not.toContain('/btw');
+    // The mirror has no focusable surface of its own, so the composer
+    // panel's key hints would advertise keys that act on whatever control
+    // holds focus (Enter on the header "?" re-asks the question).
+    expect(block?.textContent).not.toContain('Press Space');
+
+    rerender({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm2',
+        taskId: 'shell-1',
+        question: 'Explain what this task is doing: npm run dev',
+        answer: '',
+        isPending: true,
+      },
+    });
+    const pendingBlock = container.querySelector(
+      '[data-testid="artifact-panel-explanation"]',
+    );
+    expect(pendingBlock?.textContent).not.toContain('Ctrl+C');
+  });
+
+  it('does not mirror an explanation for another task', () => {
+    const { container } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm1',
+        taskId: 'other-task',
+        question: 'Explain what this task is doing: other',
+        answer: 'About another task.',
+        isPending: false,
+      },
+    });
+    expect(
+      container.querySelector('[data-testid="artifact-panel-explanation"]'),
+    ).toBeNull();
+  });
+
+  it('remounts the mirrored answer when a new ask replaces the old one', () => {
+    const explanation = (messageId: string) => ({
+      messageId,
+      taskId: 'shell-1',
+      question: 'Explain what this task is doing: npm run dev',
+      answer: 'It runs the dev server.',
+      isPending: false,
+    });
+    const { container, rerender } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: explanation('m1'),
+    });
+    const contentSelector =
+      '[data-testid="artifact-panel-explanation"] [data-web-shell-btw-content]';
+    const first = container.querySelector(contentSelector);
+    expect(first).not.toBeNull();
+
+    rerender({ onExplainTask: vi.fn(), taskExplanation: explanation('m2') });
+
+    const second = container.querySelector(contentSelector);
+    expect(second).not.toBeNull();
+    expect(second).not.toBe(first);
+  });
+
+  it('excerpts a multi-KB label in the header aria label', () => {
+    const longTask = {
+      ...task,
+      label: 'echo ' + 'x'.repeat(4_000),
+      command: 'echo ' + 'x'.repeat(4_000),
+    };
+    const { container } = renderExplainPanel({
+      explainTask: longTask,
+      onExplainTask: vi.fn(),
+    });
+    const aria =
+      container
+        .querySelector('[data-testid="artifact-panel-explain"]')
+        ?.getAttribute('aria-label') ?? '';
+    expect(aria.length).toBeLessThanOrEqual(150);
+    expect(aria).toContain('…');
   });
 });
