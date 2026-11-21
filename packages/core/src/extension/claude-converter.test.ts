@@ -22,7 +22,12 @@ import {
 } from './claude-converter.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
-import { performVariableReplacement } from './variables.js';
+import {
+  performVariableReplacement,
+  substituteHookVariables,
+} from './variables.js';
+import { ExtensionManager } from './extensionManager.js';
+import { ExtensionStore } from './extension-store.js';
 import {
   SubagentManager,
   loadSubagentFromDir,
@@ -640,7 +645,7 @@ describe('convertClaudePluginPackage', () => {
     expect(exists(convertedCommands, 'a.md')).toBe(true);
   });
 
-  it('should convert hooks from Claude plugin format to Qwen format with variable substitution', async () => {
+  it('preserves file-hook plugin-root tokens until the installed root is known', async () => {
     // hooks.json in Claude format: HookDefinition (matcher, sequential) holding HookConfig[].
     const hooksJson = {
       hooks: {
@@ -659,19 +664,52 @@ describe('convertClaudePluginPackage', () => {
         ],
       },
     };
-    const { dir: pluginSourceDir, result } = await layoutAndConvert(
+    const { result } = await layoutAndConvert(
       'plugin-with-hooks',
       { name: 'hooks-plugin', hooks: './hooks/hooks.json' },
-      { 'hooks/hooks.json': JSON.stringify(hooksJson) },
+      {
+        'hooks/hooks.json': JSON.stringify(hooksJson),
+        'scripts/post-install.sh': 'echo POST_INSTALL\n',
+      },
     );
 
     expect(result.config.hooks).toBeDefined();
     expect(result.config.hooks!['PostToolUse']).toHaveLength(1);
-    // The plugin-root variable is substituted.
     expect(
       (result.config.hooks!['PostToolUse']![0].hooks![0] as { command: string })
         .command,
-    ).toBe(`${pluginSourceDir}/scripts/post-install.sh`);
+    ).toBe('${CLAUDE_PLUGIN_ROOT}/scripts/post-install.sh');
+    const stored = JSON.parse(
+      fs.readFileSync(
+        path.join(result.convertedDir, 'qwen-extension.json'),
+        'utf8',
+      ),
+    );
+    expect(stored.hooks).toEqual(hooksJson.hooks);
+
+    // Installation copies the converted tree and then deletes the conversion
+    // directory, so only load-time expansion can still reach the script.
+    const extensionsDir = path.join(testDir, 'extensions');
+    const installedDir = path.join(extensionsDir, 'hooks-plugin');
+    fs.cpSync(result.convertedDir, installedDir, { recursive: true });
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+
+    const manager = new ExtensionManager({
+      workspaceDir: testDir,
+      isWorkspaceTrusted: true,
+      extensionStore: new ExtensionStore({
+        extensionsDir,
+        storeDir: path.join(testDir, 'extension-store'),
+      }),
+    });
+    const loaded = await manager.loadExtension({ extensionDir: installedDir });
+    const installedCommand = (
+      loaded!.hooks!['PostToolUse']![0].hooks![0] as { command: string }
+    ).command;
+    expect(installedCommand).toBe(`${installedDir}/scripts/post-install.sh`);
+    expect(fs.readFileSync(installedCommand, 'utf8')).toBe(
+      'echo POST_INSTALL\n',
+    );
   });
 
   it.each(['absolute', 'relative-outside'])(
@@ -765,7 +803,12 @@ describe('convertClaudePluginPackage', () => {
           },
         ],
       });
-      const hook = result.config.hooks!['SessionStart']![0].hooks![0];
+      expect(result.config.hooks).toEqual(classicHooks);
+      const loadedHooks = substituteHookVariables(
+        result.config.hooks,
+        result.convertedDir,
+      );
+      const hook = loadedHooks!['SessionStart']![0].hooks![0];
       expect(
         fs.readFileSync((hook as { command: string }).command, 'utf8'),
       ).toBe('echo CLASSIC_HOOK\n');

@@ -30,7 +30,6 @@ import {
 } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent, stripAnsiAndControl } from '../utils/textUtils.js';
-import { substituteHookVariables } from './variables.js';
 import { parseAgentExecutionBackend } from '../subagents/execution-backend.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
@@ -715,7 +714,7 @@ export async function buildQwenExtensionFromPlugin(
             };
           }
 
-          mergedConfig.hooks = substituteHookVariables(hooksData, pluginSource);
+          mergedConfig.hooks = hooksData;
         } catch (error) {
           debugLogger.warn(
             `Failed to parse hooks file ${hooksPath}: ${error instanceof Error ? error.message : String(error)}`,
