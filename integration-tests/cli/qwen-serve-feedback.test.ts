@@ -14,17 +14,8 @@
  * `system/ui_telemetry` chat record `logUserFeedback` appends to the
  * session JSONL.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DaemonClient } from '@qwen-code/sdk';
 import { isNonBlockingAccepted } from '@qwen-code/sdk/daemon';
@@ -33,13 +24,14 @@ import {
   startFakeOpenAIServer,
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
+import {
+  makeTempWorkspace,
+  spawnDaemon,
+  writeWorkspaceSettings,
+  type SpawnedDaemon,
+} from './_daemon-harness.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CLI_BIN =
-  process.env['TEST_CLI_PATH'] ??
-  path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'feedback-integ-secret';
-const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 
 const SKIP =
   process.platform === 'win32' ||
@@ -59,7 +51,7 @@ interface Rig {
   base: string;
   workspaceDir: string;
   homeDir: string;
-  daemon: ChildProcess;
+  spawned: SpawnedDaemon;
   feedbackRecords: (sessionId: string) => FeedbackRecord[];
   postFeedback: (
     sessionId: string,
@@ -73,87 +65,35 @@ let fakeServer: FakeOpenAIServer;
 async function startRig(opts: {
   workspaceSettings?: Record<string, unknown>;
 }): Promise<Rig> {
-  const homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-feedback-home-'));
-  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'qwen-feedback-ws-'));
+  const homeDir = makeTempWorkspace('feedback-home');
+  const workspaceDir = makeTempWorkspace('feedback-ws');
   const qwenHome = path.join(homeDir, '.qwen');
   mkdirSync(qwenHome, { recursive: true });
   if (opts.workspaceSettings) {
-    mkdirSync(path.join(workspaceDir, '.qwen'), { recursive: true });
-    writeFileSync(
-      path.join(workspaceDir, '.qwen', 'settings.json'),
-      JSON.stringify(opts.workspaceSettings),
-      'utf8',
-    );
+    writeWorkspaceSettings(workspaceDir, opts.workspaceSettings);
   }
-  const daemon = spawn(
-    process.execPath,
-    [
-      CLI_BIN,
-      'serve',
-      '--port',
-      '0',
-      '--token',
-      TOKEN,
-      '--hostname',
-      '127.0.0.1',
-      '--workspace',
-      workspaceDir,
-      '--initialize-timeout-ms',
-      String(ACP_INITIALIZE_TIMEOUT_MS),
-    ],
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...Object.fromEntries(
-          Object.entries(process.env).filter(
-            ([key]) =>
-              !/^(https?|all)_proxy$/i.test(key) &&
-              !/^QWEN_/.test(key) &&
-              !/^OPENAI_/.test(key) &&
-              !/^DASHSCOPE/.test(key),
-          ),
-        ),
-        HOME: homeDir,
-        QWEN_HOME: qwenHome,
-        NO_PROXY: '127.0.0.1,localhost',
-        no_proxy: '127.0.0.1,localhost',
-        OPENAI_API_KEY: 'fake-key',
-        OPENAI_BASE_URL: fakeServer.baseUrl,
-        OPENAI_MODEL: 'fake-model',
-        QWEN_MODEL: 'fake-model',
-        // Keep test events out of the production RUM sink; the local
-        // ui_telemetry chat record is the assertion seam.
-        QWEN_USAGE_STATISTICS_ENABLED: 'false',
-      },
+  const spawned = await spawnDaemon({
+    workspaceCwd: workspaceDir,
+    token: TOKEN,
+    bootTimeoutMs: 30_000,
+    // Hermetic rig: host-session leakage (QWEN_RUNTIME_DIR above all)
+    // would redirect the daemon's storage away from the temp HOME.
+    envDrop: [/^QWEN_/, /^OPENAI_/, /^DASHSCOPE/, /^(https?|all)_proxy$/i],
+    env: {
+      HOME: homeDir,
+      QWEN_HOME: qwenHome,
+      NO_PROXY: '127.0.0.1,localhost',
+      no_proxy: '127.0.0.1,localhost',
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: fakeServer.baseUrl,
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+      // Keep test events out of the production RUM sink; the local
+      // ui_telemetry chat record is the assertion seam.
+      QWEN_USAGE_STATISTICS_ENABLED: 'false',
     },
-  );
-  let stderrBuf = '';
-  daemon.stderr!.on('data', (chunk: Buffer) => {
-    stderrBuf += chunk.toString();
   });
-  const port = await new Promise<number>((resolve, reject) => {
-    let buf = '';
-    const bootTimer = setTimeout(
-      () => reject(new Error(`daemon boot timeout; stderr: ${stderrBuf}`)),
-      30_000,
-    );
-    const onData = (chunk: Buffer) => {
-      buf += chunk.toString();
-      const m = buf.match(/listening on http:\/\/127\.0\.0\.1:(\d+)/);
-      if (m) {
-        daemon.stdout!.off('data', onData);
-        clearTimeout(bootTimer);
-        resolve(Number(m[1]));
-      }
-    };
-    daemon.stdout!.on('data', onData);
-    daemon.once('exit', (c) => {
-      clearTimeout(bootTimer);
-      reject(new Error(`daemon exited with ${c}; stderr: ${stderrBuf}`));
-    });
-  });
-  const base = `http://127.0.0.1:${port}`;
-  const client = new DaemonClient({ baseUrl: base, token: TOKEN });
+  const { client, base } = spawned;
   const headers = {
     Authorization: `Bearer ${TOKEN}`,
     'Content-Type': 'application/json',
@@ -239,7 +179,7 @@ async function startRig(opts: {
     base,
     workspaceDir,
     homeDir,
-    daemon,
+    spawned,
     feedbackRecords,
     postFeedback,
     completeTurn,
@@ -248,10 +188,7 @@ async function startRig(opts: {
 
 async function stopRig(rig: Rig | undefined): Promise<void> {
   if (!rig) return;
-  if (rig.daemon.exitCode === null) {
-    rig.daemon.kill('SIGTERM');
-    await new Promise((r) => rig.daemon.once('exit', r));
-  }
+  await rig.spawned.dispose();
   rmSync(rig.homeDir, { recursive: true, force: true });
   rmSync(rig.workspaceDir, { recursive: true, force: true });
 }

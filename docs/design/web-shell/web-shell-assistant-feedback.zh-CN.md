@@ -27,7 +27,9 @@
   统计开关约束。独立版应用后续的开启以独立一层追加了遥测通路，见
   [Web Shell 助手反馈遥测](web-shell-assistant-feedback-telemetry.zh-CN.md)；
   下文的嵌入式宿主契约仍不发遥测。
-- 不引入 `promptId` 锚点、不新增 daemon 路由、不改 daemon 的 transcript 投影与线格式。
+- **标记本身**不引入 `promptId` 锚点、不新增 daemon 路由：标记存储仍只在浏览器本地。
+  （遥测后续的 `POST /session/:id/feedback` 是独立的、不落盘的通知层，不是标记存储。）
+  不改 daemon 的 transcript 投影与线格式。
 - 不接受宿主传入初始状态：宿主无法预置或覆盖标记。
 - 不做逐轮可见性控制：宿主只能整体开或关。
 

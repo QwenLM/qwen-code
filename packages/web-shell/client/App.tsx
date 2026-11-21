@@ -4167,10 +4167,25 @@ export function App({
     return {
       onRate: (info) => {
         if (info.rating === null) return;
+        // Split panes inherit this option but own a different session; a
+        // mark must never be recorded under a session that did not admit
+        // its turn. Pane marks stay local-only until dispatch can reach
+        // the pane's own session client.
+        if (
+          info.sessionId !== undefined &&
+          info.sessionId !== connection.sessionId
+        )
+          return;
         void sessionActions.rateAssistantTurn(info.promptId, info.rating);
       },
     };
-  }, [assistantFeedback, standalone, connection.capabilities, sessionActions]);
+  }, [
+    assistantFeedback,
+    standalone,
+    connection.capabilities,
+    connection.sessionId,
+    sessionActions,
+  ]);
   const customization = useMemo(
     () => ({
       onRefreshModels,

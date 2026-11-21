@@ -24171,6 +24171,40 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.rateAssistantTurn).not.toHaveBeenCalled();
     });
 
+    it('does not record a mark owned by another session (split pane)', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      const onRate = testState.capturedAssistantFeedback?.onRate;
+      expect(onRate).toBeDefined();
+      onRate!({
+        rating: 'up',
+        sessionId: 'other-session',
+        promptId: 'prompt-1',
+        userMessage: { text: 'hello' },
+      });
+
+      expect(mockSessionActions.rateAssistantTurn).not.toHaveBeenCalled();
+    });
+
+    it('still dispatches when the payload carries no session id', async () => {
+      renderApp({}, undefined, true);
+      await flush();
+
+      const onRate = testState.capturedAssistantFeedback?.onRate;
+      expect(onRate).toBeDefined();
+      onRate!({
+        rating: 'down',
+        promptId: 'prompt-1',
+        userMessage: { text: 'hello' },
+      });
+
+      expect(mockSessionActions.rateAssistantTurn).toHaveBeenCalledWith(
+        'prompt-1',
+        'down',
+      );
+    });
+
     it('keeps the marks hidden without the capability', async () => {
       mockConnection.capabilities.features = [];
       renderApp({}, undefined, true);

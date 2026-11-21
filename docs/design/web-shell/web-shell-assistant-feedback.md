@@ -34,8 +34,11 @@ the action row, so a host cannot put controls next to the built-in Copy button.
   wire path as a separate layer, designed in
   [Web Shell Assistant Feedback Telemetry](web-shell-assistant-feedback-telemetry.md);
   the embedded-host contract below remains telemetry-free.
-- No prompt-id anchoring, no daemon route, and no change to the daemon's
-  transcript projection or wire format.
+- No prompt-id anchoring or daemon route **for the mark itself**: the mark
+  store stays browser-local. (The telemetry follow-up's
+  `POST /session/:id/feedback` is a separate, non-persisting notification
+  layer, not a mark store.) No change to the daemon's transcript projection
+  or wire format.
 - No host-supplied initial state: a host cannot seed or override a mark.
 - No per-turn visibility control: the host switches the whole feature on or off.
 

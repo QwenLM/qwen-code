@@ -232,9 +232,15 @@ Three independent gates, each with a distinct owner:
 - The wire path requires the live owning session. A mark clicked after the
   session's child exited fails the route's ownership resolution; the mark
   stays lit locally and the event is dropped (best-effort).
-- Two tabs or panes each emit their own clicks; there is no dedup across
+- Separate tabs each emit their own clicks; there is no dedup across
   instances, consistent with the local storage's existing multi-instance
   constraint.
+- Split-view panes inherit the standalone option but own a different session
+  than the app-level dispatch target. The wiring drops payloads whose
+  `sessionId` differs from the app-level session, so a pane mark lights
+  locally but emits no telemetry rather than mis-pairing a foreign
+  `promptId` with the app session's identity. Pane telemetry awaits a
+  dispatch that reaches the pane's own session client.
 - The hosted persona and Managed channels do not advertise the tag; the
   standalone client against such a daemon shows no marks.
 - `recorded: true` attests emission into `logUserFeedback`, not RUM delivery:

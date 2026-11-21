@@ -14775,7 +14775,7 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        const settings = loadSettingsCached(config.storage.getProjectRoot());
+        const settings = loadSettingsCached(this.sessionWorkspaceRoot(config));
         if (settings.merged.ui?.enableUserFeedback === false) {
           return { recorded: false };
         }
