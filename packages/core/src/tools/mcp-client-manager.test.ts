@@ -130,7 +130,9 @@ function mkPool(acquire: unknown = vi.fn(), budget?: unknown) {
 function mkConn(name: string, extra: Rec = {}) {
   return {
     release: vi.fn(),
+    replaySnapshot: vi.fn(),
     on: vi.fn(),
+    off: vi.fn(),
     id: `${name}::abc`,
     serverName: name,
     entryIndex: 0,
@@ -360,6 +362,152 @@ describe('McpClientManager', () => {
     expect(McpClient).not.toHaveBeenCalled();
   });
 
+  it('replays retained catalogs after a coalesced explicit rediscovery', async () => {
+    const serverConfig = { command: 'node' };
+    const servers: Record<string, typeof serverConfig> = { srv: serverConfig };
+    const first = mkConn('srv', {
+      transportId: connectionIdOf('srv', serverConfig),
+      updateConfig: vi.fn(),
+    });
+    const added = mkConn('added', {
+      transportId: connectionIdOf('added', serverConfig),
+    });
+    const pending = deferred();
+    const acquire = vi.fn().mockImplementation(async (name: string) => {
+      if (name === 'added') {
+        await pending.promise;
+        return added;
+      }
+      return first;
+    });
+    const { config, manager } = poolManager(() => servers, acquire);
+    await manager.discoverAllMcpTools(config);
+    await manager.discoverAllMcpTools(config);
+    expect(first.replaySnapshot).not.toHaveBeenCalled();
+
+    servers['added'] = serverConfig;
+    const reconciliation = manager.discoverAllMcpTools(config);
+    const rediscovery = manager.discoverAllMcpTools(config, true);
+    expect(first.replaySnapshot).not.toHaveBeenCalled();
+    pending.resolve();
+    await Promise.all([reconciliation, rediscovery]);
+
+    expect(first.replaySnapshot).toHaveBeenCalledOnce();
+    expect(added.replaySnapshot).not.toHaveBeenCalled();
+    expect(first.release).not.toHaveBeenCalled();
+    expect(acquire).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['single server', 'bulk'])(
+    'contains a retained catalog replay failure during %s rediscovery',
+    async (mode) => {
+      const serverConfig = { command: 'node' };
+      const dead = mkConn('dead', {
+        transportId: connectionIdOf('dead', serverConfig),
+        updateConfig: vi.fn(),
+      });
+      const healthy = mkConn('healthy', {
+        transportId: connectionIdOf('healthy', serverConfig),
+        updateConfig: vi.fn(),
+      });
+      const acquire = vi.fn(async (name: string) =>
+        name === 'dead' ? dead : healthy,
+      );
+      const { config, manager } = poolManager(
+        () => ({ dead: serverConfig, healthy: serverConfig }),
+        acquire,
+      );
+      await manager.discoverAllMcpTools(config);
+      dead.replaySnapshot.mockImplementation(() => {
+        throw new Error('Cannot replay snapshot in state closed');
+      });
+
+      await expect(
+        mode === 'bulk'
+          ? manager.discoverAllMcpTools(config, true)
+          : manager.discoverMcpToolsForServer('dead', config),
+      ).resolves.toBeUndefined();
+
+      expect(priv(manager, 'pooledConnections').has('dead')).toBe(false);
+      expect(priv(manager, 'pooledConnections').get('healthy')).toBe(healthy);
+      expect(dead.off).toHaveBeenCalledExactlyOnceWith(
+        'event',
+        dead.on.mock.calls[0][1],
+      );
+      expect(healthy.off).not.toHaveBeenCalled();
+      expect(dead.release).not.toHaveBeenCalled();
+      if (mode === 'bulk') {
+        expect(healthy.replaySnapshot).toHaveBeenCalledOnce();
+      } else {
+        expect(healthy.replaySnapshot).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('preserves a replacement handle when the old catalog replay fails', async () => {
+    const serverConfig = { command: 'node' };
+    const connection = mkConn('srv', {
+      transportId: connectionIdOf('srv', serverConfig),
+      updateConfig: vi.fn(),
+    });
+    const replacement = mkConn('srv');
+    const { config, manager } = poolManager(
+      () => ({ srv: serverConfig }),
+      vi.fn().mockResolvedValue(connection),
+    );
+    await manager.discoverAllMcpTools(config);
+    connection.replaySnapshot.mockImplementation(() => {
+      priv(manager, 'pooledConnections').set('srv', replacement);
+      throw new Error('Cannot replay snapshot on a detached session');
+    });
+
+    await expect(
+      manager.discoverAllMcpTools(config, true),
+    ).resolves.toBeUndefined();
+    expect(priv(manager, 'pooledConnections').get('srv')).toBe(replacement);
+    expect(connection.off).toHaveBeenCalledExactlyOnceWith(
+      'event',
+      connection.on.mock.calls[0][1],
+    );
+    expect(replacement.off).not.toHaveBeenCalled();
+    expect(connection.release).not.toHaveBeenCalled();
+    expect(replacement.release).not.toHaveBeenCalled();
+  });
+
+  it.each(['replaced', 'removed'])(
+    'does not replay a %s handle after explicit reconciliation',
+    async (change) => {
+      const initialConfig = { command: 'node', args: ['old'] };
+      const changedConfig = { command: 'node', args: ['new'] };
+      let servers: Record<string, typeof initialConfig> = {
+        srv: initialConfig,
+      };
+      const previous = mkConn('srv', {
+        transportId: connectionIdOf('srv', initialConfig),
+        updateConfig: vi.fn(),
+      });
+      const replacement = mkConn('srv', {
+        transportId: connectionIdOf('srv', changedConfig),
+      });
+      const acquire = vi
+        .fn()
+        .mockResolvedValueOnce(previous)
+        .mockResolvedValueOnce(replacement);
+      const { config, manager } = poolManager(() => servers, acquire);
+      await manager.discoverAllMcpTools(config);
+
+      servers = change === 'replaced' ? { srv: changedConfig } : {};
+      await manager.discoverAllMcpTools(config, true);
+
+      expect(previous.release).toHaveBeenCalledOnce();
+      expect(previous.replaySnapshot).not.toHaveBeenCalled();
+      expect(replacement.replaySnapshot).not.toHaveBeenCalled();
+      expect(priv(manager, 'pooledConnections').get('srv')).toBe(
+        change === 'replaced' ? replacement : undefined,
+      );
+    },
+  );
+
   it('swallows BudgetExhaustedError from pool.acquire and logs at debug (F2 commit 6 W23)', async () => {
     // Wenshao W23: the `discoverAllMcpToolsViaPool` catch branches on
     // `instanceof BudgetExhaustedError` (deliberate refusal → debug log;
@@ -584,6 +732,36 @@ describe('McpClientManager', () => {
     ).toBe(true);
   });
 
+  it.each(['single server', 'bulk'])(
+    'keeps diagnostics available after rejected %s rediscovery',
+    async (mode) => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { config, manager } = poolManager(
+        () => ({ srv: {} }),
+        vi.fn().mockResolvedValue(mkConn('srv')),
+        { getDisabledTools: () => new Set(['run_shel_command']) },
+      );
+      const discover = vi.spyOn(
+        manager as unknown as {
+          discoverAllMcpToolsViaPool(config: Config): Promise<void>;
+        },
+        'discoverAllMcpToolsViaPool',
+      );
+      discover.mockRejectedValueOnce(new Error('discovery interrupted'));
+
+      await expect(
+        mode === 'bulk'
+          ? manager.discoverAllMcpTools(config, true)
+          : manager.discoverMcpToolsForServer('srv', config),
+      ).rejects.toThrow('discovery interrupted');
+      expect(warnSpy).not.toHaveBeenCalled();
+
+      await manager.discoverAllMcpTools(config);
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(String(warnSpy.mock.calls[0][0])).toContain('run_shel_command');
+    },
+  );
+
   it('refreshes metadata on a retained unpooled connection without transport churn', async () => {
     let serverConfig = {
       command: 'node',
@@ -670,15 +848,12 @@ describe('McpClientManager', () => {
     'rejects an unsuccessful pooled repair (%j)',
     async ({ result }) => {
       let serverConfig = { command: 'node' };
-      const acquireSpy = vi.fn().mockResolvedValue({
-        release: vi.fn(),
-        updateConfig: vi.fn(),
-        transportId: connectionIdOf('srv', serverConfig),
-        on: vi.fn(),
-        id: 'srv::abc',
-        serverName: 'srv',
-        entryIndex: 0,
-      });
+      const acquireSpy = vi.fn().mockResolvedValue(
+        mkConn('srv', {
+          updateConfig: vi.fn(),
+          transportId: connectionIdOf('srv', serverConfig),
+        }),
+      );
       const restartByName = vi.fn().mockResolvedValue(result);
       const fakePool = {
         restartByName,
@@ -717,15 +892,14 @@ describe('McpClientManager', () => {
       expect(acquireSpy).toHaveBeenCalledTimes(1);
       expect(McpClient).not.toHaveBeenCalled();
       serverConfig = { command: 'different' };
-      acquireSpy.mockResolvedValueOnce({
-        release: vi.fn(),
-        updateConfig: vi.fn(),
-        transportId: connectionIdOf('srv', serverConfig),
-        on: vi.fn(),
-        id: 'srv::replacement',
-        serverName: 'srv',
-        entryIndex: 1,
-      });
+      acquireSpy.mockResolvedValueOnce(
+        mkConn('srv', {
+          updateConfig: vi.fn(),
+          transportId: connectionIdOf('srv', serverConfig),
+          id: 'srv::replacement',
+          entryIndex: 1,
+        }),
+      );
       await manager.discoverMcpToolsForServer('srv', mockConfig, true);
       expect(acquireSpy).toHaveBeenCalledTimes(2);
       expect(restartByName).toHaveBeenCalledOnce();

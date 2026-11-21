@@ -114,6 +114,61 @@ const clearSpies = (r: Registries) => {
   for (const spy of Object.values(r.spies)) spy.mockClear();
 };
 
+function mkSession(
+  pool: McpTransportPool,
+  sessionId: string,
+  extra: Pick<Config, 'getMcpServers'> & Record<string, unknown>,
+) {
+  const prompts = new PromptRegistry();
+  const resources = new ResourceRegistry();
+  const config = {
+    isTrustedFolder: () => true,
+    getMcpServerCommand: () => undefined,
+    getToolDiscoveryCommand: () => undefined,
+    getTargetDir: () => process.cwd(),
+    getResourceRegistry: () => resources,
+    getPromptRegistry: () => prompts,
+    getWorkspaceContext: () => ({}),
+    getDebugMode: () => false,
+    getSessionId: () => sessionId,
+    isMcpServerDisabled: () => false,
+    getMcpToolIdleTimeoutMs: () => 0,
+    getDisabledTools: () => new Set<string>(),
+    getPermissionManager: () => ({
+      isEagerToolAllowListActive: () => false,
+    }),
+    getEagerTools: () => [],
+    getMcpTransportPool: () => pool,
+    getToolRegistry: () => registry,
+    ...extra,
+  } as unknown as Config;
+  const registry = new ToolRegistry(config);
+  return {
+    config,
+    registry,
+    prompts,
+    resources,
+    manager: registry.getMcpClientManager(),
+  };
+}
+
+const discoveryModes = [
+  'single server',
+  'MCP catalog',
+  'all discovered tools',
+] as const;
+function discoverInMode(
+  mode: (typeof discoveryModes)[number],
+  registry: ToolRegistry,
+): Promise<void> {
+  const discover: Record<typeof mode, () => Promise<void>> = {
+    'single server': () => registry.discoverToolsForServer('srv'),
+    'MCP catalog': () => registry.discoverMcpTools(),
+    'all discovered tools': () => registry.discoverAllTools(),
+  };
+  return discover[mode]();
+}
+
 /**
  * Set up the MCP SDK mocks to simulate a successfully-connecting
  * stdio server with the given tool, prompt and resource names.
@@ -387,6 +442,259 @@ describe('McpTransportPool', () => {
     }
   });
 
+  it.each(discoveryModes)(
+    'restores the session catalog without reconnecting or false eager warnings (%s)',
+    async (mode) => {
+      vi.useRealTimers();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const client = mockMcpSuccess({
+        toolNames: ['alpha', 'beta'],
+        promptNames: ['alpha', 'beta'],
+        resourceNames: ['file:///rediscovery'],
+      });
+      let cfg = new MCPServerConfig('node');
+      const pool = mkPool({ drainDelayMs: 0 });
+      const extra = {
+        getMcpServers: () => ({ srv: cfg, sibling: argCfg('sibling') }),
+        getPermissionManager: () => ({
+          isEagerToolAllowListActive: () => true,
+        }),
+        getEagerTools: () => ['mcp__srv__alpha'],
+      };
+      const first = mkSession(pool, 'first', extra);
+      const second = mkSession(pool, 'second', extra);
+      try {
+        await first.registry
+          .getMcpClientManager()
+          .discoverAllMcpTools(first.config);
+        await second.registry
+          .getMcpClientManager()
+          .discoverAllMcpTools(second.config);
+        const tools = first.registry.getToolsByServer('srv');
+        const prompts = first.prompts.getPromptsByServer('srv');
+        const resources = first.resources.getResourcesByServer('srv');
+        const secondTools = second.registry.getToolsByServer('srv');
+        const siblingTools = first.registry.getToolsByServer('sibling');
+        expect(tools).toHaveLength(2);
+        expect(prompts).toHaveLength(2);
+        expect(resources).toHaveLength(1);
+        expect(siblingTools).toHaveLength(2);
+        expect(warnSpy).not.toHaveBeenCalled();
+
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const reconciliation =
+            attempt === 1
+              ? first.registry
+                  .getMcpClientManager()
+                  .discoverAllMcpTools(first.config)
+              : Promise.resolve();
+          const rediscovery = discoverInMode(mode, first.registry);
+          await Promise.all([reconciliation, rediscovery]);
+
+          expect(
+            first.registry.getMcpClientManager().getServerStatus('srv'),
+          ).toBe(MCPServerStatus.CONNECTED);
+          expect(client.connect).toHaveBeenCalledTimes(2);
+          expect(client.close).not.toHaveBeenCalled();
+          expect(warnSpy).not.toHaveBeenCalled();
+          expect(
+            first.registry.getToolsByServer('srv').map((tool) => tool.name),
+          ).toEqual(tools.map((tool) => tool.name));
+          expect(first.prompts.getPromptsByServer('srv')).toEqual(prompts);
+          expect(first.resources.getResourcesByServer('srv')).toEqual(
+            resources,
+          );
+          for (const tool of secondTools) {
+            expect(second.registry.getTool(tool.name)).toBe(tool);
+          }
+          expect(
+            first.registry.getToolsByServer('sibling').map((tool) => tool.name),
+          ).toEqual(siblingTools.map((tool) => tool.name));
+          if (mode === 'single server') {
+            for (const tool of siblingTools) {
+              expect(first.registry.getTool(tool.name)).toBe(tool);
+            }
+          }
+          expect(pool.getSnapshot().byName['srv'].entrySummary[0].refs).toBe(2);
+        }
+
+        cfg = { ...cfg, includeTools: ['beta'] };
+        await first.registry
+          .getMcpClientManager()
+          .discoverAllMcpTools(first.config);
+        expect(warnSpy).toHaveBeenCalledOnce();
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('tools.eager: "mcp__srv__alpha"'),
+        );
+        await first.registry
+          .getMcpClientManager()
+          .discoverAllMcpTools(first.config);
+        expect(warnSpy).toHaveBeenCalledOnce();
+      } finally {
+        await first.registry.getMcpClientManager().stop();
+        await second.registry.getMcpClientManager().stop();
+        await pool.drainAll({ timeoutMs: 1000 });
+      }
+    },
+  );
+
+  it.each(
+    discoveryModes.flatMap((mode) =>
+      ['failed', 'closed', 'restart'].map((transition) => ({
+        mode,
+        transition,
+      })),
+    ),
+  )(
+    'keeps runtime sibling catalogs available after $transition ($mode)',
+    async ({ mode, transition }) => {
+      vi.useRealTimers();
+      mockMcpSuccess({
+        toolNames: ['alpha'],
+        promptNames: ['alpha'],
+        resourceNames: ['file:///runtime'],
+      });
+      const pool = mkPool({ drainDelayMs: 0 });
+      const runtime: Record<string, MCPServerConfig> = {};
+      const { registry, prompts, resources, manager } = mkSession(
+        pool,
+        'runtime-session',
+        {
+          getMcpServers: () => runtime,
+          getSettingsMcpServers: () => ({}),
+          getRuntimeMcpServers: () => runtime,
+          addRuntimeMcpServer: (name: string, cfg: MCPServerConfig) => {
+            runtime[name] = cfg;
+          },
+          removeRuntimeMcpServer: (name: string) => delete runtime[name],
+          assertGeneratedUiServerNotReplaced: () => {},
+        },
+      );
+      const cfg = { command: 'node', cwd: process.cwd() } as MCPServerConfig;
+      try {
+        await manager.addRuntimeMcpServer('srv', cfg, 'client');
+        await manager.addRuntimeMcpServer(
+          'sibling',
+          { ...cfg, args: ['sibling'] },
+          'client',
+        );
+        const siblingTools = registry.getToolsByServer('sibling');
+        const siblingPrompts = prompts.getPromptsByServer('sibling');
+        const siblingResources = resources.getResourcesByServer('sibling');
+        expect(siblingTools).toHaveLength(1);
+        expect(siblingPrompts).toHaveLength(1);
+        expect(siblingResources).toHaveLength(1);
+
+        const entry = entryOf(pool, cfg);
+        const connections = (
+          manager as unknown as {
+            pooledConnections: Map<string, PooledConnection>;
+          }
+        ).pooledConnections;
+        const connection = connections.get('srv');
+        expect(connection).toBeDefined();
+        if (transition === 'restart') {
+          const [result] = await pool.restartByName('srv');
+          expect(result.restarted).toBe(true);
+          expect(connections.get('srv')).toBe(connection);
+          expect(entry.currentState).toBe('active');
+        } else {
+          if (transition === 'closed') {
+            await entry.forceShutdown('manual');
+          } else {
+            silentDrop(entry);
+          }
+          expect(entry.currentState).toBe(transition);
+          expect(connections.has('srv')).toBe(false);
+          expect(registry.getToolsByServer('srv')).toEqual([]);
+        }
+
+        const rediscovery = discoverInMode(mode, registry);
+        await expect(rediscovery).resolves.toBeUndefined();
+        expect(registry.getToolsByServer('srv')).toHaveLength(1);
+        expect(prompts.getPromptsByServer('srv')).toHaveLength(1);
+        expect(resources.getResourcesByServer('srv')).toHaveLength(1);
+        expect(
+          registry.getToolsByServer('sibling').map((tool) => tool.name),
+        ).toEqual(siblingTools.map((tool) => tool.name));
+        expect(prompts.getPromptsByServer('sibling')).toEqual(siblingPrompts);
+        expect(resources.getResourcesByServer('sibling')).toEqual(
+          siblingResources,
+        );
+      } finally {
+        await manager.stop();
+        await pool.drainAll({ timeoutMs: 1000 });
+      }
+    },
+  );
+
+  it.each(
+    discoveryModes.flatMap((mode) =>
+      [false, true].map((reattach) => ({ mode, reattach })),
+    ),
+  )(
+    'detaches only the discarded replay listener (reattach=$reattach, $mode)',
+    async ({ mode, reattach }) => {
+      vi.useRealTimers();
+      mockMcpSuccess({ toolNames: ['alpha'] });
+      const pool = mkPool({ drainDelayMs: 0 });
+      const cfg = new MCPServerConfig('node');
+      const extra = { getMcpServers: () => ({ srv: cfg }) };
+      const first = mkSession(pool, 'first', extra);
+      const sibling = mkSession(pool, 'sibling', extra);
+      const replacement = mkSession(pool, 'first', extra);
+      let replacementDiscovery: Promise<void> | undefined;
+      let failReplay = false;
+      try {
+        await first.manager.discoverAllMcpTools(first.config);
+        await sibling.manager.discoverAllMcpTools(sibling.config);
+        const entry = [...entriesOf(pool).values()][0];
+        const emitter = (
+          entry as unknown as {
+            emitter: { listenerCount(event: string): number };
+          }
+        ).emitter;
+        expect(emitter.listenerCount('event')).toBe(2);
+        if (reattach) {
+          const remove = first.registry.removeMcpToolsByServer.bind(
+            first.registry,
+          );
+          vi.spyOn(first.registry, 'removeMcpToolsByServer').mockImplementation(
+            (name) => {
+              remove(name);
+              if (!failReplay) return;
+              failReplay = false;
+              pool.releaseSession('first');
+              replacementDiscovery = replacement.manager.discoverAllMcpTools(
+                replacement.config,
+              );
+              throw new Error('Registry rejected the old replay');
+            },
+          );
+        }
+        const rediscovery = discoverInMode(mode, first.registry);
+        if (reattach) failReplay = true;
+        else pool.releaseSession('first');
+        await expect(rediscovery).resolves.toBeUndefined();
+        await replacementDiscovery;
+        expect(pool.getSnapshot().byName['srv'].entrySummary[0].refs).toBe(
+          reattach ? 2 : 1,
+        );
+        expect(sibling.registry.getToolsByServer('srv')).toHaveLength(1);
+        if (reattach) {
+          expect(replacement.registry.getToolsByServer('srv')).toHaveLength(1);
+        }
+        expect(emitter.listenerCount('event')).toBe(reattach ? 2 : 1);
+      } finally {
+        await replacementDiscovery;
+        await first.manager.stop();
+        await replacement.manager.stop();
+        await sibling.manager.stop();
+        await pool.drainAll({ timeoutMs: 1000 });
+      }
+    },
+  );
+
   describe('acquire / release lifecycle', () => {
     it('3 sessions acquiring same key share 1 entry (1 connect call)', async () => {
       const { mocked, pool, cfg, conn } = await acquireOne({
@@ -506,12 +814,15 @@ describe('McpTransportPool', () => {
       }
     });
 
-    it('rejects updateConfig on terminated entries and detached sessions', async () => {
+    it('rejects session updates and replay on terminated entries and detached sessions', async () => {
       const { pool, cfg, conn } = await acquireOne();
       const entry = entryOf(pool, cfg);
 
       // Detached-session guard: no subscriber is attached under this id.
       expect(() => entry.updateSessionConfig('never-attached', cfg)).toThrow(
+        /detached session/,
+      );
+      expect(() => entry.replaySessionSnapshot('never-attached')).toThrow(
         /detached session/,
       );
 
@@ -520,6 +831,7 @@ describe('McpTransportPool', () => {
       silentDrop(entry);
       expect(entry.currentState).toBe('failed');
       expect(() => conn.updateConfig(cfg)).toThrow(/in state failed/);
+      expect(() => conn.replaySnapshot()).toThrow(/in state failed/);
     });
 
     it('refreshes unpooled metadata while keeping transport identity stable', async () => {
@@ -554,6 +866,9 @@ describe('McpTransportPool', () => {
       expect(() =>
         connection.updateConfig({ command: 'node' } as MCPServerConfig),
       ).toThrow(/released MCP connection/);
+      expect(() => connection.replaySnapshot()).toThrow(
+        /released MCP connection/,
+      );
     });
 
     it('resources discovered via the pool reach the session resource registry', async () => {
