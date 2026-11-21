@@ -177,11 +177,12 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    does; a control inside the header keyword (`Coo\rkie: sid=abc`) escapes both
    passes, so the welded value stays unredacted, and an empty-value header
    (`Cookie:` then CR) already loses the next line in the first pass, in base
-   too; the `TOKEN`/`KEY`/… rule is quadratic on a long word run in base (about a
-   second at 40k characters); the repair pass clamps its input to 300
-   PRE-strip characters (the shipped 300-character slice is applied post-strip)
-   so it does not add a second copy of that cost, leaving only the first pass's
-   base cost on an adversarial long line. The clamp is NOT a no-leak guarantee:
+   too; the `TOKEN`/`KEY`/… rule is quadratic on a long word run in base
+   (seconds at 40k characters, host-dependent); the repair pass clamps its input
+   to 300 PRE-strip characters (the shipped 300-character slice is applied
+   post-strip) so it does not add a second copy of that cost, leaving only the
+   first pass's base cost on an adversarial long line. The clamp is NOT a no-leak
+   guarantee:
    a value that is itself cut can only ship a sub-minimum fragment, but a
    credential whose TERMINATOR (the `-----END …-----` label, the URL `@`) falls
    past the cut never matches its rule and ships the value — or the prefix of it
@@ -320,8 +321,9 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   witness red. The URL scheme length-bound is a cost fix, not a behavior one:
   the isolated URL rule is linear (1–2 ms at 40k characters) with it. The repair
   pass clamps its input to 300 characters, so an adversarial 100k-character word
-  run costs about what base costs (≈7 s, the first pass's quadratic
-  `TOKEN`/`KEY`/… rule) rather than double it.
+  run costs about what base costs (head/base ratio ~1.0; absolute seconds are
+  host-dependent — the first pass's quadratic `TOKEN`/`KEY`/… rule) rather than
+  double it.
 - `scripts/tests/ci-platform-lanes.test.js` re-runs because `ci.yml` changed.
 
 ## Acceptance criteria
