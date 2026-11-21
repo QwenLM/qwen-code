@@ -913,6 +913,7 @@ type DingTalkClientInternals = DWClient & {
 type DingtalkChannelConfig = ChannelConfig & {
   useConnectionManager?: unknown;
   interactiveCards?: unknown;
+  mediaStorage?: unknown;
 };
 
 interface ProactiveTextDelivery {
@@ -993,6 +994,7 @@ export class DingtalkChannel extends ChannelBase {
   private proactiveToken?: { token: string; expiresAt: number };
   private readonly interactiveCardConfig: DingtalkInteractiveCardConfig;
   private readonly outputMode?: ChannelOutputMode;
+  private readonly mediaStorage: 'inline' | 'file';
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
   private questionCardController?: QuestionCardController;
@@ -1038,6 +1040,18 @@ export class DingtalkChannel extends ChannelBase {
       (config as DingtalkChannelConfig).interactiveCards,
     );
     this.outputMode = parseChannelOutputMode(name, config.outputMode, true);
+
+    const rawMediaStorage = (config as DingtalkChannelConfig).mediaStorage;
+    if (
+      rawMediaStorage !== undefined &&
+      rawMediaStorage !== 'inline' &&
+      rawMediaStorage !== 'file'
+    ) {
+      throw new Error(
+        `Channel "${name}" mediaStorage must be "inline" or "file".`,
+      );
+    }
+    this.mediaStorage = rawMediaStorage ?? 'inline';
     this.backgroundOutputCoordinator = new BackgroundOutputCoordinator({
       outputMode: this.outputMode,
       getTarget: (sessionId, workflowOrigin) =>
@@ -3606,7 +3620,7 @@ export class DingtalkChannel extends ChannelBase {
     const media = await downloadMedia(downloadCode, robotCode, token);
     if (!media) return;
 
-    if (mediaType === 'image') {
+    if (mediaType === 'image' && this.mediaStorage !== 'file') {
       const mimeType = media.mimeType.startsWith('image/')
         ? media.mimeType
         : 'image/jpeg';
