@@ -197,37 +197,11 @@ export function consumeFrames(buf: string): {
 } {
   const frames: string[] = [];
   let cursor = 0;
-  // BX9_a + BeFHR + BeFId: scan for `\n\n` first; on hit, look for
-  // an earlier `\r\n\r\n` within the window `[cursor, lf)` ONLY by
-  // slicing before scanning (Node's `String.indexOf` has no upper-
-  // bound argument). On the LF-not-found path, fall back to a full
-  // CRLF scan over the remainder. Net cost in the common LF-only
-  // case is one full scan + one bounded scan over the matched
-  // frame's bytes (small).
-  while (cursor < buf.length) {
-    const lf = buf.indexOf('\n\n', cursor);
-    if (lf === -1) {
-      // No LF separator left — try the CRLF fallback.
-      const crlf = buf.indexOf('\r\n\r\n', cursor);
-      if (crlf === -1) break;
-      frames.push(buf.slice(cursor, crlf));
-      cursor = crlf + 4;
-      continue;
-    }
-    // An LF exists. Look for a CRLF that appears earlier
-    // (mixed-encoding edge case) by searching ONLY the
-    // pre-LF window so we don't pay for a full-remainder scan
-    // every iteration.
-    const window = buf.slice(cursor, lf);
-    const crlfInWindow = window.indexOf('\r\n\r\n');
-    if (crlfInWindow !== -1) {
-      const crlf = cursor + crlfInWindow;
-      frames.push(buf.slice(cursor, crlf));
-      cursor = crlf + 4;
-    } else {
-      frames.push(buf.slice(cursor, lf));
-      cursor = lf + 2;
-    }
+  const separators = /\r\n\r\n|\n\n/g;
+  let match: RegExpExecArray | null;
+  while ((match = separators.exec(buf)) !== null) {
+    frames.push(buf.slice(cursor, match.index));
+    cursor = separators.lastIndex;
   }
   return { frames, tail: buf.slice(cursor) };
 }
