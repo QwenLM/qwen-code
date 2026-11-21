@@ -36,6 +36,7 @@ afterEach(() => {
     container.remove();
   }
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function render(node: ReactNode): HTMLElement {
@@ -106,6 +107,19 @@ function SuspendingContent({
   }
   return null;
 }
+
+const scheduledTaskRunContent = [
+  'Scheduled task: Review PRs',
+  'Task ID: task-1',
+  'Schedule: 0 * * * *',
+  'Triggered at: 2026-08-26T07:27:00.000Z',
+  'Trigger: scheduled',
+  'Session: new chat for this run',
+  '',
+  'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.',
+  '',
+  'review the next PR',
+].join('\n');
 
 describe('UserMessage', () => {
   it('names the session a message came from', () => {
@@ -1142,6 +1156,45 @@ describe('UserMessage', () => {
     expect(toggle).toBeDefined();
   });
 
+  it('restores the baseline ResizeObserver after each test', () => {
+    expect(vi.isMockFunction(globalThis.ResizeObserver)).toBe(false);
+    expect(new globalThis.ResizeObserver(() => {}).unobserve).toBeTypeOf(
+      'function',
+    );
+  });
+
+  it('resets automatic instructions after editing and lets them reopen', () => {
+    const content = '/loop inspect the edited copy\n\nrestore this detail';
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const view = (editing: boolean) => (
+      <I18nProvider language="en">
+        <UserMessage content={content} source="cron" editing={editing} />
+      </I18nProvider>
+    );
+    const toggle = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-automatic-trigger-message] button',
+      );
+    const instructions = () =>
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      );
+    act(() => root.render(view(false)));
+    expect(toggle()?.textContent).toBe('Show more');
+    act(() => toggle()?.click());
+    expect(instructions()?.textContent).toBe(content);
+    act(() => root.render(view(true)));
+    expect(container.querySelector('textarea')?.value).toBe(content);
+    act(() => root.render(view(false)));
+    expect(instructions()).toBeNull();
+    expect(toggle()?.textContent).toBe('Show more');
+    act(() => toggle()?.click());
+    expect(instructions()?.textContent).toBe(content);
+  });
+
   it('keeps readonly automatic instructions behind a disclosure', () => {
     const content = 'readonly automatic prompt\nsecond line';
     const container = render(
@@ -1308,17 +1361,23 @@ describe('UserMessage', () => {
     expect(container.querySelector('[data-web-shell-user-bubble]')).toBeNull();
   });
 
+  it('prioritizes the structured per-run card over an automatic source without host overrides', () => {
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage content={scheduledTaskRunContent} source="cron" />
+      </I18nProvider>,
+    );
+    expect(
+      container.querySelector('[data-web-shell-scheduled-task-run-message]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-message]'),
+    ).toBeNull();
+  });
+
   it('renders scheduled-task context as a compact localized card', () => {
     const renderUserMessageContent = vi.fn(() => <span>custom message</span>);
-    const content =
-      'Scheduled task: Review PRs\n' +
-      'Task ID: task-1\n' +
-      'Schedule: 0 * * * *\n' +
-      'Triggered at: 2026-08-26T07:27:00.000Z\n' +
-      'Trigger: scheduled\n' +
-      'Session: new chat for this run\n\n' +
-      'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.\n\n' +
-      'review the next PR';
+    const content = scheduledTaskRunContent;
     const container = render(
       <I18nProvider language="zh-CN">
         <WebShellCustomizationProvider value={{ renderUserMessageContent }}>

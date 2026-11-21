@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_152_549;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_152_570;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -186,9 +186,9 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_152_549;
 // 2,149,864 bytes. The forbidden-input guard passes. A normal build at the
 // measured size below is not warned; only further growth is warned.
 // Generation-safe presentation and readable short
-// echoes add real document-export work: the final source measures 2,152,549 JS
-// bytes, so warn only on further growth below the 251-byte ceiling reserve.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_152_800;
+// echoes add real document-export work: the final source measures 2,152,570 JS
+// bytes, so warn only on further growth; reserve 430 bytes for toolchain variance.
+const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 430;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

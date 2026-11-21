@@ -21,7 +21,7 @@ Web Shell 目前把所有 user 角色记录都交给普通 `UserMessage` 气泡�
 
 ## 范围边界
 
-- 仅改 Web Shell 展示及对应的实测文档导出体积上限，不改调度、取消、模型输入、transcript 记录、回放元数据或 daemon API。
+- 仅改 Web Shell 展示、此展示所需的既有 document 导出投影及对应的实测 renderer 体积上限，不改调度、取消、模型输入、transcript 记录、回放元数据或 daemon API。
 - 不把 tick 按 Loop 重新分组，不臆造 Loop 次数或 chain ID，也不为每个 tick 创建独立会话。
 - 不增加待唤醒角标、定时任务控制或新的设置项。
 - 本切片不改变自动 user turn 的含义或可编辑性。
@@ -33,6 +33,10 @@ Web Shell 目前把所有 user 角色记录都交给普通 `UserMessage` 气泡�
 ### 消息接线
 
 `MessageItem` 将已有的 `message.source` 传给 `UserMessage`，`MessageList` 复用同一来源 predicate，使时间线与正文分类一致。其 memo 还比较文件名、MIME 类型、预览文本、附件 ID 和 Blob 引用，确保仅附件变化也能进入展开区。现有外层 `MessageTimestamp` 仍是唯一的时间展示，并保持当前语义。
+
+### document 导出的版本化 source 投影
+
+离线回放把持久化的 cron subtype 恢复为 `DaemonTextTranscriptBlock.meta.source`。已发布的 V1 刻意排除这段 metadata，因此无法在真实导出的自动输入上启用新展示。不能原地放宽 V1：V2 仅允许既有 user block 携带可选的 `meta.source: 'cron'`，其 schema 从未修改的 V1 派生，新的 HTML 输出采用 V2。V1 的产生方和读取方仍保持封闭的字段集合，不接受该新增字段；renderer 同时接受 V1 与 V2，其它版本值仍被拒绝。V2 标签不带 timestamp、source record ID 或其它外围 metadata，既有 forbidden-field 防护门仍只允许 exporter 构造的单键对象。这里改变的是向外的 HTML document envelope，不改变调度、transcript 持久化、回放 metadata 生成或 daemon API；`rendererVersion` 仍然是精确的 CLI 版本或内容 hash，不与 schemaVersion 混同。
 
 ### 自动触发展示
 
@@ -59,20 +63,21 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 
 ### 样式与本地化
 
-在 `UserMessage.module.css` 中添加作用域样式，复用现有定时任务卡的视觉 tokens、图标处理、元信息换行与语义颜色。在 `i18n.tsx` 添加英文 `userMessage.automatic.title`，并分别在 `i18n-zh-cn.ts`、`i18n-zh-tw.ts` 与 `i18n-ru-part5.ts` 添加简体中文、繁体中文和俄文标签，使所有支持的 catalog 都显示本地化标题。
+在 `UserMessage.module.css` 中添加作用域样式，复用现有定时任务卡的视觉 tokens、图标处理与语义颜色。自动触发的 header 用 `flex-wrap: nowrap` 保持在同一 flex line，不改共享的 per-run header。`.scheduledTaskHeading` 在可用宽度内缩小；已知完整 echo 只在自身摘要内换行，保证全文可读。在 `i18n.tsx` 添加英文 `userMessage.automatic.title`，并分别在 `i18n-zh-cn.ts`、`i18n-zh-tw.ts` 与 `i18n-ru-part5.ts` 添加简体中文、繁体中文和俄文标签，使所有支持的 catalog 都显示本地化标题。
 
 ## 关键设计决策
 
-| 决策                                              | 理由                                                                                             |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| 修改 `UserMessage` 展示变体，不改 transcript role | user 角色记录仍是 turn 起点，现有编辑、删除、重试、时间线和 tool-call 消费者继续看到同一条消息。 |
-| 在 `UserMessage` 内部接入                         | 保留附件、自定义内容渲染、编辑、失败处理与 per-run 卡片，不建立平行消息路径。                    |
-| 优先使用现有 per-run 卡片                         | 其结构化任务名、cron、task ID、触发方式和 session mode 比通用自动卡信息更完整。                  |
-| 使用与 source 无关的可见标签                      | 回放把持久化自动记录映射为 `cron`；同一次 tick 不能在重载后被重新标成别的类型。                  |
-| 只保留现有外层时间戳                              | 当前值是投影/执行时间，不一定是调度触发时间；卡片内再显示一次会重复并夸大其含义。                |
-| 短 echo 不显示冗余展开控件                        | 短 echo 已完整可见，而完整模型输入不能由当前投影提供；“展开完整指令”既无意义也有误导性。         |
-| 按需构造详情内容                                  | 长会话不应为了显示紧凑摘要而解析或宿主渲染每一条隐藏指令。                                       |
-| 不按 wakeup ID 分组                               | 自调节 rearm 会创建新的 one-shot ID，它不是稳定的 Loop 链身份。                                  |
+| 决策                                              | 理由                                                                                                                            |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 修改 `UserMessage` 展示变体，不改 transcript role | user 角色记录仍是 turn 起点，现有编辑、删除、重试、时间线和 tool-call 消费者继续看到同一条消息。                                |
+| 在 `UserMessage` 内部接入                         | 保留附件、自定义内容渲染、编辑、失败处理与 per-run 卡片，不建立平行消息路径。                                                   |
+| 优先使用现有 per-run 卡片                         | 其结构化任务名、cron、task ID、触发方式和 session mode 比通用自动卡信息更完整。                                                 |
+| 使用与 source 无关的可见标签                      | 回放把持久化自动记录映射为 `cron`；同一次 tick 不能在重载后被重新标成别的类型。                                                 |
+| 只保留现有外层时间戳                              | 当前值是投影/执行时间，不一定是调度触发时间；卡片内再显示一次会重复并夸大其含义。                                               |
+| 短 echo 不显示冗余展开控件                        | 短 echo 已完整可见，而完整模型输入不能由当前投影提供；“展开完整指令”既无意义也有误导性。                                        |
+| 按需构造详情内容                                  | 长会话不应为了显示紧凑摘要而解析或宿主渲染每一条隐藏指令。                                                                      |
+| 不按 wakeup ID 分组                               | 自调节 rearm 会创建新的 one-shot ID，它不是稳定的 Loop 链身份。                                                                 |
+| 升级 document schema，而非放宽 V1                 | V1 的 allowlist 是安全契约。V2 仅在 user block 中带来已有的规范化 cron 路由标签，不带其它 metadata，renderer 同时读取两种格式。 |
 
 ## 涉及文件
 
@@ -86,14 +91,26 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 - `packages/web-shell/client/components/MessageItem.dom.test.tsx` — props 传递和 source 更新覆盖。
 - `packages/web-shell/client/components/messages/UserMessage.test.tsx` — 组件行为与回归覆盖。
 - `packages/web-templates/src/export-html/build.mjs` — 针对新增展示及既有静态导出行为，实测并调整 renderer 体积上限。
+- `packages/cli/src/ui/utils/export/export-transcript-document.ts` — 保留 V1 表示形式，增加 V2 及其派生 schema，以承载规范化的 cron 路由标签，且不带出外围 metadata。
+- `packages/cli/src/ui/utils/export/index.ts` — 在既有 V1 接口旁导出两个版本的工厂与 document 类型。
+- `packages/cli/src/ui/utils/export/formatters/html.ts` — 产出 V2 HTML 数据结构，并在读取时校验两种受支持的版本。
+- `packages/cli/src/ui/utils/export/export-transcript-document.test.ts` — V2 来源与 metadata 边界、非 cron 来源以及 V1 兼容性覆盖。
+- `packages/cli/src/ui/utils/export/formatters/html.test.ts` — 产品端 V2 输出与旧 V1 渲染覆盖。
+- `packages/web-templates/src/export-html/src/document-main.tsx` — 接受 V1 与 V2，拒绝其它 schema 版本。
+- `docs/design/web-shell/chat-transcript-contract-prevalidation.md` — 同步 allowlist、版本规则和生产 schema 的约定。
 - `packages/web-shell/client/e2e/web-shell.automatic-trigger-message.spec.ts` — 确定性浏览器覆盖与截图。
 
 ## 验证计划
 
+实测 renderer JavaScript 为 **2,152,570 字节**，分离的组件 CSS 为 **2,427,140 字节**。告警基线为 **2,152,570**，硬上限为 **2,153,000 字节**，为工具链差异保留 430 字节。此前的实测还曾在旧的 `2,152,549` 告警基线上产生真实超额告警，因而在正常尺寸检查之外，也验证了后续增长会触发告警。
+
 - 单测覆盖 `cron` 与 `loop`、普通/未知 source、per-run 优先级、展开、短 echo 控件抑制、内置渲染惰性、附件、编辑、来源、内容、附件数与编辑态变化时在解析前收起旧详情、空内容、document 展开，以及以 `Loop tick — ` 开头的真实指令在 interactive 和 document 视图中的保留。验证自动触发标题在所有支持的 catalog 中均已本地化。
 - 验证现有 `MessageItem` 仅改变 source 时会更新转发的 props，并验证普通长消息在 source 变为自动来源后恢复紧凑状态。
-- 运行聚焦 Web Shell 测试、包级 typecheck、lint 和 format 检查，再运行贡献流程要求的仓库 build 与 typecheck。重建 `dist/transcript.js` 与 web-templates，确认实测 renderer 为 2,152,549 字节，低于调整后的 2,152,800 字节上限，本地余量为 251 字节。回归用例覆盖未知 `tasks from` source label、宿主的独立替换或脱敏渲染、readonly 展开，以及不需要 document parser 的已知 echo。
+- 运行用户消息、自动触发 predicate 及全部支持 catalog 的聚焦测试，再执行贡献流程要求的仓库 build 与 typecheck。实测最终 renderer 字节，把运行时告警阈值设为该值，硬上限保留其上方 430 字节，保证告警阈值严格小于硬上限；同时验证当前尺寸不告警以及未来增长会告警。
+- 在桌面与移动宽度断言日历与摘要同处一行，带详情的展开按钮也处在同一行。完整短 echo 在自身摘要内换行可读，自动头部样式不污染 per-run 共享样式，且页面没有横向溢出。
+- 覆盖固定数量文件的各字段更新、没有宿主覆盖时的 per-run 优先级、observer 清理，以及展开 → 编辑 → 取消 → 收起 → 再次展开。
 - 用同一组 cron、loop、普通和 per-run fixture 对 baseline 与修改后构建运行 Playwright 场景，在桌面与移动宽度截取紧凑和展开状态，并断言 document 无横向溢出。
+- document 导出断言持久化 cron 记录的 `schemaVersion: 2`，其 user block 仅含 `meta.source: 'cron'`，普通与 `goal_runtime` 输入不携带该字段。覆盖额外 timestamp 被拒绝、V1 拒绝新增标签，以及旧 V1 HTML 的生成。重新生成真实 HTTP 导出，验证 V2 标记、紧凑展示和全局折叠/展开。
 - 保留面向模型的 JSONL 内容与回放 source 断言作为回归证据；这些层不需要生产改动。
 
 ## 验收标准
@@ -103,7 +120,7 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 - 普通用户消息与结构化 per-run 定时任务消息保持当前展示。
 - 内置路径在关闭展开区时延后默认富文本 parser，而宿主提供的替换或脱敏渲染保持对消息正文的完全控制。
 - 附件、编辑、重试、source 元数据、既有时间戳语义、turn 边界和 tool-call 导航继续工作。
-- 静态 document 默认包含详细展示文本，且没有交互控件。
+- 静态 V2 document 输出携带规范化 cron 路由标签而不带出外围 metadata，旧 V1 文档保持可读；默认包含详细展示文本，且无需交互式触发控件。
 - 聚焦测试与浏览器检查通过，桌面和移动宽度均无横向溢出。
 
 ## 未决问题

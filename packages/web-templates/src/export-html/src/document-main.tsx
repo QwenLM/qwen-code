@@ -14,7 +14,7 @@ declare const __EXPORT_TRANSCRIPT_MAX_BLOCKS__: number;
 declare const __EXPORT_TRANSCRIPT_MAX_ENVELOPE_BYTES__: number;
 
 interface ExportTranscriptDocument {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   rendererVersion: string;
   blocks: DaemonTranscriptBlock[];
   metadata: {
@@ -72,7 +72,7 @@ function parseDocument(): ExportTranscriptDocument {
   }
   const value = JSON.parse(serialized) as Partial<ExportTranscriptDocument>;
   if (
-    value.schemaVersion !== 1 ||
+    (value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
     value.rendererVersion !== __EXPORT_TRANSCRIPT_RENDERER_VERSION__ ||
     !Array.isArray(value.blocks) ||
     value.blocks.length > __EXPORT_TRANSCRIPT_MAX_BLOCKS__ ||

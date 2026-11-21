@@ -418,6 +418,7 @@ export const UserMessage = memo(function UserMessage({
     !scheduledTaskRun &&
     // A host-provided renderer owns the complete body, including any redaction.
     !renderUserMessageContent &&
+    !renderUserMessageContent &&
     !parseUserMessageContent &&
     !renderComposerTag &&
     !renderComposerTagTooltip &&

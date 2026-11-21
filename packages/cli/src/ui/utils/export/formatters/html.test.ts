@@ -54,6 +54,7 @@ describe('HTML export formatter', () => {
     const nonce = html.match(/script-src 'nonce-([^']+)'/)?.[1];
     const secondNonce = secondHtml.match(/script-src 'nonce-([^']+)'/)?.[1];
     expect(html).toContain('id="transcript-document"');
+    expect(html).toContain('"schemaVersion":2');
     expect(html).toContain('Hello from the document exporter.');
     expect(html).toContain("connect-src 'none'");
     expect(html).toMatch(/script-src 'nonce-[^']+';/);
@@ -88,6 +89,16 @@ describe('HTML export formatter', () => {
     expect(stylesheetLink).not.toBe('');
     expect(stylesheetLink).toContain(`nonce="${nonce}"`);
     expect(stylesheetLink).toMatch(/integrity="sha384-[A-Za-z0-9+/]{64}"/);
+  });
+
+  it('still renders a legacy V1 envelope', () => {
+    const document = createExportTranscriptDocumentV1(records, sessionData, {
+      rendererVersion: EXPORT_TRANSCRIPT_RENDERER_VERSION,
+      exportedAt: '2026-08-16T01:00:00.000Z',
+    });
+    expect(renderExportTranscriptDocumentToHtml(document)).toContain(
+      '"schemaVersion":1',
+    );
   });
 
   it('fails closed when the product template loses its document slot', () => {

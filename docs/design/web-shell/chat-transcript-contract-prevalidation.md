@@ -474,6 +474,8 @@ JSON Schema 以 `additionalProperties: false` 封闭每种 block：
 | `prompt_cancelled`           | 安全 reason                                                                                                                       |
 | `debug`                      | V1 默认拒绝；产生 code/count diagnostic                                                                                           |
 
+在 schema version 2 中，且仅在 block 为 `user` 时，额外允许一个受限的 `meta: { source: 'cron' }`。这是离线回放生成的规范化展示路由标签，不是透传的 metadata bag；不含 timestamp、sourceRecordIds 或其它用户提供的元数据。V1 的 `user` block 不包含 `meta`，保持原有封闭字段集合。
+
 以下字段永不直接导出：
 
 - `eventId`、`serverTimestamp`、`sourceRecordIds`、`promptId`、`branchRecordId`；
@@ -607,6 +609,7 @@ HTML 使用与 CLI build 精确绑定的 renderer。禁止 `latest`、版本范�
 - `rendererVersion` 必须是精确 CLI 版本或内容 hash，禁止 `latest`、`~`、`^`、比较范围和 `*`；
 - renderer 明确声明支持的 schema 版本；不兼容时显示只读错误页，不宽松解析；
 - schema 升级保留上一已发布版本的读取和安全 canary 测试，直到对应 CLI 退出支持；
+- automatic-trigger 的 document 投影遵循上述递增：版本 2 的 user block 可增加单键、固定为 `cron` 的 `meta.source`。版本 1 的产生器和文件仍拒绝该字段；HTML writer 选择版本 2，reader 同时接受版本 1 和版本 2，其它版本值仍触发只读错误页。V2 的其余 metadata 排除规则不变。
 - `fixtureVersion` 只描述测试录制格式，不代替 export schema version。
 
 ## 11. Fixture、schema 与 capability matrix
@@ -630,7 +633,7 @@ integration-tests/fixtures/chat-transcript-contract/v1/
     └── manifest.schema.json
 ```
 
-Export schema 的唯一生产副本位于 `packages/cli/src/ui/utils/export/export-transcript-document-v1.schema.json`。integration gate 直接读取该文件；fixture 不再复制第二份容易漂移的 schema。
+V1 schema 的唯一生产副本仍位于 `packages/cli/src/ui/utils/export/export-transcript-document-v1.schema.json`。integration gate 直接读取该文件；fixture 不再复制第二份容易漂移的 schema。该文件不被改写；V2 schema 在导出工厂中从它派生，区分版本标识并仅对既有 `userBlock` 增加受限的 `meta.source`，其余结构与安全策略继承不变。
 
 规则：
 

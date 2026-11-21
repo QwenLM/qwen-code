@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -308,6 +308,10 @@ test('canceling automatic-input edit restores the compact card @smoke', async ({
     '[data-web-shell-automatic-trigger-message][data-source="loop"]',
   );
   await expect(card).toBeVisible();
+  await card.getByRole('button', { name: 'Show more', exact: true }).click();
+  await expect(
+    card.locator('[data-web-shell-automatic-trigger-instructions]'),
+  ).toBeVisible();
   await page
     .getByRole('button', { name: 'More message actions', exact: true })
     .hover();
@@ -323,4 +327,79 @@ test('canceling automatic-input edit restores the compact card @smoke', async ({
   await expect(
     card.locator('[data-web-shell-automatic-trigger-instructions]'),
   ).toHaveCount(0);
+  await card.getByRole('button', { name: 'Show more', exact: true }).click();
+  await expect(
+    card.locator('[data-web-shell-automatic-trigger-instructions]'),
+  ).toHaveText(loopPrompt);
+});
+
+async function expectAutomaticHeaderOnOneRow(card: Locator): Promise<void> {
+  const layout = await card.evaluate((element) => {
+    const svg = element.querySelector('svg');
+    const summary = element.querySelector(
+      '[data-web-shell-automatic-trigger-summary]',
+    );
+    if (!svg?.parentElement || !summary?.parentElement) {
+      throw new Error('Automatic trigger header is incomplete');
+    }
+    const icon = svg.parentElement.getBoundingClientRect();
+    const heading = summary.parentElement.getBoundingClientRect();
+    const button = element.querySelector('[aria-expanded]');
+    const toggle = button?.getBoundingClientRect();
+    return {
+      icon: {
+        left: icon.left,
+        right: icon.right,
+        top: icon.top,
+        bottom: icon.bottom,
+      },
+      heading: {
+        left: heading.left,
+        right: heading.right,
+        top: heading.top,
+        bottom: heading.bottom,
+      },
+      onOneRow:
+        icon.right <= heading.left &&
+        Math.min(icon.bottom, heading.bottom) > Math.max(icon.top, heading.top),
+      toggleOnSameRow: !toggle
+        ? true
+        : icon.right <= toggle.left &&
+          Math.min(icon.bottom, toggle.bottom) > Math.max(icon.top, toggle.top),
+    };
+  });
+  expect(layout.onOneRow, JSON.stringify(layout)).toBe(true);
+  expect(layout.toggleOnSameRow, JSON.stringify(layout)).toBe(true);
+}
+
+test('keeps the automatic-trigger calendar with its summary @smoke', async ({
+  page,
+}, testInfo) => {
+  await openFixture(page, String(testInfo.project.use.baseURL), [
+    sourcedUserTextEvent(cronPrompt, 'cron', 1),
+    assistantTextEvent('Cron details available.', { id: 2 }),
+    turnCompleteEvent('header-desktop', { id: 3 }),
+    sourcedUserTextEvent('Loop tick — tasks from project loop.md', 'loop', 4),
+    assistantTextEvent('Loop echo acknowledged.', { id: 5 }),
+    turnCompleteEvent('header-phone-echo', { id: 6 }),
+  ]);
+  const cronCard = page.locator(
+    '[data-web-shell-automatic-trigger-message][data-source="cron"]',
+  );
+  const echoCard = page.locator(
+    '[data-web-shell-automatic-trigger-message][data-source="loop"]',
+  );
+  await expect(cronCard).toBeVisible();
+  await expect(echoCard).toBeVisible();
+  await expectAutomaticHeaderOnOneRow(cronCard);
+  await expectAutomaticHeaderOnOneRow(echoCard);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectAutomaticHeaderOnOneRow(cronCard);
+  await expectAutomaticHeaderOnOneRow(echoCard);
+  const image = testInfo.outputPath('automatic-header-mobile-390.png');
+  await page.screenshot({ path: image });
+  await testInfo.attach('automatic-header-mobile-390', {
+    path: image,
+    contentType: 'image/png',
+  });
 });

@@ -21,7 +21,7 @@ The existing `ScheduledTaskRunMessage` handles the structured prompt of an indep
 
 ## Scope boundaries
 
-- Web Shell presentation and its measured document-export byte budget only. Do not change scheduling, cancellation, model input, transcript recording, replay metadata, or daemon APIs.
+- Limit this part to Web Shell presentation, the existing document-export projection needed for that presentation, and the measured renderer budget. Do not change scheduling, cancellation, model input, transcript recording, replay metadata, or daemon APIs.
 - Do not regroup ticks under a loop, invent a loop iteration number or chain ID, or create a session per tick.
 - Do not add pending-wakeup badges, scheduled-task controls, or a new settings option.
 - Do not change the meaning or editability of automatic user turns in this slice.
@@ -33,6 +33,10 @@ The existing `ScheduledTaskRunMessage` handles the structured prompt of an indep
 ### Message wiring
 
 `MessageItem` passes the existing `message.source` to `UserMessage`, and `MessageList` shares the same source predicate so its timeline cannot disagree with the body. Its memo comparison also compares filenames, MIME types, text previews, attachment IDs, and Blob identities so file-only updates reach the disclosure. The existing outer `MessageTimestamp` remains the only timestamp display and keeps its current meaning.
+
+### Versioned document-export source projection
+
+Offline replay restores a persisted cron subtype to `DaemonTextTranscriptBlock.meta.source`. Published V1 deliberately excludes that metadata, so V1 cannot show the automatic-trigger presentation for a real exported wakeup. Do not widen V1 in place: V2 permits only an optional user-block `meta.source: 'cron'`, derived from the unmodified V1 schema and used by new HTML output. The V1 producer and reader retain their existing closed field set and do not accept it; the renderer accepts both V1 and V2 documents and rejects other versions. The V2 tag carries no timestamp, source record ID, or other surrounding metadata, and the forbidden-field gate still admits only the exporter-generated single-key object. This changes the outbound HTML document envelope, not scheduling, transcript persistence, replay metadata generation, or daemon APIs. It does not change the meaning of `rendererVersion`, which remains an exact CLI version or content hash.
 
 ### Automatic-trigger presentation
 
@@ -59,7 +63,7 @@ The generic 400 px overflow disclosure is disabled for automatic-trigger cards s
 
 ### Styling and localization
 
-Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-task visual tokens, icon treatment, metadata wrapping, and semantic colors. Add English `userMessage.automatic.title` in `i18n.tsx`, Simplified Chinese in `i18n-zh-cn.ts`, Traditional Chinese in `i18n-zh-tw.ts`, and Russian in `i18n-ru-part5.ts`, so every supported catalog displays a localized eyebrow.
+Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-task visual tokens, icon treatment, and semantic colors. Keep the automatic-trigger header on one flex line with `flex-wrap: nowrap`, leaving the shared per-run header unchanged. `.scheduledTaskHeading` shrinks within the available width, while a complete runtime echo wraps only inside its own summary. Add English `userMessage.automatic.title` in `i18n.tsx`, Simplified Chinese in `i18n-zh-cn.ts`, Traditional Chinese in `i18n-zh-tw.ts`, and Russian in `i18n-ru-part5.ts`, so every supported catalog displays a localized eyebrow.
 
 ## Key design decisions
 
@@ -74,6 +78,8 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 | Construct detail content on demand                        | Long sessions should not parse or host-render every hidden instruction merely to show a compact summary.                                                                    |
 | Do not group by wakeup ID                                 | Self-paced rearming creates a new one-shot ID, so it is not a stable loop-chain identity.                                                                                   |
 
+| Version the export instead of widening V1 | The V1 allowlist is a safety contract. V2 carries the existing canonical cron routing tag on user blocks, with no other metadata, and the renderer supports reading both formats. |
+
 ## Files affected
 
 - `packages/web-shell/client/utils/automatic-trigger.ts` and `.test.ts` — shared source and fail-open echo predicates.
@@ -86,14 +92,26 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 - `packages/web-shell/client/components/MessageItem.dom.test.tsx` — prop forwarding and source-update coverage.
 - `packages/web-shell/client/components/messages/UserMessage.test.tsx` — component behavior and regression coverage.
 - `packages/web-templates/src/export-html/build.mjs` — measured renderer budget for the added presentation and existing static-export behavior.
+- `packages/cli/src/ui/utils/export/export-transcript-document.ts` — preserve the V1 representation and add V2 plus its derived schema for the canonical cron routing tag, without admitting surrounding metadata.
+- `packages/cli/src/ui/utils/export/index.ts` — export both versioned factories and document types alongside the existing V1 interface.
+- `packages/cli/src/ui/utils/export/formatters/html.ts` — produce V2 HTML envelopes and validate either supported version on read.
+- `packages/cli/src/ui/utils/export/export-transcript-document.test.ts` — V2 source and metadata-boundary coverage, non-cron sources, and V1 compatibility.
+- `packages/cli/src/ui/utils/export/formatters/html.test.ts` — product V2 output and legacy V1 rendering coverage.
+- `packages/web-templates/src/export-html/src/document-main.tsx` — accept V1 and V2 while rejecting other schema versions.
+- `docs/design/web-shell/chat-transcript-contract-prevalidation.md` — synchronized allowlist, versioning, and schema-production rules.
 - `packages/web-shell/client/e2e/web-shell.automatic-trigger-message.spec.ts` — deterministic browser coverage and screenshots.
 
 ## Validation plan
 
+The renderer measures **2,152,570 bytes** of JavaScript and **2,427,140 bytes** of separated component CSS. The warning baseline is **`2,152,570`**, and the hard ceiling is **`2,153,000` bytes**, preserving 430 bytes for toolchain variance. A build also produced a real above-baseline warning under the previous `2,152,549` threshold, so future-growth warning generation is exercised in addition to the normal-size check.
+
 - Unit-test both `cron` and `loop`, ordinary/unknown sources, per-run priority, disclosure, short-echo suppression, lazy built-in rendering, attachments, editing, source, content, and attachment-count changes that synchronously collapse the outgoing detail before parser work, empty content, document expansion, and preservation of real `Loop tick — ` prefixed instructions in interactive and document views. Verify that the automatic-trigger title is localized for every supported catalog.
 - Verify that changing only the source on an existing `MessageItem` updates the forwarded props, and that an ordinary expanded message becomes compact when its source becomes automatic.
-- Run the focused Web Shell tests, package typecheck, lint and format checks, then the repository build and typecheck required by the contributor workflow. Rebuild `dist/transcript.js` and WebTemplates and verify the measured renderer is 2,152,549 bytes, below a 2,152,800-byte ceiling with a 251-byte local margin. Regression cases cover unrecognized `tasks from` source labels, exclusive host replacement/redaction rendering, readonly disclosure, and known echoes that require no document parser.
+- Run the focused Web Shell suites for user messages, automatic-trigger predicates, and all supported catalogs, then the repository build and typecheck required by the contributor workflow. Measure the final renderer bytes and set the runtime warning to that measured value, with a hard ceiling exactly 430 bytes above it. Keep the warning strictly below the ceiling and exercise no-warning-at-current-size and future-growth warning behavior.
+- Assert that the calendar and summary stay on one flex row and, for detailed input, the disclosure stays on that row too, at desktop and phone widths. Keep complete short-echo labels wrapped and readable, continue isolating variant selection from shared per-run styling, and assert there is no horizontal page overflow.
+- Cover every same-count attachment field update, the no-host per-run priority path, observer cleanup, and expand → edit → cancel → collapsed → reopen.
 - Run a Playwright scenario with the same cron, loop, ordinary, and per-run fixtures against the baseline and changed build. Capture compact and expanded states at desktop and mobile widths and assert no horizontal document overflow.
+- Assert V2 `schemaVersion: 2` for a persisted cron record, only `meta.source: 'cron'` on its user block, and no metadata on ordinary or `goal_runtime` inputs. Verify timestamp rejection, rejection of the new tag in V1, and generation of legacy V1 HTML. Regenerate an actual HTTP export and verify its V2 marker, compact state, and global collapse/expand behavior.
 - Keep model-facing JSONL content and replay source assertions as regression evidence; no production changes are expected in those layers.
 
 ## Acceptance criteria
@@ -103,7 +121,7 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 - Ordinary user messages and structured per-run scheduled-task messages retain their current presentation.
 - Built-in closed disclosures defer the default rich-content parser, while host-provided replacement or redaction rendering retains its complete ownership of the message body.
 - Attachments, editing, retry, source metadata, existing timestamp semantics, turn boundaries, and tool-call navigation continue to work.
-- Static document output includes detailed display text by default and has no interactive control.
+- Static V2 document output carries the canonical cron routing tag without surrounding metadata, keeps V1 documents readable, and includes detailed display text by default without an interactive trigger disclosure.
 - Focused tests and browser checks pass at desktop and mobile widths without horizontal overflow.
 
 ## Open questions
