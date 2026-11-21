@@ -51,7 +51,7 @@ describe('mcp command', () => {
     const commandCalls = mockYargs.command.mock.calls;
     const commandNames = commandCalls.map((call) => call[0].command);
 
-    expect(commandNames).toContain('add <name> <commandOrUrl> [args...]');
+    expect(commandNames).toContain('add <name> <commandOrUrl>');
     expect(commandNames).toContain('remove <name>');
     expect(commandNames).toContain('list');
     expect(commandNames).toContain('reconnect [server-name]');
