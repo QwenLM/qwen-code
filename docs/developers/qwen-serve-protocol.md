@@ -1092,6 +1092,10 @@ channel-service lease if nothing else has. That restore:
   registered later extends;
 - does not happen after `DELETE /workspace/channel` stopped hosting, until a
   `PUT /workspace/channel` commits a selection again or the daemon restarts;
+- does not happen while a boot restore declined for a channel-service lease
+  conflict stands, even after the holder's record disappears, until a
+  `PUT /workspace/channel` commits a selection again or the daemon restarts
+  (the transient "already starting" race is not latched this way);
 - leaves a committed `all` selection as it is;
 - adds that workspace's names to the committed selection in one change, one
   late restore at a time. Unlike boot, which drops a name it cannot host and
