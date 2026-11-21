@@ -163,6 +163,12 @@ describe('tokenLimit', () => {
   });
 
   describe('Google Gemini', () => {
+    it('should return 1M for Gemini 4.x and its aliases', () => {
+      expect(tokenLimit('gemini-4-neon')).toBe(1000000);
+      expect(tokenLimit('gemini-4-pro-preview-20261121')).toBe(1000000);
+      expect(tokenLimit('vertex_ai/gemini-4-flash')).toBe(1000000);
+    });
+
     it('should return 1M for Gemini 3.x (latest)', () => {
       expect(tokenLimit('gemini-3-pro-preview')).toBe(1000000);
       expect(tokenLimit('gemini-3-flash-preview')).toBe(1000000);
@@ -485,6 +491,13 @@ describe('tokenLimit with output type', () => {
     it('should return correct output limits for GPT-5.x', () => {
       expect(tokenLimit('gpt-5.2', 'output')).toBe(131072);
       expect(tokenLimit('gpt-5-mini', 'output')).toBe(131072);
+    });
+
+    it('should return 64K output for Gemini 4.x and its aliases', () => {
+      expect(tokenLimit('gemini-4-neon', 'output')).toBe(65536);
+      expect(tokenLimit('gemini-4-pro-preview-20261121', 'output')).toBe(65536);
+      expect(tokenLimit('vertex_ai/gemini-4-flash', 'output')).toBe(65536);
+      expect(hasExplicitOutputLimit('gemini-4-neon')).toBe(true);
     });
 
     it('should return correct output limits for Gemini 3.x', () => {
