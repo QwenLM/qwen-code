@@ -106,7 +106,7 @@ final class AgentMessageProjection {
         String comparison = backward ? "<" : ">";
         String order = backward ? " DESC" : " ASC";
         boolean numericBoundary = afterSequence > 0 && org.apache.commons.lang3.StringUtils.isBlank(cursor);
-        List<Object> pageArguments = new ArrayList<>(List.of(scope, tenantId, sessionId, position.through()));
+        List<Object> pageArguments = new ArrayList<>(List.of(tenantId, sessionId, position.through()));
         if (numericBoundary) {
             pageArguments.add(afterSequence);
         }
@@ -116,7 +116,7 @@ final class AgentMessageProjection {
                 "SELECT m.item_id, m.first_sequence, OCTET_LENGTH(m.attributes_json) +"
                         + " OCTET_LENGTH(m.parts_json) + COALESCE(OCTET_LENGTH(r.inline_bytes), 0) AS byte_length"
                         + " FROM ma_message m LEFT JOIN ma_resource r ON r.resource_key = m.body_resource_key"
-                        + " AND r.session_scope_key = ? AND r.tenant_id = m.tenant_id AND r.session_id = m.session_id"
+                        + " AND r.tenant_id = m.tenant_id AND r.session_id = m.session_id"
                         + " WHERE m.tenant_id = ? AND m.session_id = ? AND m.first_sequence <= ?"
                         + (numericBoundary ? " AND m.first_sequence > ?" : "")
                         + " AND (m.first_sequence " + comparison + " ? OR (m.first_sequence = ? AND m.item_id "
@@ -510,12 +510,13 @@ final class AgentMessageProjection {
             var entry = iterator.next();
             List<ItemPartRecord> retained = entry.getValue();
             if (retained.isEmpty()) {
-                ManagedProjectionResourceCollector.release(jdbc, scope, "MESSAGE",
+                ManagedProjectionResourceCollector.release(jdbc, tenantId, sessionId, "MESSAGE",
                         com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, entry.getKey()));
                 jdbc.update(
-                        "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind ="
+                        "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind ="
                                 + " 'MESSAGE' AND owner_key = ?",
-                        scope,
+                        tenantId,
+                        sessionId,
                         com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
                                 scope, entry.getKey()));
                 jdbc.update(
@@ -794,12 +795,13 @@ final class AgentMessageProjection {
                             item);
             long revision = ((Number) previous.get("revision")).longValue();
             if (previous.get("body_resource_key") != null) {
-                ManagedProjectionResourceCollector.release(jdbc, scope, "MESSAGE", owner);
+                ManagedProjectionResourceCollector.release(jdbc, tenantId, sessionId, "MESSAGE", owner);
             }
             jdbc.update(
-                    "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind ="
+                    "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind ="
                             + " 'MESSAGE' AND owner_key = ?",
-                    scope,
+                    tenantId,
+                    sessionId,
                     owner);
             String resource = null;
             if (bytes.length > 64 * 1024) {
@@ -808,9 +810,8 @@ final class AgentMessageProjection {
                 resource = ManagedSessionStore.resourceKey(scope, id);
                 try {
                     jdbc.update(
-                            "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
+                            "INSERT INTO ma_resource (resource_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                             resource,
-                            scope,
                             tenantId,
                             sessionId,
                             id,
@@ -822,8 +823,7 @@ final class AgentMessageProjection {
                             jdbc.query(
                                     "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? FOR UPDATE",
                                     (row, index) ->
-                                            scope.equals(row.getString("session_scope_key"))
-                                                    && tenantId.equals(row.getString("tenant_id"))
+                                            tenantId.equals(row.getString("tenant_id"))
                                                     && sessionId.equals(row.getString("session_id"))
                                                     && id.equals(row.getString("resource_id"))
                                                     && "managed-message-parts"
@@ -849,8 +849,7 @@ final class AgentMessageProjection {
                     }
                 }
                 jdbc.update(
-                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES (?, 'MESSAGE', ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                        scope,
+                        "INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES ('MESSAGE', ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                         owner,
                         revision,
                         resource,
@@ -894,7 +893,7 @@ final class AgentMessageProjection {
         List<byte[]> rows =
                 jdbc.query(
                         "SELECT inline_bytes, byte_length, sha256 FROM ma_resource WHERE"
-                            + " resource_key = ? AND session_scope_key = ? AND tenant_id = ? AND"
+                            + " resource_key = ? AND tenant_id = ? AND"
                             + " session_id = ? AND kind = ? AND schema_version = 1 AND state ="
                             + " 'REFERENCED' AND deletion_operation_key IS NULL",
                         (row, i) -> {
@@ -909,7 +908,6 @@ final class AgentMessageProjection {
                             return bytes;
                         },
                         resourceKey,
-                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         tenantId,
                         sessionId,
                         "managed-message-parts");
