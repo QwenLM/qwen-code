@@ -32,6 +32,7 @@ import {
   localFilterOverrides,
   parseArgs,
   parseRepo,
+  requireBoundary,
   reviewState,
   validateContext,
 } from '../../scripts/verify-pr-prepare.mjs';
@@ -802,6 +803,26 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toMatch(
       /node \/trusted-scripts\/verify-pr-prepare\.mjs --require-isolation --artifact-dir "\/work\/tmp\/pr42-verify-\d{8}-\d{6}"/,
     );
+    // R3-4: the printed VM guidance must carry the same scoping as the skill —
+    // a VM runs no --require-isolation gate, so there is no in-boundary gate
+    // command and no boundary-gate.json (naming an --artifact-dir invocation
+    // without the gate would dead-end the operator at parseArgs' exit 2) — and
+    // name the FULL mode:"vm" shape with the attestation gloss the checker
+    // requires (what the operator confirmed: nothing mounted, no host
+    // credentials), never the inverted "what the VM mounts".
+    expect(result.stdout).toContain(
+      'A VM boundary takes the same trusted copy',
+    );
+    expect(result.stdout).toContain('NO --require-isolation gate');
+    expect(result.stdout).toContain('no boundary-gate.json for a VM');
+    expect(result.stdout).toContain(
+      'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
+    );
+    expect(result.stdout).toContain(
+      'attestation (what the operator confirmed: nothing mounted,',
+    );
+    expect(result.stdout).toContain('no host credentials), and approval');
+    expect(result.stdout).not.toContain('what the VM mounts');
 
     const root = realpathSync(dir);
     const contextPath = join(root, 'tmp', 'verify-context', 'pr42.json');
@@ -1083,8 +1104,10 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
         observed: ['/.dockerenv'],
         signals: ['/.dockerenv'],
         credentialFree: true,
+        nonceSha256: createHash('sha256').update('nonce').digest('hex'),
       }),
     );
+    writeFileSync(join(artifacts, 'harness.log'), 'container-nonce: nonce\n');
     const writeReport = (oid) =>
       writeFileSync(join(artifacts, 'report.md'), `merge-ready · ${oid}\n`);
     const check = () =>
@@ -1208,6 +1231,18 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
         credentialFree: true,
       });
       expect(typeof record.at).toBe('string');
+      // R16-1: the record carries only the nonce hash, never the plaintext,
+      // and the hash matches the container-local file the battery echoes
+      // from. A host battery cannot recover the plaintext from the record.
+      expect(record.nonce).toBeUndefined();
+      expect(record.nonceSha256).toMatch(/^[0-9a-f]{64}$/);
+      const containerNonce = readFileSync(
+        join(env.HOME, '.qwen-verify-nonce'),
+        'utf8',
+      ).trim();
+      expect(record.nonceSha256).toBe(
+        createHash('sha256').update(containerNonce).digest('hex'),
+      );
 
       // A failed gate writes no record: the checker must not see a pass.
       const art2 = makeTmpDir();
@@ -1224,6 +1259,89 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       expect(noDir.status).toBe(0);
     },
   );
+
+  // Ungated producer witness: the gate-pass path above is ambient-gated on an
+  // observed container marker, but requireBoundary's detectors take seams, so
+  // a fake /.dockerenv exercises the record write on a bare host. R16-1: the
+  // record carries only the nonce hash, never the plaintext, and the hash
+  // matches the container-local file the battery echoes from.
+  it('writes a hash-only nonce record bound to the container-local plaintext', () => {
+    const art = makeTmpDir();
+    const home = makeTmpDir();
+    const rc = requireBoundary(art, {
+      env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+      exists: (p) => p === '/.dockerenv',
+      home,
+    });
+    expect(rc).toBe(0);
+    const record = JSON.parse(
+      readFileSync(join(art, 'boundary-gate.json'), 'utf8'),
+    );
+    expect(record.nonce).toBeUndefined();
+    expect(record.nonceSha256).toMatch(/^[0-9a-f]{64}$/);
+    const plaintext = readFileSync(
+      join(home, '.qwen-verify-nonce'),
+      'utf8',
+    ).trim();
+    expect(record.nonceSha256).toBe(
+      createHash('sha256').update(plaintext).digest('hex'),
+    );
+    // The plaintext never rides the record: a host battery cannot copy it out.
+    expect(JSON.stringify(record)).not.toContain(plaintext);
+  });
+
+  // R1-4: an unwritable/absent $HOME must fail the gate before the pass line,
+  // not silently write a record whose nonce plaintext exists nowhere (which
+  // would leave the round uncertifiable only after the whole battery ran).
+  // R2-4: seed a stale pass record so the refusal's invalidateRecord() is
+  // witnessed — a failed re-run must not leave an earlier pass's record behind.
+  it('fails the gate when the container-local nonce cannot be written', () => {
+    const art = makeTmpDir();
+    const missingHome = join(makeTmpDir(), 'no-such-home');
+    writeFileSync(
+      join(art, 'boundary-gate.json'),
+      JSON.stringify({ gate: 'require-isolation', passed: true }),
+    );
+    const rc = requireBoundary(art, {
+      env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+      exists: (p) => p === '/.dockerenv',
+      home: missingHome,
+    });
+    expect(rc).toBe(3);
+    expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+  });
+
+  // R5-1: an unresolvable $HOME must reach the gate's exit-3 refusal, not
+  // escape as an uncaught throw (exit 1) that leaves a stale pass record
+  // behind; an empty home must not write the nonce into the PR-writable CWD.
+  // home:null models os.homedir() throwing (no passwd entry for the UID +
+  // unset HOME); home:'' models HOME set but empty (join('', …) is relative).
+  it('fails the gate on an unresolvable or empty $HOME without a stray nonce', () => {
+    const cwd = process.cwd();
+    const sandbox = makeTmpDir();
+    process.chdir(sandbox);
+    try {
+      for (const home of [null, '']) {
+        const art = makeTmpDir();
+        writeFileSync(
+          join(art, 'boundary-gate.json'),
+          JSON.stringify({ gate: 'require-isolation', passed: true }),
+        );
+        const rc = requireBoundary(art, {
+          env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+          exists: (p) => p === '/.dockerenv',
+          home,
+        });
+        expect(rc).toBe(3);
+        // The stale pass record is invalidated, not left for the checker.
+        expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+        // No plaintext landed in the process CWD (the PR-writable mount).
+        expect(existsSync(join(sandbox, '.qwen-verify-nonce'))).toBe(false);
+      }
+    } finally {
+      process.chdir(cwd);
+    }
+  });
 
   // R10-20: a self-chosen container= string is a declaration, not an observed
   // boundary. On a bare host it must not mint a passing gate record.

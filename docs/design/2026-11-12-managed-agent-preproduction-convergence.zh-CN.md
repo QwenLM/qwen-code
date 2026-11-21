@@ -29,7 +29,7 @@
 - **结构性根源。** `ModuleArchitectureTest` 强制 `control-plane`/`persistence`/`runtime-*` 只依赖自身加 `contracts`；`ClassSizeRatchetTest` 强制拆分 `persistence`/`runtime-broker` 中 ≥800 行的类（全局上限 2,549，单调不升）。拆类后碎片需要跨模块可见，就制造出一个新的 `contracts` 接口。镜像是这两个门禁的产物，而非纪律问题。
 - **API 表面。** `SurfaceRegistry` 在 Public、WebShell 与内部表面上共枚举 234 个路由常量。两套公共表面是能力分工，而非同构镜像：Public 偏读/管理（`PUBLIC_TURN_GET/LIST/EVENTS`、workspace list/get），WebShell 承载交互写侧。至少 24 个 WebShell 能力名没有 Public 对应（`TURN_SUBMIT`、`TURN_CANCEL`、`SESSION_APPROVAL`、`SESSION_MODEL_CHANGE`、`WORKSPACE_CREATE/REGISTER/FILES_*`、`TRANSCRIPT`、`EVENT_STREAM`……）。web-shell UI 消费生成客户端（`packages/web-shell/scripts/generate-managed-agent-api.mjs`）；Java SDK 暴露 Public 操作；README 在 `/v1/agents` 上文档化业务宿主流。
 - **HTTP。** `RuntimeBrokerHttpServer`（1,063 行）是第三端口上的手写 JDK `HttpServer`；`csi-retirement:worker-authority` 同时注册在它和 Tomcat internal connector 上。
-- **preflight。** 5 个文件共 4,393 行生产代码，加 6 个文件共 5,513 行测试（合计约 9,900 行），只服务 `--check`：`ServerEnvironment`（1,095，:229 处 `StackWalker` 格式嗅探）、`ManagedAgentPreflight`（2,486，:794 处 `YamlWalk` 注释 AST）、`HarnessBrokerUrl`（410，与 `packages/cli/src/serve/managed-runtime-broker-url.fixtures.json` 共享的 WHATWG 子集）、`ServiceAccount`（194，用户态 `namei`）。
+- **preflight。** 5 个文件共 4,393 行生产代码，加 6 个文件共 5,513 行测试（合计约 9,900 行），只服务 `--check`：`ServerEnvironment`（1,095，:229 处 `StackWalker` 格式嗅探）、`ManagedAgentPreflight`（2,486，:794 处 `YamlWalk` 注释 AST）、`HarnessBrokerUrl`（此变更前基线 410 行，与 `packages/cli/src/serve/managed-runtime-broker-url.fixtures.json` 共享的 WHATWG 子集；切片 6 canonical 门后约 215 行，#17510）、`ServiceAccount`（194，用户态 `namei`）。
 - **打包。** 仅剩单个 `exec` repackage（#17064 删除了 6 个 classifier fat-JAR execution；运维工具以 admin 子命令形式保留）。maintenance 家族为 14 个类 / 1,553 行（后经 #17415 缩减为 6 个类 / 647 行），被 `scripts/package-managed-agent-reference.mjs`、e2e 测试与 README 引用。
 - **棘轮。** `verification/pom.xml` 原为 831 行、17 个 profile、约 435 行近乎重复的 Failsafe XML；将共享的 Failsafe 版本与 `integration-test`/`verify` 执行绑定移入 `pluginManagement` 后为 700 行（保持同样 17 个 profile）。`ManagedSchemaCatalog`（630 行；5 个文件的 `managedschema` 包共 1,185 行，#17415 后为 1,177 行）在启动时用对缩进敏感的正则重解析规范 DDL。
 - **是注册 provider，而非死代码。** 全部 5 个 `runtime-*` 模块都经 `META-INF/services` 注册 `RuntimeProviderFactory`，因此它们是 ServiceLoader 动态发现的 provider，而非静态接线的 bean。`runtime-kubernetes`（kind `kubernetes-workspace`）是 resident-workspace / CSI provisioner（`KubernetesRuntimeProviderFactory`），积极开发、承重；`runtime-external` 注册 `ExternalRuntimeProviderFactory`（`external-scratch` 功能完整，`external-workspace` 刻意 fail-closed）。早先的 K1 scratch provisioner（`KubernetesRuntimeProvisioner`）与 `JdbcRuntimeBrokerSchema` 别名确属死/冗余，已删除（#17058、#17075）。移除剩余 provider 是能力决策，而非清理。
@@ -127,7 +127,8 @@ Public 已被 Java SDK、OpenAPI 契约与 README 业务流锚定。反之留 We
 
 ### 切片 6 —— preflight 简化
 
-- 在配置入口要求规范 `http(s)://host:port`；删除 WHATWG 子集与共享 URL fixture（或把校验挪到 Node 侧）。用 Spring ConfigData API 替换 `StackWalker` 格式嗅探；保留按值秘密检测（URL userinfo 口令与任意键下的 `?password=`/`?token=` 参数），只删除 YAML/注释 AST 与路径机器——仅按键名扫描会漏掉如 `spring.datasource.url` 中的凭据、丢失 `chmod 600` 告警；以服务身份实测 `ServiceAccount` 访问，而非 root 用户态 `namei`。
+- **已完成 —— 规范化 Broker URL 入口。** `HarnessBrokerUrl` 删除手写 WHATWG IPv4/IPv6 子集（410 → 约 210 行，IPv6 经 `InetAddress` 规范化）；它与 Node 解析器（`packages/cli/src/serve/managed-runtime-broker-url.ts`）现在在入口拒绝非规范写法——`inet_aton` 简写/八进制/十六进制 IPv4、缺失或多余的协议斜杠、点段路径、空或越界端口——共用同一份更新后的 fixture。其余子项为触及安全语义的重设计，另行跟踪。
+- 用 Spring ConfigData API 替换 `StackWalker` 格式嗅探；保留按值秘密检测（URL userinfo 口令与任意键下的 `?password=`/`?token=` 参数），只删除 YAML/注释 AST 与路径机器——仅按键名扫描会漏掉如 `spring.datasource.url` 中的凭据、丢失 `chmod 600` 告警；以服务身份实测 `ServiceAccount` 访问，而非 root 用户态 `namei`。
 - 理由：URL parity 契约只在接受任意 URL 写法时才需要；投产前可以拒绝它们。
 - 验证：对规范输入重写的 preflight 测试；`--check` 冒烟。
 

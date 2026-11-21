@@ -344,7 +344,7 @@ describe('qwen serve — capabilities envelope', () => {
     expect(caps.v).toBe(1);
     expect(caps.mode).toBe('http-bridge');
     // Order must match `SERVE_CAPABILITY_REGISTRY` in
-    // `packages/cli/src/serve/capabilities.ts` and the unit-level
+    // `packages/sdk-typescript/src/daemon/capabilities.ts` and the unit-level
     // baseline features in `packages/cli/src/serve/server.test.ts`.
     //
     // Conditional tags absent under this suite's spawn flags (no
@@ -396,6 +396,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_info',
       'session_source_metadata',
       'session_side_task',
+      'session_sub_session_send',
       'session_prompt',
       'session_turn_status',
       'session_attachments',
@@ -498,10 +499,12 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_github_setup',
       'workspace_github_prs',
       'workspace_github_pr_files',
+      'workspace_git_log_exclude_refs',
       'workspace_git_worktrees',
       'workspace_git_check_ignore',
       'workspace_mcp_restart',
       'session_recap',
+      'session_mod_rows',
       'session_generation',
       'workspace_generation',
       'session_btw',
@@ -550,6 +553,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_archived_session_export',
       'workspace_session_live_state',
       'workspace_session_live_state_batch',
+      'restart_recovery',
       'workspace_session_metadata',
       'session_worktree_persistence_v1',
       'session_worktree_reset_v1',

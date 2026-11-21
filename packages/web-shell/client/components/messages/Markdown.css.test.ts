@@ -44,6 +44,9 @@ describe('Markdown bidirectional text contract', () => {
       /unicode-bidi:\s*plaintext;/,
     );
     expect(rule('.inlineCode')).toMatch(/unicode-bidi:\s*isolate;/);
+    // isolate alone leaves the leading slash of an LTR path reordered inside
+    // an RTL paragraph; plaintext is what keeps the chip's path readable.
+    expect(rule('.imageFallback')).toMatch(/unicode-bidi:\s*plaintext;/);
 
     expect(
       markdownSource.match(/data-markdown-source=\{source\}\s+dir="auto"/g),

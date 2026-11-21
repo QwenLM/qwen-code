@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.daemon.DaemonTransportException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.daemon.HostedHarnessStreamIdleException;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessAttachmentLostFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessGenerationFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
@@ -30,6 +31,18 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class HarnessSdkValuesTest {
+    @Test
+    void attachmentRecoverySignalSurvivesTheSdkBoundary() throws Exception {
+        var refused = sdk(DaemonHttpException.class, new Class<?>[] {String.class, int.class, String.class},
+                "submit", 404, "{\"code\":\"hosted_session_not_found\"}");
+        var lost = new HarnessAttachmentLostFailure(HarnessSdkValues.runtime(refused));
+        var delegate = mock(HarnessConnector.class);
+        when(delegate.submit("tenant", "session", "prompt", java.util.List.of(), "digest")).thenThrow(lost);
+        assertThatThrownBy(() -> new SdkHarnessBoundary(delegate).submit("tenant", "session", "prompt",
+                java.util.List.of(), "digest")).isSameAs(lost)
+                .hasCauseInstanceOf(HarnessHttpFailure.class);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void boundaryForwardsModelConfigurationCapability(boolean supported) {

@@ -18,6 +18,7 @@ import type {
 import { DeviceFlowRegistry } from './auth/device-flow.js';
 import {
   buildDaemonStatusResponse,
+  sseMaxConnections,
   type BuildDaemonStatusOptions,
   type DaemonMetricsBucket,
 } from './daemon-status.js';
@@ -2443,6 +2444,7 @@ interface MakeOptionsInput {
   totalAdmissionLiveCount?: number;
   totalAdmissionInFlight?: number;
   daemonLog?: DaemonLogger;
+  writerIdleTimeoutMs?: number;
 }
 
 function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
@@ -2479,6 +2481,7 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
       port: 4170,
       mode: 'http-bridge',
       rateLimit: input.rateLimitEnabled,
+      writerIdleTimeoutMs: input.writerIdleTimeoutMs,
     },
     boundWorkspace: BASE_WORKSPACE,
     bridge,
@@ -2529,6 +2532,19 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
       ? { rateLimiter: makeRateLimiter(input.rateLimitHits) }
       : {}),
     getRestSseActive: () => 0,
+    getStreamOccupancy: () => ({
+      total: 0,
+      bySurface: {
+        restEvents: 0,
+        agentEvents: 0,
+        generation: 0,
+        artifactLibrary: 0,
+        hostedEvents: 0,
+        acpSse: 0,
+        acpWs: 0,
+      },
+      byListener: { primary: 0, 'local-control': 0, 'remote-access': 0 },
+    }),
     features: ['health', 'daemon_status'],
     protocolVersions: { current: 'v1', supported: ['v1'] },
     supportedDeviceFlowProviders: ['qwen-oauth'],
@@ -2582,3 +2598,48 @@ function fakeInterval(): ReturnType<typeof setInterval> {
     unref: () => {},
   } as unknown as ReturnType<typeof setInterval>;
 }
+
+describe('SSE capacity normalization and effective writer-stall budget', () => {
+  it('derives the SSE cap from the listener headroom', () => {
+    expect(sseMaxConnections(256, undefined)).toBe(204);
+    expect(sseMaxConnections(10, undefined)).toBe(8);
+    expect(sseMaxConnections(1, undefined)).toBe(1);
+    expect(sseMaxConnections(0, undefined)).toBeNull();
+    expect(sseMaxConnections(undefined, undefined)).toBe(204);
+  });
+
+  it('normalizes explicit caps: floor at one stream, clamp to headroom', () => {
+    // Fractional values must not collapse to 0 (the enforcement site
+    // treats 0 as unlimited while status would publish a third state).
+    expect(sseMaxConnections(256, 0.8)).toBe(1);
+    expect(sseMaxConnections(10, 0.8)).toBe(1);
+    // An explicit cap above the listener budget cannot erase the
+    // reserved short-request headroom.
+    expect(sseMaxConnections(256, 500)).toBe(204);
+    expect(sseMaxConnections(256, 5)).toBe(5);
+    // 0 / Infinity keep meaning unlimited, even with the listener cap
+    // disabled — an explicit cap still applies in that case.
+    expect(sseMaxConnections(256, 0)).toBeNull();
+    expect(sseMaxConnections(256, Infinity)).toBeNull();
+    expect(sseMaxConnections(0, 100)).toBe(100);
+    expect(sseMaxConnections(256, -3)).toBeNull();
+    expect(sseMaxConnections(256, Number.NaN)).toBeNull();
+  });
+
+  it('reports the effective writer-stall budget, not the raw flag', async () => {
+    // The reaper is default-on: an unset flag must report the 60s
+    // default, not null (which would read as "no writer eviction").
+    const unset = await buildDaemonStatusResponse('summary', makeOptions({}));
+    expect(unset.limits.writerIdleTimeoutMs).toBe(60_000);
+    const explicit = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ writerIdleTimeoutMs: 30_000 }),
+    );
+    expect(explicit.limits.writerIdleTimeoutMs).toBe(30_000);
+    const disabled = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ writerIdleTimeoutMs: 0 }),
+    );
+    expect(disabled.limits.writerIdleTimeoutMs).toBeNull();
+  });
+});
