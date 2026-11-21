@@ -426,6 +426,48 @@ describe('persisted hook turn pages', () => {
     });
     expect(read).toHaveBeenCalled();
   });
+  it('does not let frozen hook retention evict the live index after an mtime-regressing append', async () => {
+    append(event('one'));
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const anchor = await reader.readTurnIndexPage(sessionId);
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const extra = append();
+    extra.message = { role: 'user', parts: [{ text: 'x'.repeat(16384) }] };
+    // Append, then restore an older source timestamp (in-place sync): the
+    // live snapshot's mtime is older than the frozen prefix's.
+    const frozen = await fs.stat(file);
+    await write();
+    await fs.utimes(file, frozen.atime, new Date(frozen.mtimeMs - 60000));
+    await reader.readTurnIndexPage(sessionId);
+    const liveBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+    setSessionTranscriptIndexCacheMaxBytesForTest(oldBytes + liveBytes);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+    const read = vi.fn();
+    setSessionTranscriptSelectedLineReadHookForTest(read);
+    const build = vi.fn();
+    setSessionTranscriptIndexBuildCompleteHookForTest(build);
+    expect(
+      await reader.readTurnHooksPage(sessionId, promptId, {
+        snapshot: anchor.snapshot,
+      }),
+    ).toMatchObject({ totalExecutions: 1, coverage: 'recorded' });
+    // Length, not mtime order: the longer live index is protected even
+    // though its mtime is older than the frozen snapshot's.
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      oldBytes + liveBytes,
+    );
+    await reader.readTurnIndexPage(sessionId);
+    expect(build).not.toHaveBeenCalled();
+    read.mockClear();
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchor.snapshot,
+    });
+    expect(read).toHaveBeenCalled();
+  });
   it('reclaims a superseded entry when a hook aggregate crosses into a full oversized class', async () => {
     append(event('one'));
     await write();

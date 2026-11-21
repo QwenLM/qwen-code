@@ -3916,6 +3916,39 @@ describe('SessionTranscriptReader', () => {
     expect(uuids(oldPage.records)).toEqual(['large-1']);
   });
 
+  it('evicts a shorter prefix by length when an append restored an older mtime', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    // An in-place sync that appends and then restores an older source
+    // timestamp: the live snapshot's mtime is older than the prefix's.
+    await fs.utimes(filePath, frozen.atime, new Date(frozen.mtimeMs - 60000));
+    // Fits the grown snapshot alone, but not it plus the old prefix.
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 2048);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    // Length decides supersession, not mtime order: the live snapshot
+    // reclaims the shorter prefix and repeats hit.
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+    // The superseded frozen prefix rebuilds on demand (the second build),
+    // and its admission must not evict the live index even though the
+    // live mtime is older: the following live read still hits.
+    const oldPage = await readAfter(reader, oldState, { limit: 1 });
+    expect(uuids(oldPage.records)).toEqual(['large-1']);
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(2);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+  });
+
   it('does not let a frozen-prefix admission reclaim the live newer index', async () => {
     setSessionTranscriptIndexCacheMaxBytesForTest(1);
     const reader = newReader();
@@ -4849,6 +4882,60 @@ describe('SessionTranscriptReader', () => {
     }
   });
 
+  it('does not let frozen projection retention evict the live index after an mtime-regressing append', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { file, authority, commit } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'short reply' },
+      { uuid: 'u2', parent: 'a1', text: bigText },
+    ]);
+    let closed = false;
+    try {
+      const reader = newReader();
+      await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+      const physicalBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+        physicalBytes + 1024,
+      );
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const oldState = first.nextCursorState!;
+      setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+      // Append, then restore an older source timestamp (in-place sync):
+      // the live snapshot's mtime is older than the frozen prefix's.
+      const frozen = await fs.stat(file);
+      await commit('a2', 'u2', 'short appended reply');
+      // Close the writer before restoring the timestamp: the lease seals
+      // against the transcript state its own commits produced.
+      await authority.close();
+      closed = true;
+      await fs.utimes(file, frozen.atime, new Date(frozen.mtimeMs - 60000));
+      await reader.readPage(sessionId, { limit: 1 });
+      const liveTotal =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize - physicalBytes;
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      setSessionTranscriptIndexCacheMaxBytesForTest(physicalBytes + liveTotal);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+      const builds = countBuilds(file);
+      projectionReads.count = 0;
+      await readAfter(reader, oldState, { limit: 1 });
+      // Length, not mtime order: the longer live index is protected even
+      // though its mtime is older than the frozen snapshot's.
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes + liveTotal,
+      );
+      await reader.readPage(sessionId, { limit: 1 });
+      expect(builds.count).toBe(0);
+      expect(projectionReads.count).toBe(1);
+    } finally {
+      if (!closed) await authority.close();
+    }
+  });
+
   it('does not let a frozen projection retention evict a replaced live index at a new inode', async () => {
     const bigText = 'x'.repeat(256 * 1024);
     const { file, authority, commit } = await openManagedFixture([
@@ -4902,6 +4989,83 @@ describe('SessionTranscriptReader', () => {
       releaseDecode!();
       await frozenRead;
       // The live index at the new inode survives the refused retention.
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes + liveTotal,
+      );
+      await reader.readPage(sessionId, { limit: 1 });
+      expect(builds.count).toBe(0);
+    } finally {
+      if (!closed) await authority.close();
+    }
+  });
+
+  it('does not let frozen projection retention evict a shorter replacement live index', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    // The big body sits in the SECOND record: dropping the last record's
+    // wrapper pair keeps it in the replacement, and the dropped record's
+    // projection bytes are dwarfed by the replacement's physical index,
+    // so the frozen growth stays in the shared class and the reclaim
+    // branch examines the live entry.
+    const { file, authority } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: bigText },
+      ...Array.from({ length: 18 }, (_, i) => ({
+        uuid: `u${i + 2}`,
+        parent: i ? `u${i + 1}` : 'a1',
+        text: `filler ${i}`,
+      })),
+    ]);
+    let closed = false;
+    try {
+      const reader = newReader();
+      await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+      const physicalBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+        physicalBytes + 1024,
+      );
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const oldState = first.nextCursorState!;
+      setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+      await authority.close();
+      closed = true;
+      // Pause the frozen projection decode; while it is suspended, replace
+      // the transcript at a new inode with a SHORTER prefix and cache the
+      // live snapshot. The foreign-identity entry is shorter than the
+      // frozen snapshot, but it may be the live index: retention must
+      // protect it, not reclaim it by length.
+      let releaseDecode: (() => void) | undefined;
+      const decodeBlocked = new Promise<void>((resolve) => {
+        releaseDecode = resolve;
+      });
+      projectionReads.pause = decodeBlocked;
+      projectionReads.count = 0;
+      const frozenRead = readAfter(reader, oldState, { limit: 1 });
+      await vi.waitFor(() => expect(projectionReads.count).toBe(1));
+      const raw = await fs.readFile(file, 'utf8');
+      const lines = raw.trimEnd().split('\n');
+      // Drop the last record's event+commit wrapper pair: a shorter,
+      // still-valid managed log at a new inode.
+      const short = lines.slice(0, lines.length - 2).join('\n') + '\n';
+      const temp = `${file}.replacement`;
+      await fs.writeFile(temp, short, 'utf8');
+      await fs.rename(temp, file);
+      await reader.readPage(sessionId, { limit: 1 });
+      const liveTotal =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize - physicalBytes;
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      setSessionTranscriptIndexCacheMaxBytesForTest(physicalBytes + liveTotal);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+      const builds = countBuilds(file);
+      releaseDecode!();
+      // The frozen page still serves from the cached old index; the
+      // retention accounting ran against the replacement's live entry.
+      await frozenRead;
+      // The shorter live index at the new inode survives the refusal.
       expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
       expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
         physicalBytes + liveTotal,

@@ -1979,7 +1979,7 @@ function getIndexCacheBytesByClass(): { shared: number; oversized: number } {
 // currentSnapshotSize is the verified current file length when the caller
 // just verified the entry's snapshot against the file (the offer door),
 // and undefined for frozen-prefix growth (hook aggregates, projections
-// decoded under a frozen cursor): those reclaim temporally superseded
+// decoded under a frozen cursor): those reclaim same-identity shorter
 // prefixes only, never the live newer index.
 function cacheAdditionFitsClassBudget(
   entry: CacheEntry,
@@ -2086,12 +2086,17 @@ function pruneCacheByteBudget(oversizedClass: boolean): void {
 // backup restored an older mtime), a length beyond the current file (the
 // size guard rejects them, even when a same-millisecond truncation kept
 // the mtime), or an equal size at a different mtime (the mtime guard
-// rejects them). Only callers that just verified the incoming snapshot
-// against the current file pass that state; a frozen-prefix growth caller
-// passes undefined and reclaims by temporal order alone, so retaining a
-// hook aggregate or projection never evicts the live newer index.
-// Temporal order covers the append case: a strictly older snapshot, or a
-// same-mtime smaller prefix, is reclaimable fit-before-evict.
+// rejects them). Supersession itself is decided by length, never by
+// mtime order: an in-place sync can append and then restore an older
+// source timestamp, so a newer mtime does not make a shorter prefix
+// live, and an older mtime does not make a longer index dead. Under the
+// append-only read model a same-identity strictly shorter prefix is
+// contained in the incoming snapshot and reclaimable fit-before-evict;
+// a longer same-identity index still serves the frozen offsets and is
+// protected. A frozen-prefix growth caller passes undefined (no verified
+// current state): it reclaims only same-identity strictly shorter
+// prefixes, and protects longer or foreign-identity entries, which may
+// be the live index, so retention never evicts it.
 function isSupersededSnapshot(
   value: TranscriptIndex,
   filePath: string,
@@ -2101,13 +2106,11 @@ function isSupersededSnapshot(
   currentSnapshotSize: number | undefined,
 ): boolean {
   if (value.filePath !== filePath) return false;
+  const sameIdentity =
+    value.fileIdentity.dev === fileIdentity.dev &&
+    value.fileIdentity.ino === fileIdentity.ino;
   if (currentSnapshotSize !== undefined) {
-    if (
-      value.fileIdentity.dev !== fileIdentity.dev ||
-      value.fileIdentity.ino !== fileIdentity.ino
-    ) {
-      return true;
-    }
+    if (!sameIdentity) return true;
     if (value.snapshotSize > currentSnapshotSize) return true;
     if (
       value.snapshotSize === snapshotSize &&
@@ -2115,10 +2118,9 @@ function isSupersededSnapshot(
     ) {
       return true;
     }
+    return value.snapshotSize < snapshotSize;
   }
-  // ISO-8601 UTC strings compare chronologically.
-  if (value.lastUpdated < lastUpdated) return true;
-  return value.lastUpdated === lastUpdated && value.snapshotSize < snapshotSize;
+  return sameIdentity && value.snapshotSize < snapshotSize;
 }
 
 // The bytes evictSupersededSnapshots would free, so admission can check the
@@ -3967,7 +3969,7 @@ export class SessionTranscriptReader {
         // entries, and an aggregate that pushes a shared entry past the
         // shared budget moves it into the oversized class. The snapshot is
         // frozen, not verified against the current file: reclaim only
-        // temporally superseded prefixes, never the live newer index.
+        // same-identity shorter prefixes, never the live newer index.
         if (cacheAdditionFitsClassBudget(cached, byteSize, undefined)) {
           cached.hookTurns ??= new Map();
           cached.hookTurns.set(promptId, turn);
@@ -4670,8 +4672,8 @@ export class SessionTranscriptReader {
           // (it deletes from the WeakMap when the bodies do not fit). The
           // has() guard above keeps the helper's unconditional byte add from
           // double-counting an already-accounted projection. The index may
-          // be a frozen prefix of a grown file: reclaim only temporally
-          // superseded entries, never the live newer index.
+          // be a frozen prefix of a grown file: reclaim only same-identity
+          // shorter entries, never the live newer index.
           managedProjections.set(index, projection);
           accountManagedProjection(index, cachedEntry, undefined);
         }
