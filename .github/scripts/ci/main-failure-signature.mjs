@@ -287,6 +287,7 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
   const extra = tests.length > 1 ? ` (+${tests.length - 1} more)` : '';
   return {
     workflow: workflowName,
+    logCount: logTexts.length,
     tests,
     failedJobs,
     signature: tests.length
@@ -404,23 +405,30 @@ function cappedTestLines(tests) {
 
 export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
   const code = (text) => `\`${String(text).replace(/[`\r\n]/g, ' ')}\``;
+  // A job that hit its execution cap concludes `cancelled`, not `failure`;
+  // keep it so a timed-out leg is named in the report (#16272, #16214). The
+  // coverage denominator counts the same jobs the body names below it.
+  const namedJobs = jobs.filter((job) =>
+    ['failure', 'cancelled'].includes(job.conclusion),
+  );
+  const logCount = analysis.logCount ?? 0;
+  const coverage = namedJobs.length
+    ? `${logCount} of ${namedJobs.length} failed-job logs${logCount === namedJobs.length ? '' : ' (incomplete coverage)'}.`
+    : `${logCount}; failed-job entries empty or unavailable.`;
   return [
     `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
     `### ${code(analysis.workflow)} failed`,
     '',
     `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
     '',
-    ...jobs
-      // A job that hit its execution cap concludes `cancelled`, not `failure`;
-      // keep it so a timed-out leg is named in the report (#16272). The step
-      // filter below already accepts cancelled, so the two levels agree.
-      .filter((job) => ['failure', 'cancelled'].includes(job.conclusion))
-      .map((job) => {
-        const steps = (job.steps ?? [])
-          .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
-          .map((step) => code(step.name));
-        return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
-      }),
+    `- Job logs analyzed: ${coverage}`,
+    '',
+    ...namedJobs.map((job) => {
+      const steps = (job.steps ?? [])
+        .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
+        .map((step) => code(step.name));
+      return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
+    }),
     '',
     ...(analysis.tests.length
       ? [
