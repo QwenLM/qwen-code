@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   QWEN_CODE_DESKTOP_ENV,
+  QWEN_CODE_MANAGED_RUNTIME_ENV,
   QWEN_CODE_SERVE_ENV,
   resolveAcpChannelFallback,
 } from './acp-channel-fallback.js';
@@ -35,11 +36,32 @@ describe('resolveAcpChannelFallback', () => {
     ).toBe('desktop');
   });
 
+  it('reports managed for the Hosted Harness and its children', () => {
+    expect(
+      resolveAcpChannelFallback({ [QWEN_CODE_MANAGED_RUNTIME_ENV]: '1' }),
+    ).toBe('managed');
+    // The Harness is a daemon too; the Managed deployment identity wins.
+    expect(
+      resolveAcpChannelFallback({
+        [QWEN_CODE_SERVE_ENV]: '1',
+        [QWEN_CODE_MANAGED_RUNTIME_ENV]: '1',
+      }),
+    ).toBe('managed');
+    expect(
+      resolveAcpChannelFallback({
+        [QWEN_CODE_SERVE_ENV]: '1',
+        [QWEN_CODE_DESKTOP_ENV]: '1',
+        [QWEN_CODE_MANAGED_RUNTIME_ENV]: '1',
+      }),
+    ).toBe('managed');
+  });
+
   it.each(['', '0', 'false'])('ignores marker value %j', (value) => {
     expect(
       resolveAcpChannelFallback({
         [QWEN_CODE_SERVE_ENV]: value,
         [QWEN_CODE_DESKTOP_ENV]: value,
+        [QWEN_CODE_MANAGED_RUNTIME_ENV]: value,
       }),
     ).toBe('ACP');
   });
