@@ -61,6 +61,7 @@ describe('bundled pkgdiet skill', () => {
     expect(body).toContain('## Configuration Scope Limitation');
     expect(normalizedBody).toContain('SystemDefaults');
     expect(normalizedBody).toContain('QWEN_CODE_SYSTEM_DEFAULTS_PATH');
+    expect(normalizedBody).toContain('QWEN_CODE_SYSTEM_SETTINGS_PATH');
     expect(normalizedBody).toContain('--mcp-config');
     expect(normalizedBody).toContain('Session-injected');
     expect(normalizedBody).toContain(
@@ -73,7 +74,7 @@ describe('bundled pkgdiet skill', () => {
       'The pkgdiet allowlist (command, args, cwd validation) is applied only to the **user scope** entry',
     );
     expect(normalizedBody).toContain(
-      'SystemDefaults, system-scope, CLI-flag, or session-injected entries',
+      'SystemDefaults, system-scope, CLI-flag, extension, or session-injected entries',
     );
 
     // Bootstrap checks, policy filters, allowlist, and whole entry inspection
@@ -126,21 +127,21 @@ describe('bundled pkgdiet skill', () => {
       'record its full configuration object verbatim',
     );
 
-    expect(normalizedBody).toContain('If shell execution is sandboxed');
+    // Normalized registry check in evaluator's non-project cwd (R7-2)
     expect(normalizedBody).toContain(
-      'identity mismatch rather than a residual risk',
+      "Check the active npm registry in the evaluator's non-project cwd",
     );
-
-    // Normalized registry check and non-zero exit handling (R7-2)
     expect(normalizedBody).toContain('npm config get registry');
     expect(normalizedBody).toContain(
-      'If the command exits non-zero, report that npm could not be executed to inspect the registry, and stop',
+      'If the command exits non-zero, report that npm could not be executed to inspect the registry in the evaluator `cwd`, and stop',
     );
     expect(normalizedBody).toContain(
       'Normalize the registry URL by stripping any trailing slash: the normalized output must be `https://registry.npmjs.org`',
     );
-    expect(body).not.toContain('~/.npmrc');
     expect(normalizedBody).toContain('https://registry.npmjs.org');
+    expect(normalizedBody).toContain(
+      'identity mismatch rather than a residual risk',
+    );
 
     // Registration in a single write with cwd (R7-3)
     expect(normalizedBody).toContain(
@@ -167,29 +168,26 @@ describe('bundled pkgdiet skill', () => {
       'offer removal only if the user chooses to abandon installation',
     );
 
+    // Critical ordering checks: registry probe in evaluator cwd must precede fastPath skip to Instructions!
     const inspectCheck = normalizedBody.indexOf(
       'Inspect session policy filters, configured MCP servers, and tool availability',
     );
     const provenanceHalt = normalizedBody.indexOf(
       'If `check_dependency` is reachable but no `pkgdiet` entry is found',
     );
-    const configuredBranch = normalizedBody.indexOf(
-      'If an entry named `pkgdiet` is configured in any of the three readable tiers',
+    const registryCheck = normalizedBody.indexOf(
+      "Check the active npm registry in the evaluator's non-project cwd",
     );
     const fastPath = normalizedBody.indexOf('skip to Instructions');
     const sandboxCheck = normalizedBody.indexOf(
       'If shell execution is sandboxed',
     );
-    const registryCheck = normalizedBody.indexOf(
-      'Check the active npm registry',
-    );
 
     expect(inspectCheck).toBeGreaterThanOrEqual(0);
     expect(provenanceHalt).toBeGreaterThan(inspectCheck);
-    expect(configuredBranch).toBeGreaterThan(provenanceHalt);
-    expect(fastPath).toBeGreaterThan(configuredBranch);
+    expect(registryCheck).toBeGreaterThan(provenanceHalt);
+    expect(fastPath).toBeGreaterThan(registryCheck);
     expect(sandboxCheck).toBeGreaterThan(fastPath);
-    expect(registryCheck).toBeGreaterThan(sandboxCheck);
 
     const confirmation = normalizedBody.indexOf(
       'Use `ask_user_question` to ask whether to continue',
@@ -257,9 +255,9 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'packages fetched from non-npm registries are not covered',
     );
-    expect(normalizedBody).toContain('route to the permission step');
+    expect(normalizedBody).toContain('routing to the permission step on ALLOW');
 
-    // Policy files and cache gating
+    // Policy files and cache gating (with blockedPackages taking precedence over allowedPackages)
     expect(normalizedBody).toContain(
       'evaluating packages in each project directory',
     );
@@ -272,13 +270,14 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain('minHealthScore');
     expect(normalizedBody).toContain('securityMode');
     expect(normalizedBody).toContain(
-      'do not install regardless of the verdict',
+      '`blockedPackages` taking precedence over `allowedPackages`',
     );
     expect(normalizedBody).toContain(
       'committed cache must be removed before proceeding',
     );
 
-    // Registry redirects and rewritten local resolution (R6-2)
+    // Registry redirects (including ~/.npmrc) and rewritten local resolution (R6-2)
+    expect(normalizedBody).toContain('~/.npmrc');
     expect(normalizedBody).toContain('.yarnrc.yml');
     expect(normalizedBody).toContain('bunfig.toml');
     expect(normalizedBody).toContain('node_modules/.bin');
