@@ -25,12 +25,19 @@ import {
   isArrowFunction,
   isBinaryExpression,
   isCallExpression,
+  isConstructorDeclaration,
   isFunctionDeclaration,
   isFunctionExpression,
+  isGetAccessorDeclaration,
   isIdentifier,
   isIfStatement,
+  isMethodDeclaration,
   isNoSubstitutionTemplateLiteral,
+  isPropertyAccessExpression,
+  isPropertyAssignment,
   isReturnStatement,
+  isSetAccessorDeclaration,
+  isShorthandPropertyAssignment,
   isStringLiteral,
   isVariableDeclaration,
   isVariableStatement,
@@ -116,29 +123,36 @@ const literalText = (node) =>
     : undefined;
 
 // The classifier delegation, as structure. The decision itself is executed
-// elsewhere, so this pins only the wiring the executed test cannot reach: one
-// call per arm, inside that arm's own fake-model callback, with its own call
-// id, the result bound and returned inside a `!== undefined` guard in that
-// same callback, and no other respond_in_schema answer site anywhere. Each
-// clause exists because a measured evasion satisfied the weaker form: both
-// delegations in one callback, delegations parked in a dead top-level helper,
-// a same-named return elsewhere in the function, a return inside a nested
-// closure in the guard's branch, and a bypass sibling answering non-block
-// side queries with a schema-invalid allow.
+// elsewhere, so nothing here pins the decision's internals; what is pinned is
+// the wiring the executed test cannot reach, and the packaged arms own that
+// wiring behaviourally. Judged by property, not spelling: the ids compare as a
+// set, the arms as a multiset, the gate may be spelled either way round or as a
+// direct return, and the answer inventory is confined to the two loop callbacks
+// so a legitimate third arm is not a violation. Each clause exists because a
+// measured shape satisfied the weaker form it replaces — a hand-built or
+// computed-name answer element, a fabricated body argument, a rebinding write,
+// a return from a method or closure inside the guard's branch, a delegation
+// parked in another arm's fake, and a swallowed fall-through.
 const classifierDelegation = (text) => {
   const file = createSourceFile('runner.ts', text, ScriptTarget.Latest, true);
   const isFn = (node) =>
     isFunctionDeclaration(node) ||
     isFunctionExpression(node) ||
-    isArrowFunction(node);
+    isArrowFunction(node) ||
+    isMethodDeclaration(node) ||
+    isGetAccessorDeclaration(node) ||
+    isSetAccessorDeclaration(node) ||
+    isConstructorDeclaration(node);
   const enclosingFn = (node) => {
     for (let current = node.parent; current; current = current.parent) {
       if (isFn(current)) return current;
     }
     return undefined;
   };
-  // A fake-model callback is the first argument of startFakeOpenAIServer; a
-  // delegation parked anywhere else wires nothing.
+  const fnKey = (node) => {
+    const fn = enclosingFn(node);
+    return fn === undefined ? -1 : fn.pos;
+  };
   const isFakeCallback = (fn) => {
     const parent = fn?.parent;
     return (
@@ -149,78 +163,185 @@ const classifierDelegation = (text) => {
       parent.arguments[0] === fn
     );
   };
+  // The arm a callback belongs to is the flag guarding its block, so a
+  // delegation moved into the failover fake or the sibling arm is caught even
+  // though it keeps the right call id.
+  const armFlag = (node) => {
+    for (let current = node.parent; current; current = current.parent) {
+      if (
+        isIfStatement(current) &&
+        isIdentifier(current.expression) &&
+        (current.expression.text === 'loopSkill' ||
+          current.expression.text === 'loopFire')
+      ) {
+        return current.expression.text;
+      }
+    }
+    return undefined;
+  };
   const calls = [];
   const guards = [];
-  const answerSites = [];
-  // The identifier returns inside one branch, stopping at function boundaries:
-  // a closure declared in the branch returns from the closure, not from the
-  // callback, so crediting it would let the callback fall through.
-  const returnedNames = (branch) => {
-    const names = [];
+  const writes = [];
+  const returns = [];
+  const loopAnswerSites = [];
+  const loopHandBuilt = [];
+  const guardReturnPositions = new Set();
+  // Returns inside one branch, stopping at every function boundary: a closure
+  // or method declared in the branch returns from itself, not the callback.
+  const branchReturns = (branch) => {
+    const found = [];
     const walk = (node) => {
       if (
         isReturnStatement(node) &&
         node.expression !== undefined &&
         isIdentifier(node.expression)
       ) {
-        names.push(node.expression.text);
+        found.push({ name: node.expression.text, pos: node.pos });
       }
       forEachChild(node, (child) => {
         if (!isFn(child)) walk(child);
       });
     };
-    walk(branch);
-    return names;
+    if (branch !== undefined) walk(branch);
+    return found;
   };
+  const isFakeToolCall = (node) =>
+    isCallExpression(node) &&
+    isIdentifier(node.expression) &&
+    node.expression.text === 'fakeToolCall';
   const visit = (node) => {
+    const fn = fnKey(node);
+    const arm = armFlag(node);
+    const inLoop = arm !== undefined && isFakeCallback(enclosingFn(node));
     if (
       isCallExpression(node) &&
       isIdentifier(node.expression) &&
       node.expression.text === 'loopClassifierResponse'
     ) {
-      const fn = enclosingFn(node);
+      // A direct return of the call is the same delegation as binding it and
+      // returning it under a guard, so it is recorded rather than rejected.
+      const parent = node.parent;
+      const directReturn =
+        isReturnStatement(parent) ||
+        (isBinaryExpression(parent) &&
+          parent.operatorToken.kind === SyntaxKind.QuestionQuestionToken &&
+          isReturnStatement(parent.parent));
       calls.push({
         callId: literalText(node.arguments[1]),
-        boundTo: isVariableDeclaration(node.parent)
-          ? node.parent.name.getText(file)
+        arg0: isIdentifier(node.arguments[0])
+          ? node.arguments[0].text
           : undefined,
-        fn: fn === undefined ? -1 : fn.pos,
-        fake: isFakeCallback(fn),
+        boundTo: isVariableDeclaration(parent)
+          ? parent.name.getText(file)
+          : undefined,
+        directReturn,
+        fn,
+        fake: isFakeCallback(enclosingFn(node)),
+        arm,
       });
     }
-    if (
-      isCallExpression(node) &&
-      isIdentifier(node.expression) &&
-      node.expression.text === 'fakeToolCall' &&
-      literalText(node.arguments[0]) === 'respond_in_schema'
-    ) {
-      const fn = enclosingFn(node);
-      answerSites.push(
-        fn !== undefined && isFunctionDeclaration(fn)
-          ? fn.name?.text
-          : undefined,
-      );
+    // Answer constructions inside a loop callback, by element rather than by
+    // call spelling: a hand-built element is invisible to a fakeToolCall count,
+    // and a non-inline toolCalls source cannot be enumerated at all.
+    if (inLoop) {
+      if (
+        isFakeToolCall(node) &&
+        literalText(node.arguments[0]) === 'respond_in_schema'
+      ) {
+        loopAnswerSites.push(fn);
+      }
+      if (
+        (isPropertyAssignment(node) || isShorthandPropertyAssignment(node)) &&
+        (isIdentifier(node.name) ? node.name.text : literalText(node.name)) ===
+          'toolCalls'
+      ) {
+        const source = isShorthandPropertyAssignment(node)
+          ? undefined
+          : node.initializer;
+        if (source === undefined || !isArrayLiteralExpression(source)) {
+          loopHandBuilt.push(fn);
+        } else {
+          for (const element of source.elements) {
+            // A computed tool name is as unattributable as a hand-built
+            // element: neither can be told apart from a classifier answer.
+            if (
+              !isFakeToolCall(element) ||
+              literalText(element.arguments[0]) === undefined
+            ) {
+              loopHandBuilt.push(fn);
+            }
+          }
+        }
+      }
     }
     if (
-      isIfStatement(node) &&
-      isBinaryExpression(node.expression) &&
-      node.expression.operatorToken.kind ===
-        SyntaxKind.ExclamationEqualsEqualsToken &&
-      isIdentifier(node.expression.left) &&
-      isIdentifier(node.expression.right) &&
-      node.expression.right.text === 'undefined'
+      isBinaryExpression(node) &&
+      node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= SyntaxKind.LastAssignment &&
+      isIdentifier(node.left)
     ) {
-      const fn = enclosingFn(node);
-      guards.push({
-        name: node.expression.left.text,
-        fn: fn === undefined ? -1 : fn.pos,
-        returns: returnedNames(node.thenStatement),
-      });
+      writes.push({ name: node.left.text, fn });
+    }
+    if (isReturnStatement(node) && node.expression !== undefined) {
+      // Every name the returned expression reads, not just a bare identifier:
+      // `return classified ?? fixture` and `return { ...classified }` swallow
+      // the fall-through exactly as `return classified` does.
+      const names = new Set();
+      const collect = (child) => {
+        if (isIdentifier(child)) {
+          // A property key is not a read of the binding; a shorthand key is,
+          // and a computed key is not an Identifier so it stays collected.
+          const parent = child.parent;
+          const isKey =
+            parent !== undefined &&
+            parent.name === child &&
+            (isPropertyAssignment(parent) ||
+              isPropertyAccessExpression(parent));
+          if (!isKey) names.add(child.text);
+        }
+        forEachChild(child, collect);
+      };
+      collect(node.expression);
+      returns.push({ names, fn, pos: node.pos });
+    }
+    if (isIfStatement(node) && isBinaryExpression(node.expression)) {
+      const operator = node.expression.operatorToken.kind;
+      const left = node.expression.left;
+      const right = node.expression.right;
+      const undefinedTest =
+        isIdentifier(left) &&
+        isIdentifier(right) &&
+        right.text === 'undefined' &&
+        (operator === SyntaxKind.ExclamationEqualsEqualsToken ||
+          operator === SyntaxKind.EqualsEqualsEqualsToken);
+      if (undefinedTest) {
+        // `X !== undefined` returns from the then branch; `X === undefined`
+        // returns from the else branch. Both are the same gate.
+        const branch =
+          operator === SyntaxKind.ExclamationEqualsEqualsToken
+            ? node.thenStatement
+            : node.elseStatement;
+        const found = branchReturns(branch);
+        for (const entry of found) guardReturnPositions.add(entry.pos);
+        guards.push({
+          name: left.text,
+          fn,
+          returns: found.map((entry) => entry.name),
+        });
+      }
     }
     forEachChild(node, visit);
   };
   visit(file);
-  return { calls, guards, answerSites };
+  return {
+    calls,
+    guards,
+    writes,
+    returns,
+    loopAnswerSites,
+    loopHandBuilt,
+    guardReturnPositions,
+  };
 };
 
 // The pin's judgement, named clause by clause so one predicate serves both the
@@ -229,40 +350,68 @@ const classifierDelegation = (text) => {
 const delegationViolations = (delegation) => {
   const violations = [];
   const ids = delegation.calls.map((call) => call.callId);
+  // A set, not source order: swapping the two arm blocks is behaviour-preserving.
   if (
     ids.length !== 2 ||
-    ids[0] !== 'loop-classifier' ||
-    ids[1] !== 'loop-fire-classifier'
+    [...ids].sort().join() !== 'loop-classifier,loop-fire-classifier'
   ) {
     violations.push('call-ids');
   }
   if (new Set(delegation.calls.map((call) => call.fn)).size !== 2) {
     violations.push('distinct-callbacks');
   }
+  // One delegation per loop arm, judged on the arms rather than on which id
+  // each arm happens to pass: the ids are labels nothing else reads, so
+  // exchanging them between the arms is behaviour-preserving.
+  const arms = delegation.calls.map((call) => call.arm);
+  if (
+    delegation.calls.some((call) => !call.fake) ||
+    [...arms].sort().join() !== 'loopFire,loopSkill'
+  ) {
+    violations.push('arm-scoping');
+  }
   for (const call of delegation.calls) {
-    if (!call.fake) violations.push('in-fake-callback');
+    if (call.arg0 !== 'body') violations.push('argument-provenance');
+    if (call.directReturn) continue;
     if (typeof call.boundTo !== 'string') {
-      violations.push('result-bound');
+      violations.push('result-returned');
       continue;
     }
+    // The branch must return the delegated value and nothing else: a branch
+    // that can also return another binding does not answer with the decision.
+    const ownGuard = delegation.guards.some(
+      (guard) =>
+        guard.name === call.boundTo &&
+        guard.fn === call.fn &&
+        guard.returns.length > 0 &&
+        guard.returns.every((name) => name === call.boundTo),
+    );
+    if (!ownGuard) violations.push('result-returned');
     if (
-      !delegation.guards.some(
-        (guard) =>
-          guard.name === call.boundTo &&
-          guard.fn === call.fn &&
-          guard.returns.includes(call.boundTo),
+      delegation.writes.some(
+        (write) => write.name === call.boundTo && write.fn === call.fn,
       )
     ) {
-      violations.push('returned-under-own-guard');
+      violations.push('no-rebinding');
+    }
+    // Returning the bound name outside the guard swallows the fall-through:
+    // a non-block request would answer the decision instead of falling through.
+    if (
+      delegation.returns.some(
+        (ret) =>
+          ret.fn === call.fn &&
+          ret.names.has(call.boundTo) &&
+          !delegation.guardReturnPositions.has(ret.pos),
+      )
+    ) {
+      violations.push('fall-through-preserved');
     }
   }
-  // The only respond_in_schema answer construction is the decision's own; a
-  // sibling in a callback would answer non-block side queries with an allow.
-  if (
-    delegation.answerSites.length !== 1 ||
-    delegation.answerSites[0] !== 'loopClassifierResponse'
-  ) {
-    violations.push('single-answer-site');
+  if (delegation.loopAnswerSites.length > 0) {
+    violations.push('no-loop-answer-site');
+  }
+  if (delegation.loopHandBuilt.length > 0) {
+    violations.push('no-loop-hand-built');
   }
   return [...new Set(violations)];
 };
@@ -3933,119 +4082,236 @@ describe('managed-agent-server e2e runner', () => {
   // The delegation predicate is executed against hostile sources, so each of
   // its clauses is witnessed rather than assumed: on the committed runner every
   // clause is satisfied by both the strong and the weak form, so weakening one
-  // would otherwise stay green. Each shape below was measured to pass the
-  // weaker predicate it replaces.
+  // would otherwise stay green. Every hostile shape below was measured to pass
+  // the weaker predicate it replaces. The positive controls exist so the pin
+  // cannot price a behaviour-preserving rewrite as a defect; each was measured
+  // to redden under the predicate this one replaces, except the two
+  // property-key shapes, which redden under an intermediate form of the new
+  // fall-through clause. Shapes that are not valid TypeScript (a setter or
+  // constructor returning the delegated value) are deliberately absent.
   it('executes the delegation predicate against hostile wiring', () => {
     const decision = [
       "function classifierBlockAnswer(p) { return p && 'shouldBlock' in p ? { shouldBlock: false } : undefined; }",
       "function loopClassifierResponse(body, callId) { const t = (body.tools || []).find((x) => x?.function?.name === 'respond_in_schema'); const a = classifierBlockAnswer(t?.function?.parameters?.properties); if (a === undefined) return undefined; return { toolCalls: [fakeToolCall('respond_in_schema', a, callId)] }; }",
     ].join('\n');
-    const arm = (lines) =>
-      'fake = await startFakeOpenAIServer(({ body }) => {\n' + lines + '\n});';
+    // The arm flag is what separates the runner's three identically spelled
+    // fakes, so the fixtures carry it too.
+    const arm = (flag, lines) =>
+      'if (' +
+      flag +
+      ') {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+      lines +
+      '\n});\n}';
+    const skill = (lines) => arm('loopSkill', lines);
+    const fire = (lines) => arm('loopFire', lines);
     const delegates = (id) =>
       "const classified = loopClassifierResponse(body, '" +
       id +
       "');\nif (classified !== undefined) return classified;";
-    const good =
-      decision +
-      '\n' +
-      arm(delegates('loop-classifier')) +
-      '\n' +
-      arm(delegates('loop-fire-classifier'));
-    // Positive control: the committed shape is accepted.
+    const SKILL = delegates('loop-classifier');
+    const FIRE = delegates('loop-fire-classifier');
+    const bound =
+      "const classified = loopClassifierResponse(body, 'loop-classifier');";
+    const good = [decision, skill(SKILL), fire(FIRE)].join('\n');
+    const withSkill = (lines) =>
+      [decision, skill(lines), fire(FIRE)].join('\n');
+    const parked = (member) => withSkill('class K { ' + member + ' }\nvoid K;');
+    const memberReturn = (member) =>
+      withSkill(
+        bound +
+          '\nif (classified !== undefined) { class K { ' +
+          member +
+          ' } void K; }',
+      );
+    const answer = (element) =>
+      withSkill(
+        SKILL + "\nif (body['x']) return { toolCalls: [" + element + '] };',
+      );
+    // Baseline: the committed shape is accepted, so a clause below cannot be
+    // satisfied by a fixture that is broken for some unrelated reason.
     expect(delegationViolations(classifierDelegation(good))).toEqual([]);
     const cases = [
-      // Both delegations parked in one callback, the other arm silent.
-      [
-        'distinct-callbacks',
-        decision +
-          '\n' +
-          arm(
-            delegates('loop-classifier') +
-              '\n' +
-              delegates('loop-fire-classifier'),
-          ) +
-          '\n' +
-          arm(''),
-      ],
-      // Delegations left in a dead top-level helper: nothing is wired.
-      [
-        'in-fake-callback',
-        decision +
-          '\nfunction unused() {\n' +
-          delegates('loop-classifier') +
-          '\n' +
-          delegates('loop-fire-classifier') +
-          '\n}\n' +
-          arm('') +
-          '\n' +
-          arm(''),
-      ],
-      // A same-named return outside the guard's own branch.
-      [
-        'returned-under-own-guard',
-        decision +
-          '\n' +
-          arm(
-            "const classified = loopClassifierResponse(body, 'loop-classifier');\nif (classified !== undefined) { void classified; }\nreturn classified;",
-          ) +
-          '\n' +
-          arm(delegates('loop-fire-classifier')),
-      ],
-      // A closure inside the branch returns from the closure, not the callback.
-      [
-        'returned-under-own-guard',
-        decision +
-          '\n' +
-          arm(
-            "const classified = loopClassifierResponse(body, 'loop-classifier');\nif (classified !== undefined) { const emit = () => { return classified; }; void emit; }",
-          ) +
-          '\n' +
-          arm(delegates('loop-fire-classifier')),
-      ],
-      // The same-named guard and return live in the SIBLING callback.
-      [
-        'returned-under-own-guard',
-        decision +
-          '\n' +
-          arm(
-            "const classified = loopClassifierResponse(body, 'loop-classifier');",
-          ) +
-          '\n' +
-          arm(
-            delegates('loop-fire-classifier') +
-              '\nif (classified !== undefined) return classified;',
-          ),
-      ],
       // A non-literal call id cannot be attributed to an arm.
       [
         'call-ids',
-        decision +
-          '\n' +
-          arm(
-            'const classified = loopClassifierResponse(body, someId);\nif (classified !== undefined) return classified;',
-          ) +
-          '\n' +
-          arm(delegates('loop-fire-classifier')),
+        withSkill(
+          'const classified = loopClassifierResponse(body, someId);\nif (classified !== undefined) return classified;',
+        ),
       ],
-      // The result is never bound, so no guard can return it.
+      // Both arms passing one id leaves the two answers indistinguishable.
+      ['call-ids', [decision, skill(SKILL), fire(SKILL)].join('\n')],
+      // Both delegations served by ONE fake, the sibling arm's fake silent.
+      // The nested flag keeps the arm multiset intact so only the callback
+      // count is at stake.
       [
-        'result-bound',
-        decision +
-          '\n' +
-          arm("return loopClassifierResponse(body, 'loop-classifier');") +
-          '\n' +
-          arm(delegates('loop-fire-classifier')),
+        'distinct-callbacks',
+        [
+          decision,
+          skill(SKILL + '\nif (loopFire) {\n' + FIRE + '\n}'),
+          fire(''),
+        ].join('\n'),
+      ],
+      // Delegations left in dead top-level helpers: nothing is wired.
+      [
+        'arm-scoping',
+        [
+          decision,
+          'function unusedSkill() {\n' + SKILL + '\n}',
+          'function unusedFire() {\n' + FIRE + '\n}',
+          skill(''),
+          fire(''),
+        ].join('\n'),
+      ],
+      // The skill delegation parked in the durable failover fake, which has
+      // no arm flag: the skill arm itself answers nothing.
+      [
+        'arm-scoping',
+        [
+          decision,
+          'fake = await startFakeOpenAIServer(({ body }) => {\n' +
+            SKILL +
+            '\n});',
+          skill(''),
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // Both delegations inside the fire arm, each in its own callback.
+      [
+        'arm-scoping',
+        [
+          decision,
+          skill(''),
+          'if (loopFire) {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+            SKILL +
+            '\n});\nfake2 = await startFakeOpenAIServer(({ body }) => {\n' +
+            FIRE +
+            '\n});\n}',
+        ].join('\n'),
+      ],
+      // A delegation parked in a dead class member inside the callback: the
+      // member is a function boundary, so the callback never delegates.
+      ['arm-scoping', parked('m() { ' + SKILL + ' }')],
+      ['arm-scoping', parked('get m() { ' + SKILL + ' }')],
+      ['arm-scoping', parked('constructor() { ' + SKILL + ' }')],
+      // A fabricated body: the decision is fed a block schema of the arm's
+      // own making, so every structured side query gets an allow.
+      [
+        'argument-provenance',
+        withSkill(
+          "const classified = loopClassifierResponse({ tools: [{ function: { name: 'respond_in_schema', parameters: { properties: { shouldBlock: { type: 'boolean' } } } } }] }, 'loop-classifier');\nif (classified !== undefined) return classified;",
+        ),
+      ],
+      // Some other binding than the callback's own request body.
+      ['argument-provenance', withSkill(SKILL.replace('(body,', '(payload,'))],
+      // The result is neither bound nor returned.
+      [
+        'result-returned',
+        withSkill("loopClassifierResponse(body, 'loop-classifier');"),
+      ],
+      // The guard's branch returns a different binding.
+      [
+        'result-returned',
+        withSkill(bound + '\nif (classified !== undefined) return other;'),
+      ],
+      // A guard on another binding happens to return the bound name.
+      [
+        'result-returned',
+        withSkill(bound + '\nif (other !== undefined) return classified;'),
+      ],
+      // The branch can also return something other than the decision.
+      [
+        'result-returned',
+        withSkill(
+          bound +
+            '\nif (classified !== undefined) { if (flag) return other; return classified; }',
+        ),
+      ],
+      // A closure inside the branch returns from the closure, not the callback.
+      [
+        'result-returned',
+        withSkill(
+          bound +
+            '\nif (classified !== undefined) { const emit = () => { return classified; }; void emit; }',
+        ),
+      ],
+      // A class method or getter inside the branch likewise returns from
+      // itself; both shapes are valid TypeScript.
+      ['result-returned', memberReturn('m() { return classified; }')],
+      ['result-returned', memberReturn('get m() { return classified; }')],
+      // The same-named guard and return live in the SIBLING callback.
+      [
+        'result-returned',
+        [
+          decision,
+          skill(bound),
+          fire(FIRE + '\nif (classified !== undefined) return classified;'),
+        ].join('\n'),
+      ],
+      // A rebinding write between the binding and the guard.
+      [
+        'no-rebinding',
+        withSkill(
+          "let classified = loopClassifierResponse(body, 'loop-classifier');\nclassified = undefined;\nif (classified !== undefined) return classified;",
+        ),
+      ],
+      // The fall-through is swallowed: a non-block request answers the
+      // decision instead of reaching the arm's own fixtures. The binding need
+      // not be returned bare for that to happen.
+      [
+        'fall-through-preserved',
+        withSkill(SKILL + '\nvoid body;\nreturn classified;'),
+      ],
+      [
+        'fall-through-preserved',
+        withSkill(
+          SKILL + "\nvoid body;\nreturn classified ?? { content: 'fixture' };",
+        ),
+      ],
+      [
+        'fall-through-preserved',
+        withSkill(SKILL + '\nvoid body;\nreturn { ...classified };'),
+      ],
+      [
+        'fall-through-preserved',
+        withSkill(SKILL + '\nvoid body;\nreturn { classified };'),
       ],
       // A bypass sibling answers non-block side queries with an allow.
       [
-        'single-answer-site',
-        good +
-          '\n' +
-          arm(
-            delegates('loop-classifier') +
-              "\nif (Array.isArray(body['tools'])) return { toolCalls: [fakeToolCall('respond_in_schema', { shouldBlock: false }, 'loop-classifier')] };",
-          ),
+        'no-loop-answer-site',
+        answer(
+          "fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')",
+        ),
+      ],
+      // The same bypass hand-built, which no fakeToolCall count can see.
+      [
+        'no-loop-hand-built',
+        answer(
+          "{ id: 'x', type: 'function', function: { name: 'respond_in_schema', arguments: '{\"shouldBlock\":false}' } }",
+        ),
+      ],
+      // A toolCalls source that is not an inline array cannot be enumerated.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst forged = [{ id: 'x' }];\nif (body['x']) return { toolCalls: forged };",
+        ),
+      ],
+      // Shorthand form of the same non-inline source.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst toolCalls = [{ id: 'x' }];\nif (body['x']) return { toolCalls };",
+        ),
+      ],
+      // A computed tool name is as unattributable as a hand-built element.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst name = 'respond_in_schema';\nif (body['x']) return { toolCalls: [fakeToolCall(name, { shouldBlock: false }, 'x')] };",
+        ),
       ],
     ];
     for (const [clause, source] of cases) {
@@ -4053,6 +4319,84 @@ describe('managed-agent-server e2e runner', () => {
         delegationViolations(classifierDelegation(source)),
         clause,
       ).toContain(clause);
+    }
+    // Behaviour-preserving rewrites of the same wiring must stay green.
+    const equivalent = [
+      // The fire arm placed before the skill arm.
+      ['arm order', [decision, fire(FIRE), skill(SKILL)].join('\n')],
+      // The two ids exchanged between the arms; nothing else reads them.
+      ['ids exchanged', [decision, skill(FIRE), fire(SKILL)].join('\n')],
+      // The gate spelled as a nullish fallback on a returned call expression.
+      [
+        'nullish gate',
+        withSkill(
+          "return loopClassifierResponse(body, 'loop-classifier') ?? { content: 'fixture' };",
+        ),
+      ],
+      // The gate spelled as a direct return.
+      [
+        'direct return',
+        withSkill("return loopClassifierResponse(body, 'loop-classifier');"),
+      ],
+      // The gate spelled the other way round, returning from the else branch.
+      [
+        'else gate',
+        withSkill(
+          bound +
+            '\nif (classified === undefined) { void 0; } else { return classified; }',
+        ),
+      ],
+      // The decision itself spelled as an arrow const.
+      [
+        'arrow-const decision',
+        [
+          decision.replace(
+            'function loopClassifierResponse(body, callId) {',
+            'const loopClassifierResponse = (body, callId) => {',
+          ),
+          skill(SKILL),
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // A legitimate third fake answering a title side query outside the loop
+      // arms: the inventory is confined to the loop callbacks.
+      [
+        'third arm',
+        good +
+          '\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+          "return { toolCalls: [fakeToolCall('respond_in_schema', { title: 't' }, 'other-title')] };\n});",
+      ],
+      // A legitimate cron answer inside a loop arm: judged per element.
+      [
+        'cron answer',
+        withSkill(
+          SKILL +
+            "\nif (body['x']) return { toolCalls: [fakeToolCall('cron_list', {}, 'loop-cron-list')] };",
+        ),
+      ],
+      // A property key that happens to share the binding's name is not a read
+      // of it, so the fall-through clause is not the one that judges these.
+      [
+        'key named like the binding',
+        withSkill(SKILL + "\nvoid body;\nreturn { classified: 'fixture' };"),
+      ],
+      [
+        'property access named like the binding',
+        withSkill(SKILL + '\nvoid body;\nreturn { content: body.classified };'),
+      ],
+      // A write from a class member is not a rebinding of the callback's own
+      // binding: the member is a function boundary.
+      [
+        'member write',
+        withSkill(
+          "let classified = loopClassifierResponse(body, 'loop-classifier');\nclass K { set m(v) { classified = undefined; } }\nvoid K;\nif (classified !== undefined) return classified;",
+        ),
+      ],
+    ];
+    for (const [label, source] of equivalent) {
+      expect(delegationViolations(classifierDelegation(source)), label).toEqual(
+        [],
+      );
     }
   });
 
