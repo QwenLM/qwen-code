@@ -2729,6 +2729,47 @@ function classifierBlockAnswer(
   return answer;
 }
 
+// The whole classifier side-query decision for one arm: the schema lookup, the
+// narrowing, the gate and the answer site. Returns the fake response for a
+// block-schema side query, or undefined when the request is not one — the
+// caller then falls through to the rest of the fake. Both arms delegate here
+// with their own call id, so a fix cannot reach one arm and miss the other.
+// Kept a top-level pure declaration so the meta-test executes the decision
+// itself against hostile bodies rather than inventorying its shape: an additive
+// fallback, a fabricated schema, a dropped gate or a wrong call id each redden
+// a direction there, and no spelling of the same value can evade it.
+function loopClassifierResponse(
+  body: Record<string, unknown>,
+  callId: string,
+): { toolCalls: ReturnType<typeof fakeToolCall>[] } | undefined {
+  const tools = Array.isArray(body['tools']) ? body['tools'] : [];
+  const schemaTool = tools.find(
+    (tool) =>
+      (tool as { function?: { name?: string } } | null | undefined)?.function
+        ?.name === 'respond_in_schema',
+  ) as
+    | {
+        function?: {
+          parameters?: { properties?: Record<string, unknown> };
+        };
+      }
+    | undefined;
+  // The body is parsed JSON arriving over HTTP, so a malformed entry falls
+  // through instead of throwing: a null element would otherwise lose the allow
+  // for a block schema behind it, and a non-object `properties` would throw in
+  // the narrowing's `in` check.
+  const properties = schemaTool?.function?.parameters?.properties;
+  const blockAnswer = classifierBlockAnswer(
+    typeof properties === 'object' && properties !== null
+      ? properties
+      : undefined,
+  );
+  if (blockAnswer === undefined) return undefined;
+  return {
+    toolCalls: [fakeToolCall('respond_in_schema', blockAnswer, callId)],
+  };
+}
+
 // The minted schedule id printed by the create tool result, matched by
 // structured call id (not a substring of the delete fixture's own argument),
 // or undefined when no matching result exists. Returning undefined — never an
@@ -3065,31 +3106,11 @@ try {
       // query delivered as a respond_in_schema synthetic tool. Answer that
       // query with an allow so cron_create is admitted; without this the
       // classifier reports unavailable and cron_create is denied unreviewed.
-      const tools = Array.isArray(body['tools']) ? body['tools'] : [];
-      const schemaTool = tools.find(
-        (tool) =>
-          (tool as { function?: { name?: string } }).function?.name ===
-          'respond_in_schema',
-      ) as
-        | {
-            function?: {
-              parameters?: { properties?: Record<string, unknown> };
-            };
-          }
-        | undefined;
-      // Match the block schema, not the tool name (classifierBlockAnswer):
-      // other structured side queries (title, tool-use summary, next speaker)
-      // also emit respond_in_schema and must not be mis-answered with a
-      // schema-invalid allow.
-      const blockProperties = schemaTool?.function?.parameters?.properties;
-      const blockAnswer = classifierBlockAnswer(blockProperties);
-      if (blockAnswer !== undefined) {
-        return {
-          toolCalls: [
-            fakeToolCall('respond_in_schema', blockAnswer, 'loop-classifier'),
-          ],
-        };
-      }
+      // The whole decision — lookup, narrowing, gate, answer — lives in
+      // loopClassifierResponse, which the meta-test executes against hostile
+      // bodies. Only a block schema is answered; anything else falls through.
+      const classified = loopClassifierResponse(body, 'loop-classifier');
+      if (classified !== undefined) return classified;
       if (body['stream'] !== true) return { content: 'fixture' };
       const messages = Array.isArray(body['messages']) ? body['messages'] : [];
       // Confirm only when this turn's own cron call has a tool result in the
@@ -3163,32 +3184,10 @@ try {
     fake = await startFakeOpenAIServer(({ body }) => {
       // Same block-schema match as the skill arm: cron_create's arm-time
       // review arrives as a respond_in_schema side query, and only the block
-      // schema may be answered with an allow.
-      const tools = Array.isArray(body['tools']) ? body['tools'] : [];
-      const schemaTool = tools.find(
-        (tool) =>
-          (tool as { function?: { name?: string } }).function?.name ===
-          'respond_in_schema',
-      ) as
-        | {
-            function?: {
-              parameters?: { properties?: Record<string, unknown> };
-            };
-          }
-        | undefined;
-      const blockProperties = schemaTool?.function?.parameters?.properties;
-      const blockAnswer = classifierBlockAnswer(blockProperties);
-      if (blockAnswer !== undefined) {
-        return {
-          toolCalls: [
-            fakeToolCall(
-              'respond_in_schema',
-              blockAnswer,
-              'loop-fire-classifier',
-            ),
-          ],
-        };
-      }
+      // schema may be answered with an allow. One shared decision, this arm's
+      // own call id.
+      const classified = loopClassifierResponse(body, 'loop-fire-classifier');
+      if (classified !== undefined) return classified;
       if (body['stream'] !== true) return { content: 'fixture' };
       const messages = Array.isArray(body['messages']) ? body['messages'] : [];
       const hasToolResult = (callId: string) =>
