@@ -8,12 +8,6 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DaemonClient } from '../../src/daemon/DaemonClient.js';
 import { DaemonSessionClient } from '../../src/daemon/DaemonSessionClient.js';
 
-vi.mock('../../src/daemon/DaemonClient.js', () => ({
-  isNonBlockingAccepted: vi.fn(),
-  matchTurnEvent: vi.fn(),
-  normalizePendingPromptLimit: vi.fn((value: number) => value),
-}));
-
 describe('DaemonSessionClient event subscription cleanup', () => {
   it.each([
     'unstarted return',
