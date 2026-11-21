@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.nio.file.attribute.UserPrincipal;
+import java.nio.file.attribute.UserPrincipalNotFoundException;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -378,7 +379,7 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
         try {
             foreign = state.getFileSystem().getUserPrincipalLookupService()
                     .lookupPrincipalByName("nobody");
-        } catch (IOException absent) {
+        } catch (UserPrincipalNotFoundException absent) {
             foreign = null;
         }
         assumeTrue(foreign != null, "nobody is resolvable");
@@ -468,7 +469,7 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
         try {
             foreign = state.getFileSystem().getUserPrincipalLookupService()
                     .lookupPrincipalByName("nobody");
-        } catch (IOException absent) {
+        } catch (UserPrincipalNotFoundException absent) {
             foreign = null;
         }
         assumeTrue(foreign != null, "nobody is resolvable");
