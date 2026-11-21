@@ -247,6 +247,34 @@ describe('useAssistantFeedback through the answer footer', () => {
     }
   });
 
+  it('does not restore a clear after another write refills the session cap', () => {
+    const stored: AssistantFeedbackStore = {};
+    for (let index = 0; index < MAX_ASSISTANT_FEEDBACK_SESSIONS - 1; index++) {
+      stored[`session-${index}`] = { 'turn-1': 'up' };
+    }
+    stored['shared-session'] = { 'turn-a': 'up' };
+    writeAssistantFeedbackStore(stored);
+    mountPair('shared-session', 'shared-session');
+    try {
+      rateInPane('first', 'Satisfied');
+      writeAssistantFeedbackStore({
+        ...readAssistantFeedbackStore(),
+        'session-third': { 'turn-c': 'up' },
+      });
+      expect(Object.keys(readAssistantFeedbackStore())).toHaveLength(
+        MAX_ASSISTANT_FEEDBACK_SESSIONS,
+      );
+
+      rateInPane('second', 'Not satisfied');
+
+      expect(readAssistantFeedbackStore()['shared-session']).toEqual({
+        'turn-b': 'down',
+      });
+    } finally {
+      unmount();
+    }
+  });
+
   it("retries local edits after storage becomes writable without losing another pane's changes", () => {
     mountPair('session-a', 'session-a');
     try {
@@ -280,6 +308,37 @@ describe('useAssistantFeedback through the answer footer', () => {
           'turn-b': 'down',
           'turn-c': 'down',
         },
+      });
+    } finally {
+      unmount();
+    }
+  });
+
+  it('adopts the persisted store after a successful write', () => {
+    writeAssistantFeedbackStore({ 'session-0': { 'turn-a': 'up' } });
+    mount('session-0', undefined, 'turn-a');
+    try {
+      expect(isLit('Satisfied')).toBe(true);
+      writeAssistantFeedbackStore({});
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <Transcript sessionId="session-0" turnId="turn-b" />
+          </I18nProvider>,
+        );
+      });
+      act(() => button('Not satisfied')?.click());
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <Transcript sessionId="session-0" turnId="turn-a" />
+          </I18nProvider>,
+        );
+      });
+
+      expect(isLit('Satisfied')).toBe(false);
+      expect(readAssistantFeedbackStore()).toEqual({
+        'session-0': { 'turn-b': 'down' },
       });
     } finally {
       unmount();

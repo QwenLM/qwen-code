@@ -69,6 +69,13 @@ export const ASSISTANT_FEEDBACK_STORAGE_KEY =
 /** Sessions kept in storage; the rest age out oldest-first. */
 export const MAX_ASSISTANT_FEEDBACK_SESSIONS = 10;
 
+const prunedSessions = new Set<string>();
+
+/** Whether a successful write evicted this session at the storage cap. */
+export function wasAssistantFeedbackSessionPruned(sessionId: string): boolean {
+  return prunedSessions.has(sessionId);
+}
+
 /** Characters of the turn's prompt forwarded to the host. */
 export const FEEDBACK_USER_MESSAGE_MAX_CHARS = 100;
 
@@ -158,7 +165,10 @@ export function readAssistantFeedbackStore(): AssistantFeedbackStore {
   let parsed: unknown;
   try {
     const raw = window.localStorage.getItem(ASSISTANT_FEEDBACK_STORAGE_KEY);
-    if (!raw) return {};
+    if (!raw) {
+      prunedSessions.clear();
+      return {};
+    }
     parsed = JSON.parse(raw);
   } catch {
     // localStorage can be unavailable in private or embedded contexts, and the
@@ -194,11 +204,20 @@ export function writeAssistantFeedbackStore(
   store: AssistantFeedbackStore,
 ): boolean {
   if (typeof window === 'undefined') return false;
+  const previous = readAssistantFeedbackStore();
+  const kept = keepMostRecentSessions(store);
   try {
     window.localStorage.setItem(
       ASSISTANT_FEEDBACK_STORAGE_KEY,
-      JSON.stringify({ v: STORAGE_VERSION, ...keepMostRecentSessions(store) }),
+      JSON.stringify({ v: STORAGE_VERSION, ...kept }),
     );
+    for (const sessionId of Object.keys(previous)) {
+      if (!store[sessionId]) prunedSessions.delete(sessionId);
+    }
+    for (const sessionId of Object.keys(store)) {
+      if (kept[sessionId]) prunedSessions.delete(sessionId);
+      else prunedSessions.add(sessionId);
+    }
     return true;
   } catch (error) {
     // A full or disabled localStorage must not break the click that just

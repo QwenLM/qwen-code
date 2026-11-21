@@ -1,8 +1,8 @@
 import { useCallback, useRef, useState } from 'react';
 import {
-  MAX_ASSISTANT_FEEDBACK_SESSIONS,
   readAssistantFeedbackStore,
   setAssistantFeedbackRating,
+  wasAssistantFeedbackSessionPruned,
   writeAssistantFeedbackStore,
   type AssistantFeedbackRating,
   type AssistantFeedbackStore,
@@ -46,6 +46,7 @@ export function useAssistantFeedback(
   const rate = useCallback(
     (turnId: string, rating: AssistantFeedbackRating | null) => {
       if (!sessionId || !turnId) return;
+      const own = storeRef.current[sessionId];
       setStore((current) =>
         setAssistantFeedbackRating(current, sessionId, turnId, rating),
       );
@@ -53,14 +54,13 @@ export function useAssistantFeedback(
         (change) => change.sessionId !== sessionId || change.turnId !== turnId,
       );
       pendingChanges.current.push({ sessionId, turnId, rating });
-      // Rebase only this pane's edits on the latest saved marks. A mounted
-      // pane's full snapshot may predate another pane's additions or removals.
+      // Replay this pane's uncommitted edits on the latest storage. Restore
+      // its snapshot only when a successful write actually pruned the session.
       let next = readAssistantFeedbackStore();
-      const own = storeRef.current[sessionId];
       if (
         own &&
         !next[sessionId] &&
-        Object.keys(next).length >= MAX_ASSISTANT_FEEDBACK_SESSIONS
+        wasAssistantFeedbackSessionPruned(sessionId)
       ) {
         next = { ...next, [sessionId]: { ...own } };
       }
@@ -72,7 +72,10 @@ export function useAssistantFeedback(
           change.rating,
         );
       }
-      if (writeAssistantFeedbackStore(next)) pendingChanges.current = [];
+      if (writeAssistantFeedbackStore(next)) {
+        pendingChanges.current = [];
+        setStore(next);
+      }
     },
     [sessionId],
   );
