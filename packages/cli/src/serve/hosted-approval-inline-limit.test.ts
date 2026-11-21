@@ -225,7 +225,7 @@ it.each([
       const options = JSON.parse(
         (await session.resources.read(action.optionsRef!)).toString(),
       );
-      expect(options.v).toBe(padding === 62_000 ? 3 : 2);
+      expect(options.v).toBe(3);
       if (padding === 63_500)
         expect(options).not.toHaveProperty('continuationRef');
       expect(

@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { AUTONOMOUS_SENTINEL_DYNAMIC } from './autonomous-loop.js';
+import { LOOP_SENTINEL_DYNAMIC } from './loop-tick-resolver.js';
+
 /**
  * Derives the Managed `/loop` skill (description + body) from the bundled local
  * SKILL.md. The Managed variant differs from the local skill in three ways:
@@ -28,8 +31,13 @@
  * See docs/design/2026-11-14-managed-loop-skill-asset.md.
  */
 
+/** The creator surfaces a Managed profile declares — the single source the
+ * parity tests iterate, so an added or removed profile cannot drift across
+ * hand-kept lists. */
+export const MANAGED_LOOP_PROFILES = ['union', 'cron', 'wakeup'] as const;
+
 /** The creator surface a Managed profile declares. */
-export type ManagedLoopProfile = 'union' | 'cron' | 'wakeup';
+export type ManagedLoopProfile = (typeof MANAGED_LOOP_PROFILES)[number];
 
 export interface ManagedLoopSkill {
   description: string;
@@ -106,11 +114,14 @@ function managedFixedInterval(section: string): string {
     'that it runs until cancelled (a Managed schedule does not expire), and that they can cancel with CronDelete (include the job ID).',
   );
   // Managed cron_create defaults the timezone to UTC; "midnight local" is wrong
-  // unless the model passes the user's IANA zone.
+  // unless the model passes the user's IANA zone. `0 0 */N * *` is a
+  // day-of-month step (days 1, 1+N, … resetting at each month start), not a
+  // rolling N-day cadence — the source table and its caveat say so, and the
+  // managed wording keeps that accurate.
   out = sub(
     out,
-    '| `Nd`               | `0 0 */N * *`          | every N days at midnight local            |',
-    "| `Nd`               | `0 0 */N * *`          | every N days at midnight UTC (pass the user's IANA `timezone` for local midnight) |",
+    '| `Nd`               | `0 0 */N * *`          | midnight local on days 1, 1+N, … of each month |',
+    "| `Nd`               | `0 0 */N * *`          | midnight UTC on days 1, 1+N, … of each month (pass the user's IANA `timezone` for local midnight) |",
   );
   return out;
 }
@@ -409,14 +420,42 @@ export function buildManagedLoopSkill(
       'Managed loop body still claims the workspace project file.',
     );
   }
-  // Cron fires expand no sentinel at all; the union and wakeup bodies may keep
-  // only the wakeup-expanded -dynamic forms.
-  const sentinel =
-    profile === 'cron' ? /<<[^>]+>>/ : /<<loop\.md>>|<<autonomous-loop>>/;
-  if (sentinel.test(body)) {
-    throw new Error(
-      `Managed ${profile} loop body teaches a non-expanding sentinel.`,
-    );
-  }
+  assertSentinelsExpanded(body, profile);
   return { description, body };
+}
+
+/** The only sentinels a Managed body may teach: the wakeup-expanded -dynamic
+ * forms, taken from the runtime constants that actually expand them so "what
+ * expands" has a single source — a runtime rename reddens the parity build
+ * here rather than silently whitelisting a token nothing expands. An
+ * allow-list, not a deny-list of known non-expanding forms, so a newly added
+ * sentinel ships red instead of slipping through. Cron fires expand no
+ * sentinel at all. Kept a top-level pure declaration so the parity test can
+ * execute it against a hostile body. */
+const EXPANDING_SENTINELS: ReadonlySet<string> = new Set([
+  LOOP_SENTINEL_DYNAMIC,
+  AUTONOMOUS_SENTINEL_DYNAMIC,
+]);
+
+export function assertSentinelsExpanded(
+  body: string,
+  profile: ManagedLoopProfile,
+): void {
+  for (const sentinel of body.match(/<<[^>]+>>/g) ?? []) {
+    // Report only what the guard established. Cron fires expand no sentinel at
+    // all, so any sentinel is wrong there. For the other profiles the fact is
+    // membership, not expansion: an unknown sentinel may well expand
+    // somewhere, and calling it "non-expanding" would assert something this
+    // allow-list never checked.
+    if (profile === 'cron') {
+      throw new Error(
+        `Managed cron loop body teaches a sentinel, but cron fires expand none: ${sentinel}.`,
+      );
+    }
+    if (!EXPANDING_SENTINELS.has(sentinel)) {
+      throw new Error(
+        `Managed ${profile} loop body teaches a sentinel outside the expanding allow-list: ${sentinel}.`,
+      );
+    }
+  }
 }

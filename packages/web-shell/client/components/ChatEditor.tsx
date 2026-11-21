@@ -1130,6 +1130,12 @@ function ToolbarPopover({
       )}
     </div>
   );
+  // iOS zooms the page when a focused field is under 16px. The sheet also
+  // opens on landscape tablets, which still match the Input's md: shrink to
+  // text-sm, so the touch field holds text-base at every breakpoint. The
+  // sheet doubles as the popover in narrow desktop windows, where a mouse
+  // wants the compact field and its spell-check, so gate on the pointer too.
+  const touchSearchField = mobileSheet && isCoarsePointerDevice();
   const searchInput = searchable ? (
     <Input
       ref={searchInputRef}
@@ -1138,6 +1144,11 @@ function ToolbarPopover({
       aria-label={searchLabel}
       placeholder={searchLabel}
       autoComplete="off"
+      className={touchSearchField ? 'h-11 text-base md:text-base' : undefined}
+      autoCapitalize={touchSearchField ? 'off' : undefined}
+      autoCorrect={touchSearchField ? 'off' : undefined}
+      spellCheck={touchSearchField ? false : undefined}
+      enterKeyHint={touchSearchField ? 'search' : undefined}
       onChange={(event) => setSearchQuery(event.target.value)}
       onKeyDown={(event) => {
         if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
@@ -1496,7 +1507,7 @@ function ModelReasoningControls({
       <div className={styles.reasoningSectionTitle}>
         {t('reasoning.options')}
       </div>
-      <div className={styles.reasoningThinkingRow}>
+      <div className={styles.reasoningThinkingRow} data-web-shell-thinking-row>
         <span>{t('reasoning.thinking')}</span>
         <Switch
           checked={reasoning.enabled}
@@ -2009,6 +2020,7 @@ export const ChatEditor = memo(
       fileUploadDirectory,
       fileDropAction,
       composerVariant = 'default',
+      composerGlowEnabled = true,
       modelPicker,
     } = useWebShellCustomization();
     const [advancedMode, setAdvancedMode] = useState(false);
@@ -2784,16 +2796,13 @@ export const ChatEditor = memo(
       };
     }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
 
-    // editorViewRef is stable for the component's lifetime, so this effect
-    // runs once and the glow stays attached to the initial contentDOM; it
-    // re-attaches only if the view ref itself is replaced (CodeMirror
-    // recreates contentDOM on view swap, which is uncommon).
     useEffect(() => {
+      if (!composerGlowEnabled) return undefined;
       const glowRoot = containerRef.current;
       const inputEl = editorViewRef.current?.contentDOM;
       if (!glowRoot || !inputEl) return undefined;
       return attachComposerGlow(glowRoot, inputEl);
-    }, [editorViewRef]);
+    }, [composerGlowEnabled, editorViewRef]);
 
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -4406,10 +4415,8 @@ export const ChatEditor = memo(
           onDragOver={handleUploadDragOver}
           onDragLeave={handleUploadDragLeave}
           onDropCapture={handleUploadDrop}
-          // Legacy marker from the pre-#8098 glow implementation; no CSS or
-          // script consumes it today, kept as-is to stay faithful to the
-          // restored original.
-          data-dac-glow
+          // Preserve the legacy marker for composers with the glow enabled.
+          data-dac-glow={composerGlowEnabled || undefined}
           onClick={(event) => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -4421,8 +4428,12 @@ export const ChatEditor = memo(
             core.focus();
           }}
         >
-          <div className={styles.dacAura} aria-hidden="true" />
-          <div className={styles.dacHalo} aria-hidden="true" />
+          {composerGlowEnabled && (
+            <>
+              <div className={styles.dacAura} aria-hidden="true" />
+              <div className={styles.dacHalo} aria-hidden="true" />
+            </>
+          )}
           {uploadEnabled && (
             <input
               ref={fileInputRef}

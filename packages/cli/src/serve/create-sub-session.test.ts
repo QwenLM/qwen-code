@@ -13,6 +13,7 @@ import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
   type AcpSessionBridge,
+  type BridgeSessionExecutionSnapshot,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   SessionOrganizationService,
@@ -28,6 +29,7 @@ import {
   sessionTitleSidecarPath,
   writeSessionTitleSidecar,
 } from '@qwen-code/qwen-code-core/services/session-title-sidecar.js';
+import * as worktreeSessionService from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
@@ -114,6 +116,7 @@ function makeFakeBridge(opts?: {
   beforeModeChange?: () => Promise<void>;
   beforeQueuedDispatch?: () => Promise<void>;
   beforePromptDispatch?: () => void;
+  sessionExecution?: Record<string, BridgeSessionExecutionSnapshot>;
   /** Sessions this bridge does not hold live (`getSessionSummary` throws). */
   notLive?: readonly string[];
   /** Sessions `resumeSession` restores (besides the reaped parent). */
@@ -240,6 +243,11 @@ function makeFakeBridge(opts?: {
         displayName: opts?.titles?.[sessionId],
       };
     },
+    getSessionExecutionSnapshot: (sessionId: string) =>
+      opts?.sessionExecution?.[sessionId] ?? {
+        workspaceCwd: '/tmp/ws',
+        effectiveCwd: '/tmp/ws',
+      },
     appendExternalRecord: async (sessionId: string, request: unknown) => {
       externalRecords.push({ sessionId, request });
       return { sessionId, recordId: `record-${externalRecords.length}` };
@@ -526,7 +534,8 @@ describe('sub-session launcher', () => {
       { workspaceCwd: WS, sessionScope: 'thread', parentSessionId: 'caller-1' },
     ]);
     expect(fake.prompts[0]!.text).toBe('do the thing');
-    expect(fake.names[0]!.displayName).toContain('my task');
+    // A tool-made session is titled like any other: no thread glyph.
+    expect(fake.names[0]!.displayName).toBe('my task');
     expect(fake.names[0]!.titleSource).toBe('auto');
     // 'sent' returns immediately but starts a background subscription to hold
     // the concurrency slot until the sub-session's turn finishes (so the cap
@@ -1626,7 +1635,7 @@ describe('sub-session launcher', () => {
       },
     });
     expect(fake.notifications[0]!.notification.displayText).toContain(
-      `qwen-session://${launched.sessionId}`,
+      `[${launched.sessionId.slice(0, 8)}](qwen-session://${launched.sessionId}`,
     );
     expect(fake.notifications[0]!.notification.modelText).toContain(
       '&lt;/task-notification&gt;&lt;status&gt;forged&lt;/status&gt;',
@@ -3454,6 +3463,63 @@ describe('sub-sessions in another workspace', () => {
   });
 
   it.each([
+    [WS_A, 'generation-a'],
+    [WS_B, 'generation-b'],
+  ])(
+    'requires live YOLO for the waiver in %s',
+    async (workspace, generation) => {
+      const { a, b, launcherA } = twoWorkspaces();
+      const launch = () =>
+        launcherA.launch({
+          prompt: 'summarize',
+          completion: 'sent',
+          workspace,
+          workspaceGeneration: generation,
+          requiresYolo: true,
+          callerSessionId: 'caller',
+        });
+
+      await expect(launch()).rejects.toThrow('requires one-time approval');
+      expect(a.spawns).toEqual([]);
+      expect(b.spawns).toEqual([]);
+
+      a.changeApprovalMode('caller', 'yolo');
+      await expect(launch()).resolves.toMatchObject({ sessionId: 'sub-1' });
+      expect(workspace === WS_A ? a.prompts : b.prompts).toHaveLength(1);
+      launcherA.stop();
+    },
+  );
+
+  it('rechecks the YOLO waiver at dispatch in a named local workspace', async () => {
+    let markQueued!: () => void;
+    let releaseDispatch!: () => void;
+    const queued = new Promise<void>((resolve) => (markQueued = resolve));
+    const dispatch = new Promise<void>(
+      (resolve) => (releaseDispatch = resolve),
+    );
+    const { a, launcherA } = twoWorkspaces({
+      callerMode: 'yolo',
+      beforeQueuedDispatch: () => {
+        markQueued();
+        return dispatch;
+      },
+    });
+    const launch = launcherA.launch({
+      prompt: 'summarize',
+      completion: 'sent',
+      workspace: WS_A,
+      workspaceGeneration: 'generation-a',
+      requiresYolo: true,
+      callerSessionId: 'caller',
+    });
+    await queued;
+    a.changeApprovalMode('caller', 'default');
+    releaseDispatch();
+    await expect(launch).rejects.toThrow('approval mode changed');
+    expect(a.prompts).toEqual([]);
+  });
+
+  it.each([
     [
       'an unknown workspace',
       {},
@@ -3739,17 +3805,19 @@ describe('following up a sub-session', () => {
   function ownChild(opts?: {
     parent?: string;
     sourceTypes?: Record<string, string>;
-    sourceIds?: Record<string, string>;
+    approvalModes?: Record<string, string>;
     sendPromptRejects?: string;
     canAcceptBackgroundNotifications?: boolean;
     events?: (promptId: string) => FakeEvent[];
   }) {
     const fake = makeFakeBridge({
       restoredCallerParents: { kid: opts?.parent ?? 'caller' },
-      approvalModes: { caller: 'default', kid: 'yolo' },
+      approvalModes: opts?.approvalModes ?? {
+        caller: 'default',
+        kid: 'default',
+      },
       resumable: ['kid'],
       ...(opts?.sourceTypes ? { callerSourceTypes: opts.sourceTypes } : {}),
-      ...(opts?.sourceIds ? { sourceIds: opts.sourceIds } : {}),
       ...(opts?.sendPromptRejects
         ? { sendPromptRejects: opts.sendPromptRejects, blockAfterEvents: true }
         : {}),
@@ -3797,7 +3865,11 @@ describe('following up a sub-session', () => {
       }),
     ]);
     expect(fake.prompts).toEqual([
-      expect.objectContaining({ sessionId: 'kid', text: 'and now?' }),
+      expect.objectContaining({
+        sessionId: 'kid',
+        text: 'and now?',
+        expectedApprovalMode: 'default',
+      }),
     ]);
     // Same workspace: the session keeps its own mode, as a new local
     // sub-session does.
@@ -3850,6 +3922,7 @@ describe('following up a sub-session', () => {
       const fake = makeFakeBridge({
         notLive: [sessionId],
         resumable: [sessionId],
+        defaultMode: 'default',
         events: (pid) => [chunkFor(pid, 'ok'), turnComplete(pid)],
       });
       const launcher = createSubSessionLauncher({
@@ -3869,14 +3942,245 @@ describe('following up a sub-session', () => {
     }
   });
 
-  it("a person's send may name any session but the caller", async () => {
+  it.each([
+    {
+      state: 'valid' as const,
+      session: {
+        slug: 'my-task',
+        worktreePath: `${WS}/.qwen/worktrees/my-task`,
+        worktreeBranch: 'worktree-my-task',
+        originalCwd: WS,
+        originalBranch: 'main',
+        originalHeadCommit: 'abc123',
+      },
+    },
+    { state: 'invalid' as const, reason: 'invalid sidecar JSON' },
+  ])(
+    'refuses a cold worktree target with a $state sidecar before restoring',
+    async (sidecar) => {
+      const sessionId = 'abcdef00-0000-4000-8000-000000000001';
+      const storedId = sessionId.toUpperCase();
+      const resolve = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockResolvedValue(storedId);
+      const read = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+        .mockResolvedValue({});
+      const readWorktree = vi
+        .spyOn(worktreeSessionService, 'readWorktreeSessionStrict')
+        .mockResolvedValue(sidecar);
+      try {
+        const fake = makeFakeBridge({
+          notLive: [sessionId],
+          resumable: [sessionId],
+          defaultMode: 'default',
+          events: (pid) => [chunkFor(pid, 'ok'), turnComplete(pid)],
+        });
+        const launcher = createSubSessionLauncher({
+          getBridge: () => fake.bridge,
+          boundWorkspace: WS,
+          getArchiveCoordinator,
+        });
+        await expect(
+          followUp(launcher, 'first-turn', sessionId),
+        ).rejects.toThrow(
+          'Open the destination worktree session before sending a follow-up',
+        );
+        expect(readWorktree).toHaveBeenCalledWith(
+          new SessionService(WS).getWorktreeSessionPath(storedId),
+        );
+        expect(fake.resumes).toEqual([]);
+        expect(fake.prompts).toEqual([]);
+      } finally {
+        readWorktree.mockRestore();
+        read.mockRestore();
+        resolve.mockRestore();
+      }
+    },
+  );
+
+  describe('worktree targets', () => {
+    async function worktreeTarget(queued?: Promise<void>) {
+      const root = await mkdtemp(path.join(tmpdir(), 'qwen-follow-up-'));
+      const workspaceCwd = path.join(root, 'workspace');
+      const worktreePath = path.join(
+        workspaceCwd,
+        '.qwen',
+        'worktrees',
+        'task',
+      );
+      const nestedCwd = path.join(worktreePath, 'src');
+      const runtimeBaseDir = path.join(root, 'runtime');
+      await mkdir(nestedCwd, { recursive: true });
+      const worktree = { slug: 'task', path: worktreePath, branch: 'task' };
+      const execution: BridgeSessionExecutionSnapshot = {
+        workspaceCwd,
+        effectiveCwd: workspaceCwd,
+      };
+      const writeSidecar = () =>
+        worktreeSessionService.writeWorktreeSession(
+          new SessionService(workspaceCwd, {
+            runtimeBaseDir,
+          }).getWorktreeSessionPath('kid'),
+          {
+            slug: 'task',
+            worktreePath,
+            worktreeBranch: 'task',
+            originalCwd: workspaceCwd,
+            originalBranch: 'main',
+            originalHeadCommit: 'abc123',
+          },
+        );
+      const fake = makeFakeBridge({
+        resumable: ['kid'],
+        defaultMode: 'default',
+        sessionExecution: { kid: execution },
+        ...(queued
+          ? { beforeQueuedDispatch: () => queued, blockAfterEvents: true }
+          : { events: (pid) => [chunkFor(pid, 'ok'), turnComplete(pid)] }),
+      });
+      const launcher = createSubSessionLauncher({
+        getBridge: () => fake.bridge,
+        boundWorkspace: workspaceCwd,
+        runtimeBaseDir,
+        getArchiveCoordinator,
+      });
+      return {
+        execution,
+        fake,
+        launcher,
+        nestedCwd,
+        worktree,
+        writeSidecar,
+        cleanup: () => rm(root, { recursive: true, force: true }),
+      };
+    }
+
+    it.each(['live metadata', 'legacy sidecar'])(
+      'requires a restored cwd for a live target identified by %s',
+      async (source) => {
+        const target = await worktreeTarget();
+        try {
+          if (source === 'live metadata') {
+            target.execution.worktree = target.worktree;
+          } else {
+            await target.writeSidecar();
+          }
+          const message = 'has not restored its worktree directory';
+          await expect(followUp(target.launcher)).rejects.toThrow(message);
+          await expect(
+            target.launcher.launchForPerson({
+              callerSessionId: 'caller',
+              sessionId: 'kid',
+              prompt: 'and now?',
+            }),
+          ).rejects.toThrow(message);
+          expect(target.fake.resumes).toEqual([]);
+          expect(target.fake.prompts).toEqual([]);
+
+          target.execution.effectiveCwd = target.nestedCwd;
+          await expect(followUp(target.launcher)).resolves.toMatchObject({
+            sessionId: 'kid',
+            result: 'ok',
+          });
+          expect(target.fake.prompts).toHaveLength(1);
+        } finally {
+          await target.cleanup();
+        }
+      },
+    );
+
+    it.each(['changes cwd', 'creates a sidecar'])(
+      'fails a queued follow-up if the preceding turn %s',
+      async (change) => {
+        let releaseQueue!: () => void;
+        const queue = new Promise<void>((resolve) => (releaseQueue = resolve));
+        const target = await worktreeTarget(queue);
+        try {
+          if (change === 'changes cwd') {
+            target.execution.worktree = target.worktree;
+            target.execution.effectiveCwd = target.nestedCwd;
+          }
+          await expect(
+            followUp(target.launcher, 'sent'),
+          ).resolves.toMatchObject({
+            sessionId: 'kid',
+          });
+          expect(target.fake.prompts).toEqual([]);
+          if (change === 'changes cwd') {
+            target.execution.effectiveCwd = target.execution.workspaceCwd;
+            delete target.execution.worktree;
+          } else {
+            await target.writeSidecar();
+          }
+          releaseQueue();
+          await vi.waitFor(() =>
+            expect(target.fake.notifications).toHaveLength(1),
+          );
+          expect(target.fake.notifications[0]!.notification.status).toBe(
+            'failed',
+          );
+          expect(
+            target.fake.notifications[0]!.notification.modelText,
+          ).toContain(
+            change === 'changes cwd'
+              ? 'has not restored its worktree directory'
+              : 'The destination worktree changed',
+          );
+          expect(target.fake.prompts).toEqual([]);
+        } finally {
+          releaseQueue();
+          await target.cleanup();
+        }
+      },
+    );
+  });
+
+  it('the tool may follow up a session another session started', async () => {
     const { fake, launcher } = ownChild({
       parent: 'someone-else',
       sourceTypes: { kid: 'side_task' },
     });
-    await expect(followUp(launcher)).rejects.toThrow(
-      'is not a sub-session this session created',
+    await expect(followUp(launcher)).resolves.toMatchObject({
+      sessionId: 'kid',
+      result: 'follow-up answer',
+    });
+    // The session keeps its own lineage and its own mode.
+    expect(fake.resumes).toEqual([
+      expect.objectContaining({
+        sessionId: 'kid',
+        parentSessionId: 'someone-else',
+        sourceType: 'side_task',
+      }),
+    ]);
+    expect(fake.modeChanges).toEqual([]);
+    await expect(followUp(launcher, 'first-turn', 'caller')).rejects.toThrow(
+      'A session cannot send a message to itself.',
     );
+    expect(fake.resumes).toHaveLength(1);
+  });
+
+  it('refuses to prompt a less restrictive session in the same workspace', async () => {
+    const { fake, launcher } = ownChild({
+      parent: 'someone-else',
+      approvalModes: { caller: 'auto-edit', kid: 'yolo' },
+    });
+    await expect(followUp(launcher)).rejects.toThrow(
+      'Follow-up requires a compatible approval mode',
+    );
+    expect(fake.prompts).toEqual([]);
+    expect(fake.modeChanges).toEqual([]);
+    expect(fake.detaches).toEqual([
+      { sessionId: 'kid', clientId: 'follow-up-1' },
+    ]);
+  });
+
+  it("a person's send may name any session but the caller", async () => {
+    const { fake, launcher } = ownChild({
+      parent: 'someone-else',
+      sourceTypes: { kid: 'side_task' },
+      approvalModes: { caller: 'default', kid: 'yolo' },
+    });
     const res = await launcher.launchForPerson({
       callerSessionId: 'caller',
       prompt: 'and now?',
@@ -3939,7 +4243,7 @@ describe('following up a sub-session', () => {
     );
     try {
       await expect(followUp(launcher, 'first-turn', sessionId)).rejects.toThrow(
-        'is not a sub-session this session created',
+        `No active session ${sessionId} in ${WS}. If it lives in another workspace, also pass that \`workspace\`.`,
       );
       expect(read).not.toHaveBeenCalled();
       expect(fake.resumes).toEqual([]);
@@ -3953,6 +4257,7 @@ describe('following up a sub-session', () => {
     const fake = makeFakeBridge({
       restoredCallerParents: { [sessionId]: 'caller' },
       resumable: [sessionId],
+      defaultMode: 'default',
       events: (pid) => [chunkFor(pid, 'ok'), turnComplete(pid)],
     });
     const launcher = createSubSessionLauncher({
@@ -3984,22 +4289,10 @@ describe('following up a sub-session', () => {
     });
   });
 
-  it.each([
-    ['another session', { parent: 'someone-else' }, 'kid'],
-    ['the caller itself', {}, 'caller'],
-    ['a side task', { sourceTypes: { kid: 'side_task' } }, 'kid'],
-    [
-      'a scheduled-task run',
-      {
-        sourceTypes: { kid: 'default' },
-        sourceIds: { kid: 'scheduled_task_run:task-1' },
-      },
-      'kid',
-    ],
-  ])('refuses %s, and touches nothing', async (_label, opts, sessionId) => {
-    const { fake, launcher } = ownChild(opts);
-    await expect(followUp(launcher, 'first-turn', sessionId)).rejects.toThrow(
-      'is not a sub-session this session created',
+  it('refuses the caller itself, and touches nothing', async () => {
+    const { fake, launcher } = ownChild();
+    await expect(followUp(launcher, 'first-turn', 'caller')).rejects.toThrow(
+      'A session cannot send a message to itself.',
     );
     expect(fake.resumes).toEqual([]);
     expect(fake.prompts).toEqual([]);
@@ -4028,7 +4321,7 @@ describe('following up a sub-session', () => {
   it('releases the client under the id the bridge resumed', async () => {
     const fake = makeFakeBridge({
       restoredCallerParents: { KID: 'caller' },
-      approvalModes: { caller: 'default' },
+      approvalModes: { caller: 'default', kid: 'default' },
       resumable: ['KID'],
       resumedAs: { KID: 'kid' },
       events: (pid) => [chunkFor(pid, 'ok'), turnComplete(pid)],
@@ -4088,11 +4381,6 @@ describe('following up a sub-session', () => {
     expect(b.detaches).toEqual([{ sessionId: 'kid', clientId: 'follow-up-1' }]);
   });
 
-  it('points at `workspace` when the session is not found here', async () => {
-    const { launcher } = ownChild({ parent: 'someone-else' });
-    await expect(followUp(launcher)).rejects.toThrow('also pass that');
-  });
-
   it('sent: returns once a follow-up is queued on a busy session in another workspace', async () => {
     let releaseQueue!: () => void;
     const queue = new Promise<void>((resolve) => (releaseQueue = resolve));
@@ -4146,34 +4434,36 @@ describe('following up a sub-session', () => {
     });
   });
 
-  it('sent: reports a queued follow-up that is refused when its turn comes', async () => {
-    let releaseQueue!: () => void;
-    const queue = new Promise<void>((resolve) => (releaseQueue = resolve));
-    const fake = makeFakeBridge({
-      restoredCallerParents: { kid: 'caller' },
-      approvalModes: { caller: 'default', kid: 'default' },
-      resumable: ['kid'],
-      beforeQueuedDispatch: () => queue,
-      beforePromptDispatch: () => {
-        throw new Error('The workspace target changed.');
-      },
-      blockAfterEvents: true,
-    });
-    const launcher = createSubSessionLauncher({
-      getBridge: () => fake.bridge,
-      boundWorkspace: WS,
-      getArchiveCoordinator,
-    });
-    await followUp(launcher, 'sent');
-    releaseQueue();
-    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
-    expect(fake.notifications[0]!.notification).toMatchObject({
-      status: 'failed',
-    });
-    expect(fake.notifications[0]!.notification.modelText).toContain(
-      'The workspace target changed.',
-    );
-  });
+  it.each(['caller', 'kid'])(
+    'sent: reports a queued follow-up as failed when the mode of %s changes',
+    async (sessionId) => {
+      let releaseQueue!: () => void;
+      const queue = new Promise<void>((resolve) => (releaseQueue = resolve));
+      const fake = makeFakeBridge({
+        restoredCallerParents: { kid: 'caller' },
+        approvalModes: { caller: 'default', kid: 'default' },
+        resumable: ['kid'],
+        beforeQueuedDispatch: () => queue,
+        blockAfterEvents: true,
+      });
+      const launcher = createSubSessionLauncher({
+        getBridge: () => fake.bridge,
+        boundWorkspace: WS,
+        getArchiveCoordinator,
+      });
+      await followUp(launcher, 'sent');
+      fake.changeApprovalMode(sessionId, 'yolo');
+      releaseQueue();
+      await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
+      expect(fake.notifications[0]!.notification).toMatchObject({
+        status: 'failed',
+      });
+      expect(fake.notifications[0]!.notification.modelText).toContain(
+        'approval mode changed',
+      );
+      expect(fake.prompts).toEqual([]);
+    },
+  );
 
   it('sent: an expired follow-up cannot dispatch after the previous turn', async () => {
     let releaseQueue!: () => void;
@@ -4182,6 +4472,7 @@ describe('following up a sub-session', () => {
     const fake = makeFakeBridge({
       restoredCallerParents: { kid: 'caller' },
       resumable: ['kid'],
+      defaultMode: 'default',
       beforeQueuedDispatch: () => queue,
       blockAfterEvents: true,
     });
@@ -4208,6 +4499,7 @@ describe('following up a sub-session', () => {
     const fake = makeFakeBridge({
       restoredCallerParents: { kid: 'caller' },
       resumable: ['kid'],
+      defaultMode: 'default',
       blockAfterEvents: true,
     });
     const sendPrompt = vi
@@ -4252,7 +4544,7 @@ describe('following up a sub-session', () => {
     { targetWorkspace: WS_B, sessionId: undefined },
     { targetWorkspace: WS_B, sessionId: 'kid' },
   ])(
-    'refuses a person’s send to a consensus workspace ($targetWorkspace, $sessionId)',
+    'refuses /send and tool follow-ups to a consensus workspace ($targetWorkspace, $sessionId)',
     async ({ targetWorkspace, sessionId }) => {
       const target = makeFakeBridge({
         permissionPolicy: 'consensus',
@@ -4290,6 +4582,22 @@ describe('following up a sub-session', () => {
           ...(sessionId !== undefined ? { sessionId } : {}),
         }),
       ).rejects.toThrow('Open or start the destination session');
+      if (sessionId !== undefined) {
+        await expect(
+          sourceLauncher.launch({
+            callerSessionId: 'caller',
+            prompt: 'summarize',
+            completion: 'first-turn',
+            sessionId,
+            ...(targetWorkspace !== undefined
+              ? {
+                  workspace: targetWorkspace,
+                  workspaceGeneration: 'generation-b',
+                }
+              : {}),
+          }),
+        ).rejects.toThrow('does not support tool follow-ups');
+      }
       expect(target.spawns).toEqual([]);
       expect(target.resumes).toEqual([]);
       expect(target.prompts).toEqual([]);
@@ -4301,7 +4609,6 @@ describe('following up a sub-session', () => {
   it('follows up a sub-session in another workspace under the delegated mode', async () => {
     const a = makeFakeBridge({ approvalModes: { caller: 'default' } });
     const b = makeFakeBridge({
-      permissionPolicy: 'consensus',
       restoredCallerParents: { kid: 'caller' },
       // Someone loosened the child since it was created.
       approvalModes: { kid: 'yolo' },

@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_154_703;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -148,24 +148,52 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_000;
 // to the warning and 1,671 to the ceiling. (A local build against the worktree's
 // own node_modules measures lower — 2,138,797 — but the lane's absolute number
 // is what these constants track.)
+//
+// The restart recovery inbox (#17677: panel copy and state strings across
+// three locales) measures 2,145,251 bytes on the merged 0c28638cc7 tree;
+// combined with the Generic Webhook copy the merged 9de5d9a311 tree measures
+// 2,147,405, 1,295 above the previous 2,146,100 ceiling. Main 3d75b8ee60
+// measures 2,147,740; adding the mid-batch failure notice brings the current
+// tree to 2,148,000. Merging the latest main and its transcript-reachable
+// additions raises the measurement to 2,148,696, so the warning sits 104
+// above that figure and the ceiling 904 above it. Workspace-lock scoping,
+// capped-result retry guidance, and stale-callback invalidation then add 220
+// bytes, bringing that tree to 2,148,976. This merge's artifact-library stub
+// registration adds 46 bytes, for 2,149,022 measured bytes. The warning sits
+// 713 above that measurement, while the existing ceiling retains 1,713 bytes.
+//
 // The workspace artifact library copy (nine keys across three locales) is
 // interactive-only: managed-artifact-library-messages.transcript-stub.ts
-// replaces it in transcript mode, so it contributes no bytes here. The merged
-// tree first measured 2,148,522 JS bytes with the copy inlined; registering
-// the stub brings it to 2,146,575 (CSS 2,423,645, separate), 46 above the
-// 2,146,529 lane measurement #17746 re-tracked. The forbidden-input guard
-// passes and the third-party input mix is unchanged, so the constants stay at
-// main's #17746 tracking instead of raising them for this PR.
+// replaces it in transcript mode, so it contributes no document bytes. Its
+// upstream branch measured 2,148,522 JS bytes with the copy inlined and
+// 2,146,575 with the stub (CSS 2,423,645, separate), 46 above the 2,146,529
+// lane measurement #17746 re-tracked. The forbidden-input guard passes and
+// the third-party input mix is unchanged. The merged branch's ceiling follows
+// the recovery-inbox measurements above, rather than lowering that branch's
+// budget or reserving space for interactive-only copy.
 //
-// This branch (#13766, transcript context diff) carries its own budget above
-// main: merged with main 3d75b8ee (head 93e2d416) the document renderer
-// measured 2,149,889 bytes in CI. The commits since that merge base
-// (3d75b8ee..250e91a238) add zero bytes to this renderer — the local worktree
-// build measures the same 2,142,853 before and after the merge, and none of
-// them touches the transcript dictionary — so the branch budget stays at the
-// 93e2d416 CI measurement: the warning sits 111 above it and the ceiling
-// 1,111 above it. Re-track when the merged tree's own CI measurement lands.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_151_000;
+// Main 73bdaa349c's declared workflow phases add 660 bytes. This tree
+// measures 2,149,682 bytes of renderer JS and 2,425,151 bytes of separate
+// CSS; the third-party input mix is unchanged and the forbidden-input guard
+// passes. The warning and ceiling retain 713- and 1,713-byte margins.
+// The merged catalog-loading tree measures 2,149,263 JS bytes, down 419,
+// with 2,425,802 bytes of separate CSS and the same third-party input mix.
+// The warning and ceiling keep 713 and 1,713 bytes above that measurement.
+//
+// A frozen-install build of a clean detached worktree at main 82a0f3031f71
+// measures 2,151,147 bytes of renderer JS on Node 22.22.2, 171 above the
+// previous ceiling. CI's Build unit-test tree (Linux, Node 22.x) measures
+// 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
+// 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
+// above the local measurement.
+// Merging main 2421ad2c3b into this context-diff branch (parent cb14101723),
+// including the CRLF verdict fix, measures 2,153,990 JS bytes with a frozen
+// lockfile install on Windows / Node 24.20.0 (CSS 2,426,376, separate). The
+// forbidden-input guard passes. The old cb14101723 Linux / Node 22.23.4 CI
+// measurement was already 2,151,544, above this branch's former 2,151,000 cap;
+// retaining an older tree's budget therefore failed the merged build. Track
+// this merged measurement with main's 713- and 1,713-byte margins instead.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_155_703;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

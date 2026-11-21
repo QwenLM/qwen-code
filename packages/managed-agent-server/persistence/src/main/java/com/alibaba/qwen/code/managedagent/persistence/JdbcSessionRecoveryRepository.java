@@ -17,7 +17,7 @@ public class JdbcSessionRecoveryRepository implements SessionRecoveryRepository 
     public List<HeadRecovery> heads(String tenantId, String sessionId) {
         return jdbc.query("SELECT recovery_status, recovery_detail_code, state,"
                         + " activation_phase, activation_head_revision, journal_revision,"
-                        + " is_wake_pending, wake_head_revision"
+                        + " is_wake_pending, wake_head_revision, wake_seal_revision"
                         + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?"
                         + " AND head_kind = 'MANAGED_SESSION'",
                 (row, index) -> new HeadRecovery(row.getString("recovery_status"),
@@ -27,7 +27,8 @@ public class JdbcSessionRecoveryRepository implements SessionRecoveryRepository 
                         row.getObject("activation_head_revision", Long.class),
                         row.getObject("journal_revision", Long.class),
                         row.getInt("is_wake_pending") != 0,
-                        row.getObject("wake_head_revision", Long.class)), tenantId, sessionId);
+                        row.getObject("wake_head_revision", Long.class),
+                        row.getObject("wake_seal_revision", Long.class)), tenantId, sessionId);
     }
 
     @Override
@@ -51,6 +52,15 @@ public class JdbcSessionRecoveryRepository implements SessionRecoveryRepository 
                         + " ON m.resource_key = r.resource_key WHERE r.session_scope_key = ?"
                         + " AND r.owner_kind = 'HOSTED_CLEANUP' AND m.state = 'REFERENCED')",
                 Boolean.class, tenantId, sessionId, scope, scope));
+    }
+
+    @Override
+    public boolean hasNativeTerminal(String tenantId, String sessionId, String turnId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
+                        + " AND turn_id = ? AND stream_kind = 'SESSION' AND is_terminal = 1"
+                        + " AND source_key IS NOT NULL)",
+                Boolean.class, tenantId, sessionId, turnId));
     }
 
     @Override
