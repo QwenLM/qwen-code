@@ -715,10 +715,10 @@ public final class LocalProcessRuntimeProvisioner
         // stays side-effect-free while a deployment that never pre-created
         // the directory can still start a Runtime.
         try {
-            // The worker bootstrap refuses a state directory that is not
-            // owner-private, so create it rwx------ like the durable store
-            // does; fall back to default attributes where POSIX permissions
-            // are unsupported.
+            // Create a missing directory owner-private (rwx------), matching
+            // the durable store's convention; an existing directory is used
+            // as-is (the local worker does not inspect its cwd's mode). Fall
+            // back to default attributes where POSIX is unsupported.
             if (workingDirectory.getFileSystem().supportedFileAttributeViews().contains("posix")) {
                 Files.createDirectories(workingDirectory, PosixFilePermissions.asFileAttribute(
                         PosixFilePermissions.fromString("rwx------")));

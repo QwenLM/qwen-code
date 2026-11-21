@@ -234,7 +234,56 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
                 .singleElement()
                 .satisfies(check -> {
                     assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.FAIL);
-                    assertThat(check.detail()).contains("is under a symbolic link");
+                    assertThat(check.detail()).contains("is not a valid durable state directory");
+                });
+    }
+
+    @Test
+    void durableExistingNonPrivateDirectoryFailsPreflightAndCreate() throws Exception {
+        Path state = Files.createDirectory(directory.resolve("existing-0755"));
+        var factory = new LocalRuntimeProviderFactory();
+        assertThat(factory.preflight(durableSettings(state)))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                    assertThat(check.detail()).contains("is not a valid durable state directory");
+                });
+        assertThatThrownBy(() -> factory.create(durableSettings(state), new HttpRuntimeTransport(),
+                RuntimeProviderDependencies.NONE))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void durableAbsentUnderNonReadableParentFailsPreflight() throws Exception {
+        Path parent = Files.createDirectory(directory.resolve("wx-parent"));
+        Path state = parent.resolve("state");
+        assumeTrue(parent.toFile().setReadable(false, false), "chmod supported");
+        assumeTrue(!Files.isReadable(parent), "permissions enforced (not root)");
+        try {
+            assertThat(new LocalRuntimeProviderFactory().preflight(durableSettings(state)))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                        assertThat(check.detail()).contains("cannot be created");
+                    });
+        } finally {
+            assertThat(parent.toFile().setReadable(true, false)).isTrue();
+        }
+    }
+
+    @Test
+    void durableAbsentInsideWorkspaceCwdFailsPreflight() {
+        Path state = directory.resolve("state");
+        var settings = durableSettings(state);
+        settings.getRuntimeBroker().setWorkspaceCwd(directory.toString());
+        assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                    assertThat(check.detail()).contains("outside Workspace roots");
                 });
     }
 

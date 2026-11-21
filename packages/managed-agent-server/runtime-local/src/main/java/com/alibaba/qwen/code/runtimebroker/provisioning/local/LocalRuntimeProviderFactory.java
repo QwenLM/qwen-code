@@ -99,7 +99,7 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
     public List<Check> preflight(ManagedAgentSettings settings) {
         var broker = settings.getRuntimeBroker();
         return List.of(directoryCheck("broker-state", broker.getStateDirectory(),
-                        broker.isDurableLocalProcess()),
+                        broker.isDurableLocalProcess(), broker),
                 executableCheck("node", broker.getNodeExecutable()),
                 readableCheck("worker-entry", broker.getWorkerEntry()));
     }
@@ -158,38 +158,58 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                 + " and QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false";
     }
 
-    private static Check directoryCheck(String name, String path, boolean durable) {
+    private static Check directoryCheck(String name, String path, boolean durable,
+            ManagedAgentSettings.RuntimeBroker broker) {
         if (StringUtils.isBlank(path)) {
             return new Check(name, Status.FAIL, "not configured",
                     "set the directory");
         }
         Path directory = Path.of(path);
         if (durable) {
-            // The durable store refuses a symlinked recovery path at wiring
-            // time; name that constraint here instead of certifying a path
-            // create() will reject.
-            for (Path current = directory.toAbsolutePath().normalize(); current != null;
-                    current = current.getParent()) {
+            // Delegate to the same checks create() runs instead of re-deriving
+            // them: the store validates an existing directory itself, and both
+            // shapes must lie outside the Workspace roots.
+            Path absolute = directory.toAbsolutePath().normalize();
+            if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+                try {
+                    requireRecoveryDirectoryOutsideWorkspaces(broker, absolute);
+                    RuntimeStateFiles.validateDirectory(directory);
+                } catch (IOException | RuntimeException error) {
+                    return new Check(name, Status.FAIL,
+                            path + " is not a valid durable state directory: " + error.getMessage(),
+                            "use a canonical, owner-private rwx------ directory outside the"
+                                    + " Workspace roots");
+                }
+                return new Check(name, Status.PASS, path, null);
+            }
+            // The store refuses a symlinked recovery path and creates the leaf
+            // single-level, then fsyncs the parent for READ: the parent must
+            // already exist, be readable, writable and searchable, and the
+            // path must be symlink-free.
+            for (Path current = absolute; current != null; current = current.getParent()) {
                 if (Files.isSymbolicLink(current)) {
                     return new Check(name, Status.FAIL, path + " is under a symbolic link",
                             "point the state directory at a canonical path; the durable store"
                                     + " refuses a symlinked recovery path");
                 }
             }
+            Path parent = absolute.getParent();
+            if (parent == null || !Files.isDirectory(parent)
+                    || !Files.isReadable(parent) || !Files.isWritable(parent)
+                    || !Files.isExecutable(parent)) {
+                return new Check(name, Status.FAIL, path + " cannot be created",
+                        "ensure the parent directory " + parent
+                                + " exists and is readable, writable and searchable");
+            }
+            try {
+                requireRecoveryDirectoryOutsideWorkspaces(broker, absolute);
+            } catch (RuntimeException error) {
+                return new Check(name, Status.FAIL, path + " " + error.getMessage(), null);
+            }
+            return new Check(name, Status.WARN,
+                    path + " does not exist yet; created during Broker wiring", null);
         }
         if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
-            if (durable) {
-                // The durable store creates the directory itself during
-                // create(), single-level: its parent must already exist.
-                Path parent = directory.toAbsolutePath().normalize().getParent();
-                if (parent != null && Files.isDirectory(parent)
-                        && Files.isWritable(parent) && Files.isExecutable(parent)) {
-                    return new Check(name, Status.WARN,
-                            path + " does not exist yet; created during Broker wiring", null);
-                }
-                return new Check(name, Status.FAIL, path + " cannot be created",
-                        "ensure the parent directory " + parent + " exists and is writable");
-            }
             // The ephemeral provisioner creates the state directory at first
             // spawn, so an absent but creatable path no longer refuses the
             // deployment.

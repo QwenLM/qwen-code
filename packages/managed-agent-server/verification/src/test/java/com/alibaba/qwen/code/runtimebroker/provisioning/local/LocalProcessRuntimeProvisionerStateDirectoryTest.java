@@ -22,8 +22,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * The ephemeral provisioner creates its state directory immediately before
  * spawn, not at construction and not on the failure path: a real child that
  * writes a marker relative to its working directory proves the directory
- * existed before {@code ProcessBuilder.start}. The created directory must be
- * owner-private, because the worker bootstrap refuses anything else.
+ * existed before {@code ProcessBuilder.start}. A missing directory is created
+ * owner-private (rwx------), matching the durable store's convention; an
+ * existing directory is used as-is.
  */
 class LocalProcessRuntimeProvisionerStateDirectoryTest {
     @TempDir
