@@ -5334,7 +5334,7 @@ jobs:
             "CI=${CI:-true}"
             "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
             "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
-            "TMPDIR=$VERIFY_SCRATCH"
+            "TMPDIR=${VERIFY_SCRATCH:?verify scratch directory was not prepared}"
             "GITHUB_TOKEN="
             "GH_TOKEN="
             "OPENAI_API_KEY=$PROXY_TOKEN"
