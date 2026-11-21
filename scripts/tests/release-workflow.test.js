@@ -4024,74 +4024,141 @@ esac`,
     );
   });
 
-  const keys = (list) => [...list.matchAll(/'([A-Z_]+)'/g)].map((m) => m[1]);
-  const stampKeys = (file) => {
-    const list = readFileSync(file, 'utf8').match(
-      /const SESSION_STAMP_ENV = \[([\s\S]*?)\];/,
-    );
-    expect(list, `SESSION_STAMP_ENV list not found in ${file}`).not.toBeNull();
-    return keys(list[1]);
+  // Pinned here, not parsed out of the files under test: a witness that reads
+  // its expectation from the scrub it checks stays green when that scrub is
+  // emptied, narrowed, or moved somewhere the probe never enters.
+  const SESSION_STAMPS = [
+    'NODE_OPTIONS',
+    'BUN_OPTIONS',
+    'CLI_VERSION',
+    'QWEN_CODE_RELAUNCH_ARGS',
+  ];
+  // The child is a real node, so NODE_OPTIONS must parse: a quoted preload
+  // path loses its backslashes on Windows. The witness is the key's absence.
+  const stampEnv = () => {
+    const env = { ...process.env };
+    for (const key of SESSION_STAMPS)
+      env[key] = key === 'NODE_OPTIONS' ? '--max-old-space-size=4096' : '9.9.9';
+    return env;
   };
 
   it.skipIf(process.platform === 'win32')(
     'isolates the standalone runtime suite from inherited session stamps',
     () => {
-      // The --ci hop spawns the driver, whose identity probes run before any
-      // worker exists, so a worker-level scrub cannot protect them. Stub the
-      // pinned runtimes and observe the env the child actually receives.
-      const stamps = stampKeys('scripts/test-standalone-runtimes.mjs');
       const dir = mkdtempSync(join(tmpdir(), 'standalone-stamps-'));
       try {
         const probe = join(dir, 'child-env');
-        const preload = join(dir, 'preload.cjs');
         const stub = join(dir, 'pinned-runtime');
-        writeFileSync(preload, '');
         writeFileSync(stub, '#!/bin/sh\nenv > "$STAMP_PROBE_OUT"\n');
         chmodSync(stub, 0o755);
-        const env = {
-          ...process.env,
-          PINNED_NODE: stub,
-          PINNED_BUN: stub,
-          STAMP_PROBE_OUT: probe,
-          NODE_OPTIONS: `--require ${preload}`,
-          BUN_OPTIONS: `--preload ${preload}`,
-          CLI_VERSION: '9.9.9',
-          QWEN_CODE_RELAUNCH_ARGS: '["--version"]',
-        };
-        // The lane exports a host-wide archive cache; this probe downloads
-        // nothing and must not sweep it.
-        delete env.QWEN_STANDALONE_RUNTIME_CACHE;
-        const result = spawnSync(
-          process.execPath,
-          ['scripts/test-standalone-runtimes.mjs', '--ci'],
-          { env, encoding: 'utf8' },
-        );
-        expect(result.status, result.stderr).toBe(0);
-        expect(existsSync(probe), 'the pinned runtime stub never ran').toBe(
-          true,
-        );
-        expect(readFileSync(probe, 'utf8')).not.toMatch(
-          new RegExp(`^(${stamps.join('|')})=`, 'm'),
-        );
+        // Both entrances: --ci hands the driver to the pinned runtime, a bare
+        // invocation runs the identity probes in its own process. A scrub
+        // placed inside ci() covers only the first.
+        for (const [mode, args] of [
+          ['--ci', ['--ci']],
+          ['direct', []],
+        ]) {
+          rmSync(probe, { force: true });
+          const env = stampEnv();
+          env.PINNED_NODE = stub;
+          env.PINNED_BUN = stub;
+          env.STAMP_PROBE_OUT = probe;
+          // The lane exports a host-wide archive cache; this probe downloads
+          // nothing and must not sweep it.
+          delete env.QWEN_STANDALONE_RUNTIME_CACHE;
+          // The stub is not a real runtime, so the bare invocation aborts just
+          // after its identity probes; the dump they wrote is the witness.
+          spawnSync(
+            process.execPath,
+            ['scripts/test-standalone-runtimes.mjs', ...args],
+            { env, encoding: 'utf8', timeout: 60_000 },
+          );
+          expect(existsSync(probe), `the stub never ran: ${mode}`).toBe(true);
+          // Key names only. The dump holds every variable the child carries,
+          // and the release lane's job env sets secrets the runner does not
+          // mask, so rendering it on failure would publish them to a public
+          // CI log.
+          const leaked = readFileSync(probe, 'utf8')
+            .split('\n')
+            .map((line) => line.slice(0, line.indexOf('=')))
+            .filter((key) => SESSION_STAMPS.includes(key));
+          expect(leaked, `child env carries session stamps: ${mode}`).toEqual(
+            [],
+          );
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     },
   );
 
+  const SUITE_STAMP_PROBE = 'QWEN_SUITE_STAMP_PROBE';
   it('isolates the scripts unit suite from inherited session stamps', () => {
-    // test:scripts runs this suite right after the standalone regression in
-    // the same job, so both entry points must drop the same keys:
-    // cli-entry.test.js imports the production wrapper, whose --version fast
-    // path would load a scripts/cli.js that does not exist. Comparing the
-    // lists, rather than pinning each one's text, reds when either drifts.
-    const setup = readFileSync('scripts/tests/test-setup.ts', 'utf8').match(
-      /for \(const key of \[([\s\S]*?)\]\)\s*delete process\.env\[key\];/,
-    );
-    expect(setup, 'test-setup.ts must delete its stamp list').not.toBeNull();
-    expect(keys(setup[1]), 'scripts unit suite stamp list').toEqual(
-      stampKeys('scripts/test-standalone-runtimes.mjs'),
-    );
+    if (process.env[SUITE_STAMP_PROBE]) {
+      // Inside the spawned suite: scripts/tests/test-setup.ts has already run
+      // in this worker, so its scrub is observable without reading its source.
+      writeFileSync(
+        process.env[SUITE_STAMP_PROBE],
+        SESSION_STAMPS.filter((key) => key in process.env).join('\n'),
+      );
+    } else {
+      const dir = mkdtempSync(join(tmpdir(), 'suite-stamps-'));
+      try {
+        const out = join(dir, 'leaked');
+        const env = stampEnv();
+        env[SUITE_STAMP_PROBE] = out;
+        spawnSync(
+          process.execPath,
+          [
+            'node_modules/vitest/vitest.mjs',
+            'run',
+            '--config',
+            'scripts/tests/vitest.config.ts',
+            'scripts/tests/release-workflow.test.js',
+            '-t',
+            'isolates the scripts unit suite',
+          ],
+          { env, encoding: 'utf8', timeout: 60_000 },
+        );
+        // vitest exits 0 when -t matches nothing, so the file the probe writes
+        // witnesses that it ran; the child's exit code cannot.
+        expect(existsSync(out), 'the spawned suite never ran the probe').toBe(
+          true,
+        );
+        expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual(
+          [],
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('declares the pinned session stamps at both test:scripts entry points', () => {
+    // Neither delete loop assigns meaning to order, so compare sets. The
+    // probes above pin what each entrance actually drops; this pins that both
+    // declare exactly the keys those probes inject, so a new stamp cannot
+    // reach one half — or both — without extending the witnesses too.
+    const declared = (file, pattern) => {
+      const list = readFileSync(file, 'utf8').match(pattern);
+      expect(list, `stamp list not found in ${file}`).not.toBeNull();
+      return [...list[1].matchAll(/'([A-Z0-9_]+)'/g)].map((m) => m[1]).sort();
+    };
+    const pinned = [...SESSION_STAMPS].sort();
+    expect(
+      declared(
+        'scripts/tests/test-setup.ts',
+        /for \(const key of \[([\s\S]*?)\]\)/,
+      ),
+      'scripts unit suite stamp list',
+    ).toEqual(pinned);
+    expect(
+      declared(
+        'scripts/test-standalone-runtimes.mjs',
+        /const SESSION_STAMP_ENV = \[([\s\S]*?)\];/,
+      ),
+      'standalone suite stamp list',
+    ).toEqual(pinned);
   });
 
   it('stages every integration package manifest after versioning', () => {
