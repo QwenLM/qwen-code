@@ -583,19 +583,21 @@ of the 54 cells the box leaves, and no row reaches the terminal's last column.
 ink ellipsizes all three at the same width; that window is recorded below, and
 matching it would mean clipping text this row has room for.
 
-Two divergences are deliberate, and they are of different kinds. The first is a
-defect ink has and this port does not. ink answers a typed free-text entry twice
+Two divergences were recorded, and they are of different kinds. The first was a
+defect ink had and this port did not. ink answered a typed free-text entry twice
 for one keystroke — the dialog's own key handler and the input widget it mounts both
-subscribe, and the key layer broadcasts to every subscriber with no notion of
-focus — and each answer advances a tab, so the question after the one being
-answered is skipped without ever being drawn. This was not reasoned from source
+subscribed, and the key layer broadcasts to every subscriber with no notion of
+focus — and each answer advanced a tab, so the question after the one being
+answered was skipped without ever being drawn. This was not reasoned from source
 alone. The ink leg of the acceptance run timed out waiting for a question that
 never appeared, and its own review tab then listed that question as
-unanswered. Here one keystroke advances one tab. Matching ink would reproduce a
-defect rather than the experience, and fixing ink would move the reference the
-whole sweep is measured against, so the divergence is recorded instead. The
-scenario was rearranged to exercise the free-text row on the last question,
-where the tab index clamps and both legs arrive at the review tab together.
+unanswered. At the time, matching ink would have reproduced a defect rather than
+the experience, so the divergence was recorded and the scenario was rearranged to
+exercise the free-text row on the last question, where the tab index clamps and
+both legs arrive at the review tab together. ink is fixed by #17485, which closes #17444:
+the input widget's submit is the only owner of Enter on that row, so one
+keystroke advances one tab on both legs, and the scenario no longer needs to sit
+on the last question.
 
 The second divergence is one this port loses. The option rows are drawn by hand
 rather than by the shared select widget, and the widget's pointer wiring did not
@@ -629,8 +631,9 @@ it inline, and a second answer landing inside that pause used to overwrite the
 scheduled swap's handle without clearing it. Both timers then fired, each
 advancing one tab, so the question between them was skipped without ever being
 drawn — the same failure this decision exists to remove, reached by a different
-route. ink cannot cancel that swap either: it calls `setTimeout` without keeping
-the handle, so it carries the orphan as well. The ref this renderer already holds
+route. ink could not cancel that swap either: it called `setTimeout` without keeping
+the handle, so it carried the orphan as well, until #17485 gave it the same lock
+and arrow cancel (Decision 34). The ref this renderer already holds
 to clear the timer on unmount makes the cancel one line. A test answers one
 question twice inside the pause and asserts the next question still arrives; it
 fails with the clear taken back out. Two Enters within 150 milliseconds is a fast
@@ -1328,10 +1331,11 @@ into these dialogs — every burst case here rests on the unit suites.
 ## Decision 34 — a manual tab move calls off the swap already scheduled
 
 The question dialog answers a question, pauses 150 ms so the tick on the row just
-answered is visible, then swaps to the next one. ink schedules that swap and never
-calls it off: neither a second answer inside the pause nor a left or right arrow of
-the user's own clears the timer, so two swaps can run and the question between them
-is never drawn. The port inherited that, and the review round caught it on the
+answered is visible, then swaps to the next one. ink scheduled that swap and never
+called it off: neither a second answer inside the pause nor a left or right arrow of
+the user's own cleared the timer, so two swaps could run and the question between them
+was never drawn. ink has since gained the same lock and arrow cancel (#17485). The
+port inherited the old behaviour, and the review round caught it on the
 arrow case — the user had navigated to a question and the dialog took it away again
 a tenth of a second later.
 
@@ -1341,13 +1345,14 @@ supersede the swap the first one scheduled; a later round put a lock in front of
 path instead, which drops an answer landing inside the pause outright (Decision 37).
 Nothing is left for the cancel to see there: a live timer always belongs to the tab the
 cursor is still on, since the only moves are the swap's own and the two arrows, and both
-arrows cancel first. The lock is therefore the armed timer alone — the ref that also held
+arrows cancel first. On the free-text row ←/→ belong to the text cursor: they move no tab
+and leave a pending swap alone, on both renderers. The lock is therefore the armed timer alone — the ref that also held
 which tab the swap belonged to modelled a distinction no path could observe, and it went
-with the dead cancel. This is one of the places where the port deliberately does not match
-ink; the same 150 ms pause, the same clamping at the last tab, and the same
-tick-before-swap are kept. ink's behaviour is recorded as a defect of its own rather than
-reproduced, and the double-fire the acceptance matrix had already watched on ink's leg is
-the same defect seen from outside.
+with the dead cancel. The same 150 ms pause, the same clamping at the last tab, and the
+same tick-before-swap are kept. ink used to lack the lock and was recorded as having a
+defect of its own rather than reproduced; the double-fire the acceptance matrix had
+already watched on ink's leg was the same defect seen from outside. ink now has the same
+lock and the same arrow cancel (#17485).
 
 The arrow is pinned by a mutation of its own: a right arrow that lands during a pending
 pause keeps the question it moved to, and removing that cancel fails this test alone. The
@@ -1487,11 +1492,20 @@ left alone, and so is every key after the swap runs. The last question tab arms 
 at all, clamped as it is, so it gets no lock; a trailing key there still lands on the row
 it reaches.
 
-ink cannot reach this leak. Its buffer notifies the parent from an effect run at commit
-(`text-buffer.ts`), so a keystroke handled after the Enter never gets a commit where its
-step is still mounted, and its text never reaches the state the plan is built from. Ours
-writes through the setter synchronously, which is what makes a mid-read submit read the
-live text at all, so it needs the explicit stop.
+ink's question dialog reached this leak as well. Its buffer notifies the parent from an
+effect run at commit (`text-buffer.ts`), which delays a trailing key's text by one commit
+rather than dropping it: the answered row stays mounted for the whole pause, so the text
+still reached the state a multi-select answer is rebuilt from, and a model was sent
+`TealX` for a typed `Teal`. A Space on the answered row inside the pause changed a
+multi-select answer the same way. #17485 gave ink the lock on a second answer, and the
+fix for #17670 the rest of the stop: a Space is refused while a swap is armed, the
+submitted text is recorded at the Enter, and for the pause a multi-select field takes no
+keys and is remounted from that recorded text. The remount lands on the commit whose
+effect would have reported a trailing key, so that key never reaches the answer. A
+single-select field stays editable in the pause, where this port settles it after any
+accepted submit; that difference is listed under Follow-ups. Ours writes through the
+setter synchronously, which is what makes a mid-read submit read the live text at all,
+so it needs the explicit stop.
 
 Coverage is eight new unit tests, four in the authentication suite and four in the
 confirmation dialog's, and eight mutations, one per behaviour named below. Each fails
@@ -2912,16 +2926,25 @@ What was verified, and how far the verification reaches:
   shown, in the session log too. Reachable on this renderer: the dispatcher
   builds fast, voice and vision dialog requests. Fixing it means carrying a row
   type out of the selection helper instead of a message string.
-- ink answers a typed free-text entry in its question dialog twice for one
-  keystroke, because the dialog's key handler and the input widget it mounts
-  both subscribe and the key layer has no focus stack to arbitrate between
-  them. Each answer advances a tab, so on a multi-question dialog the question
-  after the one being answered is skipped without ever being drawn, and the
-  review tab reports it as unanswered. This was observed on a real run, not
-  inferred. Decision 21 does not follow it, and fixing it in ink is out of
-  scope for a sweep that measures itself against ink's behaviour as it stands;
-  it is recorded here so the divergence between the two renderers is not
-  re-reported as a porting gap.
+- Closed: ink answered a typed free-text entry in its question dialog twice for
+  one keystroke, because the dialog's key handler and the input widget it
+  mounts both subscribed and the key layer has no focus stack to arbitrate
+  between them. Each answer advanced a tab, so on a multi-question dialog the
+  question after the one being answered was skipped without ever being drawn,
+  and the review tab reported it as unanswered. This was observed on a real
+  run, not inferred. Decision 21 did not follow it. ink was fixed in #17485, which closes #17444:
+  the input widget's submit is the only owner of Enter on that row, and a
+  second answer inside the pause is dropped as it is here, so the two
+  renderers no longer diverge on it.
+- Closed: inside ink's 150 ms pause a multi-select answer could change after it
+  was recorded. A Space on the answered row, or text typed or pasted into its
+  free-text field (also in the same read as the Enter), reached the state the
+  answer is rebuilt from at Submit (Decision 37). The fix for #17670 refuses
+  those keys while a swap is armed, as this port does.
+- Open: this port settles its free-text field after any accepted submit,
+  single-select included. ink's single-select field stays editable inside the
+  pause, since its answer is kept as recorded and a key there changes nothing
+  the model receives.
 - The stale-read class is closed for cursors and open for everything beside
   them. Decision 41 put the numeric cursors behind a ref mirror — the shared
   select hook and its exposed ref, the composer's completion rows, and each
