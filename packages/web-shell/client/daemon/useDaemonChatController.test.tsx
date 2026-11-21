@@ -216,6 +216,41 @@ describe('useDaemonChatController', () => {
     ).toBe('pwd');
   });
 
+  it('refreshes the cached request on a title-only re-emit at the same revision', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    // Same updatedAt and option ids; only the title changes. Only the title term
+    // can catch this shape, so dropping it from the revision must turn this red.
+    harness.pendingPermissions = [
+      { ...permissionBlock('a1'), title: 'Run pwd' } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    expect(controller!.pendingApprovals[0].request.title).toBe('Run pwd');
+  });
+
+  it('refreshes the cached request on an option-id-only re-emit at the same revision', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    expect(
+      controller!.pendingApprovals[0].request.options.map((o) => o.id),
+    ).toEqual(['submit', 'cancel']);
+    // Same updatedAt and title; only the option ids change. Only the option-id
+    // term can catch this shape, so dropping it must turn this red.
+    harness.pendingPermissions = [
+      {
+        ...permissionBlock('a1'),
+        options: [
+          { optionId: 'allow', label: 'Allow', raw: { kind: 'allow_once' } },
+          { optionId: 'deny', label: 'Deny', raw: { kind: 'reject_once' } },
+        ],
+      } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    expect(
+      controller!.pendingApprovals[0].request.options.map((o) => o.id),
+    ).toEqual(['allow', 'deny']);
+  });
+
   it('answers a question by voting its allow_once option with indexed answers', async () => {
     harness.pendingPermissions = [permissionBlock('q1', { questions: true })];
     mountReact(<Probe />);

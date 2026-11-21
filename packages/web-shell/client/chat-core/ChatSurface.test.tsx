@@ -362,6 +362,27 @@ describe('ChatSurface', () => {
     expect(reported.cause).toBe(boom);
   });
 
+  it('does not report on an accepted stop', async () => {
+    const onError = vi.fn();
+    const controller = fakeController({
+      cancel: vi.fn(async () => ({
+        admission: 'accepted',
+        target: { sessionId: 's1' },
+      })),
+    });
+    mountReact(<ChatSurface controller={controller} onError={onError} />);
+    const onCancel = captured.editor?.onCancel as () => void;
+    await act(async () => {
+      onCancel();
+    });
+    // Let any erroneous report settle before asserting silence, so a change that
+    // reports on every cancel settlement turns this red.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it('keeps the running affordance while submitting, running, or cancelling', () => {
     for (const phase of ['submitting', 'running', 'cancelling'] as const) {
       const controller = fakeController({ phase });
@@ -543,6 +564,13 @@ describe('ChatSurface', () => {
     expect((onError.mock.calls[0][0] as Error).message).toBe(
       'localized:chat.promptNotAdmitted',
     );
+    // A rejected submit must not arm the admission lock: the composer stays
+    // dispatchable so the user can edit and retry. Arming the lock on any
+    // non-accepted result must turn this red.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(captured.editor?.submitDisabled).toBe(false);
   });
 
   it('reports a submit transport rejection without wiping the draft', async () => {
