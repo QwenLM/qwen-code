@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import nodeFs from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -16,6 +17,13 @@ import {
   revokeA2AGrant,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
 import { updateWorkspaceAgents } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+import {
+  attachExternalSession,
+  completeExternalSubmission,
+  getExternalTaskForCaller,
+  reserveExternalSubmission,
+} from '@qwen-code/qwen-code-core/agents/workspace-agents/external-intake.js';
+import { updateSessionAgents } from '@qwen-code/qwen-code-core/agents/session-agents/binding-store.js';
 import type { AgentAdapterTurnResult } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import { Storage, type A2ASessionPort } from '@qwen-code/qwen-code-core';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
@@ -408,6 +416,192 @@ it.each(['replaced', 'untrusted', 'disabled'] as const)(
 );
 
 describe('the default session port factory', () => {
+  it.each(['active', 'archived'] as const)(
+    'recovers the same task after an EIO reading its %s transcript',
+    async (location) => {
+      const callerId = headers['x-qwen-caller-id'];
+      const agentId = headers['x-qwen-agent-id'];
+      const { secret } = await issueA2AGrant(PROJECT_ROOT, {
+        callerId,
+        agentId,
+      });
+      const sessionId = randomUUID();
+      const taskId = 'sr_completed';
+      const messageId = 'msg-completed';
+      const text = 'Inspect the cache.';
+      const answer = 'The cache is warm.';
+      const { entry } = await reserveExternalSubmission(PROJECT_ROOT, {
+        callerId,
+        targetAgentId: agentId,
+        messageId,
+        text,
+      });
+      await attachExternalSession(PROJECT_ROOT, callerId, entry.key, sessionId);
+      await completeExternalSubmission(
+        PROJECT_ROOT,
+        callerId,
+        entry.key,
+        taskId,
+      );
+      await updateSessionAgents(PROJECT_ROOT, sessionId, (file) => {
+        file.runs.push({
+          id: taskId,
+          agentId,
+          status: 'completed',
+          recorded: true,
+          triggerRecordIds: [],
+          chainDepth: 0,
+          createdAt: 1,
+          attempts: 1,
+        });
+      });
+
+      const sessionRuntimeBaseDir = path.join(runtimeDir, 'transcripts');
+      const service = new SessionService(PROJECT_ROOT, {
+        runtimeBaseDir: sessionRuntimeBaseDir,
+      });
+      const active = service.getSessionTranscriptPath(sessionId);
+      const record = `${JSON.stringify({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId,
+        cwd: PROJECT_ROOT,
+        timestamp: new Date(1).toISOString(),
+        type: 'system',
+        subtype: 'agent_message',
+        systemPayload: {
+          author: { agentId, name: 'lead' },
+          runId: taskId,
+          status: 'completed',
+          displayText: answer,
+        },
+      })}\n`;
+      await fs.mkdir(path.dirname(active), { recursive: true });
+      await fs.writeFile(active, record);
+      const app = express();
+      registerA2ATransportRoutes(
+        app,
+        createWorkspaceRegistry([{ ...runtime(true), sessionRuntimeBaseDir }]),
+      );
+      const call = (method: string, params: unknown) =>
+        request(app)
+          .post('/a2a/v1')
+          .set({
+            ...headers,
+            authorization: `Bearer ${secret}`,
+            'A2A-Version': '1.0',
+          })
+          .send({ jsonrpc: '2.0', id: 1, method, params })
+          .expect(200);
+      const getTask = () => call('GetTask', { id: taskId });
+      const keptResult = async () =>
+        (await getExternalTaskForCaller(PROJECT_ROOT, callerId, taskId))
+          ?.result;
+
+      let transcript = active;
+      if (location === 'archived') {
+        expect((await service.archiveSessions([sessionId])).archived).toEqual([
+          sessionId,
+        ]);
+        transcript = path.join(
+          path.dirname(active),
+          'archive',
+          path.basename(active),
+        );
+        await fs.truncate(transcript, 64 * 1024 * 1024 + 1);
+        expect((await getTask()).body.error).toMatchObject({ code: -32603 });
+        expect(await keptResult()).toBeUndefined();
+        await fs.writeFile(transcript, record);
+      }
+
+      let readError: NodeJS.ErrnoException = Object.assign(
+        new Error(`EIO reading ${transcript}`),
+        { code: 'EIO', syscall: 'read' },
+      );
+      const createReadStream = nodeFs.createReadStream;
+      const stream = vi
+        .spyOn(nodeFs, 'createReadStream')
+        .mockImplementation((...args) => {
+          if (args[0] !== transcript) return createReadStream(...args);
+          return createReadStream(transcript, {
+            fs: {
+              open: nodeFs.open,
+              close: nodeFs.close,
+              read(_fd, buffer, _offset, _length, _position, callback) {
+                queueMicrotask(() => callback(readError, 0, buffer));
+              },
+            },
+          });
+        });
+      try {
+        await fs.access(transcript, nodeFs.constants.R_OK);
+        for (const [method, params] of [
+          ['GetTask', { id: taskId }],
+          ['ListTasks', {}],
+          ['CancelTask', { id: taskId }],
+          [
+            'SendMessage',
+            { message: { role: 'ROLE_USER', messageId, parts: [{ text }] } },
+          ],
+        ] as const) {
+          stream.mockClear();
+          const response = await call(method, params);
+          expect(stream).toHaveBeenCalledWith(transcript);
+          expect(response.body.error).toMatchObject({
+            code: -32012,
+            message: 'Agents are not available in this workspace right now.',
+          });
+          expect(JSON.stringify(response.body.error)).not.toContain(transcript);
+          expect(await keptResult()).toBeUndefined();
+        }
+
+        readError = Object.assign(new TypeError('Invalid argument'), {
+          code: 'ERR_INVALID_ARG_TYPE',
+        });
+        expect((await getTask()).body.error).toMatchObject({
+          code: -32603,
+          message: 'Internal error.',
+        });
+        expect(await keptResult()).toBeUndefined();
+      } finally {
+        stream.mockRestore();
+      }
+
+      if (location === 'active') {
+        const originalStat = nodeFs.promises.stat.bind(nodeFs.promises);
+        const stat = vi
+          .spyOn(nodeFs.promises, 'stat')
+          .mockImplementation(async (filePath, ...args) => {
+            if (filePath === transcript) {
+              throw Object.assign(new Error('Transcript stat failed'), {
+                code: 'ENOENT',
+                syscall: 'stat',
+              });
+            }
+            return originalStat(filePath, ...args);
+          });
+        try {
+          expect((await getTask()).body.error).toMatchObject({ code: -32012 });
+          expect(await keptResult()).toBeUndefined();
+        } finally {
+          stat.mockRestore();
+        }
+      }
+
+      const recovered = await getTask();
+      expect(recovered.body.result).toMatchObject({
+        id: taskId,
+        contextId: sessionId,
+        status: { state: 'TASK_STATE_COMPLETED' },
+      });
+      expect(recovered.body.result.artifacts[0].parts[0].text).toBe(answer);
+      expect(await keptResult()).toMatchObject({
+        state: 'TASK_STATE_COMPLETED',
+        answer,
+      });
+    },
+  );
+
   it('reads replies from, and discards sessions under, the runtime session dir', async () => {
     // A workspace whose own session runtime dir is NOT the ambient default,
     // so reading the ambient dir would silently miss its transcripts.
