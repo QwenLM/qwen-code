@@ -739,6 +739,134 @@ describe('BackgroundShellRegistry', () => {
     });
   });
 
+  describe('owner routing (#15748)', () => {
+    function settle(
+      overrides: Partial<ShellTaskRegistration> & { shellId: string },
+    ) {
+      reg.register(makeEntry(overrides));
+      reg.complete(overrides.shellId, 0, 2000);
+    }
+
+    it('delivers to the launching agent instead of the session', () => {
+      const session = vi.fn();
+      const owner = vi.fn().mockReturnValue(true);
+      reg.setNotificationCallback(session);
+      reg.setAgentNotificationCallback('agent-a', owner);
+
+      settle({ shellId: 'a', ownerAgentId: 'agent-a' });
+
+      expect(owner).toHaveBeenCalledTimes(1);
+      expect(owner.mock.calls[0][1]).toContain('<task-id>a</task-id>');
+      expect(owner.mock.calls[0][2]).toMatchObject({
+        shellId: 'a',
+        status: 'completed',
+      });
+      expect(session).not.toHaveBeenCalled();
+      expect(reg.get('a')!.notified).toBe(true);
+    });
+
+    it('falls back to the nearest ancestor that accepts', () => {
+      const session = vi.fn();
+      const owner = vi.fn().mockReturnValue(false);
+      const parent = vi.fn().mockReturnValue(true);
+      const grandparent = vi.fn().mockReturnValue(true);
+      reg.setNotificationCallback(session);
+      reg.setAgentNotificationCallback('agent-b', owner);
+      reg.setAgentNotificationCallback('agent-a', parent);
+      reg.setAgentNotificationCallback('agent-root', grandparent);
+
+      settle({
+        shellId: 'a',
+        ownerAgentId: 'agent-b',
+        ownerAncestorAgentIds: ['agent-a', 'agent-root'],
+      });
+
+      expect(owner).toHaveBeenCalledTimes(1);
+      expect(parent).toHaveBeenCalledTimes(1);
+      expect(grandparent).not.toHaveBeenCalled();
+      expect(session).not.toHaveBeenCalled();
+    });
+
+    it('skips agents that have no callback any more', () => {
+      const session = vi.fn();
+      const parent = vi.fn().mockReturnValue(true);
+      reg.setNotificationCallback(session);
+      reg.setAgentNotificationCallback('agent-a', parent);
+
+      settle({
+        shellId: 'a',
+        ownerAgentId: 'agent-b',
+        ownerAncestorAgentIds: ['agent-a'],
+      });
+
+      expect(parent).toHaveBeenCalledTimes(1);
+      expect(session).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the session when no agent in the chain accepts', () => {
+      const session = vi.fn();
+      const owner = vi.fn().mockReturnValue(false);
+      const throwing = vi.fn(() => {
+        throw new Error('boom');
+      });
+      reg.setNotificationCallback(session);
+      reg.setAgentNotificationCallback('agent-b', owner);
+      reg.setAgentNotificationCallback('agent-a', throwing);
+
+      settle({
+        shellId: 'a',
+        ownerAgentId: 'agent-b',
+        ownerAncestorAgentIds: ['agent-a'],
+      });
+
+      expect(owner).toHaveBeenCalledTimes(1);
+      expect(throwing).toHaveBeenCalledTimes(1);
+      expect(session).toHaveBeenCalledTimes(1);
+      expect(session.mock.calls[0][1]).toContain('<task-id>a</task-id>');
+      expect(reg.get('a')!.notified).toBe(true);
+    });
+
+    it('falls back to the session after the owner callback is removed', () => {
+      const session = vi.fn();
+      const owner = vi.fn().mockReturnValue(true);
+      reg.setNotificationCallback(session);
+      reg.setAgentNotificationCallback('agent-a', owner);
+      reg.setAgentNotificationCallback('agent-a', undefined);
+
+      settle({ shellId: 'a', ownerAgentId: 'agent-a' });
+
+      expect(owner).not.toHaveBeenCalled();
+      expect(session).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps an undelivered owned notification eligible for replay', () => {
+      const owner = vi.fn().mockReturnValue(false);
+      reg.setAgentNotificationCallback('agent-a', owner);
+
+      settle({ shellId: 'a', ownerAgentId: 'agent-a' });
+
+      expect(owner).toHaveBeenCalledTimes(1);
+      expect(reg.get('a')!.notified).toBe(false);
+
+      const session = vi.fn();
+      reg.setNotificationCallback(session);
+      expect(session).toHaveBeenCalledTimes(1);
+      expect(reg.get('a')!.notified).toBe(true);
+    });
+
+    it('ignores agent callbacks for shells without an owner', () => {
+      const session = vi.fn();
+      const agent = vi.fn().mockReturnValue(true);
+      reg.setNotificationCallback(session);
+      reg.setAgentNotificationCallback('agent-a', agent);
+
+      settle({ shellId: 'a' });
+
+      expect(agent).not.toHaveBeenCalled();
+      expect(session).toHaveBeenCalledTimes(1);
+    });
+  });
+
   const addWithController = (shellId: string) => {
     const ac = new AbortController();
     reg.register(makeEntry({ shellId, abortController: ac }));

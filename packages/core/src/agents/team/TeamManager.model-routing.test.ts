@@ -95,6 +95,9 @@ function createLeaderConfig(projectRoot: string): Config {
     getAllConfiguredModels: vi.fn().mockReturnValue([]),
     getToolRegistry: vi.fn().mockReturnValue(createMockToolRegistry()),
     createToolRegistry: vi.fn().mockResolvedValue(createMockToolRegistry()),
+    getBackgroundShellRegistry: vi.fn().mockReturnValue({
+      setAgentNotificationCallback: vi.fn(),
+    }),
     getMonitorRegistry: vi.fn().mockReturnValue({
       setAgentNotificationCallback: vi.fn(),
       cancelRunningForOwner: vi.fn(),

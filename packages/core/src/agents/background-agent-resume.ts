@@ -1214,6 +1214,17 @@ export class BackgroundAgentResumeService {
       monitorRegistry.setAgentLifecycleCallback(meta.agentId, () =>
         registry.wakeExternalInputWaiters(meta.agentId),
       );
+      // Same owner routing for background shells as AgentTool's
+      // registerOwnedMonitorNotifications (#15748).
+      const shellRegistry = this.config.getBackgroundShellRegistry();
+      shellRegistry.setAgentNotificationCallback(
+        meta.agentId,
+        (_displayText, modelText) =>
+          registry.queueExternalInput(meta.agentId, {
+            kind: 'notification',
+            text: modelText,
+          }),
+      );
       let cleanedUpOwnedMonitorNotifications = false;
       cleanupOwnedMonitorNotifications = () => {
         if (cleanedUpOwnedMonitorNotifications) return;
@@ -1223,6 +1234,7 @@ export class BackgroundAgentResumeService {
         });
         monitorRegistry.setAgentNotificationCallback(meta.agentId, undefined);
         monitorRegistry.setAgentLifecycleCallback(meta.agentId, undefined);
+        shellRegistry.setAgentNotificationCallback(meta.agentId, undefined);
       };
 
       const hookSystem = this.config.getHookSystem();

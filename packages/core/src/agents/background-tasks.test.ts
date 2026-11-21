@@ -374,6 +374,32 @@ describe('BackgroundTaskRegistry', () => {
     expect(orphan.parentName).toBeUndefined();
   });
 
+  it('lists registered ancestors nearest first and stops at a gap', () => {
+    reg('root', { outputFile: '/tmp/root.jsonl' });
+    reg('mid', {
+      outputFile: '/tmp/mid.jsonl',
+      isBackgrounded: false,
+      parentAgentId: 'root',
+      depth: 1,
+    });
+    reg('leaf', {
+      outputFile: '/tmp/leaf.jsonl',
+      isBackgrounded: false,
+      parentAgentId: 'mid',
+      depth: 2,
+    });
+    reg('orphan', {
+      outputFile: '/tmp/orphan.jsonl',
+      parentAgentId: 'gone',
+      depth: 1,
+    });
+
+    expect(registry.getAncestorAgentIds('leaf')).toEqual(['mid', 'root']);
+    expect(registry.getAncestorAgentIds('root')).toEqual([]);
+    expect(registry.getAncestorAgentIds('orphan')).toEqual([]);
+    expect(registry.getAncestorAgentIds('unknown')).toEqual([]);
+  });
+
   it('completes a background agent and sends notification', () => {
     const callback = completeTest1({}, 'The result text');
 

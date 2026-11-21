@@ -409,6 +409,9 @@ describe('AgentTool', () => {
       }),
       getWorktreeSymlinkDirectories: vi.fn().mockReturnValue([]),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
+      getBackgroundShellRegistry: vi.fn().mockReturnValue({
+        setAgentNotificationCallback: vi.fn(),
+      }),
       getMonitorRegistry: vi.fn().mockReturnValue(stubMonitorRegistry),
       getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
       createToolRegistry: vi.fn().mockResolvedValue(stubToolRegistry),
@@ -4347,6 +4350,41 @@ describe('AgentTool', () => {
       releaseExecute();
       await vi.runAllTimersAsync();
       expectMonitorCleanup(agentId);
+    });
+
+    it('routes owned background shell notifications and cleanup for forks', async () => {
+      // #15748: a background shell the fork launches reports back to the
+      // fork through the same input queue as its owned monitors.
+      const releaseExecute = holdExecute(mockAgent);
+      withMessaging(null);
+
+      await runFork(forkParams('fork task'));
+      await vi.waitFor(() => expect(mockAgent.execute).toHaveBeenCalled());
+
+      const shells = config.getBackgroundShellRegistry() as unknown as Record<
+        'setAgentNotificationCallback',
+        MockFn
+      >;
+      const [agentId, callback] = shells.setAgentNotificationCallback.mock
+        .calls[0] as [
+        string,
+        (displayText: string, modelText: string) => boolean,
+      ];
+      const provider = (
+        mockAgent as unknown as Record<'setExternalMessageProvider', MockFn>
+      ).setExternalMessageProvider.mock.calls[0][0] as () => unknown[];
+
+      expect(callback('Background shell "npm test" completed.', '<x />')).toBe(
+        true,
+      );
+      expect(provider()).toEqual([{ kind: 'notification', text: '<x />' }]);
+
+      releaseExecute();
+      await vi.runAllTimersAsync();
+      expect(shells.setAgentNotificationCallback).toHaveBeenCalledWith(
+        agentId,
+        undefined,
+      );
     });
 
     it('reserves a background slot with the resolved parent model when fork runs in background', async () => {
