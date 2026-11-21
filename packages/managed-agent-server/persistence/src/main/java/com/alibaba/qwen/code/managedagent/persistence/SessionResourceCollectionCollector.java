@@ -39,7 +39,7 @@ public final class SessionResourceCollectionCollector {
                 + " deletion_operation_key IS NULL AND NOT EXISTS (SELECT 1 FROM ma_resource_ref f"
                 + " WHERE f.resource_key = ma_resource.resource_key) THEN 1 ELSE 0 END AS"
                 + " collectible FROM ma_resource USE INDEX (idx_ma_resource_scope_page) WHERE"
-                + " session_scope_key = ? AND resource_key > ? ORDER BY resource_key LIMIT "
+                + " tenant_id = ? AND session_id = ? AND resource_key > ? ORDER BY resource_key LIMIT "
                     + (PAGE_ROWS + 1);
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -171,8 +171,8 @@ public final class SessionResourceCollectionCollector {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String request = JSON.createObjectNode().put("version", 1).put("sessionId", session).toString();
         jdbc.update(
-                "INSERT IGNORE INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)",
-                operationKey(scope), scope, scope, operationId(scope), tenant, session, scope,
+                "INSERT IGNORE INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)",
+                operationKey(scope), scope, operationId(scope), tenant, session, scope,
                 ManagedSchemaKeys.key(request), request, current, current);
     }
 
@@ -326,19 +326,19 @@ public final class SessionResourceCollectionCollector {
             return "reader_active";
         }
         if (!jdbc.query(
-                        "SELECT operation_key FROM ma_operation WHERE session_scope_key = ? AND"
+                        "SELECT operation_key FROM ma_operation WHERE tenant_id = ? AND session_id = ? AND"
                                 + " operation_kind = 'OBJECT_PUT' AND state <> 'RETURNED' LIMIT 1",
-                (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
+                (row, index) -> row.getString(1), tenant, session).isEmpty()) {
             return "put_unresolved";
         }
         // The relay's classifications are all terminal (its discovery page and claim exclude
         // them): an `unknown` walk is never rewritten, so holding for it would hold forever. A
         // close still owed rides its own CHILD_SESSION_CLOSE row and reads no parent resource.
         if (!jdbc.query(
-                        "SELECT operation_key FROM ma_operation WHERE session_scope_key = ? AND"
+                        "SELECT operation_key FROM ma_operation WHERE tenant_id = ? AND session_id = ? AND"
                             + " operation_kind = 'CHILD_SESSION_START' AND state NOT IN ('done',"
                             + " 'orphaned', 'unknown') LIMIT 1",
-                (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
+                (row, index) -> row.getString(1), tenant, session).isEmpty()) {
             return "child_start_unresolved";
         }
         // A recovery capture or verification reads a retired Session's bytes through
@@ -386,13 +386,14 @@ public final class SessionResourceCollectionCollector {
             return false;
         }
         if (ManagedSessionRetirementStore.deleteOwnerBatch(jdbc, claim.tenant(), claim.session(), PAGE_ROWS)
-                || deleteArtifactBatch(claim.scope())) {
+                || deleteArtifactBatch(claim.tenant(), claim.session(), claim.scope())) {
             jdbc.update(
                     "UPDATE ma_operation SET phase = 'RELEASING_OWNERS', claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
                     now + CLAIM_MILLIS, now, operationKey(claim.scope()), claim.generation());
             return true;
         }
-        var rows = jdbc.query(RESOURCE_PAGE, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), claim.scope(), claim.cursor());
+        var rows = jdbc.query(RESOURCE_PAGE, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), claim.tenant(),
+                claim.session(), claim.cursor());
         long bytes = 0;
         var ids = new java.util.ArrayList<String>(PAGE_ROWS);
         String cursor = claim.cursor();
@@ -417,20 +418,21 @@ public final class SessionResourceCollectionCollector {
         }
         long freed = 0;
         if (!ids.isEmpty()) {
-            var args = new java.util.ArrayList<Object>(ids.size() + 1);
-            args.add(claim.scope());
+            var args = new java.util.ArrayList<Object>(ids.size() + 2);
+            args.add(claim.tenant());
+            args.add(claim.session());
             args.addAll(ids);
             String in = String.join(", ", java.util.Collections.nCopies(ids.size(), "?"));
             // Retirement fences new references; only this operation can collect these SQL bodies.
             jdbc.update(
                     "UPDATE ma_resource SET state = 'COLLECTED', inline_bytes = NULL,"
-                        + " retention_until = NULL WHERE session_scope_key = ? AND inline_bytes IS"
+                        + " retention_until = NULL WHERE tenant_id = ? AND session_id = ? AND inline_bytes IS"
                         + " NOT NULL AND resource_key IN ("
                             + in + ")",
                     args.toArray());
             freed = jdbc.queryForObject(
                             "SELECT COALESCE(SUM(byte_length), 0) FROM ma_resource WHERE"
-                                + " session_scope_key = ? AND state = 'COLLECTED' AND resource_key"
+                                + " tenant_id = ? AND session_id = ? AND state = 'COLLECTED' AND resource_key"
                                 + " IN ("
                                     + in + ")",
                     Long.class, args.toArray());
@@ -442,7 +444,7 @@ public final class SessionResourceCollectionCollector {
             jdbc.update(
                     "UPDATE ma_operation SET result_json = ?, claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
                     result, now + CLAIM_MILLIS, now, operationKey(claim.scope()), claim.generation());
-        } else if (ManagedSessionRetirementStore.hasJournalPacks(jdbc, claim.scope())) {
+        } else if (ManagedSessionRetirementStore.hasJournalPacks(jdbc, claim.tenant(), claim.session())) {
             jdbc.update("UPDATE ma_operation SET result_json = ?, state = 'PENDING', phase = 'WAITING_JOURNAL_PACKS',"
                             + " claim_owner = NULL, claim_until = NULL, available_at = ?, failure_code = NULL, gmt_modified = ?"
                             + " WHERE operation_key = ? AND claim_generation = ?",
@@ -463,15 +465,16 @@ public final class SessionResourceCollectionCollector {
         return true;
     }
 
-    private boolean deleteArtifactBatch(String scope) {
+    private boolean deleteArtifactBatch(String tenant, String session, String scope) {
         var artifacts = jdbc.query("SELECT artifact_id FROM ma_artifact WHERE scope_key = ?"
                         + " ORDER BY creation_sequence, artifact_id LIMIT ? FOR UPDATE",
                 (row, index) -> row.getString(1), scope, PAGE_ROWS);
         for (String artifact : artifacts) {
             jdbc.update(
-                    "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind ="
+                    "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind ="
                             + " 'ARTIFACT' AND owner_key = ?",
-                    scope,
+                    tenant,
+                    session,
                     ManagedSchemaKeys.key(scope, artifact));
             jdbc.update(
                     "DELETE FROM ma_artifact WHERE scope_key = ? AND artifact_id = ?",

@@ -2,7 +2,7 @@
 
 [English](2026-11-18-mod-rows-in-web-shell.md) | [简体中文](2026-11-18-mod-rows-in-web-shell.zh-CN.md)
 
-Status: implemented. This draws the Mods' rewrites of reply rows in the Web Shell, tracked in #13749. It builds on [Mods in ACP sessions](2026-11-18-mods-in-acp-sessions.md) and [Mod reply rows](2026-11-10-mod-assistant-message-rows.md). Thinking rows follow in the next step.
+Status: implemented. This draws the Mods' rewrites of reply rows in the Web Shell, tracked in #13749. It builds on [Mods in ACP sessions](2026-11-18-mods-in-acp-sessions.md) and [Mod reply rows](2026-11-10-mod-assistant-message-rows.md). Thinking rows followed in [Mod thinking rows in the Web Shell](2026-11-20-mod-thinking-rows-in-web-shell.md).
 
 ## Problem and current behavior
 
@@ -19,10 +19,10 @@ Goals:
 
 Non-goals:
 
-- Thinking rows, which are the next step, the band above the prompt, and trees drawn in place of a row.
+- Thinking rows, which [Mod thinking rows in the Web Shell](2026-11-20-mod-thinking-rows-in-web-shell.md) adds, the band above the prompt, and trees drawn in place of a row.
 - Redrawing rows that a page already holds on `$.ui.invalidate('ui.render')`.
 - Mod rows over the ACP-over-HTTP transport or in other ACP clients (Zed, the VS Code companion).
-- Removing `MessageRewriteMiddleware`. It can go once thinking rows land too.
+- Removing `MessageRewriteMiddleware`, which [Mod thinking rows in the Web Shell](2026-11-20-mod-thinking-rows-in-web-shell.md) leaves as a decision of its own.
 
 ## Compatibility contract
 
@@ -41,7 +41,7 @@ The plan before this step had the child run the hooks on each finished block and
 
 ### Capability and surface
 
-The daemon's bridge names, in its ACP `initialize` client capabilities, the row sites its Web Shell draws: `_meta["qwen.modRows"]: ["AssistantMessage"]`. When a client draws a row site, the child runs each of its sessions' Mods on the `desktop` surface and offers the sites it can answer of those. Zed and the VS Code companion send no such capability, so their sessions stay as they were. The surface is read at load, so it belongs to the daemon and not to whichever page is open: a session another daemon client drives reports `desktop` too. The daemon advertises `session_mod_rows` in `/capabilities`, and the Web Shell asks only then. `isInteractive` is true on the desktop because the Web Shell has a person at its prompt.
+The daemon's bridge names the Web Shell's row sites in its ACP `initialize` client capabilities. This step declared `_meta["qwen.modRows"]: ["AssistantMessage"]`. The [thinking rows design](2026-11-20-mod-thinking-rows-in-web-shell.md) adds `Thinking` to the list. When a client draws a row site, the child runs each of its sessions' Mods on the `desktop` surface and offers the sites it can answer of those. Zed and the VS Code companion send no such capability, so their sessions stay as they were. The surface is read at load, so it belongs to the daemon and not to whichever page is open: a session another daemon client drives reports `desktop` too. The daemon advertises `session_mod_rows` in `/capabilities`, and the Web Shell asks only then. `isInteractive` is true on the desktop because the Web Shell has a person at its prompt.
 
 The Mod host keeps "an ACP session" apart from its surface, so a desktop session keeps the ACP host's rules: no prompts and no tool middleware, logs through the ACP notification, and context figures from the session's own chat.
 
@@ -77,7 +77,7 @@ Unit tests:
 - Bridge, daemon route and SDK: `initialize` declares the sites and the row is forwarded. The route checks the body and answers 404 for a session that is not live. The SDK knows `mod_log`, draws it below a streaming reply, and posts the row.
 - Web Shell: the asker asks one row at a time, skips a released row, keeps answers, asks again after a failure and stops after an unhooked answer. A reply row draws the rewrite and copies the original; it is asked only once complete and on screen, and keeps its answer off screen. The list flags reply rows and their `isFirstOfReply`, passing over thinking and Mod log lines, and flags none without the capability. Command output carries its source.
 
-An integration test runs a real `qwen serve` with a Mod installed and Mods off. The capability is advertised, and a session answers unhooked. Turning Mods on through the settings route reports that a restart is needed, yet the next session loads the Mod, and a prompt completes. The row is rewritten; the same row from a second client comes from the first answer, so the hook's counter does not grow; a different flag runs the hook again. `Thinking` is unhooked, mismatched props fail, and the event stream carries the `mod_log` line `start desktop true ["desktop"]`. The ACP integration test still sees `null` for a client without the capability.
+An integration test runs a real `qwen serve` with a Mod installed and Mods off. The capability is advertised, and a session answers unhooked. Turning Mods on through the settings route reports that a restart is needed, yet the next session loads the Mod, and a prompt completes. The row is rewritten; the same row from a second client comes from the first answer, so the hook's counter does not grow; a different flag runs the hook again. A site the Web Shell does not draw is unhooked, mismatched props fail, and the event stream carries the `mod_log` line `start desktop true ["desktop"]`. The ACP integration test still sees `null` for a client without the capability.
 
 A browser check ran the same against the real Web Shell, with a reply streamed in chunks around a file read. Each of the two reply blocks was rendered once while live; after a reload, in a second tab, and with the finished turn opened again, both showed their first answers, and copying gave the original.
 
@@ -90,4 +90,3 @@ Acceptance: in the Web Shell, with `experimental.mods` on and a Mod that rewrite
 - `$.ui.invalidate('ui.render')` does not redraw rows a page already holds; the page asks again only after a reload. A notification that tells pages to ask again can follow.
 - `mod_log` lines take places in the session's event ring like any other frame.
 - An ask in flight counts as session work for idle cleanup. An explicit close can cancel it while the hook waits for a model.
-- A `Thinking` hook in a Web Shell session loads without the "will not run" diagnostic, because the session raises `ui.render` for reply rows, and is not called until thinking rows land.

@@ -94,11 +94,14 @@ describe('AcpModSession', () => {
       _meta: { 'qwen.modRows': ['Thinking', 'AssistantMessage', 'Pane'] },
     });
     // Rows this host answers, of those the client draws.
-    expect(sites).toEqual(['AssistantMessage']);
+    expect(sites).toEqual(['AssistantMessage', 'Thinking']);
+    expect(
+      acpModRowSites({ _meta: { 'qwen.modRows': ['AssistantMessage'] } }),
+    ).toEqual(['AssistantMessage']);
     const client = { extNotification: vi.fn() };
     AcpModSession.create(config, settings(true), 'acp-1', client, sites);
     expect(mocks.host!.surface).toBe('desktop');
-    expect(mocks.host!.sites!()).toEqual(['AssistantMessage']);
+    expect(mocks.host!.sites!()).toEqual(['AssistantMessage', 'Thinking']);
   });
 
   it('asks the Mods for a row once they loaded, checking what the client sent', async () => {
@@ -128,18 +131,26 @@ describe('AcpModSession', () => {
     await expect(mods.askRow('Pane', {})).resolves.toEqual({
       status: 'unhooked',
     });
+    await mods.askRow('Thinking', { text: 'Hm' });
+    expect(mocks.askRow).toHaveBeenLastCalledWith(
+      'Thinking',
+      { text: 'Hm' },
+      expect.any(AbortSignal),
+    );
     for (const [component, bad] of [
       [7, props],
       ['AssistantMessage', null],
       ['AssistantMessage', { text: 'Hi' }],
       ['AssistantMessage', { text: 1, isFirstOfReply: true }],
       ['AssistantMessage', { ...props, extra: true }],
+      ['Thinking', props],
+      ['Thinking', { text: 1 }],
     ])
       await expect(mods.askRow(component, bad)).rejects.toMatchObject({
         code: -32602,
         data: { errorKind: 'invalid_mod_row' },
       });
-    expect(mocks.askRow).toHaveBeenCalledOnce();
+    expect(mocks.askRow).toHaveBeenCalledTimes(2);
   });
 
   it('answers unhooked once the Mods failed to load', async () => {

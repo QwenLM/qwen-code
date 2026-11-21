@@ -381,15 +381,14 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval.");
         }
         if (!jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE record_kind='DOMAIN'"
-                + " AND session_scope_key=? AND tenant_id=? AND session_id=? AND domain='child_run'"
-                + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId).isEmpty()) {
+                + " AND tenant_id=? AND session_id=? AND domain='child_run'"
+                + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", tenantId, sessionId).isEmpty()) {
             throw new ManagedAgentException(409, "session_context_busy", "The Session has an unsettled child run.");
         }
         long now = storeRows.lifecycleDatabaseTime();
-        for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record WHERE session_scope_key=?"
-                + " AND record_kind='ACTION' AND state='requested' AND tenant_id=? AND session_id=? FOR UPDATE",
-                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId)) {
+        for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record WHERE"
+                + " record_kind='ACTION' AND state='requested' AND tenant_id=? AND session_id=? FOR UPDATE",
+                String.class, tenantId, sessionId)) {
             Object expiresAt = storeRows.readMap(options).get("expiresAt");
             if (expiresAt instanceof Number expiration && now < expiration.longValue()) {
                 throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval.");
@@ -738,10 +737,9 @@ final class AgentSessionPolicies {
     boolean hasDecidableAction(SessionRecord session) {
         long now = storeRows.lifecycleDatabaseTime();
         for (String options : jdbc.queryForList(
-                        "SELECT options_json FROM ma_session_record WHERE session_scope_key = ? AND"
+                        "SELECT options_json FROM ma_session_record WHERE"
                             + " record_kind = 'ACTION' AND state = 'requested' AND tenant_id = ?"
                             + " AND session_id = ?", String.class,
-                ManagedSessionStore.sessionScopeKey(session.tenantId(), session.sessionId()),
                 session.tenantId(), session.sessionId())) {
             try {
                 if (now < objectMapper.readTree(options).path("expiresAt").asLong()) {
