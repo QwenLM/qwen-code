@@ -153,10 +153,7 @@ export function fakeServerHostOptions(): FakeOpenAIServerOptions | undefined {
     : undefined;
 }
 
-export function fakeModelOptions(
-  baseUrl: string,
-  extraEnv: Record<string, string> = {},
-) {
+export function fakeModelOptions(baseUrl: string) {
   const noProxy = IS_CONTAINER_SANDBOX
     ? CONTAINER_SANDBOX_NO_PROXY
     : '127.0.0.1,localhost';
@@ -170,7 +167,6 @@ export function fakeModelOptions(
       OPENAI_BASE_URL: baseUrl,
       OPENAI_MODEL: 'fake-model',
       QWEN_MODEL: 'fake-model',
-      ...extraEnv,
     },
   };
 }
