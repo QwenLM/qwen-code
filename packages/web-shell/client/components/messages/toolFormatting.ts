@@ -672,6 +672,21 @@ export function isSkillToolName(name: string): boolean {
   return name.toLowerCase() === 'skill';
 }
 
+export function isExecToolName(name: string): boolean {
+  return name.toLowerCase() === 'exec';
+}
+
+/**
+ * The JavaScript body of a code-mode `exec` call. `exec` carries a single
+ * `source` string, so its arguments card can show the program itself instead
+ * of a JSON object wrapping one escaped line.
+ */
+export function getExecSource(tool: ACPToolCall): string | undefined {
+  if (!isExecToolName(tool.toolName)) return undefined;
+  const source = tool.args?.['source'];
+  return typeof source === 'string' && source.trim() ? source : undefined;
+}
+
 export function toolContainsCallId(
   tool: ACPToolCall,
   toolCallId: string,
