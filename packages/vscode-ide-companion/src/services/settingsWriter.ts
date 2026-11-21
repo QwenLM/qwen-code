@@ -202,7 +202,7 @@ function readSettings(): Record<string, unknown> {
     const message =
       err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     throw new Error(
-      `Cannot parse ~/.qwen/settings.json (${message}). ` +
+      `Cannot parse ${settingsPath} (${message}). ` +
         `Standard JSONC (// comments, /* */, trailing commas) is supported, ` +
         `but non-standard JSON features (unquoted keys, single quotes) are not. ` +
         `Please fix or delete ${settingsPath} and try again.`,
@@ -252,6 +252,9 @@ function writeSettings(settings: Record<string, unknown>): void {
     // Best effort — surface nothing to the user if the FS rejects chmod
     // (e.g. Windows, mounted FS without POSIX permissions).
   }
+  // This can be the first thing a new install stores, so claim the directory
+  // as the CLI would. After the writes above, which created it owner-only.
+  Storage.markDefaultGlobalQwenDir();
 }
 
 /**

@@ -539,6 +539,74 @@ describe('loadOutputStyleCatalog', () => {
     expect(labels(catalog)).toContain('qwenhome:user');
   });
 
+  it('reads the user level from an XDG_CONFIG_HOME outside the home directory', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const stylesDir = path.join(root, 'xdg', 'qwen', 'output-styles');
+    await fs.rm(path.join(fakeHome, '.qwen'), { recursive: true });
+    await fs.mkdir(stylesDir, { recursive: true });
+    await writeFiles(stylesDir, { 'xdgstyle.md': 'XDG' });
+    vi.stubEnv('QWEN_HOME', undefined);
+    vi.stubEnv('XDG_CONFIG_HOME', path.join(root, 'xdg'));
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    try {
+      const catalog = await loadOutputStyleCatalog();
+      expect(labels(catalog)).toContain('xdgstyle:user');
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
+  });
+
+  describe('a user style linked into the home directory', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+
+    beforeEach(async () => {
+      // The ordinary dotfiles setup: the style file lives under the home dir
+      // and the global dir's output-styles/ only holds a link to it.
+      await fs.rm(path.join(fakeHome, '.qwen'), { recursive: true });
+      await fs.mkdir(path.join(fakeHome, 'dotfiles'));
+      await writeFiles(path.join(fakeHome, 'dotfiles'), {
+        'linked.md': 'Linked',
+      });
+      await fs.writeFile(path.join(root, 'outside.md'), 'Outside');
+      vi.stubEnv('QWEN_HOME', undefined);
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process, 'platform', platform);
+    });
+
+    const linkStyles = async (stylesDir: string) => {
+      await fs.mkdir(stylesDir, { recursive: true });
+      await fs.symlink(
+        path.join(fakeHome, 'dotfiles', 'linked.md'),
+        path.join(stylesDir, 'linked.md'),
+      );
+      await fs.symlink(
+        path.join(root, 'outside.md'),
+        path.join(stylesDir, 'outside.md'),
+      );
+    };
+
+    it('loads from the default XDG dir inside the home directory', async () => {
+      vi.stubEnv('XDG_CONFIG_HOME', undefined);
+      await linkStyles(path.join(fakeHome, '.config', 'qwen', 'output-styles'));
+
+      const catalog = await loadOutputStyleCatalog();
+      expect(labels(catalog)).toContain('linked:user');
+      expect(labels(catalog)).not.toContain('outside:user');
+    });
+
+    it('loads from an XDG_CONFIG_HOME outside the home directory', async () => {
+      vi.stubEnv('XDG_CONFIG_HOME', path.join(root, 'xdg'));
+      await linkStyles(path.join(root, 'xdg', 'qwen', 'output-styles'));
+
+      const catalog = await loadOutputStyleCatalog();
+      expect(labels(catalog)).toContain('linked:user');
+      expect(labels(catalog)).not.toContain('outside:user');
+    });
+  });
+
   it('keeps the project level when QWEN_HOME points away from the home directory', async () => {
     vi.stubEnv('QWEN_HOME', path.join(root, 'elsewhere', '.qwen'));
     await writeFiles(userDir, { 'homestyle.md': 'Home' });

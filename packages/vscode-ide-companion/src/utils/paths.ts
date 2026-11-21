@@ -35,13 +35,40 @@ function resolvePath(dir: string): string {
   return resolved;
 }
 
+// Written into the XDG directory while it is the default global dir in use;
+// see Storage.getGlobalQwenDir() in packages/core.
+const GLOBAL_DIR_MARKER = '.qwen-global-dir';
+
+/**
+ * The global Qwen directory when QWEN_HOME is unset. Mirrors
+ * Storage.getGlobalQwenDir() in packages/core.
+ */
+function getDefaultQwenDir(homeDir: string): string {
+  const legacyDir = path.join(homeDir, '.qwen');
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    return legacyDir;
+  }
+  const xdgConfigHome = process.env['XDG_CONFIG_HOME'];
+  const xdgDir = path.join(
+    xdgConfigHome && path.isAbsolute(xdgConfigHome)
+      ? xdgConfigHome
+      : path.join(homeDir, '.config'),
+    'qwen',
+  );
+  return !fs.existsSync(legacyDir) ||
+    fs.existsSync(path.join(xdgDir, GLOBAL_DIR_MARKER))
+    ? xdgDir
+    : legacyDir;
+}
+
 let envBootstrapped = false;
 
 /**
- * Pre-resolves QWEN_HOME / QWEN_RUNTIME_DIR from `<homedir>/.qwen/.env` and
- * `<homedir>/.env`. Mirrors the CLI's `preResolveHomeEnvOverrides` so the
- * companion's lock-file location agrees with the CLI even when these vars
- * are only configured via `.env`. Idempotent.
+ * Pre-resolves QWEN_HOME / QWEN_RUNTIME_DIR from the default global Qwen
+ * dir's `.env` and `<homedir>/.env`. Mirrors the CLI's
+ * `preResolveHomeEnvOverrides` so the companion's lock-file location agrees
+ * with the CLI even when these vars are only configured via `.env`.
+ * Idempotent.
  */
 function bootstrapHomeEnvOverrides(): void {
   if (envBootstrapped) {
@@ -61,7 +88,7 @@ function bootstrapHomeEnvOverrides(): void {
   const initialQwenHome = process.env['QWEN_HOME'];
   const currentQwenDir = initialQwenHome
     ? resolvePath(initialQwenHome)
-    : path.join(homeDir, '.qwen');
+    : getDefaultQwenDir(homeDir);
 
   const KEYS = ['QWEN_HOME', 'QWEN_RUNTIME_DIR'] as const;
   const readInto = (file: string) => {
@@ -102,7 +129,8 @@ export function resetEnvBootstrapForTesting(): void {
 /**
  * Returns the global Qwen home directory (config, credentials, etc.).
  *
- * Priority: QWEN_HOME env var > ~/.qwen
+ * Priority: QWEN_HOME env var > the platform default (~/.qwen, or the XDG
+ * config directory on Linux)
  */
 export function getGlobalQwenDir(): string {
   bootstrapHomeEnvOverrides();
@@ -111,9 +139,7 @@ export function getGlobalQwenDir(): string {
     return resolvePath(envDir);
   }
   const homeDir = os.homedir();
-  return homeDir
-    ? path.join(homeDir, '.qwen')
-    : path.join(os.tmpdir(), '.qwen');
+  return homeDir ? getDefaultQwenDir(homeDir) : path.join(os.tmpdir(), '.qwen');
 }
 
 /**

@@ -261,7 +261,7 @@ function deriveDescription(body: string): string {
  * the machine's files, and a link naming one is never something they need.
  * A user file may be a link, because `~/.qwen/output-styles/x.md ->
  * ~/dotfiles/x.md` is an ordinary setup, but its target has to stay inside
- * the user's own root. Both refuse `nlink > 1`, which is how a hard link to
+ * the user's own roots. Both refuse `nlink > 1`, which is how a hard link to
  * a sensitive file looks like an ordinary regular file, and both confine the
  * canonical path so a symlinked *ancestor* (a checked-in `.qwen -> /outside`,
  * which a final-component `lstat` cannot see) is caught too.
@@ -269,7 +269,7 @@ function deriveDescription(body: string): string {
 async function resolveStyleFileToRead(
   filePath: string,
   source: Exclude<OutputStyleSource, 'built-in'>,
-  confineTo: string,
+  confineTo: string | readonly string[],
 ): Promise<string | null> {
   // `lstat` is the guard for a project file: it does not follow the final
   // component, so a symlink is not a regular file and never reaches the read.
@@ -289,14 +289,18 @@ async function resolveStyleFileToRead(
     return null;
   }
   const realPath = await fs.realpath(filePath);
-  const realRoot = await fs.realpath(confineTo);
-  if (realPath !== realRoot && !isWithinRoot(realPath, realRoot)) {
-    debugLogger.warn(
-      `Skipping output style ${filePath}: it resolves outside ${realRoot}`,
-    );
-    return null;
+  const realRoots: string[] = [];
+  for (const root of typeof confineTo === 'string' ? [confineTo] : confineTo) {
+    const realRoot = await fs.realpath(root);
+    if (realPath === realRoot || isWithinRoot(realPath, realRoot)) {
+      return realPath;
+    }
+    realRoots.push(realRoot);
   }
-  return realPath;
+  debugLogger.warn(
+    `Skipping output style ${filePath}: it resolves outside ${realRoots.join(' and ')}`,
+  );
+  return null;
 }
 
 /**
@@ -335,13 +339,14 @@ async function readBoundedStyleFile(readPath: string): Promise<Buffer> {
  * skipped so one bad file never hides the others. Files are read in name
  * order, and a later file that repeats an earlier file's name is skipped.
  *
- * `confineTo` is the root a style file must resolve inside: the project root
- * for project styles, the user's `~/.qwen` root for user styles.
+ * `confineTo` is the root a style file must resolve inside, or a list of
+ * roots it may resolve inside any of: the project root for project styles,
+ * the user's roots for user styles.
  */
 export async function loadOutputStylesFromDir(
   dir: string,
   source: Exclude<OutputStyleSource, 'built-in'>,
-  confineTo: string,
+  confineTo: string | readonly string[],
 ): Promise<OutputStyleDefinition[]> {
   let entries: string[];
   try {
@@ -413,7 +418,9 @@ export function getUserOutputStylesDir(): string {
  * The root a user style file must resolve inside. It is the home directory
  * rather than `~/.qwen`, because `~/.qwen/output-styles/x.md ->
  * ~/dotfiles/x.md` is an ordinary dotfiles setup and has to keep working;
- * an explicit `QWEN_HOME` relocates the root with it.
+ * an explicit `QWEN_HOME` relocates the root with it. The catalog also
+ * accepts the global dir itself, which an absolute `XDG_CONFIG_HOME` can put
+ * outside the home directory.
  */
 export function getUserOutputStylesRoot(): string {
   const envDir = process.env['QWEN_HOME'];
@@ -464,11 +471,10 @@ export async function loadOutputStyleCatalog(
           projectRoot,
         )
       : Promise.resolve([]),
-    loadOutputStylesFromDir(
-      getUserOutputStylesDir(),
-      'user',
+    loadOutputStylesFromDir(getUserOutputStylesDir(), 'user', [
+      Storage.getGlobalQwenDir(),
       getUserOutputStylesRoot(),
-    ),
+    ]),
   ]);
 
   const winners = new Map<string, OutputStyleDefinition>();

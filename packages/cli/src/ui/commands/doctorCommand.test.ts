@@ -1469,4 +1469,40 @@ describe('doctorCommand', () => {
       expect(cpuProfilerModule.startCpuProfile).not.toHaveBeenCalled();
     }
   });
+
+  it.each([
+    ['win32', 'CPU profile was stopped externally. Check'],
+    ['linux', 'CPU profile was stopped externally (e.g., via SIGUSR1). Check'],
+  ])(
+    'names the resolved output dir when the profile was stopped outside /doctor on %s',
+    async (value, message) => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      Object.defineProperty(process, 'platform', { value });
+      vi.mocked(cpuProfilerModule.getCpuProfileOutputDir).mockReturnValue(
+        '/custom/global/cpu-profiles',
+      );
+      vi.mocked(cpuProfilerModule.stopCpuProfile).mockResolvedValue({
+        ok: false,
+        error: 'CPU profiler is not recording',
+      });
+      try {
+        const result = await doctorCommand.action!(
+          createMockCommandContext({
+            executionMode: 'non_interactive',
+          } as unknown as CommandContext),
+          'cpu-profile --duration 1',
+        );
+
+        expect(result).toEqual({
+          type: 'message',
+          messageType: 'info',
+          content: expect.stringContaining(
+            `${message} /custom/global/cpu-profiles for the output.`,
+          ),
+        });
+      } finally {
+        Object.defineProperty(process, 'platform', platform);
+      }
+    },
+  );
 });

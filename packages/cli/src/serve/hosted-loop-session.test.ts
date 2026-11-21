@@ -8,7 +8,7 @@ import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -492,6 +492,50 @@ describe('HostedLoopSession fire-time sentinel expansion', () => {
       classifyFire,
     );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'reads loop.md from a global dir that XDG_CONFIG_HOME puts outside the home directory',
+    async () => {
+      const harness = await createHarness();
+      const root = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-loop-xdg-')),
+      );
+      temporaryDirectories.add(root);
+      const home = path.join(root, 'home');
+      const xdgConfigHome = path.join(root, 'data-config');
+      await fs.mkdir(home, { recursive: true });
+      await fs.mkdir(path.join(xdgConfigHome, 'qwen'), { recursive: true });
+      await fs.writeFile(
+        path.join(xdgConfigHome, 'qwen', 'loop.md'),
+        '- ship the release\n',
+      );
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      vi.stubEnv('QWEN_HOME', undefined);
+      vi.stubEnv('HOME', home);
+      vi.stubEnv('USERPROFILE', home);
+      vi.stubEnv('XDG_CONFIG_HOME', xdgConfigHome);
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      try {
+        await withLoop(
+          harness,
+          async (loops) => {
+            const tick = await loops.expandFireText(
+              'loop:xdg',
+              LOOP_SENTINEL_DYNAMIC,
+            );
+            expect(tick).not.toBeNull();
+            expect(tick!.expanded).toBe(true);
+            expect(tick!.text).toContain('- ship the release');
+          },
+          allow,
+          allow,
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', platform);
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('a denied re-review settles loop_admission_denied and skips the fire', async () => {
     const harness = await createHarness();

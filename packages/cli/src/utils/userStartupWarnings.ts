@@ -4,8 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
+import {
+  GLOBAL_DIR_MARKER,
+  OAUTH_FILE,
+  QWEN_DIR,
+  Storage,
+} from '@qwen-code/qwen-code-core/config/storage.js';
+import { tildeifyPath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { canUseRipgrep } from '@qwen-code/qwen-code-core/utils/ripgrepUtils.js';
 
 type WarningCheckOptions = {
@@ -59,10 +68,58 @@ const ripgrepAvailabilityCheck: WarningCheck = {
   },
 };
 
+// The files that decide whether the user is signed in.
+const SIGN_IN_FILES = ['settings.json', OAUTH_FILE];
+
+// Nothing reads ~/.qwen while the XDG directory is the global dir, so signing
+// in from an install that still uses ~/.qwen (an older release that recreated
+// it, say) looks like being signed out here. Say where those files are rather
+// than read them: both installs would then refresh one Qwen OAuth token
+// without a shared lock or file.
+const legacyGlobalDirCheck: WarningCheck = {
+  id: 'legacy-global-dir',
+  check: async () => {
+    const xdgDir = Storage.getXdgGlobalQwenDir();
+    if (
+      process.env['QWEN_HOME'] ||
+      !xdgDir ||
+      Storage.getGlobalQwenDir() !== xdgDir
+    ) {
+      return null;
+    }
+    const legacyDir = path.join(os.homedir(), QWEN_DIR);
+    const files = SIGN_IN_FILES.filter(
+      (file) =>
+        existsSync(path.join(legacyDir, file)) &&
+        !existsSync(path.join(xdgDir, file)),
+    );
+    if (files.length === 0) {
+      return null;
+    }
+    const legacy = tildeifyPath(legacyDir);
+    // Settings can be copied; a token cannot be shared (see above), so a
+    // missing oauth_creds.json means signing in here.
+    const remedies = [
+      ...(files.includes('settings.json')
+        ? [`copy settings.json into ${tildeifyPath(xdgDir)}`]
+        : []),
+      ...(files.includes(OAUTH_FILE) ? ['run /auth to sign in here'] : []),
+    ].join(' and ');
+    return (
+      `${legacy} has ${files.join(' and ')} from another Qwen Code install, ` +
+      `but this install uses ${tildeifyPath(xdgDir)} and does not read ` +
+      `${files.length === 1 ? 'it' : 'them'}. ` +
+      `${remedies.charAt(0).toUpperCase()}${remedies.slice(1)}, or delete ` +
+      `${tildeifyPath(path.join(xdgDir, GLOBAL_DIR_MARKER))} to use ${legacy} instead.`
+    );
+  },
+};
+
 // All warning checks
 const WARNING_CHECKS: readonly WarningCheck[] = [
   rootDirectoryCheck,
   ripgrepAvailabilityCheck,
+  legacyGlobalDirCheck,
 ];
 
 export async function getUserStartupWarnings(

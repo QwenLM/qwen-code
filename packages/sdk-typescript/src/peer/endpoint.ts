@@ -51,6 +51,7 @@ import { startPeerInbox, type PeerInbox } from './inbox.js';
 import { boundSessionName, flattenPeerLabel, peerRef } from './label.js';
 import {
   isValidSessionKind,
+  markDefaultQwenHome,
   readLiveSessionRecords,
   removeOwnRecord,
   removeOwnRecordSync,
@@ -93,7 +94,10 @@ export interface PeerEndpointOptions {
   sessionId?: string;
   /** Free text recorded as the writer's version. */
   version?: string;
-  /** The Qwen home to join. Default `QWEN_HOME`, else `~/.qwen`. */
+  /**
+   * The Qwen home to join. Default `QWEN_HOME`, else `~/.qwen` (on Linux, the
+   * XDG config directory for a new install). See `resolveQwenHome()`.
+   */
   qwenHome?: string;
   /**
    * Bind the inbox here instead of choosing a path. If something live
@@ -429,6 +433,10 @@ export class PeerEndpoint {
       keepAlive: options.keepAlive ?? true,
     });
     try {
+      // The registry may be the first thing this install stores in the XDG
+      // directory; claim it as the CLI would. An explicit home is like
+      // QWEN_HOME and never claims anything.
+      if (!options.qwenHome) markDefaultQwenHome();
       endpoint.recordFile = await writeOwnRecord(endpoint.registryDir, {
         schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
         pid: process.pid,
