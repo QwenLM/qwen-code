@@ -18,6 +18,8 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.j
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ModSession } from '../services/mod-session.js';
+import { waitForPendingMemoryTasks } from './memory-tasks.js';
+import { cancelAndSettleWorkflowRuns } from './workflow-shutdown.js';
 import { ControlContext } from './control/ControlContext.js';
 import { ControlDispatcher } from './control/ControlDispatcher.js';
 import { ControlService } from './control/ControlService.js';
@@ -55,6 +57,7 @@ import {
 } from './chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
+const EOF_MEMORY_WAIT_TIMEOUT_MS = 5_000;
 
 interface MonitorStartedQueueItem {
   task_id: string;
@@ -79,6 +82,7 @@ class Session {
   private pendingContinueTurn: boolean = false;
   private continueTurnInProgress: boolean = false;
   private readonly sessionAbortController: AbortController;
+  private readonly memoryWaitStopController = new AbortController();
   private activeTurnAbortController: AbortController | null = null;
   private config: Config;
   private sessionId: string;
@@ -564,6 +568,7 @@ class Session {
         ...(isToolMessage(userMessage) ? { fromTool: true } : {}),
         modSession: this.modSession,
         abortController: turnAbortController,
+        memoryWaitStopSignal: this.memoryWaitStopController.signal,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
         captureMonitorNotifications: false,
@@ -664,6 +669,7 @@ class Session {
       await runNonInteractive(this.config, this.settings, '', promptId, {
         modSession: this.modSession,
         abortController: turnAbortController,
+        memoryWaitStopSignal: this.memoryWaitStopController.signal,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
         continueInterrupted: true,
@@ -736,6 +742,7 @@ class Session {
         {
           modSession: this.modSession,
           abortController: turnAbortController,
+          memoryWaitStopSignal: this.memoryWaitStopController.signal,
           adapter: this.outputAdapter,
           controlService: this.controlService ?? undefined,
           sendMessageType: SendMessageType.Notification,
@@ -961,14 +968,48 @@ class Session {
   private async drainAndShutdown(): Promise<void> {
     debugLogger.debug('[Session] Draining pending work before shutdown');
 
+    // The EOF window must bound the memory wait, never the foreground work
+    // still queued at EOF. An absolute deadline armed here would be spent
+    // by that work itself, and every memory wait beginning after it would
+    // enter an already-aborted signal and wait nothing, so the retained
+    // tasks never get their window (R7-1). Release the in-turn waits now —
+    // stopping a wait does not cancel its tasks — and give the final
+    // retained-memory drain its own fresh bounded window below.
+    this.memoryWaitStopController.abort();
     // Abort monitors and stop callbacks first, then drain anything already
     // queued so EOF does not remain coupled to monitor process lifetime.
     this.abortTaskRegistries();
     this.stopMonitorCallbacks();
     await this.waitForAllPendingWork();
-    this.abortTaskRegistries();
-
-    this.finishShutdown();
+    try {
+      if (
+        this.configInitialized &&
+        !this.sessionAbortController.signal.aborted
+      ) {
+        const client = this.config.getLlmClient();
+        if (client) {
+          const finalMemoryWindow = new AbortController();
+          const finalMemoryWindowTimer = setTimeout(
+            () => finalMemoryWindow.abort(),
+            EOF_MEMORY_WAIT_TIMEOUT_MS,
+          );
+          try {
+            await waitForPendingMemoryTasks(
+              client,
+              this.sessionAbortController.signal,
+              finalMemoryWindow.signal,
+            );
+          } finally {
+            clearTimeout(finalMemoryWindowTimer);
+          }
+        }
+      }
+    } catch (error) {
+      if (!this.sessionAbortController.signal.aborted) throw error;
+    } finally {
+      this.abortTaskRegistries();
+      this.finishShutdown();
+    }
   }
 
   private abortTaskRegistries(): void {
@@ -980,7 +1021,6 @@ class Session {
   private finishShutdown(): void {
     this.abortSession();
     this.dispatcher?.shutdown();
-    this.cleanupSignalHandlers();
   }
 
   private stopMonitorCallbacks(): void {
@@ -1107,7 +1147,11 @@ class Session {
       await this.shutdown();
       throw error;
     } finally {
-      this.cleanupSignalHandlers();
+      try {
+        await cancelAndSettleWorkflowRuns(this.config.getWorkflowRunRegistry());
+      } finally {
+        this.cleanupSignalHandlers();
+      }
     }
   }
 }

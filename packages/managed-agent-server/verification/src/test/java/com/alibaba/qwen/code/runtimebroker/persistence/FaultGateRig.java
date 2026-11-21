@@ -13,7 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.provisioning.FaultGateBroker;
+import com.alibaba.qwen.code.runtimebroker.provisioning.local.FaultGateBroker;
 import org.h2.tools.Server;
 
 import javax.sql.DataSource;

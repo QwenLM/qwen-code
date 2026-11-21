@@ -1,5 +1,9 @@
 package com.alibaba.qwen.code.managedagent.preflight;
 
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -18,11 +22,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
 
 class ResolvedConfigurationTest {
     private static final String STATE = "runtimeStateDirectory";
@@ -183,16 +189,24 @@ class ResolvedConfigurationTest {
         assertEquals("http://127.0.0.1:8080/actuator/health",
                 defaults.get("healthUrl"));
         assertEquals("http://127.0.0.1:4170", defaults.get("harnessBaseUrl"));
+        // The Harness is disabled by default, so the server never reads it.
+        assertEquals("skip", defaults.get("harnessOrigin"));
+        assertEquals("true", resolve(Map.of(
+                "QWEN_MANAGED_AGENT_HARNESS_ENABLED", "true"))
+                .get("harnessOrigin"));
 
         // The port in the launcher's file, where server.env cannot see it.
         Path config = write("config/application.yml", """
                 server:
                   port: 9090
+                qwen.managed-agent.harness.enabled: true
                 qwen.managed-agent.harness.base-url: ' http://127.0.0.1:4171 '
                 """);
         Map<String, String> file = resolve(additional(config));
         assertEquals("http://127.0.0.1:9090", file.get("serverUrl"));
-        assertEquals("http://127.0.0.1:4171", file.get("harnessBaseUrl"));
+        // As the server parses it, untrimmed, which the preflight fails.
+        assertEquals(" http://127.0.0.1:4171 ", file.get("harnessBaseUrl"));
+        assertEquals("false", file.get("harnessOrigin"));
         assertEquals("http://127.0.0.1:9091",
                 resolve(Map.of("SERVER_PORT", "9091")).get("serverUrl"));
         assertEquals("http://127.0.0.1:9092",
@@ -227,6 +241,81 @@ class ResolvedConfigurationTest {
                     resolve(Map.of(), "--server.port=" + port);
             assertEquals("", resolved.get("serverUrl"), port);
             assertEquals("", resolved.get("healthUrl"), port);
+        }
+    }
+
+    @Test
+    void passesOnThePreflightsVerdictOnTheHarnessUrl() {
+        // With the single Harness enabled, the preflight's harness row fails
+        // each false one on its setting alone; the upgrade command refuses
+        // start over them before it restarts the Harness.
+        Map<String, String> verdicts = new LinkedHashMap<>();
+        verdicts.put("http://127.0.0.1:4170", "true");
+        verdicts.put("https://harness.internal:4170/base", "true");
+        verdicts.put("http://[::1]:4170", "true");
+        verdicts.put("http://qwen_harness:4170", "false");
+        verdicts.put("http://@127.0.0.1:4170", "false");
+        verdicts.put("http://svc:s3cret@127.0.0.1:4170", "false");
+        verdicts.put("http://127.0.0.1:4170/?", "false");
+        verdicts.put("http://127.0.0.1:4170#x", "false");
+        verdicts.put("http://127.0.0.1:4170/a b", "false");
+        verdicts.put("ftp://127.0.0.1:4170", "false");
+        verdicts.put("", "false");
+        verdicts.put(" http://127.0.0.1:4170 ", "false");
+        verdicts.forEach((url, verdict) -> assertEquals(verdict, resolve(
+                Map.of(), "--qwen.managed-agent.harness.enabled=true",
+                "--qwen.managed-agent.harness.base-url=" + url)
+                .get("harnessOrigin"), url));
+
+        // Disabled, nothing reads the value: the Harness row skips before it
+        // does, and the server never dials it.
+        for (String url : new String[] {"http://qwen_harness:4170",
+                " http://127.0.0.1:4170 ", "http://127.0.0.1:4170"}) {
+            assertEquals("skip", resolve(Map.of(),
+                    "--qwen.managed-agent.harness.base-url=" + url)
+                    .get("harnessOrigin"), url);
+            assertEquals("skip", resolve(Map.of(
+                    "QWEN_MANAGED_AGENT_HARNESS_ENABLED", "false"),
+                    "--qwen.managed-agent.harness.base-url=" + url)
+                    .get("harnessOrigin"), url);
+        }
+        // Pooled, the row skips too, but each member's connector reads it.
+        verdicts.forEach((url, verdict) -> assertEquals(verdict, resolve(
+                Map.of("QWEN_MANAGED_AGENT_HARNESS_POOL_ENABLED", "true"),
+                "--qwen.managed-agent.harness.enabled=true",
+                "--qwen.managed-agent.harness.base-url=" + url)
+                .get("harnessOrigin"), url));
+    }
+
+    @Test
+    void judgesTheHarnessUrlAsTheConnectorThatDialsItDoes() {
+        // The connector is built from the one base-url and refuses it by the
+        // preflight's rule; a pool builds each member's connector from the
+        // same value, as HarnessConfigurationTest pins.
+        for (String url : new String[] {"http://127.0.0.1:4170",
+                "https://harness.internal:4170/base", "http://[::1]:4170",
+                "http://qwen_harness:4170", "http://@127.0.0.1:4170",
+                "http://svc:s3cret@127.0.0.1:4170",
+                "http://127.0.0.1:4170/?", "http://127.0.0.1:4170#x",
+                "http://127.0.0.1:4170/a b", "ftp://127.0.0.1:4170",
+                "proxy.test:4170", "", " http://127.0.0.1:4170 "}) {
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            ManagedAgentProperties.Harness harness = properties.getHarness();
+            harness.setEnabled(true);
+            harness.setBaseUrl(url);
+            harness.setToken("token");
+            harness.setCapabilityDigest("sha256:" + "a".repeat(64));
+            boolean built;
+            try {
+                new QwenHostedHarnessConnector(properties,
+                        mock(AgentStateStore.class),
+                        mock(JdbcWorkspaceExecutionStore.class)).close();
+                built = true;
+            } catch (IllegalArgumentException | IllegalStateException refused) {
+                built = false;
+            }
+            assertEquals(String.valueOf(built),
+                    ManagedAgentPreflight.harnessUrlVerdict(harness), url);
         }
     }
 

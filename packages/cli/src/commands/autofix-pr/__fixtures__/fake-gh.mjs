@@ -15,9 +15,9 @@
 // missing as it would be. Anything this file does not know — a command, a
 // flag, a path, a jq expression, a `--json` field, a GraphQL field or
 // alias, a host other than the world's — fails the call with exit 2 and is
-// logged as unsupported, and so does a crash while answering. The test
-// checks the log: some helpers take a failed call for "no answer" and go
-// on, so the exit code alone would not show it.
+// logged as unsupported, and so do a world it cannot read and a crash
+// while answering. The test checks the log: some helpers take a failed
+// call for "no answer" and go on, so the exit code alone would not show it.
 
 import { execFileSync } from 'node:child_process';
 import {
@@ -30,8 +30,6 @@ import process from 'node:process';
 
 const ACTIONS_APP = 15368;
 
-const worldPath = process.env['FAKE_GH_WORLD'];
-const world = JSON.parse(readFileSync(worldPath, 'utf8'));
 const args = process.argv.slice(2);
 const stdin = args.includes('--input') ? readFileSync(0, 'utf8') : '';
 const log = (entry) =>
@@ -50,6 +48,20 @@ function unsupported(what) {
   fail(`fake gh: unsupported ${what}: gh ${args.join(' ')}`, 2);
 }
 
+// The world, and the names it gives the repository and the PR: read once
+// the call is logged, so a world that cannot be read is logged too.
+const worldPath = process.env['FAKE_GH_WORLD'];
+let world, slug, repoUrl, pr, prUrl;
+try {
+  world = JSON.parse(readFileSync(worldPath, 'utf8'));
+  slug = `${world.owner}/${world.repo}`;
+  repoUrl = `https://${world.host}/${slug}`;
+  pr = world.pr;
+  prUrl = `${repoUrl}/pull/${pr.number}`;
+} catch (err) {
+  unsupported(`world ${worldPath}: ${err.message}`);
+}
+
 function print(value) {
   process.stdout.write(
     typeof value === 'string' ? `${value}\n` : `${JSON.stringify(value)}\n`,
@@ -58,6 +70,15 @@ function print(value) {
 
 function save() {
   writeFileSync(worldPath, `${JSON.stringify(world, null, 2)}\n`);
+}
+
+// A write is saved, then answered: with `loseNextAnswer`, it reaches GitHub
+// and its answer is lost on the way back.
+function saveWrite(lostMessage) {
+  const lost = world.loseNextAnswer;
+  world.loseNextAnswer = false;
+  save();
+  if (lost) fail(lostMessage);
 }
 
 function git(...gitArgs) {
@@ -75,11 +96,6 @@ function isAncestor(a, b) {
   }
 }
 
-const slug = `${world.owner}/${world.repo}`;
-const repoUrl = `https://${world.host}/${slug}`;
-const pr = world.pr;
-const prUrl = `${repoUrl}/pull/${pr.number}`;
-
 function headSha() {
   return git('rev-parse', `refs/heads/${pr.headRefName}`);
 }
@@ -90,6 +106,12 @@ function nextId() {
 }
 
 // --- checks -----------------------------------------------------------------
+
+// The conclusions of a job that failed: a re-run with `--failed` re-runs
+// them. (It re-runs a cancelled job too, a conclusion this file does not
+// model.)
+const FAILED_JOB = new Set(['FAILURE', 'TIMED_OUT']);
+const JOB_CONCLUSIONS = new Set(['SUCCESS', ...FAILED_JOB]);
 
 // The latest attempt of each job of a run: a re-run appends new jobs to it.
 function latestJobs(run) {
@@ -109,19 +131,28 @@ function runStatus(run) {
 
 function runConclusion(run) {
   if (runStatus(run) !== 'COMPLETED') return null;
-  return latestJobs(run).some((job) => job.conclusion === 'FAILURE')
+  return latestJobs(run).some((job) => FAILED_JOB.has(job.conclusion))
     ? 'FAILURE'
     : 'SUCCESS';
 }
 
-// A run with no job is one GitHub could not start, which this file does
-// not model.
-function runsOn(sha) {
-  const runs = world.runs.filter((run) => run.sha === sha);
+// A run with no job is one GitHub could not start, and a job conclusion
+// it does not list is one the helpers read their own way: this file models
+// neither.
+function modelled(runs) {
   if (runs.some((run) => run.jobs.length === 0)) {
     unsupported('a run with no job');
   }
+  for (const job of runs.flatMap((run) => run.jobs)) {
+    if (job.status === 'COMPLETED' && !JOB_CONCLUSIONS.has(job.conclusion)) {
+      unsupported(`job conclusion ${job.conclusion}`);
+    }
+  }
   return runs;
+}
+
+function runsOn(sha) {
+  return modelled(world.runs.filter((run) => run.sha === sha));
 }
 
 function contextNodes(sha) {
@@ -172,9 +203,9 @@ function suiteNodes(sha) {
 }
 
 function findRun(id) {
-  return (
-    world.runs.find((run) => run.id === Number(id)) ?? unsupported('run id')
-  );
+  const run =
+    world.runs.find((r) => r.id === Number(id)) ?? unsupported('run id');
+  return modelled([run])[0];
 }
 
 // --- comments ---------------------------------------------------------------
@@ -509,13 +540,8 @@ function api() {
   let m;
   if (method === 'POST') {
     const body = JSON.parse(stdin).body;
-    // `loseNextAnswer`: the POST reaches GitHub and its answer is lost on
-    // the way back.
     const answered = (response) => {
-      const lost = world.loseNextAnswer;
-      world.loseNextAnswer = false;
-      save();
-      if (lost) fail('gh: HTTP 502: Bad Gateway');
+      saveWrite('gh: HTTP 502: Bad Gateway');
       print(response);
     };
     if ((m = /^issues\/(\d+)\/comments$/.exec(route))) {
@@ -587,7 +613,8 @@ function api() {
 }
 
 // `gh run rerun <id> --failed -R <slug>`: a new attempt of each failed job,
-// queued.
+// queued. gh words an answer other than a 403 as "failed to rerun: <the
+// HTTP error>", and an error page that is not JSON by its status line.
 function runRerun() {
   const [, , id, failed, r, repo, ...rest] = args;
   if (failed !== '--failed' || r !== '-R' || rest.length > 0) {
@@ -598,11 +625,14 @@ function runRerun() {
   if (runStatus(run) !== 'COMPLETED') {
     fail(`run ${run.id} cannot be rerun; This workflow is already running`);
   }
-  for (const job of latestJobs(run)) {
-    if (job.conclusion !== 'FAILURE') continue;
+  const jobs = latestJobs(run).filter((job) => FAILED_JOB.has(job.conclusion));
+  if (jobs.length === 0) unsupported('a re-run of a run with no failed job');
+  for (const job of jobs) {
     run.jobs.push({ id: nextId(), name: job.name, status: 'QUEUED' });
   }
-  save();
+  saveWrite(
+    `failed to rerun: HTTP 502: 502 Bad Gateway (https://${world.host}/api/v3/repos/${slug}/actions/runs/${run.id}/rerun-failed-jobs)`,
+  );
 }
 
 // Every call goes to the host the watch was prepared for: one that drops it

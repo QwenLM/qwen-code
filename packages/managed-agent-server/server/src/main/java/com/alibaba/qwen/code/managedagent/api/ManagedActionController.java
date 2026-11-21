@@ -64,7 +64,7 @@ public class ManagedActionController {
                         response.kind(),
                         response.inputRevision(),
                         response.policyRevision(),
-                        response.optionId());
+                        response.optionId(), response.answers(), true);
         return ResponseEntity.accepted()
                 .header("X-Qwen-Idempotent-Replay", Boolean.toString(admission.replayed()))
                 .body(actions.publicOperation(admission.operation(), admission.replayed()));
@@ -106,7 +106,7 @@ public class ManagedActionController {
                         response.kind(),
                         response.inputRevision(),
                         response.policyRevision(),
-                        response.optionId());
+                        response.optionId(), response.answers(), false);
         return ResponseEntity.accepted()
                 .body(actions.webOperation(admission.operation(), admission.replayed()));
     }

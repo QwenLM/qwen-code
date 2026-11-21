@@ -163,14 +163,14 @@ it.each(['ordinary-prompt', 'monitor:wake:run'])(
           f.brokerOptions,
           'other-prompt',
         ),
-      ).toEqual(new Map());
+      ).toEqual({ states: new Map(), held: new Map() });
       expect(
         await reconcileHostedTurnCleanup(
           f.session,
           f.brokerOptions,
           f.promptId,
         ),
-      ).toEqual(new Map([[f.promptId, 'owed']]));
+      ).toEqual({ states: new Map([[f.promptId, 'owed']]), held: new Map() });
       expect(release).not.toHaveBeenCalled();
       await f.terminal();
       expect(
@@ -179,7 +179,10 @@ it.each(['ordinary-prompt', 'monitor:wake:run'])(
           f.brokerOptions,
           f.promptId,
         ),
-      ).toEqual(new Map([[f.promptId, 'confirmed']]));
+      ).toEqual({
+        states: new Map([[f.promptId, 'confirmed']]),
+        held: new Map(),
+      });
       expect(release).toHaveBeenCalledOnce();
       await reconcileHostedTurnCleanup(f.session, f.brokerOptions, f.promptId);
       expect(release).toHaveBeenCalledOnce();

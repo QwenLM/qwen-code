@@ -110,18 +110,12 @@ class SessionStoreDefaultsTest {
         Path link = Files.createSymbolicLink(workspace.resolve("link"), Files.createDirectory(workspace.resolve("real")));
         String expected = DigestUtils.sha256Hex(link.toRealPath().toString().getBytes(StandardCharsets.UTF_8))
                 .substring(0, 16);
-        for (String provisioner : new String[] {"local-process", "kubernetes"}) {
-            ManagedAgentProperties derived = enabledStore();
-            derived.getRuntimeBroker().setProvisioner(provisioner);
-            derived.getRuntimeBroker().setWorkspaceCwd(
-                    "kubernetes".equals(provisioner) ? "/workspace" : link.toString());
-            derived.validateWorkspaceFiles();
-            assertThat(derived.getSessionStore().getWorkspaceId()).as(provisioner)
-                    .isEqualTo(EmbeddedRuntimeBroker.workspaceId(derived.getRuntimeBroker()));
-            if ("local-process".equals(provisioner)) {
-                assertThat(derived.getSessionStore().getWorkspaceId()).isEqualTo(expected);
-            }
-        }
+        ManagedAgentProperties derived = enabledStore();
+        derived.getRuntimeBroker().setWorkspaceCwd(link.toString());
+        derived.validateWorkspaceFiles();
+        assertThat(derived.getSessionStore().getWorkspaceId())
+                .isEqualTo(EmbeddedRuntimeBroker.workspaceId(derived.getRuntimeBroker()))
+                .isEqualTo(expected);
     }
 
     @Test

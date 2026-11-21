@@ -50,6 +50,7 @@ const mocks = vi.hoisted(() => {
           {
             ...(key === undefined ? null : { key }),
             ...(bg === undefined ? null : { 'data-bg': bg }),
+            'data-id': (config as { id?: string } | null)?.id,
           },
           children,
         );
@@ -109,8 +110,15 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   buildConfirmationPrompt,
+  OpenTuiProjectHooksApprovalDialog,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
+import {
+  layoutProjectHooksLines,
+  PROJECT_HOOKS_DIALOG_DESCRIPTION,
+  PROJECT_HOOKS_DIALOG_TITLE,
+  ProjectHooksApprovalChoice,
+} from '../components/hooks/ProjectHooksApprovalDialog.js';
 
 const onConfirmNoop = async () => {};
 
@@ -456,6 +464,38 @@ describe('OpenTuiToolConfirmation', () => {
         />,
       ).container;
     }
+
+    it('provides selected state and decorative markers from actual question chips', () => {
+      const details = multiAskDetails(async () => {});
+      if (details.type === 'ask_user_question')
+        details.questions[0].header = '▸ Deploy';
+      const container = mount(details);
+      const first = container.querySelector(
+        '[data-id="screen-reader-selected-question-tab"]',
+      );
+      expect(first?.textContent).toContain('▸ ▸ Deploy');
+      press({ name: 'right', sequence: '' });
+      expect(first?.getAttribute('data-id')).toBe(
+        'screen-reader-unselected-question-tab',
+      );
+      expect(first?.textContent?.trim()).toBe('▸ Deploy');
+      expect(
+        container.querySelector(
+          '[data-id="screen-reader-selected-question-tab"]',
+        )?.textContent,
+      ).toContain('▸ Region');
+      press({ name: 'right', sequence: '' });
+      press({ name: 'right', sequence: '' });
+      const submit = container.querySelector(
+        '[data-id="screen-reader-selected-submit-tab"]',
+      );
+      expect(submit?.textContent).toBe('▸ Submit');
+      press({ name: 'left', sequence: '' });
+      expect(submit?.getAttribute('data-id')).toBe(
+        'screen-reader-unselected-submit-tab',
+      );
+      expect(submit?.textContent?.trim()).toBe('Submit');
+    });
 
     function typeChars(text: string) {
       for (const char of text) press({ name: char, sequence: char });
@@ -1550,5 +1590,61 @@ describe('OpenTuiToolConfirmation', () => {
     press({ name: 's', ctrl: true });
     expect(container.textContent).toContain('OVERFLOW_LINE_00');
     expect(container.textContent).toContain('lines hidden');
+  });
+});
+
+describe('OpenTuiProjectHooksApprovalDialog', () => {
+  const lines = Array.from({ length: 30 }, (_, i) => `Stop  hook-${i}.sh`);
+
+  beforeEach(() => {
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.dimensions = { width: 110, height: 40 };
+  });
+
+  it.each([
+    ['escape', [{ name: 'escape' }], ProjectHooksApprovalChoice.DISMISS],
+    [
+      'enter',
+      [{ name: 'return', sequence: '\r' }],
+      ProjectHooksApprovalChoice.APPROVE,
+    ],
+    [
+      'down + enter',
+      [{ name: 'down' }, { name: 'return', sequence: '\r' }],
+      ProjectHooksApprovalChoice.REJECT,
+    ],
+  ])('maps %s to its choice', (_name, keys, expected) => {
+    const onSelect = vi.fn();
+    render(
+      <OpenTuiProjectHooksApprovalDialog lines={lines} onSelect={onSelect} />,
+    );
+    for (const key of keys) {
+      act(() => {
+        for (const handler of mocks.state.keyboardHandlers) handler(key);
+      });
+    }
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(expected);
+  });
+
+  it('budgets the list by the dialog region, not the terminal height', () => {
+    const view = render(
+      <OpenTuiProjectHooksApprovalDialog
+        lines={lines}
+        availableTerminalHeight={20}
+        onSelect={vi.fn()}
+      />,
+    );
+    const header = [
+      PROJECT_HOOKS_DIALOG_TITLE,
+      PROJECT_HOOKS_DIALOG_DESCRIPTION,
+    ];
+    const rows = (height: number) =>
+      layoutProjectHooksLines(lines, header, 110, height);
+    expect(rows(20)).not.toEqual(rows(40));
+    const rendered = Array.from(view.container.querySelectorAll('span'))
+      .map((span) => span.textContent ?? '')
+      .filter((text) => text.startsWith('  '))
+      .map((text) => text.slice(2));
+    expect(rendered).toEqual(rows(20));
   });
 });

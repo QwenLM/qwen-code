@@ -57,6 +57,7 @@ export interface ListenerScopedCredentials {
  */
 export class CredentialStore implements ListenerScopedCredentials {
   #runtime: Buffer | undefined;
+  #remote: Buffer | undefined;
   /** Pairing id → sha256 of the pairing secret. */
   readonly #pairing = new Map<string, Buffer>();
   /** Device id → the digest and issuance time of its Web Shell credential. */
@@ -68,6 +69,10 @@ export class CredentialStore implements ListenerScopedCredentials {
 
   constructor(runtimeToken?: string) {
     this.#runtime = hashToken(runtimeToken);
+  }
+
+  setRemoteToken(token: string | undefined): void {
+    this.#remote = hashToken(token);
   }
 
   addPairingToken(id: string, token: string): void {
@@ -145,7 +150,7 @@ export class CredentialStore implements ListenerScopedCredentials {
    * "operator chose the surface area" reasoning that governs `--hostname`.
    */
   isOpen(listener: ListenerIdentity): boolean {
-    if (listener.kind === 'local-control') return false;
+    if (listener.kind !== 'primary') return false;
     return this.#runtime === undefined;
   }
 
@@ -158,6 +163,9 @@ export class CredentialStore implements ListenerScopedCredentials {
    */
   verify(credentials: string, listener: ListenerIdentity): boolean {
     const candidate = createHash('sha256').update(credentials, 'utf8').digest();
+    if (listener.kind === 'remote-access') {
+      return this.#remote !== undefined && equalDigest(candidate, this.#remote);
+    }
     let matched = false;
     if (listener.kind === 'local-control') {
       for (const expected of this.#pairing.values()) {
@@ -190,10 +198,9 @@ export function singleTokenCredentials(
 ): ListenerScopedCredentials {
   const expected = hashToken(token);
   return {
-    isOpen: (listener) =>
-      expected === undefined && listener.kind !== 'local-control',
+    isOpen: (listener) => expected === undefined && listener.kind === 'primary',
     verify: (candidate, listener) => {
-      if (expected === undefined || listener.kind === 'local-control') {
+      if (expected === undefined || listener.kind !== 'primary') {
         return false;
       }
       return equalDigest(

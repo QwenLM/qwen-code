@@ -75,6 +75,7 @@ describe('isCompressionFailureStatus', () => {
       CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
       CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
       CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
     ]) {
       expect(isCompressionFailureStatus(status)).toBe(true);
     }
@@ -278,6 +279,36 @@ describe('Turn', () => {
         onModelRequestDispatched: dispatched,
       });
     });
+    it('forwards isSessionTurn and ledgerTurnKey to the chat send options (R15)', async () => {
+      // Interior link of the ledger-key hop: Turn must forward the sender's
+      // membership flag and the Goal run's fresh turn key to LlmChat, or the
+      // headless runtime Goal boundary never reaches the ledger.
+      const isolated = new Turn(
+        { sendMessageStream: mockSendMessageStream } as unknown as LlmChat,
+        'goal-prompt',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        'goal-prompt/goal/goal-runtime:t1',
+      );
+      for await (const event of isolated.run(
+        'test-model',
+        [{ text: 'hello' }],
+        new AbortController().signal,
+      )) {
+        expect(event).toBeDefined();
+      }
+      expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        isSessionTurn: true,
+        ledgerTurnKey: 'goal-prompt/goal/goal-runtime:t1',
+      });
+    });
     it('should yield content events for text parts', async () => {
       const reqParts: Part[] = [{ text: 'Hi' }];
       const events = await run(
@@ -325,8 +356,68 @@ describe('Turn', () => {
         }),
         'prompt-id-1',
         undefined,
-        { promptId: 'stable-prompt-id', retractDeliveredOutputOnRetry: true },
+        {
+          promptId: 'stable-prompt-id',
+          retractDeliveredOutputOnRetry: true,
+        },
       );
+    });
+
+    it('forwards isExplicitRetry and isSessionTurn to the chat send options', async () => {
+      // client.ts passes the explicit-Retry flag as Turn's 10th positional
+      // argument and ledger membership as the 11th; pin both slots so a
+      // constructor reorder cannot misroute them.
+      turn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+        } as unknown as LlmChat,
+        'prompt-id-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        false,
+      );
+      await run([textChunk('Hello')]);
+
+      // Distinct values pin the slot mapping: swapping the two adjacent
+      // boolean declarations would emit { isSessionTurn: true } instead.
+      expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        isExplicitRetry: true,
+      });
+
+      turn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+        } as unknown as LlmChat,
+        'prompt-id-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        true,
+      );
+      await run([textChunk('Hello')]);
+
+      expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        isSessionTurn: true,
+      });
     });
 
     it('should preserve ordered image parts in content events', async () => {
@@ -635,6 +726,22 @@ describe('Turn', () => {
     // "[API Error: 400 status code (no body)]" and nothing to quote.
     // See https://github.com/QwenLM/qwen-code/issues/14115
     describe('request id on the Error event', () => {
+      it('retains marked subscription quota context for display formatting', async () => {
+        const subscriptionQuota = {
+          type: 'subscription_quota',
+          memberType: 'pro',
+        };
+        const error = Object.assign(new Error('quota fallback'), {
+          status: 402,
+          subscriptionQuota,
+        });
+        const events = await runFailing(error);
+        expect((events[0] as ServerLlmErrorEvent).value.error).toMatchObject({
+          message: 'quota fallback',
+          status: 402,
+          subscriptionQuota,
+        });
+      });
       const REQUEST_ID = 'a30a1854-1925-4da8-8803-73fee2865116';
 
       it('carries x-request-id from a real Headers instance', async () => {
@@ -910,6 +1017,28 @@ describe('Turn', () => {
       ]);
     });
 
+    it('should include a provider finish message', async () => {
+      const events = await run([
+        textChunk('Content blocked', {
+          finishReason: 'SAFETY',
+          finishMessage: 'Response refused due to cyber-related safety policy.',
+        }),
+      ]);
+
+      expect(events).toEqual([
+        contentEvent('Content blocked'),
+        {
+          type: LlmEventType.Finished,
+          value: {
+            reason: 'SAFETY',
+            usageMetadata: undefined,
+            finishMessage:
+              'Response refused due to cyber-related safety policy.',
+          },
+        },
+      ]);
+    });
+
     it('should yield finished event with undefined reason when there is no finish reason', async () => {
       const events = await run([textChunk('Response without finish reason')]);
 
@@ -1111,6 +1240,224 @@ describe('Turn', () => {
 
       expect(turn.pendingToolCalls).toHaveLength(1);
       expect(turn.pendingToolCalls[0].wasOutputTruncated).toBeUndefined();
+    });
+
+    // #16417: alongside the flag, the turn records the budget numbers — the
+    // used tokens from the response's own usageMetadata and the limit from
+    // the send layer — so the scheduler's rejection can name them.
+    // usageMetadata must be at the response root (not inside candidates[0])
+    // because that is where turn.ts reads it.
+    it('records the output budget alongside the truncation mark (#16417)', async () => {
+      // Wire a chat that returns a limit, so the budget actually lands.
+      const budgetTurn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+          getLastRequestMaxOutputTokens: () => 8192,
+        } as unknown as LlmChat,
+        'prompt-budget',
+      );
+      mockSendMessageStream.mockResolvedValue(
+        streamOf(
+          chunk({
+            functionCalls: [
+              {
+                name: 'write_file',
+                args: { file_path: '/big.txt', content: 'x'.repeat(50_000) },
+              },
+            ],
+          }),
+          chunk({
+            candidates: [
+              { content: { parts: [] }, finishReason: 'MAX_TOKENS' },
+            ],
+            usageMetadata: { totalTokenCount: 9216, promptTokenCount: 1024 },
+          }),
+        ),
+      );
+      await collect(
+        budgetTurn.run(
+          'test-model',
+          [{ text: 'Test' }],
+          new AbortController().signal,
+        ),
+      );
+
+      const tc = budgetTurn.pendingToolCalls[0];
+      expect(tc.wasOutputTruncated).toBe(true);
+      // total − prompt = 9216 − 1024 = 8192 (see R1: includes reasoning)
+      expect(tc.outputBudgetAtTruncation).toEqual({
+        usedTokens: 8192,
+        limitTokens: 8192,
+      });
+    });
+
+    // M13: the total − prompt preference over candidatesTokenCount is
+    // unpinned — when a provider reports both (Gemini-style with separate
+    // reasoning tokens in thoughtsTokenCount), the subtraction includes
+    // reasoning that a bare candidates count omits. Pin that the
+    // subtraction wins when the two disagree.
+    it('prefers total − prompt over candidatesTokenCount when both are reported (#16417 M13)', async () => {
+      const budgetTurn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+          getLastRequestMaxOutputTokens: () => 8_192,
+        } as unknown as LlmChat,
+        'prompt-budget-prefer-subtraction',
+      );
+      // total − prompt = 9200 − 1000 = 8200, but candidates = 1000 (the
+      // bare output count without reasoning). The subtraction must win.
+      mockSendMessageStream.mockResolvedValue(
+        streamOf(
+          chunk({
+            functionCalls: [
+              {
+                name: 'write_file',
+                args: { file_path: '/big.txt', content: 'x'.repeat(50_000) },
+              },
+            ],
+          }),
+          chunk({
+            candidates: [
+              { content: { parts: [] }, finishReason: 'MAX_TOKENS' },
+            ],
+            usageMetadata: {
+              totalTokenCount: 9_200,
+              promptTokenCount: 1_000,
+              candidatesTokenCount: 1_000,
+            },
+          }),
+        ),
+      );
+      await collect(
+        budgetTurn.run(
+          'test-model',
+          [{ text: 'Test' }],
+          new AbortController().signal,
+        ),
+      );
+
+      const tc = budgetTurn.pendingToolCalls[0];
+      expect(tc.wasOutputTruncated).toBe(true);
+      // 9200 − 1000 = 8200 (reasoning-inclusive), NOT 1000 (bare candidates).
+      expect(tc.outputBudgetAtTruncation).toEqual({
+        usedTokens: 8_200,
+        limitTokens: 8_192,
+      });
+    });
+
+    it('falls back to candidatesTokenCount when total or prompt is missing (#16417 R1)', async () => {
+      const budgetTurn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+          getLastRequestMaxOutputTokens: () => 4096,
+        } as unknown as LlmChat,
+        'prompt-budget-fallback',
+      );
+      mockSendMessageStream.mockResolvedValue(
+        streamOf(
+          chunk({
+            functionCalls: [
+              {
+                name: 'write_file',
+                args: { file_path: '/x.txt', content: 'y' },
+              },
+            ],
+          }),
+          chunk({
+            candidates: [
+              { content: { parts: [] }, finishReason: 'MAX_TOKENS' },
+            ],
+            usageMetadata: { candidatesTokenCount: 3500 },
+          }),
+        ),
+      );
+      await collect(
+        budgetTurn.run(
+          'test-model',
+          [{ text: 'Test' }],
+          new AbortController().signal,
+        ),
+      );
+
+      expect(budgetTurn.pendingToolCalls[0].outputBudgetAtTruncation).toEqual({
+        usedTokens: 3500,
+        limitTokens: 4096,
+      });
+    });
+
+    // R4-1: a MAX_TOKENS cut always consumed output tokens, so a zero or
+    // non-finite candidatesTokenCount is a coerced/missing value — the
+    // fallback must refuse to certify "used 0 of the N-token limit".
+    it('leaves the budget unset when candidatesTokenCount is zero-coerced (#16417 R4-1)', async () => {
+      const budgetTurn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+          getLastRequestMaxOutputTokens: () => 4096,
+        } as unknown as LlmChat,
+        'prompt-budget-zero-coerced',
+      );
+      mockSendMessageStream.mockResolvedValue(
+        streamOf(
+          chunk({
+            functionCalls: [
+              {
+                name: 'write_file',
+                args: { file_path: '/x.txt', content: 'y' },
+              },
+            ],
+          }),
+          chunk({
+            candidates: [
+              { content: { parts: [] }, finishReason: 'MAX_TOKENS' },
+            ],
+            // OpenAI converters stamp every count with `|| 0` when the
+            // usage payload is missing.
+            usageMetadata: {
+              totalTokenCount: 0,
+              promptTokenCount: 0,
+              candidatesTokenCount: 0,
+            },
+          }),
+        ),
+      );
+      await collect(
+        budgetTurn.run(
+          'test-model',
+          [{ text: 'Test' }],
+          new AbortController().signal,
+        ),
+      );
+
+      const tc = budgetTurn.pendingToolCalls[0];
+      expect(tc.wasOutputTruncated).toBe(true);
+      expect(tc.outputBudgetAtTruncation).toBeUndefined();
+    });
+
+    it('leaves the budget unset when the chat lacks the getter (#16417)', async () => {
+      await runCallsThenFinish('MAX_TOKENS', {
+        name: 'write_file',
+        args: { file_path: '/test.txt', content: 'hello' },
+      });
+
+      const tc = turn.pendingToolCalls[0];
+      expect(tc.wasOutputTruncated).toBe(true);
+      expect(tc.outputBudgetAtTruncation).toBeUndefined();
     });
 
     it('should handle multiple pending tool calls with MAX_TOKENS', async () => {

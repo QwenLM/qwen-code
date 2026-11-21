@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -45,7 +46,7 @@ class ManagedMessageSnapshotRemovalTest {
         manager = new DataSourceTransactionManager(source);
         transaction = new TransactionTemplate(manager);
         store = VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
         session = transaction.execute(status -> store.insertSessionCommand(TENANT, "actor",
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, "title", List.of(), null))
                 .sessionId();
@@ -112,20 +113,19 @@ class ManagedMessageSnapshotRemovalTest {
         assertThat(jdbc.queryForObject("SELECT retention_until FROM ma_resource WHERE resource_key = ?",
                 Long.class, oldBody)).isNotNull().isLessThanOrEqualTo(ToolPublicationRetentionStore.now(jdbc));
 
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, session);
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, session);
         String nativeId = "native-snapshot-manifest";
-        String nativeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, nativeId);
+        String nativeKey = ManagedSessionStore.resourceKey(scope, nativeId);
         byte[] nativeBytes = {123, 125};
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, session_id,"
                         + " resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
                         + " inline_bytes, state, gmt_create, retention_until)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 0, 0)",
-                nativeKey, scope, TENANT, session, nativeId, ManagedNativeJournalSnapshots.MANIFEST_KIND,
+                        + " VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 0, 0)",
+                nativeKey, TENANT, session, nativeId, ManagedNativeJournalSnapshots.MANIFEST_KIND,
                 nativeBytes.length, ToolPublicationContract.sha256(nativeBytes), nativeBytes);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key,"
                         + " owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create)"
-                        + " VALUES (?, 'NATIVE_SNAPSHOT', ?, 1, ?, ?, ?, ?, 0)",
-                scope, ManagedSchemaKeys.key(scope, nativeId), nativeKey, TENANT, session, nativeId);
+                        + " VALUES ('NATIVE_SNAPSHOT', ?, 1, ?, ?, ?, ?, 0)", ManagedSchemaKeys.key(scope, nativeId), nativeKey, TENANT, session, nativeId);
         jdbc.update("UPDATE ma_resource SET retention_until = 0 WHERE resource_key = ?", currentBody);
 
         assertThat(new ManagedProjectionResourceCollector(jdbc, manager).runOnce()).isTrue();

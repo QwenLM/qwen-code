@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication;
+import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
@@ -17,15 +18,18 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
 @EnableConfigurationProperties(ManagedAgentProperties.class)
 @EnableScheduling
 @EnableTransactionManagement(proxyTargetClass = true)
+@org.springframework.boot.autoconfigure.ImportAutoConfiguration(ExtensionArchiveStorageAutoConfiguration.class)
 @Import({
     ManagedAgentConfiguration.PersistenceImport.class,
     ExecutionConfiguration.class,
     HarnessConfiguration.class,
     RuntimeBrokerConfiguration.class,
     RuntimeRetentionConfiguration.class,
+    ParkedMcpReclamationConfiguration.class,
     ManagedArtifactConfiguration.class,
     ToolPublicationConfiguration.class,
     EventTransportConfiguration.class,
+    ManagedMemoryConfiguration.class,
     AliyunToolPublicationStorageAutoConfiguration.class
 })
 @ComponentScan(
@@ -38,6 +42,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
             "com.alibaba.qwen.code.managedagent.automation",
             "com.alibaba.qwen.code.managedagent.event",
             "com.alibaba.qwen.code.managedagent.session",
+            "com.alibaba.qwen.code.managedagent.memory",
             "com.alibaba.qwen.code.managedagent.persistence",
             "com.alibaba.qwen.code.managedagent.adapters.extensions"
         },
@@ -83,7 +88,7 @@ public class ManagedAgentConfiguration {
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.workspace.SessionWorktreeOperations.Factory managedWorktreeFactory() {
         return (git, timeout) -> new com.alibaba.qwen.code.managedagent.adapters.workspace.SessionWorktreeGit(
-                new com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit(git, timeout));
+                new ChildWorktreeGit(git, timeout));
     }
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader managedStorageIdentityReader() {
@@ -91,17 +96,17 @@ public class ManagedAgentConfiguration {
     }
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFiles managedLocalWorkspaceFiles() {
-        return new com.alibaba.qwen.code.runtimebroker.provisioning.WorkspaceFileProcess();
+        return new com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess();
     }
-    @org.springframework.context.annotation.Bean
-    public com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy managedSessionReaderVersion() {
-        return new ManagedSessionReaderVersion();
-    }
-    @org.springframework.context.annotation.Bean(destroyMethod = "")
+    @org.springframework.context.annotation.Bean(destroyMethod = "close")
     public com.alibaba.qwen.code.runtimebroker.spi.SshConnections managedSshConnections(ManagedAgentProperties properties) {
-        return properties.getRuntimeBroker().getSsh().getNodes().isEmpty() ? null
-                : new com.alibaba.qwen.code.runtimebroker.provisioning.SshConnectionManager(
-                    java.net.URI.create(properties.getToolPublication().getServiceBaseUrl()));
+        if (!com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties)
+                .includes(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS)) {
+            return null;
+        }
+        var registry = new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry();
+        registry.validateSelected(properties);
+        return registry.ssh().createConnections(java.net.URI.create(properties.getToolPublication().getServiceBaseUrl()));
     }
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository managedChannelRoutes(
@@ -112,6 +117,16 @@ public class ManagedAgentConfiguration {
     public com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository managedChannelDeliveries(
             @org.springframework.beans.factory.annotation.Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc) {
         return new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository(jdbc);
+    }
+    @org.springframework.context.annotation.Bean
+    public com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository managedChannelSegments(
+            @org.springframework.beans.factory.annotation.Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        return new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelSegmentRepository(jdbc);
+    }
+    @org.springframework.context.annotation.Bean
+    public com.alibaba.qwen.code.managedagent.contracts.persistence.PrWatchInjectionRepository managedPrWatchInjections(
+            @org.springframework.beans.factory.annotation.Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        return new com.alibaba.qwen.code.managedagent.persistence.JdbcPrWatchInjectionRepository(jdbc);
     }
 
     @org.springframework.context.annotation.Bean
@@ -126,6 +141,7 @@ public class ManagedAgentConfiguration {
     }
 
     public ManagedAgentConfiguration(ManagedAgentProperties properties) {
+        properties.validateRuntimeProvider();
         BrokerSecurity.checkPublicationTransport(properties, new java.util.ArrayList<>());
     }
 

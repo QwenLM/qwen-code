@@ -40,6 +40,7 @@ import {
   indexGapsByChild,
 } from './history-gap-notice.js';
 import { coalesceFindingsHistoryItems } from './findings-coalescing.js';
+import { modPromptRow } from '../../services/mod-prompt-frame.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 import {
   collectInlineImages,
@@ -418,6 +419,24 @@ function convertToHistoryItems(
           }
           break;
         }
+        // A Mod's own prompt restores as the row the terminal showed for it.
+        if (record.provenance === 'mod_prompt') {
+          const payload = record.systemPayload as { mod?: string } | undefined;
+          const text =
+            projectUserTranscriptForDisplay(record).displayText ||
+            extractTextFromParts(record.message?.parts as Part[]);
+          if (text) {
+            if (currentToolGroup.length > 0) {
+              items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+              currentToolGroup = [];
+            }
+            items.push({
+              type: 'notification',
+              text: modPromptRow(payload?.mod ?? 'unknown', text),
+            });
+          }
+          break;
+        }
         if (record.subtype === 'mid_turn_user_message') {
           const payload = record.systemPayload as
             | { displayText?: string; attachmentReferences?: unknown[] }
@@ -772,22 +791,41 @@ export function stripSuppressOnRestore<T extends Pick<HistoryItem, 'display'>>(
   };
 }
 
+/**
+ * Counts the resumed user turns that the visible Prompts statistic tracks.
+ * Mirrors the live counter, which advances only for UserQuery / Cron /
+ * Teammate sends: background and agent records are `type: 'user'` but never a
+ * real user prompt, so counting them would inflate the statistic on resume
+ * (the exact inflation the promptCount/userPromptCount split prevents). Cold
+ * background notifications are excluded, but a Teammate turn records as
+ * `subtype: 'notification'` with `teammateTurn: true` and stays counted
+ * (R15-1/R17-1); cron records stay counted too.
+ */
+export function computeResumedUserTurnCount(
+  records: readonly ChatRecord[],
+): number {
+  return records.filter(
+    (m) =>
+      m.type === 'user' &&
+      m.subtype !== 'mid_turn_user_message' &&
+      m.subtype !== 'realtime_message' &&
+      m.subtype !== 'goal_runtime' &&
+      m.subtype !== 'agent_mention' &&
+      m.subtype !== 'agent_message' &&
+      (m.subtype !== 'notification' || m.teammateTurn === true),
+  ).length;
+}
+
 /** Seeds a resumed prompt counter past both recorded turns and claimed ids. */
 export function computeResumedPromptCountSeed(
   records: readonly ChatRecord[],
   sessionId: string,
 ): number {
-  const userTurnCount = records.filter(
-    (m) =>
-      m.type === 'user' &&
-      m.subtype !== 'mid_turn_user_message' &&
-      m.subtype !== 'realtime_message',
-  ).length;
   if (records.length === 0) {
     return 0;
   }
   return Math.max(
-    userTurnCount,
+    computeResumedUserTurnCount(records),
     computeInitialTurnFromHistory(records, sessionId) + 1,
   );
 }

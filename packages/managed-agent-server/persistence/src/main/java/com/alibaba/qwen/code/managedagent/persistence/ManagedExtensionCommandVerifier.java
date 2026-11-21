@@ -27,11 +27,11 @@ import java.util.Set;
 @Component
 public final class ManagedExtensionCommandVerifier implements RuntimeExtensionCommandVerifier {
     private final JdbcTemplate jdbc;
-    private final ManagedExtensionRecordStore records;
+    private final JdbcManagedExtensionRecordStore records;
     private final SessionQueryStore sessions;
     private final ObjectMapper json;
 
-    public ManagedExtensionCommandVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ManagedExtensionRecordStore records, SessionQueryStore sessions, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
+    public ManagedExtensionCommandVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, JdbcManagedExtensionRecordStore records, SessionQueryStore sessions, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.records = records;
         this.sessions = sessions;
@@ -60,10 +60,10 @@ public final class ManagedExtensionCommandVerifier implements RuntimeExtensionCo
                 .anyMatch(phase -> phase.equals(operation.get("action"))));
         JsonNode recordRef = grant.get("resourceScope").get("recordRef");
         var projection = jdbc.query("SELECT revision, record_resource_id, operation_hash FROM ma_session_record"
-                        + " WHERE record_kind='DOMAIN' AND session_scope_key=? AND tenant_id=? AND workspace_id=?"
+                        + " WHERE record_kind='DOMAIN' AND tenant_id=? AND workspace_id=?"
                         + " AND session_id=? AND domain='tool_stage' AND record_id=?",
                 (row, index) -> new Projection(row.getLong(1), row.getString(2), row.getString(3)),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, harness), tenant, session.getScope().getWorkspaceId(), harness, stageId);
+                tenant, session.getScope().getWorkspaceId(), harness, stageId);
         check(projection.size() == 1);
         Projection latest = projection.getFirst();
         check(latest.revision() == grant.get("operationRevision").longValue()

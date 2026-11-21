@@ -85,6 +85,8 @@ export QQ_APP_SECRET=<your-app-secret>
 | `moderationRecallWindowMs` | `-1`    | How long, in milliseconds, the channel keeps an inbound message that member-targeted recall can resolve. `-1` means no time limit: entries are capped per chat, and once the channel is tracking more than 256 chats the least-recently-active chat's whole ring can be evicted. `0` disables member-targeted recall entirely — no message id is reachable from the session, so only an explicit `message_id` supplied by the operator or read from the channel logs can still be passed. `N > 0` keeps an entry for N milliseconds. A non-integer or a value below `-1` warns and falls back to `-1`. |
 | `groupAllPolicy`           | unset   | Receive ordinary (non-@) group messages: `"log"` to observe them only, `"keyword"` or `"all"` to let them start a turn (with `groups: {"*": {"requireMention": false}}`). Unset means the gateway delivers only @-mentions and direct messages. See [Group Chats](#group-chats).                                                                                                                                                                                                                                                                                                                       |
 | `purgeLegacySessions`      | `false` | Delete legacy single-scope and user-scope session routes — see below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `fileTools`                | `false` | Expose the outbound media tools so the agent can send a local file, image, video, or voice message to the chat — see [Outbound Media](#outbound-media).                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `forwardBotMessages`       | `false` | Deliver messages authored by other bots with a `[bot]` sender prefix instead of dropping them — see [Group Chats](#group-chats).                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 All standard channel options (see [Channel Overview](./overview#options)) are also supported:
 `privatePolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`.
@@ -111,6 +113,14 @@ To use the bot in QQ groups:
 4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start. Note that once a group is approved, **any member of that group** can use the bot by default (restrict with the group's `senders: "allowlist"` and `allowedUsers`); `privatePolicy` and the top-level `allowedUsers` do not gate members of an approved group.
 
 QQ Bot API V2 only delivers group messages that @mention the bot — the bot does not see all group messages. By default, `requireMention` is `true` and should be left that way for QQ.
+
+Messages authored by another bot are dropped by default. Set `forwardBotMessages: true` to deliver them instead: such a message reaches the model with a `[bot]` prefix on the sender line, and the model decides whether replying makes sense. Bot-to-bot conversation is a feature, not a defect, and the switch is its whole boundary — QQ delivers message events for user-authored messages only (a bot's own sends come back in the send API's response, not as events), so the enabled path can only ever carry another bot's message; there is deliberately no automatic rate cap on the enabled path; the group's human members and the model's own silence rules (`<noreply>`) are the guard, so enabling it is an explicit operator tradeoff.
+
+### Scheduled Loops and Proactive Delivery
+
+Loop, webhook-task, and background or named-task results are delivered back to the chat that created them as **active messages** — QQ posts them without a reply anchor, so they do not depend on a recent inbound message. In a group, each such delivery spends the group's platform active-message quota.
+
+If a group's admin has disabled active messages, these deliveries fail instead of silently falling back to an anchored passive reply: loop and webhook target checks refuse the run before the agent turn, background and named-task results are rejected at delivery with `ACTIVE_MSG_DISABLED`, and the loop scheduler counts consecutive failures and auto-disables the loop after 5. Proactive delivery also requires the chat type to be already learned: a loop or webhook target in a group the bot has never received a message from is rejected instead of sent.
 
 ### Session Isolation
 
@@ -155,6 +165,20 @@ For a group action to reach a member's message by name, the channel remembers th
 
 Each channel instance owns its tools: one bridge can serve several channels, and a tool is only offered to sessions of the channel that registered it, so two QQ channels in one process never act on each other's chats or credentials.
 
+## Outbound Media
+
+With `fileTools: true`, the channel exposes four outbound tools to the agent: `qq_send_file` sends a downloadable file card, `qq_send_image` sends a PNG or JPEG as an image message, `qq_send_video` sends an MP4 as a playable video, and `qq_send_voice` sends a SILK, MP3, WAV, or OGG recording as a voice bar. The model passes an absolute local path. The switch is off by default, because the tools hand a local file to QQ under the bot's own identity.
+
+Every tool uses the same boundary: the path must resolve inside the session's workspace or the system temporary directory — a symlink out of the workspace is resolved first and refused, a file with more than one hard link is refused, and where the platform exposes `/proc/self/fd` the opened descriptor is re-resolved so a directory swapped between the check and the open is caught — and the file must be a non-empty regular file. `qq_send_file` accepts any format up to 20 MiB, keeping the repository's outbound cap so the file stays in memory and the exposure stays bounded. The media tools cap at the platform's soft limits: an image at 20 MB, a video at 30 MB, and a voice message at 20 MB.
+
+The media tools check the bytes, not the file name. A file whose magic bytes do not match the tool's format list is refused before any upload, and the model is told to use `qq_send_file` instead, which sends it as a file card. The same happens above a soft limit: the platform would otherwise quietly downgrade an over-limit image, video, or voice upload to a file card, and the tool would report success for a different visible outcome. Accepted formats are `png`/`jpg` for images, `mp4` for videos, and `silk`/`mp3`/`wav`/`ogg` for voice messages.
+
+Every upload goes up through the platform's chunked path (`upload_prepare` → PUT each part → `upload_part_finish` → merge), which is the only path that fits a local file: the URL form needs a public origin the bot does not have, and the binary form stops at 5 MB. A transient `40093001` on a part is retried; `40093002` (the chat's daily file-sending limit) is reported as permanent. A rejected send is never replaced by a text message, because that would read as success while the user never received the media.
+
+The upload is followed by a `msg_type=7` send that reuses the text path's reply anchor and `msg_seq` counter, so media sent mid-turn stays in the same reply chain as that turn's text and cannot replay a `(msg_id, msg_seq)` pair the platform dedupes. The channel anchors a reply for 5 minutes in every chat type — the platform allows 60 minutes for a direct chat, but the channel's own anchor expires first, so a long turn can fall out of the reply window and the media is then sent as an active message. When a group admin has turned active messages off and that window has closed, the tool reports the refusal instead of dropping the media.
+
+Each channel instance owns its tools: one bridge can serve several channels, and the outbound tools are only offered to sessions of the channel that registered them.
+
 ## Markdown Support
 
 The QQ Bot channel supports Markdown formatting (`msg_type=2`). The agent's Markdown responses are sent as-is, and QQ renders them with rich formatting (bold, italic, code blocks, links, lists).
@@ -196,7 +220,7 @@ Image input requires a model that accepts images. Declare the capability when th
 
 With a text-only model the agent receives an "unsupported image" note plus the saved path instead of the picture.
 
-Sending images, videos, files, or voice messages back to QQ is not supported.
+Sending media back to QQ is supported through the opt-in outbound tools — see [Outbound Media](#outbound-media).
 
 ## Token Management
 

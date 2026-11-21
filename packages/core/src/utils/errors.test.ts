@@ -7,7 +7,13 @@
 import { describe, it, expect } from 'vitest';
 import { APIUserAbortError as AnthropicAPIUserAbortError } from '@anthropic-ai/sdk';
 import { APIConnectionError, APIUserAbortError } from 'openai';
-import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
+import {
+  getErrorMessage,
+  getModuleNotFoundError,
+  isAbortError,
+  isNodeError,
+  wrapLazyModuleLoadError,
+} from './errors.js';
 
 /** An Error with a Node-style `code`, like undici's syscall errors. */
 const coded = (message: string, code: string) =>
@@ -261,6 +267,54 @@ describe('isNodeError', () => {
     expect(isNodeError({ code: 'ENOENT' })).toBe(false);
     expect(isNodeError('string')).toBe(false);
     expect(isNodeError(null)).toBe(false);
+  });
+});
+
+describe('getModuleNotFoundError', () => {
+  it('finds ERR_MODULE_NOT_FOUND on the error itself or in its cause chain', () => {
+    const missing = coded(
+      "Cannot find module './chunk.js'",
+      'ERR_MODULE_NOT_FOUND',
+    );
+    expect(getModuleNotFoundError(missing)).toBe(missing);
+    const wrapped = new Error('outer', {
+      cause: new Error('middle', { cause: missing }),
+    });
+    expect(getModuleNotFoundError(wrapped)).toBe(missing);
+  });
+
+  it('ignores other codes and non-Error values', () => {
+    expect(
+      getModuleNotFoundError(coded('File not found', 'ENOENT')),
+    ).toBeUndefined();
+    expect(
+      getModuleNotFoundError({ code: 'ERR_MODULE_NOT_FOUND' }),
+    ).toBeUndefined();
+    expect(getModuleNotFoundError(undefined)).toBeUndefined();
+  });
+});
+
+describe('wrapLazyModuleLoadError', () => {
+  it('asks for a restart and keeps the missing-module error as cause', () => {
+    const missing = coded(
+      "Cannot find module './chunk.js'",
+      'ERR_MODULE_NOT_FOUND',
+    );
+    const wrapped = wrapLazyModuleLoadError(
+      new Error('import failed', { cause: missing }),
+      'the feature',
+    ) as Error;
+
+    expect(wrapped.message).toBe(
+      'Qwen Code was updated in the background and needs to be restarted.\n' +
+        'Please exit and restart Qwen Code to use the feature.',
+    );
+    expect(wrapped.cause).toBe(missing);
+  });
+
+  it('returns any other error unchanged', () => {
+    const other = new Error('network timeout');
+    expect(wrapLazyModuleLoadError(other, 'the feature')).toBe(other);
   });
 });
 

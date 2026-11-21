@@ -14,7 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
@@ -134,14 +134,12 @@ class JdbcRuntimeRetentionTest {
         fixture.execution(binding, "session", "settled", "SETTLED", OLD);
         fixture.execution(binding, "session", "abandoned", "ABANDONED", OLD);
         fixture.execute("INSERT INTO ma_session_head"
-                + " (tenant_key, harness_key, tenant_id, session_id, harness_session_id, head_kind, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-harness"),
+                + " (tenant_id, session_id, harness_session_id, head_kind, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 "other-tenant", "other-harness", "other-harness");
-        fixture.execute("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id)"
-                + " VALUES (?, ?, ?, ?, ?, ?)",
-                JdbcRuntimeBindingRepository.storageAliasKey("other-tenant", "other-storage"),
-                JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-storage"),
+        fixture.execute("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, fence_operation_id)"
+                + " VALUES (?, ?, ?, ?)",
+                RuntimeAdmissionFences.storageAliasKey("other-tenant", "other-storage"),
                 "other-tenant", "other-storage", UUID.randomUUID().toString());
 
         var total = fixture.complete(1, NO_REFERENCES);
@@ -300,7 +298,7 @@ class JdbcRuntimeRetentionTest {
         fixture.binding("unproven", "local-process", true, "RELEASED");
         RuntimeBindingRecord drained = fixture.binding("drained", "local-process", true, "RELEASED");
         RuntimeResourceHandle drainHandle = fixture.handle(drained);
-        fixture.execute("UPDATE ma_runtime_binding SET drain_requested = TRUE, drain_receipt_json = ? "
+        fixture.execute("UPDATE ma_runtime_binding SET is_drain_requested = TRUE, drain_receipt_json = ? "
                         + "WHERE binding_id = ?",
                 new RuntimeDrainReceipt(drained.getBindingId(), drained.getGeneration(),
                         drained.getProvisionSeed().getProvisionRequestId(), drainHandle, OLD).toJson(),
@@ -603,7 +601,7 @@ class JdbcRuntimeRetentionTest {
 
         Fixture(DataSource dataSource) {
             source = dataSource;
-            JdbcRuntimeBrokerSchema.initialize(source);
+            ManagedSchema.initialize(source);
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32]),
                     () -> nextId);
             sessions = new JdbcRuntimeSessionRepository(source);
@@ -644,7 +642,7 @@ class JdbcRuntimeRetentionTest {
             executions.findOrCreate(ToolExecutionRecord.prepared(id, id + "-key", binding.getBindingId(),
                     binding.getGeneration(), "harness", session, "turn", "call", "digest",
                     Map.of("sessionId", session, "promptId", "turn", "callId", "call", "argsDigest", "digest")));
-            execute("UPDATE ma_tool_execution SET execution_state = ?, cancel_requested = ?, execution_status = ?, "
+            execute("UPDATE ma_tool_execution SET execution_state = ?, is_cancel_requested = ?, execution_status = ?, "
                             + "result_json = ?, settled_at = ?, abandoned_at = ?, loss_evidence_id = ? "
                             + "WHERE execution_call_id = ?", state, "CANCEL_REQUESTED".equals(state),
                     "SETTLED".equals(state) ? "success" : null,

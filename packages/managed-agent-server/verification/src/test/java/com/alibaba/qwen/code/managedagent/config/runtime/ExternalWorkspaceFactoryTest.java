@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
+import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -19,10 +20,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * durable registry, and leave every other kind exactly as it was (#15512 step 3a).
  */
 class ExternalWorkspaceFactoryTest {
-    private static final ExternalStorageRegistry EMPTY = (tenant, alias) -> Optional.empty();
+    private static final RuntimeProviderDependencies EMPTY = new RuntimeProviderDependencies() {
+        @Override
+        public ExternalStorageRegistry externalStorage() { return (tenant, alias) -> Optional.empty(); }
+    };
 
-    private static ManagedAgentProperties.RuntimeBroker broker(String kind) {
-        var broker = new ManagedAgentProperties.RuntimeBroker();
+    private static ManagedAgentProperties broker(String kind) {
+        var properties = new ManagedAgentProperties();
+        var broker = properties.getRuntimeBroker();
+        broker.setWorkspaceId("fixture-workspace");
+        broker.setWorkspaceCwd("/workspace");
         broker.setProvisioner(kind);
         broker.setTrustedLocalRebootRecovery(false);
         broker.setExternalProviderUrl("http://provider.invalid/api");
@@ -30,7 +37,7 @@ class ExternalWorkspaceFactoryTest {
         broker.setExternalProviderId("placement-service");
         broker.setExternalRequestTimeout(Duration.ofSeconds(7));
         broker.setExternalStartupTimeout(Duration.ofSeconds(90));
-        return broker;
+        return properties;
     }
 
     @Test
@@ -41,13 +48,16 @@ class ExternalWorkspaceFactoryTest {
             assertTrue(provisioner.supportsKind(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE));
             assertFalse(provisioner.supportsKind(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_SCRATCH));
             assertFalse(provisioner.supportsDrainedStop());
+            assertTrue(provisioner.supportsDrainedStopKind("external-workspace"));
+            assertFalse(provisioner.supportsDrainedStopKind("external-scratch"));
+            assertFalse(provisioner.supportsDrainedStop((com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord) null));
         }
     }
 
     @Test
     void theWorkspaceKindRefusesToStartWithoutItsRegistry() {
         var error = assertThrows(IllegalStateException.class, () -> EmbeddedRuntimeBroker
-                .provisioner(broker(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE), new HttpRuntimeTransport(), null));
+                .provisioner(broker(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE), new HttpRuntimeTransport(), RuntimeProviderDependencies.NONE));
         assertTrue(error.getMessage().contains("Managed Session Store"), error.getMessage());
     }
 

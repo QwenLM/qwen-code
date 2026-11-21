@@ -35,6 +35,26 @@ const EN_MESSAGES: Record<string, Message> = {
 
 const messages: Record<WebShellLanguage, Record<string, Message>> = {
   en: EN_MESSAGES,
+  'zh-TW': {
+    'chat.searchConversation': '搜尋當前會話',
+    'chat.searchConversationPlaceholder': '搜尋訊息和程式碼…',
+    'chat.searchConversationHint': '輸入關鍵詞，查詢之前的內容。',
+    'chat.searchingConversation': '正在搜尋會話歷史…',
+    'chat.searchLoadedOnly':
+      '僅可搜尋已載入訊息，更新 Qwen Code 後可搜尋完整歷史。',
+    'chat.searchResultPosition': (vars) =>
+      `${vars?.['current']} / ${vars?.['total']} 條結果`,
+    'chat.searchNoResults': '沒有匹配的訊息。',
+    'chat.searchPrevious': '上一個結果',
+    'chat.searchNext': '下一個結果',
+    'chat.searchResults': '搜尋結果',
+    'chat.searchResultsLimited': (vars) =>
+      `僅顯示前 ${vars?.['count']} 條結果，請使用更具體的關鍵詞。`,
+    'chat.searchFailed': '未能搜尋全部歷史，結果可能不完整。',
+    'chat.searchLocateFailed': '無法定位此結果，請重新搜尋以重新整理結果。',
+    'chat.searchUser': '你',
+    'chat.searchAssistant': '助手',
+  },
   'zh-CN': {
     'chat.searchConversation': '搜索当前会话',
     'chat.searchConversationPlaceholder': '搜索消息和代码…',
@@ -55,9 +75,29 @@ const messages: Record<WebShellLanguage, Record<string, Message>> = {
     'chat.searchUser': '你',
     'chat.searchAssistant': '助手',
   },
-  // Not translated yet — same partial-catalog policy as the ru table in
-  // i18n.tsx (#13391): ru reuses the EN copy.
-  ru: EN_MESSAGES,
+  ru: {
+    'chat.searchConversation': 'Искать в этом разговоре',
+    'chat.searchConversationPlaceholder': 'Искать сообщения и код…',
+    'chat.searchConversationHint':
+      'Введите ключевое слово, чтобы найти более раннее содержимое.',
+    'chat.searchingConversation': 'Поиск по истории разговора…',
+    'chat.searchLoadedOnly':
+      'Доступны только загруженные сообщения. Обновите Qwen Code, чтобы искать по всей истории.',
+    'chat.searchResultPosition': (vars) =>
+      `${vars?.['current']} / ${vars?.['total']} результатов`,
+    'chat.searchNoResults': 'Нет подходящих сообщений.',
+    'chat.searchPrevious': 'Предыдущий результат',
+    'chat.searchNext': 'Следующий результат',
+    'chat.searchResults': 'Результаты поиска',
+    'chat.searchResultsLimited': (vars) =>
+      `Показаны первые ${vars?.['count']} результатов. Уточните запрос для более точных совпадений.`,
+    'chat.searchFailed':
+      'Не удалось выполнить поиск по всей истории. Результаты могут быть неполными.',
+    'chat.searchLocateFailed':
+      'Этот результат не удалось найти. Повторите поиск, чтобы обновить его.',
+    'chat.searchUser': 'Вы',
+    'chat.searchAssistant': 'Ассистент',
+  },
 };
 
 export function useConversationSearchI18n() {

@@ -400,6 +400,8 @@ describe('WeComChannel', () => {
     vi.stubEnv('TMPDIR', suiteTmpDir);
     vi.stubEnv('TMP', suiteTmpDir);
     vi.stubEnv('TEMP', suiteTmpDir);
+    // Channel event journals must not land in the developer's real ~/.qwen.
+    vi.stubEnv('QWEN_HOME', join(suiteTmpDir, 'qwen-home'));
   });
 
   afterAll(() => {
@@ -3912,6 +3914,75 @@ describe('WeComChannel', () => {
 
     finishSecond?.();
 
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
+  });
+
+  it('buffers a file attachment mid-turn under inject instead of dropping its path', async () => {
+    const bridge = makeBridge();
+    const queueMidTurnMessage = vi.fn(() => ({ accepted: true }));
+    (
+      bridge as unknown as { queueMidTurnMessage: typeof queueMidTurnMessage }
+    ).queueMidTurnMessage = queueMidTurnMessage;
+    let finishFirst: (() => void) | undefined;
+    let finishSecond: (() => void) | undefined;
+    (bridge.prompt as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishFirst = () => resolve('');
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishSecond = () => resolve('');
+          }),
+      );
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ dispatchMode: 'inject' }),
+      bridge,
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-active',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'active.txt',
+      },
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+    client.emit('message.file', {
+      msgid: 'msg-buffered',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'buffered.txt',
+      },
+    });
+
+    // The mid-turn queue carries text only; injecting the `saved to:` path
+    // while the adapter deletes the file would hand the agent a broken path.
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(2));
+    expect(queueMidTurnMessage).not.toHaveBeenCalled();
+    const bufferedDir = channelFileDirs().find((dir) =>
+      existsSync(join(dir, 'buffered.txt')),
+    );
+    expect(bufferedDir).toBeDefined();
+
+    finishFirst?.();
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+    expect(existsSync(join(bufferedDir!, 'buffered.txt'))).toBe(true);
+
+    finishSecond?.();
     await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
   });
 

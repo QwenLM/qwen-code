@@ -7,6 +7,10 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { join } from 'node:path';
 import {
+  canonicalToolName,
+  ToolNames,
+} from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import {
   runForcedToolCallScenario,
   TestRig,
   printDebugInfo,
@@ -139,11 +143,12 @@ describe('file-system', () => {
     const readCall = toolLogs.find(
       (log) => log.toolRequest.name === 'read_file',
     );
-    const writeCall = toolLogs.find(
-      (log) =>
-        log.toolRequest.name === 'write_file' ||
-        log.toolRequest.name === 'replace',
-    );
+    // Either write tool completes the task; canonicalToolName folds the
+    // edit tool's legacy alias ('replace') into its current name.
+    const writeCall = toolLogs.find((log) => {
+      const name = canonicalToolName(log.toolRequest.name ?? '');
+      return name === ToolNames.WRITE_FILE || name === ToolNames.EDIT;
+    });
 
     if (!readCall || !writeCall) {
       printDebugInfo(rig, result, { readCall, writeCall });
@@ -152,7 +157,7 @@ describe('file-system', () => {
     expect(readCall, 'Expected to find a read_file tool call').toBeDefined();
     expect(
       writeCall,
-      'Expected to find a write_file or replace tool call',
+      'Expected to find a write_file or edit tool call',
     ).toBeDefined();
 
     const newFileContent = rig.readFile(fileName);

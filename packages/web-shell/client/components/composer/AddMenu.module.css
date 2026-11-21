@@ -1,0 +1,90 @@
+.iconTile {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted) 65%, transparent);
+  color: var(--muted-foreground);
+}
+
+.separator {
+  margin-inline: 6px;
+}
+
+.mobileSeparator {
+  /* Mobile buttons add a 1px transparent border before their content. */
+  margin-inline: 7px;
+}
+
+.actionText {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+  white-space: normal;
+}
+
+.actionLabel {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.description {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.planRow [data-slot='dropdown-menu-checkbox-item-indicator'] {
+  display: none;
+}
+
+.toggleTrack {
+  display: inline-flex;
+  width: 36px;
+  height: 22px;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 30%, transparent);
+  pointer-events: none;
+}
+
+.toggleThumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--foreground);
+}
+
+.toggleTrack[data-checked='true'] {
+  background: var(--primary);
+}
+
+.toggleTrack[data-checked='true'] .toggleThumb {
+  transform: translateX(14px);
+  background: var(--primary-foreground);
+}
+
+@media (forced-colors: active) {
+  .toggleTrack,
+  .toggleTrack[data-checked='true'] {
+    forced-color-adjust: none;
+    background: Canvas;
+    outline: 1px solid CanvasText;
+  }
+
+  .toggleThumb,
+  .toggleTrack[data-checked='true'] .toggleThumb {
+    background: CanvasText;
+  }
+}

@@ -15,6 +15,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { combineAbortSignals } from '../utils/abortController.js';
 import { openBrowserSecurely } from '../utils/secure-browser-launcher.js';
 import { osc8Hyperlink, supportsHyperlinks } from '../utils/osc8.js';
+import { withQwenChatTracking } from './oauth-config.js';
 import {
   SharedTokenManager,
   TokenManagerError,
@@ -887,15 +888,26 @@ async function authWithQwenDeviceFlow(
     }
 
     // Emit device authorization event for UI integration immediately
-    qwenOAuth2Events.emit(QwenOAuth2Event.AuthUri, deviceAuth);
+    const authorizationUrl = withQwenChatTracking(
+      deviceAuth.verification_uri_complete,
+      'cli',
+    );
+    qwenOAuth2Events.emit(QwenOAuth2Event.AuthUri, {
+      ...deviceAuth,
+      verification_uri: withQwenChatTracking(
+        deviceAuth.verification_uri,
+        'cli',
+      ),
+      verification_uri_complete: authorizationUrl,
+    });
 
     if (config.isBrowserLaunchSuppressed() || !config.isInteractive()) {
-      showFallbackMessage(deviceAuth.verification_uri_complete);
+      showFallbackMessage(authorizationUrl);
     }
 
     // Try to open browser if not suppressed
     if (!config.isBrowserLaunchSuppressed()) {
-      await launchBrowser(deviceAuth.verification_uri_complete);
+      await launchBrowser(authorizationUrl);
     }
 
     emitAuthProgress('polling', 'Waiting for authorization...');

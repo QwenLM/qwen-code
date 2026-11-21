@@ -23,7 +23,7 @@
 | Harness 路由    | Java 配置一个 Harness 地址和一个客户端。已有进程顺序替换能力；并发副本选择和持久 Session 路由仍需补齐。                                                                                                      |
 | Runtime 隔离    | Broker 范围包含租户和 Workspace，并区分 Workspace 或 Session 隔离类别。这些逻辑范围本身不能证明不可信用户之间的操作系统隔离。                                                                                |
 
-源码参考：[身份过滤器](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/api/TenantContextFilter.java)、[公共 Controller](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/api/PublicAgentController.java)、[Hosted Session](../../packages/cli/src/serve/hosted-harness-session.ts)、[Hosted 模型](../../packages/cli/src/serve/hosted-harness-model.ts)、[writer 凭据](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/security/WriterCredentialPolicy.java)、[连接器](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnector.java)和 [Runtime 范围](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/runtimebroker/RuntimeScope.java)。
+源码参考：[身份过滤器](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/TenantContextFilter.java)、[公共 Controller](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/PublicAgentController.java)、[Hosted Session](../../packages/cli/src/serve/hosted-harness-session.ts)、[Hosted 模型](../../packages/cli/src/serve/hosted-harness-model.ts)、[writer 凭据](../../packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/security/WriterCredentialPolicy.java)、[连接器](../../packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnector.java)和 [Runtime 范围](../../packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/RuntimeScope.java)。
 
 ## 部署与信任边界
 
@@ -103,7 +103,7 @@ Harness 部署位置与 Tool Runtime 的创建方式是独立选择。保留 `QW
 | `local-process` Tool Runtime            | 保留已有 Broker 选择和 `LocalProcessRuntimeProvisioner` 的启动、ready 握手、执行身份、取消与恢复契约。Harness 水平扩展不要求替换该 provisioner，也不要求本地安装 Kubernetes。                                              |
 | Kubernetes Harness 配合本地进程 Runtime | 针对所选拓扑验证网络可达性和存储归属。Harness 必须能访问 Java 的 Store 和 Broker 地址。同机 Broker 消费的 worker 回环端点可以继续本地使用；回调和资源 URL 必须按实际调用方的网络命名空间验证。此混合拓扑需要独立验收证据。 |
 
-参考：[本地 Runtime provisioner](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/LocalProcessRuntimeProvisioner.java)。
+参考：[本地 Runtime provisioner](../../packages/managed-agent-server/runtime-local/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/local/LocalProcessRuntimeProvisioner.java)。
 
 共享多租户部署要求更严格的 Actor、writer 凭据和容量前提。保留已有明确受信任的单用户本地部署的认证与信任契约；不能仅因部署在本地，就悄然豁免实际服务多租户的部署。可选的发现和服务池生命周期行为不进入默认单地址路径。源码兼容是设计要求，不代表未来共用代码变更已经通过本地回归，也不代表本地进程提供了不可信用户沙箱。
 

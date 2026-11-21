@@ -28,6 +28,7 @@ import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type {
   ArenaAgentCardData,
   CompressionProps,
+  HistoryItemInfo,
   HistoryItem as CanonicalHistoryItem,
   HistoryItemWithoutId as CanonicalHistoryItemWithoutId,
 } from '../types.js';
@@ -93,6 +94,7 @@ export type LiveInfoItem = {
   kind: 'info';
   id: string;
   text: string;
+  presentation?: HistoryItemInfo['presentation'];
   historyIsSynthetic?: false;
 };
 
@@ -521,6 +523,7 @@ function foldLiveEventData(
         kind: 'info',
         id: nid('info'),
         text: ev.text,
+        ...(ev.presentation ? { presentation: ev.presentation } : {}),
         ...(ev.historyIsSynthetic !== undefined
           ? { historyIsSynthetic: ev.historyIsSynthetic }
           : {}),

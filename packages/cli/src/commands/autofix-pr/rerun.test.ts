@@ -33,6 +33,11 @@ import {
   writeState,
   type AutofixPrState,
 } from './state.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 const HEAD = 'a'.repeat(40);
 
@@ -410,7 +415,10 @@ describe('runRerun', () => {
       );
     });
     expect(() => runRerun(7, 50)).toThrow(
-      /GitHub did not re-run run 50: .*answer its failures as needing a human/,
+      refused(
+        'rerun_failed',
+        /GitHub did not re-run run 50: .*answer its failures as needing a human/,
+      ),
     );
     // Nothing re-ran: the failures stay reported, the budget stays unspent.
     expect(state().rerunChecks).toBeUndefined();
@@ -438,7 +446,9 @@ describe('runRerun', () => {
       pr: { ...prData(), state: 'MERGED' },
       viewer: 'me',
     }));
-    expect(() => runRerun(7, 50)).toThrow(/is merged; nothing is re-run/);
+    expect(() => runRerun(7, 50)).toThrow(
+      refused('pr_closed', /is merged; nothing is re-run/),
+    );
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 
@@ -456,7 +466,9 @@ describe('runRerun', () => {
       ...state(),
       watch: { every: 2, reply: true, instructions: '', task: 'bbbbbbbbbbbb' },
     });
-    expect(() => runRerun(7, 50, 'aaaaaaaaaaaa')).toThrow(/no longer drives/);
+    expect(() => runRerun(7, 50, 'aaaaaaaaaaaa')).toThrow(
+      refused('task_replaced', /no longer drives/),
+    );
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 
@@ -465,7 +477,9 @@ describe('runRerun', () => {
       ...state(),
       ended: { at: '2026-10-25T00:00:00.000Z', reason: 'kept' },
     });
-    expect(() => runRerun(7, 50)).toThrow(/watch was stopped/);
+    expect(() => runRerun(7, 50)).toThrow(
+      refused('watch_stopped', /watch was stopped/),
+    );
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 

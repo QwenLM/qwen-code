@@ -38,6 +38,44 @@ function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
 }
 
 describe('SystemMessage — prompt_cancelled marker', () => {
+  it('uses shared quota copy in the Chinese Desktop and VS Code message component', () => {
+    const container = render(
+      <SystemMessage
+        content="You've used up your weekly credits. Your credits are expected to reset in 3 hours. Please try again after the reset."
+        variant="error"
+        source="turn_error"
+        data={{
+          subscriptionQuota: {
+            type: 'subscription_quota',
+            memberType: 'pro',
+            resetAt: Math.floor(Date.now() / 1000) + 3 * 3600,
+          },
+        }}
+      />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain(
+      '周额度已用完，预计将于3小时后恢复，请在额度恢复后重试。',
+    );
+    expect(container.textContent).not.toContain('/upgrade');
+  });
+
+  it('preserves backend public text in the Chinese error component', () => {
+    const container = render(
+      <SystemMessage content="Backend public text" variant="error" />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain('Backend public text');
+  });
+  it('does not infer quota errors from backend message wording', () => {
+    const message =
+      "You've used up your weekly credits. Please try again after the reset.";
+    const container = render(
+      <SystemMessage content={message} variant="error" />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain(message);
+  });
   it.each([
     ['zh-CN', 10999, '你在 11s 后取消了请求'],
     ['zh-CN', 999, '你在 1s 后取消了请求'],
@@ -159,9 +197,17 @@ describe('SystemMessage — goal status', () => {
       );
 
       expect(container.textContent).toContain(title);
-      expect(container.textContent).toContain(reason);
+      expect(container.textContent).not.toContain(reason);
       expect(container.textContent).not.toContain('Goal aborted');
       expect(container.textContent).not.toContain('目标已中止');
+
+      const toggle = container.querySelector<HTMLButtonElement>(
+        'button[aria-expanded="false"]',
+      );
+      expect(toggle).not.toBeNull();
+      act(() => toggle?.click());
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+      expect(container.textContent).toContain(reason);
     },
   );
 });
@@ -814,7 +860,7 @@ describe('SystemMessage — background notification i18n body', () => {
     window.addEventListener('qwen:open-session', handler);
     const container = render(
       <SystemMessage
-        content="Sub-session [🧵 abc12345](qwen-session://abc12345-full) completed."
+        content="Sub-session [abc12345](qwen-session://abc12345-full) completed."
         variant="info"
         source="background_notification"
         data={{ status: 'completed', kind: 'agent' }}
@@ -823,7 +869,7 @@ describe('SystemMessage — background notification i18n body', () => {
 
     const link = container.querySelector('a[role="button"]');
     expect(link).not.toBeNull();
-    expect(link?.textContent).toBe('🧵 abc12345');
+    expect(link?.textContent).toBe('abc12345');
     expect(container.textContent).not.toContain('](');
     act(() => {
       link?.dispatchEvent(
@@ -968,6 +1014,44 @@ describe('background continuation', () => {
     expect(locate).toHaveBeenCalledWith('', 'tool-1');
     act(() => container.querySelectorAll('button')[1]!.click());
     expect(details).toHaveBeenCalledWith(expect.objectContaining(turn));
+  });
+  it('names a reply from another session and opens that session', () => {
+    const details = vi.fn();
+    const openSession = vi.fn();
+    const container = render(
+      <SubagentDetailsProvider
+        onOpen={vi.fn()}
+        onOpenBackground={details}
+        onOpenSession={openSession}
+      >
+        <SystemMessage
+          content="projB · Kid"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{
+            turnId: 'turn-1',
+            taskId: 'kid',
+            kind: 'agent',
+            startedAt: 100,
+            label: 'projB · Kid',
+            backgroundTask: {
+              status: 'completed',
+              fromSession: { sessionId: 'kid', workspaceCwd: '/w/b' },
+            },
+          }}
+        />
+      </SubagentDetailsProvider>,
+    );
+    expect(container.textContent).toContain(
+      'Cross-session message·projB · Kid',
+    );
+    act(() => container.querySelector('button')!.click());
+    expect(openSession).toHaveBeenCalledWith({
+      sessionId: 'kid',
+      workspaceCwd: '/w/b',
+      title: 'projB · Kid',
+    });
+    expect(details).not.toHaveBeenCalled();
   });
   it('names a cross-session message and offers no details to open', () => {
     const details = vi.fn();

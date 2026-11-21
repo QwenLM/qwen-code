@@ -95,6 +95,48 @@ const EN_COPY = {
 
 const COPY = {
   en: EN_COPY,
+  'zh-TW': {
+    'desktopRelay.title': '這臺電腦',
+    'desktopRelay.trigger': '使用這臺電腦',
+    'desktopRelay.hint':
+      '讓當前會話在這臺電腦上執行程式碼、檢視並操作螢幕，用於 Computer Use。每次連線都要在這臺電腦彈出的對話方塊裡確認。',
+    'desktopRelay.connect': '連線這臺電腦',
+    'desktopRelay.disconnect': '斷開',
+    'desktopRelay.checkAgain': '重新檢測',
+    'desktopRelay.copy': '複製命令',
+    'desktopRelay.copied': '已複製',
+    'desktopRelay.setupHint':
+      '若尚未安裝，請在這臺電腦的終端裡執行下面的命令，然後重新檢測；若已安裝，請檢查瀏覽器的連線錯誤。它註冊一個 macOS launchd socket，平時沒有程序在後臺執行。',
+    'desktopRelay.approveHint': '請在這臺電腦彈出的對話方塊裡確認。',
+    'desktopRelay.otherSessionHint':
+      '這臺電腦已連線到另一個會話。在這裡連線會替換那個連線。',
+    'desktopRelay.needsSessionHint': '請先建立一個會話。連線只繫結一個會話。',
+    'desktopRelay.status.checking': '檢測中…',
+    'desktopRelay.status.permissionRequired': '需要瀏覽器權限',
+    'desktopRelay.status.missing': '未檢測到中繼',
+    'desktopRelay.status.unknown': '連線狀態未知',
+    'desktopRelay.unknownHint':
+      '如果此前連線過，該會話可能仍能操作這臺電腦。可在這臺電腦的終端執行已安裝的中繼，請求本地斷開，無需瀏覽器或網路（自定義安裝路徑請替換命令路徑並新增 --home <目錄>）：',
+    'desktopRelay.status.idle': '未連線',
+    'desktopRelay.status.awaitingApproval': '等待確認',
+    'desktopRelay.status.connecting': '連線中…',
+    'desktopRelay.status.connected': '已連線',
+    'desktopRelay.status.otherSession': '被其他會話使用中',
+    'desktopRelay.status.failed': '連線失敗',
+    'desktopRelay.status.unavailable': '當前環境不可用',
+    'desktopRelay.status.needsSession': '等待會話',
+    'desktopRelay.blocker.insecureContext':
+      '瀏覽器只允許安全頁面訪問這臺電腦。請透過 https 訪問 Web Shell，或用 SSH 轉發 daemon 埠後開啟 http://localhost:<port>。',
+    'desktopRelay.blocker.unsupportedDaemon':
+      '該 daemon 未啟用反向工具通道（client_mcp_over_ws）。請以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 啟動它。',
+    'desktopRelay.blocker.workspaceIneligible':
+      '該會話的工作區不能使用這臺電腦（不受信任或 live 工作區）。',
+    'desktopRelay.blocker.workspaceResolving': '尚不能確定該會話所屬的工作區。',
+    'desktopRelay.permissionHint':
+      '請在瀏覽器提示或網站設定中允許本地網路訪問，然後重新檢測。',
+    'desktopRelay.error.denied': '請求在這臺電腦上被拒絕。',
+    'desktopRelay.error.unreachable': '無法連線到這臺電腦上的桌面中繼。',
+  },
   'zh-CN': {
     'desktopRelay.title': '这台电脑',
     'desktopRelay.trigger': '使用这台电脑',
@@ -137,16 +179,63 @@ const COPY = {
     'desktopRelay.error.denied': '请求在这台电脑上被拒绝。',
     'desktopRelay.error.unreachable': '无法连接到这台电脑上的桌面中继。',
   },
-  // Not translated yet — same partial-catalog policy as the ru table in
-  // i18n.tsx (#13391): ru reuses the EN copy.
-  ru: EN_COPY,
+  ru: {
+    'desktopRelay.title': 'Этот компьютер',
+    'desktopRelay.trigger': 'Использовать этот компьютер',
+    'desktopRelay.hint':
+      'Позволяет этой сессии выполнять код на этом компьютере, видеть и управлять его экраном — для Computer Use. Каждое подключение вы подтверждаете в диалоге на этом компьютере.',
+    'desktopRelay.connect': 'Подключить этот компьютер',
+    'desktopRelay.disconnect': 'Отключить',
+    'desktopRelay.checkAgain': 'Проверить снова',
+    'desktopRelay.copy': 'Скопировать команду',
+    'desktopRelay.copied': 'Скопировано',
+    'desktopRelay.setupHint':
+      'Если не установлено, один раз выполните это в терминале на этом компьютере, затем проверьте снова. Если уже установлено, проверьте ошибки подключения браузера. Регистрируется macOS launchd socket; в фоне ничего не остаётся работать.',
+    'desktopRelay.approveHint':
+      'Подтвердите запрос в диалоге, который открылся на этом компьютере.',
+    'desktopRelay.otherSessionHint':
+      'Этот компьютер подключён к другой сессии. Подключение здесь заменит то соединение.',
+    'desktopRelay.needsSessionHint':
+      'Сначала запустите сессию. Подключение привязывается ровно к одной сессии.',
+    'desktopRelay.status.checking': 'Проверка…',
+    'desktopRelay.status.permissionRequired': 'Требуется разрешение браузера',
+    'desktopRelay.status.missing': 'Реле не обнаружено',
+    'desktopRelay.status.unknown': 'Статус подключения неизвестен',
+    'desktopRelay.unknownHint':
+      'Если ранее было подключение, та сессия всё ещё может управлять этим компьютером. Чтобы запросить локальное отключение без браузера или сети, запустите установленное реле в терминале на этом компьютере (для своей установки скорректируйте путь к исполняемому файлу и добавьте --home <dir>):',
+    'desktopRelay.status.idle': 'Не подключено',
+    'desktopRelay.status.awaitingApproval': 'Ожидание подтверждения',
+    'desktopRelay.status.connecting': 'Подключение…',
+    'desktopRelay.status.connected': 'Подключено',
+    'desktopRelay.status.otherSession': 'Используется другой сессией',
+    'desktopRelay.status.failed': 'Ошибка',
+    'desktopRelay.status.unavailable': 'Здесь недоступно',
+    'desktopRelay.status.needsSession': 'Ожидание сессии',
+    'desktopRelay.blocker.insecureContext':
+      'Браузеры разрешают доступ к этому компьютеру только с защищённой страницы. Откройте Web Shell по https или перенаправьте порт демона через SSH и откройте http://localhost:<port>.',
+    'desktopRelay.blocker.unsupportedDaemon':
+      'Этот демон не объявляет обратный канал инструментов (client_mcp_over_ws). Запустите его с QWEN_SERVE_CLIENT_MCP_OVER_WS=1.',
+    'desktopRelay.blocker.workspaceIneligible':
+      'Рабочая область этого разговора не может использовать этот компьютер (недоверенная или live-область).',
+    'desktopRelay.blocker.workspaceResolving':
+      'Пока неизвестно, к какой рабочей области относится этот разговор.',
+    'desktopRelay.permissionHint':
+      'Разрешите доступ к локальной сети для этого сайта в запросе браузера или в настройках сайта, затем проверьте снова.',
+    'desktopRelay.error.denied': 'Запрос был отклонён на этом компьютере.',
+    'desktopRelay.error.unreachable':
+      'Не удалось связаться с настольным реле на этом компьютере.',
+  },
 } as const;
 
 type CopyKey = keyof (typeof COPY)['en'];
 
 function useDesktopRelayCopy(): (key: CopyKey) => string {
   const { language } = useI18n();
-  return useCallback((key: CopyKey) => COPY[language][key], [language]);
+  // The provider is typed to the shipped languages, but the runtime value is
+  // not checked: a locale without a dictionary must fall back to English
+  // instead of crashing the whole shell on the first lookup.
+  const copy = COPY[language] ?? COPY.en;
+  return useCallback((key: CopyKey) => copy[key], [copy]);
 }
 
 export interface DesktopRelayStatus {

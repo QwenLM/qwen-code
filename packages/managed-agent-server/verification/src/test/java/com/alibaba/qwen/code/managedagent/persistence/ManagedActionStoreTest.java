@@ -6,8 +6,11 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,7 +50,8 @@ class ManagedActionStoreTest {
     private static final String ACTION = "tool_approval_" + "a".repeat(32);
     private ConsolidatedStoreFixture fixture;
     private JdbcTemplate jdbc;
-    private ManagedActionStore actions;
+    private StoreLockTrace trace;
+    private JdbcManagedActionStore actions;
     private AgentStateStore agents;
     private TransactionTemplate transactions;
     private String scope;
@@ -55,12 +59,13 @@ class ManagedActionStoreTest {
     @BeforeEach
     void initialize() throws Exception {
         fixture = ConsolidatedStoreFixture.open("action_store");
-        var source = fixture.source();
+        var source = new StoreLockTrace(fixture.source());
+        trace = source;
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
-        scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
+        scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
         jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,approval_mode,gmt_create,gmt_modified)"
                 + " VALUES (?,?,'agent','ACTIVE','manual',0,0)", TENANT, SESSION);
         agents = mock(AgentStateStore.class);
@@ -73,7 +78,7 @@ class ManagedActionStoreTest {
                         row.getString("failure_code"), row.getInt("lifecycle_protocol_version")),
                 call.getArgument(0), call.getArgument(1), call.getArgument(2)).stream().findFirst());
         when(agents.hasExecutionRegistryFacts(anyString(), anyString())).thenReturn(true);
-        actions = new ManagedActionStore(jdbc, agents);
+        actions = new JdbcManagedActionStore(jdbc, agents);
     }
 
     @AfterEach
@@ -81,6 +86,80 @@ class ManagedActionStoreTest {
         if (fixture != null) {
             fixture.close();
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "decided, allow, false, COMPLETED,",
+        "decided, allow, true, COMPLETED,",
+        "decided, deny, false, FAILED, action_already_resolved",
+        "expired, allow, true, FAILED, action_expired",
+        "cancelled, allow, false, FAILED, action_cancelled"
+    })
+    void settlesEndedResponsesWithOneRead(String state, String decision, boolean leased,
+            String expectedState, String expectedFailure) {
+        project("requested", null, 1, 1000);
+        String operationId = admit("settle", "digest", response("allow"), 10).operation().operationId();
+        if (leased) {
+            lease(operationId);
+        }
+        project(state, "decided".equals(state) ? response(decision) : null, 2, 1000);
+        String decisionReceipt = actions.find(TENANT, SESSION, ACTION).orElseThrow().decisionReceiptId();
+        trace.clear();
+
+        actions.settleEndedResponses(20);
+
+        assertThat(trace.events()).filteredOn(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED
+                && event.sql().startsWith("select ")).hasSize(1);
+        assertThat(stringColumn("state", operationId)).isEqualTo(expectedState);
+        assertThat(stringColumn("failure_code", operationId)).isEqualTo(expectedFailure);
+        assertThat(stringColumn("decision_receipt_id", operationId))
+                .isEqualTo("COMPLETED".equals(expectedState) ? decisionReceipt : null);
+        assertThat(stringColumn("admission_stage", operationId)).isEqualTo("HARNESS_CONFIRMED");
+        assertThat(stringColumn("delivery_state", operationId)).isEqualTo("CONFIRMED");
+        assertThat(stringColumn("claim_owner", operationId)).isNull();
+        String receipt = stringColumn("receipt_id", operationId);
+        assertThat(receipt).isNotBlank();
+        trace.clear();
+
+        actions.settleEndedResponses(30);
+
+        assertThat(trace.events()).noneMatch(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED
+                && event.sql().startsWith("update "));
+        assertThat(stringColumn("receipt_id", operationId)).isEqualTo(receipt);
+    }
+
+    @Test
+    void doesNotSettleARequestedAction() {
+        project("requested", null, 1, 1000);
+        String operationId = admit("settle", "digest", response("allow"), 10).operation().operationId();
+
+        actions.settleEndedResponses(20);
+
+        assertThat(stringColumn("state", operationId)).isEqualTo("PENDING");
+        assertThat(stringColumn("delivery_state", operationId)).isEqualTo("PENDING");
+        assertThat(stringColumn("receipt_id", operationId)).isNull();
+    }
+
+    @Test
+    void doesNotOverwriteAResponseConfirmedAfterCandidateSelection() {
+        project("requested", null, 1, 1000);
+        String operationId = admit("settle", "digest", response("allow"), 10).operation().operationId();
+        project("decided", response("allow"), 2, 1000);
+        var racing = new ManagedSchemaJdbcTemplate(fixture.source()) {
+            @Override
+            public <T> java.util.List<T> query(String sql, org.springframework.jdbc.core.RowMapper<T> mapper) {
+                var rows = super.query(sql, mapper);
+                jdbc.update("UPDATE ma_operation SET state = 'COMPLETED', delivery_state = 'CONFIRMED',"
+                                + " receipt_id = 'concurrent-receipt' WHERE tenant_id = ? AND session_id = ?"
+                                + " AND operation_id = ?", TENANT, SESSION, operationId);
+                return rows;
+            }
+        };
+
+        new JdbcManagedActionStore(racing, agents).settleEndedResponses(20);
+
+        assertThat(stringColumn("receipt_id", operationId)).isEqualTo("concurrent-receipt");
     }
 
     @Test
@@ -172,11 +251,9 @@ class ManagedActionStoreTest {
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_delivery_failed", 10, 0);
         // The resurrection arm's evidence that a new delivery must wait.
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(TENANT, "storage"),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey("storage"),
+        jdbc.update("INSERT INTO ma_storage (alias_key,"
+                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?)",
+                RuntimeAdmissionFences.storageAliasKey(TENANT, "storage"),
                 TENANT, "storage", "op-fence");
 
         var replayed = admitAs("owner", "idem", "digest", response("allow"), 20);
@@ -431,15 +508,21 @@ class ManagedActionStoreTest {
     void planExitUsesItsActiveTurnAfterLivePolicyChanges(String turnStatus, String option,
             boolean expectedPlan, long expectedRevision) {
         jdbc.update("UPDATE ma_session SET approval_mode='default', selected_approval_mode='yolo',"
-                + " approval_revision=2, plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
+                + " approval_revision=2, is_plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
         jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
-                        + "status,approval_mode,approval_revision,plan_enabled,gmt_create,gmt_modified)"
+                        + "status,approval_mode,approval_revision,is_plan_enabled,gmt_create,gmt_modified)"
                         + " VALUES (?,?,'turn','turn','[]','digest',?,'default',1,TRUE,0,0)",
                 TENANT, SESSION, turnStatus);
         ObjectNode options = planExitOptions();
+        trace.clear();
         project("requested", null, 1, options);
         project("decided", response(option), 2, options);
-        assertThat(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+        if (option.equals("allow")) {
+            trace.assertSessionBeforeTurn(TENANT, SESSION);
+        } else {
+            assertThat(trace.successful(TENANT, SESSION)).noneMatch(StoreLockTrace.Event::turn);
+        }
+        assertThat(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
                 Boolean.class, TENANT, SESSION)).isEqualTo(expectedPlan);
         assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
                 Long.class, TENANT, SESSION)).isEqualTo(expectedRevision);
@@ -447,6 +530,23 @@ class ManagedActionStoreTest {
                 String.class, TENANT, SESSION)).isEqualTo("yolo");
         assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_turn WHERE tenant_id=? AND session_id=?",
                 Long.class, TENANT, SESSION)).isEqualTo(1);
+    }
+
+    @Test
+    void uncapturedPlanExitApprovalDecidesWithoutReleasingPlan() {
+        jdbc.update("UPDATE ma_session SET approval_mode='default', selected_approval_mode='yolo',"
+                + " approval_revision=2, is_plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,approval_mode,approval_revision,is_plan_enabled,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','turn','[]','digest','RUNNING','default',1,TRUE,0,0)",
+                TENANT, SESSION);
+        ObjectNode options = planExitOptions();
+        options.remove("continuationRef");
+        project("requested", null, 1, options);
+        project("decided", response("allow"), 2, options);
+        assertThat(actions.find(TENANT, SESSION, ACTION).orElseThrow().state()).isEqualTo("decided");
+        assertThat(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+                Boolean.class, TENANT, SESSION)).isTrue();
     }
 
     private ObjectNode planExitOptions() {
@@ -482,7 +582,7 @@ class ManagedActionStoreTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"1,true", "2,true", "3,true", "1,false", "2,false", "3,false"})
+    @CsvSource({"3,true", "3,false"})
     void actionOptionsPreserveOnlyAnExplicitHumanDecisionRequirement(int version, boolean required) {
         ObjectNode options = planExitOptions().put("v", version).put("requiresHumanDecision", required);
         if (version < 3) {
@@ -497,6 +597,31 @@ class ManagedActionStoreTest {
         } else {
             assertThatThrownBy(() -> project("requested", null, 1, options)).isInstanceOf(ManagedAgentException.class);
         }
+    }
+
+    @Test
+    void projectsAndFindsCommandStepApproval() throws Exception {
+        String id = "command_approval_" + "b".repeat(48);
+        ObjectNode options = planExitOptions();
+        options.put("requestId", id).put("toolName", "run_shell_command");
+        ObjectNode inputRef = storeBody("command-input", "managed-extension-command-input",
+                JSON.createObjectNode().put("command", "printf rewritten").put("timeout", 120000));
+        options.set("inputRef", inputRef);
+        ObjectNode continuation = (ObjectNode) JSON.readTree(jdbc.queryForObject(
+                "SELECT inline_bytes FROM ma_resource WHERE resource_key=?",
+                byte[].class, ManagedSchemaKeys.key(scope, "continuation")));
+        continuation.put("actionId", id);
+        ObjectNode call = (ObjectNode) continuation.withArray("calls").get(0);
+        call.put("actionId", id);
+        ((ObjectNode) call.path("call")).put("name", "skill");
+        ObjectNode step = continuation.putObject("commandStep").put("toolStageId", "command-stage")
+                .put("toolName", "shell").put("configRevision", 1);
+        step.set("inputRef", inputRef);
+        options.set("continuationRef", storeBody("command-continuation", "hosted-approval-continuation", continuation));
+
+        project("requested", null, 1, options);
+
+        assertThat(actions.find(TENANT, SESSION, id).orElseThrow().options()).isEqualTo(options);
     }
 
     private OperationAdmission admitAs(String actor, String key, String digest, JsonNode body, long now) {
@@ -541,13 +666,13 @@ class ManagedActionStoreTest {
                         + " context_revision = 1, workspace_config_ref = 'config',"
                         + " workspace_policy_ref = 'policy', owner_actor_key = ?"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(TENANT, "owner"), TENANT, SESSION);
+                ManagedWorkspaceRegistry.actorKey(TENANT, "owner"), TENANT, SESSION);
     }
 
     private void grantRole(String actor, String role) {
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id,"
                         + " actor_id, role) VALUES (?, 'workspace', ?, ?)",
-                TENANT, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(TENANT, actor), role);
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, actor), role);
     }
 
     private String stringColumn(String name, String operationId) {
@@ -563,7 +688,7 @@ class ManagedActionStoreTest {
     }
 
     private void project(String state, JsonNode answer, long sequence, long expiresAt) {
-        ObjectNode options = JSON.createObjectNode().put("v", 1).put("requestId", ACTION).put("turnId", "turn")
+        ObjectNode options = JSON.createObjectNode().put("v", 3).put("requestId", ACTION).put("turnId", "turn")
                 .put("functionCallId", "call").put("toolName", "write_file").put("policyRevision", "hosted-tool-approval/1")
                 .put("inputRevision", 1).put("createdAt", 1).put("expiresAt", expiresAt);
         options.putArray("options").addObject().put("id", "allow").put("label", "Allow");
@@ -582,7 +707,8 @@ class ManagedActionStoreTest {
         ObjectNode envelope = JSON.createObjectNode().put("v", 1).put("sequence", sequence).put("eventId", "action:" + sequence)
                 .put("kind", "action.changed").put("occurredAt", sequence);
         envelope.putObject("sessionKey").put("tenantId", TENANT).put("workspaceId", "workspace").put("sessionId", SESSION);
-        ObjectNode payload = envelope.putObject("payload").put("requestId", ACTION).put("kind", "permission").put("source", "tool_call")
+        ObjectNode payload = envelope.putObject("payload").put("requestId", options.path("requestId").asText())
+                .put("kind", "permission").put("source", "tool_call")
                 .put("inputRevision", 1).put("state", state);
         payload.set("optionsRef", optionsRef);
         if (decision == null) {
@@ -602,10 +728,10 @@ class ManagedActionStoreTest {
         try {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
+            jdbc.update("INSERT INTO ma_resource (resource_key,tenant_id,workspace_id,session_id,resource_id,kind,"
                             + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
-                            + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
-                    ManagedSchemaKeys.key(scope, id), scope, TENANT, "workspace", SESSION, id, kind, bytes.length, digest, bytes);
+                            + " VALUES (?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
+                    ManagedSchemaKeys.key(scope, id), TENANT, "workspace", SESSION, id, kind, bytes.length, digest, bytes);
             return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         } catch (java.security.NoSuchAlgorithmException error) {
             throw new IllegalStateException(error);

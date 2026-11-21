@@ -70,16 +70,16 @@ class ExecutedQueryPlanTest {
     }
 
     @Test
-    void requiresActualPrimaryConstPageEvidence() {
+    void requiresActualConstIndexPageEvidence() {
         for (String access : new String[] {"ref", "const"}) {
-            for (String key : new String[] {"another", "PRIMARY"}) {
+            for (String key : new String[] {"", "uk_ma_resource_business_key", "PRIMARY"}) {
                 for (String pages : new String[] {"null", "0", "\"2\"", "2"}) {
                     var plan = ExecutedQueryPlan.mariaDb("{\"table\":{\"table_name\":\"r\","
                             + "\"access_type\":\"" + access + "\",\"key\":\"" + key + "\","
                             + "\"r_rows\":null,\"r_loops\":0,\"r_engine_stats\":{\"pages_accessed\":" + pages + "}}}");
                     assertThat(plan.scannedRows()).isZero();
                     assertThat(plan.preExecutionPageReads()).isEqualTo(
-                            access.equals("const") && key.equals("PRIMARY") && pages.equals("2") ? 2 : 0);
+                            access.equals("const") && !key.isBlank() && pages.equals("2") ? 2 : 0);
                 }
             }
         }

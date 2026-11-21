@@ -6,8 +6,20 @@
 # ratchet:docker.io/library/node:22-slim
 FROM docker.io/library/node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS builder
 
+# Optional apt mirror for the layer below. Empty keeps deb.debian.org, which is
+# what release builds and local sandbox builds use; the E2E leg passes a
+# regional mirror only on hosts where its probe found the default CDN path to be
+# far slower (#16214).
+ARG APT_MIRROR=
+
 # Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN set -e; \
+  if [ -n "${APT_MIRROR}" ]; then \
+    for sources in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+      if [ -f "${sources}" ]; then sed -i "s|deb.debian.org|${APT_MIRROR}|g" "${sources}"; fi; \
+    done; \
+  fi; \
+  apt-get update && apt-get install -y --no-install-recommends \
   python3 \
   make \
   g++ \
@@ -40,11 +52,20 @@ FROM docker.io/library/node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1
 
 ARG SANDBOX_NAME="qwen-code-sandbox"
 ARG CLI_VERSION_ARG
+# Same optional override as the builder stage: a stage cannot inherit an ARG
+# declared before its own FROM.
+ARG APT_MIRROR=
 ENV SANDBOX="$SANDBOX_NAME"
 ENV CLI_VERSION=$CLI_VERSION_ARG
 
 # Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN set -e; \
+  if [ -n "${APT_MIRROR}" ]; then \
+    for sources in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+      if [ -f "${sources}" ]; then sed -i "s|deb.debian.org|${APT_MIRROR}|g" "${sources}"; fi; \
+    done; \
+  fi; \
+  apt-get update && apt-get install -y --no-install-recommends \
   python3 \
   man-db \
   curl \

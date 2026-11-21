@@ -344,7 +344,7 @@ describe('qwen serve — capabilities envelope', () => {
     expect(caps.v).toBe(1);
     expect(caps.mode).toBe('http-bridge');
     // Order must match `SERVE_CAPABILITY_REGISTRY` in
-    // `packages/cli/src/serve/capabilities.ts` and the unit-level
+    // `packages/sdk-typescript/src/daemon/capabilities.ts` and the unit-level
     // baseline features in `packages/cli/src/serve/server.test.ts`.
     //
     // Conditional tags absent under this suite's spawn flags (no
@@ -352,7 +352,7 @@ describe('qwen serve — capabilities envelope', () => {
     // rate-limit opt-in, no `--channel`, no configured batch ASR model):
     // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
     // `prompt_absolute_deadline`, `writer_idle_timeout`,
-    // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
+    // `workspace_voice_transcription`, `rate_limit`.
     // `native_directory_picker` is host-conditional (the daemon host's GUI
     // environment, not a spawn flag) and is spliced at its registry
     // position below, using the boot-time probe captured when the daemon
@@ -370,11 +370,13 @@ describe('qwen serve — capabilities envelope', () => {
     // depends on the mounted runtime's bridge, which the bootstrap envelope
     // cannot see, so the tag appears only once the runtime app serves the
     // envelope.
+    // `channel_reload` also appears once the runtime channel manager mounts.
     expect(
       caps.features.filter(
         (feature) =>
           feature !== 'scheduled_task_session_reuse' &&
-          feature !== 'workspace_runtime_stop',
+          feature !== 'workspace_runtime_stop' &&
+          feature !== 'channel_reload',
       ),
     ).toEqual([
       'health',
@@ -389,10 +391,12 @@ describe('qwen serve — capabilities envelope', () => {
       'session_resume',
       'unstable_session_resume',
       'session_list',
+      'session_last_user_prompt_sort',
       'session_catalog_batch',
       'session_info',
       'session_source_metadata',
       'session_side_task',
+      'session_sub_session_send',
       'session_prompt',
       'session_turn_status',
       'session_attachments',
@@ -409,6 +413,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_artifact_library',
       'workspace_artifact_library_stream',
       'session_sources',
+      'generated_ui_state',
       'slow_client_warning',
       'typed_event_schema',
       'session_set_model',
@@ -476,10 +481,13 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_tool_toggle',
       'workspace_skill_settings_toggle',
       'workspace_skill_settings_batch_toggle',
+      'user_skill_activation',
       'workspace_session_refresh',
       'extension_batch_activation_v2',
       'extension_activation_explicit_refresh',
       'workspace_skill_manage',
+      'skill_archive_install',
+      'skill_zip_file_source',
       'web_shell_brand',
       'workspace_settings',
       'workspace_permissions',
@@ -490,9 +498,13 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_init',
       'workspace_github_setup',
       'workspace_github_prs',
+      'workspace_github_pr_files',
+      'workspace_git_log_exclude_refs',
       'workspace_git_worktrees',
+      'workspace_git_check_ignore',
       'workspace_mcp_restart',
       'session_recap',
+      'session_mod_rows',
       'session_generation',
       'workspace_generation',
       'session_btw',
@@ -520,6 +532,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_channel_observed_contacts',
       'dynamic_workspace_registration',
       'persistent_workspace_registration',
+      'workspace_order',
       'workspace_display_name',
       'scratch_workspace_registration',
       ...(gitAvailableAtBoot ? ['git_workspace_clone'] : []),
@@ -540,9 +553,12 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_archived_session_export',
       'workspace_session_live_state',
       'workspace_session_live_state_batch',
+      'restart_recovery',
       'workspace_session_metadata',
       'session_worktree_persistence_v1',
       'session_worktree_reset_v1',
+      'session_worktree_branch_v1',
+      'session_worktree_handoff_v1',
       'voice_transcribe',
       'web_terminal',
     ]);

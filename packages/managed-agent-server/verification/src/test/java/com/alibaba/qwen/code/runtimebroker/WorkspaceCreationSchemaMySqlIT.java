@@ -9,7 +9,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 
@@ -27,24 +26,23 @@ class WorkspaceCreationSchemaMySqlIT {
             var source = database.source();
             Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
             var jdbc = new JdbcTemplate(source);
-            jdbc.update("INSERT INTO ma_session_head (head_kind, tenant_key, harness_key, tenant_id,"
-                    + " harness_session_id, workspace_id, session_id, storage_version, state,"
+            jdbc.update("INSERT INTO ma_session_head (head_kind, tenant_id,"
+                    + " harness_session_id, workspace_id, session_id, state,"
                     + " writer_generation, writer_id, writer_lease_until, lease_token_hash,"
                     + " journal_revision, committed_sequence, last_commit_digest, activation_epoch,"
                     + " compacted_through_revision, recovery_status, gmt_create, gmt_modified)"
-                    + " VALUES ('MANAGED_SESSION', ?, ?, 'tenant', 'session', 'workspace', 'session',"
-                    + " 1, 'SEALED', 1, 'original', 946684800000, ?, 1, 1, ?, 1, 0, 'READY', 1, 1)",
-                    ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key("session"),
+                    + " VALUES ('MANAGED_SESSION', 'tenant', 'session', 'workspace', 'session',"
+                    + " 'SEALED', 1, 'original', 946684800000, ?, 1, 1, ?, 1, 0, 'READY', 1, 1)",
                     "a".repeat(64), "b".repeat(64));
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+            jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id,"
                     + " workspace_id, session_id, resource_id, kind, schema_version, byte_length,"
                     + " sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create)"
-                    + " VALUES ('resource', 'scope', 'tenant', 'workspace', 'session', 'descriptor',"
+                    + " VALUES ('resource', 'tenant', 'workspace', 'session', 'descriptor',"
                     + " 'hosted-turn-cleanup', 1, 0, ?, 'MYSQL_INLINE', ?, 'published', 'REFERENCED', 1)",
                     org.apache.commons.codec.digest.DigestUtils.sha256Hex(new byte[0]), new byte[0]);
-            jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+            jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key,"
                     + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                    + " journal_revision, resource_id, gmt_create) VALUES ('scope', 'JOURNAL',"
+                    + " journal_revision, resource_id, gmt_create) VALUES ('JOURNAL',"
                     + " 'owner', 1, 'resource', 'tenant', 'workspace', 'session', 1, 'descriptor', 1)");
             var head = jdbc.queryForMap("SELECT * FROM ma_session_head");
             var reference = jdbc.queryForMap("SELECT * FROM ma_resource_ref");
@@ -98,11 +96,11 @@ class WorkspaceCreationSchemaMySqlIT {
             ManagedSchema.validate(source);
             assertEquals(1, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
-            assertThat(upgradedSession).containsEntry("plan_enabled", false)
-                    .containsEntry("public_child_agents_version", 0);
+            assertThat(((Number) upgradedSession.get("is_plan_enabled")).longValue()).isZero();
+            assertThat(((Number) upgradedSession.get("public_child_agents_version")).longValue()).isZero();
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
-            assertThat(upgradedTurn).containsKey("plan_enabled");
-            assertThat(upgradedTurn).containsEntry("plan_enabled", null);
+            assertThat(upgradedTurn).containsKey("is_plan_enabled");
+            assertThat(upgradedTurn).containsEntry("is_plan_enabled", null);
             assertThat(upgradedSession)
                     .usingRecursiveComparison().isEqualTo(session);
             assertThat(upgradedTurn)
@@ -160,7 +158,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     assertTrue(result.next());
                     assertEquals(0, result.getInt(1), "A disposable empty catalog is required");
                 }
-                executeResource(connection, ManagedSchema.RESOURCE);
+                ManagedSchema.initialize(source);
                 receipt(connection, "existing", "SESSION_COMMAND");
                 statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                         + " VALUES ('tenant','session','qwen-code',1,1)");
@@ -207,20 +205,6 @@ class WorkspaceCreationSchemaMySqlIT {
                 statement.execute("UPDATE ma_session SET model_id='m',model_revision=1");
                 statement.execute("UPDATE ma_turn SET model_id='m',model_revision=1");
                 assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_revision=9007199254740992"));
-            }
-        }
-    }
-
-    private static void executeResource(Connection connection, String resource) throws Exception {
-        try (var statement = connection.createStatement();
-                var input = ManagedSchema.class.getResourceAsStream(resource)) {
-            for (String sql :
-                    new String(input.readAllBytes(), StandardCharsets.UTF_8)
-                            .replaceAll("(?m)^--[^\\n]*", "")
-                            .split(";")) {
-                if (!sql.isBlank()) {
-                    statement.execute(sql);
-                }
             }
         }
     }

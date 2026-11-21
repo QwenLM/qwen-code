@@ -37,6 +37,11 @@ export interface SquadsSectionProps {
   onRetire: (squadId: string) => void;
   /** Puts `@name ` into the chat composer; absent hides the button. */
   onMention?: (name: string) => void;
+  /**
+   * A join or remote connect from a runtime dialog is in flight: mentioning
+   * would leave the page, and drop its result.
+   */
+  connecting?: boolean;
 }
 
 /** Agents that can lead or join: not retired (a paused one may still join). */
@@ -302,6 +307,7 @@ export function SquadsSection({
   onUpdate,
   onRetire,
   onMention,
+  connecting = false,
 }: SquadsSectionProps) {
   const { t } = useI18n();
   // The squad being edited, if any.
@@ -382,7 +388,7 @@ export function SquadsSection({
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={!!squad.leaderIssue || pending}
+                  disabled={!!squad.leaderIssue || pending || connecting}
                   onClick={() => onMention(squad.name)}
                 >
                   {t('collab.agent.mentionIt')}

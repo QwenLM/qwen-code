@@ -61,7 +61,11 @@ export const DefaultAppLayout: React.FC = () => {
     uiState.terminalHeight,
     uiState.staticExtraHeight,
   );
-  const dialogHeight = uiState.constrainHeight ? dialogMaxHeight : undefined;
+  const constrainDialogHeight =
+    uiState.constrainHeight &&
+    !uiState.auth.isAuthDialogOpen &&
+    !uiState.auth.authError;
+  const dialogHeight = constrainDialogHeight ? dialogMaxHeight : undefined;
   // The /btw answer viewport only exists in VP mode. Its ScrollableList arms
   // SGR mouse tracking (bypassVpGate), which must not happen on the non-VP
   // main screen where the terminal keeps native scrollback — so the row budget
@@ -118,7 +122,7 @@ export const DefaultAppLayout: React.FC = () => {
                 flexDirection="column"
                 width={uiState.mainAreaWidth}
                 height={dialogHeight}
-                overflow={uiState.constrainHeight ? 'hidden' : undefined}
+                overflow={constrainDialogHeight ? 'hidden' : undefined}
               >
                 <DialogManager
                   terminalWidth={uiState.terminalWidth}

@@ -6,13 +6,19 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { ModRenderHost } from '@qwen-code/qwen-code-core/mods/runtime.js';
+import type {
+  ModRenderHost,
+  ModRuntime,
+} from '@qwen-code/qwen-code-core/mods/runtime.js';
 import {
   ENGINE_NODE,
+  type ModAssistantMessageInput,
+  type ModBandInput,
   type ModRenderElement,
-  type ModRenderInput,
+  type ModRenderSite,
 } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
+import { MOD_MAX_BYTES } from '@qwen-code/qwen-code-core/mods/types.js';
 import { ModSession, type ModTerminalHost } from './mod-session.js';
 
 const mocks = vi.hoisted(() => ({
@@ -38,7 +44,7 @@ const input = ({
   rows?: number;
   maxRows?: number;
   isWorking?: boolean;
-} = {}): ModRenderInput => ({
+} = {}): ModBandInput => ({
   surface: 'terminal',
   component: 'AbovePrompt',
   requestId: 'above-prompt',
@@ -58,6 +64,13 @@ const line = (text: string): ModRenderElement => ({
   children: [{ type: 'Text', children: [text] }],
 });
 
+const replyRow: ModAssistantMessageInput = {
+  surface: 'terminal',
+  component: 'AssistantMessage',
+  requestId: '1',
+  props: { text: 'Original', isFirstOfReply: true },
+};
+
 function deferred() {
   let resolve: () => void = () => {};
   const promise = new Promise<void>((done) => {
@@ -66,7 +79,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-describe('Mod session band renders', () => {
+describe('Mod session renders', () => {
   const sessions: ModSession[] = [];
 
   beforeEach(() => {
@@ -79,7 +92,10 @@ describe('Mod session band renders', () => {
     vi.resetAllMocks();
   });
 
-  function setup({ sites = ['AbovePrompt' as const] } = {}) {
+  function setup({
+    sites = ['AbovePrompt'],
+    desktop = false,
+  }: { sites?: readonly ModRenderSite[]; desktop?: boolean } = {}) {
     const sessionId = vi.fn(() => 'session-1');
     const extension = {
       id: 'id',
@@ -95,8 +111,8 @@ describe('Mod session band renders', () => {
       getModel: () => 'model',
       getCliVersion: () => '1.2.3',
       getExtensions: () => [extension],
-      isInteractive: () => true,
-      getExperimentalZedIntegration: () => false,
+      isInteractive: () => !desktop,
+      getExperimentalZedIntegration: () => desktop,
       isTrustedFolder: () => true,
       getDisableAllHooks: () => false,
       getBareMode: () => false,
@@ -114,12 +130,15 @@ describe('Mod session band renders', () => {
     const runtime = {
       hasToolHooks: false,
       renderHooks: ['token-weather'],
+      renderHooksFor(site: ModRenderSite): readonly string[] {
+        return sites.includes(site) ? this.renderHooks : [];
+      },
       turnHooks: { start: false, complete: [] as string[] },
       getCommands: () => [],
       runTool: vi.fn<ModToolCall>(async (call, next, signal) =>
         next(call, signal, async (_input, verdict) => verdict),
       ),
-      render: vi.fn(async (request: ModRenderInput, _signal: AbortSignal) => {
+      render: vi.fn<ModRuntime['render']>(async (request) => {
         order.push(`render ${request.viewport?.columns}`);
         return { tree: line(`${request.viewport?.columns}`), notes: [] };
       }),
@@ -143,7 +162,12 @@ describe('Mod session band renders', () => {
       sites: () => sites,
       draw: vi.fn<NonNullable<ModTerminalHost['draw']>>(),
     };
-    const session = new ModSession(config as unknown as Config, host);
+    const session = new ModSession(
+      config as unknown as Config,
+      desktop
+        ? { surface: 'desktop', log: host.log, sites: () => sites }
+        : host,
+    );
     sessions.push(session);
     const renderHost = () =>
       mocks.create.mock.lastCall![9] as ModRenderHost | undefined;
@@ -160,6 +184,54 @@ describe('Mod session band renders', () => {
     expect(runtime.render).toHaveBeenCalledOnce();
     expect(runtime.render.mock.calls[0][0]).toEqual(input());
     expect(host.draw).toHaveBeenCalledWith(line('80'), 'token-weather');
+  });
+
+  it.each(['clear', 'resume'] as const)(
+    'cancels a pending render and suppresses its result on %s',
+    async (reason) => {
+      const { session, config, runtime, host } = setup();
+      await session.initialize(new AbortController().signal);
+      runtime.render.mockImplementationOnce(async (_input, signal) => {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return { tree: line('old-session'), notes: [] };
+      });
+      session.setRenderInput(input());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.render).toHaveBeenCalledOnce();
+      const renderSignal = runtime.render.mock.calls[0][1];
+      config.getSessionId.mockReturnValue('session-2');
+      await session.syncSession(reason);
+      expect(renderSignal.aborted).toBe(true);
+      expect(host.draw).not.toHaveBeenCalledWith(
+        line('old-session'),
+        'token-weather',
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(host.draw).toHaveBeenLastCalledWith(line('80'), 'token-weather');
+    },
+  );
+
+  it('renders again when a session switch is rolled back', async () => {
+    const { session, runtime, host } = setup();
+    await session.initialize(new AbortController().signal);
+    runtime.render.mockImplementationOnce(async (_input, signal) => {
+      await new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return { tree: line('cancelled'), notes: [] };
+    });
+    session.setRenderInput(input());
+    await vi.advanceTimersByTimeAsync(0);
+    session.invalidateTools();
+    await session.restoreTools();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(host.draw).not.toHaveBeenCalledWith(
+      line('cancelled'),
+      'token-weather',
+    );
+    expect(host.draw).toHaveBeenLastCalledWith(line('80'), 'token-weather');
   });
 
   it('offers no site and renders nothing where the terminal draws none', async () => {
@@ -193,7 +265,9 @@ describe('Mod session band renders', () => {
     expect(order).toEqual(['render 80', 'render 80', 'render 110']);
     await vi.advanceTimersByTimeAsync(1);
     expect(runtime.render).toHaveBeenCalledTimes(4);
-    expect(runtime.render.mock.calls[3][0].props.maxRows).toBe(10);
+    expect(runtime.render.mock.calls[3][0]).toMatchObject({
+      props: { maxRows: 10 },
+    });
   });
 
   it('folds requests into one waiting render and never cancels a running one', async () => {
@@ -215,7 +289,9 @@ describe('Mod session band renders', () => {
     release.resolve();
     await vi.advanceTimersByTimeAsync(500);
     expect(runtime.render).toHaveBeenCalledTimes(2);
-    expect(runtime.render.mock.calls[1][0].props.isWorking).toBe(true);
+    expect(runtime.render.mock.calls[1][0]).toMatchObject({
+      props: { isWorking: true },
+    });
   });
 
   it('waits behind a tool call and reads the latest input when it runs', async () => {
@@ -244,7 +320,9 @@ describe('Mod session band renders', () => {
     await call;
     await vi.advanceTimersByTimeAsync(0);
     expect(order).toEqual(['render 80', 'tool', 'render 80']);
-    expect(runtime.render.mock.calls[1][0].props.isWorking).toBe(true);
+    expect(runtime.render.mock.calls[1][0]).toMatchObject({
+      props: { isWorking: true },
+    });
   });
 
   it('keeps to the live rate, and to the steady rate after a slow render', async () => {
@@ -342,5 +420,266 @@ describe('Mod session band renders', () => {
     session.setRenderInput(input());
     await vi.advanceTimersByTimeAsync(0);
     expect(host.draw).toHaveBeenCalledWith(line('80'), 'hooks');
+  });
+
+  it.each(['clear', 'resume'] as const)(
+    'only renders rows from the adopted transcript after %s',
+    async (reason) => {
+      const { config, runtime, session } = setup({
+        sites: ['AssistantMessage'],
+      });
+      await session.initialize(new AbortController().signal);
+      runtime.render.mockResolvedValue({
+        tree: ENGINE_NODE,
+        notes: [],
+        props: { ...replyRow.props, text: 'Rewritten' },
+      });
+      const release = session.watchRow('session-1', replyRow, () => {});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.render).toHaveBeenCalledOnce();
+
+      config.getSessionId.mockReturnValue('session-2');
+      await session.syncSession(reason);
+      expect(session.watchRow('session-1', replyRow, () => {})).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.render).toHaveBeenCalledOnce();
+
+      const adoptedRow = {
+        ...replyRow,
+        props: { ...replyRow.props, text: 'Adopted' },
+      };
+      session.watchRow('session-2', adoptedRow, () => {});
+      release?.();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.render).toHaveBeenCalledTimes(2);
+      expect(runtime.render.mock.lastCall?.[0]).toEqual(adoptedRow);
+      expect(session.rowProps('session-1', adoptedRow)).toBeUndefined();
+      expect(session.rowProps('session-2', replyRow)).toBeUndefined();
+      expect(session.rowProps('session-2', adoptedRow)).toEqual({
+        ...replyRow.props,
+        text: 'Rewritten',
+      });
+    },
+  );
+
+  it('tells a transcript that switched first when the Mods adopt its session', async () => {
+    const { config, runtime, session } = setup({ sites: ['AssistantMessage'] });
+    await session.initialize(new AbortController().signal);
+    runtime.render.mockResolvedValue({
+      tree: ENGINE_NODE,
+      notes: [],
+      props: { ...replyRow.props, text: 'Rewritten' },
+    });
+    const adopted = vi.fn();
+    session.subscribeSession(adopted);
+    // The transcript already belongs to the new session; the Mods do not yet.
+    config.getSessionId.mockReturnValue('session-2');
+    expect(session.rowSession).toBe('session-1');
+    expect(session.watchRow('session-2', replyRow, () => {})).toBeUndefined();
+
+    await session.syncSession('resume');
+    expect(adopted).toHaveBeenCalledOnce();
+    expect(session.rowSession).toBe('session-2');
+    // Asked again, the row renders for the adopted session.
+    session.watchRow('session-2', replyRow, () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runtime.render).toHaveBeenCalledOnce();
+    expect(session.rowProps('session-2', replyRow)).toEqual({
+      ...replyRow.props,
+      text: 'Rewritten',
+    });
+  });
+
+  describe('rows a desktop client draws', () => {
+    const props = { text: 'Original', isFirstOfReply: true };
+
+    it('loads on the desktop surface with the rows its client draws', async () => {
+      const { session, renderHost } = setup({
+        sites: ['AssistantMessage'],
+        desktop: true,
+      });
+      await session.initialize(new AbortController().signal);
+      const args = mocks.create.mock.lastCall!;
+      // surface, prompts, queuePrompt and tools stay the ACP host's.
+      expect([args[5], args[10], args[11], args[14]]).toEqual([
+        'desktop',
+        false,
+        undefined,
+        false,
+      ]);
+      expect(renderHost()?.sites).toEqual(['AssistantMessage']);
+    });
+
+    it('answers a row with what its hooks rewrote, the same props from the first answer', async () => {
+      const { runtime, session } = setup({
+        sites: ['AssistantMessage'],
+        desktop: true,
+      });
+      await session.initialize(new AbortController().signal);
+      runtime.render.mockImplementation(async (request) => ({
+        tree: ENGINE_NODE,
+        props: { ...request.props, text: `译 ${request.requestId.length}` },
+        notes: [],
+      }));
+      const signal = new AbortController().signal;
+      await expect(
+        session.askRow('AssistantMessage', props, signal),
+      ).resolves.toEqual({
+        status: 'answered',
+        props: { text: '译 32', isFirstOfReply: true },
+      });
+      const [asked] = runtime.render.mock.lastCall!;
+      expect(asked).toEqual({
+        surface: 'desktop',
+        component: 'AssistantMessage',
+        requestId: expect.stringMatching(/^[0-9a-f]{32}$/),
+        props,
+      });
+      await session.askRow('AssistantMessage', { ...props }, signal);
+      expect(runtime.render).toHaveBeenCalledOnce();
+      await session.askRow(
+        'AssistantMessage',
+        { ...props, isFirstOfReply: false },
+        signal,
+      );
+      expect(runtime.render).toHaveBeenCalledTimes(2);
+      expect(runtime.render.mock.lastCall![0].requestId).not.toBe(
+        asked.requestId,
+      );
+    });
+
+    it('answers unhooked where no hook hears the site, and draws a row too large as it is', async () => {
+      const { runtime, session } = setup({
+        sites: ['AssistantMessage'],
+        desktop: true,
+      });
+      await session.initialize(new AbortController().signal);
+      const signal = new AbortController().signal;
+      await expect(
+        session.askRow(
+          'AssistantMessage',
+          { text: 'x'.repeat(MOD_MAX_BYTES), isFirstOfReply: true },
+          signal,
+        ),
+      ).resolves.toEqual({ status: 'answered' });
+      await expect(
+        session.askRow('Thinking', { text: 'thought' }, signal),
+      ).resolves.toEqual({ status: 'unhooked' });
+      runtime.renderHooks = [];
+      await expect(
+        session.askRow('AssistantMessage', props, signal),
+      ).resolves.toEqual({ status: 'unhooked' });
+      expect(runtime.render).not.toHaveBeenCalled();
+      // A terminal's rows are its own to draw.
+      const terminal = setup({ sites: ['AssistantMessage'] });
+      await terminal.session.initialize(new AbortController().signal);
+      await expect(
+        terminal.session.askRow('AssistantMessage', props, signal),
+      ).resolves.toEqual({ status: 'unhooked' });
+    });
+
+    it('leaves a timed-out render unanswered and can rewrite it on the next ask', async () => {
+      const { runtime, session } = setup({
+        sites: ['AssistantMessage'],
+        desktop: true,
+      });
+      const signal = new AbortController().signal;
+      await session.initialize(signal);
+      const deadline = new AbortController();
+      const timeout = vi
+        .spyOn(AbortSignal, 'timeout')
+        .mockReturnValueOnce(deadline.signal);
+      runtime.render
+        .mockImplementationOnce(async (_request, renderSignal) => {
+          await new Promise<void>((resolve) =>
+            renderSignal.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          );
+          renderSignal.throwIfAborted();
+          return { tree: ENGINE_NODE, notes: [] };
+        })
+        .mockResolvedValue({
+          tree: ENGINE_NODE,
+          notes: [],
+          props: { ...props, text: 'Rewritten' },
+        });
+      try {
+        const asked = session.askRow('AssistantMessage', props, signal);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(timeout).toHaveBeenCalledWith(30_000);
+        deadline.abort();
+        await expect(asked).resolves.toEqual({ status: 'unanswered' });
+        expect(runtime.render).toHaveBeenCalledOnce();
+
+        await expect(
+          session.askRow('AssistantMessage', props, signal),
+        ).resolves.toEqual({
+          status: 'answered',
+          props: { ...props, text: 'Rewritten' },
+        });
+        expect(runtime.render).toHaveBeenCalledTimes(2);
+      } finally {
+        timeout.mockRestore();
+      }
+    });
+
+    it('leaves a skipped render unanswered until the session can render it', async () => {
+      const { runtime, session, extension } = setup({
+        sites: ['AssistantMessage'],
+        desktop: true,
+      });
+      const signal = new AbortController().signal;
+      await session.initialize(signal);
+      extension.isActive = false;
+      await expect(
+        session.askRow('AssistantMessage', props, signal),
+      ).resolves.toEqual({ status: 'unanswered' });
+      expect(runtime.render).not.toHaveBeenCalled();
+
+      extension.isActive = true;
+      runtime.render.mockResolvedValue({ tree: ENGINE_NODE, notes: [], props });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(
+          session.askRow('AssistantMessage', props, signal),
+        ).resolves.toEqual({ status: 'answered' });
+      }
+      expect(runtime.render).toHaveBeenCalledOnce();
+    });
+  });
+
+  it('aborts a stalled row on its wall-clock deadline and releases the next tool', async () => {
+    const { runtime, session } = setup({ sites: ['AssistantMessage'] });
+    runtime.hasToolHooks = true;
+    await session.initialize(new AbortController().signal);
+    const deadline = new AbortController();
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValueOnce(deadline.signal);
+    runtime.render.mockImplementationOnce(async (_request, signal) => {
+      await new Promise<void>((resolve) =>
+        signal.addEventListener('abort', () => resolve(), { once: true }),
+      );
+      signal.throwIfAborted();
+      return { tree: ENGINE_NODE, notes: [] };
+    });
+    try {
+      session.watchRow('session-1', replyRow, () => {});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(timeout).toHaveBeenCalledWith(30_000);
+      const tool = session.toolCall(() => {})!(
+        { tool: 'write_file' },
+        async () => ({ result: {} }),
+        new AbortController().signal,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.runTool).not.toHaveBeenCalled();
+      deadline.abort();
+      await tool;
+      expect(runtime.runTool).toHaveBeenCalledOnce();
+      expect(session.rowProps('session-1', replyRow)).toBeUndefined();
+    } finally {
+      timeout.mockRestore();
+    }
   });
 });

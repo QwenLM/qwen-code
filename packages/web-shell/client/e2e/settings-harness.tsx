@@ -1,17 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import '../styles/standalone.css';
+import { WebShellWithProviders, WEB_SHELL_SETTING_ITEM_IDS } from '../index';
 import type { WebShellSettingItemId } from '../settings';
 import type { WebShellTheme } from '../themeContext';
 import type {
   WebShellUnavailableModel,
   WebShellUnavailableModelTooltipMount,
 } from '../unavailableModels';
-
-const indexEntry = '../index.tsx';
-const { WebShellWithProviders, WEB_SHELL_SETTING_ITEM_IDS } = await import(
-  /* @vite-ignore */ indexEntry
-);
 
 const params = new URLSearchParams(window.location.search);
 const sessionId = params.get('sessionId') ?? 'settings-harness-e2e';

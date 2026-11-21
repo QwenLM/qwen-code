@@ -1099,13 +1099,17 @@ function setupAcpTest(
       );
 
       const blockedEvent = writeFileEvents.find(
-        (e) => e.status === 'failed' && e.error?.includes('Plan mode'),
+        (e) => e.status === 'failed' && /plan mode/i.test(e.error ?? ''),
       );
       expect(
         blockedEvent,
         `expected a failed write_file tool_call_update blocked by plan mode; events=${JSON.stringify(toolCallEvents)}`,
       ).toBeDefined();
-      expect(blockedEvent?.error).toContain('Plan mode is active');
+      // The ACP session gate says "Plan mode is active"; the core scheduler
+      // that the unified agent loop goes through says "Tool blocked by plan
+      // mode". Either wording proves the guard fired; the file assertion
+      // below proves nothing ran.
+      expect(blockedEvent?.error).toMatch(/plan mode/i);
 
       // Verify the file was NOT created
       const fs = await import('fs');

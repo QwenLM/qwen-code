@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
@@ -12,20 +11,21 @@ import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.UUID;
 public final class WorkspaceRecoveryProtocol {
+    private static final int MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+    private static final int MAX_TEXT_LENGTH = 8192;
     private WorkspaceRecoveryProtocol() { }
-    private static final ObjectMapper JSON = new ObjectMapper();
     public static JsonNode parse(String text) {
         return parse(text.getBytes(StandardCharsets.UTF_8));
     }
 
     public static JsonNode parse(byte[] bytes) {
-        check(bytes.length <= 16 * 1024 * 1024, "message_too_large");
+        check(bytes.length <= MAX_MESSAGE_BYTES, "message_too_large");
         return ToolPublicationContract.readJson(bytes);
     }
 
     public static String text(JsonNode node, String field) {
         JsonNode value = node.path(field);
-        check(value.isTextual() && !value.asText().isEmpty() && value.asText().length() <= 8192, "invalid_request");
+        check(value.isTextual() && !value.asText().isEmpty() && value.asText().length() <= MAX_TEXT_LENGTH, "invalid_request");
         return value.asText();
     }
 

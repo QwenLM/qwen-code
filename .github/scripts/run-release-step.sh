@@ -173,6 +173,86 @@ case "${step}" in
     release_branch_name="${BRANCH_NAME:?}"
     commit_release_version
     if [[ "${IS_DRY_RUN}" == "false" ]]; then
+      # A release branch left behind by an earlier attempt means this version
+      # may be partially published. Resume it instead of force-pushing over
+      # it: when the regenerated tree matches the branch tip, reuse that
+      # commit so the publish step can skip already-published packages and
+      # ship the rest. A divergent tree is a different release under the same
+      # version and stays refused. This restores the retry semantics the
+      # push-time "already shipped" guard (#9076) accidentally killed: it ran
+      # before publish and failed any rerun whose first attempt had already
+      # pushed the branch, so the per-package skip never got to run.
+      remote_branch="$(git ls-remote --heads origin "refs/heads/${release_branch_name}")"
+      if [[ -n "${remote_branch}" ]]; then
+        # Read-only probes only, ahead of the write-credential export; the
+        # channel guard's code rides the workflow-pinned checkout.
+        if [[ -z "${RELEASE_SHA:-}" ]]; then
+          echo "::error::RELEASE_SHA is not set; refusing to resume an existing release branch without provenance."
+          exit 1
+        fi
+        git fetch --no-tags origin "refs/heads/${release_branch_name}"
+        release_commit="$(git rev-parse FETCH_HEAD)"
+        # A completed release outranks every other refusal, including the
+        # finalize CHANGELOG commit that advanced the branch after shipping.
+        if release_state="$(gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>&1)"; then
+          if [[ "${release_state}" == "false" ]]; then
+            echo "::notice::Release ${RELEASE_TAG} is already published; nothing to resume."
+            echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+        elif ! echo "${release_state}" | grep -qi 'not found'; then
+          echo "::error::Cannot confirm GitHub Release ${RELEASE_TAG} state: ${release_state}"
+          exit 1
+        fi
+        # Same parentage restore-release enforces: the source itself (no
+        # bump needed) or a single-parent bump commit on it; merges fail.
+        if [[ "${release_commit}" != "${RELEASE_SHA}" ]] &&
+          [[ "$(git rev-list --parents -n 1 "${release_commit}")" != "${release_commit} ${RELEASE_SHA}" ]]; then
+          echo "::error::${release_branch_name} tip ${release_commit} is not the release source ${RELEASE_SHA} or its direct single-parent version commit. Refusing to resume."
+          exit 1
+        fi
+        if [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "${release_commit}^{tree}")" ]]; then
+          echo "::error::${release_branch_name} already exists with different contents. Resume from that release commit instead."
+          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
+        # gh release create ignores --target for an existing tag, so a tag
+        # on another commit would split npm and the Release across commits.
+        remote_tag="$(git ls-remote origin "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")"
+        if [[ -n "${remote_tag}" ]]; then
+          # Prefer the peeled commit of an annotated tag; else the ref itself.
+          tag_commit="$(printf '%s\n' "${remote_tag}" | awk '/\^\{\}$/{sha=$1} END{if(!sha) sha=$1; print sha}')"
+          if [[ "${tag_commit}" != "${release_commit}" ]]; then
+            echo "::error::Remote tag ${RELEASE_TAG} points at ${tag_commit}, not the release commit ${release_commit}. Refusing to resume."
+            exit 1
+          fi
+        fi
+        # Same exit-code contract as the pre-push guard below: only 2 retries.
+        for attempt in 1 2 3; do
+          channel_status=0
+          node .release-workflow/scripts/assert-release-version.mjs --assert-channel-resumable --version="${RELEASE_VERSION}" --tag="${NPM_TAG}" || channel_status=$?
+          if [[ "${channel_status}" -ne 2 ]]; then
+            break
+          fi
+          if [[ "${attempt}" -lt 3 ]]; then
+            echo "Resume channel probe failed (exit 2); retrying in $(( attempt * 15 ))s (attempt ${attempt} of 3)..."
+            sleep $(( attempt * 15 ))
+          fi
+        done
+        if [[ "${channel_status}" -eq 1 ]]; then
+          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
+        if [[ "${channel_status}" -ne 0 ]]; then
+          exit "${channel_status}"
+        fi
+        # -C overwrites the restored handoff's stale same-name branch so the
+        # rebuild below builds the adopted commit.
+        git switch -C "${release_branch_name}" "${release_commit}"
+        echo "reused_commit=true" >> "${GITHUB_OUTPUT}"
+        echo "::notice::Reusing ${release_branch_name} at ${release_commit}; published npm versions will be skipped."
+        exit 0
+      fi
       # Keep the write credential unavailable until the push step needs it.
       export GH_TOKEN="${CI_BOT_PAT}"
       gh auth setup-git
@@ -199,7 +279,7 @@ case "${step}" in
         exit "${guard_status}"
       fi
       echo "Pushing release branch to remote..."
-      git push --force --set-upstream origin "${release_branch_name}" --follow-tags
+      git push --set-upstream origin "${release_branch_name}" --follow-tags
     else
       echo "Dry run enabled. Skipping push."
     fi
@@ -266,6 +346,10 @@ case "${step}" in
     ;;
 
   create-github-release)
+    if gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx 'false'; then
+      echo "::notice::Release ${RELEASE_TAG} already published; skipping creation."
+      exit 0
+    fi
     prerelease_flag=""
     if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
       prerelease_flag="--prerelease"
@@ -429,17 +513,24 @@ BODY
     # good (#15705). Bot authorship is a hard requirement: a human may have
     # filed the same title to track the flakiness, and closing their issue
     # would discard that follow-up.
+    #
+    # Shared with the VSCode companion and Chrome extension release workflows
+    # (#15840), which file their own issues: they pass FAILURE_TITLE_PREFIX and
+    # RELEASE_VERSION because their titles and version outputs differ from
+    # release.yml's.
+    release_version="${RELEASE_VERSION:-${RELEASE_TAG:-unknown}}"
+    title_prefix="${FAILURE_TITLE_PREFIX:-Release Failed for }"
     existing_issue="$(
       gh issue list --repo "${GH_REPO}" \
         --state open \
-        --search "\"Release Failed for ${RELEASE_TAG}\" in:title" \
+        --search "\"${title_prefix}${release_version}\" in:title" \
         --limit 30 \
         --json number,url,labels,author,title \
-      | jq -c --arg tag "${RELEASE_TAG}" \
-        '[ .[] | select(.title | startswith("Release Failed for " + $tag + " on ")) | select(.author.login == "github-actions[bot]") ][0] // empty'
+      | jq -c --arg prefix "${title_prefix}" --arg version "${release_version}" \
+        '[ .[] | select(.title | startswith($prefix + $version + " on ")) | select(.author.login == "github-actions[bot]") ][0] // empty'
     )"
     if [[ -z "${existing_issue}" ]]; then
-      echo "No workflow-owned release-failure issue is open for ${RELEASE_TAG}; nothing to reconcile."
+      echo "No workflow-owned release-failure issue is open for ${release_version}; nothing to reconcile."
       exit 0
     fi
     issue_number="$(jq -r '.number' <<< "${existing_issue}")"
@@ -448,10 +539,10 @@ BODY
     cat > "${body_file}" <<BODY
 The release completed successfully on a later attempt of this run, so the failure this issue reported is no longer current.
 
-Release tag: ${RELEASE_TAG}
+Release tag: ${release_version}
 Run: ${DETAILS_URL} (attempt ${RUN_ATTEMPT:-unknown})
 
-Closing as not planned. Reopen if the ${RELEASE_TAG} artifacts later prove incomplete.
+Closing as not planned. Reopen if the ${release_version} artifacts later prove incomplete.
 BODY
     gh issue comment "${issue_number}" --repo "${GH_REPO}" --body-file "${body_file}" || {
       echo "::warning::Failed to comment on ${issue_url}; closing regardless."

@@ -19,7 +19,7 @@ public final class RuntimeRetentionJob {
 
     @Scheduled(scheduler = "runtimeRetentionScheduler",
             fixedDelayString = "${qwen.managed-agent.runtime-broker.retention.scan-delay:1m}")
-    public synchronized void tick() {
+    public void tick() {
         long started = System.nanoTime();
         try {
             var result = runOnce();

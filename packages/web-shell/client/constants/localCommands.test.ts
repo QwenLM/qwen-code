@@ -12,6 +12,28 @@ const zh = getTranslator('zh-CN');
 const en = getTranslator('en');
 
 describe('getLocalCommands', () => {
+  it('adds subscription account commands only when available', () => {
+    expect(
+      getLocalCommands(en).some((command) => command.name === 'upgrade'),
+    ).toBe(false);
+    expect(
+      getLocalCommands(zh, { subscriptionAvailable: true }),
+    ).toContainEqual({
+      name: 'upgrade',
+      description: '打开 Qwen 订阅套餐页面',
+      source: 'builtin-command',
+    });
+    expect(
+      getLocalCommands(en).some((command) => command.name === 'logout'),
+    ).toBe(false);
+    expect(
+      getLocalCommands(zh, { subscriptionAvailable: true }),
+    ).toContainEqual({
+      name: 'logout',
+      description: '断开此设备与你的 Qwen 账号的连接',
+      source: 'builtin-command',
+    });
+  });
   it('translates fallback command descriptions to the active language', () => {
     const byName = new Map(getLocalCommands(zh).map((c) => [c.name, c]));
     expect(byName.get('status')?.description).toBe('查看版本信息');
@@ -44,6 +66,22 @@ describe('localizeBuiltinDescriptions (commands)', () => {
     );
     expect(localizeBuiltinDescriptions(commands, en)[0].description).toBe(
       'Submit a bug report',
+    );
+  });
+
+  it('re-localizes /pr so the slash menu matches the UI language', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'pr',
+        description: 'Bind a GitHub pull request to this session',
+        source: 'builtin-command',
+      },
+    ];
+    expect(localizeBuiltinDescriptions(commands, zh)[0].description).toBe(
+      '将 GitHub 拉取请求绑定到本会话',
+    );
+    expect(localizeBuiltinDescriptions(commands, en)[0].description).toBe(
+      'Bind a GitHub pull request to this session',
     );
   });
 
