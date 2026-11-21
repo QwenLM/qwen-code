@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify one Managed release, or publish it to Maven and OSS.
+"""Publish one verified Managed release to Maven, OSS and the release manifest.
 
 Consumes the four CI artifacts produced by native_release, runtime_release and the
 Worker/Harness image jobs:
@@ -14,24 +14,20 @@ Ordering guarantees:
   1. Local verification: releaseId/sourceSha match, native mode matches the declared gate
      (package or verify), both image records describe this exact runtime, and every SHA256
      in both PROVENANCE documents and assembly-validation.json matches the bytes on disk.
-  2. Credential gate: Maven credentials must exist. OSS candidates are optional;
-     when no OSS credential can HEAD the release prefix, the runtime archive and
-     manifest are uploaded as CI artifacts instead of OSS objects, and the run
-     still publishes Maven coordinates and image digests.
+  2. Credential gate: Maven and OSS credentials are both optional. When a channel
+     has no working credential, its artifacts remain as CI artifacts and the run
+     still records what was published and what was skipped.
   3. Every OSS PUT sends x-oss-forbid-overwrite; every written object is read back
      and its SHA256 re-verified. SDK and MAS are both published to Maven. The release
      manifest, including immutable Worker/Harness image digests, is written last as
      the commit marker for the release.
-
-With --bundle-out, the script stops after verification and writes a release bundle
-manifest. With --published-manifest-out, it also records the final post-publication
-manifest while uploading the JARs and image digests.
 
 Credentials are read from the environment and are never printed, never put on a
 command line, and never embedded in an error message.
 """
 import argparse
 import base64
+import email.utils
 import hashlib
 import hmac
 import json
@@ -177,7 +173,7 @@ def verify_image_record(image_dir, producer, repository, release_id, runtime_pro
     }
 
 
-# --- OSS (V1 signed requests, stdlib only) -------------------------------------
+# --- OSS (V1 presigned URLs, stdlib only) -------------------------------------
 
 def oss_signed_request(object_key, access_key, secret, method, extra_headers=None,
                        security_token=None):
@@ -196,7 +192,7 @@ def oss_signed_request(object_key, access_key, secret, method, extra_headers=Non
     signature = base64.b64encode(
         hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha1).digest()
     ).decode()
-    url = f"https://{BUCKET}.{OSS_HOST}/{urllib.parse.quote(object_key)}"
+    url = f"https://{OSS_HOST}/{urllib.parse.quote(object_key)}"
     headers = dict(signed_headers)
     headers["Date"] = date
     headers["Authorization"] = f"OSS {access_key}:{signature}"
@@ -307,10 +303,10 @@ def require_maven_credentials():
         fail("Maven credentials missing: set MAVEN_USERNAME and MAVEN_PASSWORD")
 
 
-def artifact_url(coordinate, extension, base_url=MAVEN_REPO_URL):
+def artifact_url(coordinate, extension):
     group_id, artifact_id, version = coordinate.split(":")
     group_path = group_id.replace(".", "/")
-    return f"{base_url}/{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.{extension}"
+    return f"{MAVEN_REPO_URL}/{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.{extension}"
 
 
 def maven_headers(username, password):
@@ -334,23 +330,17 @@ def maven_probe(jar_url, pom_url, username, password):
         fail("cannot inspect Maven coordinate before deploy: HTTP " + ",".join(map(str, statuses)))
 
 
-def maven_verify(url, expected_sha, username, password, wait_seconds=0):
-    deadline = time.monotonic() + wait_seconds
-    while True:
-        request = urllib.request.Request(url, headers=maven_headers(username, password))
-        digest = hashlib.sha256()
-        try:
-            with urllib.request.urlopen(request, timeout=300) as response:
-                for chunk in iter(lambda: response.read(1 << 20), b""):
-                    digest.update(chunk)
-            if digest.hexdigest() != expected_sha:
-                fail("Maven readback sha256 mismatch")
-            return
-        except urllib.error.HTTPError as error:
-            if error.code == 404 and time.monotonic() < deadline:
-                time.sleep(2)
-                continue
-            fail(f"Maven readback failed: HTTP {error.code}")
+def maven_verify(url, expected_sha, username, password):
+    request = urllib.request.Request(url, headers=maven_headers(username, password))
+    digest = hashlib.sha256()
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            for chunk in iter(lambda: response.read(1 << 20), b""):
+                digest.update(chunk)
+    except urllib.error.HTTPError as error:
+        fail(f"Maven readback failed: HTTP {error.code}")
+    if digest.hexdigest() != expected_sha:
+        fail("Maven readback sha256 mismatch")
 
 
 def maven_deploy(jar, pom, coordinate, username, password):
@@ -401,14 +391,12 @@ def main():
                         help="Directory containing worker-image.json")
     parser.add_argument("--harness-image-dir", type=Path, required=True,
                         help="Directory containing harness-image.json")
-    parser.add_argument("--oss-skip-if-no-credential", action="store_true",
-                        help="Skip OSS upload and emit manifest as local artifact when no OSS credential works")
+    parser.add_argument("--skip-oss", action="store_true",
+                        help="Skip OSS upload and emit manifest as local artifact")
+    parser.add_argument("--skip-maven", action="store_true",
+                        help="Skip Maven deploy and emit manifest as local artifact")
     parser.add_argument("--expected-native-mode", choices=("package", "verify"),
                         help="Native producer mode that must match provenance")
-    parser.add_argument("--bundle-out", type=Path,
-                        help="verify the inputs and write a release bundle manifest without external writes")
-    parser.add_argument("--published-manifest-out", type=Path,
-                        help="write the final manifest here when publishing")
     parser.add_argument("--repo", type=Path, default=Path("."),
                         help="qwen-code checkout (for resolve-oss-sts.sh fallback)")
     args = parser.parse_args()
@@ -429,34 +417,13 @@ def main():
     }
     print(f"verified release {args.release_id} at {args.source_sha}")
 
-    manifest = {
-        "releaseId": args.release_id,
-        "sourceRevision": args.source_sha,
-        "nativeMode": plan["nativeMode"],
-        "maven": {
-            "repository": MAVEN_REPO_URL,
-            "sdk": plan["sdkCoordinate"],
-            "server": plan["coordinate"],
-        },
-        "images": images,
-        "hashes": plan["hashes"],
-    }
-    if args.bundle_out:
-        args.bundle_out.parent.mkdir(parents=True, exist_ok=True)
-        args.bundle_out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-        print(json.dumps(manifest, indent=2, sort_keys=True))
-        print(f"verified release bundle {args.bundle_out}")
-        return
-
     server_key = f"dist/managedagent/java/qwen-managed-agent-server-{args.release_id}.jar"
     runtime_key = f"dist/managedagent/runtime/{args.release_id}/qwen-runtime-{args.release_id}.tar.gz"
     manifest_key = f"dist/managedagent/releases/{args.release_id}/release-manifest.json"
 
-    require_maven_credentials()
-
     oss_name = None
     access_key = secret = security_token = None
-    if not args.oss_skip_if_no_credential:
+    if not args.skip_oss:
         oss_name, access_key, secret, security_token = resolve_oss_credentials(args.repo, server_key)
         print(f"credentials ok: OSS identity {oss_name}, Maven repository {MAVEN_REPO_ID}")
         for key in (runtime_key, manifest_key):
@@ -465,40 +432,33 @@ def main():
     else:
         print("OSS credential check skipped; runtime archive and manifest will be CI artifacts only")
 
+    maven_username = os.environ.get("MAVEN_USERNAME", "")
+    maven_password = os.environ.get("MAVEN_PASSWORD", "")
+    if not args.skip_maven and (not maven_username or not maven_password):
+        print("Maven credentials missing; skipping Maven deploy")
+        args.skip_maven = True
+
     # Maven deploy happens before the first OSS object, so its failure cannot strand a
     # forbid-overwrite release id on OSS without its manifest.
-    maven_username = os.environ["MAVEN_USERNAME"]
-    maven_password = os.environ["MAVEN_PASSWORD"]
-    sdk_jar_url = artifact_url(plan["sdkCoordinate"], "jar")
-    sdk_pom_url = artifact_url(plan["sdkCoordinate"], "pom")
-    server_jar_url = artifact_url(plan["coordinate"], "jar")
-    server_pom_url = artifact_url(plan["coordinate"], "pom")
-    maven_probe(sdk_jar_url, sdk_pom_url, maven_username, maven_password)
-    maven_probe(server_jar_url, server_pom_url, maven_username, maven_password)
-    maven_deploy(plan["sdkJar"], plan["sdkPom"], plan["sdkCoordinate"],
-                 maven_username, maven_password)
-    maven_verify(sdk_jar_url, plan["hashes"]["sdkJarSha256"], maven_username, maven_password)
-    maven_verify(sdk_pom_url, plan["hashes"]["sdkPomSha256"], maven_username, maven_password)
-    print(f"verified maven {plan['sdkCoordinate']}")
-    maven_deploy(plan["serverJar"], plan["serverPom"], plan["coordinate"],
-                 maven_username, maven_password)
-    maven_verify(server_jar_url, plan["hashes"]["serverJarSha256"], maven_username, maven_password)
-    maven_verify(server_pom_url, plan["hashes"]["serverPomSha256"], maven_username, maven_password)
-    print(f"verified maven {plan['coordinate']}")
-
-    for coordinate, artifact, hash_key in (
-        (plan["sdkCoordinate"], "jar", "sdkJarSha256"),
-        (plan["sdkCoordinate"], "pom", "sdkPomSha256"),
-        (plan["coordinate"], "jar", "serverJarSha256"),
-        (plan["coordinate"], "pom", "serverPomSha256"),
-    ):
-        maven_verify(
-            artifact_url(coordinate, artifact),
-            plan["hashes"][hash_key],
-            maven_username,
-            maven_password,
-            wait_seconds=60,
-        )
+    if not args.skip_maven:
+        sdk_jar_url = artifact_url(plan["sdkCoordinate"], "jar")
+        sdk_pom_url = artifact_url(plan["sdkCoordinate"], "pom")
+        server_jar_url = artifact_url(plan["coordinate"], "jar")
+        server_pom_url = artifact_url(plan["coordinate"], "pom")
+        maven_probe(sdk_jar_url, sdk_pom_url, maven_username, maven_password)
+        maven_probe(server_jar_url, server_pom_url, maven_username, maven_password)
+        maven_deploy(plan["sdkJar"], plan["sdkPom"], plan["sdkCoordinate"],
+                     maven_username, maven_password)
+        maven_verify(sdk_jar_url, plan["hashes"]["sdkJarSha256"], maven_username, maven_password)
+        maven_verify(sdk_pom_url, plan["hashes"]["sdkPomSha256"], maven_username, maven_password)
+        print(f"verified maven {plan['sdkCoordinate']}")
+        maven_deploy(plan["serverJar"], plan["serverPom"], plan["coordinate"],
+                     maven_username, maven_password)
+        maven_verify(server_jar_url, plan["hashes"]["serverJarSha256"], maven_username, maven_password)
+        maven_verify(server_pom_url, plan["hashes"]["serverPomSha256"], maven_username, maven_password)
+        print(f"verified maven {plan['coordinate']}")
+    else:
+        print("Maven deploy skipped; SDK and MAS remain as CI artifacts")
 
     if oss_name:
         oss_put(server_key, plan["serverJar"], access_key, secret, security_token)
@@ -508,7 +468,9 @@ def main():
     else:
         print("OSS upload skipped; server JAR and runtime archive remain as CI artifacts")
 
-    manifest.update({
+    manifest = {
+        "releaseId": args.release_id,
+        "sourceRevision": args.source_sha,
         "publishedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "bucket": BUCKET,
         "objects": ({
@@ -517,19 +479,15 @@ def main():
         } if oss_name else {}),
         "maven": {
             "repository": MAVEN_REPO_URL,
-            "sdk": plan["sdkCoordinate"],
-            "server": plan["coordinate"],
+            "sdk": plan["sdkCoordinate"] if not args.skip_maven else None,
+            "server": plan["coordinate"] if not args.skip_maven else None,
         },
         "images": images,
         "hashes": plan["hashes"],
-    })
+    }
     manifest_path = Path(tempfile.mkstemp(prefix="release-manifest-", suffix=".json")[1])
     try:
-        manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-        manifest_path.write_text(manifest_text)
-        if args.published_manifest_out:
-            args.published_manifest_out.parent.mkdir(parents=True, exist_ok=True)
-            args.published_manifest_out.write_text(manifest_text)
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         if oss_name:
             manifest_sha = sha256(manifest_path)
             oss_put(manifest_key, manifest_path, access_key, secret, security_token)
