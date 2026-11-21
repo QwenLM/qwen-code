@@ -349,7 +349,7 @@ describe('Managed workspace navigation', () => {
     expect(group('new')).not.toBeNull();
   });
 
-  it('opens the artifact library with the workspace identity and label', async () => {
+  it('opens the artifact library with the workspace identity and hides it after a failed reload', async () => {
     const openLibrary = vi.fn();
     list.mockResolvedValue({
       data: [workspace],
@@ -373,6 +373,18 @@ describe('Managed workspace navigation', () => {
     );
     expect(openLibrary).toHaveBeenCalledWith('a', 'Project');
     expect(selectWorkspace).not.toHaveBeenCalled();
+
+    list.mockRejectedValueOnce(new Error('Workspace list offline'));
+    await render({ revision: 1 });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Workspace list offline',
+    );
+    expect(group('a').textContent).toContain('Project');
+    expect(group('a').textContent).toContain('Task one');
+    expect(container.querySelector('p[role="status"]')).toBeNull();
+    expect(
+      group('a').querySelector('button[aria-label^="Artifact library: "]'),
+    ).toBeNull();
   });
 
   it.each([
