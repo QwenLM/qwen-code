@@ -1,5 +1,7 @@
 # Session Recap Design
 
+[English](session-recap-design.md) | [简体中文](session-recap-design.zh-CN.md)
+
 > A brief (1-2 sentence) "where did I leave off" summary surfaced when the user
 > returns to an idle session, either on demand (`/recap`) or after the
 > terminal has been blurred for 5+ minutes.
@@ -218,6 +220,23 @@ if `inFlightRef.current === controller` (so it doesn't overwrite a
 newer controller).
 
 A second `useEffect` aborts the in-flight controller on unmount.
+
+### Web Shell host
+
+The Web Shell (`packages/web-shell/client/App.tsx`) implements the
+auto-trigger itself against `document.visibilitychange` rather than
+`useAwaySummary`; the table above describes the terminal host only.
+Three behaviours differ by design:
+
+- The away trigger is a hidden tab, not terminal blur.
+- A return that lands mid-turn is **dropped, not deferred** — the handler
+  clears `hiddenAtRef` before the streaming check, so there is no re-fire
+  when the turn finishes.
+- The firing gate differs: the terminal fires only after at least 3 user
+  messages with at least 2 new ones since the last recap
+  (`MIN_USER_MESSAGES_TO_FIRE` / `MIN_USER_MESSAGES_SINCE_LAST_RECAP` in
+  `useAwaySummary.ts`), while the Web Shell fires after at least 4 new
+  transcript blocks of any kind (`MIN_NEW_BLOCKS` in `App.tsx`).
 
 ### `/recap` gating
 
