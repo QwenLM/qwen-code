@@ -162,7 +162,8 @@ Common fields:
 - `exclude_tools`: exclude named tools explicitly.
 - `allowed_tools`: bypass approval for matching tools; this is not a tool-registration allowlist.
 - `timeout`: seconds for control requests, permission callbacks, and stream
-  close waits
+  close waits. Every value must be a finite number greater than zero, whether
+  supplied in a mapping or a `TimeoutOptions` object.
 
 `env` is merged on top of the parent process environment. Set secrets such as
 `OPENAI_API_KEY` in the parent environment or a secrets manager rather than
