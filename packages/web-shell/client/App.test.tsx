@@ -4620,6 +4620,32 @@ describe('task activity key', () => {
     ).toBeNull();
   });
 
+  it('does not show the artifacts entry for an unrelated restored tab at zero artifacts', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'review:stored',
+          tabs: [
+            { id: 'review:stored', kind: 'review', title: 'Stored review' },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
   it('does not restore a persisted artifacts tab when the host hides the artifacts entry', async () => {
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
