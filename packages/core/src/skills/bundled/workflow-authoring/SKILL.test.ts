@@ -101,6 +101,11 @@ describe('bundled workflow-authoring skill', () => {
       { type: 'string' },
       { type: 'object', required: ['a'], properties: { a: false } },
       { type: 'object', required: ['a', 'b'], maxProperties: 1 },
+      { unevaluatedProperties: {} },
+      { dependentRequired: {} },
+      { dependentSchemas: {} },
+      { $dynamicRef: '#' },
+      { $recursiveRef: '#' },
     ];
     for (const schema of refused) {
       expect(prepareWorkflowSchema(schema).ok).toBe(false);
@@ -119,6 +124,17 @@ describe('bundled workflow-authoring skill', () => {
       { ...contradictory, if: {}, then: {}, else: {} },
       { ...contradictory, dependencies: {} },
       { ...contradictory, propertyNames: {} },
+      ...[
+        'unevaluatedProperties',
+        'dependentRequired',
+        'dependentSchemas',
+        '$dynamicRef',
+        '$recursiveRef',
+      ].map((keyword) => ({
+        ...contradictory,
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        [keyword]: keyword.endsWith('Ref') ? '#' : {},
+      })),
     ]) {
       expect(prepareWorkflowSchema(schema).ok).toBe(true);
     }
@@ -133,6 +149,7 @@ describe('bundled workflow-authoring skill', () => {
       'required list longer than `maxProperties` allows',
       'skips a node carrying',
       'property-name keywords',
+      'newer-dialect spellings need a matching `$schema`',
     ]) {
       expect(prose).toContain(anchor);
     }

@@ -125,9 +125,11 @@ say explicitly what each one should read and whether it may edit files.
   `maxProperties` allows, or a required property its own object forbids) makes
   agent() resolve to null without starting the agent. The check reads only a
   node's own property rules and skips a node carrying reference, combinator,
-  conditional, dependency, unevaluated-property or property-name keywords: the
-  agent is dispatched and the failure arrives as failed submissions. Each
-  failed submission hands its error back to the agent, and
+  conditional, dependency, unevaluated-property or property-name keywords;
+  newer-dialect spellings need a matching `$schema`, or strict compilation
+  refuses them before dispatch. Otherwise the agent is dispatched and the
+  failure arrives as failed submissions. Each failed submission hands its
+  error back to the agent, and
   the third failed submission stops it. With no valid result agent() resolves
   to null and the failure states how many submissions failed and the last
   error; check for null.
