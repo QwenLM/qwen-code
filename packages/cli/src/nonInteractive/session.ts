@@ -43,6 +43,7 @@ import {
 import { createMinimalSettings } from '../config/settings.js';
 import { readHumanInputFromSdkMessage } from './sdk-human-input.js';
 import type { LoadedSettings } from '../config/settings.js';
+import { AlreadyReportedError } from '../utils/errors.js';
 import {
   runNonInteractive,
   TurnInterruptedError,
@@ -860,6 +861,9 @@ class Session {
     this.outputAdapter.emitResult({
       isError: true,
       errorMessage: message,
+      ...(error instanceof AlreadyReportedError && error.status !== undefined
+        ? { errorStatus: error.status }
+        : {}),
       durationMs,
       apiDurationMs,
       numTurns,

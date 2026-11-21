@@ -168,6 +168,8 @@ export interface SDKResultMessageError {
   error?: {
     type?: string;
     message: string;
+    /** Provider HTTP status, when the failure came from an API response. */
+    status?: number;
     [key: string]: unknown;
   };
   [key: string]: unknown;
