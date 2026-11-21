@@ -173,7 +173,7 @@ class WorkspaceSessionCloseMySqlIT {
                         assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                                 String.class, tenant, session)).isEqualTo("ACTIVE");
                         actionSnapshot.countDown();
-                        return actions.admit(tenant, session, OWNER, ACTOR_DIGEST,
+                        return actions.admit(tenant, session, null, OWNER, ACTOR_DIGEST,
                                 "answer", "answer-digest", action, mapper.createObjectNode(), System.currentTimeMillis());
                     }));
                 }));
@@ -204,7 +204,7 @@ class WorkspaceSessionCloseMySqlIT {
                 + "\"policyRevision\":\"hosted-tool-approval/1\",\"expiresAt\":" + (now + 86_400_000) + "}");
         var body = mapper.createObjectNode().put("optionId", "allow").put("inputRevision", 1)
                 .put("policyRevision", "hosted-tool-approval/1");
-        String operationId = transaction(() -> actions.admit(tenant, session, OWNER, ACTOR_DIGEST,
+        String operationId = transaction(() -> actions.admit(tenant, session, null, OWNER, ACTOR_DIGEST,
                 "answer", "answer-digest", action, body, now)).operation().operationId();
         jdbc.update("UPDATE ma_operation SET state = 'FAILED', phase = 'FAILED', delivery_state = 'CONFIRMED',"
                         + " admission_stage = 'JAVA_DURABLE', session_status_before = 'ACTIVE', receipt_id = 'rcpt-1',"
@@ -219,7 +219,7 @@ class WorkspaceSessionCloseMySqlIT {
                     assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                             String.class, tenant, session)).isEqualTo("ACTIVE");
                     snapshotRead.countDown();
-                    return actions.admit(tenant, session, OWNER, ACTOR_DIGEST,
+                    return actions.admit(tenant, session, null, OWNER, ACTOR_DIGEST,
                             "answer", "answer-digest", action, body, now + 1);
                 }));
                 awaitBlocked(snapshotRead, response);

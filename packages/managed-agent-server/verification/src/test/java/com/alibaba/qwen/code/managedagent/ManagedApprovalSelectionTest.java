@@ -242,10 +242,13 @@ class ManagedApprovalSelectionTest {
                                         "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"unbound\",\"approvalMode\":\"default\"}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("unsupported_approval_mode"));
+        // An unbound Session still requires a verified principal; only the
+        // approval-mode selection needs a Workspace.
         String legacy =
                 mvc.perform(
                                 post(BASE + "/sessions/create")
                                         .header(TenantContextFilter.HEADER, tenant)
+                                        .principal(actor(tenant))
                                         .contentType(MediaType.APPLICATION_JSON)
                                         .content(
                                                 "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"legacy\"}"))
@@ -257,6 +260,7 @@ class ManagedApprovalSelectionTest {
         mvc.perform(
                         post(BASE + "/sessions/get")
                                 .header(TenantContextFilter.HEADER, tenant)
+                                .principal(actor(tenant))
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"sessionId\":\"" + legacyId + "\"}"))
                 .andExpect(status().isOk())

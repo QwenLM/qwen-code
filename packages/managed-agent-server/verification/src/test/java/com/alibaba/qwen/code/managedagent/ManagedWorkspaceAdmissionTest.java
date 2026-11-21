@@ -1279,6 +1279,90 @@ class ManagedWorkspaceAdmissionTest {
         });
     }
 
+    // A subject-bearing caller's receipt carries the principal encoding, so
+    // the recorded rename must answer that same caller through both replay
+    // comparisons (the service pre-read and the store's replay-owner gate)
+    // while a sibling — a different user, or a different business actor of
+    // the same user — stays refused.
+    @Test
+    void aBoundPrincipalRenameReplaysItsOwnKeyAndRefusesEverySibling() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a",
+                        "."))
+                .build())
+                .sessionId();
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public Attachment createOrLoad(String tenantId,
+                            String sessionId, boolean loadExisting) {
+                        return new Attachment("boot");
+                    }
+
+                    @Override
+                    public boolean supportsFencedTitles() {
+                        return true;
+                    }
+
+                    @Override
+                    public void rename(String tenantId, String sessionId,
+                            String title) {
+                    }
+                };
+        ManagedAgentService service = new ManagedAgentService(gated,
+                new RequestDigests(), mock(HarnessCoordinator.class), harness,
+                registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var recorder = com.alibaba.qwen.code.managedagent.model.SessionPrincipal
+                .of(tenant, "actor-a", "subject-a");
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        transaction.executeWithoutResult(status -> {
+            assertThat(service.renameSession(recorder, "rename", sessionId,
+                    "new title").replayed()).isFalse();
+            // The recorder's own retry replays, whichever arm answers it.
+            assertThat(service.renameSession(recorder, "rename", sessionId,
+                    "new title").replayed()).isTrue();
+            // A sibling user holding OPERATOR on the Workspace is not the
+            // recorder either: the recorded outcome stays creator-scoped.
+            assertThatThrownBy(() -> service.renameSession(
+                    com.alibaba.qwen.code.managedagent.model.SessionPrincipal
+                            .of(tenant, "actor-b", "subject-b"),
+                    "rename", sessionId, "new title"))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                        // A live, workspace-bound Session answers the
+                        // non-creator with this one refusal; a 404 here would
+                        // collapse "unreadable" into "unknown".
+                        assertThat(error.getStatus()).isEqualTo(409);
+                        assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    });
+        });
+    }
+
     // The grant-less arm of the rename replay gate: with the key recorded
     // as a completed rename of the Session, every title shape — over-long,
     // blank, control-bearing — must answer the same 404 a fresh key
@@ -1424,6 +1508,116 @@ class ManagedWorkspaceAdmissionTest {
                 "SELECT title FROM ma_session WHERE tenant_id = ?"
                         + " AND session_id = ?",
                 String.class, tenant, sessionY)).isNull();
+    }
+
+    // The submit and cancel arms of the same tenant-global collision: a key
+    // consumed on Session A, reused by a principal who owns Session B but has
+    // no grant on A, must answer idempotency_conflict — never the recorded
+    // Session's read-grant 404 that would name a Session the caller owns.
+    @Test
+    void aKeyConsumedByAnotherSessionAnswersIdempotencyConflictForSubmitAndCancel() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        register(tenant, "ws-b", "storage-b",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-b", "actor-b", true);
+        String sessionX = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create-x")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build()).sessionId();
+        String sessionY = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-b")
+                .idempotencyKey("create-y")
+                .requestDigest("sha256:" + "b".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-b", "."))
+                .build()).sessionId();
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        // actor-a consumes "k1" under SUBMIT and under CANCEL on X.
+        var turn = transaction.execute(status ->
+                service.submitTurn(tenant, "actor-a", "k1", sessionX, input));
+        transaction.executeWithoutResult(status ->
+                service.cancelTurn(tenant, "actor-a", "k1", sessionX,
+                        turn.turnId()));
+        // actor-b owns Y, has no grant on X: each reuse is a collision.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.submitTurn(tenant, "actor-b",
+                        "k1", sessionY, input))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getCode())
+                                    .isEqualTo("idempotency_conflict");
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.CONFLICT.value());
+                        }));
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.cancelTurn(tenant, "actor-b",
+                        "k1", sessionY, turn.turnId()))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getCode())
+                                    .isEqualTo("idempotency_conflict");
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.CONFLICT.value());
+                        }));
+    }
+
+    // The unbound requester of the same collision, and the opposite verdict.
+    // An unbound Session is private, so a key recorded on a Workspace-bound
+    // Session must answer the 404 the in-store receipt probe gives once the
+    // receipt lands: requireSessionAuthority passes for a bound recorded
+    // Session, so deleting the pre-read arm turns this answer into
+    // idempotency_conflict, which confirms the foreign key is live. Same actor
+    // and same input on both Sessions, so only the recorded Session's
+    // Workspace binding can decide the verdict — an actor or ownership
+    // difference would refuse it even with the arm deleted.
+    @Test
+    void anUnboundSessionReusingABoundRecordedKeyGetsTheReceiptProbesNotFound() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        String bound = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create-bound")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build()).sessionId();
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        var recorder = com.alibaba.qwen.code.managedagent.model.SessionPrincipal
+                .of(tenant, "actor-a", "subject-a");
+        transaction.executeWithoutResult(status ->
+                service.submitTurn(recorder, "k1", bound, input));
+        String unbound = transaction.execute(status ->
+                service.createSession(recorder, "create-unbound", "qwen-code",
+                        null, "private", Map.of(), List.of()).sessionId());
+        assertThat(store.requireSession(tenant, unbound).workspace()).isNull();
+        assertThat(store.requireSession(tenant, bound).workspace()).isNotNull();
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.submitTurn(recorder, "k1",
+                        unbound, input))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getCode())
+                                    .isEqualTo("session_not_found");
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.NOT_FOUND.value());
+                        }));
     }
 
     // The recorded rename's actor gate covers the UNFINISHED row too, not
@@ -2899,6 +3093,214 @@ class ManagedWorkspaceAdmissionTest {
                 .selection(new WorkspaceSelection("ws-a", "."))
                 .build())
                 .sessionId();
+    }
+
+    @Test
+    void boundSessionReadsServeAnActorAtTheFilterAdmissionCeiling() throws Exception {
+        // R7-1/R9-1: 512 CJK code points (1536 UTF-8 bytes) sit at the
+        // tenant filter's admission ceiling. R9-1 made the principal bound
+        // admit that same ceiling, so every route serves this actor instead
+        // of failing it after admission; the bound still rejects one byte
+        // past the widest ceiling actor (512 supplementary code points).
+        String longActor = "界".repeat(512);
+        String widestActor = "𝄞".repeat(512);
+        assertThat(com.alibaba.qwen.code.managedagent.model.SessionPrincipal
+                .ofUser("tenant", widestActor).userId()).isEqualTo(widestActor);
+        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser("tenant", widestActor + "a"))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("invalid_actor"));
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-long", "storage-long",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-long", longActor, true);
+        String session = new TransactionTemplate(transactionManager).execute(status ->
+                store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId(longActor)
+                        .idempotencyKey("create-long")
+                        .requestDigest("sha256:" + "b".repeat(64))
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("ws-long", "."))
+                        .build())
+                        .sessionId());
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of("sessionId", session))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sessionId").value(session));
+        mvc.perform(get("/v1/agents/sessions/{sessionId}", session)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(session));
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].sessionId").value(session));
+        mvc.perform(get("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id").value(session));
+        mvc.perform(get("/v1/agents/sessions/{sessionId}/actions", session)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isOk());
+        mvc.perform(get("/v1/agents/sessions/{sessionId}/user-messages", session)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
+        // R7-1 (round 8): the Workspace-only management routes keep the raw
+        // actor too — requirePrincipal() here answered 400 invalid_actor.
+        mvc.perform(get("/v1/agents/sessions/{sessionId}/extensions", session)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/agent/web-shell/v1/session-skills/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of("sessionId", session))))
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/agent/web-shell/v1/session-mcp/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of("sessionId", session))))
+                .andExpect(status().isOk());
+        // R7-1 (round 10): the artifact and tool-details read gates take the
+        // filter-admitted actor too; requirePrincipal() answered 400
+        // invalid_actor before the route could answer its own 404.
+        mvc.perform(get("/v1/agents/sessions/{sessionId}/artifacts/{artifactId}",
+                        session, "missing-artifact")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("artifact_not_found"));
+        mvc.perform(post("/api/agent/web-shell/v1/tool-details/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of(
+                                "sessionId", session, "itemId", "missing-item"))))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("tool_details_not_found"));
+    }
+
+    @Test
+    void unboundSessionCreationAdmitsAnActorBeyondTheOldPrincipalByteBound() throws Exception {
+        // R9-1: 171 CJK code points are 513 UTF-8 bytes — past the old
+        // 512-byte principal bound but well inside the tenant filter's
+        // 512-code-point admission, so both creation surfaces must answer
+        // the base's 202 and record the actor instead of 400 invalid_actor.
+        assertUnboundCreateAdmitsActor("界".repeat(171));
+    }
+
+    @Test
+    void unboundSessionCreationAdmitsTheWidestAdmittedActor() throws Exception {
+        // R9-1: 512 supplementary code points are the 2048-byte worst case
+        // the filter can admit. The ownership row and the creation receipt
+        // must both hold the full principal, or a route the filter accepted
+        // would fail inside its own transaction.
+        assertUnboundCreateAdmitsActor("𝄞".repeat(512));
+    }
+
+    private void assertUnboundCreateAdmitsActor(String actor) throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String publicSession = mapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "ceiling-public")
+                                .principal(actor(tenant, actor))
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(mapper.writeValueAsString(Map.of(
+                                        "agent_id", "qwen-code",
+                                        "input", List.of()))))
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString())
+                .path("id").asText();
+        assertOnlyPrincipalRowNamesActor(tenant, publicSession, actor);
+        String webShellSession = mapper.readTree(mvc.perform(
+                        post("/api/agent/web-shell/v1/sessions/create")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .principal(actor(tenant, actor))
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(mapper.writeValueAsString(Map.of(
+                                        "idempotencyKey", "ceiling-web-shell",
+                                        "agentId", "qwen-code",
+                                        "input", List.of()))))
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString())
+                .path("sessionId").asText();
+        assertOnlyPrincipalRowNamesActor(tenant, webShellSession, actor);
+    }
+
+    private void assertOnlyPrincipalRowNamesActor(String tenant,
+            String sessionId, String actor) {
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " ma_session_principal WHERE tenant_id = ? AND"
+                        + " session_id = ?", Integer.class, tenant, sessionId))
+                .isEqualTo(1);
+        var row = com.alibaba.qwen.code.managedagent.persistence
+                .ManagedSessionPrincipal.find(jdbc, tenant, sessionId);
+        assertThat(row).isNotNull();
+        assertThat(row.userId()).isEqualTo(actor);
+        assertThat(row.actorPresent()).isFalse();
+    }
+
+    @Test
+    void legacyCancelGateServesAnActorAtTheFilterAdmissionCeiling() {
+        // R7-1 (round 10): the raw-actor cancel gates no longer build a
+        // byte-bounded principal before any ownership row exists. On a
+        // legacy (row-less) Session the answer is the route's own 404, not
+        // 400 invalid_actor, for an actor at the filter's 512-code-point
+        // admission ceiling.
+        String longActor = "界".repeat(512);
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = store.insertSessionCommand(tenant, "CREATE_SESSION",
+                "legacy-create", "sha256:" + "d".repeat(64), "qwen-code",
+                null, null, List.of(), null).sessionId();
+        jdbc.update("UPDATE ma_session SET status = 'DELETED'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        assertThatThrownBy(() -> service.cancelTurn(tenant, longActor,
+                "legacy-cancel", session, "turn-legacy"))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode())
+                                .isEqualTo("session_not_found"));
+    }
+
+    @Test
+    void crossSessionReplayProbeServesAnActorAtTheFilterAdmissionCeiling() {
+        // R7-1 (round 10): requireSubmitterRole and
+        // requireRecordedSessionGrant gate a tenant-global key reused across
+        // Sessions with the raw actor; the recorded Session's ownership
+        // probe must not construct a byte-bounded principal first. The
+        // answer is the key conflict, not 400 invalid_actor, for an actor at
+        // the filter's 512-code-point admission ceiling.
+        String longActor = "界".repeat(512);
+        String tenant = "tenant-" + UUID.randomUUID();
+        String requested = store.insertSessionCommand(tenant, "CREATE_SESSION",
+                "probe-requested", "sha256:" + "e".repeat(64), "qwen-code",
+                null, null, List.of(), null).sessionId();
+        String recorded = store.insertSessionCommand(tenant, "CREATE_SESSION",
+                "probe-recorded", "sha256:" + "f".repeat(64), "qwen-code",
+                null, null, List.of(), null).sessionId();
+        new TransactionTemplate(transactionManager).executeWithoutResult(status ->
+                store.beginSessionMutation(tenant, "RENAME_SESSION",
+                        "probe-reused-key", "sha256:" + "1".repeat(64),
+                        recorded, SessionMutationKind.RENAME, "actor-a"));
+        assertThatThrownBy(() -> service.renameSession(tenant, longActor,
+                "probe-reused-key", requested, "renamed"))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode())
+                                .isEqualTo("idempotency_conflict"));
     }
 
     private ManagedAgentService boundService(boolean workspaceFiles) {

@@ -23,6 +23,11 @@ class BackfillWitnessesTest {
         activate(source);
         activate(source);
         ManagedSchema.validate(source);
+        // 49 = the 48 baseline tables plus flyway_schema_history. This merge
+        // unioned one table from each side of the split: the PR's
+        // ma_session_principal ownership row and the base's
+        // ma_pr_watch_binding. Replaying the activation above must not add any
+        // table beyond this pinned catalog.
         assertThat(
                         new JdbcTemplate(source)
                                 .queryForObject(
@@ -30,7 +35,7 @@ class BackfillWitnessesTest {
                                             + " table_schema = 'public' AND table_type='BASE"
                                             + " TABLE'",
                                         Integer.class))
-                .isEqualTo(48);
+                .isEqualTo(49);
         assertThat(
                         new JdbcTemplate(source)
                                 .queryForObject(

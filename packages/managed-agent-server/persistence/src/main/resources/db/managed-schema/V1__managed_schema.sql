@@ -3,6 +3,7 @@
 -- Do not add V2+ migrations or increment the database schema version before that release.
 -- Development catalogs must be recreated when the baseline changes; no upgrade path is maintained.
 -- No old-schema upgrade or compatibility objects are provided.
+-- Generated-column comments stay on a continuation line because validation reads the expression line.
 
 CREATE TABLE ma_session (
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
@@ -92,6 +93,24 @@ CREATE INDEX idx_ma_session_retirement ON ma_session (retired_at, is_recovery_pr
 
 CREATE INDEX idx_ma_session_storage_scope ON ma_session (tenant_id, workspace_storage_id, is_resource_gc_completed, session_id);
 
+-- Ownership of a non-Workspace Session: exactly one immutable row per
+-- unbound Session, written in the Session creation transaction. The owner is
+-- the full verified principal (tenant, user and DataAgent business actor);
+-- actor_present distinguishes a present business actor from none. Legacy
+-- Sessions without this row remain invisible to ownership-enforcing paths.
+CREATE TABLE ma_session_principal (
+    tenant_id VARBINARY(512) NOT NULL,
+    session_id VARBINARY(512) NOT NULL,
+    version BIGINT NOT NULL,
+    user_id VARBINARY(2048) NOT NULL COMMENT 'The filter-admitted actor: 512 code points, at most 2048 UTF-8 bytes.',
+    actor_present BOOLEAN NOT NULL,
+    actor_subject_id VARBINARY(2048) COMMENT 'The verified business actor subject, bounded like the user.',
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    CONSTRAINT uk_ma_session_principal_business_key UNIQUE (tenant_id, session_id),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_session_principal_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE ma_user_message_queue (
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
     session_id VARBINARY(512) NOT NULL COMMENT 'Managed Session identity.',
@@ -112,7 +131,7 @@ CREATE TABLE ma_user_message (
     message_id VARBINARY(144) NOT NULL COMMENT 'Stable identity of the queued user input.',
     sequence_number BIGINT UNSIGNED NOT NULL COMMENT 'FIFO position of the input within the Session.',
     revision BIGINT UNSIGNED NOT NULL COMMENT 'Input revision used to reject stale edits or withdrawals.',
-    actor_id VARBINARY(512) NOT NULL COMMENT 'Actor identity associated with this record.',
+    actor_id VARBINARY(2048) NOT NULL COMMENT 'Actor identity associated with this record.',
     input_json LONGTEXT NOT NULL COMMENT 'Serialized user input blocks.',
     state VARCHAR(32) NOT NULL COMMENT 'Input queue state, including queued, claimed, consumed, or recovery_blocked.',
     context_revision BIGINT UNSIGNED COMMENT 'Session context revision captured when the input was queued.',
@@ -131,7 +150,7 @@ CREATE TABLE ma_user_message_command (
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
     session_id VARBINARY(512) NOT NULL COMMENT 'Managed Session identity.',
     command_key CHAR(64) NOT NULL COMMENT 'Digest of actor identity and idempotency key for a queue command.',
-    actor_id VARBINARY(512) NOT NULL COMMENT 'Actor identity associated with this record.',
+    actor_id VARBINARY(2048) NOT NULL COMMENT 'Actor identity associated with this record.',
     request_digest CHAR(71) NOT NULL COMMENT 'Request digest used to reject conflicting retries.',
     result_json LONGTEXT NOT NULL COMMENT 'Serialized queue snapshot returned for this command and its retries.',
     CONSTRAINT uk_ma_user_message_command_business_key UNIQUE (tenant_id, session_id, command_key),
@@ -654,7 +673,7 @@ CREATE TABLE ma_request_receipt (
     idempotency_key VARBINARY(2048) NOT NULL COMMENT 'Original key identifying retries of the same request.',
     idempotency_digest CHAR(64) NOT NULL COMMENT 'Digest of the idempotency key used in unique indexes.',
     request_digest VARCHAR(80) NOT NULL COMMENT 'Request digest used to reject conflicting retries.',
-    actor_id VARBINARY(2048) COMMENT 'Actor identity associated with this record.',
+    actor_id VARBINARY(4099) COMMENT 'Actor identity associated with this record: a raw actor key (at most 2048 bytes) or the principal receipt stamp (2048-byte user + NUL + flag + NUL + 2048-byte subject).',
     operation VARCHAR(64) COMMENT 'Command operation associated with this receipt.',
     state VARCHAR(32) NOT NULL COMMENT 'Admission or settlement state of the request.',
     is_workspace_bound TINYINT UNSIGNED COMMENT 'Whether the Session creation request binds a Workspace.',
@@ -705,7 +724,7 @@ CREATE TABLE ma_operation (
     target_id VARBINARY(2048) COMMENT 'Original identity of the operation target.',
     storage_key CHAR(64) COMMENT 'Storage identity key used for indexed lookup and coordination.',
     physical_key CHAR(64) COMMENT 'Canonical physical storage identity shared by logical aliases.',
-    actor_key VARBINARY(2048) COMMENT 'Encoded actor identity used for authorization and idempotency.',
+    actor_key VARBINARY(2048) COMMENT 'Encoded actor identity used for authorization and idempotency; a key wider than the column (the principal receipt stamp reaches 4099 bytes) is stored as its SHA-256 hex digest, while the full stamp stays on ma_request_receipt.actor_id.',
     actor_id VARBINARY(2048) COMMENT 'Actor identity associated with this record.',
     idempotency_key VARBINARY(2048) COMMENT 'Original key identifying retries of the same request.',
     idempotency_digest CHAR(64) COMMENT 'Digest of the idempotency key used in unique indexes.',

@@ -28,6 +28,7 @@ class ManagedSchemaTest {
     // Pin the original business identities independently of the mutable DDL.
     private static final Map<String, List<String>> BUSINESS_KEYS = Map.ofEntries(
             Map.entry("ma_session", List.of("tenant_id", "session_id")),
+            Map.entry("ma_session_principal", List.of("tenant_id", "session_id")),
             Map.entry("ma_user_message_queue", List.of("tenant_id", "session_id")),
             Map.entry("ma_user_message", List.of("tenant_id", "session_id", "message_id")),
             Map.entry("ma_user_message_command", List.of("tenant_id", "session_id", "command_key")),

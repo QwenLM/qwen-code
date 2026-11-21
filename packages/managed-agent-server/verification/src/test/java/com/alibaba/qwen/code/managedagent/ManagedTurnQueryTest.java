@@ -576,7 +576,7 @@ class ManagedTurnQueryTest {
     }
 
     private String emptySession(String tenant) throws Exception {
-        return objectMapper.readTree(mvc.perform(post("/v1/agents/sessions")
+        String id = objectMapper.readTree(mvc.perform(post("/v1/agents/sessions").principal(actor(tenant, "actor-a"))
                         .header(TENANT, tenant)
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
@@ -584,6 +584,8 @@ class ManagedTurnQueryTest {
                 .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();
+        legacyState(tenant, id);
+        return id;
     }
 
     private static String cursor(String raw) {
@@ -613,5 +615,11 @@ class ManagedTurnQueryTest {
                 return actorId;
             }
         };
+    }
+
+    private void legacyState(String tenant, String sessionId) {
+        jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL WHERE tenant_id = ? AND session_id = ?"
+                + " AND namespace = 'SESSION_COMMAND' AND operation = 'CREATE_SESSION'", tenant, sessionId);
     }
 }

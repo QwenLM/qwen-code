@@ -99,15 +99,26 @@ public class TenantContextFilter extends OncePerRequestFilter {
             }
             actorId = claimedActorId;
         }
-        request.setAttribute(ATTRIBUTE, new TenantContext(tenantId, actorId));
+        request.setAttribute(ATTRIBUTE,
+                new TenantContext(tenantId, actorId));
         chain.doFilter(request, response);
     }
 
     private static boolean validActorId(String tenantId, String actorId) {
+        if (actorId == null || actorId.isBlank()) {
+            return false;
+        }
         try {
+            // WorkspaceActor's requireText enforces the Workspace contract's
+            // 512-code-point bound (counting code points, not UTF-16 units),
+            // so a 512-code-point BMP actor (1536 bytes) passes here and a
+            // 512-supplementary-code-point actor (2048 bytes) is the widest
+            // this filter admits. SessionPrincipal's byte bound matches that
+            // ceiling, so a principal is never narrower than this admission.
             new WorkspaceActor(tenantId, actorId);
             return true;
-        } catch (IllegalArgumentException error) {
+        } catch (IllegalArgumentException
+                | com.alibaba.qwen.code.managedagent.exception.ManagedAgentException error) {
             return false;
         }
     }
