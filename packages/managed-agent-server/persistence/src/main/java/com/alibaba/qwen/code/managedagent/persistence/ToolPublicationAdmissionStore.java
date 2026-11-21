@@ -176,7 +176,9 @@ public final class ToolPublicationAdmissionStore {
                     ((Number) journal.get("byte_length")).longValue());
         }
         require(raw instanceof byte[], "Original receipt bytes are missing");
-        byte[] bytes = (byte[]) raw;
+        // Analyzer-visible null assertion for SpotBugs; require() above already
+        // throws ContractViolationException on null, so this never fires.
+        byte[] bytes = (byte[]) Objects.requireNonNull(raw, "Original receipt bytes are missing");
         require(bytes.length > 0 && bytes.length <= ManagedSessionStoreModels.MAX_TRANSACTION_BYTES
                 && bytes.length == positiveCounter(journal.get("byte_length"))
                 && ToolPublicationContract.sha256(bytes).equals(journal.get("record_digest")),
