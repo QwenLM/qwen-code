@@ -595,6 +595,164 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('history recall tolerates a JSON-persisted paste map', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'pasted body'.padEnd(1200, 'x');
+    const persisted = JSON.parse(
+      JSON.stringify(new Map([[placeholder, body]])),
+    );
+    props.pendingPastes = new Map();
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: placeholder,
+          recallText: body,
+          pasteExpansions: persisted,
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    expect(() => historyArgs.onChange(body)).not.toThrow();
+    expect(props.buffer.setText).toHaveBeenCalledWith(body);
+    unmount();
+  });
+
+  it('history recall does not suffix identical placeholders across items', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const firstBody = 'first'.padEnd(1200, 'x');
+    const secondBody = 'second'.padEnd(1200, 'y');
+    const onPendingPastesChange = vi.fn();
+    props.pendingPastes = new Map();
+    props.onPendingPastesChange = onPendingPastesChange;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: placeholder,
+          recallText: firstBody,
+          pasteExpansions: new Map([[placeholder, firstBody]]),
+        },
+        {
+          id: 2,
+          type: 'user',
+          text: placeholder,
+          recallText: secondBody,
+          pasteExpansions: new Map([[placeholder, secondBody]]),
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    function StatefulPrompt() {
+      const [pastes, setPastes] = useState<Map<string, string>>(new Map());
+      return (
+        <InputPrompt
+          {...props}
+          pendingPastes={pastes}
+          onPendingPastesChange={(next) => {
+            onPendingPastesChange(next);
+            setPastes(next);
+          }}
+        />
+      );
+    }
+
+    const { unmount } = renderWithProviders(<StatefulPrompt />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    act(() => historyArgs.onChange(firstBody));
+    const secondHistoryArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!secondHistoryArgs) throw new Error('useInputHistory was not called');
+    act(() => secondHistoryArgs.onChange(secondBody));
+
+    expect(props.buffer.setText).toHaveBeenLastCalledWith(placeholder);
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(
+      new Map([[placeholder, secondBody]]),
+    );
+    unmount();
+  });
+
+  it('history recall drops pastes absent from the recalled text', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'pasted body'.padEnd(1200, 'x');
+    const onPendingPastesChange = vi.fn();
+    props.pendingPastes = new Map();
+    props.onPendingPastesChange = onPendingPastesChange;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: 'hello',
+          recallText: 'hello',
+          pasteExpansions: new Map([[placeholder, body]]),
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    act(() => historyArgs.onChange('hello'));
+
+    expect(onPendingPastesChange).toHaveBeenCalledWith(new Map());
+    expect(props.buffer.setText).toHaveBeenCalledWith('hello');
+    unmount();
+  });
+
+  it('history return restores the original paste map', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const originalBody = 'original'.padEnd(1200, 'x');
+    const recalledBody = 'recalled'.padEnd(1200, 'y');
+    const originalPastes = new Map([[placeholder, originalBody]]);
+    const onPendingPastesChange = vi.fn();
+    props.buffer.text = 'original draft';
+    props.pendingPastes = originalPastes;
+    props.onPendingPastesChange = onPendingPastesChange;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: placeholder,
+          recallText: recalledBody,
+          pasteExpansions: new Map([[placeholder, recalledBody]]),
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    act(() => historyArgs.onChange(recalledBody));
+    act(() => historyArgs.onChange('original draft'));
+
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(originalPastes);
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('original draft');
+    unmount();
+  });
+
   it('queues the prompt for the next turn on Ctrl+Q', async () => {
     props.buffer.setText('send this later');
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);

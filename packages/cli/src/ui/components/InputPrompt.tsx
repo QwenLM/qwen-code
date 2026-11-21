@@ -510,6 +510,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // Needed because handleSubmitAndClear is passed into useInputHistory as
   // onSubmit, so we can't reference inputHistory directly here without a cycle.
   const resetHistoryNavRef = useRef<() => void>(() => {});
+  const pendingPastesBeforeHistoryRef = useRef<Map<string, string> | undefined>(
+    undefined,
+  );
 
   const handleSubmitAndClear = useCallback(
     (submittedValue: string, deferUntilIdle = false) => {
@@ -517,6 +520,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // A submission supersedes any clipboard read still in flight; the late
       // read checks this epoch before inserting into the cleared buffer.
       submitEpochRef.current += 1;
+      pendingPastesBeforeHistoryRef.current = undefined;
       // Expand any large paste placeholders to their full content before submitting
       const submittedPrompt = submittedValue;
       const pasteExpansions =
@@ -633,18 +637,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (item.recallText ?? item.text) === newText,
       );
       const recalledPastes =
-        recalledItem?.type === 'user'
+        recalledItem?.type === 'user' &&
+        recalledItem.pasteExpansions instanceof Map &&
+        recalledItem.pasteExpansions.size > 0
           ? recalledItem.pasteExpansions
           : undefined;
       if (recalledPastes) {
+        pendingPastesBeforeHistoryRef.current ??= new Map(pendingPastes);
         const collapsed = collapsePastes(restored, recalledPastes);
         const draft = restorePasteDraft(
           collapsed.text,
-          recalledPastes,
-          pendingPastes,
+          collapsed.pasteExpansions,
+          pendingPastesBeforeHistoryRef.current,
         );
         restored = draft.text;
         setPendingPastes(draft.pasteExpansions);
+      } else if (!recalledItem && pendingPastesBeforeHistoryRef.current) {
+        setPendingPastes(new Map(pendingPastesBeforeHistoryRef.current));
+        pendingPastesBeforeHistoryRef.current = undefined;
       }
       // The refill replaces the buffer, so a clipboard read started before
       // the recall must not land at the recalled prompt's cursor.
