@@ -613,20 +613,23 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         } finally {
             context.unlock();
         }
-        // Background work owns the mount until it ends: refuse BEFORE the
+        // Background work owns the mount until it ends. The observe-only sweep
+        // settles runs that already ended (without the observation capability
+        // nothing else does), then a row still active refuses BEFORE the
         // transport closes any connection, so a live run keeps its stdio
-        // servers and its storage. The pull settles an ended run's row, so
-        // reclamation no longer needs its own settlement sweep — an active row
-        // here is exactly the work that must extend the park.
-        boolean backgroundLive = executionRepository.hasActiveByRuntimeSession(
-                context.binding().getBindingId(), context.binding().getGeneration(),
-                context.session().getRuntimeSessionId());
-        CompletionStage<Boolean> reclaimed = !parked.getAsBoolean() || backgroundLive
+        // servers and its storage.
+        CompletionStage<Boolean> reclaimed = !parked.getAsBoolean()
                 ? CompletableFuture.completedFuture(false)
-                : safeStage(() -> transport.reclaimMcp(context.lease(), context.session())).thenCompose(ignored ->
-                        !parked.getAsBoolean() ? CompletableFuture.completedFuture(false)
-                                : executionRecovery.releaseMountAfterSweep(context, claim,
-                                        context.session().getRuntimeSessionId()));
+                : safeStage(() -> executionRecovery.settleUnprovenBackgroundRows(context, false)).thenCompose(swept ->
+                        executionRepository.hasActiveByRuntimeSession(
+                                context.binding().getBindingId(), context.binding().getGeneration(),
+                                context.session().getRuntimeSessionId())
+                                ? CompletableFuture.completedFuture(false)
+                                : safeStage(() -> transport.reclaimMcp(context.lease(), context.session()))
+                                        .thenCompose(ignored -> !parked.getAsBoolean()
+                                                ? CompletableFuture.completedFuture(false)
+                                                : executionRecovery.releaseMountAfterSweep(context, claim,
+                                                        context.session().getRuntimeSessionId())));
         return reclaimed.whenComplete((released, error) -> {
             context.lock();
             try {

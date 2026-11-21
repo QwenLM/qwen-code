@@ -454,8 +454,7 @@ export class ManagedShellPublisherRegistry
         let writerGeneration: number | undefined;
         try {
           const keys = Object.keys(req.body ?? {}).sort();
-          const withGeneration =
-            this.observation.enabled && keys.includes('writerGeneration');
+          const withGeneration = keys.includes('writerGeneration');
           const body = publisherFields(
             req.body,
             withGeneration
@@ -483,7 +482,9 @@ export class ManagedShellPublisherRegistry
             if (!Number.isSafeInteger(generation) || generation < 1) {
               throw new Error('Invalid writer generation.');
             }
-            writerGeneration = generation;
+            // The Harness always sends its generation; a worker without the
+            // capability keeps the legacy exact-match registration.
+            if (this.observation.enabled) writerGeneration = generation;
           }
         } catch {
           res.status(400).json({ code: 'managed_runtime_attestation_invalid' });
