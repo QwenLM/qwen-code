@@ -151,11 +151,11 @@ class ExternalWorkspaceRetirementServiceTest {
                 .isEqualTo(RuntimeBindingRecord.State.RELEASED);
         assertThat(jdbc.queryForMap("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
                 + " FROM ma_storage_owner").values()).containsOnlyNulls();
-        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, physical_key, mount_root, mount_revision"
+        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, storage_key, mount_root, mount_revision"
                 + " FROM ma_storage_owner")).isEqualTo(Map.of(
                         "tenant_id", owner.get("tenant_id"),
                         "storage_id", owner.get("storage_id"),
-                        "physical_key", owner.get("physical_key"),
+                        "storage_key", owner.get("storage_key"),
                         "mount_root", owner.get("mount_root"),
                         "mount_revision", owner.get("mount_revision")));
         assertThat(executions.findByIdempotencyKey("tool-key").getState())
@@ -525,5 +525,53 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThatThrownBy(() -> service.retire(request, this::terminated))
                 .isInstanceOf(RuntimeBrokerException.class)
                 .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
+    }
+
+    // R4-1: deleting a member Session leaves ma_session.status='DELETED', a head
+    // with state='DELETED' and a compaction point at its journal revision. That
+    // head is reclaimed — no journal revision can be pending — so it must not
+    // fence retirement of the Workspace forever.
+    @Test
+    void deletedMemberWithFullyReclaimedHeadRetires() {
+        reclaimDeletedHead(5);
+
+        var receipt = service.retire(request, this::terminated);
+
+        assertThat(receipt.state()).isEqualTo("RELEASED");
+        assertThat(receipt.resumed()).isFalse();
+        assertThat(bindings.findById(original.getBindingId()).getState())
+                .isEqualTo(RuntimeBindingRecord.State.RELEASED);
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_workspace", String.class))
+                .isEqualTo("DRAINING");
+    }
+
+    // The narrowing is exactly "no pending revision can exist": a deleted head
+    // whose compaction point is still behind its journal revision keeps the 409.
+    @Test
+    void deletedHeadShortOfItsJournalRevisionStillFencesRetirement() {
+        reclaimDeletedHead(3);
+
+        assertThatThrownBy(() -> service.retire(request, this::terminated))
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("statusCode", 409)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
+        assertThat(service.inspect(request)).isNull();
+        assertThat(bindings.findById(original.getBindingId()).getVersion())
+                .isEqualTo(original.getVersion());
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_workspace", String.class))
+                .isEqualTo("ACTIVE");
+    }
+
+    private void reclaimDeletedHead(long compactedThroughRevision) {
+        jdbc.update("UPDATE ma_session SET status = 'DELETED' WHERE tenant_id = ? AND session_id = ?",
+                "tenant", "user-session");
+        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, session_id,"
+                + " harness_session_id, head_kind, state, phase, writer_generation, journal_revision,"
+                + " committed_sequence, activation_epoch, compacted_through_revision, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, 'tenant', 'user-session', 'user-session', 'MANAGED_SESSION', 'DELETED',"
+                + " 'DRAINING', 1, 5, 5, 1, ?, 1, 1)",
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("tenant"),
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("user-session"),
+                compactedThroughRevision);
     }
 }

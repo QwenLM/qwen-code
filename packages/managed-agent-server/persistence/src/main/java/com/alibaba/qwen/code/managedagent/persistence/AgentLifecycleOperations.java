@@ -104,7 +104,7 @@ final class AgentLifecycleOperations {
             String sessionId, OperationKind kind, String actorDigest,
             String idempotencyKey, String requestDigest) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        if (storeRows.requireLegacySessionForUpdate(tenantId, sessionId).workspace() != null) {
+        if (storeRows.requireSessionForUpdate(tenantId, sessionId).workspace() != null) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, null, false);
@@ -133,7 +133,7 @@ final class AgentLifecycleOperations {
 
     SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId, String actorId, String scopedKey, String requestDigest) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         requireWorkspaceCreator(session, actorId);
         String namespace = "UNARCHIVE_WORKSPACE_SESSION";
         // Replay first, like every other mutation path: a recorded success
@@ -327,7 +327,7 @@ final class AgentLifecycleOperations {
                         .isPresent()) {
             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         }
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !trustedChildClose) {
             requireWorkspaceCreator(session, actorId);
         }
@@ -628,7 +628,7 @@ final class AgentLifecycleOperations {
         if (target.kind() == OperationKind.DELETE && !WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
         }
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion()) && target.kind() == OperationKind.DELETE) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
         }

@@ -71,7 +71,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
             if (!jdbc.queryForList("SELECT alias_key FROM ma_storage WHERE alias_key = ?", aliasKey).isEmpty()
                     || !jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE tenant_id = ? AND (storage_id = ? OR workspace_id = ?)", tenant, workspace, workspace).isEmpty()
                     || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE storage_alias_key = ?", aliasKey).isEmpty()
-                    || !jdbc.queryForList("SELECT physical_key FROM ma_storage_owner WHERE physical_key = ?", physical).isEmpty()) {
+                    || !jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ?", physical).isEmpty()) {
                 throw conflict("alias_conflict");
             }
             for (String saved : jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE storage_kind = 'EXTERNAL'", String.class)) {
@@ -81,15 +81,14 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                 }
             }
             try {
-                jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, tenant_id, storage_id,"
-                        + " storage_kind, mount_root, mount_revision) VALUES (?, ?, ?, ?, 'EXTERNAL', ?, ?)",
-                        physical, physical, tenant, workspace, registration.alias().mountRoot(),
+                jdbc.update("INSERT INTO ma_storage_owner (storage_key, tenant_id, storage_id,"
+                        + " storage_kind, mount_root, mount_revision) VALUES (?, ?, ?, 'EXTERNAL', ?, ?)",
+                        physical, tenant, workspace, registration.alias().mountRoot(),
                         registration.identity().registrationRevision());
-                jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+                jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, physical_key,"
                         + " storage_kind, registration_state, registration_revision, registration_json, gmt_create, gmt_modified)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 'EXTERNAL', 'REGISTERED', ?, ?, " + ManagedSchemaTime.SQL_NOW
+                        + " VALUES (?, ?, ?, ?, 'EXTERNAL', 'REGISTERED', ?, ?, " + ManagedSchemaTime.SQL_NOW
                         + ", " + ManagedSchemaTime.SQL_NOW + ")", aliasKey,
-                        RuntimeAdmissionFences.storageFenceKey(tenant), RuntimeAdmissionFences.storageFenceKey(workspace),
                         tenant, workspace, physical, registration.identity().registrationRevision(), encoded);
             } catch (DuplicateKeyException duplicate) {
                 // The global lock serializes registration, so the pre-checks above
@@ -143,19 +142,18 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                             aliasKey).isEmpty()) {
                 throw conflict("alias_conflict");
             }
-            jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, tenant_id, storage_id,"
+            jdbc.update("INSERT INTO ma_storage_owner (storage_key, tenant_id, storage_id,"
                             + " storage_kind, mount_root, mount_revision)"
-                            + " VALUES (?, ?, ?, ?, 'EPHEMERAL', ?, ?)",
-                    ownerKey, ownerKey, tenant, workspace, registration.mountRoot(),
+                            + " VALUES (?, ?, ?, 'EPHEMERAL', ?, ?)",
+                    ownerKey, tenant, workspace, registration.mountRoot(),
                     registration.registrationRevision());
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id,"
-                            + " storage_id, physical_key, storage_kind, registration_state,"
-                            + " registration_revision, registration_json, gmt_create, gmt_modified)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, 'EPHEMERAL', 'REGISTERED', ?, ?, "
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, physical_key,"
+                            + " storage_kind, registration_state, registration_revision,"
+                            + " registration_json, gmt_create, gmt_modified)"
+                            + " VALUES (?, ?, ?, ?, 'EPHEMERAL', 'REGISTERED', ?, ?, "
                             + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                    aliasKey, RuntimeAdmissionFences.storageFenceKey(tenant),
-                    RuntimeAdmissionFences.storageFenceKey(workspace), tenant, workspace,
-                    ownerKey, registration.registrationRevision(), encoded);
+                    aliasKey, tenant, workspace, ownerKey,
+                    registration.registrationRevision(), encoded);
             long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);
             ManagedReceipts.insert(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT, tenant,
                     idempotencyKey, digest, "REGISTER_EPHEMERAL_WORKSPACE", null, null,

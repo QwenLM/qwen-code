@@ -126,6 +126,37 @@ public class JdbcWorkspaceLifecycleStore
         return requireIdleJournal(jdbc, json, tenant, session, allowCleanup, v2, null);
     }
 
+    /**
+     * Idle-journal check for Workspace retirement: a managed head that a session
+     * deletion already fully reclaimed is idle evidence on its own.
+     *
+     * <p>{@code state = 'DELETED'} with
+     * {@code compacted_through_revision >= journal_revision} proves that no journal
+     * revision can be pending — compaction deleted every row it covers and the head
+     * records how far it reached. That is the steady state after a Workspace member
+     * is deleted, and it is the same predicate {@link ManagedRuntimeRetentionGuard}
+     * uses to call a head reclaimed; the lifecycle close path cannot use it because
+     * it also has to settle the close journal it is producing. Every head still
+     * short of that point falls through to the lifecycle check, so a genuinely
+     * unsettled journal keeps raising the documented refusal.
+     */
+    public static void requireIdleJournalForRetirement(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session) {
+        var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, state, compacted_through_revision, journal_revision"
+                + " FROM ma_session_head"
+                + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session));
+        if (!heads.isEmpty()) {
+            var head = heads.getFirst();
+            if (tenant.equals(head.get("tenant_id")) && session.equals(head.get("session_id"))
+                    && "DELETED".equals(head.get("state"))
+                    && ((Number) head.get("compacted_through_revision")).longValue()
+                            >= ((Number) head.get("journal_revision")).longValue()) {
+                return;
+            }
+        }
+        requireIdleJournal(jdbc, json, tenant, session);
+    }
+
     public static java.util.Set<String> requireIdleJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session, boolean allowCleanup, boolean v2, JdbcJournalPacks packs) {
         var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, compacted_through_revision, journal_revision"
                 + " FROM ma_session_head"

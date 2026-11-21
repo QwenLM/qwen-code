@@ -258,7 +258,7 @@ public final class ExternalWorkspaceRetirementService {
                         && (head.get("state") == null || List.of("ACTIVE", "SEALED", "DELETED").contains(head.get("state"))));
             }
             try {
-                JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, json, request.tenantId(), session);
+                JdbcWorkspaceLifecycleStore.requireIdleJournalForRetirement(jdbc, json, request.tenantId(), session);
             } catch (ManagedAgentException busy) {
                 // An unsettled journal or an active Turn is idle evidence the
                 // documented retirement refusal must answer, not a pass-through
