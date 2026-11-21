@@ -46,6 +46,11 @@ const RUNTIME_STATUS_SCAN_SKIP_DIRS = new Set([
  * Stored as a sidecar JSON file alongside the session's JSONL transcript at
  * `<chatsDir>/<sessionId>.worktree.json`.
  */
+export interface WorktreeRemovalState {
+  /** Basename of the owned snapshot archive, never its filesystem path. */
+  archiveKey: string;
+}
+
 export interface WorktreeSession {
   slug: string;
   worktreePath: string;
@@ -121,6 +126,8 @@ export interface WorktreeSession {
    * `originalCwd` and on sidecars written before the field existed.
    */
   carriedFrom?: string;
+  /** Set after the managed checkout is physically removed and snapshotted. */
+  worktreeRemoved?: WorktreeRemovalState;
 }
 
 export type StrictWorktreeSession =
@@ -155,7 +162,26 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
     (v['carriedEntries'] === undefined ||
       (Array.isArray(v['carriedEntries']) &&
         v['carriedEntries'].every(isValidCarriedEntry))) &&
-    (v['carriedFrom'] === undefined || typeof v['carriedFrom'] === 'string')
+    (v['carriedFrom'] === undefined || typeof v['carriedFrom'] === 'string') &&
+    (v['worktreeRemoved'] === undefined ||
+      isValidWorktreeRemoval(v['worktreeRemoved']))
+  );
+}
+
+function isValidWorktreeRemoval(value: unknown): value is WorktreeRemovalState {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const state = value as Record<string, unknown>;
+  const key = state['archiveKey'];
+  return (
+    Object.keys(state).every((field) => field === 'archiveKey') &&
+    typeof key === 'string' &&
+    key.length > 0 &&
+    !key.includes('..') &&
+    !key.includes('/') &&
+    !key.includes('\\') &&
+    key.endsWith('.worktree-snapshot.tar.gz')
   );
 }
 
@@ -938,6 +964,11 @@ export async function restoreWorktreeContext(
   }
 
   if (!worktreeAlive) {
+    // A retained snapshot can reconstruct the checkout, but ordinary resume
+    // must neither erase that binding nor pretend it is already restored.
+    if (session.worktreeRemoved !== undefined) {
+      return { contextMessage: null, session: null };
+    }
     try {
       await clearWorktreeSession(sidecarPath);
     } catch (error) {

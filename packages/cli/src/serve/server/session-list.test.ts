@@ -183,7 +183,11 @@ describe('merged session catalog pagination', () => {
         [first.sessionId, 'active'],
         [second.sessionId, 'active'],
       ];
-      expect(worktree.mock.calls).toEqual(persistedReads);
+      expect(worktree.mock.calls).toEqual([
+        ...persistedReads,
+        // Revalidate the selected current worktree on the cache-hit page.
+        [second.sessionId, 'active'],
+      ]);
       expect(artifact.mock.calls).toEqual(persistedReads);
       expect(pr.mock.calls).toEqual([
         ...persistedReads,

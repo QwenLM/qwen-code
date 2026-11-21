@@ -159,6 +159,7 @@ export interface SessionCard {
   workspaceCwd: string;
   /** Catalog the session came from; 'standalone' has no workspace of its own. */
   sourceType?: string;
+  worktree?: DaemonSessionSummary['worktree'];
 }
 
 type SessionStatusFilter = 'all' | 'attention' | 'running' | 'idle';
@@ -280,6 +281,7 @@ export function deriveSessionCards(
         session.branch?.name,
       workspaceCwd: session.workspaceCwd,
       sourceType: session.sourceType,
+      ...(session.worktree ? { worktree: session.worktree } : {}),
     };
   });
   cards.sort((a, b) => {
@@ -372,6 +374,10 @@ function SessionOverviewPanelInner({
   const canExportWorkspaceSessions =
     connection.capabilities?.features?.includes('workspace_session_export') ??
     false;
+  const restoreWorktreeEnabled =
+    connection.capabilities?.features?.includes(
+      'session_worktree_restore_v1',
+    ) ?? false;
   const registeredWorkspaces =
     connection.capabilities?.workspaces ?? workspace.capabilities?.workspaces;
   const workspaceCatalogAdvertised =
@@ -1073,6 +1079,52 @@ function SessionOverviewPanelInner({
     [],
   );
 
+  const restoreWorktree = useCallback(
+    (card: SessionCard) => {
+      if (
+        !restoreWorktreeEnabled ||
+        card.worktree?.worktreeRemoved === undefined ||
+        card.worktree.canRestore !== true
+      ) {
+        return;
+      }
+      const busy = busyIds.has(getSessionIdentity(card));
+      if (busy || batchBusy) return;
+      setActionError(null);
+      void runBusy(card, async () => {
+        try {
+          await workspace.client
+            .workspaceByCwd(card.workspaceCwd)
+            .restoreWorktreeSession(card.sessionId, {
+              workspaceCwd: card.workspaceCwd,
+            });
+          await reloadData();
+          onOpenSession(
+            card.sessionId,
+            card.workspaceCwd,
+            openSessionContext(card),
+          );
+        } catch (error) {
+          setActionError(
+            `${t('sessionsOverview.restoreWorktreeFailed')}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      });
+    },
+    [
+      batchBusy,
+      busyIds,
+      onOpenSession,
+      reloadData,
+      restoreWorktreeEnabled,
+      runBusy,
+      t,
+      workspace.client,
+    ],
+  );
+
   const startRename = useCallback((card: SessionCard) => {
     setActionError(null);
     setDetailsOpen(null);
@@ -1598,6 +1650,44 @@ function SessionOverviewPanelInner({
                     </span>
                   </>
                 )}
+                {card.worktree?.worktreeRemoved && (
+                  <span
+                    className="inline-flex shrink-0 items-center"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      className="shrink-0"
+                      data-web-shell-session-restore-worktree
+                      title={
+                        card.worktree.canRestore === true
+                          ? t('sessionsOverview.restoreWorktree')
+                          : t('sessionsOverview.restoreWorktreeUnavailable')
+                      }
+                      aria-label={
+                        card.worktree.canRestore === true
+                          ? t('sessionsOverview.restoreWorktree')
+                          : t('sessionsOverview.restoreWorktreeUnavailable')
+                      }
+                      aria-busy={
+                        busyIds.has(getSessionIdentity(card)) || undefined
+                      }
+                      disabled={
+                        batchBusy ||
+                        busyIds.has(getSessionIdentity(card)) ||
+                        !restoreWorktreeEnabled ||
+                        card.worktree.canRestore !== true
+                      }
+                      onClick={() => restoreWorktree(card)}
+                    >
+                      {busyIds.has(getSessionIdentity(card))
+                        ? t('sessionsOverview.restoringWorktree')
+                        : t('sessionsOverview.restoreWorktree')}
+                    </Button>
+                  </span>
+                )}
                 <SessionPrBadge prs={card.prs ?? []} />
               </div>
             </div>
@@ -1830,6 +1920,8 @@ function SessionOverviewPanelInner({
       isCurrentCard,
       onOpenSession,
       registeredWorkspaces,
+      restoreWorktree,
+      restoreWorktreeEnabled,
       sessionMetadataEnabled,
       sessionDetailsProps,
       startBindPr,

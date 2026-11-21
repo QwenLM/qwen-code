@@ -617,6 +617,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // restore surface reports the superseded / interrupted / missing-marker
   // classifications as typed 409s.
   session_worktree_reset_v1: { since: 'v1' },
+  // Restore an owned retained-chat worktree snapshot with workspace and
+  // owner validation before the ordinary session load/attestation phase.
+  session_worktree_restore_v1: { since: 'v1' },
   // "Create branch here": `POST /session/:id/worktree-branch` turns a
   // detached managed worktree into a named branch at its current HEAD.
   session_worktree_branch_v1: { since: 'v1' },

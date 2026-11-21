@@ -596,6 +596,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   session_worktree_reset_v1: NO_MANAGED_EQUIVALENT(
     'Managed worktree inspect and cleanup do not transfer checkout ownership to a fresh replacement Session',
   ),
+  session_worktree_restore_v1: NO_MANAGED_EQUIVALENT(
+    'Managed has no retained-chat snapshot selector, Git reconstruction, and owner-attested restore session flow',
+  ),
   session_worktree_branch_v1: NO_MANAGED_EQUIVALENT(
     'Managed allocates an initial branch during worktree creation, but has no post-create create-branch-here operation',
   ),

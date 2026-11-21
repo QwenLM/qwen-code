@@ -5170,3 +5170,151 @@ describe('SessionOverviewPanel standalone sessions', () => {
     expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
   });
 });
+
+describe('worktree snapshot restore in the session overview', () => {
+  const cwd = '/work/secondary';
+
+  function present(cardCanRestore = true): void {
+    connectionState.capabilities = {
+      ...connectionState.capabilities,
+      features: [
+        ...(connectionState.capabilities?.features ?? []),
+        'session_worktree_restore_v1',
+      ],
+    };
+    sessionsState = {
+      sessions: [
+        session('removed-session', {
+          workspaceCwd: cwd,
+          worktree: {
+            slug: 'reclaimed',
+            path: `${cwd}/.qwen/worktrees/reclaimed`,
+            branch: '',
+            worktreeRemoved: {
+              archiveKey: 'removed-session.1.1.worktree-snapshot.tar.gz',
+            },
+            canRestore: cardCanRestore,
+          },
+        }),
+      ],
+      loading: false,
+    };
+    render();
+  }
+
+  function restoreButton(): HTMLButtonElement {
+    const button = container!.querySelector<HTMLButtonElement>(
+      '[data-web-shell-session-restore-worktree]',
+    );
+    expect(button).not.toBeNull();
+    return button!;
+  }
+
+  it('disables duplicate clicks while pending and opens the owning session after reload', async () => {
+    let finish: () => void = () => {};
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const restore = vi.fn(() => pending);
+    workspaceClient.workspaceByCwd.mockReturnValue({
+      restoreWorktreeSession: restore,
+    });
+    present();
+    const button = restoreButton();
+    expect(button.disabled).toBe(false);
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(
+      container!.querySelectorAll('[data-web-shell-session-restore-worktree]'),
+    ).toHaveLength(1);
+    expect(restore).toHaveBeenCalledOnce();
+    expect(restoreButton().disabled).toBe(true);
+    expect(container!.textContent).toContain('Restoring…');
+    await act(async () => {
+      restoreButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(restore).toHaveBeenCalledOnce();
+    expect(restore).toHaveBeenCalledWith('removed-session', {
+      workspaceCwd: cwd,
+    });
+    expect(workspaceClient.workspaceByCwd).toHaveBeenCalledWith(cwd);
+    expect(onOpenSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    await vi.waitFor(() =>
+      expect(onOpenSession).toHaveBeenCalledWith(
+        'removed-session',
+        cwd,
+        undefined,
+      ),
+    );
+    expect(sessionsReload).toHaveBeenCalled();
+    expect(restoreButton().disabled).toBe(false);
+  });
+
+  it('shows failure without claiming the session opened, and releases busy state', async () => {
+    const restore = vi.fn().mockRejectedValue(new Error('damaged snapshot'));
+    workspaceClient.workspaceByCwd.mockReturnValue({
+      restoreWorktreeSession: restore,
+    });
+    present();
+    const button = restoreButton();
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await vi.waitFor(() =>
+      expect(container!.textContent).toContain(
+        'Snapshot restore failed: damaged snapshot',
+      ),
+    );
+    expect(onOpenSession).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(button.disabled).toBe(false));
+  });
+
+  it('keeps an unavailable archive disabled instead of issuing a request', async () => {
+    workspaceClient.workspaceByCwd.mockClear();
+    present(false);
+    const button = restoreButton();
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute('aria-label')).toBe(
+      'Snapshot is unavailable for this workspace',
+    );
+    act(() => button.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(workspaceClient.workspaceByCwd).not.toHaveBeenCalled();
+  });
+
+  it('does not enable restore without the daemon capability or without a removed state', async () => {
+    present();
+    connectionState.capabilities = {
+      ...connectionState.capabilities,
+      features: (connectionState.capabilities?.features ?? []).filter(
+        (feature) => feature !== 'session_worktree_restore_v1',
+      ),
+    };
+    rerender({ manageLiveState: true });
+    const button = restoreButton();
+    expect(button.disabled).toBe(true);
+
+    sessionsState = {
+      sessions: [
+        session('healthy-session', {
+          workspaceCwd: cwd,
+          worktree: {
+            slug: 'healthy',
+            path: `${cwd}/.qwen/worktrees/healthy`,
+            branch: '',
+          },
+        }),
+      ],
+      loading: false,
+    };
+    rerender();
+    expect(
+      container!.querySelector('[data-web-shell-session-restore-worktree]'),
+    ).toBeNull();
+  });
+});

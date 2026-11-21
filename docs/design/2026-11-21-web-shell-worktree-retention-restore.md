@@ -1,0 +1,246 @@
+# Managed session worktree retention and restore (P6 U4/U5)
+
+[English](2026-11-21-web-shell-worktree-retention-restore.md) | [简体中文](2026-11-21-web-shell-worktree-retention-restore.zh-CN.md)
+
+- Status: U4/U5 is implemented, and the isolated primary+secondary HTTP/Chromium validation passed. This document does not claim a merge or completion of later P6/P7 scope.
+- Investigated on: `01b7e92f61b1593517acd1e4afe752d431280e90`.
+- Tracks: [#17237](https://github.com/QwenLM/qwen-code/issues/17237), P6 U4/U5 only.
+- Builds on: `2026-11-17-worktree-carry-metadata.md` and `2026-11-17-worktree-retention-snapshots.md`.
+- E2E plan: `.qwen/e2e-tests/2026-11-21-web-shell-worktree-retention-restore.md`.
+- Progress on 2026-11-21: core snapshot, binding, and pin-store suites passed 167 checks; the affected CLI route suites passed 380; archive lifecycle passed 123; the DaemonClient SDK suite passed 579; the SessionOverviewPanel suite passed 182. The filtered lifecycle tests also passed 71. After fixing stale live/cache lifecycle projection, the expanded restoration-preview suite passed 6/6 and the existing session-list suite passed 64/64. The real primary and secondary HTTP/browser validation has also completed; it is not inferred from those suites or the earlier baselines.
+- The mode deviation found by the baseline is fixed at the archive extraction boundary: node-tar did not apply the captured mode to reused HEAD files. Replacing those files on restore retains the snapshot's owner-executable bit. This is not a blanket checkout-wide permission normalization or a claim that untested platforms are covered.
+
+## Problem and pre-change state
+
+The snapshot and dirty-overlay primitives already exist. `captureWorktreeSnapshot`, `buildWorktreeSnapshotMeta`, and `restoreWorktreeSnapshot` in `packages/core/src/services/worktree-snapshot-service.ts` preserve raw file bytes, owner-executable bits, symlinks, hardlinks, and tracked deletions, while excluding `.git`, the session marker, and ignored regenerable output. The protected cleanup path in `packages/cli/src/serve/server/worktree-orphan-cleanup.ts` already refuses removal on hidden index bits, pending operations, initialized submodules, drift, or an unverifiable checkout.
+
+The remaining gap is orchestration, not tar support:
+
+- `worktree.maxRetained` is declared but still reserved, has no retention reader, is not exposed through the daemon settings allowlist, and its Chinese description explicitly says that the sweep is not applied (`packages/cli/src/config/settingsSchema.ts`, `packages/cli/src/config/config.ts`, `packages/core/src/config/config.ts`, `packages/cli/src/serve/routes/workspace-settings.ts`).
+- There is no retention sweep, no per-session archive selector, and no production caller of snapshot restore.
+- A `WorktreeSession` has no removed-plus-snapshot state. More importantly, `restoreWorktreeContext` can clear the binding when the directory is unavailable (`packages/core/src/services/worktreeSessionService.ts`).
+- Ordinary archive/unarchive relocates transcripts and worktree sidecars, but not the snapshot pairs stored beside them. Snapshot state can therefore become detached from its owner.
+- `executeWorktreeCleanup` returns no removal outcome and assumes its session record has already been deleted. It cannot be used wholesale by a retained-chat sweep.
+- The pin store deliberately degrades an unreadable store to an empty store for ordinary UI reads. That behavior must not authorize retention deletion: the raw reader `readStoreDocument()` is available in `packages/core/src/services/session-organization-service.ts` and must be the basis for a strict, scoped pin check.
+- The only supported restore target of `restoreWorktreeSnapshot` is fresh reconstruction. It does not select an archive, create a Git worktree or its owner marker, verify repository objects, or atomically update its sidecar. Calling it directly against a nonempty directory is unsafe.
+
+P7/configurable worktree roots, the existing age-based tool/agent sweep, arena/managed-agent session storage, Java lifecycle code, archive-expiry knobs, and the separately tracked R5/coverage suggestions are out of scope.
+
+## Decisions and boundaries
+
+### 1. Count only a uniquely owned management root
+
+A sweep belongs to its selected workspace runtime, its own `SessionService`, and its own persisted stores. It does not enumerate the primary workspace by default or move resources into a different runtime. A candidate must pass the existing strict ownership and containment checks, including the route-owned `workspaceCwd`, source root, slug, marker, and expected managed-root derivation.
+
+**Coverage is daemon-wide**: every active, eligible, non-internal runtime returned by `workspaceRegistry.list()` is included, whether primary or secondary. Each runtime uses its own settings, session/pin stores, bridge, lifecycle generation, and in-flight bookkeeping; a non-primary runtime's operations are never redirected to the primary runtime's settings or storage. Internal/scratch runtimes must stay out unless they are explicitly within the requested worktree scope.
+
+For a linked checkout, raw `cwd`/transcript cwd and `originalCwd` alone do not establish daemon workspace ownership. `originalCwd` locates the creating worktree service/repository, while `workspaceCwd`, the marker, runtime-local storage, the current registry, and the session-owner index prove the owner. Parent/containment relationships use canonical realpaths, and where parent candidates are exposed by workspace discovery, the most specific matching registered parent scope applies rather than the outer primary by default. That relationship must agree with the current runtime owner, not merely a string prefix or `$QWEN_CODE_PROJECT_DIR`. A legacy record without attested `workspaceCwd`, or another record/root whose unique owner cannot be proven, is preserved and reported rather than being swept by assumption.
+
+The count is scoped by the canonical managed root resolved from the validated source root and `getUserWorktreesDir()`, not by an arbitrary path prefix or only by a repository name. Different independently owned roots sweep independently.
+
+If two runtimes claim the same canonical management root, or their effective settings conflict, automatic sweeping of that root stops with a diagnostic. Unknown workspace ownership, an untrusted workspace, a draining runtime, or an unreadable root has the same result. There is no cross-runtime aggregate count and no fallback to the primary runtime. This is the user-selected conservative boundary, rather than inventing a distributed lock or an implicit settings winner.
+
+The ownership map is computed across eligible sibling runtimes before cleanup proceeds. An unreadable root, environment, or settings entry pauses automatic sweeping until that evidence is restored: otherwise an unattested sibling could share the supposedly unique candidate root. Each workspace's settings, storage and limit still apply independently, but independence does not authorize deletion from an incomplete ownership map. This is a deliberate conservative pause, not a bridge for quietly ignoring secondary workspaces..
+
+Only eligible, ownership-verified records count toward `N`. Active and pinned chats receive additional protection and do not consume the deletion-eligible quota: the recent `N` eligible records plus protected extras survive. Select older eligible records first after protecting the newest `N`. Chat records and sidecars survive; only the eligible checkout is reclaimed.
+
+Last activity comes from the existing persisted session/transcript timestamps, with live activity taking the newer value where already available. When there is no readable session timestamp but ownership of a sidecar is established, a validated sidecar/snapshot timestamp is the defined fallback. Raw directory mtime is not activity. Unreadable or invalid timestamps do not silently become the oldest item to delete.
+
+### 2. Preserve orphan archives rather than guess their ownership
+
+Without a verifiable surviving record and sidecar, an archive is not automatically deleted by count, age, or restore probing. There is no new TTL setting and no automatic “orphan cleanup” in this phase.
+
+Likewise, an orphan archive must not manufacture a new live chat or guess a repository from its filename. Its snapshot header carries capture metadata, not a complete repository/workspace ownership proof. Recovery without a valid owner remains a separate later policy decision. This does not delete the artifact or assert that it is useless to a human.
+
+### 3. Every retention removal has a snapshot
+
+Before a retention sweep deletes any eligible checkout, it captures that checkout. This applies even when a pristine carried overlay could otherwise be bare-collected under the existing session-deletion rules. The source may change after cleanup; the retained chat must have a usable snapshot for later restoration.
+
+The existing U3 bare-delete outcome for other lifecycle paths remains unchanged. U3's hydrated `needsSnapshot` value, `worktreeHasWork`, pre/post content digests, hidden-index checks, pending-operation checks, carried-source verification, populated-gitlink checks, and `checkoutMatchesCapture` remain shared safety behavior. An unreadable or non-representable state preserves the checkout rather than weakening these invariants.
+
+### 4. The removed state is explicit and keyed to its archive pair
+
+Proposed optional sidecar state, retaining the existing back-compatible fields:
+
+```text
+worktreeRemoved?: { archiveKey: string }
+```
+
+`archiveKey` is the validated tar basename only, with no directory component, traversal, or platform separator substitution. Its JSON header filename is the corresponding `.json` basename. The stable key permits relocation of the pair during archive/unarchive instead of recording a path that goes stale when the location changes.
+
+The state is written only after the real removal result succeeds and the expected checkout directory is confirmed absent. Snapshot creation, an HTTP `removed` response, or `removeUserWorktree().success` alone is not proof. `branchPreserved`, `keptBranch`, and partial-removal diagnostics remain distinct and determine the subsequent branch policy. `removeUserWorktree`'s unmerged-commit and ref-ownership guards remain unchanged.
+
+The 64 KiB sidecar cap still applies. Existing `fitSidecarToReadCap` may discard `carriedEntries` to preserve the binding, but it must preserve the removal record. A sidecar with a malformed removal record is invalid, not silently “clean.” Strict readers use the current `readWorktreeSessionStrict` contract; new state is not accepted through permissive parsing.
+
+Creation provenance such as `originalCwd`, `workspaceCwd`, `originalHeadCommit`, and `worktreeBase` is not rewritten to make later history look like the original creation. Capture-time `headCommit` and `branch` govern snapshot recovery; a mutable `worktreeBranch` reflects the reconstructed checkout, so a detached restoration cannot accidentally acquire ownership of the old slug-derived ref. Existing carry metadata is retained where valid, but restoration must not invent a new carry exemption.
+
+### 5. Snapshot pairs follow archive/unarchive, with failure visibility
+
+Archive/unarchive must move every owned matching snapshot pair with its transcript and sidecar, across `chats/` and `chats/archive/`. Pair identity is checked against `sessionId`, `slug`, basename/header correspondence, and the removal record; arbitrary same-prefix files are not promoted to owned archives. Ordinary archive of a valid, existing checkout remains non-destructive and does not create a snapshot.
+
+A partial move, unreadable pair, duplicate/conflicting destination, or ambiguous active/archived location fails visibly and preserves recoverable artifacts. It must not make a reader silently select an unrelated older copy in the other directory. Reads use the pair belonging to the current validated archive state. The selector never follows a directory-level or file-level symlink to escape the owned location.
+
+A restored chat whose worktree was removed must still have its archive operations coordinated with restoration. Existing archive coordination order is preserved; snapshots are never moved while a restore is selecting or extracting them without that coordination.
+
+### 6. A missing directory is not itself permission to restore
+
+`worktreeRemoved` must be handled before the generic missing-directory cleanup, so a recognized removed state is not erased as stale state. Other, older non-daemon cases without that state keep their existing behavior unless separately reviewed; generic CLI/agent worktrees are not pulled into this feature.
+
+A write failure after a successful physical removal can leave the old sidecar plus a new archive. Recovery may reconcile this only when the record belongs to the selected runtime, its ownership is valid, the expected location is no longer a verified live checkout, and a complete pair matches the same session/slug. That candidate can offer restoration, but must not be described as proof of an atomic historical removal. Snapshot production and sidecar mutation are not an atomic transaction.
+
+An absent directory alone, a stale `.git` pointer, a random snapshot with a matching prefix, or an error saying only “not found” is not sufficient evidence. The existing load/reset paths must distinguish an accepted restoration candidate from unrecognizable stale state. Read-only enumeration does not silently repair state; a recognized write is part of the owned restore operation.
+
+## Shared capture/removal helper
+
+Refactor narrowly inside the existing cleanup implementation, rather than create a second deletion pipeline:
+
+- Keep the existing ordering and guard conditions in `worktree-orphan-cleanup.ts`.
+- Extract an internal execution seam that returns structured `removed`/`preserved` outcomes, snapshot information, and the true branch/removal result.
+- Keep `executeWorktreeCleanup` as a compatible wrapper that discards the result for existing callers.
+- Give retention an explicit `requireSnapshot` option and an optional final protection callback. The callback runs after the existing capture/drift checks and before removal. It rechecks strict pin state and live-session protection without replacing U3's own checks.
+- Reuse `preclassifyWorktreeCleanup`/`verifyWorktreeCleanupOwnership` for an existing checkout, with the selected runtime's storage and bridge. Never call session-deletion entry points that would remove the surviving chat or its attachments.
+
+This is not an abstract repository of cleanup algorithms. There are two call sites sharing the same safety-critical execution path, with no change to the stricter conditions already exercised by U3.
+
+## U4: runtime-scoped retention orchestration
+
+Add a focused daemon module beside the existing worktree cleanup code, with collocated tests. Do not place the scheduler in ACP bridge idle-turn reaping. Start it only for eligible, trusted workspace runtimes and stop it through the same per-runtime lifecycle used for scheduled work. Enumerate every active, trusted, non-internal runtime returned by the registry, not only the primary. The same coverage applies to runtime additions, draining/cancel paths, removals, and generations: a closed, blocked, removed, or untrusted runtime receives no new destructive retention action. In particular, a missing scope is not a reason to use `resolveWorkspaceCwd(undefined)` as a primary fallback when it cannot be proven to own this request.
+
+Relevant existing seams are `server.ts` per-runtime start/stop maps and `scheduledActivity`, plus the workspace add/drain hooks in `run-qwen-serve.ts` and `captureRuntimeGenerationAssertion` before ownership attestation or destructive mutation. The scheduler must:
+
+1. evaluate configuration for this runtime, not a process-global primary profile;
+2. enumerate the runtime's own active and archived session sidecars with strict reads;
+3. classify only uniquely owned roots and eligible candidates, avoiding duplicate sweeps for one root;
+4. acquire `acquireWorktreeOwnershipOp` using its canonical-path/raw-fallback key rule and keep the existing ownership-lock → archive-coordinator ordering;
+5. revalidate ownership, strict liveness/pinned state, and all U3 conditions immediately before destructive steps;
+6. capture, remove, confirm the filesystem outcome, then atomically persist and re-read the surviving sidecar; and
+7. account for in-flight work so workspace stop/drain waits for the scheduled operation without killing a Git or metadata write halfway through.
+
+Cancellation between candidates is allowed. Cancellation after a Git/metadata mutation starts must follow the existing `removeUserWorktree` finish-preserving semantics rather than force-killing the writer. Recovery on restart follows the ownership rules above, not blind resumption of an old in-memory snapshot.
+
+For live checks, only an explicit not-found answer from a session that is not closing can count as absent; query absence, failure, or closing state remains protective. For pin checks, a small strict getter should reuse `readStoreDocument()` and the same storage and store-lock semantics, while distinguishing a genuinely absent entry from an unreadable/corrupt store. Do not change the ordinary UI's degraded pin display semantics. A later pin change after a committed physical removal still leaves the archive and the retained chat recoverable, but is not represented as protected before that removal. No claim is made of a cross-process distributed pin transaction.
+
+## U5: deterministic archive selection
+
+Extend `worktree-snapshot-service.ts` with a small session selector, using the existing header reader and root/package exports rather than a new archive format.
+
+For each qualified pair in the validated current archive directory, it:
+
+- restricts enumeration to exact session-prefixed snapshot names and header pairs;
+- rejects a pair whose basename violates the no-directory-component key rule or whose JSON header names another session/slug;
+- requires supported schema version 2, a complete nonempty expected pair, and complete valid header content, including a nonnegative safe-integer `createdAt` in epoch milliseconds;
+- requires regular files and the established no-symlink/link-ownership constraints on its own inputs; and
+- orders by header `createdAt`, then archive `mtimeNs`, then the full archive path deterministically, never by directory enumeration order. Compare the filesystem `mtimeNs` as `bigint` without converting it to `Number`; serialize it to a decimal string if it must appear in JSON evidence.
+
+An unreadable or malformed competing header, an unknown version, or an unreadable directory rejects selection; it does not silently fall back to an older valid-looking archive. Unrelated files are not invented as session snapshots.
+
+The existing `checkoutMatchesCapture` is a capture-time result, not durable authentication embedded in the archive. Selection does not claim that the pair is signed or that a prior deletion was inevitably committed. It establishes structure, ownership binding, and a deterministic choice for a subsequent guarded restore.
+
+## U5: guarded restoration orchestration
+
+Add a restore operation beside the current worktree flow in `packages/cli/src/serve/routes/session.ts`, rather than changing reset into a different ownership-transfer feature. A natural route shape is `POST /session/:id/worktree-restore`, using the same runtime resolver/owner-activity model as reset. The endpoint accepts no raw target directory or arbitrary archive path; snapshot choice is owned and revalidated by the server.
+
+The operation proceeds as follows:
+
+For a secondary or linked-workspace call, the client must explicitly provide the registered workspace `cwd` that owns the session. The request must not rely on the resolver's default primary when `cwd` is absent. That `cwd` must agree with the sidecar's registered owner, the marker, and the live-owner resolution. Missing, noncanonical, wrong-runtime, untrusted, ambiguous, or mismatched owner evidence is rejected rather than retargeted to primary. The existing default-primary normalization is preserved only for genuinely primary-owned flows.
+
+1. Resolve the selected workspace runtime and the stored session id (`resolveRuntimeForSessionRestore`, `createWorkspaceRuntimeSessionService`, and the stored-id resolver). The concrete workspace-qualified scope must match the sidecar's `workspaceCwd`; no primary-workspace fallback for an absent or ambiguous scope.
+2. Strictly read the worktree record and validate root/source/slug containment for the currently selected runtime. Reuse ownership resolution with a missing-checkout variant: a missing expected target under the owned managed root is not the failure that the existing reset's `realpathSync` rule must report, and it must never be redirected to a primary workspace.
+3. Acquire the worktree ownership lock and archive coordination in their established order. Re-read the sidecar under the lock, distinguish an accepted restoration candidate from stale state, and revalidate that its class has not changed.
+4. Select the newest valid pair. Require `headCommit` to be a full hexadecimal object id of the repository's actual object format (40 hex characters for SHA-1, 64 for SHA-256), never an empty value, option-looking string, or merely a ref fallback. Verify that exact commit object exists in the **same source repository**. Missing objects fail before creating or unpacking anything; archives do not contain the Git object database or promise remote fetch recovery.
+5. For a captured named branch, attach it only if the intended ref still resolves to the captured head and is not an unsafe/out-of-scope reference. If the ref is missing, moved ahead, or ambiguous, restore detached at `headCommit`, report that the named ref was untouched, and update the current branch field to its actual value. `createUserWorktree(..., { detached: true })` is the no-ref-rewrite path; never use a reset/rebase to force a user's branch to an older point.
+6. Require a fresh, owned target. Merely calling `mkdir` or restore is not reconstruction: `createUserWorktree` and `getUserWorktreePath` must be used so the checkout, its administrative Git registration, and its managed root remain consistent. An existing or unexpected nonempty/alien directory is refused, never cleared or overwritten.
+7. Call `restoreWorktreeSnapshot` with the selected header, then create the marker via `createWorktreeSessionMarkerExclusive` for the selected stored session id. `.git` and the marker stay outside the snapshot.
+8. Verify restored content against the selected archive: raw bytes, owner executable bits, real link targets, recorded deletions, and expected commit, including unsafe/non-regular late entries. Compare the capture-selected commit and the actual reconstructed branch state (empty when intentionally detached), rather than mechanically rejecting a valid detached fallback because it differs from the captured branch name. Reuse the existing comparison duties in the snapshot area instead of a weaker path-existence check. Compare after extraction and again before final sidecar mutation where needed. Regenerable ignored output stays outside the unchanged U1 promise.
+9. Atomically update the surviving sidecar to clear the removed state, with actual current branch/path/carry identity, and confirm the marker and checkout still validate. Only then permit ordinary `restoreSessionCore` to relocate/open the session's checkout and expose the restored state to clients.
+
+### Failure and retry behavior
+
+Restore is not a promise of an all-or-nothing Git and filesystem transaction. On failure, retain the archive and any partial/restored work, and report an explicit failure state rather than claiming success.
+
+- A malformed archive, hostile member, missing commit, unexpected target, or failing marker blocks further recovery and preserves all existing files.
+- A failure after extracting/marker creation but before the sidecar flip retains a removal record as conservative state. A later retry may be binding finalization **only** when the owned marker, expected target, and content are proven to match the selected pair. Otherwise it fails without re-extracting over the directory.
+- Late user changes, corrupt or partial snapshot content, extra unknown files, and target drift must not be cleared to produce a successful-looking result. A preserved snapshot and a visible failure reason remain available.
+- Invalid archive metadata or unreadable source/competing headers never falls back to a different archive or a different repository.
+
+Continuation of ordinary load still verifies realpath containment, marker owner, and the real target, as it does today in `session-restore.ts`. A successful 2xx response is returned only after that proof, not after an archive read or a directory-creation call. Regular ignore/regenerable-output and index-state limitations are unchanged: staged-vs-unstaged index state is not restored, and states which previously failed closed must remain preserved rather than being “fixed” by a sweep.
+
+## Configuration, SDK, API, and UI
+
+### Settings
+
+Use `worktree.maxRetained` as the sole count setting, default 15, with `0` disabling sweeping. Add non-negative safe-integer validation based on the existing settings machinery: negatives, fractions, non-finite values, and wrong types are not accepted or silently coerced into 0 or 15. `0` must take effect before enumeration, rather than being lost through a truthiness check. It disables only automatic sweeping, not an explicit, ownership-checked restore.
+
+The retention settings reader must use `preserveInvalidWorkspaceSettings: true` from the existing `LoadSettingsOptions`, or equivalent strict error propagation. Malformed workspace configuration must not be rewritten to an empty/default object and then authorize deletion. Refresh effective settings between root-level runs and keep one validated settings snapshot per run; hot updates affect the next run rather than retroactively redefining a deletion already in flight. Other settings and unrelated daemon UI behavior must retain their current degradation/compatibility behavior.
+
+Complete every existing boundary instead of bypassing it:
+
+- the CLI/core worktree-settings forwarding in `packages/cli/src/config/config.ts` and `packages/core/src/config/config.ts`;
+- the effective precedence already provided by `packages/cli/src/config/settings.ts` (system defaults, user, workspace, system);
+- `WEB_SHELL_SETTINGS` and its public settings alias, type and drift tests;
+- the generated VS Code settings schema; and
+- the schema description and relevant Web Shell settings messages, including removing “not yet applied” only once the consumer and restore surface both exist.
+
+`showInDialog`/allowlist behavior must follow the current number-row pattern rather than add a parallel number editor. The description must name the default, protected active/pinned behavior, the `0` opt-out, and the unique-root/ownership restrictions rather than promise a global N across unrelated workspaces.
+
+### Session metadata and restore API
+
+Expose semantic recovery state, not local archive paths or arbitrary archive keys, through the existing session-summary/worktree projection in `packages/cli/src/serve/server/session-list.ts` and `packages/sdk-typescript/src/daemon/types.ts`. Only meaningful removal/recovery fields are added; ordinary legacy records preserve their existing shape. Do not default an absent field to “restorable.”
+
+A recoverable record retains its branch/slug binding through `deriveSessionCards`. Do not drop it merely because the physical directory or old marker is gone. Extend `DaemonClient`/`DaemonSessionClient` using the existing request/workspace scoping pattern and encode the session id with the current helper; add the corresponding SDK method and compatibility/invalid-scope tests. The restore client must wait for final server completion before calling the ordinary reopen/load path.
+
+For secondary/linked calls, the browser and SDK must obtain the **selected registered owner workspace `cwd`** from the current runtime/discovery context rather than blindly reuse transcript cwd, which may identify a child worktree directory rather than the registered workspace root. Omitting or substituting an unverified scope is a refusal, not permission to fall back to primary.
+
+If the endpoint is promoted into the supported public REST integration surface, update **all** of `GUIDE_OPERATIONS`, `SDK_METHOD_BY_OPERATION`, `docs/developers/daemon-rest-api.openapi.json`, the existing operation IDs/types, and the existing integration-guide tables. Test them with `rest-integration-docs-contract.test.ts`; no new operation may be added to only one layer. Choosing that promoted surface is an explicit compatibility decision; keeping the endpoint internal/capability-gated must not be described as expanding the stable public integration contract. The separate `check-contract-version.js` tool applies to the **Managed Agent public API contract**, not automatically to this daemon REST document.
+
+### Web Shell
+
+Use `SessionOverviewPanel.tsx` and its current busy/error/open model and workspace-scoped client calls. Keep the entry in Session Overview rather than adding a phantom row to `GitWorktreesDialog`, which only lists real Git worktrees.
+
+- A valid record with a removed checkout exposes a restore affordance, with loading, pending, unavailable, and read-failure distinctions.
+- Opening a removed record must not silently fall back to the source checkout. The explicit restore flow completes first, then calls the normal open path.
+- Disable the action during its own operation and while incompatible lifecycle actions are running; use the existing busy/error behavior rather than another watcher subsystem.
+- Failure exposes the conservative reason without hiding the retained archive or a partial restored target.
+- Do not reuse `ManagedSessionWorktrees.tsx` or the separate arena/provider API as a model for this local daemon sidecar data.
+
+Use current `sessionsOverview.*`/`gitWorktrees.*` i18n placement and English/Chinese (and other applicable locale fallback) conventions. Tests must use complete state-bearing fixtures, not only a snapshot-free `worktreeRemoved: true` flag, and prove that unavailable scopes do not become actionable.
+
+## Proposed file groups
+
+| Area                     | Existing files to extend, with focused additions where needed                                                                                                                                   |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Snapshot and sidecar     | `packages/core/src/services/worktree-snapshot-service.ts`, `worktreeSessionService.ts`, `sessionService.ts`, `session-organization-service.ts`                                                  |
+| Protected removal        | `packages/cli/src/serve/server/worktree-orphan-cleanup.ts`, plus a focused retention module and its collocated tests                                                                            |
+| Restore/load/activity    | `packages/cli/src/serve/routes/session.ts`, `server/session-restore.ts`, `server.ts`, `run-qwen-serve.ts`, runtime-scoped storage/resolution helpers                                            |
+| Settings                 | `packages/cli/src/config/settingsSchema.ts`, `config.ts`, `settings.ts`, `packages/core/src/config/config.ts`, `packages/cli/src/serve/routes/workspace-settings.ts`, generated settings schema |
+| Public/client projection | `packages/cli/src/serve/server/session-list.ts`, `packages/sdk-typescript/src/daemon/{types,DaemonClient,DaemonSessionClient}.ts`, index exports as required                                    |
+| Web Shell                | `components/SessionOverviewPanel.tsx`, `client/i18n.tsx`, `client/settings/messages.ts`, relevant settings alias/drift/UI tests                                                                 |
+
+Every added optional field requires an explicit producer, validator, projection, and consumer check across these layers. An unused optional flag is not an implementation.
+
+## Catalog lifecycle freshness
+
+Persisted worktree sidecars are authoritative for `worktreeRemoved.archiveKey` and `canRestore`. When a live summary still carries an older checkout, its complete worktree object must not overwrite a newer removal or resurrect that removal after a successful restore. Other live worktree fields retain their existing merge behavior. Concurrent PR/artifact metadata de-duplication must not freeze this lifecycle state: each catalog view verifies the current sidecar and, when applicable, validates its keyed snapshot pair.
+
+## Acceptance and verification
+
+Implementation must satisfy the detailed cases in `.qwen/e2e-tests/2026-11-21-web-shell-worktree-retention-restore.md`, including at least:
+
+1. Real Git/tar/filesystem archives containing dirty tracked/untracked content, tracked deletions, file-directory swaps, executable bits, links, and the intended regenerated-output exclusions.
+2. Root retention keeps exactly the newest N eligible worktrees, with `0` disabling and active/pinned records protected separately. Invalid settings, unknown pin store state, root collisions, and unknown ownership preserve rather than delete.
+3. The retained chat/transcript/sidecar survive retention; checkout removal is confirmed on the filesystem; every accepted removal has the keyed archive pair. Ordinary archive/unarchive still preserves existing checkout content and bindings.
+4. Restore recreates the managed target with the captured HEAD and real dirty/deleted/mode/link content. No existing nonempty target is overwritten, and a moved named branch is never reset.
+5. Missing objects, malformed headers, incomplete pairs, hostile archive members, and a stale or wrong workspace fail closed without moving ownership or discarding archives.
+6. After-remove sidecar-write failure is reconciled from strict ownership and valid pairs; after-restore/before-binding failure is completed only by a strictly matching verification, not a blind re-extraction.
+7. Scheduled activity prevents shutdown from stranding in-flight work, while retention, archive, reset, and restore serialize their ownership-critical sections.
+8. A supported API selection preserves old responses, the SDK method actually invokes the correct scoped route, and a real Session Overview restore click causes the actual HTTP restoration followed by successful load.
+
+On Linux/Node 26, the completed isolated run used real primary and secondary runtime homes, storage, Git repositories, and filesystem state, with a mock model provider and real Chromium. Both retained targets restored through their own registered owner `cwd`, with content, deletion, `0755`, detached HEAD, owner-marker, and archive checks. A later primary removal produced a fresh binding agreed by storage and the owner-scoped preview. Corrupting that selected tar produced a visible UI error and an actual `TAR_BAD_ARCHIVE`/500 response without creating an owner marker or overwriting the bound archive or removal state. Evidence is under `/tmp/qwen-u45-baseline3-B2sRuw/evidence/` (`report.json`, `ui-done.json`, `overview-after-restore.png`, and `restore-failure-visible.png`). This is that environment's integration result, not a claim that every CI lane or another platform has passed.
+
+## Out of scope and residual limits
+
+- P7/custom root semantics and coordinated changes to `worktree.root`, root migration, or shell-guard policy.
+- Deleting orphan archives, a retention TTL, a global cross-runtime aggregate counter, a new distributed locking layer, or production debug sweep/remove endpoints.
+- Restoring a vanished orphan archive into a guessed workspace, arbitrary user-selected archive directories, or recovering an unrelated manual `git worktree remove` solely because the path is absent.
+- A byte-for-byte transactional guarantee covering Git object stores, external process crashes, archive/header write pairs, and arbitrary concurrent raw filesystem edits. The selected-runtime safeguards and the partial-state recovery above are the limits of this phase.
+- Changing archive `jobs: 1`, sparse/index rules, branch ownership guards, the accepted older-Git compatibility path, or broad lifecycle conventions to make feature tests easier.

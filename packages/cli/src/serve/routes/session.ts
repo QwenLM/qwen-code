@@ -198,6 +198,10 @@ import {
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import { restoreSessionCore } from '../server/session-restore.js';
 import {
+  restoreWorktreeFromSessionSnapshot,
+  WorktreeRestoreUnavailableError,
+} from '../server/session-worktree-restore.js';
+import {
   exportSessionTranscript,
   parseSessionExportFormat,
   sessionExportFormatValues,
@@ -4944,6 +4948,120 @@ export function registerSessionRoutes(
     }
   };
   app.post('/session/:id/worktree-reset', mutate(), worktreeResetHandler);
+
+  const worktreeRestoreHandler = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    const route = 'POST /session/:id/worktree-restore';
+    const sessionId = requireSessionId(req, res);
+    if (!sessionId) return;
+    if (parseVirtualSubagentSessionId(sessionId)) {
+      res.status(400).json({
+        error: 'Virtual subagent sessions do not support worktree restore',
+        code: 'unsupported_action',
+        sessionId,
+      });
+      return;
+    }
+    const body = safeBody(req);
+    try {
+      const resolved = await resolveRuntimeForSessionRestore(
+        body,
+        res,
+        route,
+        sessionId,
+      );
+      if (resolved === undefined) return;
+      const { runtime } = resolved;
+      if (!runtime.primary && !('cwd' in body)) {
+        res.status(400).json({
+          error:
+            'Non-primary worktree restore requires the registered workspace cwd',
+          code: 'workspace_mismatch',
+          sessionId,
+        });
+        return;
+      }
+      if (isInternalWorkspaceRuntime(runtime)) {
+        res.status(400).json({
+          error:
+            'Conversation sessions do not support snapshot worktree restore',
+          code: 'unsupported_action',
+          sessionId,
+        });
+        return;
+      }
+      if (runtime.routeFileSystemFactory.sshWorkspace) {
+        res.status(501).json({
+          error: 'Restore through the remote workspace client',
+          code: 'ssh_workspace_operation_unsupported',
+          sessionId,
+        });
+        return;
+      }
+      const assertRuntimeGenerationOpen =
+        captureRuntimeGenerationAssertion(runtime);
+      const service = createWorkspaceRuntimeSessionService(runtime);
+      const storedSessionId = await resolveSessionIdForRestore(
+        service,
+        sessionId,
+      );
+      if (storedSessionId === undefined) {
+        throw new SessionNotFoundError(sessionId);
+      }
+      let busy = false;
+      try {
+        const summary = runtime.bridge.getSessionSummary(storedSessionId);
+        busy =
+          summary.hasActivePrompt || (summary.pendingInteractionCount ?? 0) > 0;
+      } catch (error) {
+        // An offline retained chat has no live summary to be busy in.
+        if (
+          !isSessionNotFoundError(error) ||
+          (error as SessionNotFoundError).code === 'session_closing'
+        ) {
+          throw error;
+        }
+      }
+      if (busy) {
+        res.status(409).json({
+          error:
+            'The session is busy; restore it after the active turn settles',
+          code: 'worktree_restore_active',
+          sessionId,
+        });
+        return;
+      }
+      if (
+        (await service.getMaintainableSessionLocation(storedSessionId)) ===
+        'conflict'
+      ) {
+        throw new SessionConflictError(storedSessionId);
+      }
+      await runOwnerRuntimeActivity(runtime, async () => {
+        await restoreWorktreeFromSessionSnapshot({
+          runtime,
+          sessionId: storedSessionId,
+          archiveCoordinator,
+          assertRuntimeGenerationOpen,
+        });
+      });
+      await restoreSessionHandler('load')(req, res);
+    } catch (err) {
+      if (res.headersSent) return;
+      if (err instanceof WorktreeRestoreUnavailableError) {
+        res.status(409).json({
+          error: err.message,
+          code: err.code,
+          sessionId,
+        });
+        return;
+      }
+      sendBridgeError(res, err, { route, sessionId });
+    }
+  };
+  app.post('/session/:id/worktree-restore', mutate(), worktreeRestoreHandler);
 
   // "Create branch here" (Codex parity): turn a detached managed worktree
   // into a named branch at its current HEAD, in place. No session transfer —

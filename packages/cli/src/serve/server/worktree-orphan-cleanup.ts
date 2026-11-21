@@ -25,6 +25,7 @@ import {
   type SessionService,
   type WorktreeSession,
 } from '@qwen-code/qwen-code-core';
+import type { WorktreeSnapshotPaths } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import { runGit } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
@@ -219,7 +220,7 @@ export function acquireWorktreeCleanupLock(
   return acquireWorktreeOwnershipOp(plan.lockKey);
 }
 
-async function worktreeAllowedRoots(
+export async function worktreeAllowedRoots(
   workspaceCwd: string,
   originalCwd: string,
 ): Promise<string[]> {
@@ -594,17 +595,36 @@ export const checkoutChangeDigestForTesting = checkoutChangeDigest;
  * removed, branch kept" stays distinguishable from "checkout kept,
  * ownership doubtful".
  */
+export interface WorktreeCleanupExecutionOptions {
+  /** Retained chats always require an archive, unlike a bare carried delete. */
+  requireSnapshot?: boolean;
+  /** Last chance to protect a newly live/pinned chat before physical removal. */
+  beforeRemoval?: () => Promise<boolean>;
+}
+
+export interface WorktreeCleanupExecution {
+  removed: boolean;
+  snapshot?: WorktreeSnapshotPaths;
+  removal?: Awaited<ReturnType<GitWorktreeService['removeUserWorktree']>>;
+}
+
 export async function executeWorktreeCleanup(
   plan: WorktreeCleanupPlan,
-): Promise<void> {
+  options: WorktreeCleanupExecutionOptions = {},
+): Promise<WorktreeCleanupExecution> {
   const { sessionId, sidecar } = plan;
+  let snapshot: WorktreeSnapshotPaths | undefined;
+  const preserved = (): WorktreeCleanupExecution => ({
+    removed: false,
+    ...(snapshot ? { snapshot } : {}),
+  });
   const marker = await readWorktreeSessionMarkerStrict(plan.lockKey);
   if (marker.state !== 'valid' || marker.sessionId !== sessionId) {
     logWorktreeCleanupPreserve(
       sessionId,
       'marker changed after session mutation',
     );
-    return;
+    return preserved();
   }
   // An initialized submodule holds its own object database (possibly unpushed
   // commits) that neither the worktree tar nor the removal preserves, so the
@@ -616,7 +636,7 @@ export async function executeWorktreeCleanup(
       sessionId,
       'initialized submodule present (or gitlink probe unreadable)',
     );
-    return;
+    return preserved();
   }
   // Exempt the recorded carried overlay only while its content still matches
   // the carry-time identities, so a checkout whose only content is the
@@ -627,10 +647,9 @@ export async function executeWorktreeCleanup(
   // this classification: source verification may read a large carried file,
   // and a new session file saved meanwhile must differ from this baseline.
   const beforeDigest = await checkoutChangeDigest(plan.lockKey);
-  let needsSnapshot = await worktreeHasWork(
-    plan.lockKey,
-    sidecar.carriedEntries,
-  );
+  let needsSnapshot =
+    options.requireSnapshot === true ||
+    (await worktreeHasWork(plan.lockKey, sidecar.carriedEntries));
   // A pristine carried-only checkout reads clean, but collecting it WITHOUT an
   // archive is safe only while the source checkout still holds the overlay —
   // the overlay is a copy of the source's dirty state, and the source may have
@@ -666,7 +685,7 @@ export async function executeWorktreeCleanup(
         slug: sidecar.slug,
         baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
       });
-      const snapshot = await captureWorktreeSnapshot({
+      snapshot = await captureWorktreeSnapshot({
         worktreePath: plan.lockKey,
         snapshotDir: path.dirname(plan.sidecarPath),
         meta,
@@ -682,7 +701,7 @@ export async function executeWorktreeCleanup(
         sessionId,
         `snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return;
+      return preserved();
     }
   }
   // An editor autosave can land between the has-work gate and the end of the
@@ -700,7 +719,7 @@ export async function executeWorktreeCleanup(
       sessionId,
       'checkout changed during cleanup (or its change digest is unreadable)',
     );
-    return;
+    return preserved();
   }
   // An index bit set during capture can hide a tracked edit from every
   // content digest. The shared probe keeps the clean-sparse carve-out.
@@ -709,7 +728,7 @@ export async function executeWorktreeCleanup(
       sessionId,
       'hidden index bit appeared during cleanup',
     );
-    return;
+    return preserved();
   }
   // A bisect/rebase/revert can start AFTER the pre-capture check without
   // changing file bytes or HEAD. Its private administrative state is not in
@@ -719,7 +738,7 @@ export async function executeWorktreeCleanup(
       sessionId,
       'git operation became pending during cleanup',
     );
-    return;
+    return preserved();
   }
   if (
     !needsSnapshot &&
@@ -735,7 +754,7 @@ export async function executeWorktreeCleanup(
       sessionId,
       'carried source changed during cleanup',
     );
-    return;
+    return preserved();
   }
   // A submodule initialized during capture keeps its object store outside
   // the checkout root: neither the archive nor removal preserves that store.
@@ -744,11 +763,18 @@ export async function executeWorktreeCleanup(
       sessionId,
       'initialized submodule appeared during cleanup',
     );
-    return;
+    return preserved();
   }
   if (!checkoutMatchesCapture) {
     logWorktreeCleanupPreserve(sessionId, 'checkout changed during capture');
-    return;
+    return preserved();
+  }
+  if (options.beforeRemoval && !(await options.beforeRemoval())) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'retention eligibility changed before removal',
+    );
+    return preserved();
   }
   // originalCwd is the root the creating worktree service used; the
   // sidecar contract reserves it for exactly this resolution, and the
@@ -781,7 +807,7 @@ export async function executeWorktreeCleanup(
         )} reason=${safeLogValue(errorText)}`,
       );
     }
-    return;
+    return preserved();
   }
   if (result.branchPreserved || result.keptBranch) {
     logWarning(
@@ -792,4 +818,22 @@ export async function executeWorktreeCleanup(
       )} reason=${result.branchPreserved ? 'unmerged commits' : 'branch kept'}`,
     );
   }
+  const remaining = await fsp
+    .lstat(plan.lockKey)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+  if (remaining !== null) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'checkout still present after removal',
+    );
+    return preserved();
+  }
+  return {
+    removed: true,
+    ...(snapshot ? { snapshot } : {}),
+    removal: result,
+  };
 }

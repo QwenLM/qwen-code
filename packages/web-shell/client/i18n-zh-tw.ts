@@ -4456,6 +4456,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sessionsOverview.popupBlocked':
     '彈出視窗被攔截。請允許本站彈窗，以便在新標籤頁中開啟會話。',
   'sessionsOverview.refresh': '重新整理',
+  'sessionsOverview.restoreWorktree': '復原快照',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    '此工作區沒有可用的 Worktree 快照',
+  'sessionsOverview.restoringWorktree': '復原中…',
+  'sessionsOverview.restoreWorktreeFailed': '復原快照失敗',
   'sessionsOverview.selectAll': '全選',
   'sessionsOverview.titleColumn': '標題',
   'sessionsOverview.actions': '操作',

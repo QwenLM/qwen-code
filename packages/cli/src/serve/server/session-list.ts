@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { realpathSync } from 'node:fs';
+import path from 'node:path';
+import { selectWorktreeSnapshot } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
   addDaemonRequestAttribute,
   SESSION_PR_LIST_LIMIT,
@@ -58,9 +61,17 @@ const persistedSessionListCache = new PersistedSessionListCache(
   MAX_ORGANIZED_SESSIONS,
 );
 // Each row is owned by one persisted snapshot. Its sidecars expire with it.
+interface PersistedSidecarLoad extends SessionListLoad<BridgeSessionSummary> {
+  worktreeLoad?: SessionListLoad<BridgeSessionSummary>;
+}
+
+interface CachedCatalogSnapshot extends PersistedSessionListSnapshot {
+  revalidateWorktree: boolean;
+}
+
 const persistedSidecarLoads = new WeakMap<
   Readonly<BridgeSessionSummary>,
-  SessionListLoad<BridgeSessionSummary>
+  PersistedSidecarLoad
 >();
 
 export interface ListWorkspaceSessionsOptions {
@@ -476,7 +487,7 @@ function encodeMetadataSessionCursor(
  * files so the ⑂ badge survives daemon restarts. Shared by all three
  * listing paths (default, organized, metadata-filtered).
  */
-async function enrichWorktreeSidecars(
+export async function enrichWorktreeSidecars(
   bySessionId: Map<string, BridgeSessionSummary>,
   sessionService: SessionService,
   archiveState: SessionArchiveState = 'active',
@@ -484,13 +495,12 @@ async function enrichWorktreeSidecars(
 ): Promise<void> {
   for (const [sessionId, summary] of bySessionId) {
     signal?.throwIfAborted();
-    if (summary.worktree) continue;
+    const sidecarPath = sessionService.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      archiveState,
+    );
     let sidecar: Awaited<ReturnType<typeof readWorktreeSession>>;
     try {
-      const sidecarPath = sessionService.getWorktreeSessionPathForArchiveState(
-        sessionId,
-        archiveState,
-      );
       sidecar = signal
         ? await readWorktreeSession(sidecarPath, { signal })
         : await readWorktreeSession(sidecarPath);
@@ -498,22 +508,61 @@ async function enrichWorktreeSidecars(
       signal?.throwIfAborted();
       sidecar = null;
     }
+    if (!sidecar) continue;
+    const removed = sidecar.worktreeRemoved;
     if (
-      sidecar &&
-      (await readWorktreeSessionMarker(sidecar.worktreePath)) === sessionId
+      !removed &&
+      (await readWorktreeSessionMarker(sidecar.worktreePath)) !== sessionId
     ) {
-      bySessionId.set(sessionId, {
-        ...summary,
-        worktree: {
-          slug: sidecar.slug,
-          path: sidecar.worktreePath,
-          branch: sidecar.worktreeBranch,
-          baseCommit:
-            sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
-          baseBranch: sidecar.originalBranch || undefined,
-        },
-      });
+      if (summary.worktree) {
+        const stripped = { ...summary };
+        delete stripped.worktree;
+        bySessionId.set(sessionId, stripped);
+      }
+      continue;
     }
+    let canRestore = false;
+    if (removed && sidecar.workspaceCwd) {
+      try {
+        if (
+          realpathSync(sidecar.workspaceCwd) ===
+          realpathSync(sessionService.getProjectRoot())
+        ) {
+          canRestore =
+            (await selectWorktreeSnapshot({
+              directory: path.dirname(sidecarPath),
+              sessionId,
+              slug: sidecar.slug,
+              archiveKey: removed.archiveKey,
+            })) !== undefined;
+        }
+      } catch {
+        // An unavailable pair is shown as such, never as a restore capability.
+      }
+    }
+    // Normal metadata remains with its snapshot; lifecycle fields follow the
+    // current sidecar read.
+    const worktree =
+      !removed && summary.worktree
+        ? { ...summary.worktree }
+        : {
+            slug: sidecar.slug,
+            path: sidecar.worktreePath,
+            branch: sidecar.worktreeBranch,
+            baseCommit:
+              sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+            baseBranch: sidecar.originalBranch || undefined,
+          };
+    delete worktree.worktreeRemoved;
+    delete worktree.canRestore;
+    if (removed) {
+      worktree.worktreeRemoved = removed;
+      worktree.canRestore = canRestore;
+    }
+    bySessionId.set(sessionId, {
+      ...summary,
+      worktree,
+    });
   }
 }
 
@@ -699,6 +748,25 @@ function mergeLiveSessionSummary(
     hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     isArchived: false,
   };
+  if (live.worktree) {
+    // Snapshot lifecycle changes are owned by the sidecar, not a live
+    // summary that may predate its removal or restoration.
+    const worktree = { ...live.worktree };
+    delete worktree.worktreeRemoved;
+    delete worktree.canRestore;
+    const removed = existing.worktree?.worktreeRemoved;
+    if (removed) {
+      merged.worktree = {
+        ...worktree,
+        worktreeRemoved: removed,
+        ...(existing.worktree?.canRestore !== undefined
+          ? { canRestore: existing.worktree.canRestore }
+          : {}),
+      };
+    } else {
+      merged.worktree = worktree;
+    }
+  }
   // The live entry only knows PR bindings from this daemon lifetime while the
   // sidecar-enriched persisted summary holds the full history. The sidecar is
   // the append-only binding-time record (last = latest — the order the badge
@@ -858,7 +926,8 @@ function readPersistedSidecars(
   session: Readonly<BridgeSessionSummary>,
   service: SessionService,
   archiveState: SessionArchiveState,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  revalidateWorktree: boolean,
 ): Promise<BridgeSessionSummary> {
   signal?.throwIfAborted();
   let load = persistedSidecarLoads.get(session);
@@ -874,7 +943,7 @@ function readPersistedSidecars(
       readSignal.throwIfAborted();
       return rows.get(session.sessionId)!;
     };
-    const started: SessionListLoad<BridgeSessionSummary> = {
+    const started: PersistedSidecarLoad = {
       controller,
       waiterCount: 0,
       settled: false,
@@ -893,7 +962,60 @@ function readPersistedSidecars(
     persistedSidecarLoads.set(session, started);
     load = started;
   }
-  return waitForSessionListLoad(load, signal);
+  const metadataLoad = load;
+  return waitForSessionListLoad(metadataLoad, signal).then(async (cached) => {
+    // A fresh scan and its joiners already share this validated projection.
+    if (!revalidateWorktree) return clonePersistedSummary(cached);
+    let worktreeLoad = metadataLoad.worktreeLoad;
+    if (
+      !worktreeLoad ||
+      worktreeLoad.settled ||
+      worktreeLoad.controller.signal.aborted
+    ) {
+      // Removal and restoration can change while metadata is cached. Share
+      // only the pending read; a later view validates the sidecar again.
+      const controller = new AbortController();
+      const started: SessionListLoad<BridgeSessionSummary> = {
+        controller,
+        waiterCount: 0,
+        settled: false,
+        promise: Promise.resolve()
+          .then(async () => {
+            controller.signal.throwIfAborted();
+            const rows = new Map([
+              [session.sessionId, clonePersistedSummary(cached)],
+            ]);
+            const summary = rows.get(session.sessionId)!;
+            if (summary.worktree) {
+              delete summary.worktree.worktreeRemoved;
+              delete summary.worktree.canRestore;
+            }
+            await enrichWorktreeSidecars(
+              rows,
+              service,
+              archiveState,
+              controller.signal,
+            );
+            controller.signal.throwIfAborted();
+            return rows.get(session.sessionId)!;
+          })
+          .catch((error: unknown) => {
+            if (metadataLoad.worktreeLoad === started) {
+              delete metadataLoad.worktreeLoad;
+            }
+            throw error;
+          })
+          .finally(() => {
+            started.settled = true;
+          }),
+      };
+      worktreeLoad = started;
+      metadataLoad.worktreeLoad = started;
+    }
+    return waitForSessionListLoad(worktreeLoad, signal).then(
+      clonePersistedSummary,
+    );
+  });
 }
 
 async function enrichCatalogPage(
@@ -902,7 +1024,8 @@ async function enrichCatalogPage(
   liveRows: readonly BridgeSessionSummary[],
   service: SessionService,
   archiveState: SessionArchiveState,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  revalidateWorktree: boolean,
 ): Promise<void> {
   const selectedIds = new Set(page.map((session) => session.sessionId));
   const detailsById = new Map<string, BridgeSessionSummary>();
@@ -912,7 +1035,13 @@ async function enrichCatalogPage(
       detailsById.set(
         sessionId,
         clonePersistedSummary(
-          await readPersistedSidecars(stored, service, archiveState, signal),
+          await readPersistedSidecars(
+            stored,
+            service,
+            archiveState,
+            signal,
+            revalidateWorktree,
+          ),
         ),
       );
     }
@@ -1001,7 +1130,7 @@ async function listAllPersistedSummaries(
   runtimeBaseDir: string,
   queryKind: 'organized' | 'metadata',
   signal?: AbortSignal,
-): Promise<PersistedSessionListSnapshot> {
+): Promise<CachedCatalogSnapshot> {
   const lookup = persistedSessionListCache.lookup(
     { runtimeBaseDir, workspaceCwd, archiveState },
     (loadSignal) =>
@@ -1047,7 +1176,10 @@ async function listAllPersistedSummaries(
       snapshot.scanDurationMs,
     );
   }
-  return snapshot;
+  return {
+    ...snapshot,
+    revalidateWorktree: lookup.status === 'cache_hit',
+  };
 }
 
 function getSummaryActivityTime(
@@ -1433,6 +1565,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
     sessionService,
     archiveState,
     readOptions.signal,
+    persisted.revalidateWorktree,
   );
   return {
     sessions: page,
@@ -1646,6 +1779,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
     sessionService,
     archiveState,
     readOptions.signal,
+    persisted.revalidateWorktree,
   );
   return {
     sessions: page,

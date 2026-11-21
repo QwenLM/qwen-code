@@ -38,6 +38,7 @@ import {
   preclassifyWorktreeCleanup,
   verifyWorktreeCleanupOwnership,
 } from './worktree-orphan-cleanup.js';
+import { moveWorktreeSnapshotsWithSession } from './worktree-snapshot-pairs.js';
 
 export interface DaemonArchiveSessionsResult {
   archived: string[];
@@ -497,7 +498,7 @@ async function deletePersistedSessionWithLease(
   };
 }
 
-function sessionLiveOnBridge(
+export function sessionLiveOnBridge(
   bridge: Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>,
   candidate: string,
 ): boolean {
@@ -1065,6 +1066,11 @@ export async function archiveDaemonSessions(params: {
               (await classifySessionLocation(service, sessionId)) ===
               'archived',
             afterMutationApplied: async () => {
+              await moveWorktreeSnapshotsWithSession(
+                service,
+                sessionId,
+                'archived',
+              );
               assertCanMutate?.();
               await updateScheduledTaskForMaintenance(
                 service,
@@ -1251,6 +1257,11 @@ export async function unarchiveDaemonSessions(params: {
             mutationAppliedAfterError: async () =>
               (await classifySessionLocation(service, sessionId)) === 'active',
             afterMutationApplied: async () => {
+              await moveWorktreeSnapshotsWithSession(
+                service,
+                sessionId,
+                'active',
+              );
               assertCanMutate?.();
               await updateScheduledTaskForMaintenance(
                 service,

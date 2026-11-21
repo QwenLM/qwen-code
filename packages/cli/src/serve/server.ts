@@ -205,6 +205,10 @@ import {
   type KeepaliveSessionResumeRequest,
 } from './scheduled-task-keepalive.js';
 import {
+  startWorktreeRetention,
+  type WorktreeRetentionController,
+} from './server/worktree-retention.js';
+import {
   registerWorkspaceDiagnosticStatusRoutes,
   registerWorkspaceQualifiedDiagnosticStatusRoutes,
   registerWorkspaceQualifiedStatusRoutes,
@@ -967,6 +971,7 @@ export function createServeApp(
   let runtimeStopReady = false;
   let runtimeStopsClosing = false;
   const scheduledActivity = new WeakMap<WorkspaceRuntime, () => boolean>();
+  const retentionStops = new Set<Promise<void>>();
   const rehydratingWorkspaces = new Set<WorkspaceRuntime>();
   const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
   // The scheduled-task helpers retain an outer watchdog for injected bridges.
@@ -4205,6 +4210,19 @@ export function createServeApp(
     // Every trusted workspace gets its own keepalive + rehydration against its
     // own cron file + bridge.
     const keepaliveStops = new Map<string, () => void>();
+    const retentions = new Map<string, WorktreeRetentionController>();
+    const stopRetentionForWorkspace = (workspaceCwd: string): void => {
+      const controller = retentions.get(workspaceCwd);
+      if (!controller) return;
+      const stopped = controller.stop();
+      retentionStops.add(stopped);
+      const remove = () => {
+        if (retentions.get(workspaceCwd) === controller) {
+          retentions.delete(workspaceCwd);
+        }
+      };
+      void stopped.then(remove, remove);
+    };
     const startKeepaliveForWorkspace = (runtime: WorkspaceRuntime) => {
       const trusted = runtime.primary
         ? isPrimaryWorkspaceTrusted()
@@ -4222,7 +4240,16 @@ export function createServeApp(
         onTasksRead: (tasks) =>
           registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
       });
-      scheduledActivity.set(runtime, () => keepalive.activeWork);
+      retentions.set(
+        runtime.workspaceCwd,
+        startWorktreeRetention(runtime, workspaceRegistry, archiveCoordinator),
+      );
+      scheduledActivity.set(
+        runtime,
+        () =>
+          keepalive.activeWork ||
+          retentions.get(runtime.workspaceCwd)?.activeWork === true,
+      );
       rehydrateWorkspace(runtime);
       keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
     };
@@ -4238,6 +4265,9 @@ export function createServeApp(
       app.locals as { stopScheduledTaskKeepalive?: () => void }
     ).stopScheduledTaskKeepalive = () => {
       runtimeStopsClosing = true;
+      for (const workspaceCwd of retentions.keys()) {
+        stopRetentionForWorkspace(workspaceCwd);
+      }
       for (const stop of keepaliveStops.values()) stop();
       keepaliveStops.clear();
     };
@@ -4246,6 +4276,7 @@ export function createServeApp(
         stopScheduledTaskKeepaliveForWorkspace?: (workspaceCwd: string) => void;
       }
     ).stopScheduledTaskKeepaliveForWorkspace = (workspaceCwd) => {
+      stopRetentionForWorkspace(workspaceCwd);
       keepaliveStops.get(workspaceCwd)?.();
       keepaliveStops.delete(workspaceCwd);
     };
@@ -4636,6 +4667,7 @@ export function createServeApp(
           .stopAgentHostRestore,
       );
       stopAppResource(() => webTerminalRegistry.dispose());
+      pendingDrains.push(...retentionStops);
       const drains = await Promise.allSettled(pendingDrains);
       stopAppResource(() => acpHandleRef.current?.dispose());
       const bridgeDrains = await Promise.allSettled(

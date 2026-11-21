@@ -394,6 +394,7 @@ async function checkoutMatchesCapture(
   snapshotPath: string,
   matcher: DisposableIgnoredMatcher,
   meta: CaptureWorktreeSnapshotOptions['meta'],
+  privateCapture = true,
 ): Promise<boolean> {
   const regularFiles: string[] = [];
   const symlinks = new Map<string, string>();
@@ -458,9 +459,11 @@ async function checkoutMatchesCapture(
   await tar.t({
     file: snapshotPath,
     strict: true,
-    // This is the private archive just written by this process, not an
-    // untrusted restore input. Restore keeps its own decompression limits.
-    maxDecompressionRatio: Number.POSITIVE_INFINITY,
+    // A capture is private process output; a later restore must keep the
+    // library's decompression limits for a file re-read from disk.
+    maxDecompressionRatio: privateCapture
+      ? Number.POSITIVE_INFINITY
+      : undefined,
     onReadEntry: (entry) => {
       const rel = normalizeRel(entry.path);
       if (!rel || rel === '.') return;
@@ -531,11 +534,9 @@ async function checkoutMatchesCapture(
  * archive a later restore would trust. Rejects on any capture error — the
  * caller must not delete the worktree without a durable snapshot.
  */
-export async function captureWorktreeSnapshot(
-  options: CaptureWorktreeSnapshotOptions,
-): Promise<WorktreeSnapshotPaths> {
-  const { worktreePath, snapshotDir, meta } = options;
-  await fs.access(path.join(worktreePath, '.git'));
+async function readSnapshotExclusions(
+  worktreePath: string,
+): Promise<DisposableIgnoredMatcher> {
   // The ignored disposable output the exclusion geometry consults, taken
   // from the SAME listing the has-work gate waives (`status --porcelain
   // --ignored=matching -z`, the `!!` records) so the two geometries cannot
@@ -602,6 +603,30 @@ export async function captureWorktreeSnapshot(
     ),
   };
   await assertNoProtectedCaseVariantPaths(worktreePath, matcher);
+  return matcher;
+}
+
+export async function verifyRestoredWorktreeSnapshot(options: {
+  worktreePath: string;
+  snapshotPath: string;
+  meta: CaptureWorktreeSnapshotOptions['meta'];
+}): Promise<boolean> {
+  const matcher = await readSnapshotExclusions(options.worktreePath);
+  return checkoutMatchesCapture(
+    options.worktreePath,
+    options.snapshotPath,
+    matcher,
+    options.meta,
+    false,
+  );
+}
+
+export async function captureWorktreeSnapshot(
+  options: CaptureWorktreeSnapshotOptions,
+): Promise<WorktreeSnapshotPaths> {
+  const { worktreePath, snapshotDir, meta } = options;
+  await fs.access(path.join(worktreePath, '.git'));
+  const matcher = await readSnapshotExclusions(worktreePath);
   await fs.mkdir(snapshotDir, { recursive: true });
   const fullMeta: WorktreeSnapshotMeta = {
     version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
@@ -674,13 +699,17 @@ export async function readWorktreeSnapshotMeta(
       `Unsupported worktree snapshot version ${String(v['version'])} at ${metaPath}`,
     );
   }
+  const safeCount = (value: unknown): boolean =>
+    Number.isSafeInteger(value) && (value as number) >= 0;
   if (
     typeof v['sessionId'] !== 'string' ||
+    v['sessionId'].length === 0 ||
     typeof v['slug'] !== 'string' ||
+    v['slug'].length === 0 ||
     typeof v['baseCommit'] !== 'string' ||
     typeof v['headCommit'] !== 'string' ||
     typeof v['branch'] !== 'string' ||
-    typeof v['createdAt'] !== 'number'
+    !safeCount(v['createdAt'])
   ) {
     throw new Error(`Worktree snapshot meta at ${metaPath} is malformed`);
   }
@@ -690,8 +719,8 @@ export async function readWorktreeSnapshotMeta(
   }
   const d = dirty as Record<string, unknown>;
   if (
-    typeof d['tracked'] !== 'number' ||
-    typeof d['untracked'] !== 'number' ||
+    !safeCount(d['tracked']) ||
+    !safeCount(d['untracked']) ||
     !Array.isArray(d['deleted']) ||
     !d['deleted'].every(
       (p) =>
@@ -703,6 +732,100 @@ export async function readWorktreeSnapshotMeta(
     throw new Error(`Worktree snapshot meta at ${metaPath} is malformed`);
   }
   return parsed as WorktreeSnapshotMeta;
+}
+
+export interface SelectedWorktreeSnapshot
+  extends Pick<WorktreeSnapshotPaths, 'snapshotPath' | 'metaPath'> {
+  meta: WorktreeSnapshotMeta;
+  mtimeNs: bigint;
+}
+
+export async function selectWorktreeSnapshot(options: {
+  directory: string;
+  sessionId: string;
+  slug: string;
+  archiveKey?: string;
+}): Promise<SelectedWorktreeSnapshot | undefined> {
+  if (!path.isAbsolute(options.directory)) {
+    throw new Error('Snapshot directory must be an absolute path');
+  }
+  const archiveSuffix = '.worktree-snapshot.tar.gz';
+  const metaSuffix = '.worktree-snapshot.json';
+  const archiveKey = options.archiveKey;
+  if (
+    archiveKey !== undefined &&
+    (archiveKey.length === 0 ||
+      archiveKey.includes('..') ||
+      archiveKey.includes('/') ||
+      archiveKey.includes('\\') ||
+      !archiveKey.endsWith(archiveSuffix) ||
+      !archiveKey.startsWith(`${options.sessionId}.`))
+  ) {
+    throw new Error('Invalid worktree snapshot archive key');
+  }
+  if (!(await fs.lstat(options.directory)).isDirectory()) {
+    throw new Error('Snapshot directory is not a directory');
+  }
+  const names = await fs.readdir(options.directory);
+  const prefix = `${options.sessionId}.`;
+  const matchingNames = names.filter(
+    (name) =>
+      name.startsWith(prefix) &&
+      (name.endsWith(archiveSuffix) || name.endsWith(metaSuffix)),
+  );
+  if (archiveKey !== undefined && !matchingNames.includes(archiveKey)) {
+    throw new Error('Requested worktree snapshot pair was not found');
+  }
+  const bases = new Set(
+    matchingNames.map((name) =>
+      name.endsWith(archiveSuffix)
+        ? name.slice(0, -'.tar.gz'.length)
+        : name.slice(0, -'.json'.length),
+    ),
+  );
+  const selected: SelectedWorktreeSnapshot[] = [];
+  for (const base of [...bases].sort()) {
+    const snapshotPath = path.join(options.directory, `${base}.tar.gz`);
+    const metaPath = path.join(options.directory, `${base}.json`);
+    for (const file of [snapshotPath, metaPath]) {
+      const stat = await fs.lstat(file, { bigint: true });
+      if (!stat.isFile() || stat.nlink !== 1n) {
+        throw new Error(
+          `Snapshot pair file is not an owned regular file: ${file}`,
+        );
+      }
+      if (file === metaPath && stat.size > 64n * 1024n) {
+        throw new Error(`Snapshot metadata exceeds 64 KiB: ${file}`);
+      }
+    }
+    const meta = await readWorktreeSnapshotMeta(metaPath);
+    if (
+      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(meta.baseCommit) ||
+      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(meta.headCommit)
+    ) {
+      throw new Error(`Snapshot pair has invalid commit ids: ${metaPath}`);
+    }
+    if (meta.sessionId !== options.sessionId || meta.slug !== options.slug) {
+      throw new Error(`Snapshot pair identity mismatch: ${metaPath}`);
+    }
+    const mtimeNs = (await fs.lstat(snapshotPath, { bigint: true })).mtimeNs;
+    selected.push({ snapshotPath, metaPath, meta, mtimeNs });
+  }
+  selected.sort(
+    (a, b) =>
+      b.meta.createdAt - a.meta.createdAt ||
+      (a.mtimeNs === b.mtimeNs ? 0 : a.mtimeNs < b.mtimeNs ? 1 : -1) ||
+      (a.snapshotPath < b.snapshotPath
+        ? -1
+        : a.snapshotPath > b.snapshotPath
+          ? 1
+          : 0),
+  );
+  return (
+    selected.find(
+      (entry) => path.basename(entry.snapshotPath) === archiveKey,
+    ) ?? (archiveKey === undefined ? selected[0] : undefined)
+  );
 }
 
 /**
@@ -883,6 +1006,8 @@ export async function restoreWorktreeSnapshot(
     file: snapshotPath,
     cwd: targetWorktreePath,
     strict: true,
+    // Replace existing HEAD files so creation applies the archived mode.
+    unlink: true,
     // Keep absolute and ../ link targets (R8-5), but never materialize an
     // archived symlink during extraction: a later member could traverse it as
     // a parent and escape through a link created by the archive itself.

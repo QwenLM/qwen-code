@@ -15,6 +15,7 @@ import {
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
+  type RestoreWorktreeSessionRequest,
   type ResumeSessionRequest,
   type SubscribeOptions,
   type WorktreeResetSessionRequest,
@@ -571,6 +572,26 @@ export class DaemonSessionClient {
       // The replacement is freshly created: seed from the start of its bus
       // so events fired during the transfer window are not skipped.
       lastEventId: 0,
+      eventEpoch: session.eventEpoch,
+    });
+  }
+
+  /**
+   * Restore this session's retained worktree, preserving its workspace owner.
+   * The server performs snapshot selection and ordinary session loading before
+   * this returns a client whose replay starts at the server's last event id.
+   */
+  static async restoreWorktree(
+    client: DaemonClient,
+    sessionId: string,
+    req: RestoreWorktreeSessionRequest = {},
+  ): Promise<DaemonSessionClient> {
+    const session = await client.restoreWorktreeSession(sessionId, req);
+    return new DaemonSessionClient({
+      client,
+      session,
+      hasActivePrompt: session.hasActivePrompt,
+      lastEventId: session.lastEventId,
       eventEpoch: session.eventEpoch,
     });
   }

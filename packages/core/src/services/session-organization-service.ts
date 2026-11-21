@@ -484,6 +484,39 @@ export class SessionOrganizationService {
     return next;
   }
 
+  /**
+   * Strict read for destructive retention; degraded UI pin views must never
+   * authorize deletion. Only a missing store or an explicitly unpinned entry
+   * returns false. Any unreadable or invalid pin state is thrown to the caller.
+   */
+  async isSessionPinnedStrict(sessionId: string): Promise<boolean> {
+    return this.withStoreLock(async () => {
+      let store: Record<string, unknown>;
+      try {
+        store = await this.readStoreDocument();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+        throw error;
+      }
+      const sessions = store['sessions'];
+      if (sessions === undefined) return false;
+      if (!isPlainRecord(sessions)) {
+        throw new Error('session organization store sessions is not an object');
+      }
+      for (const [id, entry] of Object.entries(sessions)) {
+        if (
+          !isPlainRecord(entry) ||
+          (entry['pinnedAt'] !== undefined &&
+            typeof entry['pinnedAt'] !== 'string')
+        ) {
+          throw new Error(`invalid session organization entry: ${id}`);
+        }
+      }
+      const entry = sessions[sessionId];
+      return isPlainRecord(entry) && typeof entry['pinnedAt'] === 'string';
+    });
+  }
+
   private async readStoreDocument(): Promise<Record<string, unknown>> {
     const raw = JSON.parse(
       await fs.readFile(this.getStorePath(), 'utf8'),
