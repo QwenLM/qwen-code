@@ -5,7 +5,10 @@
  * restarts.
  */
 
-import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
+import {
+  closeFileWatcher,
+  shouldPollFileWatchers,
+} from '../utils/file-watcher-cleanup.js';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 
@@ -391,6 +394,7 @@ export class CronScheduler {
     }
   }
   private fileWatcher: fsSync.FSWatcher | null = null;
+  private stopFilePolling: (() => void) | null = null;
   private lockProbeTimer: ReturnType<typeof setInterval> | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   // Test-only auto-fire timers (QWEN_CODE_TEST_CRON_FAST). Each timer
@@ -1354,26 +1358,45 @@ export class CronScheduler {
   }
 
   private startFileWatcher(projectRoot: string): void {
-    if (this.fileWatcher) return;
+    if (this.fileWatcher || this.stopFilePolling) return;
     const filePath = getCronFilePath(projectRoot);
     const dir = path.dirname(filePath);
     const fileName = path.basename(filePath);
 
-    // Watch the directory instead of the file — the file may not exist yet.
-    // When it's created or modified, we reload. Non-owners reload too, so
-    // their view tracks tasks the owner fires/removes.
+    // The tasks file may not exist yet. Both routes observe its creation
+    // and modification. Non-owners reload too, so their view tracks tasks
+    // the owner fires/removes.
     try {
       fsSync.mkdirSync(dir, { recursive: true });
+      const reload = () => {
+        if (this.debounceTimer) clearTimeout(this.debounceTimer);
+        this.debounceTimer = setTimeout(() => {
+          void this.loadFileTasks(false);
+        }, FILE_DEBOUNCE_MS);
+        this.debounceTimer.unref();
+      };
+      if (shouldPollFileWatchers()) {
+        let active = true;
+        const listener = () => {
+          if (active) reload();
+        };
+        fsSync.watchFile(
+          filePath,
+          { interval: 500, persistent: false },
+          listener,
+        );
+        this.stopFilePolling = () => {
+          active = false;
+          fsSync.unwatchFile(filePath, listener);
+        };
+        return;
+      }
       this.fileWatcher = fsSync.watch(
         dir,
         { persistent: false },
         (_event, filename) => {
           if (filename && filename !== fileName) return;
-          if (this.debounceTimer) clearTimeout(this.debounceTimer);
-          this.debounceTimer = setTimeout(() => {
-            void this.loadFileTasks(false);
-          }, FILE_DEBOUNCE_MS);
-          this.debounceTimer.unref();
+          reload();
         },
       );
       this.fileWatcher.on('error', (err) => {
@@ -1821,6 +1844,8 @@ export class CronScheduler {
       clearInterval(this.lockProbeTimer);
       this.lockProbeTimer = null;
     }
+    this.stopFilePolling?.();
+    this.stopFilePolling = null;
     if (this.fileWatcher) {
       void closeFileWatcher(this.fileWatcher);
       this.fileWatcher = null;

@@ -6,6 +6,11 @@
 
 let exitingProcess = false;
 
+export function shouldPollFileWatchers(): boolean {
+  // Bun's Darwin fs.watch can wait synchronously for FSEvents stream rebuilds.
+  return process.platform === 'darwin' && Boolean(process.versions['bun']);
+}
+
 /** Only call when the CLI will exit after resource cleanup. */
 export function prepareFileWatchersForProcessExit(): void {
   exitingProcess = process.platform === 'darwin';

@@ -8,6 +8,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import * as path from 'node:path';
 import { SettingsWatcher } from './settingsWatcher.js';
+import * as watcherCleanup from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   SettingScope,
   type LoadedSettings,
@@ -189,6 +190,36 @@ describe('SettingsWatcher', () => {
         vi.resetModules();
       }
     });
+
+    it.each([false, true])(
+      'routes target and bootstrap watchers with polling=%s',
+      (polling) => {
+        const policy = vi
+          .spyOn(watcherCleanup, 'shouldPollFileWatchers')
+          .mockReturnValue(polling);
+        try {
+          watcher.startWatching();
+          for (const call of mockWatch.mock.calls) {
+            expect(call[1].usePolling).toBe(polling);
+          }
+          expect(mockWatch).toHaveBeenCalledTimes(2);
+          watcher.stopWatching();
+          for (const entry of mockWatchers) {
+            expect(entry.instance.close).toHaveBeenCalledOnce();
+          }
+          mockWatch.mockClear();
+          mockExistsSync.mockReturnValue(false);
+          watcher.startWatching();
+          expect(mockWatch).toHaveBeenCalledTimes(2);
+          for (const call of mockWatch.mock.calls) {
+            expect(call[1].usePolling).toBe(polling);
+          }
+        } finally {
+          watcher.stopWatching();
+          policy.mockRestore();
+        }
+      },
+    );
 
     it('should create chokidar watchers for user and workspace directories', () => {
       watcher.startWatching();

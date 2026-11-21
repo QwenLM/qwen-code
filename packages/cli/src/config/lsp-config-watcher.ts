@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import {
+  closeFileWatcher,
+  shouldPollFileWatchers,
+} from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
@@ -72,6 +75,7 @@ export class LspConfigWatcher {
     try {
       const watcher = watchFs(this.workspaceRoot, {
         ignoreInitial: true,
+        usePolling: shouldPollFileWatchers(),
         depth: 0,
       })
         .on('all', (_event: string, changedPath: string) => {

@@ -18,6 +18,11 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { useWorktreeSession } from './useWorktreeSession.js';
 
+const pollingPolicy = vi.hoisted(() => vi.fn(() => false));
+vi.mock('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js', () => ({
+  shouldPollFileWatchers: pollingPolicy,
+}));
+
 const SESSION_ID = 'test-session-id';
 
 function makeMockConfig(sidecarPath: string): Config {
@@ -38,11 +43,12 @@ const sample: WorktreeSession = {
   originalHeadCommit: 'a'.repeat(40),
 };
 
-describe('useWorktreeSession', () => {
+describe.each([false, true])('useWorktreeSession polling=%s', (polling) => {
   let tmpDir: string;
   let sidecarPath: string;
 
   beforeEach(async () => {
+    pollingPolicy.mockReturnValue(polling);
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'use-wt-session-'));
     sidecarPath = path.join(tmpDir, 'session.worktree.json');
   });
@@ -85,6 +91,22 @@ describe('useWorktreeSession', () => {
     );
     expect(result.current?.slug).toBe(sample.slug);
     expect(result.current?.worktreePath).toBe(sample.worktreePath);
+  });
+
+  it('observes an atomic replacement at the same sidecar path', async () => {
+    await writeWorktreeSession(sidecarPath, sample);
+    const config = makeMockConfig(sidecarPath);
+    const { result } = renderHook(() => useWorktreeSession(config));
+    await vi.waitFor(() => expect(result.current?.slug).toBe(sample.slug), {
+      timeout: 1000,
+    });
+    const replacement = { ...sample, slug: 'replaced' };
+    const temporary = path.join(tmpDir, 'replacement.worktree.json');
+    await writeWorktreeSession(temporary, replacement);
+    await fs.rename(temporary, sidecarPath);
+    await vi.waitFor(() => expect(result.current?.slug).toBe('replaced'), {
+      timeout: 2000,
+    });
   });
 
   it('reacts to sidecar deletion (clear)', async () => {

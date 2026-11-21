@@ -48,6 +48,17 @@ const { mockWatchers, mockWatch, mockExistsSync, mockReadFileSync } =
     return { mockWatchers, mockWatch, mockExistsSync, mockReadFileSync };
   });
 
+const pollingPolicy = vi.hoisted(() => vi.fn(() => false));
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js')
+    >()),
+    shouldPollFileWatchers: pollingPolicy,
+  }),
+);
+
 vi.mock('chokidar', () => ({
   watch: mockWatch,
 }));
@@ -94,10 +105,32 @@ describe('ExtensionFileWatcher', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    pollingPolicy.mockReturnValue(false);
     mockWatchers.length = 0;
     mockExistsSync.mockReturnValue(true);
     mockReadFileSync.mockReturnValue('{"generation":1}');
   });
+
+  it.each([false, true])(
+    'routes target and bootstrap watchers with polling=%s',
+    (polling) => {
+      pollingPolicy.mockReturnValue(polling);
+      mockExistsSync.mockReturnValue(false);
+      const watcher = new ExtensionFileWatcher(
+        configWithExtensions([]),
+        extensionsDir,
+      );
+      try {
+        watcher.startWatching();
+        expect(mockWatchers).toHaveLength(2);
+        for (const entry of mockWatchers) {
+          expect(entry.options['usePolling']).toBe(polling);
+        }
+      } finally {
+        watcher.stopWatching();
+      }
+    },
+  );
 
   it('watches the extensions directory and linked extension sources', () => {
     const linkedSource = path.resolve('relative-linked-extension');

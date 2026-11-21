@@ -6,6 +6,7 @@
 
 import { useState, useEffect } from 'react';
 import fs from 'node:fs';
+import { shouldPollFileWatchers } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
@@ -16,20 +17,9 @@ import { readWorktreeSession } from '@qwen-code/qwen-code-core/services/worktree
  * Watches the active session's WorktreeSession sidecar file and returns
  * its current contents (or `null` when no active worktree exists).
  *
- * The sidecar lives at `<chatsDir>/<sessionId>.worktree.json`. We watch the
- * directory rather than the file directly because the file may not exist
- * yet when `enter_worktree` hasn't run. Directory watchers also catch
- * rename/delete events that file watchers miss.
- *
- * Known limitation: `fs.watch` holds an inode handle to `chatsDir` at
- * mount time. If the directory is deleted out-of-band (manual cleanup,
- * antivirus quarantine, reset scripts) and then recreated, the watcher
- * does NOT re-attach to the new inode — the Footer indicator stops
- * responding to sidecar changes until the session restarts. In normal
- * use `chatsDir` is stable for the session's lifetime; if rotation
- * becomes a real failure mode, add a polling fallback or listen for
- * `watcher.on('error')` and re-run `setupWatcher`. (PR #4174 review
- * #3256239608.)
+ * Bun on macOS polls the exact sidecar path, including when it is absent.
+ * Other runtimes retain the directory watcher, whose inode does not reattach
+ * after an out-of-band directory replacement.
  */
 export function useWorktreeSession(config: Config): WorktreeSession | null {
   const [loaded, setLoaded] = useState<{
@@ -62,6 +52,22 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
     const filePath = config
       .getSessionService()
       .getWorktreeSessionPath(sessionId);
+    if (shouldPollFileWatchers()) {
+      const listener = () => {
+        if (cancelled) return;
+        void safeLoad();
+      };
+      try {
+        fs.watchFile(filePath, { persistent: false, interval: 500 }, listener);
+      } catch {
+        // Watcher setup is best-effort.
+      }
+      return () => {
+        cancelled = true;
+        fs.unwatchFile(filePath, listener);
+      };
+    }
+
     const dirPath = path.dirname(filePath);
     const fileName = path.basename(filePath);
 

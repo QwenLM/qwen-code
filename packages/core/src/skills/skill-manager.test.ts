@@ -1673,6 +1673,52 @@ describe('SkillManager', () => {
   });
 
   describe('file watchers', () => {
+    it.each([
+      ['darwin', true, true],
+      ['darwin', false, false],
+      ['linux', true, false],
+    ] as const)(
+      'routes %s bun=%s skill watchers to polling=%s',
+      async (platform, bun, polling) => {
+        const platformDescriptor = Object.getOwnPropertyDescriptor(
+          process,
+          'platform',
+        )!;
+        const bunDescriptor = Object.getOwnPropertyDescriptor(
+          process.versions,
+          'bun',
+        );
+        try {
+          Object.defineProperty(process, 'platform', {
+            configurable: true,
+            value: platform,
+          });
+          Object.defineProperty(process.versions, 'bun', {
+            configurable: true,
+            value: bun ? 'test' : undefined,
+          });
+          vi.mocked(fsSync.existsSync).mockImplementation(
+            (p) => String(p) === PROJECT_QWEN_DIR,
+          );
+          mockReaddir();
+          mockWatch.mockClear();
+          await manager.startWatching();
+          expect(mockWatch).toHaveBeenCalledWith(PROJECT_QWEN_DIR, {
+            usePolling: polling,
+            ignoreInitial: true,
+            ignored: watcherIgnored,
+            depth: WATCHER_MAX_DEPTH,
+          });
+        } finally {
+          manager.stopWatching();
+          Object.defineProperty(process, 'platform', platformDescriptor);
+          if (bunDescriptor)
+            Object.defineProperty(process.versions, 'bun', bunDescriptor);
+          else Reflect.deleteProperty(process.versions, 'bun');
+        }
+      },
+    );
+
     it('detaches skill events without native close during macOS process exit', async () => {
       vi.resetModules();
       const { SkillManager: FreshSkillManager } = await import(
@@ -1721,6 +1767,7 @@ describe('SkillManager', () => {
       await manager.startWatching();
 
       expect(mockWatch).toHaveBeenCalledWith(PROJECT_QWEN_DIR, {
+        usePolling: expect.any(Boolean),
         ignoreInitial: true,
         ignored: watcherIgnored,
         depth: WATCHER_MAX_DEPTH,
