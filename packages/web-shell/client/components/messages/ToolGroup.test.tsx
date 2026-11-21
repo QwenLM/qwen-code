@@ -302,6 +302,27 @@ describe('tool header description direction', () => {
       dir: 'auto',
       tag: 'SPAN',
     },
+    // A failed ACP invocation can put prose in a machine-shaped title.
+    {
+      title: "Grep: 'نمط|pattern' in the text you provided",
+      args: {
+        path: './src',
+        limit: 0,
+        description: "'نمط|pattern' in the text you provided",
+      },
+      dir: 'auto',
+      tag: 'SPAN',
+    },
+    {
+      title: "Grep: 'نمط|pattern' in path './src'",
+      args: {
+        path: './src',
+        limit: 0,
+        description: "'نمط|pattern' in path './src'",
+      },
+      dir: 'auto',
+      tag: 'SPAN',
+    },
     {
       title: "Grep: 'نمط|pattern' in ~/other/src",
       args: { path: '/home/worker/other/src' },
@@ -378,6 +399,79 @@ describe('tool header description direction', () => {
       expect(arg?.textContent).toBe(`'نمط|pattern' in ${shown}`);
     },
   );
+
+  it.each([
+    { file: 'a.ts', args: { offset: 0, limit: 50 }, suffix: '(lines 1-50)' },
+    { file: 'a.ts', args: { limit: 100 }, suffix: '(first 100 lines)' },
+    { file: 'a.ts', args: { offset: 19 }, suffix: '(from line 20)' },
+    { file: 'a.pdf', args: { pages: '2' }, suffix: '(pages 2)' },
+    { file: 'a.pdf', args: { pages: '2-4' }, suffix: '(pages 2-4)' },
+  ])(
+    'isolates a daemon ReadFile title with $suffix',
+    ({ file, args, suffix }) => {
+      const path = `مجلد/${file}`;
+      const title = `${path} ${suffix}`;
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'read_file',
+          title: `ReadFile: ${title}`,
+          args: { file_path: `/workspace/${path}`, ...args },
+        }),
+        { workspaceCwd: '/workspace' },
+        {},
+        'ar',
+      );
+      expect(
+        container.querySelector('bdi[class*="lineArg"][dir="ltr"]')
+          ?.textContent,
+      ).toBe(title);
+    },
+  );
+
+  it('isolates a replayed ReadFile title using only the exported preview', () => {
+    const title = 'مجلد/a.ts (lines 1-50)';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        title,
+        args: { path: 'مجلد/a.ts', range: [1, 50] },
+      }),
+      {},
+      {},
+      'ar',
+    );
+    expect(
+      container.querySelector('bdi[class*="lineArg"][dir="ltr"]')?.textContent,
+    ).toBe(title);
+  });
+
+  it.each([
+    {
+      name: 'explicit prose matching the title framing',
+      args: {
+        path: 'مجلد/a.ts',
+        range: [1, 50],
+        description: 'مجلد/a.ts (lines 1-50)',
+      },
+      title: 'مجلد/a.ts (lines 1-50)',
+    },
+    {
+      name: 'a title inconsistent with the requested range',
+      args: { file_path: 'مجلد/a.ts', offset: 0, limit: 50 },
+      title: 'مجلد/a.ts (lines 1-51)',
+    },
+  ])('keeps ReadFile $name auto-direction', ({ args, title }) => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', title: `ReadFile: ${title}`, args }),
+      {},
+      {},
+      'ar',
+    );
+    expect(
+      container.querySelector('span[class*="lineArg"][dir="auto"]')
+        ?.textContent,
+    ).toBe(title);
+  });
 
   it('keeps a fetch URL with a prose prompt auto-direction', () => {
     const container = renderToolLine(

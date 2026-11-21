@@ -345,6 +345,17 @@ export function isMachineToolDescription(
   workspaceCwd?: string,
 ): boolean {
   if (!description) return false;
+  const explicit = tool.args?.description;
+  // ACP can use explicit prose as the title when an invocation cannot be
+  // built; it is not machine text even when it matches the machine framing.
+  if (
+    typeof explicit === 'string' &&
+    explicit.trim() &&
+    getDescriptionFromTitle(tool, workspaceCwd) ===
+      formatDescriptionPaths(explicit, workspaceCwd)
+  ) {
+    return false;
+  }
   const produced = getDescriptionFromArgs(
     tool,
     workspaceCwd,
@@ -357,11 +368,38 @@ export function isMachineToolDescription(
     return description === text || description === truncateText(text, 120);
   };
   if (matches(produced.text)) return true;
+  const name = tool.toolName.toLowerCase();
+  if (name === 'read_file' || name === 'readfile' || name === 'read') {
+    const suffix = readFileTitleSuffix(tool.args);
+    if (suffix && matches(`${produced.text} ${suffix}`)) return true;
+  }
 
   // Legacy grep titles have no provenance flag. Recognize the daemon's
   // pattern and filter framing without reimplementing its path formatting.
   const grepTitle = getDaemonGrepDescription(tool, workspaceCwd);
   return grepTitle !== null && matches(grepTitle);
+}
+
+// Match only a decoration supported by the original arguments or by a
+// replayed file_read preview's 1-based inclusive range.
+function readFileTitleSuffix(args: ACPToolCall['args']): string {
+  const pages = getStringArg(args, 'pages');
+  if (pages) return `(pages ${pages})`;
+  const { offset, limit, range } = args ?? {};
+  if (typeof offset === 'number') {
+    return typeof limit === 'number'
+      ? `(lines ${offset + 1}-${offset + limit})`
+      : `(from line ${offset + 1})`;
+  }
+  if (typeof limit === 'number') return `(first ${limit} lines)`;
+  if (
+    Array.isArray(range) &&
+    range.length === 2 &&
+    range.every(Number.isInteger)
+  ) {
+    return `(lines ${range[0]}-${range[1]})`;
+  }
+  return '';
 }
 
 function getDaemonGrepDescription(
