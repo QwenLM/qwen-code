@@ -2,7 +2,7 @@
 
 [English](2026-11-16-cross-workspace-sub-sessions.md) | [简体中文](2026-11-16-cross-workspace-sub-sessions.zh-CN.md)
 
-Status: steps 1, 2 and 3 implemented.
+Status: steps 1, 2 and 3 and the approval-flow refinements are implemented.
 
 ## Problem
 
@@ -67,19 +67,58 @@ link to the child in the target workspace. After confirmation, a selector
 for the caller's own workspace uses the same-runtime execution and
 completion path.
 
-Each call with a named workspace requires one-time human approval in the
-calling session, unless that session is in `yolo` mode. The daemon resolves the selector before the confirmation,
-which shows the registered workspace's path and the full prompt. The approval
-is tied to that runtime generation. If the selector resolves to a different
-runtime at launch, the caller must request approval again. Deny rules apply to the supplied selector,
-the registered path, and the workspace ID. Existing permanent grants continue
-to apply to calls that omit the selector. In `yolo` mode the tool resolves the
-selector itself when the call runs, so the deny rules and the generation check
-still apply. The tool checks the calling mode again after resolution. The
-daemon verifies that a call without one-time approval is still in `yolo` and
-checks the caller's approval revision again before dispatch. A workspace
-settings reload invalidates existing approval checks on the affected ACP
-channel and blocks new checks until the reload request settles.
+Before the permission decision, the daemon resolves a named selector and returns
+`sameWorkspace`, computed by the caller's launcher as `target.launcher === launcher`.
+The tool caches that binding, so confirmation and execution use one runtime
+generation. A selector for the caller's own runtime follows the ordinary
+permission flow, exactly like an omitted selector; it adds no destination
+confirmation. A different runtime requires one-time human approval in `default`
+and `auto-edit`. `auto` sends the call through its classifier even when a legacy
+allow rule matches, while `yolo` auto-approves it. Deny rules apply to the
+selector, registered path, and workspace ID; deny rules still take precedence.
+An explicit ask rule takes the same identities and still requires a one-time
+human decision. An explicitly named workspace stays blocked in Plan mode.
+
+A manual cross-workspace confirmation shows the resolved path and full prompt
+and is tied to that runtime generation. Automatic paths consume the cached
+resolved binding instead, applying the actual approval decision made after the
+async resolution and, for a `PermissionRequest` replacement, after the
+replacement resolves too. Entering `auto` during resolution therefore cannot
+invent a classifier approval, and a stale `default` decision cannot bypass the
+classifier after the mode changes. If the selector resolves to a different
+runtime at launch, the caller must request approval again. Existing permanent
+grants continue to apply to calls that omit the selector. In `yolo` mode the
+same pre-permission resolution applies. After resolution, the tool rechecks the
+calling mode and resolved binding before execution; deny and generation checks
+still apply. For a call requiring AUTO review, both the ACP permission host and
+the unified-agent-loop Core scheduler recheck the live mode before their
+automatic `ProceedOnce`. An upgrade from AUTO to YOLO is supported; any other
+mode change rejects the stale automatic grant as not started, rather than
+recording it as a manual one-time destination approval. Automatic grants
+record the current authorization mode at confirmation. Losing that recorded
+mode after another asynchronous guard or before execution refuses to spawn
+instead of preserving that automated decision as a one-time manual approval. An actual human `ProceedOnce` clears that automated provenance and
+keeps its one-time approval. Same-workspace human confirmations record that
+approval too rather than looking indistinguishable from automatic YOLO.
+Remote automatic launches carry
+`requiresAutoMode` when the confirmed authorization mode is AUTO, and
+`requiresYolo` when it is YOLO, including an AUTO-to-YOLO upgrade. The launcher
+rechecks the mode corresponding to that marker and refuses to launch if it no
+longer matches. A human `ProceedOnce` clears automatic provenance and carries
+neither requirement, while YOLO keeps its existing waiver checks. Later permission-flow
+evaluations on the same invocation reuse the cached binding without another
+workspace query, but re-check the current ask and deny rules against the
+selector and its registered path and ID. Live rule additions and removals
+therefore change the approval decision without treating a permission-rule
+update as a runtime-generation update. For a call without one-time approval,
+the daemon validates the mode captured during automatic confirmation and
+requires it again at dispatch. An AUTO decision can be upgraded to YOLO
+during the approval flow, after which it requires YOLO rather than AUTO.
+Switching to `default` or `auto-edit`, or otherwise losing the recorded mode,
+invalidates the request and requires a new decision under that mode. It checks
+the caller's approval revision again before dispatch. A
+workspace settings reload invalidates existing approval checks on the affected
+ACP channel and blocks new checks until the reload request settles.
 
 ### Resolving the target
 
@@ -168,12 +207,14 @@ they chose. Two top-level sessions can prompt each other back and forth with
 `sent`, bounded only by the caps.
 
 **Approval.** A follow-up that names a workspace goes through everything step
-1 requires for that workspace, including one-time approval outside `yolo`.
-The confirmation identifies the target session. The launcher compares both
-sessions' approval modes. A follow-up in the same workspace requires a
-compatible target mode that can be used as-is. In another workspace, any
-required mode change takes effect when the follow-up starts its turn. A
-mode change after admission invalidates the pending dispatch in either
+1 requires for that workspace: one-time approval in `default` and `auto-edit`,
+the classifier in `auto`, and a `yolo` waiver that deny and explicit ask rules
+still override. A required human confirmation identifies the target session. The launcher compares both
+sessions' approval modes. A follow-up in the same workspace follows the tool's
+ordinary permission flow, including the caller's current-workspace and
+classifier rules above. Cross-workspace follow-ups follow those same modes and
+any required mode change takes effect when the follow-up starts its turn. Any
+approval-mode change after admission invalidates the pending dispatch in either
 workspace.
 
 **Running the turn.** The launcher resumes the session on its workspace's
@@ -400,9 +441,16 @@ and any pending notification.
 
 - Unit: resolution by absolute path and id, refusal of unknown and untrusted
   targets and callers, the depth gate, target-bridge dispatch, caller-bridge
-  notification delivery, named-workspace confirmation despite legacy grants,
-  no confirmation while the caller stays in `yolo`, deny rules still applied,
-  loss of YOLO during resolution or before dispatch, settings reload
+  notification delivery, destination confirmation under `default` and
+  `auto-edit` even with a legacy allow rule, the current-runtime selector's
+  ordinary permission flow,
+  mandatory AUTO classification after legacy grants and replacements, live
+  permission-rule updates evaluated against cached destination identities,
+  stale automatic grants rejected rather than recorded as manual one-time approval
+  on either ACP or the unified-agent-loop Core path, no confirmation while
+  the caller stays in `yolo`, deny rules still applied, loss of YOLO during
+  resolution or before dispatch, an already-cancelled call never starting
+  resolution, cancellation while destination resolution is pending, settings reload
   invalidation on control and secondary channels, live approval reads,
   incompatible or changed modes, and target cancellation.
 - End to end: with two trusted workspaces, start a child in B from A, read B's
