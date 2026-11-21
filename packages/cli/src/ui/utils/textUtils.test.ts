@@ -20,6 +20,8 @@ import {
   sanitizeMultilineForDisplay,
   sanitizeSensitiveText,
   sanitizeTerminalLine,
+  sanitizeTerminalLineLossless,
+  sanitizeTerminalLineLosslessWithFlag,
   sliceTextByVisualHeight,
   toCodePoints,
   truncateToWidth,
@@ -455,6 +457,103 @@ describe('textUtils', () => {
 
     it('still strips ANSI sequences and the remaining control bytes', () => {
       expect(sanitizeTerminalLine('\u001b[31mred\u001b[0m\x07')).toBe('red');
+    });
+  });
+
+  describe('sanitizeTerminalLineLossless', () => {
+    // One shared table so the code points this function must mark and the
+    // cases that pin it can never drift apart (a list kept only in the test
+    // file is exactly as easy to under-cover as the hand-picked list this
+    // function used to carry internally).
+    const MARKED_CODE_POINT_CASES: Array<
+      [name: string, char: string, marker: string]
+    > = [
+      ['BEL (C0)', '\x07', '\\^G'],
+      ['BS (C0)', '\x08', '\\^H'],
+      ['DEL', '\x7f', '\\^?'],
+      ['C1 control (U+009B, CSI)', '\u009b', '\\u009B'],
+      ['bidi override (U+202E, RLO)', '\u202e', '\\u202E'],
+      ['zero-width space (U+200B)', '\u200b', '\\u200B'],
+      // Not in any hand-picked zero-width/bidi list: only covered because
+      // isInvisibleOrFormat checks the Unicode Cf / Default_Ignorable_Code_Point
+      // class instead of an enumerated set.
+      ['invisible separator (U+2063)', '\u2063', '\\u2063'],
+      // Astral (beyond the Basic Multilingual Plane): exercises the `\u{X...}`
+      // branch of hexNotation, which the 4-digit `\uXXXX` form cannot express.
+      ['astral format character (U+1D173)', '\u{1d173}', '\\u{1D173}'],
+    ];
+
+    it.each(MARKED_CODE_POINT_CASES)(
+      'marks %s as a visible, lossless stand-in instead of dropping or copying it',
+      (_name, char, marker) => {
+        expect(sanitizeTerminalLineLossless(`probe${char} *`)).toBe(
+          `probe${marker} *`,
+        );
+      },
+    );
+
+    it('does not mark an ordinary letter', () => {
+      expect(sanitizeTerminalLineLossless('probe *')).toBe('probe *');
+    });
+
+    it('does not rewrite a backslash that cannot collide with a generated marker', () => {
+      expect(sanitizeTerminalLineLossless('C:\\tools\\x.exe')).toBe(
+        'C:\\tools\\x.exe',
+      );
+      expect(sanitizeTerminalLineLossless('grep \\.ts$')).toBe('grep \\.ts$');
+    });
+
+    it('doubles a literal backslash immediately before a caret or hex run, so it cannot collide with a generated marker', () => {
+      // Three plain characters (backslash, caret, G): not a real BEL, but
+      // shaped exactly like the marker a real BEL produces.
+      expect(sanitizeTerminalLineLossless('probe\\^G')).toBe('probe\\\\^G');
+      // Six plain characters (backslash, u, 2, 0, 2, E): not a real bidi
+      // override, but shaped exactly like the marker one produces.
+      expect(sanitizeTerminalLineLossless('probe\\u202E')).toBe(
+        'probe\\\\u202E',
+      );
+    });
+
+    it('does not double a backslash before a letter or lowercase hex run that a marker never produces (R2-4)', () => {
+      // 'f' is not in caretNotation's output alphabet ('@'-'_' or '?'), so
+      // this backslash cannot be mistaken for the start of a real marker.
+      expect(sanitizeTerminalLineLossless('grep \\^foo')).toBe('grep \\^foo');
+      // hexNotation always uppercases; lowercase hex digits cannot be a
+      // real marker either.
+      expect(sanitizeTerminalLineLossless('grep \\u00e9')).toBe('grep \\u00e9');
+    });
+
+    it('distinguishes a real marked code point from literal text shaped like its own marker, even across a following digit or a second code point to mark (R2-4)', () => {
+      // A real U+2063 followed by a plain digit must not render the same
+      // as the six literal characters "⁣" followed by the same digit:
+      // the previous boundary-based guess required a non-word character
+      // after the hex run to double the backslash, so a trailing digit
+      // slipped through unguarded.
+      const real = sanitizeTerminalLineLossless(`probe⁣0${'\x07'}`);
+      const literal = sanitizeTerminalLineLossless(`probe\\u20630${'\x07'}`);
+      expect(real).not.toBe(literal);
+      expect(real).toBe('probe\\u20630\\^G');
+      expect(literal).toBe('probe\\\\u20630\\^G');
+
+      // A literal backslash immediately followed by a real BEL must not
+      // fuse with that BEL's generated marker into the same text a user
+      // who typed the three literal characters "\^G" would produce.
+      const backslashThenRealBel = sanitizeTerminalLineLossless(
+        `probe\\${'\x07'}${'\x07'}`,
+      );
+      const literalCaretGThenBel = sanitizeTerminalLineLossless(
+        `probe\\^G${'\x07'}`,
+      );
+      expect(backslashThenRealBel).not.toBe(literalCaretGThenBel);
+    });
+
+    it('sanitizeTerminalLineLossless is the text-only view of sanitizeTerminalLineLosslessWithFlag', () => {
+      const dirty = sanitizeTerminalLineLosslessWithFlag('probe\x07 *');
+      expect(dirty).toEqual({ text: 'probe\\^G *', replaced: true });
+      expect(sanitizeTerminalLineLossless('probe\x07 *')).toBe(dirty.text);
+
+      const clean = sanitizeTerminalLineLosslessWithFlag('probe *');
+      expect(clean).toEqual({ text: 'probe *', replaced: false });
     });
   });
 

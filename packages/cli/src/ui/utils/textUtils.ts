@@ -374,6 +374,207 @@ export function sanitizeTerminalLine(value: string): string {
     .replace(/[\t\r\n]+/g, ' ');
 }
 
+/**
+ * Caret-notation code for a C0/DEL control byte (0x00-0x1f, 0x7f): the
+ * standard `^X` convention (byte XOR 0x40), e.g. BEL (0x07) -> `^G`,
+ * ESC (0x1b) -> `^[`, DEL (0x7f) -> `^?`.
+ */
+function caretNotation(code: number): string {
+  return code === 0x7f ? '^?' : '^' + String.fromCharCode(code ^ 0x40);
+}
+
+/**
+ * `\uXXXX` (4 uppercase hex digits) for a code point on the Basic
+ * Multilingual Plane, or `\u{X...}` for one beyond it (astral code points,
+ * e.g. U+1D173 MUSICAL SYMBOL BEGIN BEAM, need more than 4 hex digits and
+ * have no 4-digit form).
+ */
+function hexNotation(code: number): string {
+  const hex = code.toString(16).toUpperCase();
+  return code > 0xffff ? '\\u{' + hex + '}' : '\\u' + hex.padStart(4, '0');
+}
+
+/** C1 control bytes (0x80-0x9f, e.g. U+009B, CSI as a single code point):
+ * not Default_Ignorable_Code_Point or Cf by Unicode's own classification
+ * (they are Cc, Control), so {@link isInvisibleOrFormat} does not see them
+ * and this stays a separate, explicit check. */
+function isC1Control(code: number): boolean {
+  return code >= 0x80 && code <= 0x9f;
+}
+
+// Any code point Unicode itself classifies as format (general category Cf)
+// or marks Default_Ignorable_Code_Point: bidi overrides/isolates, zero-width
+// joiners/spaces, variation selectors, soft hyphen, the tag block, and every
+// other "invisible or near-invisible" code point in the standard -- not a
+// hand-kept list of the ones a particular review happened to name. A list
+// like that is always incomplete (a prior version of this function listed
+// five zero-width code points and the bidi range by hand, and still let
+// U+2063, U+061C, U+00AD and others straight through). Checked per code
+// point without the `g` flag, since the caller already iterates one code
+// point at a time.
+const DEFAULT_IGNORABLE_OR_FORMAT_REGEX =
+  /[\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
+
+function isInvisibleOrFormat(code: number): boolean {
+  return DEFAULT_IGNORABLE_OR_FORMAT_REGEX.test(String.fromCodePoint(code));
+}
+
+// Whether sanitizeTerminalLineLosslessWithFlag will itself turn the code
+// point at codePoints[i] into a marker (so a literal backslash immediately
+// before it, in the source text, must be doubled or the backslash fuses
+// with the generated marker into something a different, clean rule could
+// also produce).
+function willBeReplaced(codePoints: string[], i: number): boolean {
+  const code = codePoints[i]?.codePointAt(0);
+  if (code === undefined) return false;
+  return (
+    (code >= 0x00 && code <= 0x1f) ||
+    code === 0x7f ||
+    isC1Control(code) ||
+    isInvisibleOrFormat(code)
+  );
+}
+
+// The exact alphabet caretNotation can produce as the character after `^`:
+// code ^ 0x40 for code in 0x00-0x1f lands on '@'-'_' (0x40-0x5f), and DEL
+// (0x7f) is the special case '?'. Deliberately narrower than "any letter"
+// -- `\^foo` in a clean rule must stay untouched, and lowercase 'f' is not
+// a shape caretNotation ever emits.
+const CARET_MARKER_SECOND_CHAR_REGEX = /^[@A-Z[\\\]^_?]$/;
+
+// Whether the literal text starting at codePoints[i] already spells out
+// something indistinguishable from a marker this function generates, even
+// though none of it is itself a code point this function would replace:
+// a caret pair using caretNotation's real output alphabet (`\^G`, not
+// `\^foo`), or an UPPERCASE `\uXXXX` / `\u{X...}` hex run (hexNotation
+// always uppercases; `\u00e9` in a clean rule must stay untouched).
+function looksLikeGeneratedMarker(codePoints: string[], i: number): boolean {
+  const first = codePoints[i];
+  if (first === undefined) return false;
+  if (first === '^') {
+    const second = codePoints[i + 1];
+    return second !== undefined && CARET_MARKER_SECOND_CHAR_REGEX.test(second);
+  }
+  if (first === 'u') {
+    const four = codePoints.slice(i + 1, i + 5).join('');
+    if (/^[0-9A-F]{4}$/.test(four)) return true;
+    if (codePoints[i + 1] === '{') {
+      let j = i + 2;
+      let hexDigits = 0;
+      while (codePoints[j] !== undefined && /^[0-9A-F]$/.test(codePoints[j])) {
+        j++;
+        hexDigits++;
+      }
+      return hexDigits > 0 && codePoints[j] === '}';
+    }
+  }
+  return false;
+}
+
+// A backslash is doubled only where leaving it alone could make clean,
+// legitimate input (a Windows path, a regex) collide with a marker this
+// function generates: immediately before a code point this function is
+// about to replace (so the generated marker that follows can't fuse with
+// an un-doubled backslash already there), or immediately before literal
+// text that already spells out this function's own marker alphabet (so a
+// real control byte's marker can't collide with a user who typed the same
+// characters as plain text). Checked structurally against what the rest of
+// this function actually does, not by guessing at surrounding word
+// boundaries -- a boundary-based guess previously let a literal `\u2063`
+// run into a following digit without doubling, while a real U+2063 in the
+// same position rendered identically (R2-4). Any other backslash -- in
+// `C:\tools\x.exe`, in `grep \.ts$`, in `grep \^foo`, in `grep \u00e9` (the
+// marker alphabet is uppercase-only, so lowercase hex and a non-marker
+// letter after `^` both fall through untouched) -- renders byte-identical,
+// so "clean input renders identically before and after this function"
+// stays true.
+function mustDoubleBackslash(
+  codePoints: string[],
+  backslashIndex: number,
+): boolean {
+  const next = backslashIndex + 1;
+  return (
+    willBeReplaced(codePoints, next) ||
+    looksLikeGeneratedMarker(codePoints, next)
+  );
+}
+
+/**
+ * Sanitizes a single-row label that stands for a *persisted* decision (an
+ * "Always allow" rule), where two different underlying values must never
+ * render identically — a human approving one grant must not be shown the
+ * same text a different, already-approved grant would show. `sanitizeTerminalLine`
+ * is wrong here: it deletes bare C0 bytes and C1 bytes, strips bidi
+ * override/isolate characters, and leaves other invisible or format code
+ * points untouched, so e.g. a rule carrying a BEL (U+0007), a bidi override
+ * (U+202E, which renders as the text "U+202E" below, not the live character
+ * itself), or a zero-width space (U+200B) can each collapse onto the same
+ * visible label as the clean rule even though they are different stored
+ * authorizations.
+ *
+ * Every C0/DEL/C1 control byte and every code point Unicode classifies as
+ * format (Cf) or Default_Ignorable_Code_Point (bidi overrides, zero-width
+ * joiners, variation selectors, the tag block, and the rest of that class,
+ * not a hand-picked subset of it) is replaced with a visible, terminal-inert
+ * stand-in (caret notation for C0/DEL, `\uXXXX` / `\u{X...}` for everything
+ * else) instead of being dropped or passed through. Every literal backslash
+ * already in the text that could otherwise be mistaken for part of a
+ * generated marker is doubled first — so a real control byte's `\^G` (or a
+ * real "U+202E" character) can never collide with a user who typed the same
+ * characters as plain text (which becomes `\\^G` / `\\u202E`, a different
+ * string) — while a backslash anywhere else (a Windows path, a regex) is
+ * left alone, so clean input with no control bytes still renders identically
+ * before and after this function. The result is a lossless, single-row,
+ * terminal-safe stand-in for the raw value: no code point in either class is
+ * silently discarded or passed through unexamined, so a different grant
+ * always reads differently.
+ */
+export function sanitizeTerminalLineLossless(value: string): string {
+  return sanitizeTerminalLineLosslessWithFlag(value).text;
+}
+
+/**
+ * Same sanitizer as {@link sanitizeTerminalLineLossless}, but also reports
+ * whether anything was replaced. A caller that renders this text into a
+ * truncating, single-line UI slot (a `RadioButtonSelect` option with
+ * `wrap="truncate"`, for instance) needs that boolean: the in-place marker
+ * this function writes can itself fall past the truncation point on a long
+ * value, which would silently recreate the exact collision this function
+ * exists to prevent. Such a caller should prefix the *whole* label with a
+ * fixed, always-visible marker when `replaced` is true, at the position
+ * truncation can never reach (the very start), in addition to the in-place
+ * marker for anyone who sees the untruncated text.
+ */
+export function sanitizeTerminalLineLosslessWithFlag(value: string): {
+  text: string;
+  replaced: boolean;
+} {
+  const codePoints = toCodePoints(value);
+  let result = '';
+  let replaced = false;
+  for (let i = 0; i < codePoints.length; i++) {
+    const char = codePoints[i];
+    const code = char.codePointAt(0);
+    if (code === undefined) continue;
+    if (char === '\\' && mustDoubleBackslash(codePoints, i)) {
+      result += '\\\\';
+      continue;
+    }
+    if ((code >= 0x00 && code <= 0x1f) || code === 0x7f) {
+      result += '\\' + caretNotation(code);
+      replaced = true;
+      continue;
+    }
+    if (isC1Control(code) || isInvisibleOrFormat(code)) {
+      result += hexNotation(code);
+      replaced = true;
+      continue;
+    }
+    result += char;
+  }
+  return { text: result, replaced };
+}
+
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)
  * and escapes all ANSI control characters found in any string values.
  *
