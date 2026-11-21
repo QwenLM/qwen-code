@@ -79,28 +79,33 @@ Every scheduled or manual release follows these steps:
 5.  Builds and publishes the packages to npm with the appropriate dist-tag.
 6.  Creates a GitHub Release for the version.
 
-### Packages awaiting their npm bootstrap publish
+### Bootstrap-gated packages
 
 npm only lets a maintainer configure trusted publishing for a package that
 already exists, and `Publish Release` authenticates with trusted publishing
 alone — it carries no npm token. A package that has never been published
 therefore cannot be released by the workflow, and attempting it fails the
-whole `publish` job, not just that package.
+whole `publish` job, not just that package. Such packages are gated on
+repository variables so a release skips them instead of failing to
+authenticate.
 
-`@qwen-code/external-context-mem0` and `@qwen-code/channel-msteams` stay out of
-the publish set until a maintainer completes their one-time public bootstrap
-publish and binds them to `release.yml` in the `production-release`
-environment. They are gated on the repository variables
-`NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED` and
-`NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED`, both defaulting to off, so a
-release skips them instead of failing to authenticate. Set a variable to
-`true` only after its bootstrap publish. Bootstrap at a version that has
-already shipped — the first release that ships with the package skipped — never
-at an upcoming one, and do not invent a second version line. Hand-publishing an
-upcoming version does not get the release refused: for a stable release the
-version step probes every published package, finds that version on npm and
-increments past it, leaving the stray version on npm for good. The push-time
-guard still keeps a partial release from being overwritten by a retry.
+`@qwen-code/external-context-mem0` is still awaiting its one-time public
+bootstrap publish. It stays out of the publish set until a maintainer
+bootstrap-publishes it and binds it to `release.yml` in the `production-release`
+environment, then sets `NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED`
+to `true` (it defaults to off). Bootstrap at a version that has already shipped
+— the first release that ships with the package skipped — never at an upcoming
+one, and do not invent a second version line. Hand-publishing an upcoming
+version does not get the release refused: for a stable release the version step
+probes every published package, finds that version on npm and increments past
+it, leaving the stray version on npm for good.
+
+`@qwen-code/channel-msteams` was bootstrap-published on 2026-11-20 and has been
+published by the release workflow since, so it is no longer awaiting a
+bootstrap. Its gate `NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED` is already
+`true`, which puts it in the publish set; the variable now serves only as an
+off switch. The push-time guard still keeps a partial release from being
+overwritten by a retry.
 
 ### Failure Handling
 
