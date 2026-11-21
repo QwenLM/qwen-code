@@ -216,6 +216,10 @@ relay, a build watcher. The program shows up in `qwen sessions ps`, and in the
 by name with `send_message`. It can message them back. It runs on Node only and
 needs nothing beyond Node itself.
 
+Peer discovery limits concurrent socket probes so scanning many registered
+sessions does not open one connection per session at once. Each distinct inbox
+is still probed once, and results keep their original directory order.
+
 ```typescript
 import { PeerEndpoint } from '@qwen-code/sdk/peer';
 

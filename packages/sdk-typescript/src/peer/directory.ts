@@ -18,6 +18,8 @@ import { probePeerSocketVerdict, type PeerSocketVerdict } from './client.js';
 import { flattenPeerLabel, peerRef } from './label.js';
 import type { SessionRecord } from './registry.js';
 
+const MAX_CONCURRENT_PROBES = 16;
+
 /** A live session that advertises an inbox. */
 export interface PeerDirectoryEntry {
   sessionId: string;
@@ -76,11 +78,20 @@ export async function reachableEntries(
   const candidates = records
     .map(toDirectoryEntry)
     .filter((entry): entry is PeerDirectoryEntry => entry !== null);
-  const verdicts = new Map(
-    await Promise.all(
-      [...new Set(candidates.map((entry) => entry.ipcPath))].map(
-        async (ipcPath) => [ipcPath, await probe(ipcPath)] as const,
-      ),
+  const paths = [...new Set(candidates.map((entry) => entry.ipcPath))];
+  const verdicts = new Map<string, PeerSocketVerdict>();
+  let nextPath = 0;
+  // A large directory must not turn local descriptor pressure into unknown
+  // verdicts for peers that would answer if probed in smaller groups.
+  await Promise.all(
+    Array.from(
+      { length: Math.min(MAX_CONCURRENT_PROBES, paths.length) },
+      async () => {
+        while (nextPath < paths.length) {
+          const ipcPath = paths[nextPath++]!;
+          verdicts.set(ipcPath, await probe(ipcPath));
+        }
+      },
     ),
   );
   const reachable = candidates.filter(
