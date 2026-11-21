@@ -2147,7 +2147,13 @@ export const ORPHAN_TOOL_USE_REPAIR_REASON =
  *       arrives.
  *   (2) Repair any remaining dangling `model[fc]` whose
  *       `user[fr]` never landed (`repairOrphanedToolUseTurns`):
- *         - SYNTHESIZE an `error` fr for ids with no matching response;
+ *         - WIDEN the search past the adjacent window and adopt the
+ *           first genuine `functionResponse` found later in history
+ *           before declaring an id unmatched (`adoptLateResponses`);
+ *         - SYNTHESIZE an `error` `functionResponse` for ids with no
+ *           `functionResponse` in the adjacent window and no genuine one
+ *           later in history (a placeholder already in the window
+ *           closes the pair);
  *         - HOIST the real fr into the immediately-adjacent user turn
  *           when it landed in a non-adjacent later turn;
  *         - DROP duplicate fr copies for the same id.
@@ -2213,7 +2219,8 @@ function isLegacyLoopSkippedResponse(part: Part | undefined): boolean {
 /**
  * Walk `history` left-to-right and close every dangling
  * tool_use ↔ tool_result pair. For each `model[functionCall]`:
- *  - SYNTHESIZE an `error` `functionResponse` for ids with no match;
+ *  - SYNTHESIZE an `error` `functionResponse` for ids with no genuine
+ *    match in the adjacent window or anywhere later in history;
  *  - HOIST a real fr from a non-adjacent later user turn into the
  *    adjacent one;
  *  - drop duplicate fr copies for the same id.
@@ -2348,15 +2355,59 @@ function planRepair(scan: ScanResult): RepairPlan {
 }
 
 /**
+ * WIDEN — for ids the adjacent-window scan left unmatched, adopt the
+ * first genuine `functionResponse` found later in history as the hoist
+ * survivor; extra genuine copies drop as duplicates. See the canonical
+ * note for why the window scan can miss them.
+ */
+function adoptLateResponses(
+  history: Content[],
+  scan: ScanResult,
+  plan: RepairPlan,
+): void {
+  for (const [id, name] of [...plan.synthesizeIds]) {
+    const locations: FrLocation[] = [];
+    for (let turnIdx = scan.scanEnd; turnIdx < history.length; turnIdx++) {
+      const parts = history[turnIdx]?.parts ?? [];
+      for (let partIdx = 0; partIdx < parts.length; partIdx++) {
+        const part = parts[partIdx]!;
+        if (part.functionResponse?.id !== id) continue;
+        if (isSynthesizedRepairPart(part)) continue;
+        locations.push({ turnIdx, partIdx, part });
+      }
+    }
+    const survivor = locations[0];
+    if (!survivor) continue;
+    plan.synthesizeIds = plan.synthesizeIds.filter(([sid]) => sid !== id);
+    plan.hoistedParts.push(survivor.part);
+    plan.removalTargets.push({
+      turnIdx: survivor.turnIdx,
+      partIdx: survivor.partIdx,
+    });
+    for (let k = 1; k < locations.length; k++) {
+      plan.removalTargets.push({
+        turnIdx: locations[k]!.turnIdx,
+        partIdx: locations[k]!.partIdx,
+      });
+      plan.droppedDuplicates.push({ callId: id, name });
+    }
+  }
+}
+
+/**
  * MUTATION — apply the plan to `history` in place. Returns the count
  * of new user turns inserted (0 or 1) so the outer loop can advance its
  * cursor.
  *
- * Order: (1) splice removal targets desc-by-desc, (2) drop empty user
- * turns after the resolved adjacent turn, (3) HEAD-insert at that user
- * turn OR splice a new user turn there. The HEAD insert is
- * load-bearing (mirrors upstream `hoistToolResults`) — see the
- * canonical note for why tail-append re-triggers the wedge.
+ * Order: (1) mark the source turns a removal will empty, (2) splice
+ * removal targets desc-by-desc, (3) drop the emptied source turns,
+ * (4) drop empty user turns after the resolved adjacent turn,
+ * (5) HEAD-insert at that user turn OR splice a new user turn there.
+ * The drop decision in (1) is taken against the unmutated history and
+ * applied only after every part-splice, so a late-hoist removal can
+ * never delete a turn through an index shifted by an earlier splice.
+ * The HEAD insert is load-bearing (mirrors upstream `hoistToolResults`)
+ * — see the canonical note for why tail-append re-triggers the wedge.
  */
 function applyRepair(
   history: Content[],
@@ -2372,7 +2423,22 @@ function applyRepair(
   }));
   const partsToInject: Part[] = [...syntheticParts, ...plan.hoistedParts];
 
-  // (1) Splice removal targets, descending so indices stay valid.
+  // (1) Decide which source turns a removal will empty, BEFORE any
+  // mutation. Only a turn whose every part is a `functionResponse` is a
+  // drop candidate — a turn that also carries the user's own text must
+  // survive as a text-only message. Reading these indices up front keeps
+  // the drop immune to the array shifts the splices below cause.
+  const dropTurnIdx = new Set<number>();
+  for (const loc of plan.removalTargets) {
+    if (loc.turnIdx < plan.scanEnd) continue;
+    const parts = history[loc.turnIdx]?.parts ?? [];
+    if (parts.length === 0) continue;
+    if (parts.every((part) => part.functionResponse !== undefined)) {
+      dropTurnIdx.add(loc.turnIdx);
+    }
+  }
+
+  // (2) Splice removal targets, descending so indices stay valid.
   const removals = [...plan.removalTargets].sort((a, b) => {
     if (a.turnIdx !== b.turnIdx) return b.turnIdx - a.turnIdx;
     return b.partIdx - a.partIdx;
@@ -2382,7 +2448,16 @@ function applyRepair(
     if (turnParts) turnParts.splice(loc.partIdx, 1);
   }
 
-  // (2) Drop now-empty user turns after the resolved adjacent turn.
+  // (3) Drop the source turns a removal emptied, still descending so the
+  // remaining indices stay valid. Runs only after every part-splice above,
+  // never interleaved with them.
+  for (const idx of [...dropTurnIdx].sort((a, b) => b - a)) {
+    if ((history[idx]?.parts?.length ?? 0) === 0) {
+      history.splice(idx, 1);
+    }
+  }
+
+  // (4) Drop now-empty user turns after the resolved adjacent turn.
   // Preserve the adjacent turn even if empty — we'll rewrite it
   // below.
   const adjacentIdx = plan.adjacentIdx;
@@ -2394,7 +2469,7 @@ function applyRepair(
 
   if (partsToInject.length === 0) return { insertedBefore: 0 };
 
-  // (3) Place new parts at the head of the adjacent user turn, OR
+  // (5) Place new parts at the head of the adjacent user turn, OR
   // insert a fresh user turn at the resolved adjacency.
   const next = history[adjacentIdx];
   if (next?.role === 'user') {
@@ -2449,6 +2524,11 @@ export function repairOrphanedToolUseTurns(
       plan.synthesizeIds = plan.synthesizeIds.filter(
         ([id]) => !preserveCallIds.has(id),
       );
+    }
+    if (plan.synthesizeIds.length > 0) {
+      // The window scan only sees the consecutive user run; fall back
+      // to the whole history before declaring the pair unanswerable.
+      adoptLateResponses(history, scan, plan);
     }
     if (plan.synthesizeIds.length === 0 && plan.removalTargets.length === 0) {
       continue;
