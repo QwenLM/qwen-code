@@ -1497,6 +1497,22 @@ describe('runAssertChannelResumableCli', () => {
     expect(runAssertChannelResumableCli('1.2.3-preview.10', 'preview')).toBe(0);
   });
 
+  it('compares core numbers numerically and ranks a stable above its prereleases', () => {
+    // The guard compares without an external dependency, so the two rules
+    // a string compare gets wrong are pinned here: 1.10.0 is ahead of
+    // 1.9.0, and a shipped stable outranks any prerelease of that version.
+    vi.mocked(execSync).mockImplementation(tagsAll('1.10.0'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.9.0', 'latest')).toBe(1);
+    vi.mocked(execSync).mockImplementation(tagsAll('1.2.3'));
+    expect(runAssertChannelResumableCli('1.2.3-preview.2', 'preview')).toBe(1);
+    vi.mocked(execSync).mockImplementation(tagsAll('1.2.3-preview.2'));
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(0);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('is 1.2.3, past 1.2.3-preview.2'),
+    );
+  });
+
   it('resumes an equal nightly but refuses a different same-day nightly', () => {
     // Same-date nightlies end in unordered short SHAs: semver cannot prove
     // which published first, so an unequal suffix refuses conservatively.

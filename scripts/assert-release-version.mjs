@@ -7,7 +7,6 @@
  */
 
 import { execSync } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { RELEASE_WORKSPACES } from './release-packages.mjs';
 
@@ -30,13 +29,11 @@ function isExpectedMissingGitHubRelease(error) {
   return message.includes('release not found') || message.includes('Not Found');
 }
 
+const RELEASE_VERSION_PATTERN =
+  /^\d+\.\d+\.\d+(?:-preview\.\d+|-nightly\.\d{8}\.[0-9a-f]+)?$/;
+
 export function assertVersionUnreleased(version) {
-  if (
-    typeof version !== 'string' ||
-    !/^\d+\.\d+\.\d+(?:-preview\.\d+|-nightly\.\d{8}\.[0-9a-f]+)?$/.test(
-      version,
-    )
-  ) {
+  if (typeof version !== 'string' || !RELEASE_VERSION_PATTERN.test(version)) {
     const error = new Error(
       'assert-unreleased requires a version in release format, e.g. --assert-unreleased=1.2.3',
     );
@@ -119,6 +116,44 @@ export function runAssertVersionCli(version) {
   return 0;
 }
 
+// Deliberately not `semver`: this guard rides the workflow-pinned checkout,
+// but a bare `require('semver')` resolves up into the release checkout's
+// `node_modules`, which the selected ref's lockfile installs — the ref would
+// then own the code that decides the resume verdict, in the first step that
+// carries a write-scoped token. Only release-format versions are compared,
+// so numeric core and prerelease fields are the whole precedence rule.
+// Returns null for anything outside that format, which the caller refuses.
+function compareReleaseVersions(left, right) {
+  if (
+    !RELEASE_VERSION_PATTERN.test(left) ||
+    !RELEASE_VERSION_PATTERN.test(right)
+  )
+    return null;
+  const [leftCore, leftPre] = left.split('-');
+  const [rightCore, rightPre] = right.split('-');
+  const leftNumbers = leftCore.split('.').map(Number);
+  const rightNumbers = rightCore.split('.').map(Number);
+  for (const [index, value] of leftNumbers.entries()) {
+    if (value !== rightNumbers[index])
+      return value < rightNumbers[index] ? -1 : 1;
+  }
+  if (!leftPre || !rightPre) {
+    if (leftPre === rightPre) return 0;
+    return leftPre ? -1 : 1;
+  }
+  const leftFields = leftPre.split('.');
+  const rightFields = rightPre.split('.');
+  for (const [index, field] of leftFields.entries()) {
+    const other = rightFields[index];
+    if (other === undefined) return 1;
+    if (field === other) continue;
+    const numeric = /^\d+$/.test(field) && /^\d+$/.test(other);
+    const ahead = numeric ? Number(field) > Number(other) : field > other;
+    return ahead ? 1 : -1;
+  }
+  return leftFields.length === rightFields.length ? 0 : -1;
+}
+
 /**
  * Resume-time guard: pnpm re-points the dist-tag of every package it
  * publishes, so any published package's channel tag ahead of the resuming
@@ -132,9 +167,7 @@ export function runAssertChannelResumableCli(version, tag) {
   if (
     typeof version !== 'string' ||
     typeof tag !== 'string' ||
-    !/^\d+\.\d+\.\d+(?:-preview\.\d+|-nightly\.\d{8}\.[0-9a-f]+)?$/.test(
-      version,
-    ) ||
+    !RELEASE_VERSION_PATTERN.test(version) ||
     !/^[a-z][a-z0-9-]*$/.test(tag)
   ) {
     console.log(
@@ -142,8 +175,6 @@ export function runAssertChannelResumableCli(version, tag) {
     );
     return 4;
   }
-  const semver = createRequire(import.meta.url)('semver');
-  const target = semver.parse(version);
   const nightly = /^(\d+\.\d+\.\d+-nightly\.\d{8})\.([0-9a-f]+)$/;
   const targetNightly = nightly.exec(version);
   for (const pkg of PUBLISHED_PACKAGES) {
@@ -161,14 +192,14 @@ export function runAssertChannelResumableCli(version, tag) {
       continue;
     }
     if (current === '') continue;
-    const parsed = semver.parse(current);
-    if (!parsed) {
+    const order = compareReleaseVersions(current, version);
+    if (order === null) {
       console.log(
         `::error::Cannot compare npm ${tag} for ${pkg} (${current}) with ${version}; refusing to resume.`,
       );
       return 1;
     }
-    if (semver.gt(parsed, target)) {
+    if (order > 0) {
       console.log(
         `::error::npm ${tag} for ${pkg} is ${current}, past ${version}. Resuming would regress the dist-tag.`,
       );

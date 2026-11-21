@@ -4190,9 +4190,10 @@ esac`,
       '${{ needs.prepare.outputs.release_sha }}',
     );
     // The resume-time channel guard must ride the same workflow-pinned
-    // script (its semver import and npm probes cannot come from the
-    // selected release ref), run before the write credential is exported,
-    // and turn its decisive exit 1 into the version_refusal marker.
+    // script (neither its comparison code nor its npm probes may come from
+    // the selected release ref), run before the write credential is
+    // exported, and turn its decisive exit 1 into the version_refusal
+    // marker.
     const resumeGuardCall =
       'node .release-workflow/scripts/assert-release-version.mjs --assert-channel-resumable --version="${RELEASE_VERSION}" --tag="${NPM_TAG}"';
     const resumeGuard = releaseStepScript.indexOf(resumeGuardCall);
@@ -4305,6 +4306,78 @@ esac`,
       );
       expect(result.status).toBe(3);
       expect(result.stdout).toContain('has already shipped');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'decides the resume verdict without the release checkout dependencies',
+    () => {
+      // The publish job installs the selected ref's lockfile into the
+      // release checkout, and a bare require('semver') from
+      // .release-workflow/scripts/ walks up into that node_modules. Plant a
+      // copy that reports every version as not-ahead: a guard loading it
+      // would resume a release whose channel already moved past it, in the
+      // first step carrying a write-scoped token. The verdict must survive
+      // the poisoning, so it can only come from the pinned script itself.
+      const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'resume-')));
+      const pinned = join(workspace, '.release-workflow');
+      mkdirSync(join(pinned, 'scripts'), { recursive: true });
+      for (const file of [
+        'assert-release-version.mjs',
+        'release-packages.mjs',
+        'workspaces.js',
+      ]) {
+        writeFileSync(
+          join(pinned, 'scripts', file),
+          readFileSync(join('scripts', file)),
+        );
+      }
+      writeFileSync(
+        join(pinned, 'package.json'),
+        JSON.stringify({ workspaces: ['packages/*'] }),
+      );
+      mkdirSync(join(pinned, 'packages/example'), { recursive: true });
+      writeFileSync(
+        join(pinned, 'packages/example/package.json'),
+        JSON.stringify({ name: '@qwen-code/example' }),
+      );
+      const poisoned = join(workspace, 'node_modules', 'semver');
+      mkdirSync(poisoned, { recursive: true });
+      writeFileSync(
+        join(poisoned, 'package.json'),
+        JSON.stringify({ name: 'semver', main: 'index.js' }),
+      );
+      writeFileSync(
+        join(poisoned, 'index.js'),
+        'module.exports = { parse: (value) => ({ value }), gt: () => false };\n',
+      );
+      const bin = join(workspace, 'bin');
+      mkdirSync(bin);
+      const runGuard = (distTag) => {
+        writeFileSync(join(bin, 'npm'), `#!/bin/sh\necho "${distTag}"\n`, {
+          mode: 0o755,
+        });
+        return spawnSync(
+          process.execPath,
+          [
+            join(pinned, 'scripts', 'assert-release-version.mjs'),
+            '--assert-channel-resumable',
+            '--version=1.2.3',
+            '--tag=latest',
+          ],
+          {
+            cwd: workspace,
+            encoding: 'utf8',
+            env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+          },
+        );
+      };
+      const ahead = runGuard('9.9.9');
+      expect(ahead.status, ahead.stderr).toBe(1);
+      expect(ahead.stdout).toContain('past 1.2.3');
+      const behind = runGuard('1.2.2');
+      expect(behind.status, behind.stderr).toBe(0);
+      rmSync(workspace, { recursive: true, force: true });
     },
   );
 
