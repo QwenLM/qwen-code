@@ -177,10 +177,13 @@ def verify_image_record(image_dir, producer, repository, release_id, runtime_pro
     }
 
 
-# --- OSS (V1 presigned URLs, stdlib only) -------------------------------------
+# --- OSS (V1 signed requests, stdlib only) -------------------------------------
 
-def oss_url(object_key, access_key, secret, method, extra_headers=None, security_token=None):
-    expires = str(int(time.time()) + 300)
+def oss_signed_request(object_key, access_key, secret, method, extra_headers=None,
+                       security_token=None):
+    """Return (url, headers) signed with the Authorization header approach.
+    Query-string presigned PUTs get SignatureDoesNotMatch on this bucket."""
+    date = email.utils.formatdate(time.time(), usegmt=True)
     signed_headers = dict(extra_headers or {})
     if security_token:
         signed_headers["x-oss-security-token"] = security_token
@@ -189,23 +192,23 @@ def oss_url(object_key, access_key, secret, method, extra_headers=None, security
         canonical_oss = "".join(
             f"{key.lower()}:{value}\n" for key, value in sorted(signed_headers.items())
         )
-    string_to_sign = f"{method}\n\n\n{expires}\n{canonical_oss}/{BUCKET}/{object_key}"
+    string_to_sign = f"{method}\n\n\n{date}\n{canonical_oss}/{BUCKET}/{object_key}"
     signature = base64.b64encode(
         hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha1).digest()
     ).decode()
-    query = urllib.parse.urlencode({
-        "OSSAccessKeyId": access_key,
-        "Expires": expires,
-        "Signature": signature,
-    })
-    return f"https://{OSS_HOST}/{urllib.parse.quote(object_key)}?{query}"
+    url = f"https://{BUCKET}.{OSS_HOST}/{urllib.parse.quote(object_key)}"
+    headers = dict(signed_headers)
+    headers["Date"] = date
+    headers["Authorization"] = f"OSS {access_key}:{signature}"
+    return url, headers
 
 
 def oss_head(object_key, access_key, secret, security_token=None):
-    headers = {"x-oss-security-token": security_token} if security_token else {}
+    extra = {"x-oss-security-token": security_token} if security_token else None
+    url, headers = oss_signed_request(object_key, access_key, secret, "HEAD",
+                                      extra_headers=extra, security_token=None)
     request = urllib.request.Request(
-        oss_url(object_key, access_key, secret, "HEAD", security_token=security_token),
-        method="HEAD", headers=headers)
+        url, method="HEAD", headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return response.status
@@ -263,11 +266,10 @@ def resolve_oss_credentials(repo, probe_key):
 
 
 def oss_put(object_key, path, access_key, secret, security_token=None):
-    headers = {"x-oss-forbid-overwrite": "true"}
-    if security_token:
-        headers["x-oss-security-token"] = security_token
-    url = oss_url(object_key, access_key, secret, "PUT", extra_headers=headers,
-                  security_token=security_token)
+    url, headers = oss_signed_request(
+        object_key, access_key, secret, "PUT",
+        extra_headers={"x-oss-forbid-overwrite": "true"},
+        security_token=security_token)
     request = urllib.request.Request(url, data=path.read_bytes(), method="PUT", headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=600) as response:
@@ -279,10 +281,11 @@ def oss_put(object_key, path, access_key, secret, security_token=None):
 
 
 def oss_verify(object_key, expected_sha, access_key, secret, security_token=None):
-    headers = {"x-oss-security-token": security_token} if security_token else {}
+    url, headers = oss_signed_request(
+        object_key, access_key, secret, "GET",
+        security_token=security_token)
     request = urllib.request.Request(
-        oss_url(object_key, access_key, secret, "GET", security_token=security_token),
-        headers=headers)
+        url, headers=headers)
     digest = hashlib.sha256()
     try:
         with urllib.request.urlopen(request, timeout=600) as response:
