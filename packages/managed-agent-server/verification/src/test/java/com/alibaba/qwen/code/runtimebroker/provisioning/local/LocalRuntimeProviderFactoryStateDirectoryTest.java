@@ -424,18 +424,56 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
     @Test
     void durableDirectoryOwnedByTheServiceAccountPassesPreflight() throws Exception {
         // R4-1: ownership is judged against the configured service account, so
-        // a canonical 0700 directory owned by that account passes regardless of
-        // who runs the check. Unconditional: the service account is this
-        // process's own account, which always resolves.
+        // a canonical 0700 directory owned by that account passes. Needs no
+        // chown (the directory and the service account are both this process),
+        // but it runs only where this account has a resolvable name: on a
+        // bare-uid host lookupPrincipalByName cannot resolve the numeric uid.
         Path state = Files.createDirectory(directory.resolve("service-owned"));
         Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwx------"));
+        String serviceUser = System.getProperty("user.name");
+        try {
+            state.getFileSystem().getUserPrincipalLookupService()
+                    .lookupPrincipalByName(serviceUser);
+        } catch (IOException | RuntimeException unresolvable) {
+            assumeTrue(false, "current account has no resolvable name (bare uid)");
+        }
         var settings = durableSettings(state);
-        settings.setServiceUser(System.getProperty("user.name"));
+        settings.setServiceUser(serviceUser);
         assertThat(new LocalRuntimeProviderFactory().preflight(settings))
                 .filteredOn(check -> check.name().equals("broker-state"))
                 .singleElement()
                 .satisfies(check -> assertThat(check.status())
                         .isEqualTo(RuntimeProviderFactory.Status.PASS));
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    void durableUnsetServiceUserForeignOwnedDirectoryWarnsPreflight() throws Exception {
+        // F13: with no service account configured the Broker runs as its
+        // launcher, which a checker that does not own the directory cannot be
+        // assumed to be, so ownership warns (type/mode/canonicality still
+        // fail). Requires privilege to chown to a foreign principal; skips
+        // where denied. The matching-owner case passes (see the relative-path
+        // and service-account PASS tests, which leave serviceUser blank/set).
+        Path state = Files.createDirectory(directory.resolve("unset-service-foreign"));
+        Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwx------"));
+        UserPrincipal foreign = state.getFileSystem().getUserPrincipalLookupService()
+                .lookupPrincipalByName("nobody");
+        assumeTrue(!foreign.equals(RuntimeStateFiles.processOwner()), "checker is not nobody");
+        try {
+            Files.setOwner(state, foreign);
+        } catch (IOException | UnsupportedOperationException denied) {
+            assumeTrue(false, "chown to a foreign principal requires privilege");
+        }
+        assumeTrue(!Files.getOwner(state).equals(RuntimeStateFiles.processOwner()),
+                "directory owner differs from the checker");
+        assertThat(new LocalRuntimeProviderFactory().preflight(durableSettings(state)))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.WARN);
+                    assertThat(check.detail()).contains("not the checking account");
+                });
     }
 
     @Test

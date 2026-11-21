@@ -189,10 +189,25 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                     }
                     // Judge ownership against the account the Broker runs as,
                     // not the checker: root --check is recommended, so the owner
-                    // operand is the configured service account (the launching
-                    // account when none is set). The store enforces the same
-                    // ownership as its own process at startup, so a directory
-                    // the Broker cannot own must not pass here.
+                    // operand is the configured service account. The store
+                    // enforces the same ownership as its own process at startup.
+                    // With no service account configured the Broker runs as its
+                    // launcher, which a checker that does not own the directory
+                    // (root --check of a bare deployment) cannot be assumed to
+                    // be: ownership is then unjudgeable, so it warns instead of
+                    // failing, while type, mode and canonicality still fail.
+                    if (StringUtils.isBlank(serviceUser)) {
+                        UserPrincipal owner = Files.getOwner(absolute);
+                        if (!owner.equals(RuntimeStateFiles.processOwner())) {
+                            RuntimeStateFiles.validate(absolute, true, owner);
+                            return new Check(name, Status.WARN,
+                                    path + " is owned by " + owner.getName()
+                                            + ", not the checking account",
+                                    "set QWEN_MANAGED_AGENT_SERVICE_USER to the account that"
+                                            + " launches the Broker, or run --check as that"
+                                            + " account");
+                        }
+                    }
                     RuntimeStateFiles.validate(absolute, true, expectedOwner(serviceUser));
                 } catch (UserPrincipalNotFoundException unknown) {
                     return new Check(name, Status.WARN,
