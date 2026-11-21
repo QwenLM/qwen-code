@@ -36,10 +36,10 @@ import { createGitWorkspaceScenario } from './utils/gitScenario';
 
 const COMPOSER_TEXTAREA = 'textarea[data-web-shell-composer-editor]';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
-const TEST_ACCESSORY_TOP = 437.5;
+const TEST_KEYBOARD_TOP = 437.5;
 
 async function installTestSoftwareKeyboard(page: Page): Promise<void> {
-  await page.addInitScript((accessoryTop) => {
+  await page.addInitScript((keyboardTop) => {
     let open = false;
     const listeners = new Map<string, Set<EventListener>>();
     const emit = (type: string) => {
@@ -51,7 +51,7 @@ async function installTestSoftwareKeyboard(page: Page): Promise<void> {
       configurable: true,
       value: {
         get height() {
-          return open ? accessoryTop : window.innerHeight;
+          return open ? keyboardTop : window.innerHeight;
         },
         get width() {
           return window.innerWidth;
@@ -95,7 +95,7 @@ async function installTestSoftwareKeyboard(page: Page): Promise<void> {
         keyboard.dataset.testSoftwareKeyboard = '';
         Object.assign(keyboard.style, {
           position: 'fixed',
-          top: `${accessoryTop}px`,
+          top: `${keyboardTop}px`,
           right: '0',
           bottom: '0',
           left: '0',
@@ -124,7 +124,7 @@ async function installTestSoftwareKeyboard(page: Page): Promise<void> {
       },
       true,
     );
-  }, TEST_ACCESSORY_TOP);
+  }, TEST_KEYBOARD_TOP);
 }
 
 async function setTestSoftwareKeyboard(
@@ -154,7 +154,7 @@ async function expectUncoveredStableSend(
     path: screenshotPath,
     contentType: 'image/png',
   });
-  expect(box!.y + box!.height).toBeLessThanOrEqual(TEST_ACCESSORY_TOP);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
   const center = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
   expect(
     await page.evaluate(({ x, y }) => {
@@ -807,7 +807,7 @@ test('keeps the custom-footer mobile welcome group inside the pane above a softw
   await setTestSoftwareKeyboard(page, true);
 
   const viewportHeight = page.viewportSize()!.height;
-  const expectedInset = `${viewportHeight - TEST_ACCESSORY_TOP}px`;
+  const expectedInset = `${viewportHeight - TEST_KEYBOARD_TOP}px`;
   await expect
     .poll(() =>
       page
@@ -842,8 +842,8 @@ test('keeps the custom-footer mobile welcome group inside the pane above a softw
   expect(layout.headerBottom).toBeLessThanOrEqual(layout.welcomeFooterTop);
   expect(layout.welcomeFooterTop).toBeLessThanOrEqual(layout.composerTop);
   expect(layout.composerBottom).toBeLessThanOrEqual(layout.paneBottom);
-  expect(layout.composerBottom).toBeLessThanOrEqual(TEST_ACCESSORY_TOP);
-  expect(layout.sendBottom).toBeLessThanOrEqual(TEST_ACCESSORY_TOP);
+  expect(layout.composerBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+  expect(layout.sendBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
 
   await expectUncoveredStableSend(page, testInfo, 'custom-footer-welcome');
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
