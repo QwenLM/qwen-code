@@ -4024,42 +4024,73 @@ esac`,
     );
   });
 
-  it('isolates the standalone runtime worker from inherited session stamps', () => {
-    const source = readFileSync('scripts/test-standalone-runtimes.mjs', 'utf8');
-    // A self-hosted runner operated from a qwen session inherits its env
-    // stamps: CLI_VERSION and QWEN_CODE_RELAUNCH_ARGS answer --version for the
-    // fixture through the production wrapper, and NODE_OPTIONS/BUN_OPTIONS
-    // inject preloads. The worker must drop them before any probe runs; the
-    // setup slice ends at the updater module import, ahead of the first probe.
-    const start = source.indexOf('async function worker(');
-    const end = source.indexOf('const modulePath = path.join(', start);
-    expect(start, 'worker entry point not found').toBeGreaterThanOrEqual(0);
-    expect(end, 'setup slice must end at the updater import').toBeGreaterThan(
-      start,
+  const keys = (list) => [...list.matchAll(/'([A-Z_]+)'/g)].map((m) => m[1]);
+  const stampKeys = (file) => {
+    const list = readFileSync(file, 'utf8').match(
+      /const SESSION_STAMP_ENV = \[([\s\S]*?)\];/,
     );
-    const setup = source.slice(start, end);
-    expect(setup).toMatch(
-      /for \(const key of SESSION_STAMP_ENV\) delete process\.env\[key\];/,
-    );
-    // One list feeds every environment the script builds — the worker's own
-    // and the one the parent hands the spawn — so neither can drift apart.
-    expect(source).toMatch(
-      /const SESSION_STAMP_ENV = \[\s*'NODE_OPTIONS',\s*'BUN_OPTIONS',\s*'CLI_VERSION',\s*'QWEN_CODE_RELAUNCH_ARGS',?\s*\];/,
-    );
-    expect(
-      source.match(
-        /for \(const key of SESSION_STAMP_ENV\) delete (?:process\.env|env)\[key\];/g,
-      ),
-    ).toHaveLength(2);
-  });
+    expect(list, `SESSION_STAMP_ENV list not found in ${file}`).not.toBeNull();
+    return keys(list[1]);
+  };
+
+  it.skipIf(process.platform === 'win32')(
+    'isolates the standalone runtime suite from inherited session stamps',
+    () => {
+      // The --ci hop spawns the driver, whose identity probes run before any
+      // worker exists, so a worker-level scrub cannot protect them. Stub the
+      // pinned runtimes and observe the env the child actually receives.
+      const stamps = stampKeys('scripts/test-standalone-runtimes.mjs');
+      const dir = mkdtempSync(join(tmpdir(), 'standalone-stamps-'));
+      try {
+        const probe = join(dir, 'child-env');
+        const preload = join(dir, 'preload.cjs');
+        const stub = join(dir, 'pinned-runtime');
+        writeFileSync(preload, '');
+        writeFileSync(stub, '#!/bin/sh\nenv > "$STAMP_PROBE_OUT"\n');
+        chmodSync(stub, 0o755);
+        const env = {
+          ...process.env,
+          PINNED_NODE: stub,
+          PINNED_BUN: stub,
+          STAMP_PROBE_OUT: probe,
+          NODE_OPTIONS: `--require ${preload}`,
+          BUN_OPTIONS: `--preload ${preload}`,
+          CLI_VERSION: '9.9.9',
+          QWEN_CODE_RELAUNCH_ARGS: '["--version"]',
+        };
+        // The lane exports a host-wide archive cache; this probe downloads
+        // nothing and must not sweep it.
+        delete env.QWEN_STANDALONE_RUNTIME_CACHE;
+        const result = spawnSync(
+          process.execPath,
+          ['scripts/test-standalone-runtimes.mjs', '--ci'],
+          { env, encoding: 'utf8' },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(existsSync(probe), 'the pinned runtime stub never ran').toBe(
+          true,
+        );
+        expect(readFileSync(probe, 'utf8')).not.toMatch(
+          new RegExp(`^(${stamps.join('|')})=`, 'm'),
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('isolates the scripts unit suite from inherited session stamps', () => {
-    // test:scripts runs this suite in the same job, right after the standalone
-    // regression, so the same stamps reach it: cli-entry.test.js imports the
-    // production wrapper, whose --version fast path would load a scripts/cli.js
-    // that does not exist.
-    expect(readFileSync('scripts/tests/test-setup.ts', 'utf8')).toMatch(
-      /for \(const key of \[\s*'NODE_OPTIONS',\s*'BUN_OPTIONS',\s*'CLI_VERSION',\s*'QWEN_CODE_RELAUNCH_ARGS',?\s*\]\)\s*delete process\.env\[key\];/,
+    // test:scripts runs this suite right after the standalone regression in
+    // the same job, so both entry points must drop the same keys:
+    // cli-entry.test.js imports the production wrapper, whose --version fast
+    // path would load a scripts/cli.js that does not exist. Comparing the
+    // lists, rather than pinning each one's text, reds when either drifts.
+    const setup = readFileSync('scripts/tests/test-setup.ts', 'utf8').match(
+      /for \(const key of \[([\s\S]*?)\]\)\s*delete process\.env\[key\];/,
+    );
+    expect(setup, 'test-setup.ts must delete its stamp list').not.toBeNull();
+    expect(keys(setup[1]), 'scripts unit suite stamp list').toEqual(
+      stampKeys('scripts/test-standalone-runtimes.mjs'),
     );
   });
 
