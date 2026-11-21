@@ -514,13 +514,18 @@ describe('WebFetchTool', () => {
           mockGenerateContent.mockRejectedValue(new Error('API error'));
         else mockGenerateContent.mockResolvedValue({ text: summary });
         const result = await run('https://example.com/large');
-        expect(result.persistedOutputFiles).toHaveLength(1);
-        const originalArtifact = result.persistedOutputFiles![0]!;
+        const originalArtifact = (result.llmContent as string).match(
+          /Full extracted text saved to: (.*)\. Page in/,
+        )?.[1];
+        expect(originalArtifact).toBeDefined();
         if (processingFailure) {
+          expect(result.persistedOutputFiles).toEqual([originalArtifact]);
           expect(isPersistedOutputStub(result.llmContent as string)).toBe(true);
+        } else {
+          expect(result.persistedOutputFiles).toBeUndefined();
         }
         const [finalized] = await finalizeToolResponses(
-          { ...mockConfig, getToolOutputBatchBudget: () => 500 } as Config,
+          { ...mockConfig, getToolOutputBatchBudget: () => 2_000 } as Config,
           [
             {
               callId: 'web',
@@ -535,17 +540,23 @@ describe('WebFetchTool', () => {
           ],
         );
         const artifact = finalized.persistedOutputFiles![0]!;
-        expect(artifact).toBe(originalArtifact);
         const saved = fs.readFileSync(artifact, 'utf8');
-        expect(saved).toBe(body);
-        if (!processingFailure)
-          expect(result.llmContent).toContain(summary.trim());
         const output = finalized.responseParts[0].functionResponse!.response![
           'output'
         ] as string;
+        if (processingFailure) {
+          expect(artifact).toBe(originalArtifact);
+          expect(saved).toBe(body);
+        } else {
+          expect(artifact).not.toBe(originalArtifact);
+          expect(saved).toBe(result.llmContent);
+          expect(output).toContain(
+            `Full extracted text saved to: ${originalArtifact}. Page in`,
+          );
+        }
         expect(isPersistedOutputStub(output)).toBe(true);
         expect(output).toContain(artifact);
-        expect(output.length).toBeLessThanOrEqual(500);
+        expect(output.length).toBeLessThanOrEqual(2_000);
       },
     );
 
@@ -1268,6 +1279,7 @@ describe('WebFetchTool', () => {
         body: Buffer.from('# Docs\n' + 'word '.repeat(30_000)),
         finalUrl: 'https://docs.python.org/3/library/json.md',
       });
+      mockGenerateContent.mockResolvedValue({ text: 'summary '.repeat(1_000) });
 
       const result = await run(
         'https://docs.python.org/3/library/json.md',
@@ -1276,7 +1288,29 @@ describe('WebFetchTool', () => {
       );
 
       expect(mockGenerateContent).toHaveBeenCalled();
-      expect(result.llmContent).toContain('Summary');
+      expect(result.llmContent).toContain('summary');
+      expect(result.persistedOutputFiles).toBeUndefined();
+
+      const [finalized] = await finalizeToolResponses(
+        {
+          ...configWithBrokenSpill,
+          getToolOutputBatchBudget: () => 500,
+        } as Config,
+        [
+          {
+            callId: 'web',
+            toolName: 'web_fetch',
+            responseParts: convertToFunctionResponse(
+              'web_fetch',
+              'web',
+              result.llmContent,
+              result,
+            ),
+          },
+        ],
+      );
+      const artifact = finalized.persistedOutputFiles![0]!;
+      expect(fs.readFileSync(artifact, 'utf8')).toBe(result.llmContent);
     });
   });
 
