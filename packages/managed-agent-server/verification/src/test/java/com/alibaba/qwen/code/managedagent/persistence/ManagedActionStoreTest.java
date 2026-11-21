@@ -20,6 +20,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -495,6 +496,32 @@ class ManagedActionStoreTest {
                 });
         assertThat(stringColumn("state", operationId)).isEqualTo("FAILED");
         assertThat(stringColumn("decision_receipt_id", operationId)).isNull();
+    }
+
+    // The external Shell profile runs commands in the owner's runtime
+    // exactly like the public Shell family, so a Workspace operator who is
+    // not the recorded owner must not answer its Actions either (review
+    // round 6, R6-1).
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-shell/1", "hosted-workspace-external-shell/1"})
+    void onlyTheRecordedOwnerMayAnswerAShellProfilesActions(String profile) {
+        bindWorkspace();
+        grantRole("operator", "OPERATOR");
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                profile, TENANT, SESSION);
+        project("requested", null, 1, 1000);
+
+        assertThatThrownBy(() -> admitAs("operator", "idem", "digest", response("allow"), 10))
+                .isInstanceOf(ManagedAgentException.class)
+                .satisfies(error -> {
+                    var refusal = (ManagedAgentException) error;
+                    assertThat(refusal.getStatus()).isEqualTo(403);
+                    assertThat(refusal.getCode()).isEqualTo("action_forbidden");
+                    assertThat(refusal.getMessage()).contains("recorded owner");
+                });
+
+        assertThat(admitAs("owner", "idem", "digest", response("allow"), 10).operation().state())
+                .isEqualTo("PENDING");
     }
 
     private OperationAdmission admit(String key, String digest, JsonNode body, long now) {
