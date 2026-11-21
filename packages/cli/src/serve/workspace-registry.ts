@@ -139,6 +139,7 @@ export interface WorkspaceSessionOwnerIndex {
   remove(sessionId: string, workspaceCwd?: string): void;
   getWorkspaceCwds(sessionId: string): readonly string[];
   markWorkspaceUnavailable(workspaceCwd: string): void;
+  markWorkspaceAvailable(workspaceCwd: string): void;
   isWorkspaceUnavailable(workspaceCwd: string): boolean;
   removeWorkspace(workspaceCwd: string): void;
   handleBridgeSessionLifecycle(event: WorkspaceSessionLifecycleEvent): void;
@@ -225,6 +226,9 @@ export function createWorkspaceSessionOwnerIndex(): WorkspaceSessionOwnerIndex {
     getWorkspaceCwds: (sessionId) => [...(bySessionId.get(sessionId) ?? [])],
     markWorkspaceUnavailable: (workspaceCwd) => {
       unavailableWorkspaces.add(workspaceCwd);
+    },
+    markWorkspaceAvailable: (workspaceCwd) => {
+      unavailableWorkspaces.delete(workspaceCwd);
     },
     isWorkspaceUnavailable: (workspaceCwd) =>
       unavailableWorkspaces.has(workspaceCwd),
@@ -337,20 +341,24 @@ export function createWorkspaceRegistry(
     sessionId: string,
   ): WorkspaceSessionOwnerResolution => {
     const matches: WorkspaceRuntime[] = [];
+    let unavailable = false;
     for (const entry of entries) {
-      const runtime = activeRuntime(entry);
+      const runtime = entry.current?.runtime;
       if (!runtime) continue;
       try {
         runtime.bridge.getSessionSummary(sessionId);
-        matches.push(runtime);
+        sessionOwnerIndex?.register(sessionId, runtime.workspaceCwd);
+        if (entry.state !== 'active') {
+          unavailable = true;
+        } else {
+          matches.push(runtime);
+        }
       } catch (err) {
         if (err instanceof SessionNotFoundError) continue;
         throw err;
       }
     }
-    for (const match of matches) {
-      sessionOwnerIndex?.register(sessionId, match.workspaceCwd);
-    }
+    if (unavailable) return { kind: 'unavailable' };
     if (matches.length === 0) return { kind: 'not_found' };
     if (matches.length === 1) {
       return { kind: 'found', runtime: matches[0]! };
@@ -407,9 +415,7 @@ export function createWorkspaceRegistry(
         entry.configuredRevision = configuredRevision;
         entry.state = 'transitioning';
         entry.current?.guard.close();
-        if (!entry.internal) {
-          sessionOwnerIndex?.removeWorkspace(entry.workspaceCwd);
-        }
+        sessionOwnerIndex?.markWorkspaceUnavailable(entry.workspaceCwd);
         delete entry.applyError;
         return true;
       }
@@ -417,9 +423,7 @@ export function createWorkspaceRegistry(
       entry.configuredRevision = configuredRevision;
       entry.state = 'transitioning';
       entry.current.guard.close();
-      if (!entry.internal) {
-        sessionOwnerIndex?.removeWorkspace(entry.workspaceCwd);
-      }
+      sessionOwnerIndex?.markWorkspaceUnavailable(entry.workspaceCwd);
       delete entry.applyError;
       return true;
     },
@@ -450,6 +454,10 @@ export function createWorkspaceRegistry(
         runtime,
         guard: runtime.generationGuard ?? createWorkspaceGenerationGuard(),
       };
+      sessionOwnerIndex?.markWorkspaceAvailable(entry.workspaceCwd);
+      if (!entry.internal) {
+        sessionOwnerIndex?.removeWorkspace(entry.workspaceCwd);
+      }
       entry.lastGenerationId = generationId;
       entry.current = generation;
       entry.configuredRevision = policyRevision;
@@ -468,6 +476,10 @@ export function createWorkspaceRegistry(
     },
     blockReplacement: (entry, error) => {
       entry.current?.guard.close();
+      if (!entry.current && !entry.internal) {
+        sessionOwnerIndex?.markWorkspaceAvailable(entry.workspaceCwd);
+        sessionOwnerIndex?.removeWorkspace(entry.workspaceCwd);
+      }
       entry.state = 'blocked';
       entry.appliedRevision = null;
       entry.applyError = error;
@@ -531,23 +543,21 @@ export function createWorkspaceRegistry(
       const entry = entryForRuntime(runtime);
       if (!entry || runtime.primary || entry.state !== 'active') return false;
       entry.state = 'draining';
+      sessionOwnerIndex?.markWorkspaceUnavailable(runtime.workspaceCwd);
       return true;
     },
     cancelDrain: (runtime) => {
       const entry = entryForRuntime(runtime);
       if (entry?.state === 'draining' && entry.current?.guard.closed !== true) {
         entry.state = 'active';
+        sessionOwnerIndex?.markWorkspaceAvailable(runtime.workspaceCwd);
       }
     },
     commitDrain: (runtime) => {
       const entry = entryForRuntime(runtime);
       if (!entry || runtime.primary || entry.state !== 'draining') return;
       entry.current?.guard.close();
-      if (entry.internal) {
-        sessionOwnerIndex?.markWorkspaceUnavailable(runtime.workspaceCwd);
-      } else {
-        sessionOwnerIndex?.removeWorkspace(runtime.workspaceCwd);
-      }
+      sessionOwnerIndex?.markWorkspaceUnavailable(runtime.workspaceCwd);
     },
     completeDrain: (runtime) => {
       const entry = entryForRuntime(runtime);
@@ -559,6 +569,7 @@ export function createWorkspaceRegistry(
       const index = entries.indexOf(entry);
       if (index >= 0) entries.splice(index, 1);
       if (!entry.internal) {
+        sessionOwnerIndex?.markWorkspaceAvailable(runtime.workspaceCwd);
         sessionOwnerIndex?.removeWorkspace(runtime.workspaceCwd);
       }
     },
@@ -566,20 +577,20 @@ export function createWorkspaceRegistry(
       const indexedCwds = sessionOwnerIndex?.getWorkspaceCwds(sessionId) ?? [];
       if (indexedCwds.length > 0) {
         const matches: WorkspaceRuntime[] = [];
-        let internalUnavailable = false;
+        let unavailable = false;
         for (const workspaceCwd of indexedCwds) {
           const entry = byCwd.get(workspaceCwd);
           const runtime = entry?.current?.runtime;
           if (!entry || !runtime || entry.state === 'removed') {
             if (sessionOwnerIndex?.isWorkspaceUnavailable(workspaceCwd)) {
-              internalUnavailable = true;
+              unavailable = true;
               continue;
             }
             sessionOwnerIndex?.remove(sessionId, workspaceCwd);
             continue;
           }
           if (entry.state !== 'active') {
-            internalUnavailable ||= entry.internal;
+            unavailable = true;
             continue;
           }
           try {
@@ -593,7 +604,7 @@ export function createWorkspaceRegistry(
             throw err;
           }
         }
-        if (internalUnavailable) return { kind: 'unavailable' };
+        if (unavailable) return { kind: 'unavailable' };
         if (matches.length === 1) {
           return { kind: 'found', runtime: matches[0]! };
         }

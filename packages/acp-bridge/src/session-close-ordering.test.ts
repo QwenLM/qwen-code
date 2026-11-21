@@ -15,6 +15,7 @@ import {
   WS_A,
 } from './internal/testUtils.js';
 import { BridgeChannelClosedError } from './status.js';
+import { WorkspaceDrainingError } from './bridgeErrors.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -49,6 +50,41 @@ async function switchModels(
 }
 
 describe('session calls racing the transport', () => {
+  it.each(['shutdown', 'killAllSync'] as const)(
+    'does not report a session stopped while %s is still terminating its child',
+    async (operation) => {
+      const exitAllowed = deferred<void>();
+      const handle = makeChannel();
+      const kill = handle.channel.kill;
+      handle.channel.kill = async () => {
+        await exitAllowed.promise;
+        await kill();
+      };
+      handle.channel.killSync = () => {
+        handle.killed = true;
+      };
+      let exited = false;
+      void handle.channel.exited.then(() => {
+        exited = true;
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(bridge.getSessionSummary(sessionId).sessionId).toBe(sessionId);
+      const shutdown = operation === 'shutdown' ? bridge.shutdown() : undefined;
+      if (operation === 'killAllSync') bridge.killAllSync();
+      try {
+        expect(bridge.sessionCount).toBe(0);
+        expect(exited).toBe(false);
+        await expect(bridge.closeSession(sessionId)).rejects.toBeInstanceOf(
+          WorkspaceDrainingError,
+        );
+      } finally {
+        exitAllowed.resolve();
+        await (shutdown ?? bridge.shutdown());
+      }
+    },
+  );
+
   it('fail when the transport fails before the reply arrives', async () => {
     const transportFailure = deferred<unknown>();
     const requested = deferred<void>();
