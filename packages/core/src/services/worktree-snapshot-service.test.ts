@@ -16,6 +16,8 @@ import {
   captureWorktreeSnapshot,
   readWorktreeSnapshotMeta,
   restoreWorktreeSnapshot,
+  selectWorktreeSnapshot,
+  verifyRestoredWorktreeSnapshot,
   buildWorktreeSnapshotMeta,
   WORKTREE_SNAPSHOT_SCHEMA_VERSION,
 } from './worktree-snapshot-service.js';
@@ -251,6 +253,246 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       fs.access(path.join(restored, WORKTREE_SESSION_FILE)),
     ).rejects.toThrow();
     await expect(fs.access(metaPath)).resolves.toBeUndefined();
+  });
+
+  it.skipIf(process.platform === 'win32').each([
+    { committedMode: 0o644, capturedMode: 0o755 },
+    { committedMode: 0o755, capturedMode: 0o644 },
+  ])(
+    'restores the captured mode when the committed file is $committedMode and the captured file is $capturedMode',
+    async ({ committedMode, capturedMode }) => {
+      const tracked = path.join(worktree, 'committed.txt');
+      await fs.chmod(tracked, committedMode);
+      git(
+        worktree,
+        'update-index',
+        `--chmod=${committedMode === 0o755 ? '+x' : '-x'}`,
+        'committed.txt',
+      );
+      git(
+        worktree,
+        'commit',
+        '--allow-empty',
+        '-qm',
+        'initial mode',
+        '--no-verify',
+      );
+
+      await fs.writeFile(tracked, 'captured mode\n');
+      await fs.chmod(tracked, capturedMode);
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+
+      const restored = await restoreOverHead(
+        snapshotPath,
+        metaPath,
+        'restored-mode',
+      );
+      expect(
+        (await fs.stat(path.join(restored, 'committed.txt'))).mode & 0o777,
+      ).toBe(capturedMode);
+    },
+  );
+
+  it('selects the newest pair by header time, mtime, then full path', async () => {
+    const writePair = async (
+      stem: string,
+      createdAt: number,
+      overrides: Record<string, unknown> = {},
+    ) => {
+      await fs.mkdir(snapshotDir, { recursive: true });
+      const snapshotPath = path.join(
+        snapshotDir,
+        `session-snap.${stem}.worktree-snapshot.tar.gz`,
+      );
+      const metaPath = path.join(
+        snapshotDir,
+        `session-snap.${stem}.worktree-snapshot.json`,
+      );
+      await fs.writeFile(snapshotPath, 'selector-test-bytes');
+      await fs.writeFile(
+        metaPath,
+        JSON.stringify({
+          ...meta(),
+          version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+          baseCommit: 'a'.repeat(40),
+          headCommit: 'b'.repeat(40),
+          createdAt,
+          ...overrides,
+        }),
+      );
+      return { snapshotPath, metaPath };
+    };
+    const older = await writePair('older', 1);
+    const newer = await writePair('newer', 2);
+    await fs.utimes(newer.snapshotPath, 1, 1);
+    await fs.utimes(older.snapshotPath, 2, 2);
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).resolves.toMatchObject({ snapshotPath: newer.snapshotPath });
+
+    const tiedA = await writePair('a', 3);
+    const tiedB = await writePair('b', 3);
+    await fs.utimes(tiedA.snapshotPath, 1, 1);
+    await fs.utimes(tiedB.snapshotPath, 2, 2);
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).resolves.toMatchObject({ snapshotPath: tiedB.snapshotPath });
+    await fs.utimes(tiedB.snapshotPath, 1, 1);
+    const tied = await selectWorktreeSnapshot({
+      directory: snapshotDir,
+      sessionId: 'session-snap',
+      slug: 'snap',
+    });
+    expect(tied?.snapshotPath).toBe(tiedA.snapshotPath);
+    expect(typeof tied?.mtimeNs).toBe('bigint');
+
+    await writePair('bad', 4, {
+      version: WORKTREE_SNAPSHOT_SCHEMA_VERSION + 1,
+    });
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).rejects.toThrow(/Unsupported worktree snapshot version/);
+  });
+
+  it('selects only the exact archive key and rejects missing or foreign pairs', async () => {
+    for (let index = 0; index < 2; index++) {
+      await fs.writeFile(path.join(worktree, 'committed.txt'), `edit-${index}`);
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: { ...meta(), dirty: { tracked: 1, untracked: 1, deleted: [] } },
+      });
+    }
+    const files = (await fs.readdir(snapshotDir))
+      .filter((file) => file.endsWith('.tar.gz'))
+      .sort();
+    expect(files).toHaveLength(2);
+    const first = files[0]!;
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey: first,
+      }),
+    ).resolves.toMatchObject({
+      snapshotPath: path.join(snapshotDir, first!),
+    });
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey: '../escape.worktree-snapshot.tar.gz',
+      }),
+    ).rejects.toThrow(/archive key/);
+    await fs.writeFile(
+      path.join(snapshotDir, 'session-snap.alone.worktree-snapshot.json'),
+      '{}',
+    );
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).rejects.toThrow(/ENOENT/);
+    await fs.rm(
+      path.join(snapshotDir, 'session-snap.alone.worktree-snapshot.json'),
+    );
+    const wrongSlug = path.join(
+      snapshotDir,
+      'session-snap.wrong.worktree-snapshot',
+    );
+    await fs.copyFile(path.join(snapshotDir, first), `${wrongSlug}.tar.gz`);
+    const header = JSON.parse(
+      await fs.readFile(
+        path.join(snapshotDir, first.replace(/\.tar\.gz$/, '.json')),
+        'utf8',
+      ),
+    );
+    header.slug = 'another-slug';
+    await fs.writeFile(`${wrongSlug}.json`, JSON.stringify(header));
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).rejects.toThrow(/identity mismatch/);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects linked snapshot pair inputs',
+    async () => {
+      await fs.mkdir(snapshotDir, { recursive: true });
+      const archive = path.join(
+        snapshotDir,
+        'session-snap.linked.worktree-snapshot.tar.gz',
+      );
+      const metaPath = path.join(
+        snapshotDir,
+        'session-snap.linked.worktree-snapshot.json',
+      );
+      const outside = path.join(root, 'outside.json');
+      await fs.writeFile(archive, 'bytes');
+      await fs.writeFile(outside, '{}');
+      await fs.symlink(outside, metaPath);
+      await expect(
+        selectWorktreeSnapshot({
+          directory: snapshotDir,
+          sessionId: 'session-snap',
+          slug: 'snap',
+        }),
+      ).rejects.toThrow(/owned regular file/);
+    },
+  );
+
+  it('verifies restored content and accepts an intentional detached branch', async () => {
+    await fs.writeFile(path.join(worktree, 'committed.txt'), 'draft\n');
+    await fs.writeFile(path.join(worktree, 'untracked.txt'), 'new.txt\n');
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: meta(),
+    });
+    const header = await readWorktreeSnapshotMeta(metaPath);
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-verification',
+    );
+    expect(
+      await verifyRestoredWorktreeSnapshot({
+        worktreePath: restored,
+        snapshotPath,
+        meta: { ...header, branch: '' },
+      }),
+    ).toBe(true);
+    await fs.writeFile(path.join(restored, 'committed.txt'), 'late-edit\n');
+    expect(
+      await verifyRestoredWorktreeSnapshot({
+        worktreePath: restored,
+        snapshotPath,
+        meta: { ...header, branch: '' },
+      }),
+    ).toBe(false);
   });
 
   it('captures and restores hardlinked file pairs correctly', async () => {

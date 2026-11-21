@@ -4429,6 +4429,11 @@ export const ZH: Messages = {
   'sessionsOverview.popupBlocked':
     '弹出窗口被拦截。请允许本站弹窗，以便在新标签页中打开会话。',
   'sessionsOverview.refresh': '刷新',
+  'sessionsOverview.restoreWorktree': '恢复快照',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    '当前工作区没有可用的 Worktree 快照',
+  'sessionsOverview.restoringWorktree': '恢复中…',
+  'sessionsOverview.restoreWorktreeFailed': '恢复快照失败',
   'sessionsOverview.selectAll': '全选',
   'sessionsOverview.titleColumn': '标题',
   'sessionsOverview.actions': '操作',

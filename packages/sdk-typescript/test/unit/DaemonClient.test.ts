@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { DaemonSessionClient } from '../../src/daemon/DaemonSessionClient.js';
 import {
   DaemonClient,
   DaemonHttpError,
@@ -147,6 +148,114 @@ function recordingFetch(
   ) as unknown as typeof globalThis.fetch;
   return { fetch: fetchImpl, calls };
 }
+
+describe('worktree snapshot restore', () => {
+  it('uses the snapshot-restore route and workspace-scoped restore fields', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 'id/with/slash',
+        workspaceCwd: '/work/secondary',
+        attached: false,
+        callbackReplay: [],
+        state: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client.restoreWorktreeSession(
+      'id/with/slash',
+      {
+        workspaceCwd: '/work/secondary',
+        historyPageSize: 41,
+        approvalMode: 'yolo',
+        sourceType: 'fixture',
+        sourceId: 'fixture-1',
+      },
+      'local-client',
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      'http://daemon/session/id%2Fwith%2Fslash/worktree-restore',
+    );
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('local-client');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+      approvalMode: 'yolo',
+      historyPageSize: 41,
+      sourceType: 'fixture',
+      sourceId: 'fixture-1',
+    });
+  });
+
+  it('keeps legacy empty-body normalization for a primary-owned restore', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/primary',
+        attached: false,
+        restoreState: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client.restoreWorktreeSession('s-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({});
+  });
+
+  it('makes scope explicit through a workspace client but refuses id-only selectors', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/secondary',
+        attached: false,
+        state: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client
+      .workspaceByCwd('/work/secondary')
+      .restoreWorktreeSession('s-1', { historyPageSize: 77 }, 'client-1');
+    expect(calls[0]!.url).toBe('http://daemon/session/s-1/worktree-restore');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+      historyPageSize: 77,
+    });
+
+    await expect(
+      client.workspaceByCwd('secondary-id').restoreWorktreeSession('s-1'),
+    ).rejects.toThrow('registered workspace cwd');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('returns a replay-ready session client after ordinary restore', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/secondary',
+        state: {},
+        lastEventId: 27,
+        eventEpoch: 'epoch-restore',
+        worktree: {
+          slug: 'recovered',
+          path: '/work/secondary/.qwen/worktrees/recovered',
+          branch: '',
+        },
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const restored = await DaemonSessionClient.restoreWorktree(client, 's-1', {
+      workspaceCwd: '/work/secondary',
+    });
+    expect(restored).toBeInstanceOf(DaemonSessionClient);
+    expect(restored.workspaceCwd).toBe('/work/secondary');
+    expect(restored.worktree?.branch).toBe('');
+    expect(calls[0]!.url).toBe('http://daemon/session/s-1/worktree-restore');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+    });
+  });
+});
 
 describe('DaemonClient', () => {
   describe('MCP App request deadlines', () => {

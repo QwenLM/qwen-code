@@ -415,6 +415,36 @@ describe('writeWorktreeSession', () => {
     await expectStrictInvalid();
   });
 
+  it('round-trips the snapshot removal binding', async () => {
+    const session: WorktreeSession = {
+      ...sample,
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    };
+    await writeWorktreeSession(filePath, session);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session,
+    });
+  });
+
+  it('rejects malformed snapshot removal bindings', async () => {
+    const invalid = [
+      null,
+      {},
+      { archiveKey: 42 },
+      { archiveKey: '../escape.worktree-snapshot.tar.gz' },
+      { archiveKey: 'nested/archive.worktree-snapshot.tar.gz' },
+      { archiveKey: 'archive.worktree-snapshot.tar.gz', path: '/tmp/a' },
+      { archiveKey: 'archive.json' },
+    ];
+    for (const worktreeRemoved of invalid) {
+      await writeJson({ ...sample, worktreeRemoved });
+      await expectStrictInvalid();
+    }
+  });
+
   it('round-trips the carriedEntries overlay field (R9-6)', async () => {
     const withOverlay: WorktreeSession = {
       ...sample,
@@ -469,7 +499,13 @@ describe('writeWorktreeSession', () => {
       hash: 'a'.repeat(40),
       executable: false,
     }));
-    const big: WorktreeSession = { ...sample, carriedEntries: entries };
+    const big: WorktreeSession = {
+      ...sample,
+      carriedEntries: entries,
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    };
     await writeWorktreeSession(filePath, big);
     const read = await strictRead();
     expect(read.state).toBe('valid');
@@ -478,6 +514,7 @@ describe('writeWorktreeSession', () => {
       // but the binding itself stays readable rather than orphaned.
       expect(read.session.carriedEntries).toBeUndefined();
       expect(read.session.slug).toBe(sample.slug);
+      expect(read.session.worktreeRemoved).toEqual(big.worktreeRemoved);
     }
   });
 
@@ -1352,6 +1389,25 @@ describe('restoreWorktreeContext', () => {
     expect(result.contextMessage).toBeNull();
     // Sidecar should be deleted.
     expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('preserves a retained snapshot binding when its directory is absent', async () => {
+    const session: WorktreeSession = {
+      ...sample,
+      originalCwd: tmpDir,
+      worktreePath: path.join(tmpDir, '.qwen', 'worktrees', 'removed'),
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    };
+    await writeWorktreeSession(filePath, session);
+
+    const result = await restoreWorktreeContext(filePath);
+    expect(result).toEqual({ contextMessage: null, session: null });
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session,
+    });
   });
 
   it('treats a regular file at worktreePath as not-a-worktree', async () => {

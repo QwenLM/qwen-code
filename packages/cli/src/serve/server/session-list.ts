@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { realpathSync } from 'node:fs';
+import path from 'node:path';
+import { selectWorktreeSnapshot } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
   addDaemonRequestAttribute,
   SESSION_PR_LIST_LIMIT,
@@ -476,7 +479,7 @@ function encodeMetadataSessionCursor(
  * files so the ⑂ badge survives daemon restarts. Shared by all three
  * listing paths (default, organized, metadata-filtered).
  */
-async function enrichWorktreeSidecars(
+export async function enrichWorktreeSidecars(
   bySessionId: Map<string, BridgeSessionSummary>,
   sessionService: SessionService,
   archiveState: SessionArchiveState = 'active',
@@ -484,13 +487,12 @@ async function enrichWorktreeSidecars(
 ): Promise<void> {
   for (const [sessionId, summary] of bySessionId) {
     signal?.throwIfAborted();
-    if (summary.worktree) continue;
+    const sidecarPath = sessionService.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      archiveState,
+    );
     let sidecar: Awaited<ReturnType<typeof readWorktreeSession>>;
     try {
-      const sidecarPath = sessionService.getWorktreeSessionPathForArchiveState(
-        sessionId,
-        archiveState,
-      );
       sidecar = signal
         ? await readWorktreeSession(sidecarPath, { signal })
         : await readWorktreeSession(sidecarPath);
@@ -498,22 +500,45 @@ async function enrichWorktreeSidecars(
       signal?.throwIfAborted();
       sidecar = null;
     }
+    if (!sidecar) continue;
+    const removed = sidecar.worktreeRemoved;
     if (
-      sidecar &&
-      (await readWorktreeSessionMarker(sidecar.worktreePath)) === sessionId
+      !removed &&
+      (await readWorktreeSessionMarker(sidecar.worktreePath)) !== sessionId
     ) {
-      bySessionId.set(sessionId, {
-        ...summary,
-        worktree: {
-          slug: sidecar.slug,
-          path: sidecar.worktreePath,
-          branch: sidecar.worktreeBranch,
-          baseCommit:
-            sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
-          baseBranch: sidecar.originalBranch || undefined,
-        },
-      });
+      continue;
     }
+    let canRestore = false;
+    if (removed && sidecar.workspaceCwd) {
+      try {
+        if (
+          realpathSync(sidecar.workspaceCwd) ===
+          realpathSync(sessionService.getProjectRoot())
+        ) {
+          canRestore =
+            (await selectWorktreeSnapshot({
+              directory: path.dirname(sidecarPath),
+              sessionId,
+              slug: sidecar.slug,
+              archiveKey: removed.archiveKey,
+            })) !== undefined;
+        }
+      } catch {
+        // An unavailable pair is shown as such, never as a restore capability.
+      }
+    }
+    bySessionId.set(sessionId, {
+      ...summary,
+      worktree: {
+        slug: sidecar.slug,
+        path: sidecar.worktreePath,
+        branch: sidecar.worktreeBranch,
+        baseCommit:
+          sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+        baseBranch: sidecar.originalBranch || undefined,
+        ...(removed ? { worktreeRemoved: removed, canRestore } : {}),
+      },
+    });
   }
 }
 
@@ -699,6 +724,25 @@ function mergeLiveSessionSummary(
     hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     isArchived: false,
   };
+  if (live.worktree) {
+    // Snapshot lifecycle changes are owned by the sidecar, not a live
+    // summary that may predate its removal or restoration.
+    const worktree = { ...live.worktree };
+    delete worktree.worktreeRemoved;
+    delete worktree.canRestore;
+    const removed = existing.worktree?.worktreeRemoved;
+    if (removed) {
+      merged.worktree = {
+        ...worktree,
+        worktreeRemoved: removed,
+        ...(existing.worktree?.canRestore !== undefined
+          ? { canRestore: existing.worktree.canRestore }
+          : {}),
+      };
+    } else {
+      merged.worktree = worktree;
+    }
+  }
   // The live entry only knows PR bindings from this daemon lifetime while the
   // sidecar-enriched persisted summary holds the full history. The sidecar is
   // the append-only binding-time record (last = latest — the order the badge
@@ -868,7 +912,6 @@ function readPersistedSidecars(
       const readSignal = controller.signal;
       readSignal.throwIfAborted();
       const rows = new Map([[session.sessionId, { ...session }]]);
-      await enrichWorktreeSidecars(rows, service, archiveState, readSignal);
       await enrichPrSidecars(rows, service, archiveState, readSignal);
       await enrichArtifactSummaries(rows, service, archiveState, readSignal);
       readSignal.throwIfAborted();
@@ -893,7 +936,19 @@ function readPersistedSidecars(
     persistedSidecarLoads.set(session, started);
     load = started;
   }
-  return waitForSessionListLoad(load, signal);
+  return waitForSessionListLoad(load, signal).then(async (cached) => {
+    const rows = new Map([[session.sessionId, clonePersistedSummary(cached)]]);
+    const summary = rows.get(session.sessionId)!;
+    if (summary.worktree) {
+      delete summary.worktree.worktreeRemoved;
+      delete summary.worktree.canRestore;
+    }
+    // Removal and restoration can change while cached metadata is read;
+    // verify these fields against the current sidecar for every catalog view.
+    await enrichWorktreeSidecars(rows, service, archiveState, signal);
+    signal?.throwIfAborted();
+    return rows.get(session.sessionId)!;
+  });
 }
 
 async function enrichCatalogPage(

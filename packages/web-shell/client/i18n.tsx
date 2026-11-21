@@ -4683,6 +4683,11 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sessionsOverview.popupBlocked':
     'Pop-up blocked. Allow pop-ups for this site to open sessions in new tabs.',
   'sessionsOverview.refresh': 'Refresh',
+  'sessionsOverview.restoreWorktree': 'Restore snapshot',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    'Snapshot is unavailable for this workspace',
+  'sessionsOverview.restoringWorktree': 'Restoring…',
+  'sessionsOverview.restoreWorktreeFailed': 'Snapshot restore failed',
   'sessionsOverview.selectAll': 'Select all',
   'sessionsOverview.titleColumn': 'Title',
   'sessionsOverview.actions': 'Actions',

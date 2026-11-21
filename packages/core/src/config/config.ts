@@ -1093,6 +1093,8 @@ export interface WorktreeSettings {
    * pre-existing destinations are silently skipped.
    */
   symlinkDirectories?: readonly string[];
+  /** Retained eligible checkout cap per uniquely owned management root; 0 disables sweeping. */
+  maxRetained?: number;
 }
 
 /** Settings shared across agents and multi-agent collaboration features. */
