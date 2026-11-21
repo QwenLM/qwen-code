@@ -405,25 +405,41 @@ describe('sidebar brand', () => {
     expectOriginalLightMark();
   });
 
-  it('keeps the original light mark after a logo decode failure', () => {
-    renderSidebar({ logoDataUri: 'data:image/svg+xml,NOT-SVG' }, undefined, {
-      theme: 'light',
-    });
-
-    const image = brandLogoImage();
-    expect(image).not.toBeNull();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      act(() => {
-        image!.dispatchEvent(new Event('error'));
+  // Decode fallback shares the entire failure contract across themes.
+  // Only the expected artwork differs.
+  it.each([
+    { theme: 'dark', expectMark: expectCompactDarkMark },
+    { theme: 'light', expectMark: expectOriginalLightMark },
+  ] as const)(
+    'falls back after a logo decode failure in $theme',
+    ({ theme, expectMark }) => {
+      renderSidebar({ logoDataUri: 'data:image/svg+xml,NOT-SVG' }, undefined, {
+        theme,
       });
 
-      expectOriginalLightMark();
-      expect(warn).toHaveBeenCalledTimes(1);
-    } finally {
-      warn.mockRestore();
-    }
-  });
+      const image = brandLogoImage();
+      expect(image).not.toBeNull();
+      expect(builtInMark()).toBeNull();
+
+      // The warning is the only signal for a daemon-approved but broken logo.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        act(() => {
+          image!.dispatchEvent(new Event('error'));
+        });
+
+        expect(brandLogoImage()).toBeNull();
+        expectMark();
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenNthCalledWith(
+          1,
+          '[web-shell] brand logo could not be rendered; falling back to the built-in mark',
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
 
   it('renders the configured name', () => {
     renderSidebar({ name: 'QiuQiu Code' });
@@ -478,34 +494,6 @@ describe('sidebar brand', () => {
       expect(container.querySelectorAll('script')).toHaveLength(0);
       expect(container.innerHTML).not.toContain('alert(1)</script>');
       expect(warn).not.toHaveBeenCalled();
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it('falls back to the built-in mark when the logo image fails to decode', () => {
-    renderSidebar({ logoDataUri: 'data:image/svg+xml,NOT-SVG' });
-
-    const img = brandLogoImage();
-    expect(img).not.toBeNull();
-    expect(builtInMark()).toBeNull();
-
-    // A data URI the browser cannot decode (malformed XML, an xmlns-less root)
-    // fires `error` — the mark must come back rather than leaving a blank box.
-    // And the swap must be audible: the daemon validates only the root tag,
-    // so this is the one logo failure with no other signal channel.
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      act(() => {
-        img!.dispatchEvent(new Event('error'));
-      });
-
-      expect(brandLogoImage()).toBeNull();
-      expectCompactDarkMark();
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining('brand logo could not be rendered'),
-      );
     } finally {
       warn.mockRestore();
     }
