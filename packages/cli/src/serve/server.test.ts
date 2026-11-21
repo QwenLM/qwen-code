@@ -24432,7 +24432,8 @@ describe('createServeApp', () => {
           }),
         ]);
         expect(listSessionsSpy).toHaveBeenCalledTimes(1);
-        expect(readSidecar).toHaveBeenCalledTimes(1);
+        // Metadata stays cached; each later view revalidates the sidecar.
+        expect(readSidecar).toHaveBeenCalledTimes(2);
       } finally {
         listSessionsSpy.mockRestore();
         mockWt.readSidecar = undefined;

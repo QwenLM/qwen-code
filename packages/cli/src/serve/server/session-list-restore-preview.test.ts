@@ -203,4 +203,33 @@ describe('worktree restoration preview metadata', () => {
       expect(reopened.worktree?.branch).toBe('current-live-branch');
     },
   );
+
+  it('removes a cached projection when its current marker has a new owner', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const session = await makeRetainedSession(target, {
+      slug: 'owned-before-reclaim',
+      dirty: true,
+    });
+    const bridge = {
+      listWorkspaceSessions: () => [],
+    } as unknown as AcpSessionBridge;
+    const load = async () => {
+      const result = await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+        listWorkspaceSessionsForResponse(
+          bridge,
+          target.repo,
+          { size: 100 },
+          { runtimeBaseDir: target.runtime.sessionRuntimeBaseDir },
+        ),
+      );
+      return result.sessions.find((row) => row.sessionId === session.id)!;
+    };
+    expect((await load()).worktree?.slug).toBe('owned-before-reclaim');
+
+    fs.writeFileSync(
+      path.join(session.worktreePath, '.qwen-session'),
+      'another-session',
+    );
+    expect((await load()).worktree).toBeUndefined();
+  });
 });
