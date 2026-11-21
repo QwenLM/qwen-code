@@ -210,7 +210,9 @@ function AutomaticTriggerMessage({
   const summary = content.replace(/\s+/g, ' ').trim();
   // These runtime echoes contain only a label, not the full modelText.
   const hasDetails =
-    content !== 'Autonomous loop tick' && !content.startsWith('Loop tick — ');
+    !/^(Autonomous loop tick|Loop tick — tasks from (project|home) loop\.md|Loop tick — loop\.md temporarily unavailable)$/.test(
+      content.trim(),
+    );
   return (
     <div
       className={styles.scheduledTaskRun}
@@ -411,7 +413,10 @@ export const UserMessage = memo(function UserMessage({
     [content],
   );
   const automaticTriggerSource =
-    !scheduledTaskRun && (source === 'cron' || source === 'loop')
+    !scheduledTaskRun &&
+    // A host-provided renderer owns the complete body, including any redaction.
+    !renderUserMessageContent &&
+    (source === 'cron' || source === 'loop')
       ? source
       : undefined;
   const automaticInstructionsExpanded = automaticTriggerSource

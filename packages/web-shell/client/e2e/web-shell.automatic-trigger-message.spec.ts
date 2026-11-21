@@ -224,6 +224,25 @@ test('cron and loop prompts use compact expandable cards @smoke', async ({
   expect(pageErrors).toEqual([]);
 });
 
+test('preserves an unknown tasks-from source label @smoke', async ({
+  page,
+}, testInfo) => {
+  const content = 'Loop tick — tasks from an unrecognized future source';
+  await openFixture(page, String(testInfo.project.use.baseURL), [
+    sourcedUserTextEvent(content, 'cron', 1),
+    assistantTextEvent('Cron turn completed.', { id: 2 }),
+    turnCompleteEvent('loop-prefix-instruction', { id: 3 }),
+  ]);
+  const card = page.locator(
+    '[data-web-shell-automatic-trigger-message][data-source="cron"]',
+  );
+  await expect(card).toBeVisible();
+  await card.getByRole('button', { name: 'Show more', exact: true }).click();
+  await expect(
+    card.locator('[data-web-shell-automatic-trigger-instructions]'),
+  ).toHaveText(content);
+});
+
 test('canceling automatic-input edit restores the compact card @smoke', async ({
   page,
 }, testInfo) => {

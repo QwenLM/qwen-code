@@ -47,11 +47,11 @@ The summary is the original display text with whitespace collapsed, truncated vi
 
 Interactive and readonly views default to the compact summary. The existing Show more/Collapse disclosure reveals the complete display text through the existing user-content rendering pipeline, including annotations, links, slash highlighting, attachment references, and host customization. Even a short ordinary prompt keeps this control so a narrow layout never removes access to its full text.
 
-Only the runtime's short echo forms—`Autonomous loop tick` and labels beginning with `Loop tick — `—render as static compact cards with no disclosure. Those labels intentionally contain no full `modelText`; other short automatic prompts do not inherit this suppression.
+Only the runtime's complete short echo forms—`Autonomous loop tick`, `Loop tick — tasks from project loop.md`, `Loop tick — tasks from home loop.md`, and `Loop tick — loop.md temporarily unavailable`—render as static compact cards with no disclosure. Those labels intentionally contain no full `modelText`. A real prompt or unrecognized future source label that merely shares the `Loop tick — ` prefix keeps its disclosure in interactive views and its complete text in exported documents; the matcher fails open.
 
 Document mode follows `TranscriptDocumentExpandedContext`, whose default is expanded, and exposes no interactive disclosure. Detailed content is included by default; a short echo needs no duplicate body.
 
-Rich content is constructed lazily. A closed interactive disclosure does not invoke the host renderer or default parser. Expansion constructs it once, and default-expanded document output still constructs it. Ordinary and per-run content keeps its existing evaluation behavior.
+Rich content is constructed lazily on the built-in renderer path. A closed interactive disclosure does not invoke the default parser. Expansion constructs it once, and default-expanded document output still constructs it. When a host supplies `renderUserMessageContent`, the automatic-card variant is bypassed so the host's previous complete-content replacement or redaction contract remains authoritative; the raw summary is never reintroduced around that output.
 
 The existing bubble and selectors remain in place. A dedicated selector and `data-source` attribute identify the new presentation for browser tests. Images, files, retry affordances, and the inline editor stay in their current outer layout; editing continues to use the complete original text.
 
@@ -59,7 +59,7 @@ The generic 400 px overflow disclosure is disabled for automatic-trigger cards s
 
 ### Styling and localization
 
-Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-task visual tokens, icon treatment, metadata wrapping, and semantic colors. Add English labels under `userMessage.automatic.*` in `i18n.tsx` and Simplified Chinese labels under the same keys in `i18n-zh-cn.ts`; other locales retain their normal fallback behavior.
+Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-task visual tokens, icon treatment, metadata wrapping, and semantic colors. Add English `userMessage.automatic.title` in `i18n.tsx`, Simplified Chinese in `i18n-zh-cn.ts`, Traditional Chinese in `i18n-zh-tw.ts`, and Russian in `i18n-ru-part5.ts`, so every supported catalog displays a localized eyebrow.
 
 ## Key design decisions
 
@@ -79,7 +79,8 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 - `packages/web-shell/client/components/MessageItem.tsx` — pass source.
 - `packages/web-shell/client/components/messages/UserMessage.tsx` — select the compact variant and lazily construct details.
 - `packages/web-shell/client/components/messages/UserMessage.module.css` — scoped card and disclosure styles.
-- `packages/web-shell/client/i18n.tsx` and `packages/web-shell/client/i18n-zh-cn.ts` — English and Simplified Chinese labels.
+- `packages/web-shell/client/i18n.tsx`, `i18n-zh-cn.ts`, `i18n-zh-tw.ts`, and `i18n-ru-part5.ts` — labels for every supported catalog.
+- `packages/web-shell/client/i18n.test.ts` — localized catalog coverage.
 - `packages/web-shell/client/components/MessageItem.dom.test.tsx` — prop forwarding and source-update coverage.
 - `packages/web-shell/client/components/messages/UserMessage.test.tsx` — component behavior and regression coverage.
 - `packages/web-templates/src/export-html/build.mjs` — measured renderer budget for the added presentation and existing static-export behavior.
@@ -87,9 +88,9 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 
 ## Validation plan
 
-- Unit-test both `cron` and `loop`, ordinary/unknown sources, per-run priority, disclosure, short-echo suppression, lazy host rendering, attachments, editing, source-triggered reset, empty content, and document expansion.
+- Unit-test both `cron` and `loop`, ordinary/unknown sources, per-run priority, disclosure, short-echo suppression, lazy host rendering, attachments, editing, source-triggered reset, empty content, document expansion, and preservation of real `Loop tick — ` prefixed instructions in interactive and document views. Verify that the automatic-trigger title is localized for every supported catalog.
 - Verify that changing only the source on an existing `MessageItem` updates the forwarded props, and that an ordinary expanded message becomes compact when its source becomes automatic.
-- Run the focused Web Shell tests, package typecheck, lint and format checks, then the repository build and typecheck required by the contributor workflow. Rebuild `dist/transcript.js` and WebTemplates and verify the measured renderer is 2,151,571 bytes, below a 2,152,000-byte ceiling that preserves a readable 429-byte local margin rather than accepting a 6-byte margin.
+- Run the focused Web Shell tests, package typecheck, lint and format checks, then the repository build and typecheck required by the contributor workflow. Rebuild `dist/transcript.js` and WebTemplates and verify the measured renderer is 2,151,654 bytes, below a 2,152,000-byte ceiling with a 346-byte local margin. Regression cases cover unrecognized `tasks from` source labels and exclusive host replacement/redaction rendering.
 - Run a Playwright scenario with the same cron, loop, ordinary, and per-run fixtures against the baseline and changed build. Capture compact and expanded states at desktop and mobile widths and assert no horizontal document overflow.
 - Keep model-facing JSONL content and replay source assertions as regression evidence; no production changes are expected in those layers.
 
@@ -98,7 +99,7 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 - Automatic inputs occupy a compact card by default instead of showing their full prompt in an ordinary bubble.
 - Where detailed display text exists, one user action reveals it with the existing rich rendering intact; short echoes do not get a redundant or misleading disclosure.
 - Ordinary user messages and structured per-run scheduled-task messages retain their current presentation.
-- Closed disclosures do not invoke host rendering or the default rich-content parser.
+- Built-in closed disclosures defer the default rich-content parser, while host-provided replacement or redaction rendering retains its complete ownership of the message body.
 - Attachments, editing, retry, source metadata, existing timestamp semantics, turn boundaries, and tool-call navigation continue to work.
 - Static document output includes detailed display text by default and has no interactive control.
 - Focused tests and browser checks pass at desktop and mobile widths without horizontal overflow.

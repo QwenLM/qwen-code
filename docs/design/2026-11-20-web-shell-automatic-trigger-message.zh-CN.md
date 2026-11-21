@@ -47,11 +47,11 @@ Web Shell 目前把所有 user 角色记录都交给普通 `UserMessage` 气泡�
 
 interactive 和 readonly 视图默认显示紧凑摘要。既有“显示更多/收起”控件通过现有用户内容渲染管线显示完整展示文本，保留 annotations、链接、slash 高亮、附件引用与宿主定制。普通短 prompt 也保留该控件，避免窄屏布局使用户无法查看全文。
 
-仅运行时的两类短 echo——`Autonomous loop tick` 和以 `Loop tick — ` 开头的标签——显示为无展开控件的静态紧凑卡片。这些标签有意不包含完整 `modelText`；其他短自动 prompt 不继承这种抑制。
+仅运行时的完整短 echo——`Autonomous loop tick`、`Loop tick — tasks from project loop.md`、`Loop tick — tasks from home loop.md` 和 `Loop tick — loop.md temporarily unavailable`——显示为无展开控件的静态紧凑卡片。这些标签有意不包含完整 `modelText`。仅以 `Loop tick — ` 开头的真实 prompt，或带未知未来 source label 的真实指令，仍在 interactive 视图保留展开控件，并在 document 导出中保留完整正文；匹配器按 fail-open 处理。
 
 document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且不显示交互式展开控件。详细内容默认包含；短 echo 不需要重复正文。
 
-富文本按需构造。关闭的 interactive 展开区不会调用宿主 renderer 或默认 parser；展开时构造一次，默认展开的 document 输出也仍构造完整内容。普通消息与 per-run 内容保持既有求值行为。
+内置 renderer 路径中的富文本按需构造。关闭的 interactive 展开区不会调用默认 parser；展开时构造一次，默认展开的 document 输出也仍构造完整内容。宿主提供 `renderUserMessageContent` 时，绕过自动卡片变体，继续由宿主原有的完整内容替换或脱敏契约控制显示，不在其输出周围重新夹带原始摘要。
 
 现有气泡和 selectors 保持不变。新增专用 selector 与 `data-source` 属性供浏览器测试识别。图片、文件、重试入口和内联编辑器继续留在当前外层布局中；编辑器仍使用完整原文。
 
@@ -59,7 +59,7 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 
 ### 样式与本地化
 
-在 `UserMessage.module.css` 中添加作用域样式，复用现有定时任务卡的视觉 tokens、图标处理、元信息换行与语义颜色。在 `i18n.tsx` 的 `userMessage.automatic.*` 下添加英文文案，并在 `i18n-zh-cn.ts` 的同名键下添加简体中文文案；其他 locale 保持正常 fallback。
+在 `UserMessage.module.css` 中添加作用域样式，复用现有定时任务卡的视觉 tokens、图标处理、元信息换行与语义颜色。在 `i18n.tsx` 添加英文 `userMessage.automatic.title`，并分别在 `i18n-zh-cn.ts`、`i18n-zh-tw.ts` 与 `i18n-ru-part5.ts` 添加简体中文、繁体中文和俄文标签，使所有支持的 catalog 都显示本地化标题。
 
 ## 关键设计决策
 
@@ -79,7 +79,8 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 - `packages/web-shell/client/components/MessageItem.tsx` — 传递 source。
 - `packages/web-shell/client/components/messages/UserMessage.tsx` — 选择紧凑变体并按需构造详情。
 - `packages/web-shell/client/components/messages/UserMessage.module.css` — 作用域卡片与展开样式。
-- `packages/web-shell/client/i18n.tsx` 与 `packages/web-shell/client/i18n-zh-cn.ts` — 英文与简体中文文案。
+- `packages/web-shell/client/i18n.tsx`、`i18n-zh-cn.ts`、`i18n-zh-tw.ts` 与 `i18n-ru-part5.ts` — 所有支持 catalog 的标签。
+- `packages/web-shell/client/i18n.test.ts` — 本地目录覆盖。
 - `packages/web-shell/client/components/MessageItem.dom.test.tsx` — props 传递和 source 更新覆盖。
 - `packages/web-shell/client/components/messages/UserMessage.test.tsx` — 组件行为与回归覆盖。
 - `packages/web-templates/src/export-html/build.mjs` — 针对新增展示及既有静态导出行为，实测并调整 renderer 体积上限。
@@ -87,9 +88,9 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 
 ## 验证计划
 
-- 单测覆盖 `cron` 与 `loop`、普通/未知 source、per-run 优先级、展开、短 echo 控件抑制、宿主渲染惰性、附件、编辑、source 触发的重置、空内容与 document 展开。
+- 单测覆盖 `cron` 与 `loop`、普通/未知 source、per-run 优先级、展开、短 echo 控件抑制、宿主渲染惰性、附件、编辑、source 触发的重置、空内容、document 展开，以及以 `Loop tick — ` 开头的真实指令在 interactive 和 document 视图中的保留。验证自动触发标题在所有支持的 catalog 中均已本地化。
 - 验证现有 `MessageItem` 仅改变 source 时会更新转发的 props，并验证普通长消息在 source 变为自动来源后恢复紧凑状态。
-- 运行聚焦 Web Shell 测试、包级 typecheck、lint 和 format 检查，再运行贡献流程要求的仓库 build 与 typecheck。重建 `dist/transcript.js` 与 web-templates，确认实测 renderer 为 2,151,571 字节，低于调整后的 2,152,000 字节上限，保留可读的 429 字节本地余量，而非接受仅 6 字节余量。
+- 运行聚焦 Web Shell 测试、包级 typecheck、lint 和 format 检查，再运行贡献流程要求的仓库 build 与 typecheck。重建 `dist/transcript.js` 与 web-templates，确认实测 renderer 为 2,151,654 字节，低于调整后的 2,152,000 字节上限，本地余量为 346 字节。回归用例覆盖未知 `tasks from` source label 与宿主的独立替换或脱敏渲染。
 - 用同一组 cron、loop、普通和 per-run fixture 对 baseline 与修改后构建运行 Playwright 场景，在桌面与移动宽度截取紧凑和展开状态，并断言 document 无横向溢出。
 - 保留面向模型的 JSONL 内容与回放 source 断言作为回归证据；这些层不需要生产改动。
 
@@ -98,7 +99,7 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 - 自动输入默认占用紧凑卡片，不再以普通气泡展示完整 prompt。
 - 存在详细展示文本时，用户一次操作即可按既有富内容渲染查看；短 echo 不出现冗余或误导性的展开控件。
 - 普通用户消息与结构化 per-run 定时任务消息保持当前展示。
-- 关闭的展开区不调用宿主渲染或默认富文本 parser。
+- 内置路径在关闭展开区时延后默认富文本 parser，而宿主提供的替换或脱敏渲染保持对消息正文的完全控制。
 - 附件、编辑、重试、source 元数据、既有时间戳语义、turn 边界和 tool-call 导航继续工作。
 - 静态 document 默认包含详细展示文本，且没有交互控件。
 - 聚焦测试与浏览器检查通过，桌面和移动宽度均无横向溢出。

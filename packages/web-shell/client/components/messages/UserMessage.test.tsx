@@ -643,32 +643,36 @@ describe('UserMessage', () => {
     },
   );
 
-  it('keeps host rendering available behind the automatic disclosure', () => {
-    const content = 'holder\nwith details';
-    const renderUserMessageContent = vi.fn(() => (
-      <span>custom full automatic content</span>
-    ));
-    const container = render(
-      <I18nProvider language="en">
-        <WebShellCustomizationProvider value={{ renderUserMessageContent }}>
-          <UserMessage content={content} source="cron" />
-        </WebShellCustomizationProvider>
-      </I18nProvider>,
-    );
-    expect(container.textContent).not.toContain(
-      'custom full automatic content',
-    );
-    expect(renderUserMessageContent).not.toHaveBeenCalled();
-    const toggle = container.querySelector<HTMLButtonElement>(
-      '[data-web-shell-automatic-trigger-message] button',
-    );
-    act(() => toggle?.click());
-    expect(container.textContent).toContain('custom full automatic content');
-    expect(renderUserMessageContent).toHaveBeenCalledTimes(1);
-    expect(renderUserMessageContent).toHaveBeenCalledWith(
-      expect.objectContaining({ content }),
-    );
-  });
+  it.each([false, true])(
+    'lets a host override the complete automatic-input body (document=%s)',
+    (documentMode) => {
+      const content = 'RAW-SECRET\nwith details';
+      const renderUserMessageContent = vi.fn(() => (
+        <span>custom full automatic content</span>
+      ));
+      const container = render(
+        <TranscriptRenderModeProvider
+          value={documentMode ? 'document' : 'interactive'}
+        >
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={{ renderUserMessageContent }}>
+              <UserMessage content={content} source="cron" />
+            </WebShellCustomizationProvider>
+          </I18nProvider>
+        </TranscriptRenderModeProvider>,
+      );
+      expect(container.textContent).toContain('custom full automatic content');
+      expect(container.textContent).not.toContain('RAW-SECRET');
+      expect(container.querySelector('[title="RAW-SECRET"]')).toBeNull();
+      expect(
+        container.querySelector('[data-web-shell-automatic-trigger-message]'),
+      ).toBeNull();
+      expect(renderUserMessageContent).toHaveBeenCalledTimes(1);
+      expect(renderUserMessageContent).toHaveBeenCalledWith(
+        expect.objectContaining({ content }),
+      );
+    },
+  );
 
   it('keeps attachments and the complete editor text for automatic input', () => {
     const content = '/loop full original instruction';
@@ -751,8 +755,12 @@ describe('UserMessage', () => {
     ).toBeNull();
   });
 
-  it('does not offer a redundant disclosure for a short loop tick echo', () => {
-    const content = 'Loop tick — tasks from project loop.md';
+  it.each([
+    'Autonomous loop tick',
+    'Loop tick — tasks from project loop.md',
+    'Loop tick — tasks from home loop.md',
+    'Loop tick — loop.md temporarily unavailable',
+  ])('does not offer a redundant disclosure for runtime echo %s', (content) => {
     const container = render(
       <I18nProvider language="en">
         <UserMessage content={content} source="loop" />
@@ -765,6 +773,48 @@ describe('UserMessage', () => {
     expect(card?.querySelector('button')).toBeNull();
     expect(
       card?.querySelector('[data-web-shell-automatic-trigger-instructions]'),
+    ).toBeNull();
+  });
+
+  it.each([
+    'Loop tick — real instruction\nsecond line',
+    `Loop tick — tasks from ${'x'.repeat(600)} FINAL-MARKER`,
+  ])(
+    'retains details for a real instruction with a Loop tick prefix',
+    (content) => {
+      const container = render(
+        <I18nProvider language="en">
+          <UserMessage content={content} source="cron" />
+        </I18nProvider>,
+      );
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-automatic-trigger-message] button',
+      );
+      expect(toggle?.textContent).toBe('Show more');
+      act(() => toggle?.click());
+      expect(
+        container.querySelector(
+          '[data-web-shell-automatic-trigger-instructions]',
+        )?.textContent,
+      ).toBe(content);
+    },
+  );
+
+  it('keeps a Loop tick-prefixed prompt in exported documents', () => {
+    const content = 'Loop tick — tasks from an unrecognized future source';
+    const container = render(
+      <TranscriptRenderModeProvider value="document">
+        <UserMessage content={content} source="cron" />
+      </TranscriptRenderModeProvider>,
+    );
+    const instructions = container.querySelector(
+      '[data-web-shell-automatic-trigger-instructions]',
+    );
+    expect(instructions?.textContent).toBe(content);
+    expect(
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-message] button',
+      ),
     ).toBeNull();
   });
 
