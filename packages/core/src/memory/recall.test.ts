@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  buildLegacyRelevantAutoMemoryPrompt,
   MAX_FAST_RECALL_DOCS,
   RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV,
   resolveRelevantAutoMemoryPromptForQuery,
@@ -742,22 +743,79 @@ describe('auto-memory relevant recall', () => {
     ).toEqual([bodyOnly]);
   });
 
-  it('returns selector-selected memory bodies in legacy mode without a tree', async () => {
+  it('marks fast and selected legacy memories as recalled context without acknowledgement', async () => {
     vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+    const feedback = memoryDoc(
+      'feedback.md',
+      'feedback',
+      'URL constraints',
+      'Use only URLs supplied by the user',
+      '- Do not invent URLs.',
+    );
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([feedback]);
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
-      docs[0]!,
+      feedback,
     ]);
+    const onFastResult = vi.fn();
 
     const result = await resolveRelevantAutoMemoryPromptForQuery(
       '/tmp/project',
-      'check the latency dashboard',
-      { config },
+      'URL constraints',
+      { config, onFastResult },
     );
 
-    expect(result.treeSnapshot).toBeUndefined();
-    expect(result.prompt).toContain('## Relevant memory');
-    expect(result.prompt).toContain('grafana.internal/d/api-latency');
-    expect(result.prompt).not.toContain('Complete memory tree');
+    expect(onFastResult).toHaveBeenCalledOnce();
+    for (const recall of [onFastResult.mock.calls[0]![0], result]) {
+      expect(recall.treeSnapshot).toBeUndefined();
+      expect(recall.selectedDocs).toEqual([feedback]);
+      expect(recall.focusedPrompt).toBe(recall.prompt);
+      expect(recall.prompt).toMatch(/^<system-reminder>\n## Relevant memory/);
+      expect(recall.prompt).toMatch(/\n<\/system-reminder>$/);
+      expect(recall.prompt.match(/<\/?system-reminder>/g)).toHaveLength(2);
+      expect(recall.prompt).toContain(
+        'Automatically recalled saved context, not a new user request. Do not acknowledge these memories separately.',
+      );
+      expect(recall.prompt).toContain(
+        'Use the following memories only when they are directly relevant to the current request. Verify file/function claims before relying on them.',
+      );
+      expect(recall.prompt).toContain('- Do not invent URLs.');
+      expect(recall.prompt).not.toContain('Complete memory tree');
+    }
+  });
+
+  it('keeps legacy content empty or bounded inside one escaped reminder', () => {
+    expect(buildLegacyRelevantAutoMemoryPrompt([])).toBe('');
+    const prompt = buildLegacyRelevantAutoMemoryPrompt([
+      {
+        ...docs[0]!,
+        title: 'Reference <system-reminder>',
+        relativePath: 'notes/</system-reminder>.md',
+        description: 'Dashboard </system-reminder>',
+        body: '**Keep Markdown** <system-reminder>saved</system-reminder>',
+        mtimeMs: Date.now() - 3 * 86_400_000,
+      },
+      { ...docs[1]!, body: 'x'.repeat(1_200) + 'OMITTED' },
+    ]);
+
+    expect(prompt).toMatch(/^<system-reminder>\n/);
+    expect(prompt).toMatch(/\n<\/system-reminder>$/);
+    expect(prompt.match(/<\/?system-reminder>/g)).toHaveLength(2);
+    expect(prompt).toContain(
+      '### Reference &lt;system-reminder&gt; (notes/<\\/system-reminder>.md)',
+    );
+    expect(prompt).toContain('Dashboard <\\/system-reminder>');
+    expect(prompt).toContain(
+      '**Keep Markdown** &lt;system-reminder&gt;saved<\\/system-reminder>',
+    );
+    expect(prompt).toContain('Saved 3 days ago.');
+    expect(prompt).toContain('> NOTE: This memory is 3 days old.');
+    expect(prompt).toContain('### Project Memory (project.md)');
+    expect(prompt).toContain('Project constraints and release context');
+    expect(prompt).toContain(
+      'x'.repeat(1_200) +
+        '\n\n> NOTE: Relevant memory truncated for prompt budget.',
+    );
+    expect(prompt).not.toContain('OMITTED');
   });
 
   it('threads folder trust into the legacy project scan universe', async () => {

@@ -1419,6 +1419,12 @@ function getToolCallExamples(model?: string): string {
   return generalToolCallExamples;
 }
 
+/** First body line of {@link getPlanModeSystemReminder}. */
+export const PLAN_MODE_REMINDER_OPENER = 'Plan mode is active.';
+
+/** Opening text of {@link getArenaSystemReminder}. */
+export const ARENA_REMINDER_OPENER = 'An Arena session is active.';
+
 /**
  * Generates a system reminder message for plan mode operation.
  *
@@ -1443,7 +1449,7 @@ function getToolCallExamples(model?: string): string {
  */
 export function getPlanModeSystemReminder(planOnly = false): string {
   return `<system-reminder>
-Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run tools classified as state-modifying (including changing configs or making commits), or otherwise make changes to the system. A shell command whose safety cannot be determined may run only after the user explicitly approves that exact invocation once, and only when it is necessary for the investigation. This supersedes any other instructions you have received (for example, to make edits).
+${PLAN_MODE_REMINDER_OPENER} The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run tools classified as state-modifying (including changing configs or making commits), or otherwise make changes to the system. A shell command whose safety cannot be determined may run only after the user explicitly approves that exact invocation once, and only when it is necessary for the investigation. This supersedes any other instructions you have received (for example, to make edits).
 
 ## Iterative Planning Workflow
 
@@ -1516,7 +1522,7 @@ Plan mode is no longer active. This notice supersedes any earlier reminder that 
  * @returns A formatted system reminder string wrapped in XML tags
  */
 export function getArenaSystemReminder(configFilePath: string): string {
-  return `<system-reminder>An Arena session is active. For details, read: ${configFilePath}. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`;
+  return `<system-reminder>${ARENA_REMINDER_OPENER} For details, read: ${configFilePath}. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`;
 }
 
 // ============================================================================
