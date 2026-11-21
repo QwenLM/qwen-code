@@ -2408,16 +2408,15 @@ class ManagedAgentApiContractTest {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
         byte[] body = json.getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key,"
-                + " session_scope_key, tenant_id, workspace_id, session_id,"
+                + " tenant_id, workspace_id, session_id,"
                 + " resource_id, kind, schema_version, byte_length, sha256,"
                 + " storage_kind, inline_bytes, publish_command_id, state,"
-                + " gmt_create) VALUES (?, ?, ?, 'workspace-contract', ?, ?,"
+                + " gmt_create) VALUES (?, ?, 'workspace-contract', ?, ?,"
                 + " 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?,"
                 + " 'command', 'REFERENCED', "
                 + com.alibaba.qwen.code.runtimebroker.managedschema
                         .ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId),
-                scope, tenant, sessionId, resourceId, body.length,
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId), tenant, sessionId, resourceId, body.length,
                 org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
                 body);
     }
@@ -2433,16 +2432,15 @@ class ManagedAgentApiContractTest {
             throws Exception {
         String recordKey = "c".repeat(64);
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, runtime_state,"
                         + " delivery_target, delivery_state, gmt_create,"
-                        + " started_at) VALUES (?, ?, ?, 'workspace-contract',"
+                        + " started_at) VALUES (?, ?, 'workspace-contract',"
                         + " ?, 'child_run', 'run-contract', ?, 1,"
                         + " 'resource-run-contract', 'child_agent', 'running',"
                         + " 'ready', 'session', 'planned', 1, 2)",
-                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
                 recordKey, tenant, sessionId, "d".repeat(64));
         // #13746 F2: the run's committed record names its child Session,
         // and both task views carry that link inside their schemas.
@@ -2564,8 +2562,7 @@ class ManagedAgentApiContractTest {
         // H4f-b: a workflow task serves the same cancel on both surfaces,
         // and its view advertises the action.
         String workflowKey = "e".repeat(64);
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'child_run', 'run-contract-wf', ?, 1, 'resource-run-contract-wf', 'workflow', 'running', 'ready', 'session', 'planned', 1, 2)",
-                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, 'workspace-contract', ?, 'child_run', 'run-contract-wf', ?, 1, 'resource-run-contract-wf', 'workflow', 'running', 'ready', 'session', 'planned', 1, 2)",
                 workflowKey, tenant, sessionId, "f".repeat(64));
         childRunResource(tenant, sessionId, "resource-run-contract-wf",
                 "{\"kind\":\"workflow\",\"childSessionId\":null}");
@@ -2621,8 +2618,7 @@ class ManagedAgentApiContractTest {
                 + " WHERE tenant_id = ? AND session_id = ?"
                 + " AND operation_kind = 'TASK_CANCEL'"
                 + " AND state IN ('PENDING', 'RUNNING')", tenant, sessionId);
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'automation_run', 'arun-contract', ?, 2, 'resource-automation-contract', 'automation_run', 'running', 'ready', 'session', 'planned', 1, 2)",
-                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+        jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, 'workspace-contract', ?, 'automation_run', 'arun-contract', ?, 2, 'resource-automation-contract', 'automation_run', 'running', 'ready', 'session', 'planned', 1, 2)",
                 automationKey, tenant, sessionId, "2".repeat(64));
         childRunResource(tenant, sessionId, "resource-automation-contract",
                 "{\"scheduleId\":\"asch_" + "1".repeat(32)

@@ -5,7 +5,6 @@ import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPol
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.springframework.dao.DeadlockLoserDataAccessException;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
@@ -208,11 +207,9 @@ final class JournalFencing {
 
     boolean lifecycleFenced(String tenantId, String sessionId) {
         return !jdbc.queryForList(
-                        "SELECT phase FROM ma_session_head WHERE phase <> 'OPEN' AND tenant_key = ?"
-                            + " AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?"
+                        "SELECT phase FROM ma_session_head WHERE phase <> 'OPEN' AND"
+                            + " tenant_id = ? AND harness_session_id = ?"
                             + " FOR UPDATE",
-                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId)
                 .isEmpty();
@@ -220,11 +217,9 @@ final class JournalFencing {
 
     boolean lifecycleProtocolFenced(String tenantId, String sessionId) {
         return !jdbc.queryForList(
-                        "SELECT operation_id FROM ma_session_head WHERE tenant_key = ? AND"
-                            + " harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND"
+                        "SELECT operation_id FROM ma_session_head WHERE"
+                            + " tenant_id = ? AND harness_session_id = ? AND"
                             + " operation_id IS NOT NULL FOR UPDATE",
-                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId)
                 .isEmpty();
