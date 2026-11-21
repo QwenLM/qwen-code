@@ -530,7 +530,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     private SessionRecord authorize(String tenant, String actor, String session, boolean execute) {
-        SessionRecord visible = sessions.requireLegacySessionForUpdate(tenant, session);
+        SessionRecord visible = sessions.requireSessionForUpdate(tenant, session);
         if ("DELETED".equals(visible.status()) || visible.deletedAt() != null) {
             throw error(404, "session_not_found");
         }
@@ -561,7 +561,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     private void lockRoot(String tenant, String session) {
-        sessions.requireLegacySessionForUpdate(tenant, session);
+        sessions.requireSessionForUpdate(tenant, session);
     }
 
     private Prefix prefix(String tenant, String session) {

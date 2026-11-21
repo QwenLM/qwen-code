@@ -148,11 +148,10 @@ class ToolPublicationStoreTest {
         try (var pool = Executors.newSingleThreadExecutor()) {
             new TransactionTemplate(manager).executeWithoutResult(status -> {
                 JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
-                String tenantKey = ToolPublicationContract.sha256("tenant-1".getBytes(StandardCharsets.UTF_8));
-                jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
-                        + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, "tenant-1");
-                jdbc.queryForList("SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE",
-                        tenantKey);
+                jdbc.update("INSERT INTO ma_tenant_guard (tenant_id, guard_domain) VALUES (?, 'output_publication')"
+                        + " ON DUPLICATE KEY UPDATE tenant_id = tenant_id", "tenant-1");
+                jdbc.queryForList("SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain = 'output_publication' AND tenant_id = ? FOR UPDATE",
+                        "tenant-1");
                 try {
                     assertThat(pool.submit(() -> reserve()).get(3, java.util.concurrent.TimeUnit.SECONDS)
                             .path("publicationId").asText()).isEqualTo("pub-1");
