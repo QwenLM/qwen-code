@@ -203,6 +203,64 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
                 });
     }
 
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    void durableUnderSymlinkedAncestorFailsPreflightAndCreate() throws Exception {
+        Path real = Files.createDirectory(directory.resolve("real-parent"));
+        Path link = directory.resolve("link-parent");
+        Files.createSymbolicLink(link, real);
+        Path state = link.resolve("state");
+        var factory = new LocalRuntimeProviderFactory();
+        assertThat(factory.preflight(durableSettings(state)))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                    assertThat(check.detail()).contains("is under a symbolic link");
+                });
+        assertThatThrownBy(() -> factory.create(durableSettings(state), new HttpRuntimeTransport(),
+                RuntimeProviderDependencies.NONE))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    void durableExistingLeafViaSymlinkFailsPreflight() throws Exception {
+        Path real = Files.createDirectory(directory.resolve("real-leaf"));
+        Path state = directory.resolve("linked-leaf");
+        Files.createSymbolicLink(state, real);
+        assertThat(new LocalRuntimeProviderFactory().preflight(durableSettings(state)))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                    assertThat(check.detail()).contains("is under a symbolic link");
+                });
+    }
+
+    @Test
+    void existingDirectoryWithoutSearchBitFailsPreflightAndCreate() throws Exception {
+        Path state = Files.createDirectory(directory.resolve("no-search-state"));
+        assumeTrue(state.toFile().setExecutable(false, false), "chmod supported");
+        assumeTrue(!Files.isExecutable(state), "permissions enforced (not root)");
+        try {
+            var factory = new LocalRuntimeProviderFactory();
+            assertThat(factory.preflight(settings(state)))
+                    .filteredOn(check -> check.name().equals("broker-state"))
+                    .singleElement()
+                    .satisfies(check -> {
+                        assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                        assertThat(check.detail()).contains("is not writable and searchable");
+                    });
+            assertThatThrownBy(() -> factory.create(settings(state), new HttpRuntimeTransport(),
+                    RuntimeProviderDependencies.NONE))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(state.toString());
+        } finally {
+            assertThat(state.toFile().setExecutable(true, false)).isTrue();
+        }
+    }
+
     private static ManagedAgentProperties settings(Path state) {
         var settings = new ManagedAgentProperties();
         var broker = settings.getRuntimeBroker();

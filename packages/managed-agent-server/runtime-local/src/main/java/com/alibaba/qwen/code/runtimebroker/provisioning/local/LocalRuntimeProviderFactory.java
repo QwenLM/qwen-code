@@ -164,6 +164,19 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                     "set the directory");
         }
         Path directory = Path.of(path);
+        if (durable) {
+            // The durable store refuses a symlinked recovery path at wiring
+            // time; name that constraint here instead of certifying a path
+            // create() will reject.
+            for (Path current = directory.toAbsolutePath().normalize(); current != null;
+                    current = current.getParent()) {
+                if (Files.isSymbolicLink(current)) {
+                    return new Check(name, Status.FAIL, path + " is under a symbolic link",
+                            "point the state directory at a canonical path; the durable store"
+                                    + " refuses a symlinked recovery path");
+                }
+            }
+        }
         if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
             if (durable) {
                 // The durable store creates the directory itself during
@@ -191,9 +204,9 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
             return new Check(name, Status.FAIL,
                     path + " is not a directory", "create it");
         }
-        if (!Files.isWritable(directory)) {
-            return new Check(name, Status.FAIL, path + " is not writable",
-                    "grant write access to the service account");
+        if (!Files.isWritable(directory) || !Files.isExecutable(directory)) {
+            return new Check(name, Status.FAIL, path + " is not writable and searchable",
+                    "grant write and search access to the service account");
         }
         return new Check(name, Status.PASS, path, null);
     }
