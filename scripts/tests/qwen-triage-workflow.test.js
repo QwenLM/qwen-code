@@ -2787,7 +2787,7 @@ describe('qwen-triage verify scratch isolation (#17037)', () => {
     // link between the two steps; renaming it on the producer leaves the
     // reference intact and silently hands the agent an empty TMPDIR.
     expect(prepare).toContain("id: 'verify_scratch'");
-    expect(run).toContain("steps.verify_scratch.outputs.dir");
+    expect(run).toContain('steps.verify_scratch.outputs.dir');
 
     // `mktemp -d` mints a root-owned 0700 directory while the agent runs as
     // `node`; this chown is the only thing that makes the scratch writable,
