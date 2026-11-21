@@ -28,7 +28,10 @@ import {
   SessionTranscriptChangedError,
   SessionWriterUnavailableError,
 } from './session-writer-lease.js';
-import { parseMessageGroupTranscript } from '../utils/message-group-deletion.js';
+import {
+  getTranscriptMessageGroups,
+  parseMessageGroupTranscript,
+} from '../utils/message-group-deletion.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
 import { computeInitialTurnFromHistory } from './session-turn-state.js';
 
@@ -81,6 +84,40 @@ async function fixture() {
 }
 
 describe('recorded message deletion', () => {
+  it.each([
+    ['latest', 2],
+    ['middle', 1],
+  ] as const)(
+    'invalidates prompt time after persisting deletion of the %s turn',
+    async (_turn, index) => {
+      const { recorder, transcriptPath } = await fixture();
+      for (const text of ['second question', 'third question']) {
+        recorder.recordAssistantTurn({
+          model: 'model',
+          message: [{ text: 'reply' }],
+        });
+        recorder.recordUserMessage(text);
+      }
+      await recorder.flush();
+      const { groups, snapshot } = await recorder.getMessageGroups();
+      expect(groups).toHaveLength(3);
+      const notify = vi.fn(() =>
+        getTranscriptMessageGroups(
+          parseMessageGroupTranscript(
+            nodeFs.readFileSync(transcriptPath, 'utf8'),
+          ),
+        ),
+      );
+      recorder.setLastUserPromptRecordedCallback(notify);
+      const deleted = groups[index]!;
+      await recorder.deleteMessageGroups({ snapshot, groupIds: [deleted.id] });
+      expect(notify).toHaveBeenCalledExactlyOnceWith(undefined, 'session');
+      expect(notify).toHaveReturnedWith(
+        groups.filter((group) => group.id !== deleted.id),
+      );
+    },
+  );
+
   it('upgrades a default legacy recorder to a writer lease, deletes, appends and releases ownership', async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-delete-default-'),
@@ -187,6 +224,8 @@ describe('recorded message deletion', () => {
       'daemon-second',
     );
     await recorder.flush();
+    const notify = vi.fn();
+    recorder.setLastUserPromptRecordedCallback(notify);
     const unchanged = await fs.readFile(transcriptPath, 'utf8');
     await expect(
       recorder.deleteMessageGroups({
@@ -194,6 +233,7 @@ describe('recorded message deletion', () => {
         groupIds: [before.groups[0]!.id],
       }),
     ).rejects.toMatchObject({ code: 'conflict' });
+    expect(notify).not.toHaveBeenCalled();
     expect(await fs.readFile(transcriptPath, 'utf8')).toBe(unchanged);
     expect((await recorder.getMessageGroups()).groups).toHaveLength(2);
   });
@@ -266,6 +306,8 @@ describe('recorded message deletion', () => {
     const { transcriptPath, recorder } = await fixture();
     const before = await recorder.getMessageGroups();
     const unchanged = await fs.readFile(transcriptPath, 'utf8');
+    const notify = vi.fn();
+    recorder.setLastUserPromptRecordedCallback(notify);
     vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('rename failed'));
     await expect(
       recorder.deleteMessageGroups({
@@ -273,6 +315,7 @@ describe('recorded message deletion', () => {
         groupIds: [before.groups[0]!.id],
       }),
     ).rejects.toThrow();
+    expect(notify).not.toHaveBeenCalled();
     expect(await fs.readFile(transcriptPath, 'utf8')).toBe(unchanged);
     expect(recorder.supportsMessageGroupDeletion()).toBe(true);
     expect(recorder.hasWriteOwnership()).toBe(true);
