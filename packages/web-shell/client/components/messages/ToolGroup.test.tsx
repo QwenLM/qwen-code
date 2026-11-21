@@ -232,6 +232,95 @@ describe('tool header description direction', () => {
     },
   );
 
+  // Legacy rows and exported transcripts carry no producer flag, and the
+  // daemon frames the path ("Writing to …", "Create …") or elides it.
+  it.each([
+    {
+      toolName: 'write_file',
+      title: 'WriteFile: Writing to مجلد/ملف.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'Writing to مجلد/ملف.ts',
+      tag: 'BDI',
+      dir: 'ltr',
+    },
+    {
+      toolName: 'edit',
+      title: 'Edit: Create مجلد/ملف.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'Create مجلد/ملف.ts',
+      tag: 'BDI',
+      dir: 'ltr',
+    },
+    {
+      toolName: 'list_directory',
+      title: 'ListFiles: استعراض المجلد',
+      args: {},
+      shown: 'استعراض المجلد',
+      tag: 'SPAN',
+      dir: 'auto',
+    },
+    {
+      toolName: 'write_file',
+      title: 'WriteFile: Writing to مجلد/آخر.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'Writing to مجلد/آخر.ts',
+      tag: 'SPAN',
+      dir: 'auto',
+    },
+  ])(
+    'classifies a legacy $toolName title by its payload: $title',
+    ({ toolName, title, args, shown, tag, dir }) => {
+      const container = renderToolLine(
+        makeTool({ toolName, title, args }),
+        { workspaceCwd: '/workspace' },
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.tagName).toBe(tag);
+      expect(arg?.getAttribute('dir')).toBe(dir);
+      expect(arg?.textContent).toBe(shown);
+    },
+  );
+
+  it('isolates a legacy middle-elided ListFiles title', () => {
+    const file = 'مجلد/' + 'directory/'.repeat(8) + 'ملف.ts';
+    const shown = 'مجلد/.../' + 'directory/'.repeat(6) + 'ملف.ts';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'list_directory',
+        title: `ListFiles: ${shown}`,
+        args: { path: `/workspace/${file}` },
+      }),
+      { workspaceCwd: '/workspace' },
+      {},
+      'ar',
+    );
+    expect(
+      container.querySelector('bdi[class*="lineArg"][dir="ltr"]')?.textContent,
+    ).toBe(shown);
+  });
+
+  it.each([{ filePath: './مجلد/ملف.ts' }, { filePath: 'مجلد/فرعي/../ملف.ts' }])(
+    'isolates a daemon ReadFile title whose file_path has dot segments: $filePath',
+    ({ filePath }) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'read_file',
+          title: 'ReadFile: مجلد/ملف.ts',
+          args: { file_path: filePath },
+        }),
+        {},
+        {},
+        'ar',
+      );
+      expect(
+        container.querySelector('bdi[class*="lineArg"][dir="ltr"]')
+          ?.textContent,
+      ).toBe('مجلد/ملف.ts');
+    },
+  );
+
   it.each(['CustomTool', 'mcp__server__lookup', 'Shell'])(
     'keeps Arabic semantic %s descriptions auto-direction',
     (toolName) => {

@@ -362,27 +362,37 @@ export function isMachineToolDescription(
     workspaceCwd,
     isShellToolName(tool.toolName) ? { includeTimeout: false } : {},
   );
-  if (!produced.machine) return false;
+  if (!produced.machine || !produced.text) return false;
 
+  // core resolves the parameter (makeRelative) and frames it per tool
+  // ("Writing to …", "Create …"), so the daemon title carries a prefix and a
+  // resolved path this browser's formatter does not reproduce. Match the
+  // payload as a suffix instead of enumerating every producer's framing.
+  const shown = collapseDotSegments(description);
   const matches = (candidate: string) => {
     const text = truncateText(candidate, MAX_DESCRIPTION_LENGTH);
-    return description === text || description === truncateText(text, 120);
+    const target = collapseDotSegments(text);
+    return (
+      shown === target ||
+      description === truncateText(text, 120) ||
+      shown.endsWith(target)
+    );
   };
   if (matches(produced.text)) return true;
   const name = tool.toolName.toLowerCase();
-  if (name === 'read_file' || name === 'readfile' || name === 'read') {
-    const suffix = readFileTitleSuffix(tool.args);
-    const decorate = (path: string) => (suffix ? `${path} ${suffix}` : path);
-    const path = shortenReadFilePath(produced.text);
-    if (matches(decorate(produced.text)) || matches(decorate(path)))
-      return true;
-    // A Windows-relative daemon title keeps its native separators.
-    if (
-      String(tool.args?.file_path ?? '').includes('\\') &&
-      matches(decorate(path.replaceAll('/', '\\')))
-    ) {
-      return true;
-    }
+  const suffix =
+    name === 'read_file' || name === 'readfile' || name === 'read'
+      ? readFileTitleSuffix(tool.args)
+      : '';
+  const decorate = (path: string) => (suffix ? `${path} ${suffix}` : path);
+  const path = shortenReadFilePath(produced.text);
+  if (matches(decorate(produced.text)) || matches(decorate(path))) return true;
+  // A Windows-relative daemon title keeps its native separators.
+  if (
+    String(tool.args?.file_path ?? '').includes('\\') &&
+    matches(decorate(path.replaceAll('/', '\\')))
+  ) {
+    return true;
   }
 
   // Legacy search titles have no provenance flag. Recognize the daemon's
@@ -427,6 +437,21 @@ function shortenReadFilePath(path: string): string {
   return first >= 0 && last >= 0
     ? prefix + path.slice(last + 1)
     : `${path.slice(0, 38)}...${path.slice(-38)}`;
+}
+
+// core collapses dot segments before rendering a path; pathForDisplay only
+// normalizes separators, so the comparison collapses them on both sides.
+function collapseDotSegments(text: string): string {
+  const kept: string[] = [];
+  for (const segment of text.split('/')) {
+    if (segment === '.') continue;
+    if (segment === '..' && kept.length > 0) {
+      kept.pop();
+      continue;
+    }
+    kept.push(segment);
+  }
+  return kept.join('/');
 }
 
 function getDaemonSearchDescription(
