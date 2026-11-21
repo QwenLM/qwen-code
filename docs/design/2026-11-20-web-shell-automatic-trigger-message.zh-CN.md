@@ -59,7 +59,7 @@ interactive 和 readonly 视图默认显示紧凑摘要。既有“显示更多/
 
 document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且不显示交互式展开控件。详细内容默认包含；短 echo 不需要重复正文，并在调用内置 parser 前即被排除。
 
-内置 renderer 路径中的富文本按需构造。关闭的 interactive 展开区不会调用默认 parser；展开时构造一次，默认展开的 document 输出也仍构造完整内容。来源、内容、图片数、文件数和编辑态发生变化时视作新的展示代际。通过 React state 而非在 render 期间写 ref 来比较这些字段，在解析任何新内容前同步收起上代详情，避免 defer 或放弃 render 时把状态泄漏到已提交展示。代际身份直接逐字段比较，不为每条消息反复拼接完整 prompt 字符串。宿主提供 `renderUserMessageContent`、`parseUserMessageContent` 或自定义 composer tag renderer 时，绕过自动卡片变体，继续由宿主原有的完整内容替换或脱敏契约控制显示，不在其输出周围重新夹带原始摘要。摘要与 echo predicate 只随来源和内容 memoize，编辑草稿不会反复扫描未变化的指令。
+内置 renderer 路径中的富文本按需构造。关闭的 interactive 展开区不会调用默认 parser；展开时构造一次，默认展开的 document 输出也仍构造完整内容。在普通与自动展示变体之间切换，或内容、图片数、文件数、编辑态发生变化时视为新的展示代际；`cron` 与 `loop` 之间归一化不会开启新的代际。通过 React state 而非在 render 期间写 ref 来比较这些字段，在解析任何新内容前同步收起上代详情，避免 defer 或放弃 render 时把状态泄漏到已提交展示。代际身份直接逐字段比较，不为每条消息反复拼接完整 prompt 字符串。宿主提供 `renderUserMessageContent`、`parseUserMessageContent` 或自定义 composer tag renderer 时，绕过自动卡片变体，继续由宿主原有的完整内容替换或脱敏契约控制显示，不在其输出周围重新夹带原始摘要。摘要与 echo predicate 只随来源和内容 memoize，编辑草稿不会反复扫描未变化的指令。
 
 现有气泡和 selectors 保持不变。新增专用 selector 与 `data-source` 属性供浏览器测试识别。图片、文件、重试入口和内联编辑器继续留在当前外层布局中；编辑器仍使用完整原文。
 
@@ -108,9 +108,9 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 
 ## 验证计划
 
-真实 CI 合并树 `71161df9` 在别名展开修复前测量为 2,154,340 字节。加入该修复后，合并构建的 renderer 在身份注入后为 **2,154,382 字节**，包含 user metadata 与附件引用的边界校验；分离的组件 CSS 为 **2,428,500 字节**。告警基线即实测的 **2,154,382**，硬上限为 **2,154,812 字节**，为工具链差异保留 430 字节。这里按实际合并实现重新校准基线，而不是沿用分支旧估计值，也不隐藏新增校验与共享渲染内容的增长。
+真实 CI 合并树 `71161df9` 在别名展开修复前测量为 2,154,340 字节。加入该修复后，合并构建的 renderer 在身份注入后曾测为 **2,154,382 字节**，包含 user metadata 与附件引用的边界校验。为回调捕获已验证的 `schemaVersion` 以保留类型窄化，增加 **8 字节**，使 renderer 实测为 **2,154,390 字节**；分离的组件 CSS 仍为 **2,428,500 字节**。告警基线即实测的 **2,154,390**，硬上限为 **2,154,820 字节**，为工具链差异保留 430 字节。这里按实际合并实现和完整生产输入构建重新校准基线，而不是沿用测试模式或分支旧估计值，也不隐藏新增校验与共享渲染内容的增长。
 
-- 单测覆盖 `cron` 与 `loop`、普通/未知 source、per-run 优先级、展开、短 echo 控件抑制、内置渲染惰性、附件、编辑、来源、内容、附件数与编辑态变化时在解析前收起旧详情、空内容、document 展开，以及以 `Loop tick — ` 开头的真实指令在 interactive 和 document 视图中的保留。验证自动触发标题在所有支持的 catalog 中均已本地化。
+- 单测覆盖 `cron` 与 `loop`、普通/未知 source、per-run 优先级、展开、短 echo 控件抑制、内置渲染惰性、附件、编辑、内容、附件数与编辑态变化时在解析前收起旧详情、空内容、document 展开，以及以 `Loop tick — ` 开头的真实指令在 interactive 和 document 视图中的保留。单独验证仅切换来源别名（`cron` ↔ `loop`）时保留已展开详情，且不重建 renderer。验证自动触发标题在所有支持的 catalog 中均已本地化。
 - 验证现有 `MessageItem` 仅改变 source 时会更新转发的 props，并验证普通长消息在 source 变为自动来源后恢复紧凑状态。
 - 运行用户消息、自动触发 predicate 及全部支持 catalog 的聚焦测试，再执行贡献流程要求的仓库 build 与 typecheck。在身份注入后实测 renderer 字节，与文档记录的告警峰值对照，并在该峰值上方恰好 430 字节设置硬上限，保证告警阈值严格小于硬上限；同时验证当前尺寸不告警以及未来增长会告警。
 - 在桌面与移动宽度断言日历与摘要同处一行，带详情的展开按钮也处在同一行。完整短 echo 在自身摘要内换行可读，自动头部样式不污染 per-run 共享样式，且页面没有横向溢出。

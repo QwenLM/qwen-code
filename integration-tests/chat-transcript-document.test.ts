@@ -794,6 +794,7 @@ describe('ExportTranscriptDocument browser gate', () => {
         'assistant',
       ]);
       const invalidDocument = {
+        ...document,
         schemaVersion,
         blocks: document.blocks.map((block, index) =>
           index === metaIndex ? { ...block, meta } : block,

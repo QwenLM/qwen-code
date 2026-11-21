@@ -121,10 +121,9 @@ function parseDocument(): ExportTranscriptDocument {
   ) {
     throw new Error('Transcript document is incompatible with this renderer.');
   }
+  const schemaVersion = value.schemaVersion;
   if (
-    value.blocks.some((block) =>
-      hasUnsupportedMetadata(block, value.schemaVersion),
-    )
+    value.blocks.some((block) => hasUnsupportedMetadata(block, schemaVersion))
   ) {
     throw new Error('Transcript document has unsupported user metadata.');
   }
