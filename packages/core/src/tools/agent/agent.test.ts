@@ -424,6 +424,7 @@ describe('AgentTool', () => {
       loadSubagent: vi.fn(),
       createAgentHeadless: vi.fn(),
       resolveModelGrade: vi.fn().mockReturnValue(undefined),
+      resolveSubagentModelRoute: vi.fn().mockReturnValue(undefined),
       getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
       addChangeListener: vi.fn((listener: () => void) => {
         changeListeners.push(listener);
@@ -3976,36 +3977,53 @@ describe('AgentTool', () => {
       expectSeed([h.startup, h.secondUser, h.secondModel]);
     });
 
-    it('inherits the dispatched parent prompt instead of a later canonical variant', async () => {
-      const generationConfig = {
-        systemInstruction: 'dispatched parent instruction',
-      };
-      const runtimeView = {
-        contentGenerator: {
-          generateContent: vi.fn(),
-          generateContentStream: vi.fn(),
-          embedContent: vi.fn(),
-        },
-        contentGeneratorConfig: {
-          ...config.getContentGeneratorConfig(),
-          model: 'dispatched-parent-model',
-        },
-      };
-      llmClient({
-        getHistory: vi.fn().mockReturnValue([]),
-        ...chatWith(
-          { systemInstruction: 'canonical model instruction' },
-          generationConfig,
-          { model: 'dispatched-parent-model', generationConfig, runtimeView },
-        ),
-      });
-      await runFork(forkParams('some task'));
-      expect(createArgs()?.[2]).toMatchObject({
-        renderedSystemPrompt: 'dispatched parent instruction',
-      });
-      expect(createArgs()?.[3]).toEqual({ model: 'dispatched-parent-model' });
-      expect(createArgs()?.[8]).toBe(runtimeView);
-    });
+    it.each([false, true])(
+      'inherits the dispatched parent prompt instead of a later canonical variant (background=%s)',
+      async (runInBackground) => {
+        const generationConfig = {
+          systemInstruction: 'dispatched parent instruction',
+        };
+        const runtimeView = {
+          contentGenerator: {
+            generateContent: vi.fn(),
+            generateContentStream: vi.fn(),
+            embedContent: vi.fn(),
+          },
+          contentGeneratorConfig: {
+            ...config.getContentGeneratorConfig(),
+            model: 'dispatched-parent-model',
+          },
+        };
+        llmClient({
+          getHistory: vi.fn().mockReturnValue([]),
+          ...chatWith(
+            { systemInstruction: 'canonical model instruction' },
+            generationConfig,
+            { model: 'dispatched-parent-model', generationConfig, runtimeView },
+          ),
+        });
+        if (runInBackground) withMessaging();
+        await runFork(
+          forkParams('some task', { run_in_background: runInBackground }),
+        );
+        expect(createArgs()?.[2]).toMatchObject({
+          renderedSystemPrompt: 'dispatched parent instruction',
+        });
+        expect(createArgs()?.[3]).toEqual({ model: 'dispatched-parent-model' });
+        expect(createArgs()?.[8]).toBe(runtimeView);
+        if (runInBackground) {
+          const registry = config.getBackgroundTaskRegistry();
+          expect(registry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
+            'dispatched-parent-model',
+            null,
+          );
+          expect(registry.register).toHaveBeenCalledWith(
+            expect.objectContaining({ model: 'dispatched-parent-model' }),
+            expect.anything(),
+          );
+        }
+      },
+    );
 
     it('caps fork turns and uses bubble approval mode', async () => {
       loadGeneralPurpose();
@@ -5453,6 +5471,10 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.resolveModelGrade).mockReturnValue(
         'mapped-model',
       );
+      vi.mocked(mockSubagentManager.resolveSubagentModelRoute).mockReturnValue({
+        modelId: 'mapped-model',
+        authType: 'openai',
+      });
       await launch({ model: 'high' });
       expect(mockSubagentManager.resolveModelGrade).toHaveBeenCalledWith(
         'high',
