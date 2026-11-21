@@ -310,7 +310,10 @@ export class AcpAppFramework extends AppFramework {
     });
   }
   createAcpServer(params: AcpServerParams): AcpServer {
-    return new AcpServer(params);
+    return new AcpServer({
+      ...params,
+      settings: params.settings ?? this.input.settings,
+    });
   }
   protected assertStarting(): void {
     if (this.disposed) throw new Error('Framework is disposed');

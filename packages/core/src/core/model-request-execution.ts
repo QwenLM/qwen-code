@@ -6,6 +6,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { MissingSessionModelProviderError } from '../utils/errors.js';
 import {
   modelRequestObservationError,
   observationElapsedMs,
@@ -106,7 +107,7 @@ export async function* streamProviderRequest(
   const model = request.resolution.model.key;
   const { requestSetId, requestId } = request.qoder.identity;
   if (!config?.hasModelProviderManager()) {
-    throw new Error('A session ModelProvider is required for inference.');
+    throw new MissingSessionModelProviderError();
   }
   const provider = config.getModelProviderManager();
   const contextWindow =
