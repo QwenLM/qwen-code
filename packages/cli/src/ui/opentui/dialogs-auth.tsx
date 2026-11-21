@@ -105,6 +105,11 @@ import { useSubscription } from '../auth/use-subscription.js';
 import type { HistoryItemInfo } from '../types.js';
 import { subscriptionSuccessMessage } from '../auth/subscription-success.js';
 import { activateSubscription } from '../auth/activate-subscription.js';
+import { activateGoogleOAuth } from '../auth/activate-google-oauth.js';
+import {
+  useGoogleOAuth,
+  type GoogleOAuthActivate,
+} from '../auth/use-google-oauth.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 
 // ---------------------------------------------------------------------------
@@ -113,6 +118,7 @@ import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 
 type ViewLevel =
   | 'subscription'
+  | 'google-oauth'
   | 'main'
   | 'qwencloud-select'
   | 'alibaba-select'
@@ -121,6 +127,7 @@ type ViewLevel =
 
 type MainOption =
   | 'QWEN_SUBSCRIPTION'
+  | 'GOOGLE_OAUTH'
   | 'QWENCLOUD'
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
@@ -165,6 +172,12 @@ const MAIN_ITEMS: RadioItem[] = [
       'Manually connect a local server, proxy, or unsupported provider',
     ),
     value: 'CUSTOM_PROVIDER',
+  },
+  {
+    key: 'GOOGLE_OAUTH',
+    label: t('Sign in with Google'),
+    description: t('Use your personal Google account with Gemini Code Assist'),
+    value: 'GOOGLE_OAUTH',
   },
 ];
 
@@ -1611,6 +1624,115 @@ function SubscriptionView({
   );
 }
 
+function GoogleManualCodeInput({
+  onSubmit,
+}: {
+  onSubmit: (code: string) => void;
+}) {
+  const [value, setValue] = useState('');
+  const caret = useLineInputKeys(
+    value,
+    setValue,
+    (next) => {
+      onSubmit(next);
+      return true;
+    },
+    0,
+  );
+  return (
+    <InputLine
+      value={value}
+      caret={caret}
+      placeholder={t('Authorization code')}
+      active
+    />
+  );
+}
+
+function GoogleOAuthView({
+  onBack,
+  onConnect,
+  suppressBrowserLaunch,
+  availableTerminalHeight,
+}: {
+  onBack: () => void;
+  onConnect: GoogleOAuthActivate;
+  suppressBrowserLaunch: boolean;
+  availableTerminalHeight?: number;
+}) {
+  const compact =
+    availableTerminalHeight !== undefined && availableTerminalHeight < 20;
+  const flow = useGoogleOAuth({ suppressBrowserLaunch, onActivate: onConnect });
+  const back = () => {
+    flow.cancel();
+    onBack();
+  };
+  useKeyboard((key) => {
+    const original = toOriginalKey(key);
+    if (
+      original.name === 'escape' ||
+      (original.ctrl && original.name === 'c')
+    ) {
+      back();
+    } else if (
+      flow.status === 'waiting' &&
+      original.name === 'c' &&
+      !original.ctrl &&
+      !original.meta &&
+      flow.authorizationUrl
+    ) {
+      void copyToClipboard(flow.authorizationUrl).catch(() => undefined);
+    } else if (flow.status === 'error' && original.name === 'return') {
+      flow.retry();
+    }
+  });
+
+  return (
+    <Shell
+      title={t('Sign in with Google')}
+      onClose={back}
+      borderStyle="single"
+      shrinkable
+    >
+      {flow.status === 'error' ? (
+        <box flexDirection="column" gap={1}>
+          <text fg={C.red}>{flow.error}</text>
+          <text fg={C.dim}>{t('Enter to retry · Esc to go back')}</text>
+        </box>
+      ) : (
+        <box flexDirection="column" marginTop={1}>
+          <text>
+            {flow.status === 'awaiting-code'
+              ? t('Open the authorization URL and enter the returned code.')
+              : t(
+                  'Complete Google authorization and wait for Code Assist setup…',
+                )}
+          </text>
+          {flow.status === 'awaiting-code' && (
+            <GoogleManualCodeInput onSubmit={flow.submitCode} />
+          )}
+          {flow.authorizationUrl && !compact && (
+            <>
+              <text fg={C.dim}>{t("If the browser didn't open, visit:")}</text>
+              <text fg={C.purple} attributes={8}>
+                {flow.authorizationUrl}
+              </text>
+              {flow.status === 'waiting' && (
+                <box marginTop={1}>
+                  <text fg={C.dim}>{t('c to copy link · Esc to cancel')}</text>
+                </box>
+              )}
+            </>
+          )}
+          {flow.authorizationUrl && compact && flow.status === 'waiting' && (
+            <text fg={C.dim}>{t('c to copy link · Esc to cancel')}</text>
+          )}
+        </box>
+      )}
+    </Shell>
+  );
+}
+
 function AuthDialogFlow({
   config,
   settings,
@@ -1825,6 +1947,9 @@ function AuthDialogFlow({
         case 'QWEN_SUBSCRIPTION':
           pushView('subscription');
           break;
+        case 'GOOGLE_OAUTH':
+          pushView('google-oauth');
+          break;
         case 'QWENCLOUD':
           pushView('qwencloud-select');
           break;
@@ -2001,7 +2126,8 @@ function AuthDialogFlow({
   useLayoutEffect(() => {
     const onRaw = (seq: string): boolean => {
       if (seq !== '\x1b') return false;
-      if (viewLevel === 'subscription') return false;
+      if (viewLevel === 'subscription' || viewLevel === 'google-oauth')
+        return false;
       if (viewLevel !== 'main') {
         goBack();
         return true;
@@ -2054,6 +2180,35 @@ function AuthDialogFlow({
   ]);
 
   // -- Render -------------------------------------------------------------------
+
+  if (viewLevel === 'google-oauth') {
+    return (
+      <GoogleOAuthView
+        suppressBrowserLaunch={config.isBrowserLaunchSuppressed()}
+        availableTerminalHeight={availableTerminalHeight}
+        onBack={goBack}
+        onConnect={async (signal, callbacks) => {
+          const info = await activateGoogleOAuth(
+            settings,
+            config,
+            signal,
+            callbacks,
+          );
+          signal.throwIfAborted();
+          logAuth(
+            config,
+            new AuthEvent(AuthType.GOOGLE_OAUTH, 'manual', 'success'),
+          );
+          notify?.(
+            t('Signed in with Google ({{tier}}).', {
+              tier: info.userTierName || info.userTier,
+            }),
+          );
+          onClose();
+        }}
+      />
+    );
+  }
 
   if (viewLevel === 'subscription') {
     return (

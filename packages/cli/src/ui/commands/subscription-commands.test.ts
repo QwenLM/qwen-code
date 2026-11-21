@@ -15,6 +15,10 @@ const mocks = vi.hoisted(() => ({
   browser: vi.fn(),
   signOut: vi.fn(),
   isSignedIn: vi.fn(),
+  signOutGoogle: vi.fn(),
+}));
+vi.mock('@qwen-code/qwen-code-core/code_assist/index.js', () => ({
+  signOutGoogleOAuth: mocks.signOutGoogle,
 }));
 vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
   QwenSubscriptionSession: class {
@@ -29,6 +33,7 @@ beforeEach(() => {
   mocks.isSignedIn.mockReset().mockReturnValue(true);
   mocks.browser.mockReset().mockResolvedValue(undefined);
   mocks.signOut.mockReset().mockResolvedValue(undefined);
+  mocks.signOutGoogle.mockReset().mockResolvedValue(true);
 });
 
 it.each([logoutCommand, upgradeCommand])(
@@ -179,6 +184,34 @@ it('rejects logout while a response is active', async () => {
   });
   expect(mocks.signOut).not.toHaveBeenCalled();
   expect(busy.services.config?.clearAuth).not.toHaveBeenCalled();
+});
+
+it('signs out Google without calling Qwen sign-out or switching providers', async () => {
+  const context = memberContext();
+  Object.assign(context.services.config!, {
+    getAuthType: () => AuthType.GOOGLE_OAUTH,
+  });
+  await logoutCommand.action!(context, '');
+  expect(mocks.signOutGoogle).toHaveBeenCalledWith(context.services.config);
+  expect(mocks.signOut).not.toHaveBeenCalled();
+  expect(context.services.config?.switchModel).not.toHaveBeenCalled();
+  expect(context.services.settings.setValue).not.toHaveBeenCalled();
+  expect(context.ui.cancelBtw).toHaveBeenCalledOnce();
+});
+
+it('keeps Google auth state if local credential deletion fails', async () => {
+  const context = memberContext();
+  Object.assign(context.services.config!, {
+    getAuthType: () => AuthType.GOOGLE_OAUTH,
+  });
+  mocks.signOutGoogle.mockRejectedValueOnce(new Error('EACCES'));
+  expect(await logoutCommand.action!(context, '')).toMatchObject({
+    type: 'message',
+    messageType: 'error',
+  });
+  expect(mocks.signOutGoogle).toHaveBeenCalledOnce();
+  expect(context.services.config?.clearAuth).not.toHaveBeenCalled();
+  expect(context.ui.cancelBtw).not.toHaveBeenCalled();
 });
 
 it('opens the existing Qwen Code plans page from /upgrade', async () => {

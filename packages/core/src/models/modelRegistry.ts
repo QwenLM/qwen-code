@@ -21,12 +21,16 @@ import {
   type AvailableModel,
 } from './types.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-import { QWEN_OAUTH_MODELS } from './constants.js';
+import { QWEN_OAUTH_MODELS, GOOGLE_OAUTH_MODELS } from './constants.js';
+import {
+  CODE_ASSIST_ENDPOINT,
+  DEFAULT_GOOGLE_OAUTH_MODEL,
+} from '../code_assist/constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MODEL_REGISTRY');
 
-export { QWEN_OAUTH_MODELS } from './constants.js';
+export { QWEN_OAUTH_MODELS, GOOGLE_OAUTH_MODELS } from './constants.js';
 
 /**
  * Validates if a string key is a valid AuthType enum value.
@@ -212,6 +216,8 @@ export class ModelRegistry {
     switch (authType) {
       case AuthType.QWEN_OAUTH:
         return 'DYNAMIC_QWEN_OAUTH_BASE_URL';
+      case AuthType.GOOGLE_OAUTH:
+        return CODE_ASSIST_ENDPOINT;
       case AuthType.USE_OPENAI:
         return DEFAULT_OPENAI_BASE_URL;
       default:
@@ -228,8 +234,9 @@ export class ModelRegistry {
     this.providerProtocolConfig = providerProtocolConfig ?? {};
     this.modelProvidersConfig = modelProvidersConfig;
 
-    // Always register qwen-oauth models (hard-coded, cannot be overridden)
+    // Always register hard-coded OAuth models; custom providers cannot override them.
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
+    this.registerAuthTypeModels(AuthType.GOOGLE_OAUTH, GOOGLE_OAUTH_MODELS);
     const { models, modelMetadata } = readCachedSubscriptionCatalog();
     this.setSubscriptionModels(models, modelMetadata);
 
@@ -272,10 +279,11 @@ export class ModelRegistry {
         continue;
       }
 
-      // qwen-oauth uses hard-coded models and cannot be overridden
+      // OAuth providers use hard-coded models and cannot be overridden.
       if (
         protocol === AuthType.QWEN_OAUTH ||
-        protocol === AuthType.QWEN_SUBSCRIPTION
+        protocol === AuthType.QWEN_SUBSCRIPTION ||
+        protocol === AuthType.GOOGLE_OAUTH
       ) {
         if (Array.isArray(models)) {
           for (const model of models) {
@@ -441,6 +449,9 @@ export class ModelRegistry {
   ): ResolvedModelConfig | undefined {
     if (authType === AuthType.QWEN_OAUTH) {
       return this.getModel(authType, DEFAULT_QWEN_MODEL);
+    }
+    if (authType === AuthType.GOOGLE_OAUTH) {
+      return this.getModel(authType, DEFAULT_GOOGLE_OAUTH_MODEL);
     }
     const models = this.modelsByAuthType.get(authType);
     if (!models || models.size === 0) return undefined;

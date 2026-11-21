@@ -3013,6 +3013,17 @@ export const ZH: Messages = {
   'skilldesc.triage': '把关和审查 Qwen Code 的 issue 与 PR',
   'local.approvalMode': '切换审批模式',
   'local.auth': '连接模型供应商',
+  'auth.google.entryTitle': '使用 Google 账号登录',
+  'auth.google.entryDescription':
+    '通过 Gemini Code Assist 使用个人 Google 账号',
+  'auth.google.title': '使用 Google 账号登录',
+  'auth.google.instructions':
+    '在浏览器中完成 Google 授权，然后输入返回的授权码。',
+  'auth.google.codeRequired': '请输入授权码。',
+  'auth.google.codeLabel': '授权码',
+  'auth.google.submitCode': '继续',
+  'auth.google.connected': '已使用 Google 账号登录。',
+  'auth.google.failed': 'Google 登录失败，请重试。',
   'auth.title': '连接供应商',
   'auth.step.group': '类型',
   'auth.step.authorization': '授权',

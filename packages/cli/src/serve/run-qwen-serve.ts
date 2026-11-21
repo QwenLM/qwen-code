@@ -5344,6 +5344,7 @@ async function runQwenServeImpl(
       stopWebTerminalRegistry?: () => void;
       stopHostedMountHandbacks?: () => void;
       stopSubscriptionAuth?: () => void;
+      stopGoogleOAuth?: () => void;
       stopWeixinAuth?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
@@ -5366,6 +5367,7 @@ async function runQwenServeImpl(
     stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
     stopSafely('Hosted mount handbacks', locals.stopHostedMountHandbacks);
     stopSafely('Subscription authorization', locals.stopSubscriptionAuth);
+    stopSafely('Google OAuth authorization', locals.stopGoogleOAuth);
     stopSafely('WeChat authorization', locals.stopWeixinAuth);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {

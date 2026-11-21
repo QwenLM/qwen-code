@@ -256,7 +256,9 @@ export function ModelDialog({
               label={t('model.contextWindow')}
               value={formatContextWindow(selectedModel.contextWindow, t)}
             />
-            {getAuthType(selectedModel) !== 'qwen-oauth' ? (
+            {!['qwen-oauth', 'google-oauth'].includes(
+              getAuthType(selectedModel) ?? '',
+            ) ? (
               <>
                 <DetailRow
                   label={t('model.baseUrl')}

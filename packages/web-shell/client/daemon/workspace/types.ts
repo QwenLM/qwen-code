@@ -593,6 +593,11 @@ export interface DaemonWorkspaceActions
     | 'getSubscriptionUserInfo'
     | 'getSubscriptionDefaultModel'
     | 'signOutSubscription'
+    | 'startGoogleOAuthLogin'
+    | 'getGoogleOAuthLogin'
+    | 'submitGoogleOAuthCode'
+    | 'cancelGoogleOAuthLogin'
+    | 'signOutGoogleOAuth'
   > {
   activateSubscription(options?: {
     workspaceCwd?: string;

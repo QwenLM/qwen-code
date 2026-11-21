@@ -28,6 +28,11 @@ import {
   QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
 } from '../qwen/oauth-config.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
+import {
+  CODE_ASSIST_ENDPOINT,
+  DEFAULT_GOOGLE_OAUTH_MODEL,
+  GOOGLE_OAUTH_TOKEN_PLACEHOLDER,
+} from '../code_assist/constants.js';
 import { knownTokenLimit } from '../core/tokenLimits.js';
 import {
   resolveField,
@@ -47,6 +52,7 @@ import {
   AUTH_ENV_MAPPINGS,
   DEFAULT_MODELS,
   QWEN_OAUTH_ALLOWED_MODELS,
+  GOOGLE_OAUTH_ALLOWED_MODELS,
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
 import type { ModelConfig as ModelProviderConfig } from './types.js';
@@ -206,6 +212,53 @@ export function resolveModelConfig(
       'modalities',
     ]) {
       sources[field] = computedSource('Qwen Subscription fixed configuration');
+    }
+    if (proxy) sources['proxy'] = computedSource('Config.getProxy()');
+    return { config, sources, warnings };
+  }
+
+  if (authType === AuthType.GOOGLE_OAUTH) {
+    const baseUrl = env['CODE_ASSIST_ENDPOINT'] || CODE_ASSIST_ENDPOINT;
+    if (cli?.baseUrl && cli.baseUrl !== baseUrl) {
+      throw new Error(
+        'Personal Google OAuth does not accept a generic base URL override. Set CODE_ASSIST_ENDPOINT for a Code Assist-compatible endpoint.',
+      );
+    }
+    const requestedModel = modelProvider?.id ?? cli?.model ?? settings?.model;
+    const allowedModels = new Set<string>(GOOGLE_OAUTH_ALLOWED_MODELS);
+    const model =
+      requestedModel && allowedModels.has(requestedModel)
+        ? requestedModel
+        : DEFAULT_GOOGLE_OAUTH_MODEL;
+    if (requestedModel && model !== requestedModel) {
+      warnings.push(
+        `Warning: Unsupported Google OAuth model '${requestedModel}', falling back to '${DEFAULT_GOOGLE_OAUTH_MODEL}'.`,
+      );
+    }
+    const generationConfig = resolveGenerationConfig(
+      settings?.generationConfig,
+      modelProvider?.generationConfig,
+      authType,
+      model,
+      sources,
+    );
+    applyTimeoutEnvOverride(env, generationConfig, sources, modelProvider);
+    const config: ContentGeneratorConfig = {
+      authType,
+      model,
+      apiKey: GOOGLE_OAUTH_TOKEN_PLACEHOLDER,
+      baseUrl,
+      modalities: defaultModalities(model),
+      proxy,
+      ...generationConfig,
+    };
+    for (const field of ['authType', 'model', 'baseUrl', 'apiKey']) {
+      sources[field] = computedSource('Google OAuth fixed configuration');
+    }
+    if (!sources['modalities']) {
+      sources['modalities'] = computedSource(
+        'Google OAuth fixed configuration',
+      );
     }
     if (proxy) sources['proxy'] = computedSource('Config.getProxy()');
     return { config, sources, warnings };

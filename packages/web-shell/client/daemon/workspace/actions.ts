@@ -1298,6 +1298,32 @@ export function createDaemonWorkspaceActions({
       return subscriptionRequest((client) => client.signOutSubscription());
     },
 
+    startGoogleOAuthLogin(options) {
+      return subscriptionRequest((client) =>
+        client.startGoogleOAuthLogin(options),
+      );
+    },
+    getGoogleOAuthLogin(id, options) {
+      return subscriptionRequest((client) =>
+        client.getGoogleOAuthLogin(id, options),
+      );
+    },
+    submitGoogleOAuthCode(id, code, options) {
+      return subscriptionRequest((client) =>
+        client.submitGoogleOAuthCode(id, code, options),
+      );
+    },
+    cancelGoogleOAuthLogin(id, options) {
+      return subscriptionRequest((client) =>
+        client.cancelGoogleOAuthLogin(id, options),
+      );
+    },
+    signOutGoogleOAuth(options) {
+      return subscriptionRequest((client) =>
+        client.signOutGoogleOAuth(options),
+      );
+    },
+
     async getAuthStatus() {
       const client = requireClient(getClient, 'Get auth status failed');
       return withActionTimeout(

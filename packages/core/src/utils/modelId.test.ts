@@ -11,6 +11,7 @@ import {
   resolveModelId,
   stripRuntimeSnapshotPrefix,
 } from './modelId.js';
+import { ModelRegistry } from '../models/modelRegistry.js';
 
 describe('buildRuntimeSnapshotId', () => {
   it('builds the canonical $runtime|{auth}|{model} id', () => {
@@ -267,4 +268,31 @@ describe('resolveModelId with configured model context', () => {
       }),
     ).toBeUndefined();
   });
+
+  it.each([AuthType.USE_GEMINI, AuthType.USE_VERTEX_AI])(
+    'preserves a bare Gemini 2.5 Pro selector for the registered %s provider',
+    (provider) => {
+      const registry = new ModelRegistry({
+        [provider]: [{ id: 'gemini-2.5-pro' }],
+      });
+      const context = {
+        currentModel: 'openai-main',
+        currentAuthType: AuthType.USE_OPENAI,
+        getAvailableModels: (authTypes?: AuthType[]) =>
+          authTypes
+            ? authTypes.flatMap((type) => registry.getModelsForAuthType(type))
+            : Object.values(AuthType).flatMap((type) =>
+                registry.getModelsForAuthType(type),
+              ),
+      };
+      expect(resolveModelId('gemini-2.5-pro', context)).toEqual({
+        authType: provider,
+        modelId: 'gemini-2.5-pro',
+      });
+      expect(resolveModelId('google-oauth:gemini-2.5-pro', context)).toEqual({
+        authType: AuthType.GOOGLE_OAUTH,
+        modelId: 'gemini-2.5-pro',
+      });
+    },
+  );
 });

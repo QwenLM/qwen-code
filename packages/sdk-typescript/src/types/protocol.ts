@@ -245,7 +245,8 @@ export type AuthType =
   | 'qwen-oauth'
   | 'qwen-subscription'
   | 'gemini'
-  | 'vertex-ai';
+  | 'vertex-ai'
+  | 'google-oauth';
 
 /**
  * TODO: Align with `ToolCallConfirmationDetails`

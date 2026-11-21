@@ -25,6 +25,8 @@ import type { HistoryItemWithoutId } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { subscriptionSuccessMessage } from './subscription-success.js';
 import { activateSubscription } from './activate-subscription.js';
+import { activateGoogleOAuth } from './activate-google-oauth.js';
+import type { GoogleOAuthInteractiveOptions } from '@qwen-code/qwen-code-core/code_assist/oauth2.js';
 
 /**
  * Normalize model IDs: split by comma, trim, deduplicate, remove empty.
@@ -80,6 +82,10 @@ export type AuthController = {
     handleSubscriptionSubmit: (
       signal: AbortSignal,
       authorizationUrl?: string,
+    ) => Promise<void>;
+    handleGoogleOAuthSubmit: (
+      signal: AbortSignal,
+      callbacks: Omit<GoogleOAuthInteractiveOptions, 'interactive' | 'signal'>,
     ) => Promise<void>;
     openAuthDialog: () => void;
     cancelAuthentication: () => void;
@@ -279,6 +285,55 @@ export const useAuthCommand = (
     [settings, config, completeAuthentication, addItem],
   );
 
+  const handleGoogleOAuthSubmit = useCallback(
+    async (
+      signal: AbortSignal,
+      callbacks: Omit<GoogleOAuthInteractiveOptions, 'interactive' | 'signal'>,
+    ) => {
+      try {
+        setPendingAuthType(AuthType.GOOGLE_OAUTH);
+        setIsAuthenticating(true);
+        setAuthError(null);
+        const info = await activateGoogleOAuth(
+          settings,
+          config,
+          signal,
+          callbacks,
+        );
+        signal.throwIfAborted();
+        completeAuthentication();
+        logAuth(
+          config,
+          new AuthEvent(AuthType.GOOGLE_OAUTH, 'manual', 'success'),
+        );
+        const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
+          type: MessageType.INFO,
+          text: t('Signed in with Google ({{tier}}).', {
+            tier: info.userTierName || info.userTier,
+          }),
+        };
+        addItem(feedbackItem, Date.now());
+        if (openedViaCommandRef.current) {
+          openedViaCommandRef.current = false;
+          config.getChatRecordingService?.()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: '/auth',
+            outputHistoryItems: [feedbackItem],
+          });
+        }
+      } catch (error) {
+        if (signal.aborted) {
+          setIsAuthenticating(false);
+          setPendingAuthType(undefined);
+          throw error;
+        }
+        handleAuthFailure(error, AuthType.GOOGLE_OAUTH);
+        throw error;
+      }
+    },
+    [settings, config, completeAuthentication, addItem, handleAuthFailure],
+  );
+
   // -- Dialog open / close / cancel ----------------------------------------
 
   const openAuthDialog = useCallback(() => {
@@ -326,6 +381,7 @@ export const useAuthCommand = (
       AuthType.USE_ANTHROPIC,
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,
+      AuthType.GOOGLE_OAUTH,
     ];
     if (val && !valid.includes(val as AuthType)) {
       onAuthError(
@@ -367,6 +423,7 @@ export const useAuthCommand = (
       closeAuthDialog,
       handleProviderSubmit,
       handleSubscriptionSubmit,
+      handleGoogleOAuthSubmit,
       openAuthDialog,
       cancelAuthentication,
     }),
@@ -376,6 +433,7 @@ export const useAuthCommand = (
       closeAuthDialog,
       handleProviderSubmit,
       handleSubscriptionSubmit,
+      handleGoogleOAuthSubmit,
       openAuthDialog,
       cancelAuthentication,
     ],

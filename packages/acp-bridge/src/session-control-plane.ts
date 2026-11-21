@@ -14512,7 +14512,8 @@ export function createSessionControlPlane(
       const startsWorkspaceChannel =
         method === SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart ||
         method === SERVE_CONTROL_EXT_METHODS.workspaceDirectories ||
-        method === SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan;
+        method === SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan ||
+        method === SERVE_CONTROL_EXT_METHODS.googleOAuthStart;
       const invoke = async (info: ChannelInfo) => {
         const timeout = invokeOpts?.timeoutMs ?? initTimeoutMs;
         const pending = raceLongLived(

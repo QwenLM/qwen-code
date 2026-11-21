@@ -114,15 +114,35 @@ export function useSubscriptionLogout(options: Options) {
         connectionRef.current.currentModel === model &&
         connectionRef.current.context?.state._meta?.['authType'] === authType;
       pending.current = true;
-      void actions
-        .getSubscriptionConfig()
-        .then(async (config) => {
+      void loadAuthType()
+        .then(async (authType) => {
+          if (authType === 'google-oauth' && command === 'logout') {
+            if (!isCurrent()) return;
+            if (callbacks.current.isBlocked()) {
+              callbacks.current.onBlocked();
+              return;
+            }
+            if (callbacks.current.onCommand?.(text)) return;
+            await actions.signOutGoogleOAuth();
+            setAvailable(false);
+            if (!owner.isCurrent()) return;
+            await sessionActions.refreshModels(undefined, {
+              reloadProviders: false,
+            });
+            if (owner.isCurrent()) {
+              callbacks.current.onNotice(
+                'info',
+                t('subscription.signedOutLocally'),
+              );
+            }
+            return;
+          }
+          const config = await actions.getSubscriptionConfig();
           if (!isCurrent()) return;
           if (!config.enabled) {
             callbacks.current.onNotice('info', t('subscription.unavailable'));
             return;
           }
-          const authType = await loadAuthType();
           if (!isCurrent()) return;
           const latest = await actions.getSubscriptionConfig();
           if (!isCurrent()) return;

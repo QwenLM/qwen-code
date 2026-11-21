@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { QueryOptionsSchema } from '../../src/types/queryOptionsSchema.js';
+import type { AuthType } from '../../src/types/protocol.js';
 
 describe('QueryOptionsSchema', () => {
   it('retains App resource limits in parsed MCP configuration', () => {
@@ -21,6 +22,12 @@ describe('QueryOptionsSchema', () => {
 
   it('accepts empty options', () => {
     const result = QueryOptionsSchema.safeParse({});
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts Google OAuth as an authentication type', () => {
+    const authType: AuthType = 'google-oauth';
+    const result = QueryOptionsSchema.safeParse({ authType });
     expect(result.success).toBe(true);
   });
 

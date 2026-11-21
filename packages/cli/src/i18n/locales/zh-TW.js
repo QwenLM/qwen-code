@@ -1642,6 +1642,20 @@ export default {
   'Welcome back! (Last updated: {{timeAgo}})':
     '歡迎回來！（最後更新：{{timeAgo}}）',
   'Overall Goal:': '總體目標：',
+  'Sign in with Google': '使用 Google 帳號登入',
+  'Use your personal Google account with Gemini Code Assist':
+    '透過個人 Google 帳號使用 Gemini Code Assist',
+  'Open the authorization URL and enter the returned code.':
+    '開啟授權網址並輸入取得的授權碼。',
+  'Complete Google authorization and wait for Code Assist setup…':
+    '完成 Google 授權並等待 Code Assist 設定…',
+  'Authorization code': '授權碼',
+  'Esc to cancel and return to provider selection':
+    '按 Esc 取消並返回服務商選擇',
+  'Enter to retry · Esc to go back': '按 Enter 重試，按 Esc 返回',
+  'Signed in with Google ({{tier}}).': '已使用 Google 帳號登入（{{tier}}）。',
+  'Could not remove local Google credentials. Check local file permissions.':
+    '無法刪除本機 Google 憑證。請檢查本機檔案權限。',
   'Connect a Provider': '連接服務商',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     '必須連接一個服務商才能繼續。再次按 Ctrl+C 退出',

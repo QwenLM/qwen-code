@@ -42,6 +42,8 @@ function getAuthDisplayType(
       return 'Qwen Subscription';
     case AuthType.QWEN_OAUTH:
       return AuthDisplayType.QWEN_OAUTH;
+    case AuthType.GOOGLE_OAUTH:
+      return 'Google OAuth';
     default:
       return AuthDisplayType.API_KEY;
   }

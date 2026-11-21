@@ -6754,6 +6754,23 @@ export interface DaemonSubscriptionActivation {
   runtimeSync: DaemonModelProviderRuntimeSyncResult;
 }
 
+export interface DaemonGoogleOAuthUserData {
+  projectId: string;
+  userTier: string;
+  userTierName?: string;
+  email?: string;
+}
+
+export interface DaemonGoogleOAuthFlow {
+  id: string;
+  status: 'waiting' | 'awaiting-code' | 'ready' | 'error';
+  authorizationUrl?: string;
+  userData?: DaemonGoogleOAuthUserData;
+  modelId?: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
 /**
  * WeChat login state. The credential is process-global (one account.json in
  * the daemon's home), so these views are served outside any workspace scope.

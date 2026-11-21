@@ -257,6 +257,56 @@ If you prefer to skip the interactive `/auth` flow, add the following to `~/.qwe
 >
 > The Token Plan uses dedicated, region-specific endpoints (`*.maas.aliyuncs.com`) that are different from the standard DashScope endpoint. Make sure the `baseUrl` matches the region of your subscription.
 
+## 👤 Personal Google account: Code Assist OAuth
+
+Use **Sign in with Google** in `/auth` when you want to use your personal Google account with Gemini Code Assist rather than supply a Gemini API key or configure a Google Cloud API credential. The same flow is available in Ink, OpenTUI, and Web Shell.
+
+This is a separate `google-oauth` auth type. It uses Google OAuth and the Code Assist service at `https://cloudcode-pa.googleapis.com`; it does not use the Gemini Developer API key endpoint, Vertex AI, or a generic OpenAI-compatible provider entry. The ordinary `modelProviders` installer cannot be used to receive these personal credentials.
+
+The initial built-in models are:
+
+| Model ID            | Role                       |
+| ------------------- | -------------------------- |
+| `gemini-4-argon`    | Default Gemini 4 route     |
+| `gemini-4-carbon`   | Alternate Gemini 4 route   |
+| `gemini-4-hydrogen` | Alternate Gemini 4 route   |
+| `gemini-2.5-pro`    | Stable compatibility route |
+
+Model IDs are passed to Code Assist unchanged. Availability and quota are determined by your Google account and the service; Qwen Code does not grant extra entitlement if an account or model is ineligible.
+
+### Sign in
+
+1. Run `/auth` and choose **Sign in with Google** (after the existing provider entries).
+2. Complete the Google authorization page. Ink and OpenTUI can use a local callback; Web Shell opens the authorization URL in your browser and asks for the returned authorization code. The scopes are `cloud-platform`, `userinfo.email`, and `userinfo.profile`.
+3. Qwen Code completes Code Assist onboarding when needed. The `free-tier` managed project is supplied by the service. If another tier requires your own project, use its string-based project ID through `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID`, not a purely numeric project number.
+4. After onboarding succeeds, the selected provider and model are activated. Setup failure does not persist the new provider selection.
+
+For unattended/headless use, complete that interactive sign-in once first. Cached credentials are then reused and refreshed; a missing or invalid cache fails with a Google OAuth error instead of starting an unexpected browser login in a subagent or headless session.
+
+Credentials are stored separately from Qwen OAuth:
+
+- `~/.qwen/google_oauth_creds.json` (`0600`) stores Google OAuth credentials and refreshed tokens;
+- `~/.qwen/google_accounts.json` stores account metadata;
+- `~/.qwen/oauth_creds.json` and `oauth_creds.lock` remain Qwen-specific and are never shared with Google OAuth.
+
+The standard provider setup persists only this routing data (after sign-in):
+
+```json
+{
+  "security": {
+    "auth": { "selectedType": "google-oauth" }
+  },
+  "model": {
+    "name": "gemini-4-argon",
+    "baseUrl": "https://cloudcode-pa.googleapis.com"
+  }
+}
+```
+
+Do not put Google refresh tokens or access tokens into `settings.json`, `modelProviders`, or API-key fields. If you meant to use Gemini Developer API keys, select `gemini`; for a Google Cloud project and Application Default Credentials, select `vertex-ai` instead.
+
+`CODE_ASSIST_ENDPOINT` and `CODE_ASSIST_API_VERSION` remain available for controlled tests and compatible Code Assist environments. Do not point them at an untrusted service, because the endpoint receives your bearer credential.
+
 ## 🚀 Option 5: API Key (flexible)
 
 Use this if you want to connect to third-party providers such as OpenAI, Anthropic, Google, Azure OpenAI, OpenRouter, Requesty, ModelScope, or a self-hosted endpoint. Supports multiple protocols and providers.

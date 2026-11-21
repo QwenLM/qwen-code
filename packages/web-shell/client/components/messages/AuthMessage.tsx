@@ -41,6 +41,8 @@ import { isVoiceModelId } from '../../voice/voiceModels';
 import { Switch } from '../ui/switch';
 import styles from './AuthMessage.module.css';
 import { QwenSubscriptionEntry } from './QwenSubscriptionEntry';
+import { GoogleOAuthEntry } from './GoogleOAuthEntry';
+import { GoogleOAuthFlowPanel } from './GoogleOAuthFlowPanel';
 
 const TOS_PRIVACY_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
@@ -229,6 +231,21 @@ export function AuthMessage({
   const startSubscription = useCallback(() => {
     setSubscriptionTarget(getSubscriptionContext());
   }, [getSubscriptionContext]);
+  const [googleTarget, setGoogleTarget] = useState<
+    ReturnType<typeof getSubscriptionContext> | undefined
+  >();
+  const googleTargetChanged =
+    googleTarget !== undefined &&
+    (googleTarget.workspaceCwd !== subscriptionWorkspace ||
+      googleTarget.sessionId !== subscriptionSession ||
+      googleTarget.sessionWorkspaceCwd !== subscriptionSessionWorkspace ||
+      googleTarget.standalone !== standalone);
+  useEffect(() => {
+    if (googleTargetChanged) setGoogleTarget(undefined);
+  }, [googleTargetChanged]);
+  const startGoogleOAuth = useCallback(() => {
+    setGoogleTarget(getSubscriptionContext());
+  }, [getSubscriptionContext]);
   const [subscriptionEnabled, setSubscriptionEnabled] = useState(false);
   useEffect(() => {
     const abort = new AbortController();
@@ -352,6 +369,7 @@ export function AuthMessage({
     loading,
     hasSubscriptionEntry,
     subscriptionTarget,
+    googleTarget,
   ]);
 
   useEffect(() => {
@@ -664,6 +682,10 @@ export function AuthMessage({
         startSubscription();
         return;
       }
+      if (allowAdd && groupIndex === groupOffset + groups.length) {
+        startGoogleOAuth();
+        return;
+      }
       const group = groups[groupIndex - groupOffset];
       if (!group) return;
       if (group.id === 'custom') {
@@ -730,6 +752,7 @@ export function AuthMessage({
     }
     goNext();
   }, [
+    allowAdd,
     wireApi,
     baseUrl,
     currentStep,
@@ -737,6 +760,7 @@ export function AuthMessage({
     goNext,
     hasSubscriptionEntry,
     startSubscription,
+    startGoogleOAuth,
     groupOffset,
     groupIndex,
     groups,
@@ -1283,6 +1307,13 @@ export function AuthMessage({
             groupIndex - groupOffset,
             (index) => setGroupIndex(index + groupOffset),
           )}
+          {allowAdd && (
+            <GoogleOAuthEntry
+              selected={groupIndex === groupOffset + groups.length}
+              onFocus={() => setGroupIndex(groupOffset + groups.length)}
+              onClick={startGoogleOAuth}
+            />
+          )}
           <div className={styles.terms}>
             <div>{t('auth.termsTitle')}:</div>
             <a
@@ -1344,6 +1375,71 @@ export function AuthMessage({
     }
     activate();
   };
+
+  if (googleTarget && !googleTargetChanged)
+    return (
+      <GoogleOAuthFlowPanel
+        transport={workspaceActions}
+        workspace={googleTarget.workspaceCwd}
+        onOpenExternal={(url) => {
+          if (isDesktopShell()) {
+            return openExternalUrl(url);
+          } else {
+            window.open(url, '_blank', 'noopener,noreferrer');
+          }
+        }}
+        onActivated={async (flow) => {
+          const { workspaceCwd, sessionId, sessionWorkspaceCwd, standalone } =
+            googleTarget;
+          const assertTarget = () => {
+            const current = getSubscriptionContext();
+            if (
+              current.workspaceCwd !== workspaceCwd ||
+              current.sessionId !== sessionId ||
+              current.sessionWorkspaceCwd !== sessionWorkspaceCwd ||
+              current.standalone !== standalone
+            )
+              throw new DOMException('Google target changed.', 'AbortError');
+          };
+          if (!flow.modelId) {
+            throw new Error('Google OAuth returned no model selection.');
+          }
+          assertTarget();
+          const selector = `${flow.modelId}(google-oauth)`;
+          if (sessionId) {
+            await activateSessionSubscriptionModel(
+              sessionWorkspaceCwd,
+              sessionId,
+              selector,
+            );
+            assertTarget();
+          } else {
+            if (
+              !standalone &&
+              connection.status === 'connected' &&
+              connection.workspaceCwd === workspaceCwd
+            ) {
+              await sessionActions.refreshModels(
+                (target) => {
+                  if (
+                    target.sessionId ||
+                    target.workspaceCwd !== workspaceCwd
+                  ) {
+                    throw new Error('Workspace changed.');
+                  }
+                },
+                { reloadProviders: false },
+              );
+              assertTarget();
+            }
+            onModelActivated?.(selector);
+          }
+          onMessage(t('auth.google.connected'));
+          onClose();
+        }}
+        onClose={() => setGoogleTarget(undefined)}
+      />
+    );
 
   if (subscriptionTarget && !subscriptionTargetChanged)
     return (

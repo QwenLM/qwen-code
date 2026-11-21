@@ -21306,6 +21306,8 @@ export function App({
                 if (authSource) {
                   if (authSource === 'qwen-subscription') {
                     formattedAuth = 'Qwen Subscription';
+                  } else if (authSource === 'google-oauth') {
+                    formattedAuth = 'Google OAuth';
                   } else if (
                     authSource.startsWith('oauth') ||
                     authSource === 'qwen-oauth'

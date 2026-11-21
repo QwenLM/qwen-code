@@ -1329,6 +1329,22 @@ export default {
   'Welcome back! (Last updated: {{timeAgo}})':
     'Bem-vindo de volta! (Última atualização: {{timeAgo}})',
   'Overall Goal:': 'Objetivo Geral:',
+  'Sign in with Google': 'Entrar com o Google',
+  'Use your personal Google account with Gemini Code Assist':
+    'Use sua conta pessoal do Google com o Gemini Code Assist',
+  'Open the authorization URL and enter the returned code.':
+    'Abra o URL de autorização e insira o código retornado.',
+  'Complete Google authorization and wait for Code Assist setup…':
+    'Conclua a autorização do Google e aguarde a configuração do Code Assist…',
+  'c to copy link · Esc to cancel': 'c para copiar o link · Esc para cancelar',
+  'Authorization code': 'Código de autorização',
+  'Esc to cancel and return to provider selection':
+    'Esc para cancelar e voltar à seleção de provedor',
+  'Enter to retry · Esc to go back':
+    'Enter para tentar novamente · Esc para voltar',
+  'Signed in with Google ({{tier}}).': 'Conectado com o Google ({{tier}}).',
+  'Could not remove local Google credentials. Check local file permissions.':
+    'Não foi possível remover as credenciais locais do Google. Verifique as permissões dos arquivos locais.',
   'Connect a Provider': 'Conectar um provedor',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'Você deve conectar um provedor para prosseguir. Pressione Ctrl+C novamente para sair.',

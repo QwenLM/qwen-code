@@ -8,6 +8,7 @@ import { getQwenSubscriptionPlansUrl } from '@qwen-code/qwen-code-core/qwen/oaut
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { signOutGoogleOAuth } from '@qwen-code/qwen-code-core/code_assist/index.js';
 import { openBrowserSecurely } from '@qwen-code/qwen-code-core/utils/secure-browser-launcher.js';
 import { t } from '../../i18n/index.js';
 import { MessageType } from '../types.js';
@@ -23,6 +24,33 @@ export const logoutCommand: SlashCommand = {
   canCancel: false,
   action: async (context) => {
     const { config } = context.services;
+    if (config?.getAuthType() === AuthType.GOOGLE_OAUTH) {
+      if (!context.ui.isIdleRef.current) {
+        return {
+          type: 'message',
+          messageType: 'warning',
+          content: t(
+            'Wait for the current response to finish before signing out.',
+          ),
+        };
+      }
+      try {
+        await signOutGoogleOAuth(config);
+      } catch {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            'Could not remove local Google credentials. Check local file permissions.',
+          ),
+        };
+      }
+      context.ui.cancelBtw();
+      config
+        .getBackgroundTaskRegistry()
+        .abortAll({ notify: false, persistedStatus: 'cancelled' });
+      return;
+    }
     if (
       config?.getAuthType() !== AuthType.QWEN_SUBSCRIPTION ||
       !new QwenSubscriptionSession().isSignedIn()
@@ -122,7 +150,8 @@ export function filterSubscriptionCommands(
   authType: AuthType | undefined,
   signedIn = new QwenSubscriptionSession().isSignedIn(),
 ): readonly SlashCommand[] {
-  return authType === AuthType.QWEN_SUBSCRIPTION && signedIn
+  return (authType === AuthType.QWEN_SUBSCRIPTION && signedIn) ||
+    authType === AuthType.GOOGLE_OAUTH
     ? commands
     : Object.freeze(
         commands.filter(

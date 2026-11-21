@@ -2229,6 +2229,33 @@ describe('Qwen Subscription model selection', () => {
       baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
     });
   });
+
+  it('preserves explicit Google modalities and context window on auth refresh', () => {
+    const source = (detail: string): ConfigSource => ({
+      kind: 'settings',
+      detail,
+    });
+    const config = new ModelsConfig({
+      initialAuthType: AuthType.GOOGLE_OAUTH,
+      generationConfig: {
+        model: 'gemini-4-argon',
+        modalities: { image: false, audio: false, video: false, pdf: false },
+        contextWindowSize: 123456,
+      },
+      generationConfigSources: {
+        modalities: source('model.generationConfig.modalities'),
+        contextWindowSize: source('model.generationConfig.contextWindowSize'),
+      },
+    });
+    config.syncAfterAuthRefresh(AuthType.GOOGLE_OAUTH, 'gemini-4-argon');
+    expect(config.getGenerationConfig()).toMatchObject({
+      modalities: { image: false, audio: false, video: false, pdf: false },
+      contextWindowSize: 123456,
+    });
+    const sources = config.getGenerationConfigSources();
+    expect(sources['modalities']?.kind).toBe('settings');
+    expect(sources['contextWindowSize']?.kind).toBe('settings');
+  });
 });
 
 vi.mock('../qwen/subscription-models.js', async (original) => ({

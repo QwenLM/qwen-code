@@ -106,6 +106,7 @@ import type {
   WorkspaceVoiceSettingsUpdate,
   WorkspaceAcpPreheatResult,
   WorkspaceAcpStatusResult,
+  GoogleOAuthFlowCommand,
   WorkspaceSkillBatchToggleResult,
   WorkspaceSkillToggleResult,
   WorkspaceSkillToggleActivation,
@@ -129,6 +130,7 @@ export type {
   WorkspaceVoiceSettingsUpdate,
   WorkspaceAcpPreheatResult,
   WorkspaceAcpStatusResult,
+  GoogleOAuthFlowCommand,
   WorkspaceSkillBatchToggleResult,
   WorkspaceSkillBatchToggleItem,
   WorkspaceSkillToggleError,
@@ -1819,6 +1821,19 @@ export function createDaemonWorkspaceService(
         }
         writeStderrLine('qwen serve: model-provider ACP child sync failed');
         return { status: 'failed' };
+      }
+    },
+
+    async googleOAuthCommand<T>(
+      _ctx: WorkspaceRequestContext,
+      method: GoogleOAuthFlowCommand,
+      params: Record<string, unknown> = {},
+    ): Promise<T> {
+      assertActiveGeneration();
+      try {
+        return await invokeWorkspaceCommand<T>(method, params);
+      } finally {
+        assertActiveGeneration();
       }
     },
 

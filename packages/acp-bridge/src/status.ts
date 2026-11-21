@@ -232,6 +232,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionExternalRecord: 'qwen/control/session/external_record',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
+  googleOAuthStart: 'qwen/google-oauth/start',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',
   workspaceMcpReload: 'qwen/control/workspace/mcp/reload',

@@ -37,6 +37,7 @@ const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.USE_ANTHROPIC]: ['ANTHROPIC_MODEL'],
   [AuthType.QWEN_OAUTH]: [],
   [AuthType.QWEN_SUBSCRIPTION]: [],
+  [AuthType.GOOGLE_OAUTH]: [],
 };
 
 /**
@@ -128,6 +129,12 @@ function buildSkippedProviderWarnings(
     ) {
       warnings.push(
         `Warning: modelProviders provider "${providerId}" maps to "qwen-oauth" via providerProtocol, but qwen-oauth uses hard-coded models only; its ${models.length} model(s) are ignored.`,
+      );
+      continue;
+    }
+    if (protocol === AuthType.GOOGLE_OAUTH) {
+      warnings.push(
+        `Warning: modelProviders provider "${providerId}" maps to "google-oauth" via providerProtocol, but Google OAuth uses a fixed built-in model catalog; its ${models.length} model(s) are ignored.`,
       );
       continue;
     }

@@ -529,12 +529,14 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     // Enter would open the access-method sub-menu instead.
     await press('up');
     await press('return');
-    expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
+    expect(screen.getByText('Sign in with Google')).toBeTruthy();
+    expect(screen.getByText('Workspace is not trusted.')).toBeTruthy();
     expect(screen.queryByText(/Access Method/)).toBeNull();
   });
 
   it('wraps the main-menu cursor from the last row to the first (#160)', async () => {
     renderDialog();
+    await press('down');
     await press('down');
     await press('down');
     await press('down');

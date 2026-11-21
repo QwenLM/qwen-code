@@ -50,6 +50,7 @@ const AUTH_TYPE_CHOICES = [
   'anthropic',
   'qwen-oauth',
   'qwen-subscription',
+  'google-oauth',
   'gemini',
   'vertex-ai',
 ] as const satisfies ReadonlyArray<`${CoreAuthType}`>;
@@ -64,6 +65,7 @@ export const AUTH_TYPE_PARITY_WITNESS: Record<`${CoreAuthType}`, true> = {
   anthropic: true,
   'qwen-oauth': true,
   'qwen-subscription': true,
+  'google-oauth': true,
   gemini: true,
   'vertex-ai': true,
 };
