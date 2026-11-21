@@ -125,14 +125,6 @@ case "${step}" in
     git config core.hooksPath .husky
 
     release_branch_name="release/${RELEASE_TAG}"
-    if [[ "${REUSED_COMMIT:-}" == "true" ]]; then
-      # A resume left HEAD detached at the adopted release commit and the
-      # restored handoff may hold a local branch of the same name pointing
-      # at this run's stale bump commit; recreate it from the adopted one.
-      git switch -C "${release_branch_name}"
-      echo "BRANCH_NAME=${release_branch_name}" >> "${GITHUB_OUTPUT}"
-      exit 0
-    fi
     git switch -c "${release_branch_name}"
     echo "BRANCH_NAME=${release_branch_name}" >> "${GITHUB_OUTPUT}"
     npm run release:version "${RELEASE_VERSION}"
@@ -270,7 +262,11 @@ case "${step}" in
         if [[ "${channel_status}" -ne 0 ]]; then
           exit "${channel_status}"
         fi
-        git switch --detach "${release_commit}"
+        # Reattach the branch name onto the adopted commit: the restored
+        # handoff may hold a local branch of the same name pointing at this
+        # run's stale bump commit, and the rebuild below must build the
+        # commit the published packages will be anchored to.
+        git switch -C "${release_branch_name}" "${release_commit}"
         echo "reused_commit=true" >> "${GITHUB_OUTPUT}"
         echo "::notice::Reusing ${release_branch_name} at ${release_commit}; published npm versions will be skipped."
         exit 0

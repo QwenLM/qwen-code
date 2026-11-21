@@ -834,15 +834,11 @@ jobs:
       - *checkout_release_workflow_scripts
 
       - name: 'Prepare release branch'
-        # Also when a resume adopts an existing release commit: reattach the
-        # branch name onto the adopted commit so the rebuild below builds the
-        # commit the published packages will be anchored to.
-        if: "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}"
+        if: "${{ needs.build_release.result != 'success' }}"
         id: 'release_branch'
         env:
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
-          REUSED_COMMIT: '${{ steps.push_release_branch.outputs.reused_commit }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh prepare-release-branch'
 
       - *reset_release_workflow_scripts

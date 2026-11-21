@@ -4605,15 +4605,17 @@ describe('release artifact handoff', () => {
       'Build Standalone Archives',
     ]) {
       expect(step('publish', name).if).toBe(
-        "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}",
+        name === 'Prepare release branch'
+          ? "${{ needs.build_release.result != 'success' }}"
+          : "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}",
       );
     }
     // A resume rebuilds from the adopted release commit through the same
     // two build steps, so the reset/checkout pair between them protects the
     // archives build on the retry path too — a hand-copied rebuild step
     // running both commands back-to-back would not get that re-pin.
-    expect(step('publish', 'Prepare release branch').env.REUSED_COMMIT).toBe(
-      '${{ steps.push_release_branch.outputs.reused_commit }}',
+    expect(releaseStepScript).toContain(
+      'git switch -C "${release_branch_name}" "${release_commit}"',
     );
     expect(
       releaseYaml.jobs.publish.steps.some((entry) =>
