@@ -25,6 +25,7 @@ import {
   _getFileLockCountForTest,
   _recoverObjectsFromLine,
   _resetEnsuredDirsCacheForTest,
+  canStartRecoveredSuffix,
   countLines,
   exists,
   parseLineTolerant,
@@ -354,6 +355,34 @@ describe('_recoverObjectsFromLine', () => {
     } finally {
       parseSpy.mockRestore();
     }
+  });
+
+  it('salvages complete suffix record containing 16 or more nested object opens', () => {
+    // A torn prefix glued to a record with 20 nested object opens
+    const items = Array.from({ length: 20 }, (_, i) => ({ i }));
+    const suffixRecord = { uuid: 'c2fdde8f', type: 'turn', items };
+    const line = '{"backgroundTurn":{"sess' + JSON.stringify(suffixRecord);
+    expect(_recoverObjectsFromLine(line)).toEqual([suffixRecord]);
+  });
+
+  it('salvages suffix record when prefix ends in backslash before candidate brace', () => {
+    const line =
+      '{"type":"user","content":"path C:\\\\{"type":"custom_title","customTitle":"B"}';
+    expect(_recoverObjectsFromLine(line)).toEqual([
+      { type: 'custom_title', customTitle: 'B' },
+    ]);
+  });
+
+  it('canStartRecoveredSuffix accepts brace after backslash in string', () => {
+    const line =
+      '{"type":"user","content":"path C:\\\\{"type":"custom_title","customTitle":"B"}';
+    expect(canStartRecoveredSuffix(line, 34)).toBe(true);
+  });
+
+  it('rejects fieldless empty object {} from torn string content', () => {
+    expect(
+      _recoverObjectsFromLine('{"type":"assistant","content":"let x = {}'),
+    ).toEqual([]);
   });
 
   it('preserves complete: false when recovering suffix after torn prefix in parseLineTolerantWithIntegrity', () => {

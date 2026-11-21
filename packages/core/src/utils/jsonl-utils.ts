@@ -139,12 +139,15 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
   let start = -1;
   let complete = true;
   let lastNonWs = '';
-  const candidateSuffixStarts: number[] = [];
+  let candidateSuffixStarts: number[] = [];
 
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (escape) {
       escape = false;
+      if (c === '{' && i > 0 && candidateSuffixStarts.length < 64) {
+        candidateSuffixStarts.push(i);
+      }
       continue;
     }
     if (inString) {
@@ -153,7 +156,7 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
       } else if (c === '"') {
         inString = false;
         lastNonWs = '"';
-      } else if (c === '{' && i > 0) {
+      } else if (c === '{' && i > 0 && candidateSuffixStarts.length < 64) {
         candidateSuffixStarts.push(i);
       }
       continue;
@@ -169,7 +172,8 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
         depth === 0 &&
         lastNonWs !== '[' &&
         lastNonWs !== ',' &&
-        lastNonWs !== ':'
+        lastNonWs !== ':' &&
+        candidateSuffixStarts.length < 64
       ) {
         candidateSuffixStarts.push(i);
       }
@@ -182,6 +186,8 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
         const fragment = line.slice(start, i + 1);
         try {
           out.push(JSON.parse(fragment) as T);
+          // A complete record was consumed; suffix candidates must follow it.
+          candidateSuffixStarts = [];
         } catch {
           complete = false;
           // Skip un-parseable fragment; caller may still recover others.
@@ -210,32 +216,35 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
   }
 
   // If a torn prefix or unparseable fragment prevented clean consumption,
-  // walk recorded candidate open braces backwards from the end of the line
-  // to find a complete suffix record. Attempts are bounded to keep recovery
+  // attempt candidates from the last consumed position forward to reach
+  // the record's start brace directly. Attempts are bounded to keep recovery
   // linear even on brace-dense unclosed strings.
   const MAX_SUFFIX_ATTEMPTS = 16;
   let attempts = 0;
   for (
-    let idx = candidateSuffixStarts.length - 1;
-    idx >= 0 && attempts < MAX_SUFFIX_ATTEMPTS;
-    idx--
+    let idx = 0;
+    idx < candidateSuffixStarts.length && attempts < MAX_SUFFIX_ATTEMPTS;
+    idx++
   ) {
     attempts++;
     const candidate = candidateSuffixStarts[idx];
-    try {
-      const parsed = JSON.parse(line.slice(candidate));
-      if (
-        parsed !== null &&
-        typeof parsed === 'object' &&
-        !Array.isArray(parsed)
-      ) {
-        return {
-          records: [...out, parsed as T],
-          complete: false,
-        };
+    if (canStartRecoveredSuffix(line, candidate)) {
+      try {
+        const parsed = JSON.parse(line.slice(candidate));
+        if (
+          parsed !== null &&
+          typeof parsed === 'object' &&
+          !Array.isArray(parsed) &&
+          Object.keys(parsed).length > 0
+        ) {
+          return {
+            records: [...out, parsed as T],
+            complete: false,
+          };
+        }
+      } catch {
+        // Suffix was not valid JSON; try next candidate brace.
       }
-    } catch {
-      // Suffix was not valid JSON; try earlier candidate brace.
     }
   }
 
