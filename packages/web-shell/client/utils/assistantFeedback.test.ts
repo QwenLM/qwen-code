@@ -13,6 +13,7 @@ import {
   feedbackUserMessageOf,
   notifyAssistantFeedback,
   readAssistantFeedbackStore,
+  readPrunedAssistantFeedbackSession,
   setAssistantFeedbackRating,
   shouldOfferAssistantFeedback,
   writeAssistantFeedbackStore,
@@ -33,6 +34,7 @@ function sessionIds(n: number): string[] {
 
 beforeEach(() => {
   window.localStorage.clear();
+  readAssistantFeedbackStore();
 });
 
 afterEach(() => {
@@ -69,6 +71,23 @@ describe('readAssistantFeedbackStore', () => {
       JSON.stringify({ v: 99, 'session-1': { 'turn-1': 'up' } }),
     );
     expect(readAssistantFeedbackStore()).toEqual({});
+  });
+
+  it.each([
+    ['invalid JSON', 'not json'],
+    ['a future version', JSON.stringify({ v: 2 })],
+    ['an empty valid payload', JSON.stringify({ v: 1 })],
+  ])('forgets pruned sessions after reading %s', (_label, payload) => {
+    writeAssistantFeedbackStore(
+      storeOf(sessionIds(MAX_ASSISTANT_FEEDBACK_SESSIONS + 1)),
+    );
+    expect(readPrunedAssistantFeedbackSession('session-0')).toEqual({
+      'turn-1': 'up',
+    });
+    window.localStorage.setItem(ASSISTANT_FEEDBACK_STORAGE_KEY, payload);
+
+    expect(readAssistantFeedbackStore()).toEqual({});
+    expect(readPrunedAssistantFeedbackSession('session-0')).toBeUndefined();
   });
 
   it('survives a localStorage that refuses to be read', () => {

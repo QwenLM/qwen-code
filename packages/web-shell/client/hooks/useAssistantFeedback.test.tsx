@@ -117,6 +117,10 @@ const button = (title: string) =>
   container.querySelector<HTMLButtonElement>(`button[aria-label="${title}"]`);
 const isLit = (title: string) =>
   button(title)?.getAttribute('aria-pressed') === 'true';
+const isLitInPane = (pane: 'first' | 'second', title: string) =>
+  container
+    .querySelector(`[data-pane="${pane}"] button[aria-label="${title}"]`)
+    ?.getAttribute('aria-pressed') === 'true';
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -247,15 +251,21 @@ describe('useAssistantFeedback through the answer footer', () => {
     }
   });
 
-  it('does not restore a clear after another write refills the session cap', () => {
-    const stored: AssistantFeedbackStore = {};
+  it('does not restore a clear after the session was pruned and refilled', () => {
+    const stored: AssistantFeedbackStore = {
+      'shared-session': { 'turn-a': 'up' },
+    };
     for (let index = 0; index < MAX_ASSISTANT_FEEDBACK_SESSIONS - 1; index++) {
       stored[`session-${index}`] = { 'turn-1': 'up' };
     }
-    stored['shared-session'] = { 'turn-a': 'up' };
     writeAssistantFeedbackStore(stored);
     mountPair('shared-session', 'shared-session');
     try {
+      writeAssistantFeedbackStore({
+        ...stored,
+        [`session-${MAX_ASSISTANT_FEEDBACK_SESSIONS - 1}`]: { 'turn-1': 'up' },
+      });
+      expect(readAssistantFeedbackStore()['shared-session']).toBeUndefined();
       rateInPane('first', 'Satisfied');
       writeAssistantFeedbackStore({
         ...readAssistantFeedbackStore(),
@@ -269,6 +279,54 @@ describe('useAssistantFeedback through the answer footer', () => {
 
       expect(readAssistantFeedbackStore()['shared-session']).toEqual({
         'turn-b': 'down',
+      });
+    } finally {
+      unmount();
+    }
+  });
+
+  it('does not overwrite a newer rating with a queued retry', () => {
+    mountPair('shared-session', 'shared-session');
+    try {
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementationOnce(() => {
+        throw new Error('quota exceeded');
+      });
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      rateInPane('first', 'Satisfied');
+      expect(isLitInPane('first', 'Satisfied')).toBe(true);
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <section data-pane="first">
+              <Transcript sessionId="shared-session" turnId="turn-a" />
+            </section>
+            <section data-pane="second">
+              <Transcript sessionId="shared-session" turnId="turn-a" />
+            </section>
+          </I18nProvider>,
+        );
+      });
+      rateInPane('second', 'Not satisfied');
+      expect(readAssistantFeedbackStore()).toEqual({
+        'shared-session': { 'turn-a': 'down' },
+      });
+
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <section data-pane="first">
+              <Transcript sessionId="shared-session" turnId="turn-c" />
+            </section>
+            <section data-pane="second">
+              <Transcript sessionId="shared-session" turnId="turn-b" />
+            </section>
+          </I18nProvider>,
+        );
+      });
+      rateInPane('first', 'Satisfied');
+
+      expect(readAssistantFeedbackStore()).toEqual({
+        'shared-session': { 'turn-a': 'down', 'turn-c': 'up' },
       });
     } finally {
       unmount();
@@ -377,6 +435,35 @@ describe('useAssistantFeedback through the answer footer', () => {
       expect(Object.keys(persisted)).toHaveLength(
         MAX_ASSISTANT_FEEDBACK_SESSIONS,
       );
+    } finally {
+      unmount();
+    }
+  });
+
+  it('restores the ratings that were actually evicted, not a mount snapshot', () => {
+    const stored: AssistantFeedbackStore = {
+      'session-0': { 'turn-1': 'up', 'turn-2': 'up' },
+    };
+    for (let index = 1; index < MAX_ASSISTANT_FEEDBACK_SESSIONS; index++) {
+      stored[`session-${index}`] = { 'turn-1': 'up' };
+    }
+    writeAssistantFeedbackStore(stored);
+    mount('session-0', undefined, 'turn-4');
+    try {
+      writeAssistantFeedbackStore({
+        ...stored,
+        'session-0': { 'turn-1': 'down', 'turn-3': 'up' },
+        'session-10': { 'turn-1': 'up' },
+      });
+      expect(readAssistantFeedbackStore()['session-0']).toBeUndefined();
+
+      act(() => button('Satisfied')?.click());
+
+      expect(readAssistantFeedbackStore()['session-0']).toEqual({
+        'turn-1': 'down',
+        'turn-3': 'up',
+        'turn-4': 'up',
+      });
     } finally {
       unmount();
     }

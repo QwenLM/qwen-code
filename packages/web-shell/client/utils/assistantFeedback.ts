@@ -69,11 +69,20 @@ export const ASSISTANT_FEEDBACK_STORAGE_KEY =
 /** Sessions kept in storage; the rest age out oldest-first. */
 export const MAX_ASSISTANT_FEEDBACK_SESSIONS = 10;
 
-const prunedSessions = new Set<string>();
+const prunedSessions = new Map<
+  string,
+  Record<string, AssistantFeedbackRating>
+>();
 
-/** Whether a successful write evicted this session at the storage cap. */
-export function wasAssistantFeedbackSessionPruned(sessionId: string): boolean {
-  return prunedSessions.has(sessionId);
+/** Ratings evicted from storage at the session cap. */
+export function readPrunedAssistantFeedbackSession(
+  sessionId: string,
+): Readonly<Record<string, AssistantFeedbackRating>> | undefined {
+  return prunedSessions.get(sessionId);
+}
+
+export function forgetAssistantFeedbackSessionPruned(sessionId: string): void {
+  prunedSessions.delete(sessionId);
 }
 
 /** Characters of the turn's prompt forwarded to the host. */
@@ -156,6 +165,11 @@ function keepMostRecentSessions(
   return kept;
 }
 
+function emptyAssistantFeedbackStore(): AssistantFeedbackStore {
+  prunedSessions.clear();
+  return {};
+}
+
 /**
  * Reads the persisted marks, dropping anything unrecognizable rather than
  * guessing: a hand-edited or future payload must degrade to "nothing marked".
@@ -165,19 +179,20 @@ export function readAssistantFeedbackStore(): AssistantFeedbackStore {
   let parsed: unknown;
   try {
     const raw = window.localStorage.getItem(ASSISTANT_FEEDBACK_STORAGE_KEY);
-    if (!raw) {
-      prunedSessions.clear();
-      return {};
-    }
+    if (!raw) return emptyAssistantFeedbackStore();
     parsed = JSON.parse(raw);
   } catch {
     // localStorage can be unavailable in private or embedded contexts, and the
     // stored value may not be JSON at all.
-    return {};
+    return emptyAssistantFeedbackStore();
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return emptyAssistantFeedbackStore();
+  }
   const { v, ...sessions } = parsed as Record<string, unknown>;
-  if (v !== undefined && v !== STORAGE_VERSION) return {};
+  if (v !== undefined && v !== STORAGE_VERSION) {
+    return emptyAssistantFeedbackStore();
+  }
 
   const store: AssistantFeedbackStore = {};
   for (const [sessionId, value] of Object.entries(sessions)) {
@@ -197,7 +212,9 @@ export function readAssistantFeedbackStore(): AssistantFeedbackStore {
     }
     if (Object.keys(ratings).length > 0) store[sessionId] = ratings;
   }
-  return keepMostRecentSessions(store);
+  return Object.keys(store).length > 0
+    ? keepMostRecentSessions(store)
+    : emptyAssistantFeedbackStore();
 }
 
 export function writeAssistantFeedbackStore(
@@ -216,7 +233,7 @@ export function writeAssistantFeedbackStore(
     }
     for (const sessionId of Object.keys(store)) {
       if (kept[sessionId]) prunedSessions.delete(sessionId);
-      else prunedSessions.add(sessionId);
+      else prunedSessions.set(sessionId, { ...store[sessionId]! });
     }
     return true;
   } catch (error) {
