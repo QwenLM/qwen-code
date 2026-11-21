@@ -3,13 +3,13 @@
 [English](2026-11-20-managed-identity-dehash-cluster-impl.md) | [简体中文](2026-11-20-managed-identity-dehash-cluster-impl.zh-CN.md)
 
 配套设计：[design EN](../design/2026-11-20-managed-identity-varchar-dehash.md) · [design ZH](../design/2026-11-20-managed-identity-varchar-dehash.zh-CN.md)。
-状态：执行规格。增量 1（tenant guard）已在 #17927 合并。本计划覆盖剩余 join 连通簇，须原子转换。修订（2026-11-20）：按[重复业务键调研](../design/2026-11-20-managed-identity-varchar-dehash.zh-CN.md#重复业务键)及其决策更新。
+状态：执行规格。增量 1（tenant guard）已在 #17927 合并。本计划覆盖剩余 join 连通簇，须原子转换。修订（2026-11-20）：按[重复业务键调研](../design/2026-11-20-managed-identity-varchar-dehash.zh-CN.md#重复业务键)及其决策更新。修订（2026-11-21）：增量 2（同行冗余哈希键，[设计](../design/2026-11-20-managed-identity-varchar-dehash.zh-CN.md#增量-2同行冗余哈希键)）先于原子簇落地；见[增量 2 执行](#增量-2-执行)。
 
 ## 为什么簇是原子的（没有可保绿子步）
 
 - 身份列通过哈希键与原始 actor/scope 列互相 join（如 `ma_memory_store.owner_actor_key = COALESCE(ma_session.owner_actor_key, ma_session.creator_actor_key)`），转换单表会破坏 join 直到全部转换。
 - 预算收缩与 fixture 对齐耦合：`VARCHAR(64)` 会拒绝现有长 fixture（`ws-<cwd>` workspace id、43 字符 `"tenant-"+UUID`），故 DDL 预算与 fixture 改动须同批落地。
-- 没有任何重复键哈希能在转换之前单独删除。按当前 VARBINARY 宽度，原始替代超过 3072 字节（storage alias 4096、Session head 4096、resource 4608、`idx_ma_work_pending` 约 3200），且 `receipt_key` 被生成进公开的 workspace 与 storage id。
+- 除增量 2 的同行冗余键外，没有任何重复键哈希能在转换之前单独删除。按当前 VARBINARY 宽度，原始替代超过 3072 字节（storage alias 4096、resource 4608、`idx_ma_work_pending` 约 3200），且 `receipt_key` 被生成进公开的 workspace 与 storage id。Session head 键之所以能放下，只因增量 2 把 head 租户收窄到父表的 512 字节。
 - 跨表哈希引用（`ma_message.body_resource_key`、`ma_event_stream.artifact_refs_resource_key`、`ma_resource_ref.resource_key` 等）无法展开为引用表中不存在的本地原始列；需在同批给引用表加原始 scope+resource 列（或规范可读键），即 schema 扩张。
 - 探针（H2 2.4.240 MySQL mode）：`utf8mb4_0900_bin` 可解析，但列级 plain `CHARACTER SET … COLLATE …` 子句后接 `NOT NULL DEFAULT` 或用于生成列时会语法报错；须把 charset+collate 包进 MySQL 可执行注释 `/*!80000 … */` 让 H2 忽略。VARCHAR 等值/PK 为 NO PAD；`setBytes`→VARCHAR 在 INSERT/`getBytes` 往返保留 UTF-8 与尾随空格，**但 H2 拒绝 VARCHAR 列与 byte[] 绑定做 WHERE 比较**（`CHARACTER VARYING` 与 `BINARY VARYING` 不可比）。故仅改 DDL 类型的迁移必红：DDL 类型变更与 Java `byte[]`→`String` 绑定变更须同批落地，叠加上述预算/fixture/哈希耦合。仅迁移绑定（String 绑定对接仍为 VARBINARY 的列）同样红：H2 比较要求绑定类型族与列类型族一致（`BINARY VARYING` 与 `CHARACTER VARYING` 不可比），故两半都无法单独落地。
 
@@ -24,6 +24,15 @@
 - 中心 helper：`JdbcRepositorySupport.setIdentity`→`setString`；`ManagedSchemaRows.identity`→`getString`；`ManagedWorkspaceRegistry.actorKey`→返回 String；`ManagedReceipts.actorScope(String)`→`Base64(actor.getBytes(UTF_8))`；`UNATTRIBUTED`→`""`；`ManagedRuntimeRetentionGuard.identity`→`return value`。
 - 语义修复由编译错误驱动：身份行读取 `getBytes`→`getString`；`return x.getBytes(UTF_8)`→`return x`；`actor.length==0`→`isEmpty()`；byte[]/String 条件表达式；**仅身份点**`Arrays.equals`→`Objects.equals`、`List<byte[]>`→`List<String>`、`queryForObject byte[].class`→`String.class`；测试 `containsExactly`/`fill` 身份值→String。
 - 循环：白名单类型脚本（主+verification 测试）→`test-compile`→人工修所列语义点→重复至编译绿→广谱 H2→双 Checkstyle→提交。
+
+## 增量 2 执行
+
+范围、保留键与查询规则见[设计](../design/2026-11-20-managed-identity-varchar-dehash.zh-CN.md#增量-2同行冗余哈希键)。执行要点：
+
+- 单个改动：V1 DDL、`ManagedSchemaProjection`、`ManagedSchemaTest` 业务键、所有生产查询与所有 verification fixture 一起改。VARBINARY 类型不变，绑定保持原类型。
+- 生产 SQL 逐语句重写，绝不按关键字删除。每个被删谓词都保留重建索引的原始 `(tenant_id, session_id)` 或 `(tenant_id, harness_session_id)` 前缀；join 到 `ma_session` 时保留登记标记。
+- 测试 SQL 由语句级工具重写后再审计。把 scope 变量解析为租户与 Session 时，必须取作用域内最近的声明（含方法参数）；按全文件最后一次定义解析会静默把 fixture 指向另一个 Session，并可能让断言变成空断言。原先植入与原始列不一致的哈希（伪造外部 scope 或冲突 head）的 fixture，改为使用真正不同的租户或 Session，因为原始键现在是唯一的键。
+- 绑定数断言随语句形状变化（automation ledger 批量每个 run 三个绑定，capture GC 入队每行十二个）。
 
 ## 执行顺序
 

@@ -309,6 +309,34 @@ describe('DaemonSessionClient', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('binds rateSessionTurn to the session and client identity', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { recorded: true }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.rateSessionTurn('prompt-1', 'up')).resolves.toEqual({
+      recorded: true,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe('http://daemon/session/s-1/feedback');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      promptId: 'prompt-1',
+      rating: 'up',
+    });
+  });
+
   it('binds agent, trace, and attachment reads to the session identity', async () => {
     const controller = new AbortController();
     const { signal } = controller;

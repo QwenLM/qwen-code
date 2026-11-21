@@ -745,6 +745,13 @@ export interface DaemonSessionActions {
     pr: Omit<DaemonSessionPrInfo, 'issues'>,
   ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
+  /**
+   * Report a per-turn satisfied/not-satisfied mark to telemetry.
+   * Best-effort: with no live session this is a no-op, and failures are
+   * logged, never surfaced as notices — the local mark never depends on
+   * the outcome.
+   */
+  rateAssistantTurn(promptId: string, rating: 'up' | 'down'): Promise<void>;
   generateSessionContent(
     prompt: string,
     opts?: { signal?: AbortSignal },
