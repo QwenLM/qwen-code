@@ -4068,12 +4068,15 @@ esac`,
           delete env.QWEN_STANDALONE_RUNTIME_CACHE;
           // The stub is not a real runtime, so the bare invocation aborts just
           // after its identity probes; the dump they wrote is the witness.
-          spawnSync(
+          const result = spawnSync(
             process.execPath,
             ['scripts/test-standalone-runtimes.mjs', ...args],
             { env, encoding: 'utf8', timeout: 60_000 },
           );
-          expect(existsSync(probe), `the stub never ran: ${mode}`).toBe(true);
+          expect(
+            existsSync(probe),
+            `the stub never ran: ${mode} (status=${result.status} signal=${result.signal} error=${result.error?.code})\n${result.stderr ?? ''}`,
+          ).toBe(true);
           // Key names only. The dump holds every variable the child carries,
           // and the release lane's job env sets secrets the runner does not
           // mask, so rendering it on failure would publish them to a public
@@ -4107,7 +4110,7 @@ esac`,
         const out = join(dir, 'leaked');
         const env = stampEnv();
         env[SUITE_STAMP_PROBE] = out;
-        spawnSync(
+        const result = spawnSync(
           process.execPath,
           [
             'node_modules/vitest/vitest.mjs',
@@ -4122,9 +4125,10 @@ esac`,
         );
         // vitest exits 0 when -t matches nothing, so the file the probe writes
         // witnesses that it ran; the child's exit code cannot.
-        expect(existsSync(out), 'the spawned suite never ran the probe').toBe(
-          true,
-        );
+        expect(
+          existsSync(out),
+          `the spawned suite never ran the probe (status=${result.status} signal=${result.signal} error=${result.error?.code})\n${result.stderr ?? ''}`,
+        ).toBe(true);
         expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual(
           [],
         );
@@ -4139,26 +4143,25 @@ esac`,
     // probes above pin what each entrance actually drops; this pins that both
     // declare exactly the keys those probes inject, so a new stamp cannot
     // reach one half — or both — without extending the witnesses too.
-    const declared = (file, pattern) => {
-      const list = readFileSync(file, 'utf8').match(pattern);
-      expect(list, `stamp list not found in ${file}`).not.toBeNull();
-      return [...list[1].matchAll(/'([A-Z0-9_]+)'/g)].map((m) => m[1]).sort();
-    };
     const pinned = [...SESSION_STAMPS].sort();
-    expect(
-      declared(
-        'scripts/tests/test-setup.ts',
-        /for \(const key of \[([\s\S]*?)\]\)/,
-      ),
-      'scripts unit suite stamp list',
-    ).toEqual(pinned);
-    expect(
-      declared(
-        'scripts/test-standalone-runtimes.mjs',
-        /const SESSION_STAMP_ENV = \[([\s\S]*?)\];/,
-      ),
-      'standalone suite stamp list',
-    ).toEqual(pinned);
+    // Every candidate loop, not the first one in the file: an unrelated scrub
+    // added above this one must not be mistaken for it.
+    const declares = (file, pattern) => {
+      const lists = [...readFileSync(file, 'utf8').matchAll(pattern)].map((m) =>
+        [...m[1].matchAll(/'([A-Z0-9_]+)'/g)].map((k) => k[1]).sort(),
+      );
+      expect(lists, `stamp list not declared in ${file}`).toContainEqual(
+        pinned,
+      );
+    };
+    declares(
+      'scripts/tests/test-setup.ts',
+      /for \(const key of \[([^\]]*)\]\)\s*delete process\.env\[key\];/g,
+    );
+    declares(
+      'scripts/test-standalone-runtimes.mjs',
+      /const SESSION_STAMP_ENV = \[([^\]]*)\];/g,
+    );
   });
 
   it('stages every integration package manifest after versioning', () => {
