@@ -119,11 +119,18 @@ Content paths:
 
 - `useWorkspaceArtifactLibrary(workspaceTarget)`: capability gate; SSE-first
   when `workspace_artifact_library_stream` is advertised, JSON fallback
-  otherwise; accumulate envelopes keyed by `sessionId`; flatten artifacts and
-  sort newest-first (`updatedAt` descending, `createdAt` fallback, stable
-  `(sessionId, artifactId)` tiebreak); track scan progress (`total` from
-  `start`; only `complete` terminates); a disconnect or terminal `error`
-  without `complete` marks the result partial and offers retry. No polling.
+  otherwise; an SSE admission refusal (`503 sse_connection_limit_exceeded`,
+  sent as a plain HTTP response before the stream starts) retries the same
+  scan as JSON — both capabilities share one persistence toggle, so the
+  capability check alone cannot detect this refusal. Accumulate envelopes
+  keyed by `sessionId`; the flattened newest-first list (`updatedAt`
+  descending, `createdAt` fallback, stable `(sessionId, artifactId)`
+  tiebreak) is a derived projection recomputed in batches, not on every
+  event. Track scan progress (`total` from `start`; only `complete`
+  terminates; sessions silently skipped mid-scan emit no event, so terminal
+  progress reconciles with `complete`'s `succeeded` / `failed` / `skipped`
+  counters); a disconnect or terminal `error` without `complete` marks the
+  result partial and offers retry. No polling.
 - Scan-generation ownership: every scan — initial load, manual refresh, or
   workspace switch — aborts the previous scan and bumps a monotonic generation
   bound to the workspace key (`ScanOwner = { workspaceKey, generation }`).
@@ -156,16 +163,24 @@ Content paths:
 - Rows: artifact icon and title (`artifactUtils.ts`, `FileTypeIcon`), size and
   updated time, source-session label with an `archiveState` badge; clicking
   the label opens the session. A single client-side text filter over artifact
-  title/description and session label.
+  title/description and session label. Rendered rows are bounded — incremental
+  reveal or windowing over the sorted projection; a large workspace's full
+  result set is retained per generation, but the DOM is not mounted all at
+  once.
 - Row action dispatch reuses the session panel's preview paths:
   workspace-storage artifacts preview/download through the page's own
-  workspace file-read actions (no session load); managed snapshots of live
-  sessions use the existing content route; managed snapshots of cold/archived
-  sessions jump to the session first (existing open path, including the
-  archived unarchive flow), then open the artifact; external URLs use the
-  existing safe-link opener. Where the dispatch logic is embedded in
-  `ArtifactPanel`, extract the minimal shared helper without changing
-  session-panel behavior.
+  workspace file-read actions resolved by `useArtifactWorkspaceTarget` (no
+  session load); managed snapshots of live sessions use the existing content
+  route; managed snapshots of cold/archived sessions jump to the session
+  first (existing open path, including the archived unarchive flow), then
+  open the artifact; external URLs use the existing safe-link opener.
+  Liveness comes from the shell's existing live-session tracking
+  (`workspace-session-live-state`), never from the envelope's `archiveState`
+  — that is storage location, not attachment, and a cold-but-active session's
+  managed snapshot must jump, not hit the attached-only content route. Where
+  the dispatch logic is embedded in `ArtifactPanel`, extract the minimal
+  shared helper into `artifactUtils.ts` without changing session-panel
+  behavior.
 - States: scanning progress (received/total sessions), empty workspace,
   persistence unavailable (`409 artifact_library_unavailable`), runtime
   unavailable (`503 workspace_runtime_unavailable`), request-level error with
@@ -258,9 +273,13 @@ Content paths:
 ## Validation plan
 
 - Unit: SDK wrapper request shape, Accept header, and error mapping; hook SSE
-  accumulation, JSON fallback, partial-on-disconnect, abort, refresh, sort
-  stability; page rows/filter/states/action dispatch (workspace preview vs
-  live content vs cold jump); nav gating.
+  accumulation, JSON fallback, SSE-admission-refusal JSON fallback,
+  partial-on-disconnect, abort, refresh, sort stability, zero-artifact
+  progress counting and terminal reconciliation with `complete`'s counters,
+  `displayName` fallback; page rows/filter/states (including the `503`
+  runtime-unavailable state)/bounded rendering/action dispatch (workspace
+  preview vs live content vs cold jump, with a cold-but-active managed
+  snapshot taking the jump); nav gating.
 - Interleaving witnesses for scan-generation ownership: (negative)
   same-workspace overlapping refresh — scan A emits an older envelope for
   session S, the user refreshes, scan B returns a newer S and `complete(B)`,

@@ -98,11 +98,16 @@ Managed 先例：
 ### 客户端：渐进扫描 hook
 
 - `useWorkspaceArtifactLibrary(workspaceTarget)`：能力门控；声明
-  `workspace_artifact_library_stream` 时 SSE 优先，否则 JSON 回退；按
-  `sessionId` 累积 envelope；展平产物并按最新优先排序（`updatedAt` 降序、
-  `createdAt` 回退、`(sessionId, artifactId)` 稳定 tiebreak）；跟踪扫描进度
-  （`total` 来自 `start`；仅 `complete` 表示终止）；未收到 `complete` 的断连
-  或终止 `error` 将结果标记为部分并给出重试。不轮询。
+  `workspace_artifact_library_stream` 时 SSE 优先，否则 JSON 回退；SSE 准入
+  拒绝（`503 sse_connection_limit_exceeded`，在流开始前以普通 HTTP 响应
+  发出）时同一次扫描改用 JSON 重试——两个能力共用一个持久化开关，仅靠能力
+  检查发现不了这种拒绝。按 `sessionId` 累积 envelope；展平后的最新优先列表
+  （`updatedAt` 降序、`createdAt` 回退、`(sessionId, artifactId)` 稳定
+  tiebreak）是派生投影，按批重算，不是每个事件都重算。跟踪扫描进度
+  （`total` 来自 `start`；仅 `complete` 表示终止；扫描中途被静默跳过的会话
+  不发事件，终态进度与 `complete` 的 `succeeded` / `failed` / `skipped`
+  计数对账）；未收到 `complete` 的断连或终止 `error` 将结果标记为部分并给出
+  重试。不轮询。
 - 扫描 generation 所有权：每次扫描——首次加载、手动刷新或工作区切换——都
   中止上一次扫描，并递增一个绑定工作区键的单调 generation
   （`ScanOwner = { workspaceKey, generation }`）。每个事件与终态提交
@@ -128,12 +133,19 @@ Managed 先例：
   视图；隐藏入口直接避免降级视图）。
 - 行：产物图标与标题（`artifactUtils.ts`、`FileTypeIcon`）、大小与更新时间、
   带 `archiveState` 徽标的来源会话标签；点击标签打开会话。单个客户端文本
-  过滤器，覆盖产物标题/描述与会话标签。
-- 行操作分派复用会话面板的预览路径：workspace 存储的产物经页面自身的工作区
-  文件读取 actions 预览/下载（不加载会话）；运行中会话的 managed 快照走既有
-  内容路由；冷/归档会话的 managed 快照先跳转到会话（既有打开路径，含归档
-  解归档流程），再打开产物；外部 URL 走既有安全链接 opener。分派逻辑目前
-  内嵌在 `ArtifactPanel` 的部分，抽取最小共享 helper，不改变会话面板行为。
+  过滤器，覆盖产物标题/描述与会话标签。渲染行数有界——在排序投影上增量
+  展开或窗口化；大工作区的完整结果集按 generation 保留，但 DOM 不一次性
+  全量挂载。
+- 行操作分派复用会话面板的预览路径：workspace 存储的产物经
+  `useArtifactWorkspaceTarget` 解析出的页面自身工作区文件读取 actions
+  预览/下载（不加载会话）；运行中会话的 managed 快照走既有内容路由；
+  冷/归档会话的 managed 快照先跳转到会话（既有打开路径，含归档解归档
+  流程），再打开产物；外部 URL 走既有安全链接 opener。liveness 取自 shell
+  既有的运行中会话跟踪（`workspace-session-live-state`），绝不取自 envelope
+  的 `archiveState`——那是存储位置而非挂载状态，冷但 active 的会话的
+  managed 快照必须跳转，不能打只认挂载会话的内容路由。分派逻辑目前内嵌在
+  `ArtifactPanel` 的部分，抽取最小共享 helper 到 `artifactUtils.ts`，不改变
+  会话面板行为。
 - 状态：扫描进度（已收到/总会话数）、空工作区、持久化不可用
   （`409 artifact_library_unavailable`）、runtime 不可用
   （`503 workspace_runtime_unavailable`）、请求级错误带重试、逐会话错误摘要
@@ -204,8 +216,11 @@ Managed 先例：
 ## 验证计划
 
 - 单元：SDK 封装请求形状、Accept 头与错误映射；hook SSE 累积、JSON 回退、
-  断连判部分、中止、刷新、排序稳定性；页面行/过滤器/状态/操作分派（workspace
-  预览 vs live 内容 vs 冷跳转）；导航门控。
+  SSE 准入拒绝后的 JSON 回退、断连判部分、中止、刷新、排序稳定性、零产物
+  进度计数与终态按 `complete` 计数对账、`displayName` 回退；页面
+  行/过滤器/状态（含 `503` runtime 不可用态）/有界渲染/操作分派（workspace
+  预览 vs live 内容 vs 冷跳转，冷但 active 的 managed 快照走跳转）；导航
+  门控。
 - 扫描 generation 所有权的交错见证：（负向）同工作区重叠刷新——扫描 A 先发出
   会话 S 的较旧 envelope，用户刷新，扫描 B 返回更新的 S 与 `complete(B)`，
   随后迟到的 `session(A)` 与 `complete(A)` 从一个 abort 后仍投递排队事件的
