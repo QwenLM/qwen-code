@@ -196,146 +196,31 @@ case "${step}" in
         fi
         # A completed release outranks every other refusal: a re-run of an
         # already-shipped version is a benign no-op even when the channel
-        # has since moved past it (finalize also pushes CHANGELOG commits
-        # that make the regenerated tree differ).
-        release_published=false
-        release_check_ok=false
-        for attempt in 1 2 3; do
-          gh_output="$(gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>&1)" || true
-          if echo "${gh_output}" | grep -qx 'false'; then
-            release_published=true
-            release_check_ok=true
-            break
+        # has since moved past it.
+        if release_state="$(gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>&1)"; then
+          if [[ "${release_state}" == "false" ]]; then
+            echo "::notice::Release ${RELEASE_TAG} is already published; nothing to resume."
+            echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+            exit 1
           fi
-          if echo "${gh_output}" | grep -qx 'true' || echo "${gh_output}" | grep -qi 'not found'; then
-            # Draft or absent: the release is not complete; continue probing.
-            release_published=false
-            release_check_ok=true
-            break
-          fi
-          if [[ "${attempt}" -lt 3 ]]; then
-            sleep $(( attempt * 5 ))
-          fi
-        done
-        if [[ "${release_published}" == "true" ]]; then
-          echo "::notice::Release ${RELEASE_TAG} is already published; nothing to resume."
-          echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+        elif ! echo "${release_state}" | grep -qi 'not found'; then
+          echo "::error::Cannot confirm GitHub Release ${RELEASE_TAG} state: ${release_state}"
           exit 1
         fi
-        if [[ "${release_check_ok}" == "false" ]]; then
-          echo "::error::Cannot confirm GitHub Release ${RELEASE_TAG} state after 3 attempts; refusing to resume."
-          # Infrastructure failure, not a version refusal: notify_failure
-          # should still fire.
-          exit 1
-        fi
-        # A newer version may have shipped on this channel since this run
-        # started. Resuming would publish the remaining packages under the
-        # old version and regress the dist-tag. Probe with bounded retries
-        # and refuse when the channel state cannot be confirmed.
-        current_tag=""
-        probe_ok=false
-        for attempt in 1 2 3; do
-          if current_tag="$(npm view @qwen-code/qwen-code "dist-tags.${NPM_TAG}" 2>/dev/null)"; then
-            probe_ok=true
-            break
-          fi
-          if [[ "${attempt}" -lt 3 ]]; then
-            sleep $(( attempt * 5 ))
-          fi
-        done
-        if [[ "${probe_ok}" == "false" ]]; then
-          echo "::error::Cannot confirm npm dist-tag ${NPM_TAG} state after 3 attempts; refusing to resume."
-          # Do NOT set version_refusal — this is an infrastructure failure
-          # (registry unreachable), not a version refusal. notify_failure
-          # should still fire so a human investigates.
+        # A newer version on this channel makes resuming a dist-tag regression.
+        if ! current_tag="$(npm view @qwen-code/qwen-code "dist-tags.${NPM_TAG}" 2>/dev/null)"; then
+          echo "::error::Cannot confirm npm dist-tag ${NPM_TAG}; refusing to resume."
           exit 1
         fi
         if [[ -n "${current_tag}" ]]; then
-          # Reject only when the channel has moved PAST this version. A
-          # channel still on an older version is the normal partial-publish
-          # retry: resuming moves it forward.
-          # Use a three-way exit: 0 = at/behind (safe), 1 = ahead (refuse),
-          # 2 = comparison failed (refuse with distinct message).
           compare_result=0
-          CURRENT_TAG="${current_tag}" RELEASE_VERSION_VAR="${RELEASE_VERSION}" node -e "
-            const parse = v => {
-              const s = v.replace(/^v/, '');
-              const dash = s.indexOf('-');
-              const core = (dash === -1 ? s : s.slice(0, dash)).split('.');
-              if (core.length !== 3) return null;
-              if (!core.every(x => /^[0-9]+$/.test(x))) return null;
-              const nums = core.map(x => parseInt(x, 10));
-              return { nums, pre: dash === -1 ? '' : s.slice(dash + 1) };
-            };
-            const cmpPre = (a, b) => {
-              if (!a && !b) return 0;
-              if (!a) return 1;
-              if (!b) return -1;
-              const ap = a.split('.'), bp = b.split('.');
-              for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
-                if (ap[i] === undefined) return -1;
-                if (bp[i] === undefined) return 1;
-                const an = /^[0-9]+/.test(ap[i]), bn = /^[0-9]+/.test(bp[i]);
-                if (an && bn) {
-                  const d = parseInt(ap[i], 10) - parseInt(bp[i], 10);
-                  if (d) return d > 0 ? 1 : -1;
-                } else if (an) return -1;
-                else if (bn) return 1;
-                else if (ap[i] !== bp[i]) return ap[i] > bp[i] ? 1 : -1;
-              }
-              return 0;
-            };
-            const a = parse(process.env.CURRENT_TAG), b = parse(process.env.RELEASE_VERSION_VAR);
-            if (!a || !b) process.exit(2);
-            let d = 0;
-            for (let i = 0; i < 3; i++) { d = (a.nums[i]||0) - (b.nums[i]||0); if (d) break; }
-            if (!d) d = cmpPre(a.pre, b.pre);
-            process.exit(d > 0 ? 1 : 0);
-          " 2>/dev/null || compare_result=$?
-          # node exits 1 on both "channel is ahead" and internal failure.
-          # Re-run without suppression to distinguish: if stderr is empty,
-          # the comparison ran and the channel is ahead; otherwise it failed.
+          CURRENT_TAG="${current_tag}" RELEASE_VERSION_VAR="${RELEASE_VERSION}" node -e '
+            const semver = require("semver");
+            const current = semver.valid(process.env.CURRENT_TAG);
+            const target = semver.valid(process.env.RELEASE_VERSION_VAR);
+            process.exit(!current || !target ? 2 : semver.gt(current, target) ? 1 : 0);
+          ' || compare_result=$?
           if [[ "${compare_result}" -eq 1 ]]; then
-            node_stderr="$(CURRENT_TAG="${current_tag}" RELEASE_VERSION_VAR="${RELEASE_VERSION}" node -e "
-              const parse = v => {
-                const s = v.replace(/^v/, '');
-                const dash = s.indexOf('-');
-                const core = (dash === -1 ? s : s.slice(0, dash)).split('.');
-                if (core.length !== 3) return null;
-                if (!core.every(x => /^[0-9]+$/.test(x))) return null;
-                const nums = core.map(x => parseInt(x, 10));
-                return { nums, pre: dash === -1 ? '' : s.slice(dash + 1) };
-              };
-              const cmpPre = (a, b) => {
-                if (!a && !b) return 0;
-                if (!a) return 1;
-                if (!b) return -1;
-                const ap = a.split('.'), bp = b.split('.');
-                for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
-                  if (ap[i] === undefined) return -1;
-                  if (bp[i] === undefined) return 1;
-                  const an = /^[0-9]+/.test(ap[i]), bn = /^[0-9]+/.test(bp[i]);
-                  if (an && bn) {
-                    const d = parseInt(ap[i], 10) - parseInt(bp[i], 10);
-                    if (d) return d > 0 ? 1 : -1;
-                  } else if (an) return -1;
-                  else if (bn) return 1;
-                  else if (ap[i] !== bp[i]) return ap[i] > bp[i] ? 1 : -1;
-                }
-                return 0;
-              };
-              const a = parse(process.env.CURRENT_TAG), b = parse(process.env.RELEASE_VERSION_VAR);
-              if (!a || !b) process.exit(2);
-              let d = 0;
-              for (let i = 0; i < 3; i++) { d = (a.nums[i]||0) - (b.nums[i]||0); if (d) break; }
-              if (!d) d = cmpPre(a.pre, b.pre);
-              process.exit(d > 0 ? 1 : 0);
-            " 2>&1 >/dev/null)" || true
-            if [[ -n "${node_stderr}" ]]; then
-              echo "::error::Cannot compare npm ${NPM_TAG} (${current_tag}) with ${RELEASE_VERSION}: ${node_stderr}. Refusing to resume."
-              echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
-              exit 1
-            fi
             echo "::error::npm ${NPM_TAG} is ${current_tag}, past ${RELEASE_VERSION}. Resuming would regress the dist-tag."
             echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
             exit 1
@@ -345,26 +230,6 @@ case "${step}" in
             echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
-          # compare_result == 0: channel is at or behind — safe to resume.
-        fi
-        # Block cross-version races: after the check above, a newer version
-        # could still publish on the same channel while this run rebuilds.
-        # Serialize every real publish, whichever channel it targets.
-        if [[ "${IS_DRY_RUN}" == "false" ]]; then
-          echo "::group::Checking for concurrent release runs"
-          # Key on the run id, not on `headBranch`: release.yml is triggered by
-          # schedule and workflow_dispatch, so every run's headBranch is `main`
-          # and a `release/`-prefixed filter can never match a sibling run.
-          if ! concurrent="$(gh run list --workflow release.yml --status in_progress --limit 20 --json databaseId --jq "[.[] | select((.databaseId|tostring) != \"${GITHUB_RUN_ID:-0}\")] | length" 2>/dev/null)" || [[ -z "${concurrent}" ]]; then
-            echo "::error::Cannot confirm whether another release run is in progress; refusing to resume."
-            exit 1
-          fi
-          if [[ "${concurrent}" != "0" ]]; then
-            echo "::error::Another release run is in progress. Wait for it to finish before resuming."
-            echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
-            exit 1
-          fi
-          echo "::endgroup::"
         fi
         git fetch --no-tags origin "refs/heads/${release_branch_name}"
         release_commit="$(git rev-parse FETCH_HEAD)"
@@ -383,7 +248,6 @@ case "${step}" in
         fi
         git switch --detach "${release_commit}"
         echo "reused_commit=true" >> "${GITHUB_OUTPUT}"
-        echo "reused_commit_sha=${release_commit}" >> "${GITHUB_OUTPUT}"
         echo "::notice::Reusing ${release_branch_name} at ${release_commit}; published npm versions will be skipped."
         exit 0
       fi

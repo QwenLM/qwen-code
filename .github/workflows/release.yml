@@ -767,7 +767,6 @@ jobs:
     outputs:
       version_refusal: '${{ steps.push_release_branch.outputs.version_refusal }}'
       reused_commit: '${{ steps.push_release_branch.outputs.reused_commit }}'
-      reused_commit_sha: '${{ steps.push_release_branch.outputs.reused_commit_sha }}'
     # Serialize each real/dry release tag; never cancel an active publish.
     concurrency:
       # Group by npm channel (not release tag) so a newer version cannot
@@ -870,13 +869,10 @@ jobs:
       - *checkout_release_workflow_scripts
 
       - name: 'Rebuild artifacts for the reused release commit'
-        # Only rebuild when the reused commit differs from the commit the
-        # restored artifacts were built for. When they match, the restored
-        # dist/standalone is already correct and a rebuild would wipe it
-        # (esbuild rmSync(dist)) without the archives step to regenerate it.
-        # A skipped build_release has empty outputs, which would make the
-        # comparison below read `sha != ''` and fire a redundant full rebuild.
-        if: "${{ needs.build_release.result == 'success' && steps.push_release_branch.outputs.reused_commit == 'true' && steps.push_release_branch.outputs.reused_commit_sha != needs.build_release.outputs.release_commit }}"
+        # The restored artifacts were built from this run's bump commit; after
+        # adopting the existing release commit, rebuild from it so the
+        # published package reports the tagged commit.
+        if: "${{ needs.build_release.result == 'success' && steps.push_release_branch.outputs.reused_commit == 'true' }}"
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
