@@ -70,10 +70,11 @@ export interface UsageSkillCall {
   count: number;
 }
 
-/** One day's totals for the range's daily token/session charts. */
+/** One day's tokens plus the runs whose record ended on that day. */
 export interface UsageDailyPoint {
   date: string;
   tokens: number;
+  /** Runs ended on this day; a cross-midnight run can differ from token day. */
   sessions: number;
 }
 
@@ -264,28 +265,22 @@ function buildHeatmap(
   return heatmap;
 }
 
-/**
- * Sessions whose end day falls in `[startKey, endKey]`. Day keys, not the
- * millisecond bounds: tokens are whole-local-day, so counting sessions by ms
- * would let the boundary day report tokens with zero sessions beside them.
- */
-function countSessionsInWindow(
+/** Records whose end day falls in the inclusive local-day window. */
+export function filterUsageRecordsByLocalDay(
   records: UsageSummaryRecord[],
   startKey: string,
   endKey: string,
-): number {
-  let sessions = 0;
-  for (const r of records) {
+): UsageSummaryRecord[] {
+  return records.filter((r) => {
     const day = localDateKey(r.timestamp);
-    if (day >= startKey && day <= endKey) sessions++;
-  }
-  return sessions;
+    return day >= startKey && day <= endKey;
+  });
 }
 
 /**
- * Per-day tokens + session counts on a continuous day axis (zero-filled) so the
- * daily line/bar charts have no gaps. Both sides use day keys, so a day never
- * shows tokens with zero sessions.
+ * Per-day tokens + ended-run counts on a continuous day axis (zero-filled).
+ * The two sources can attribute a cross-midnight run to different days: tokens
+ * follow each request, while sessions follow the run record's end timestamp.
  */
 function buildDaily(
   table: UsageDayModelTable,
@@ -332,13 +327,15 @@ export function buildUsageDashboard(
       ? Math.floor(options.heatmapDays)
       : DEFAULT_HEATMAP_DAYS;
 
-  // Sessions, tool calls, changed lines and skills only exist on session
-  // records; the ledger deliberately carries none of them.
-  const report = aggregateUsage(records, range);
-
   const now = Date.now();
   const todayKey = localDateKey(now);
   const rangeStartKey = localDateKey(getTimeRangeBounds(range).start.getTime());
+  // These fields only exist on session records, but they use the same whole-day
+  // window as the token table rather than a rolling millisecond cut-off.
+  const report = aggregateUsage(
+    filterUsageRecordsByLocalDay(records, rangeStartKey, todayKey),
+    'all',
+  );
 
   const table = buildUsageDayTable(records, ledgerDaily);
   const windowModels = sumUsageWindowByModel(table, rangeStartKey, todayKey);
@@ -377,7 +374,7 @@ export function buildUsageDashboard(
     cachedTokens,
     thoughtsTokens,
     requests,
-    sessions: countSessionsInWindow(records, rangeStartKey, todayKey),
+    sessions: report.sessionCount,
     toolCalls: report.tools.totalCalls,
     linesAdded: report.files.linesAdded,
     linesRemoved: report.files.linesRemoved,

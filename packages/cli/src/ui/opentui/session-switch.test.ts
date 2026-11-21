@@ -12,7 +12,19 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SessionService } from '@qwen-code/qwen-code-core';
+
+const persistUsageMock = vi.hoisted(() => vi.fn());
+vi.mock(
+  '@qwen-code/qwen-code-core/services/usageHistoryService.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/services/usageHistoryService.js')
+    >()),
+    persistSessionUsage: persistUsageMock,
+  }),
+);
+
+import { SessionService, uiTelemetryService } from '@qwen-code/qwen-code-core';
 import type { Config, ResumedSessionData } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { ModSession } from '../../services/mod-session.js';
@@ -85,6 +97,7 @@ function createFakeConfig(options?: {
   const config = {
     ...registries,
     getSessionId: () => 'old-session',
+    getProjectRoot: () => '/tmp/fake-target',
     getTargetDir: () => '/tmp/fake-target',
     getGoalRuntimeReady: async () => {},
     getChatRecordingService: () => ({
@@ -178,7 +191,10 @@ describe('handleResumeSession', () => {
   it('swaps core before UI and replays the transcript', async () => {
     const { config, calls } = createFakeConfig();
     const host = createFakeHost(config);
+    const resetLive = vi.spyOn(uiTelemetryService, 'resetLiveMetrics');
     await handleResumeSession(host, 'target-session');
+
+    expect(resetLive).toHaveBeenCalledOnce();
 
     // Core swap: startNewSession(target, data) + turn boundaries + client.
     expect(calls.startNewSession[0]).toEqual([
@@ -469,9 +485,11 @@ describe('handleBranchSession', () => {
       config as unknown as { getSessionService: () => unknown }
     ).getSessionService = () => sessionService;
     const host = createFakeHost(config);
+    const resetLive = vi.spyOn(uiTelemetryService, 'resetLiveMetrics');
 
     await handleBranchSession(host, 'my-branch');
 
+    expect(resetLive).toHaveBeenCalledOnce();
     expect(forkSession).toHaveBeenCalledWith('old-session', expect.any(String));
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),

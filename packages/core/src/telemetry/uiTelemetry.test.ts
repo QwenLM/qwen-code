@@ -1830,6 +1830,18 @@ describe('UiTelemetryService live usage accounting', () => {
     expect(requests(service.getMetrics())).toBe(0);
   });
 
+  it('resets a completed run without clearing the resumed display', () => {
+    service.addReplayedEvent(apiResponse('m', 10, [100, 10, 110, 0, 0]), 'b');
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 'b');
+
+    service.resetLiveMetrics();
+
+    expect(requests(service.getLiveMetrics())).toBe(0);
+    expect(requests(service.getMetrics())).toBe(2);
+    expect(prompt(service.getMetrics())).toBe(105);
+    expect(requests(service.getMetricsForSession('b'))).toBe(2);
+  });
+
   it('restores live usage when an abandoned swap is undone', () => {
     service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 'a');
     const snapshot = service.snapshotForReplay('b', 'a');

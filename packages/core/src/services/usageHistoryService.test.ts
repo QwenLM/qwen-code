@@ -836,13 +836,16 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1000);
   });
 
-  it('withLive: a whole-transcript replay does not add on top of persisted runs', async () => {
+  it('withLive: a cumulative copy does not add on top of persisted runs', async () => {
     seedPersisted([
       runRec('sess-mixed', 1000, t0, t0 + 60_000),
+      {
+        ...persistedRec('sess-mixed', 3000),
+        startTime: t0,
+        timestamp: t0 + DAY + 60_000,
+      },
       runRec('sess-mixed', 2000, t0 + DAY, t0 + DAY + 60_000),
     ]);
-    // The transcript covers the whole conversation (3000 cumulative).
-    plantChatJsonl('sess-mixed', 3000);
 
     const merged = await loadUsageHistoryWithLive();
 

@@ -185,15 +185,26 @@ describe('clearCommand', () => {
 
   it('should persist usage when session has activity before clearing', async () => {
     const core = await import('@qwen-code/qwen-code-core');
+    const liveMetrics = {
+      models: { 'test-model': { api: { totalRequests: 5 } } },
+    };
     (
       core.uiTelemetryService.getLiveMetrics as ReturnType<typeof vi.fn>
+    ).mockReturnValue(liveMetrics);
+    (
+      core.uiTelemetryService.getMetrics as ReturnType<typeof vi.fn>
     ).mockReturnValue({
-      models: { 'test-model': { api: { totalRequests: 5 } } },
+      models: { 'test-model': { api: { totalRequests: 400 } } },
     });
 
     await clearCommand.action!(mockContext, '');
 
-    expect(core.persistSessionUsage).toHaveBeenCalledTimes(1);
+    expect(core.persistSessionUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'test-session-id',
+        metrics: liveMetrics,
+      }),
+    );
   });
 
   it('should not persist usage when session has no activity', async () => {

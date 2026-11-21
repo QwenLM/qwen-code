@@ -433,6 +433,14 @@ describe('loadUsageDashboard', () => {
         sessionId: 'boundary',
         timestamp: boundary.getTime(),
         model: { requests: 1, inputTokens: 500, totalTokens: 500 },
+        tools: { totalCalls: 7, totalSuccess: 6, totalFail: 1 },
+        files: { linesAdded: 9, linesRemoved: 2 },
+        skills: {
+          totalCalls: 2,
+          totalSuccess: 2,
+          totalFail: 0,
+          byName: { review: { count: 2, success: 2, fail: 0 } },
+        },
       }),
     ];
 
@@ -440,6 +448,10 @@ describe('loadUsageDashboard', () => {
 
     expect(dash.summary.totalTokens).toBe(500);
     expect(dash.summary.sessions).toBe(1);
+    expect(dash.summary.toolCalls).toBe(7);
+    expect(dash.summary.linesAdded).toBe(9);
+    expect(dash.summary.linesRemoved).toBe(2);
+    expect(dash.skills).toEqual([{ name: 'review', count: 2 }]);
     expect(dash.daily[0]).toEqual({
       date: dayKey(boundary.getTime()),
       tokens: 500,
@@ -474,6 +486,12 @@ describe('loadUsageDashboard', () => {
     expect(week.summary.requests).toBe(6);
     expect(week.heatmap[dayKey(yesterday)]?.tokens).toBe(600);
     expect(week.heatmap[dayKey(now)]).toBeUndefined();
+    // Tokens follow the request day; the session series explicitly means runs
+    // ended on that day, so this cross-midnight run stays on its end day.
+    expect(week.daily.find((d) => d.date === dayKey(yesterday))?.sessions).toBe(
+      0,
+    );
+    expect(week.daily.find((d) => d.date === dayKey(now))?.sessions).toBe(1);
 
     const today = buildUsageDashboard(records, { range: 'today' }, ledger);
     expect(today.summary.totalTokens).toBe(0);

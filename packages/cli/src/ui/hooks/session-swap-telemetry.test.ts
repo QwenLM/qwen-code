@@ -29,6 +29,17 @@ import type { LoadedSettings } from '../../config/settings.js';
 const sessionServiceMocks = vi.hoisted(() => ({
   sessions: new Map<string, { conversation: unknown }>(),
 }));
+const persistUsageMock = vi.hoisted(() => vi.fn());
+
+vi.mock(
+  '@qwen-code/qwen-code-core/services/usageHistoryService.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/services/usageHistoryService.js')
+    >()),
+    persistSessionUsage: persistUsageMock,
+  }),
+);
 
 // Fault injection for the pre-UI-commit "history swap" step: both hooks
 // build the resumed history items AFTER the client initialized but BEFORE
@@ -70,6 +81,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     SessionService,
+    persistSessionUsage: persistUsageMock,
   };
 });
 
@@ -77,10 +89,12 @@ import {
   LlmClient,
   uiTelemetryService,
   EVENT_API_RESPONSE,
+  persistSessionUsage,
   type Config,
   type ResumedSessionData,
   type UiEvent,
 } from '@qwen-code/qwen-code-core';
+import { persistRunUsageOnExit } from '../../utils/usage-persistence.js';
 
 const SESSION_A = 'session-A';
 const SESSION_B = 'session-B';
@@ -208,6 +222,7 @@ function makeFakeEnv() {
   const config: any = {
     getSessionId: () => currentSessionId,
     getResumedSessionData: () => sessionData,
+    getProjectRoot: () => '/tmp/project',
     getTargetDir: () => '/tmp/project',
     startNewSession: (sessionId?: string, data?: ResumedSessionData) => {
       currentSessionId = sessionId ?? currentSessionId;
@@ -453,7 +468,7 @@ describe('session swap telemetry accounting (#9833)', () => {
     );
   });
 
-  it('a successful /branch keeps the replayed usage', async () => {
+  it('a successful /branch persists the outgoing run and keeps the replayed display', async () => {
     const { config } = await establishLiveSessionA(100);
 
     const { result } = renderHook(() =>
@@ -483,15 +498,57 @@ describe('session swap telemetry accounting (#9833)', () => {
     // replay + live); the fork's single stored event adds one more.
     expect(totalRequests()).toBe(3);
     expect(promptTokens()).toBe(205);
-    // The fork's replayed history is display-only: live usage stays the one
-    // turn this process actually made.
-    expect(
-      Object.values(uiTelemetryService.getLiveMetrics().models).reduce(
-        (sum, m) => sum + m.api.totalRequests,
-        0,
-      ),
-    ).toBe(1);
+    // The outgoing run was written under A, without its replayed history.
+    expect(persistSessionUsage).toHaveBeenCalledTimes(1);
+    const outgoing = vi.mocked(persistSessionUsage).mock.calls[0]?.[0];
+    expect(outgoing?.sessionId).toBe(SESSION_A);
+    expect(outgoing?.metrics.models['test-model']?.api.totalRequests).toBe(1);
+    expect(outgoing?.metrics.models['test-model']?.tokens.prompt).toBe(5);
+    // The next run starts with an empty live bucket; replay stays display-only.
+    expect(uiTelemetryService.getLiveMetrics().models).toEqual({});
     // A later failed swap of a THIRD session must not undo this commit.
+  });
+
+  it('a successful /resume separates the outgoing and incoming run records', async () => {
+    const { config } = await establishLiveSessionA(100);
+    sessionServiceMocks.sessions.set(SESSION_B, {
+      conversation: { ...conversationWith(100), sessionId: SESSION_B },
+    });
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        config: config as any,
+        settings: mockSettings,
+        historyManager: {
+          addItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+        },
+        startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume(SESSION_B);
+    });
+    expect(config.getSessionId()).toBe(SESSION_B);
+    expect(totalRequests()).toBe(3);
+    expect(promptTokens()).toBe(205);
+
+    uiTelemetryService.addEvent(storedApiEvent(7), SESSION_B);
+    persistRunUsageOnExit(config);
+
+    expect(persistSessionUsage).toHaveBeenCalledTimes(2);
+    const [outgoing, incoming] = vi
+      .mocked(persistSessionUsage)
+      .mock.calls.map(([record]) => record);
+    expect(outgoing?.sessionId).toBe(SESSION_A);
+    expect(outgoing?.metrics.models['test-model']?.tokens.prompt).toBe(5);
+    expect(incoming?.sessionId).toBe(SESSION_B);
+    expect(incoming?.metrics.models['test-model']?.api.totalRequests).toBe(1);
+    expect(incoming?.metrics.models['test-model']?.tokens.prompt).toBe(7);
   });
 
   it('a failure after the UI re-key does not roll back or undo', async () => {

@@ -514,6 +514,12 @@ export class UiTelemetryService extends EventEmitter {
     return this.#liveMetrics;
   }
 
+  /** Starts a new run's persistable counters without clearing the display. */
+  resetLiveMetrics(): void {
+    this.#liveMetrics = createInitialMetrics();
+    this.#sessionStartTime = new Date();
+  }
+
   getMetricsForSession(sessionId: string): SessionMetrics {
     return this.#sessionMetrics.get(sessionId) ?? createInitialMetrics();
   }

@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   UsageSummaryRecord,
   AggregatedReport,
+  TokenUsageDailyByModel,
 } from '@qwen-code/qwen-code-core';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -630,15 +631,124 @@ describe('loadStatsData — per-request ledger accounting', () => {
     expect(reportTokens(result.report)).toBe(1620);
   });
 
-  it('streams the ledger once across repeated opens of the same window', async () => {
+  it('coalesces concurrent reads but reloads on the next open', async () => {
     mockedLoadUsageHistory.mockResolvedValue([
       makeRecord({ timestamp: Date.now() }),
     ]);
+    let release!: (table: TokenUsageDailyByModel) => void;
+    const pending = new Promise<TokenUsageDailyByModel>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(loadLedgerOrEmpty).mockReturnValue(pending);
+
+    const first = loadStatsData('all');
+    const second = loadStatsData('all');
+    await vi.waitFor(() => {
+      expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledTimes(1);
+    });
+    release(new Map());
+    await Promise.all([first, second]);
 
     await loadStatsData('all');
-    await loadStatsData('all');
+    expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledTimes(2);
+  });
 
-    expect(vi.mocked(loadLedgerOrEmpty)).toHaveBeenCalledTimes(1);
+  it('sees tokens added between opens without waiting for a TTL', async () => {
+    const now = Date.now();
+    const recordWithTokens = (tokens: number) =>
+      makeRecord({
+        timestamp: now,
+        startTime: now - 1000,
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: tokens,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: tokens,
+          },
+        },
+      });
+    mockedLoadUsageHistory.mockResolvedValue([]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValueOnce(
+      new Map([[dayKey(now), ledgerDay({ requests: 1, inputTokens: 100 })]]),
+    );
+    expect(
+      reportTokens(
+        (await loadStatsData('today', recordWithTokens(100))).report,
+      ),
+    ).toBe(100);
+
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValueOnce(
+      new Map([[dayKey(now), ledgerDay({ requests: 4, inputTokens: 400 })]]),
+    );
+    expect(
+      reportTokens(
+        (await loadStatsData('today', recordWithTokens(300))).report,
+      ),
+    ).toBe(400);
+  });
+
+  it.each([
+    { range: 'week' as const, days: 20 },
+    { range: 'month' as const, days: 70 },
+  ])('compares equal-length windows for $range', async ({ range, days }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 20, 12, 0, 0));
+    try {
+      const daily: TokenUsageDailyByModel = new Map();
+      for (let i = 0; i < days; i++) {
+        const day = new Date();
+        day.setDate(day.getDate() - i);
+        daily.set(
+          dayKey(day.getTime()),
+          ledgerDay({ requests: 1, inputTokens: 100 }),
+        );
+      }
+      mockedLoadUsageHistory.mockResolvedValue([]);
+      vi.mocked(loadLedgerOrEmpty).mockResolvedValue(daily);
+
+      const result = await loadStatsData(range);
+
+      expect(result.delta?.tokens).toBeCloseTo(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts every session-granular field on the whole boundary day', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 20, 12, 0, 0));
+    try {
+      const boundary = new Date();
+      boundary.setDate(boundary.getDate() - 7);
+      boundary.setHours(0, 30, 0, 0);
+      const record = makeRecord({
+        timestamp: boundary.getTime(),
+        startTime: boundary.getTime() - 60_000,
+        durationMs: 60_000,
+      });
+      mockedLoadUsageHistory.mockResolvedValue([record]);
+      vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
+        new Map([
+          [
+            dayKey(boundary.getTime()),
+            ledgerDay({ requests: 1, inputTokens: 17_000_000 }),
+          ],
+        ]),
+      );
+
+      const result = await loadStatsData('week');
+
+      expect(reportTokens(result.report)).toBe(17_000_000);
+      expect(result.report.sessionCount).toBe(1);
+      expect(result.report.totalDurationMs).toBe(60_000);
+      expect(result.report.tools.totalCalls).toBe(5);
+      expect(result.report.files.linesAdded).toBe(20);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the previous window disjoint from the current one', async () => {

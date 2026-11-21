@@ -26,12 +26,10 @@ import {
   SessionService,
   setStartupEventSink,
   createDebugLogger,
-  persistSessionUsage,
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   resolveUsageStatisticsEnabled,
-  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
@@ -90,6 +88,7 @@ import {
   registerCleanup,
   runExitCleanup,
 } from './utils/cleanup.js';
+import { persistRunUsageOnExit } from './utils/usage-persistence.js';
 import { AppEvent, appEvents } from './utils/events.js';
 import { readStdin } from './utils/readStdin.js';
 import {
@@ -436,33 +435,7 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   };
 }
 
-/**
- * The exit path's usage write. It must bill only what this run spent: a resume
- * replays the conversation's history into the display aggregate, and persisting
- * that would charge every later run for the whole conversation again.
- *
- * `sessionStartTime` comes from uiTelemetryService so it stays correct after
- * `/clear` resets the session. Exported so the invariant is testable without
- * driving the whole startup flow.
- */
-export function persistRunUsageOnExit(config: Config): void {
-  try {
-    const metrics = uiTelemetryService.getLiveMetrics();
-    const hasActivity = Object.values(metrics.models).some(
-      (m) => m.api.totalRequests > 0,
-    );
-    if (!hasActivity) return;
-    persistSessionUsage({
-      sessionId: config.getSessionId(),
-      startTime: uiTelemetryService.getSessionStartTime(),
-      endTime: new Date(),
-      project: config.getProjectRoot(),
-      metrics,
-    });
-  } catch {
-    // Best-effort — don't block shutdown
-  }
-}
+export { persistRunUsageOnExit };
 
 export async function main() {
   profileCheckpoint('main_entry');

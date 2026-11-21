@@ -4405,10 +4405,11 @@ export interface DaemonUsageSkillCall {
   count: number;
 }
 
-/** One day's totals for the daily charts. Mirrors core's `UsageDailyPoint`. */
+/** Tokens plus ended-run counts for daily charts. Mirrors `UsageDailyPoint`. */
 export interface DaemonUsageDailyPoint {
   date: string;
   tokens: number;
+  /** Runs ended on this date, which can differ from their request-token day. */
   sessions: number;
 }
 
@@ -4433,7 +4434,7 @@ export interface DaemonUsageDashboard {
   models: DaemonUsageModelShare[];
   /** Skill invocations for the range, sorted by count desc. */
   skills: DaemonUsageSkillCall[];
-  /** Per-day tokens + sessions across the range window. */
+  /** Per-day tokens + ended-run counts across the range window. */
   daily: DaemonUsageDailyPoint[];
   /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
   heatmap: Record<string, DaemonUsageHeatmapDay>;

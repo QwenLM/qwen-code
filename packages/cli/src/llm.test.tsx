@@ -32,16 +32,16 @@ import {
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
 } from './llm.js';
-import type {
- ChatRecord, Config ,
-  persistSessionUsage,
-  uiTelemetryService,
-  EVENT_API_RESPONSE,
-  type UiEvent,
+import type { ChatRecord, Config, UiEvent } from '@qwen-code/qwen-code-core';
+import {
   ApprovalMode,
+  EVENT_API_RESPONSE,
   InputFormat,
   OutputFormat,
-  Storage } from '@qwen-code/qwen-code-core';
+  persistSessionUsage,
+  Storage,
+  uiTelemetryService,
+} from '@qwen-code/qwen-code-core';
 import { startInteractiveUI } from './ui/startInteractiveUI.js';
 import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
@@ -76,6 +76,7 @@ const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
 const mockAssertFullIcuAvailable = vi.hoisted(() => vi.fn());
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
+const mockPersistSessionUsage = vi.hoisted(() => vi.fn());
 const mockRegisterSession = vi.hoisted(
   () =>
     (..._args: unknown[]) =>
@@ -173,9 +174,19 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ...actual,
     registerSession: (...args: unknown[]) => mockRegisterSession(...args),
     // The exit-persist test must not write to the developer's own ~/.qwen.
-    persistSessionUsage: vi.fn(),
+    persistSessionUsage: mockPersistSessionUsage,
   };
 });
+
+vi.mock(
+  '@qwen-code/qwen-code-core/services/usageHistoryService.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/services/usageHistoryService.js')
+    >()),
+    persistSessionUsage: mockPersistSessionUsage,
+  }),
+);
 
 vi.mock('./config/config.js', () => ({
   loadCliConfig: vi.fn().mockResolvedValue({

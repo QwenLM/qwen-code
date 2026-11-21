@@ -1848,7 +1848,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'daemon.usage.dailyTokensTitle': 'tokens',
   'daemon.usage.dailyTokensSub': 'daily token totals',
   'daemon.usage.dailySessionsTitle': 'sessions',
-  'daemon.usage.dailySessionsSub': 'active session counts per day',
+  'daemon.usage.dailySessionsSub': 'runs ended per day',
   'delete.cannotCurrent':
     'Cannot delete the current session while it is running.',
   'delete.action': 'Delete',

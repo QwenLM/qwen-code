@@ -116,7 +116,7 @@ explicitly left the local-`today` window semantics out of scope.
 
 - In scope: `usage-dashboard-service.ts`, `tokenUsageService.ts` (read path only),
   the `usage-stats` route, the Web Shell usage tab's output tile, the persist side
-  (`UiTelemetryService`, the two replay sites, the two persist callers),
+  (`UiTelemetryService`, the two replay sites, the run-persist call sites),
   `usageHistoryService`'s record marker and reduction, and the TUI cross-session
   view (`statsDataService.loadStatsData`).
 - Out of scope: the `/stats` session view, whose cumulative resumed-history
@@ -132,14 +132,21 @@ explicitly left the local-`today` window semantics out of scope.
 attribution), then for every day the ledger covers **replaces** that day's entry
 with the ledger's. Every token-bearing output — summary token fields, requests,
 per-model share, daily tokens, heatmap cells — derives from that table. Sessions,
-tool calls, changed lines and skills still come from `aggregateUsage`, because the
-ledger deliberately carries none of them.
+ended-run duration, tool calls, changed lines and skills still come from
+`aggregateUsage`, because the ledger deliberately carries none of them. Both
+surfaces filter those records by the same inclusive local-day keys as the token
+slice, not by the rolling millisecond cut-off. Per-day `sessions` specifically
+means **runs ended on that date**; a cross-midnight run's requests and its end
+record can therefore appear on different days.
 
 - `loadTokenUsageDailyByModel(sinceLocalDate)` streams each month file at/after the
   start month, validates every record with the existing `isTokenUsageRecord`, and
   accumulates counters without materializing the history. A missing usage
   directory yields an empty table; any other read error propagates so a partially
-  read month cannot silently understate a window.
+  read month cannot silently understate a window. Both surfaces then call the
+  loader through `loadLedgerOrEmpty`: any such error degrades to an empty table and
+  restores record-derived attribution, including its potentially inflated legacy
+  values, with only a debug-log warning rather than failing the whole surface.
 - `loadUsageDashboardSources()` loads the session history and the ledger together
   over `LEDGER_WINDOW_DAYS = 366`, matching the route's `heatmapDays` clamp so one
   cached load covers every window a caller can request.
@@ -155,17 +162,23 @@ ledger deliberately carries none of them.
 `#liveMetrics` alongside the display aggregate. `addEvent` feeds both;
 `addReplayedEvent` — used by the two replay sites, `replayUiTelemetryFromConversation`
 and `LlmClient.initialize()`'s restore-runtime branch — feeds only the display
-aggregate and the session bucket. `getLiveMetrics()` is what the two persist
-callers (`/clear` and the process-exit cleanup) now write.
+aggregate and the session bucket. `getLiveMetrics()` supplies the records written
+by `/clear`, successful session switches and the process-exit cleanup.
 
 - No subtraction and no schema version bump or migration: the live counter is
   built by the same accumulator, so with no replay it is field-for-field identical
   to the display aggregate. The only record-shape addition is the optional
   `runScoped` flag described in the next section, which every existing reader
   already ignores safely.
-- `reset()` clears it, so each `/clear` segment bills only itself.
+- `reset()` clears it, so each `/clear` segment bills only itself. A successful
+  `/resume` or `/branch` also writes the outgoing run under its captured session
+  id, then calls `resetLiveMetrics()` at the UI commit point. That resets the
+  persistable counters and run start time without erasing the incoming
+  transcript's display replay, preventing the outgoing run from being written
+  under the resumed id at process exit.
 - `UiTelemetryReplaySnapshot` carries it, so an aborted swap restores it too and
-  cannot leave the live counter inflated by an abandoned replay.
+  cannot leave the live counter inflated by an abandoned replay. The flush only
+  occurs on success, never on those rollback paths.
 - A resume that makes no request of its own now fails the callers' `hasActivity`
   check and writes no record at all, instead of an all-history one.
 
@@ -222,14 +235,19 @@ The table build and window sum are now **shared exports** of
 two cannot drift. `TokenUsageDayModelTotals` gained `apiDurationMs` so the latency
 column comes from the same source as the tokens.
 
-`loadStatsData` loads the ledger once (reaching back far enough for the previous
-range too), builds the table, and replaces the report's `models`, `totalRequests`
-and `totalLatencyMs` for both the current and the previous window — otherwise the
-delta would compare a ledger-backed present against a record-backed past. Heatmap,
-tokens-per-day and streaks derive from the table.
+`loadStatsData` reads the ledger on every open (reaching back far enough for the
+previous range too), builds the table, and replaces the report's `models`,
+`totalRequests` and `totalLatencyMs` for both the current and the previous window
+— otherwise the delta would compare a ledger-backed present against a
+record-backed past. Concurrent opens of the same start day share one pending
+read; settled data is not retained, because a settled 60-second cache would hide
+spend from a turn completed between two opens while its session-record copy is
+already suppressed by ledger coverage. Heatmap, tokens-per-day and streaks derive
+from the table.
 
 Stays on session records: `sessionCount`, `totalDurationMs`, tools, files, skills
-and **projects**. The ledger has no project dimension (#4479 privacy boundary), so
+and **projects**, all selected by the same inclusive local-day keys as tokens.
+The ledger has no project dimension (#4479 privacy boundary), so
 the per-project token column cannot be corrected from it and remains
 record-derived — an acknowledged inconsistency with the corrected totals rather
 than a fabricated attribution.
@@ -239,13 +257,20 @@ than a fabricated attribution.
 - **The ledger is the intended daily source.** #4479 chose per-response JSONL with
   local date and auth type precisely to answer daily / monthly consumption; the
   dashboard predates that alignment and read session summaries instead.
-- **Replace per day, never sum.** The same requests exist in both sources, so a
-  covered day's session-record copy is dropped rather than added. Summing them
-  would reproduce the original inflation.
-- **Uncovered days keep the session-record attribution.** This preserves heatmap
-  history from before the ledger existed, and the behavior of a user who has usage
-  statistics disabled (an empty ledger leaves those days record-derived). The only
-  exception is the window boundary day, which the next bullet measures moving.
+- **Replace by run span, never sum.** The same requests exist in both sources.
+  A session record is dropped when its entire `[startTime, timestamp]` day span
+  touches **any** ledger-covered day, not merely when its end day is covered.
+  This prevents a run that spent on D and exited on D+1 from leaving a second
+  full-run copy on D+1.
+- **Runs with no ledger overlap keep session-record attribution.** This preserves
+  heatmap history from before the ledger existed and users who have usage
+  statistics disabled. The conservative trade is explicit: if a run spans both a
+  covered and an uncovered day, its whole record is discarded, so the record's
+  unattributable part on the uncovered day is lost too. For example, a 1,100-token
+  record spanning a covered day with 500 ledger tokens and an uncovered day
+  reports 500 total, not 1,100; the aggregate record cannot safely split the
+  remaining 600 by response date. Undercounting that ambiguous portion is
+  preferred to double counting.
 - **Calendar-day windows.** Day buckets cannot be split by hour, so `today`, `week`
   and `month` select whole local days (`today` is unchanged; `week` and `month`
   include the full boundary day instead of the hours after a rolling `now - N*24h`).
@@ -264,9 +289,14 @@ than a fabricated attribution.
 - **One table, two surfaces.** Extracting the table build and window sum rather
   than reimplementing them for the TUI keeps a single accounting truth; the
   dashboard's frozen-ledger exactness was re-checked after the extraction.
-- **Exclusive window ends.** The previous-range bound is exclusive, so its last
-  local day is `localDateKey(end - 1)`. Treating it inclusively pulled today into
-  "yesterday" and was caught by the delta test.
+- **Equal, disjoint calendar-day comparison windows.** The previous-range bound
+  is exclusive, so its last local day is `localDateKey(end - 1)`. If that is also
+  the current first day, move **both** previous bounds back one calendar day
+  (`setDate`, not a fixed 24-hour subtraction). This avoids both overlapping
+  windows and the asymmetric alternative: moving only the end made `week`
+  compare eight current day buckets against seven previous ones (+14.29% for
+  flat daily usage) and `month` compare 31 against 30 (+3.33%). Flat 100-token
+  days now produce a 0% delta in both ranges.
 
 ## Constraints
 
@@ -300,22 +330,27 @@ than a fabricated attribution.
   deliberate trade above).
 - **Per-project tokens stay inflated.** The TUI projects table cannot be corrected
   from the ledger, so it disagrees with the corrected totals above it.
-- **Calendar-day windows now apply to the TUI too.** Its heatmap, tokens-per-day
-  and delta previously filtered by millisecond bounds; the boundary day is now
-  whole, matching the dashboard.
+- **Calendar-day windows now apply to every record-derived tile too.** Tokens,
+  sessions, duration, tools, files and skills all include the whole boundary day;
+  the TUI's previous comparison window is disjoint and has the same number of
+  days. The daemon's per-day `sessions` field remains an ended-run series, not an
+  assertion that all shown tokens belong to runs ending that same day.
 - Records written before this change stay inflated, so other consumers of
   `loadUsageHistory` that this PR does not convert (for example the per-project
   token column and the pre-repair fallback window) still show the old numbers for
   that history. Only newly written records are correct.
-- The live counter is process-wide, like the display aggregate it mirrors, so a
-  long-lived process that switches sessions without `/clear` still attributes its
-  total to the last session id. That is pre-existing behavior, unchanged here.
+- **Fresh TUI reads trade latency for correctness.** The daemon still uses its
+  60-second source cache, but `/stats` cannot: reusing that cache can erase a just
+  completed run from both sources. Each TUI open therefore reparses its selected
+  ledger months, coalescing only concurrent opens, while the daemon's dominated
+  transcript load remains cached.
 
 ## Validation plan
 
 - Unit tests: a ledger-covered day replaces rather than adds; tokens land on the
-  day each response happened; uncovered days keep session-record tokens; the loader
-  aggregates per day/model, skips earlier days and months, returns an empty table
+  day each response happened; a run touching any covered day is dropped while a
+  wholly uncovered run keeps its record tokens; the loader aggregates per
+  day/model, skips earlier days and months, returns an empty table
   with no ledger, and drops invalid/future-schema records; the output tile under
   both provider conventions.
 - Route integration through the real loader with both sources seeded on disk.
@@ -330,9 +365,10 @@ than a fabricated attribution.
   written twice collapsing, cumulative records keeping last-wins, a cumulative
   record losing to run deltas, and a whole-transcript replay not adding on top.
   Plus a two-arm comparison of `loadUsageHistory` on the real history.
-- TUI: unit tests for day replacement, per-day attribution, uncovered days, and a
-  ledger-backed previous window for the delta; plus `loadStatsData` against an
-  independent ledger scan on both the live history and a frozen copy.
+- TUI: unit tests for day replacement, per-day attribution, wholly uncovered runs,
+  a ledger-backed previous window, equal-length flat-usage deltas, same-day
+  record-derived fields, and fresh reads between opens; plus `loadStatsData`
+  against an independent ledger scan on both the live history and a frozen copy.
 - Mutation-witness each new guard, and record which suites were actually run.
 
 ## Acceptance criteria

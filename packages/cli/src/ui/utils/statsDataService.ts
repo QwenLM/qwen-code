@@ -9,6 +9,7 @@ import {
   aggregateUsage,
   getTimeRangeBounds,
   buildUsageDayTable,
+  filterUsageRecordsByLocalDay,
   sumUsageWindowByModel,
   loadLedgerOrEmpty,
   localDateKey,
@@ -20,45 +21,26 @@ import {
   type UsageSummaryRecord,
 } from '@qwen-code/qwen-code-core';
 
-/**
- * The ledger is streamed per requested start day, and the dialog re-runs this
- * loader on every open and every range cycle. Without a cache each of those
- * parses every month file — seconds on the large histories this view targets.
- * Same 60 s window the daemon route uses, keyed by start day rather than range
- * name because the load reaches back over the previous range too.
- */
-const LEDGER_CACHE_TTL_MS = 60_000;
-const ledgerCache = new Map<
-  string,
-  { promise: Promise<TokenUsageDailyByModel>; settledAt: number | null }
->();
+/** Concurrent opens share reads; settled data is never reused across opens. */
+const pendingLedgerLoads = new Map<string, Promise<TokenUsageDailyByModel>>();
 
-/** Test-only: drop the cached ledger between cases. */
+/** Test-only: forget pending reads between cases. */
 export function _resetStatsLedgerCacheForTest(): void {
-  ledgerCache.clear();
+  pendingLedgerLoads.clear();
 }
 
-function loadLedgerCached(
+function loadLedgerShared(
   sinceLocalDate: string,
 ): Promise<TokenUsageDailyByModel> {
-  const now = Date.now();
-  const hit = ledgerCache.get(sinceLocalDate);
-  if (
-    hit &&
-    (hit.settledAt === null || now - hit.settledAt < LEDGER_CACHE_TTL_MS)
-  ) {
-    return hit.promise;
-  }
-  const entry: {
-    promise: Promise<TokenUsageDailyByModel>;
-    settledAt: number | null;
-  } = { promise: loadLedgerOrEmpty(sinceLocalDate), settledAt: null };
-  ledgerCache.set(sinceLocalDate, entry);
-  // A pending load is shared regardless of age, so concurrent opens coalesce.
-  void entry.promise.then(() => {
-    if (ledgerCache.get(sinceLocalDate) === entry) entry.settledAt = Date.now();
+  const pending = pendingLedgerLoads.get(sinceLocalDate);
+  if (pending) return pending;
+  const promise = loadLedgerOrEmpty(sinceLocalDate).finally(() => {
+    if (pendingLedgerLoads.get(sinceLocalDate) === promise) {
+      pendingLedgerLoads.delete(sinceLocalDate);
+    }
   });
-  return entry.promise;
+  pendingLedgerLoads.set(sinceLocalDate, promise);
+  return promise;
 }
 
 export interface StatsData {
@@ -319,57 +301,56 @@ export async function loadStatsData(
     records = persisted.filter((r) => r.sessionId !== currentSession.sessionId);
     records.push(currentSession);
   }
-  const report = aggregateUsage(records, range);
   const { start, end } = getTimeRangeBounds(range);
+  const currentStartKey = localDateKey(start.getTime());
+  const currentEndKey = localDateKey(end.getTime());
   const prevBounds = getPreviousRangeBounds(range);
+  let prevStartKey: string | undefined;
+  let prevEndKey: string | undefined;
+  if (prevBounds) {
+    const prevStart = new Date(prevBounds.start);
+    const prevEnd = new Date(prevBounds.end.getTime() - 1);
+    prevStartKey = localDateKey(prevStart.getTime());
+    prevEndKey = localDateKey(prevEnd.getTime());
+    if (prevEndKey === currentStartKey) {
+      // Keep both sides disjoint and the same length. Move the start too;
+      // shortening only the end made week compare 8 days against 7.
+      prevStart.setDate(prevStart.getDate() - 1);
+      prevEnd.setDate(prevEnd.getDate() - 1);
+      prevStartKey = localDateKey(prevStart.getTime());
+      prevEndKey = localDateKey(prevEnd.getTime());
+    }
+  }
 
   // One accounting table for this surface and the daemon usage dashboard. The
   // ledger window has to reach back far enough for the previous range too, or
   // the delta would compare a ledger-backed current against a record-backed past.
-  const earliestMs = Math.min(
-    start.getTime(),
-    prevBounds?.start.getTime() ?? start.getTime(),
-  );
-  const ledgerDaily = await loadLedgerCached(localDateKey(earliestMs));
+  const earliestKey =
+    prevStartKey && prevStartKey < currentStartKey
+      ? prevStartKey
+      : currentStartKey;
+  const ledgerDaily = await loadLedgerShared(earliestKey);
   const table = buildUsageDayTable(records, ledgerDaily);
-
-  applyTokenWindow(
-    report,
-    table,
-    localDateKey(start.getTime()),
-    localDateKey(end.getTime()),
+  const report = aggregateUsage(
+    filterUsageRecordsByLocalDay(records, currentStartKey, currentEndKey),
+    'all',
   );
 
-  const heatmap = buildHeatmap(
-    table,
-    localDateKey(start.getTime()),
-    localDateKey(end.getTime()),
-  );
+  applyTokenWindow(report, table, currentStartKey, currentEndKey);
+
+  const heatmap = buildHeatmap(table, currentStartKey, currentEndKey);
   const heatmapDates = Object.keys(heatmap);
   const { currentStreak, longestStreak } = calculateStreaks(heatmapDates);
 
-  const tokensPerDay = buildTokensPerDay(
-    table,
-    localDateKey(start.getTime()),
-    localDateKey(end.getTime()),
-  );
+  const tokensPerDay = buildTokensPerDay(table, currentStartKey, currentEndKey);
 
   let delta: StatsData['delta'] = null;
-  if (prevBounds) {
-    const prevFiltered = records.filter(
-      (r) =>
-        r.timestamp >= prevBounds.start.getTime() &&
-        r.timestamp < prevBounds.end.getTime(),
+  if (prevStartKey && prevEndKey) {
+    const prevFiltered = filterUsageRecordsByLocalDay(
+      records,
+      prevStartKey,
+      prevEndKey,
     );
-    const prevStartKey = localDateKey(prevBounds.start.getTime());
-    // `end` is exclusive, so the window's last day is the one before it. When
-    // that day is also the current window's first day, step back once more:
-    // overlapping windows would share the boundary day and dilute the delta.
-    const rawPrevEndKey = localDateKey(prevBounds.end.getTime() - 1);
-    const prevEndKey =
-      rawPrevEndKey === localDateKey(start.getTime())
-        ? localDateKey(start.getTime() - 24 * 60 * 60 * 1000)
-        : rawPrevEndKey;
     // A run killed before exit writes no record, so the ledger alone can cover
     // the previous window. Gate on either source, not on records only.
     const ledgerCoversPrev = [...ledgerDaily.keys()].some(
