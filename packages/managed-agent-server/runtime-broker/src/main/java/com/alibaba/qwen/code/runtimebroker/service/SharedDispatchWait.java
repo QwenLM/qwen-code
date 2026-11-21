@@ -112,6 +112,18 @@ final class SharedDispatchWait {
         awaiting.put(prepared.getExecutionCallId(), wait);
         queued.whenComplete((ignored, error) ->
                 awaiting.remove(prepared.getExecutionCallId(), wait));
+        // close() sets closed, then sweeps awaiting, then shuts the scheduler
+        // down. A wait that registers after the sweep would have its first
+        // tick discarded by shutdownNow() and never settle its PREPARED row,
+        // so re-read closed here: every close either swept this entry or is
+        // already visible.
+        if (closed.get()) {
+            awaiting.remove(prepared.getExecutionCallId(), wait);
+            settleStrandedPrepared(prepared, "dispatch_failed",
+                    "Shared Workspace dispatch failed before claim");
+            throw unavailable("runtime_admission_closed",
+                    "Runtime broker is closing");
+        }
         Instant deadline = clock.instant().plus(resultWindow);
         AtomicInteger attempt = new AtomicInteger();
         Runnable tick = new Runnable() {

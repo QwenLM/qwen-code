@@ -81,7 +81,6 @@ final class RuntimeProvisionLostRecovery {
         return restored != null ? restored : bindingRepository.findById(bindingId);
     }
 
-
     /**
      * Lost executions can be terminated by journal-loss evidence; releasing
      * their Sessions and placement additionally requires writer-stop proof.

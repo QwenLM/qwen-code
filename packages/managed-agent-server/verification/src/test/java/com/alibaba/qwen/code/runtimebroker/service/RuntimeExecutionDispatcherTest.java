@@ -825,6 +825,72 @@ class RuntimeExecutionDispatcherTest {
         assertTrue(dispatches.isEmpty());
     }
 
+    // R5-1 third exit: close() sets closed, sweeps awaiting, then shuts the
+    // executor down. A wait that registers after that sweep would have its
+    // first tick discarded unrun, so it must refuse and settle its PREPARED
+    // row itself.
+    @Test
+    void aWaitRegisteredAfterTheCloseSweepSettlesItsPreparedRecord() throws Exception {
+        var registry = mock(RuntimeBindingRegistry.class);
+        var bindings = mock(RuntimeBindingRepository.class);
+        var sessions = mock(RuntimeSessionRepository.class);
+        var executions = mock(ToolExecutionRepository.class);
+        var scheduler = new java.util.concurrent.ScheduledThreadPoolExecutor(1);
+        var context = mock(SessionContext.class);
+        var binding = mock(RuntimeBindingRecord.class);
+        var session = mock(RuntimeSession.class);
+        var prepared = mock(ToolExecutionRecord.class);
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null,
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE,
+                "workspace");
+        when(binding.getRequest()).thenReturn(request);
+        when(context.binding()).thenReturn(binding);
+        when(context.session()).thenReturn(session);
+        when(session.getScope()).thenReturn(scope);
+        when(session.getHarnessSessionId()).thenReturn("harness");
+        when(prepared.getExecutionCallId()).thenReturn("execution");
+        when(prepared.getState()).thenReturn(ToolExecutionRecord.State.PREPARED);
+        when(prepared.sameIdentity(prepared)).thenReturn(true);
+        when(prepared.getReference()).thenReturn(Map.of("sessionId", "runtime", "dispatchMode", "deferred"));
+        when(executions.findByExecutionCallId("execution")).thenReturn(prepared);
+        when(executions.claimValidatedDispatch(eq("execution"), eq("broker"), any(Duration.class), any()))
+                .thenReturn(null);
+        var closed = new AtomicBoolean();
+        var dispatcher = new RuntimeExecutionDispatcher(registry, mock(RuntimeExecutionState.class), bindings,
+                sessions, executions, mock(RuntimeProvisioner.class), mock(RuntimeTransport.class),
+                mock(RuntimePublicationVerifier.class), "broker", Duration.ofSeconds(60),
+                Duration.ofSeconds(10), Clock.fixed(Instant.parse("2026-11-01T00:00:00Z"), ZoneOffset.UTC),
+                scheduler, mock(ScheduledExecutorService.class), closed);
+        // close(): the flag is set, the sweep finds nothing registered, and the
+        // executor goes down - all before this dispatch registers its wait.
+        closed.set(true);
+        dispatcher.cancelPendingOperations();
+        scheduler.shutdownNow();
+        var refused = assertThrows(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class,
+                () -> dispatcher.beginDispatch(context, prepared,
+                        Map.of("toolName", "read_file", "input", Map.of()), null,
+                        com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload.of("digest", "read_file")));
+        assertEquals("runtime_admission_closed", refused.getCode());
+        verify(executions).settlePrepared(eq(prepared), argThat(result ->
+                "not_started".equals(result.get("executionStatus"))
+                        && result.get("error") instanceof Map<?, ?> refusal
+                        && "dispatch_failed".equals(refusal.get("type"))),
+                any(Instant.class));
+        var dispatchField = RuntimeExecutionDispatcher.class.getDeclaredField("dispatches");
+        dispatchField.setAccessible(true);
+        var dispatches = (java.util.concurrent.ConcurrentMap<String, CompletableFuture<Void>>)
+                dispatchField.get(dispatcher);
+        assertTrue(dispatches.isEmpty());
+        var waitField = RuntimeExecutionDispatcher.class.getDeclaredField("sharedDispatchWait");
+        waitField.setAccessible(true);
+        var awaitingField = SharedDispatchWait.class.getDeclaredField("awaiting");
+        awaitingField.setAccessible(true);
+        var awaiting = (java.util.Map<String, ?>) awaitingField.get(waitField.get(dispatcher));
+        assertTrue(awaiting.isEmpty());
+    }
+
     private static final class Fixture {
         private static final Duration LEASE = Duration.ofSeconds(60);
         private static final Map<String, Object> REFERENCE = Map.of("sessionId", "runtime");
