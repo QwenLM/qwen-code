@@ -1478,9 +1478,11 @@ class ManagedActionsTest {
         ActionJournal journal = action(tenant, owned,
                 System.currentTimeMillis(), 9007199254740991L);
         // The ownership row is the sole authority, so the action surface
-        // answers a foreign or anonymous caller exactly as the by-id read
-        // does — 404 — while the row-less arm above keeps the store's own
-        // 403 for a genuinely recorded creator.
+        // answers a foreign caller exactly as the by-id read does — 404 —
+        // while the row-less arm above keeps the store's own 403 for a
+        // genuinely recorded creator. A caller that presents no identity is
+        // rejected before the session is looked up, because the answer would
+        // otherwise be attributed to nobody.
         mvc.perform(auth(post(path(owned, journal.id) + "/responses"),
                 tenant, "other")
                         .header("Idempotency-Key", "foreign-answer")
@@ -1493,8 +1495,8 @@ class ManagedActionsTest {
                         .header("Idempotency-Key", "anonymous-answer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(response("allow")))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.error.code").value("session_not_found"));
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("actor_required"));
         readAccepted(auth(post(path(owned, journal.id) + "/responses"),
                 tenant, "owner")
                         .header("Idempotency-Key", "owner-answer")
