@@ -26,6 +26,8 @@ import {
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
 import { advertisedMaxSessions } from '../serve/server/serve-features.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
+import { validateSettingValue } from './settingsUtils.js';
+import { TURN_DETECTION_VALUES } from '../serve/live/provider-credentials.js';
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
@@ -33,6 +35,29 @@ import {
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
+  it('offers exactly the model-aware default and the four Live turn detection modes', () => {
+    const definition = getSettingsSchema().experimental.properties.liveVoice
+      .properties.turnDetection as SettingDefinition;
+    expect(definition.type).toBe('enum');
+    expect(definition.options?.map((option) => option.value)).toEqual([
+      '',
+      'server_vad',
+      'smart_turn',
+      'smart_turn_v2',
+      'semantic_vad',
+    ]);
+    // The schema and the daemon's reader must agree on the accepted modes.
+    expect(
+      definition.options
+        ?.map((option) => option.value)
+        .filter((value) => value !== ''),
+    ).toEqual([...TURN_DETECTION_VALUES]);
+    // Empty is the documented "use the model-aware default".
+    expect(validateSettingValue(definition, '')).toBeUndefined();
+    expect(validateSettingValue(definition, 'smart_turn_v2')).toBeUndefined();
+    expect(validateSettingValue(definition, 'server-vad')).toBeDefined();
+  });
+
   it('defaults regular subagents to background execution and requires a restart', () => {
     expect(
       getSettingsSchema().agents.properties.defaultBackground,

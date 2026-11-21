@@ -1168,6 +1168,7 @@ export class LiveSessionCoordinator {
         voice: credential.voice,
         callEpoch: context.epoch,
         instructions: context.realtimeInstructions,
+        turnDetection: credential.turnDetection,
       },
       this.callbacksFor(context, generation),
       { abortSignal: context.callAbort.signal },

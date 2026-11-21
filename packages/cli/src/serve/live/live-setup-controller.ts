@@ -18,6 +18,7 @@ import {
   listLiveRealtimeRoutes,
   LiveProviderConfigError,
   normalizeLiveRealtimeEndpoint,
+  parseTurnDetection,
   readLiveVoiceConfiguration,
   resolveLiveProviderCredential,
   type LiveProviderCredential,
@@ -68,6 +69,16 @@ export interface LiveSetupStatus {
   endpoint: string;
   /** Why the stored `endpoint` would be refused at call time. */
   endpointError?: string;
+  /**
+   * The stored turn detection mode, empty when the model-aware default
+   * (`server_vad` for qwen-audio, else `semantic_vad`) is in use.
+   */
+  turnDetection: string;
+  /**
+   * Why the stored `turnDetection` is refused. Calls fail until it is
+   * replaced or cleared; disabling Live Voice and other edits keep working.
+   */
+  turnDetectionError?: string;
   /** `realtimeOnly` routes from user-scope `modelProviders`, for a picker. */
   models: Array<{ id: string; provider: string; name?: string }>;
   /** Whether the native macOS Host can attach on this daemon. */
@@ -94,6 +105,8 @@ export interface LiveSetupUpdate {
    * Empty restores the default.
    */
   endpoint?: string;
+  /** A turn detection mode. Empty restores the model-aware default. */
+  turnDetection?: string;
 }
 
 interface SettingsWrite {
@@ -138,6 +151,7 @@ async function validateCredential(
     apiKey: credential.apiKey,
     model: credential.realtimeModel,
     voice: credential.voice,
+    turnDetection: credential.turnDetection,
     callEpoch: `setup-${randomUUID()}`,
   });
   session.close({ discardPendingInput: true });
@@ -165,6 +179,11 @@ function configuredKey(settings: Settings): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function configuredTurnDetection(settings: Settings): string {
+  const value = settings.experimental?.liveVoice?.turnDetection;
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 function candidateSettings(
   settings: Settings,
   enabled: boolean,
@@ -173,6 +192,7 @@ function candidateSettings(
   model: string,
   voice: string,
   endpoint: string | undefined,
+  turnDetection: string | undefined,
 ): Settings {
   return {
     ...settings,
@@ -186,6 +206,7 @@ function candidateSettings(
         model,
         voice,
         endpoint,
+        turnDetection,
       },
     },
   } as Settings;
@@ -234,13 +255,18 @@ export class LiveSetupController {
         });
         keyConfigured = true;
       } catch (error) {
-        keyConfigured = false;
+        // A refused turnDetection is reported through turnDetectionError;
+        // it says nothing about the key.
+        keyConfigured =
+          error instanceof LiveProviderConfigError &&
+          error.reason === 'invalid_turn_detection';
         // The merely-unset envKey is the one cause the card explains with
         // its own "not set" sentence; anything else must be named, or the
         // card asserts a missing variable that is actually set.
         if (
           error instanceof LiveProviderConfigError &&
-          error.reason !== 'env_key_missing'
+          error.reason !== 'env_key_missing' &&
+          error.reason !== 'invalid_turn_detection'
         ) {
           keyError = error.message;
         }
@@ -264,6 +290,10 @@ export class LiveSetupController {
       voice: live.voice,
       endpoint,
       ...(endpointError ? { endpointError } : {}),
+      turnDetection: configuredTurnDetection(settings),
+      ...(live.turnDetectionError
+        ? { turnDetectionError: live.turnDetectionError }
+        : {}),
       models: listLiveRealtimeRoutes(settings).map((route) => ({
         id: route.id,
         provider: route.provider,
@@ -351,6 +381,18 @@ export class LiveSetupController {
         400,
       );
     }
+    const nextTurnDetection =
+      update.turnDetection?.trim() ?? configuredTurnDetection(settings);
+    if (update.turnDetection !== undefined) {
+      const parsed = parseTurnDetection(nextTurnDetection);
+      if (parsed.error) {
+        throw new LiveSetupError(
+          parsed.error,
+          'invalid_live_turn_detection',
+          400,
+        );
+      }
+    }
     const currentEndpoint = configuredEndpoint(settings);
     const nextEndpoint = update.endpoint?.trim() ?? currentEndpoint;
     if (
@@ -362,6 +404,8 @@ export class LiveSetupController {
     const providerChanged =
       nextModel !== current.model ||
       nextVoice !== current.voice ||
+      (update.turnDetection !== undefined &&
+        nextTurnDetection !== configuredTurnDetection(settings)) ||
       effectiveEndpoint(nextEndpoint) !== effectiveEndpoint(currentEndpoint);
     const currentKey = configuredKey(settings);
     const nextKey =
@@ -400,6 +444,21 @@ export class LiveSetupController {
       usesRoute = findLiveRealtimeRoute(settings, nextModel) !== undefined;
     } catch (error) {
       routeError = error;
+    }
+    // A refused stored turnDetection, like a broken route, only blocks the
+    // updates that would start using the provider; replacing or clearing it
+    // in the same update is the repair.
+    if (
+      current.turnDetectionError &&
+      update.turnDetection === undefined &&
+      nextEnabled &&
+      needsProvider
+    ) {
+      throw new LiveSetupError(
+        current.turnDetectionError,
+        'invalid_live_turn_detection',
+        400,
+      );
     }
     if (routeError !== undefined && needsProvider) {
       throw new LiveSetupError(
@@ -456,6 +515,7 @@ export class LiveSetupController {
             nextModel,
             nextVoice,
             nextEndpoint || undefined,
+            nextTurnDetection || undefined,
           ),
           {
             apiKey: nextKey,
@@ -501,6 +561,14 @@ export class LiveSetupController {
         key: 'experimental.liveVoice.endpoint',
         // Empty restores the default, which stays implicit.
         value: nextEndpoint || undefined,
+      });
+    }
+    if (update.turnDetection !== undefined) {
+      writes.push({
+        scope: SettingScope.User,
+        key: 'experimental.liveVoice.turnDetection',
+        // Empty restores the model-aware default, which stays implicit.
+        value: nextTurnDetection || undefined,
       });
     }
     if (update.voice !== undefined) {

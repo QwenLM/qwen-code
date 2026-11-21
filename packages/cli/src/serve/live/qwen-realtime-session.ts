@@ -9,6 +9,7 @@ import WebSocket from 'ws';
 import type { SocketLike } from '../../ui/voice/voice-stream-session.js';
 import { deriveWebSocketBase } from '../../ui/voice/voice-stream-session.js';
 import { escapeAnsiCtrlCodes } from '../../ui/utils/textUtils.js';
+import type { TurnDetection } from './provider-credentials.js';
 
 export type RealtimeCallEpoch = string | number;
 
@@ -157,6 +158,7 @@ export interface QwenRealtimeConfig {
   callEpoch: RealtimeCallEpoch;
   voice?: string;
   instructions?: string;
+  turnDetection?: TurnDetection;
 }
 
 export interface QwenRealtimeDeps {
@@ -1507,7 +1509,7 @@ export function openQwenRealtimeSession(
           },
           instructions: config.instructions ?? buildQwenRealtimeInstructions(),
           turn_detection: {
-            type: 'semantic_vad',
+            type: config.turnDetection ?? 'semantic_vad',
             create_response: true,
             interrupt_response: true,
           },

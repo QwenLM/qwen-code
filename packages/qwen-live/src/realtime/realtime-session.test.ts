@@ -713,6 +713,70 @@ describe('realtime-session', () => {
     }
   });
 
+  it('defaults turn_detection to server_vad for qwen-audio models', async () => {
+    const socket = new FakeSocket();
+    const opening = openQwenRealtimeSession(
+      {
+        endpoint: 'https://dashscope.example/compatible-mode/v1',
+        apiKey: 'sk-test',
+        model: 'qwen-audio-3.0-realtime-plus',
+        callEpoch: 7,
+        voice: 'Tina',
+        instructions: 'test instructions',
+        tools: [HANDOFF_TOOL],
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+    socket.message({
+      type: 'session.created',
+      event_id: 'session-created',
+    });
+    sessionUpdated(socket, 'session-updated');
+    await opening;
+
+    const update = sentJson(socket, 0);
+    const session = update['session'] as Record<string, unknown>;
+    // qwen-audio models default to server_vad, and the orchestrator
+    // keeps create_response: false.
+    expect(session['turn_detection']).toEqual({
+      type: 'server_vad',
+      create_response: false,
+      interrupt_response: true,
+    });
+  });
+
+  it('keeps semantic_vad for non-qwen-audio models', async () => {
+    const socket = new FakeSocket();
+    const opening = openQwenRealtimeSession(
+      {
+        endpoint: 'https://dashscope.example/compatible-mode/v1',
+        apiKey: 'sk-test',
+        model: 'qwen3.5-omni-plus-realtime',
+        callEpoch: 7,
+        voice: 'Tina',
+        instructions: 'test instructions',
+        tools: [HANDOFF_TOOL],
+      },
+      {},
+      { createWebSocket: () => socket },
+    );
+    socket.message({
+      type: 'session.created',
+      event_id: 'session-created',
+    });
+    sessionUpdated(socket, 'session-updated');
+    await opening;
+
+    const update = sentJson(socket, 0);
+    const session = update['session'] as Record<string, unknown>;
+    expect(session['turn_detection']).toEqual({
+      type: 'semantic_vad',
+      create_response: false,
+      interrupt_response: true,
+    });
+  });
+
   it('sends bounded JPEG frames only after the first audio append', async () => {
     const socket = new FakeSocket();
     const callbacks = { onImageDropped: vi.fn() };

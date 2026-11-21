@@ -12,6 +12,7 @@ import {
   type QwenRealtimeCallbacks,
   type QwenRealtimeSession,
 } from './qwen-realtime-session.js';
+import type { TurnDetection } from './provider-credentials.js';
 
 class FakeSocket {
   readonly OPEN = 1;
@@ -120,6 +121,7 @@ function functionCall(
 async function connect(
   socket: FakeSocket,
   callbacks: QwenRealtimeCallbacks = {},
+  turnDetection?: TurnDetection,
 ): Promise<QwenRealtimeSession> {
   const opening = openQwenRealtimeSession(
     {
@@ -128,6 +130,7 @@ async function connect(
       model: 'qwen3.5-omni-plus-realtime',
       callEpoch: 7,
       voice: 'Tina',
+      ...(turnDetection !== undefined ? { turnDetection } : {}),
     },
     callbacks,
     { createWebSocket: () => socket },
@@ -233,6 +236,48 @@ describe('qwen-realtime-session', () => {
     expect(String(session['instructions'])).toContain(
       'If the user explicitly requests frequent or detailed updates',
     );
+  });
+
+  it('sends server_vad turn_detection', async () => {
+    const socket = new FakeSocket();
+    await connect(socket, {}, 'server_vad');
+
+    const update = sentJson(socket, 0);
+    expect(
+      (update['session'] as Record<string, unknown>)['turn_detection'],
+    ).toEqual({
+      type: 'server_vad',
+      create_response: true,
+      interrupt_response: true,
+    });
+  });
+
+  it('sends smart_turn_v2 turn_detection', async () => {
+    const socket = new FakeSocket();
+    await connect(socket, {}, 'smart_turn_v2');
+
+    const update = sentJson(socket, 0);
+    expect(
+      (update['session'] as Record<string, unknown>)['turn_detection'],
+    ).toEqual({
+      type: 'smart_turn_v2',
+      create_response: true,
+      interrupt_response: true,
+    });
+  });
+
+  it('defaults turn_detection to semantic_vad when turnDetection is undefined', async () => {
+    const socket = new FakeSocket();
+    await connect(socket);
+
+    const update = sentJson(socket, 0);
+    expect(
+      (update['session'] as Record<string, unknown>)['turn_detection'],
+    ).toEqual({
+      type: 'semantic_vad',
+      create_response: true,
+      interrupt_response: true,
+    });
   });
 
   it('lets Realtime answer an ordinary turn directly', async () => {
