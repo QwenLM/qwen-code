@@ -36,8 +36,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -471,6 +473,106 @@ class ExternalWorkspaceProvisionerTest {
                 placement.handle().getValue());
         assertTrue(subject.supportsStartupRecovery(placement.handle()));
         assertFalse(subject.supportsStartupRecovery(scratchShaped));
+    }
+
+    @Test
+    void historicalWorkspaceTerminalIdentityNeedsNoCurrentBootOrProviderTraffic() {
+        provisioner = new ExternalWorkspaceProvisioner(client, (tenant, alias) -> {
+            throw new AssertionError("Terminal validation must not reconstruct the historical boot");
+        }, PROVIDER, Duration.ofSeconds(5));
+        var original = historicalTerminalOriginal();
+
+        assertTrue(WorkspaceExecutionProfile.isExternalWorkspaceRetirementRequest(original.getRequest()));
+        assertFalse(ExternalWorkspaceProvisioner.isWorkspaceRequest(original.getRequest()));
+        assertDoesNotThrow(() -> provisioner.validateTerminalOriginal(original));
+        assertDoesNotThrow(() -> provisioner.validateTerminalOriginal(original.withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, null, Instant.now())));
+        assertTrue(client.provisions.isEmpty());
+        assertTrue(client.observes.isEmpty());
+        assertTrue(client.reattaches.isEmpty());
+    }
+
+    @Test
+    void admittedWorkspaceTerminalValidationStillRecomputesIdentity() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        var request = residentRequest();
+        var seed = seed("admitted-terminal");
+        var handle = join(subject.ensureResource(request, seed, null));
+        var original = draining(request, seed, handle, null, false).withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, null, Instant.now());
+        assertDoesNotThrow(() -> subject.validateTerminalOriginal(original));
+
+        var values = new LinkedHashMap<>(handle.getValue());
+        values.put("identity", "a".repeat(64));
+        var changed = new RuntimeResourceHandle(handle.getKind(), handle.getVersion(), values);
+        assertThrows(RuntimeBrokerException.class, () -> subject.validateTerminalOriginal(
+                original.withResourceHandle(changed, Instant.now())));
+        assertTrue(client.provisions.isEmpty());
+        assertTrue(client.observes.isEmpty());
+    }
+
+    @Test
+    void historicalTerminalValidationDoesNotAdmitProvisionReconcileOrAcquisition() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = historicalTerminalOriginal();
+        subject.validateTerminalOriginal(original);
+
+        failure(subject.ensureResource(original.getRequest(), original.getProvisionSeed(), original.getResourceHandle()));
+        failure(subject.provision(original.getRequest(), original.getProvisionSeed()));
+        assertEquals(RuntimeObservation.Outcome.CONFLICT, join(subject.reconcile(original.getRequest(),
+                original.getProvisionSeed(), original.getResourceHandle(), original.getLease())).getOutcome());
+        failure(subject.verifyAcquisition(original.withState(
+                RuntimeBindingRecord.State.READY, original.getLease(), Instant.now())));
+        assertThrows(RuntimeBrokerException.class, () -> subject.recoveryProviderRequest(original));
+        assertTrue(client.provisions.isEmpty());
+        assertTrue(client.observes.isEmpty());
+        assertTrue(client.reattaches.isEmpty());
+    }
+
+    @Test
+    void historicalTerminalValidationRejectsForeignMalformedAndMismatchedOriginals() {
+        var subject = provisioner(null);
+        var original = historicalTerminalOriginal();
+        var handle = original.getResourceHandle();
+        for (var change : List.<Map<String, Object>>of(
+                Map.of("providerId", "other-provider"),
+                Map.of("provisionRequestId", "other-request"),
+                Map.of("provider", Map.of("requestId", "other-request")),
+                Map.of("identity", "not-a-digest"),
+                Map.of("unexpected", "field"))) {
+            var values = new LinkedHashMap<>(handle.getValue());
+            values.putAll(change);
+            var changed = new RuntimeResourceHandle(handle.getKind(), handle.getVersion(), values);
+            assertThrows(RuntimeBrokerException.class, () -> subject.validateTerminalOriginal(
+                    original.withResourceHandle(changed, Instant.now())));
+        }
+        var wrongVersion = new RuntimeResourceHandle(handle.getKind(), 2, handle.getValue());
+        assertThrows(RuntimeBrokerException.class, () -> subject.validateTerminalOriginal(
+                original.withResourceHandle(wrongVersion, Instant.now())));
+        var wrongKind = new RuntimeResourceHandle("external-scratch", 1, handle.getValue());
+        assertThrows(IllegalArgumentException.class, () -> original.withResourceHandle(wrongKind, Instant.now()));
+        var seed = original.getProvisionSeed();
+        var wrongLease = new RuntimeLease(seed.getProvisionalRuntimeId(), original.getLease().getEndpoint(),
+                "other-token", seed.getLeaseId(), seed.getEpoch());
+        assertThrows(IllegalArgumentException.class, () -> original.withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, wrongLease, Instant.now()));
+        assertThrows(RuntimeBrokerException.class, () -> subject.validateTerminalOriginal(
+                original.withResourceHandle(null, Instant.now())));
+    }
+
+    private static RuntimeBindingRecord historicalTerminalOriginal() {
+        var request = new RuntimeProvisionRequest(new RuntimeScope(TENANT, ALIAS, "1", MOUNT,
+                "sha256:" + "c".repeat(64), "workspace"), null, ExternalWorkspaceProvisioner.KIND, ALIAS);
+        var seed = RuntimeProvisionSeed.create("binding-a", 1);
+        // The original digest is opaque here; the retirement service must demand
+        // an independent match against the trusted host's persisted launch.
+        var handle = new RuntimeResourceHandle(ExternalWorkspaceProvisioner.KIND, 1, Map.of(
+                "providerId", PROVIDER, "provisionRequestId", seed.getProvisionRequestId(),
+                "identity", "a".repeat(64), "provider", Map.of("requestId", seed.getProvisionRequestId())));
+        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create(RecordingClient.ENDPOINT),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        return draining(request, seed, handle, lease, false).withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED, lease, Instant.now());
     }
 
     private static RuntimeBindingRecord draining(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
