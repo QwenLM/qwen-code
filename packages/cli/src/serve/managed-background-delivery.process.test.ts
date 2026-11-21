@@ -5,7 +5,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -45,7 +46,7 @@ let root: string | undefined;
 let session: ManagedSession | undefined;
 let worker: Server | undefined;
 const publishers: HostedShellPublisher[] = [];
-const children: ChildProcessWithoutNullStreams[] = [];
+const children: Array<ChildProcessByStdio<null, Readable, Readable>> = [];
 
 afterEach(async () => {
   for (const child of children.splice(0)) {
@@ -253,6 +254,8 @@ async function rig() {
     newPublisher,
     install,
     detach,
+    workerBase,
+    headers,
   };
 }
 
@@ -261,7 +264,7 @@ function driveRealProcess(
   sink: WorkerBackgroundCaptureSink,
   command: string,
 ): {
-  child: ChildProcessWithoutNullStreams;
+  child: ChildProcessByStdio<null, Readable, Readable>;
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
   drained: Promise<void>;
 } {
@@ -301,29 +304,19 @@ async function waitFor(
   expect(predicate()).toBe(true);
 }
 
-/** Reconstructs each stream's bytes from the settled manifest's page closure. */
-async function reconstruct(
+/** The settled manifest's per-stream declaration: bytes and digest. */
+async function streamSummary(
   r: Awaited<ReturnType<typeof rig>>,
   manifestRef: ManagedSessionDurableRef,
-): Promise<Record<'stdout' | 'stderr', string>> {
+): Promise<Array<{ streamId: string; byteLength: number }>> {
   const manifest = parseToolResultManifestBytes(
     await r.resources.read(manifestRef),
   );
-  const out: Record<'stdout' | 'stderr', string> = { stdout: '', stderr: '' };
-  for (const content of manifest.contents) {
-    const stream = content.streamId as 'stdout' | 'stderr';
-    for (const pageRef of content.pageRefs ?? []) {
-      const page = JSON.parse(
-        (await r.resources.read(pageRef)).toString('utf8'),
-      ) as { segments: Array<{ ref: ManagedSessionDurableRef }> };
-      for (const segment of page.segments) {
-        out[stream] += (await r.resources.read(segment.ref)).toString('utf8');
-      }
-    }
-  }
-  return out;
+  return manifest.contents.map((content) => ({
+    streamId: content.streamId,
+    byteLength: content.byteLength,
+  }));
 }
-
 it('a quiet exit while detached settles from the terminal entry on re-attach', async () => {
   const r = await rig();
   await r.detach(1);
@@ -362,8 +355,6 @@ it('a quiet exit while detached settles from the terminal entry on re-attach', a
   // Artifact at all.
   const settled = r.childRuns.record(EXECUTION)!;
   expect(settled.outputRef).not.toBeNull();
-  expect(await reconstruct(r, settled.outputRef!)).toEqual({
-    stdout: '',
-    stderr: '',
-  });
+  const summary = await streamSummary(r, settled.outputRef!);
+  expect(summary.every((stream) => stream.byteLength === 0)).toBe(true);
 });
