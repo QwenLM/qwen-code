@@ -90,13 +90,13 @@ public class JdbcManagedToolResultStore
                                 .substring(10);
                 rows.add(new Object[] {
                         ManagedSchemaKeys.operationKey(OperationKind.TOOL_RESULT_PROJECTION, sourceScope,
-                                executionKey, source.id()), sourceScope, sourceScope, ManagedSchemaKeys.identity(source.id()),
+                                executionKey, source.id()), sourceScope, ManagedSchemaKeys.identity(source.id()),
                         ManagedSchemaKeys.identity(tenant), ManagedSchemaKeys.identity(workspace), ManagedSchemaKeys.identity(session),
                         executionKey, executionKey, JSON.valueToTree(source).toString(), source.sourceDigest(),
                         createdAt, createdAt});
             }
             jdbc.batchUpdate(
-                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, workspace_id, session_id, target_kind, target_key, execution_key, request_json, request_digest, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?, 'PROJECTING', 'PENDING', ?, ?)", rows);
+                    "INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, workspace_id, session_id, target_kind, target_key, execution_key, request_json, request_digest, phase, state, gmt_create, gmt_modified) VALUES (?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, ?, 'TOOL_EXECUTION', ?, ?, ?, ?, 'PROJECTING', 'PENDING', ?, ?)", rows);
         }
     }
 
@@ -421,7 +421,7 @@ public class JdbcManagedToolResultStore
                                         sequence);
                                 String sessionScope = scope(source.tenantId(), source.sessionId());
                                 jdbc.update(
-                                        "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) SELECT session_scope_key, 'ARTIFACT', ?, 1, resource_key, tenant_id, workspace_id, session_id, resource_id, " + ManagedSchemaTime.SQL_NOW + " FROM ma_resource WHERE scope_key = ? AND publication_id = ? AND capture_state = 'VERIFIED' AND deletion_operation_key IS NULL",
+                                        "INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) SELECT 'ARTIFACT', ?, 1, resource_key, tenant_id, workspace_id, session_id, resource_id, " + ManagedSchemaTime.SQL_NOW + " FROM ma_resource WHERE scope_key = ? AND publication_id = ? AND capture_state = 'VERIFIED' AND deletion_operation_key IS NULL",
                                         ManagedSchemaKeys.key(
                                                 sessionScope,
                                                 artifact.descriptor().path("id").asText()),

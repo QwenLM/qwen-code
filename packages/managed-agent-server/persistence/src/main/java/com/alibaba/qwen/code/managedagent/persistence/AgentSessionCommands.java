@@ -591,15 +591,14 @@ final class AgentSessionCommands {
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
                 scope, target, operationId);
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
+                "INSERT INTO ma_operation (operation_key, scope_key,"
                     + " target_kind, target_key, target_id, phase, request_json,"
                     + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
                     + " actor_key, idempotency_key, request_digest, state, admission_stage,"
                     + " delivery_state, session_status_before, available_at, gmt_create,"
-                    + " gmt_modified) VALUES (?, ?, ?, 'TURN', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
+                    + " gmt_modified) VALUES (?, ?, 'TURN', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
                     + " ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?)",
                 operationKey,
-                scope,
                 scope,
                 target,
                 turnId,

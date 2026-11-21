@@ -104,9 +104,9 @@ class ManagedSchemaTimeContractTest {
                 assertEquals(Types.BIGINT, columns.getMetaData().getColumnType(1));
             }
             try (var insert = connection.prepareStatement(
-                    "INSERT INTO ma_session_head (tenant_key,harness_key,tenant_id,session_id,"
+                    "INSERT INTO ma_session_head (tenant_id,session_id,"
                             + "harness_session_id,head_kind,gmt_create,gmt_modified)"
-                            + " VALUES ('tenant','harness',?,?,?,'HARNESS',?,?)")) {
+                            + " VALUES (?,?,?,'HARNESS',?,?)")) {
                 insert.setBytes(1, ManagedSchemaKeys.identity("tenant"));
                 insert.setBytes(2, ManagedSchemaKeys.identity("harness"));
                 insert.setBytes(3, ManagedSchemaKeys.identity("harness"));

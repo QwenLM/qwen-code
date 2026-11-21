@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelStoreSupport;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.PrWatchInjectionRepository;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
@@ -59,10 +58,10 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
                     candidate.channelInstanceId(), candidate.inputId(), digest, digest,
                     candidate.channelInstanceId(), candidate.sessionId(), operation, now, now);
             if (admitted == 1) {
-                jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id,"
+                jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id,"
                                 + " session_id, target_kind, target_key, request_digest, request_json, phase, state,"
-                                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'PR_WATCH_INJECT', ?, ?, ?, 'SESSION', ?, ?, ?, 'STAGING', 'staged', ?, ?)",
-                        operation, ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId()), scope,
+                                + " gmt_create, gmt_modified) VALUES (?, ?, 'PR_WATCH_INJECT', ?, ?, ?, 'SESSION', ?, ?, ?, 'STAGING', 'staged', ?, ?)",
+                        operation, scope,
                         candidate.inputId(), candidate.tenantId(), candidate.sessionId(), target, digest, request, now, now);
             }
         });
