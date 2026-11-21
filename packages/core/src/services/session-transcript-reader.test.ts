@@ -9,17 +9,60 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockDebugLogger, mockAddDaemonRequestAttribute, statFault } =
-  vi.hoisted(() => ({
-    mockDebugLogger: {
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
+const {
+  mockDebugLogger,
+  mockAddDaemonRequestAttribute,
+  statFault,
+  projectionReads,
+} = vi.hoisted(() => ({
+  mockDebugLogger: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+  mockAddDaemonRequestAttribute: vi.fn(),
+  statFault: {
+    zeroInode: false,
+    failNextWith: null as null | string,
+    pauseNext: null as null | Promise<void>,
+    pathCalls: new Map<string, number>(),
+    failOnCall: null as null | { path: string; call: number; code: string },
+    beforeCall: null as null | {
+      path: string;
+      call: number;
+      action: () => Promise<void>;
     },
-    mockAddDaemonRequestAttribute: vi.fn(),
-    statFault: { zeroInode: false },
-  }));
+  },
+  projectionReads: {
+    count: 0,
+    pause: null as null | Promise<void>,
+  },
+}));
+
+vi.mock(
+  '../managed-runtime/managed-session-message-projection.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('../managed-runtime/managed-session-message-projection.js')
+      >();
+    return {
+      ...actual,
+      readManagedSessionRecordsAndTitle: async (
+        options: Parameters<typeof actual.readManagedSessionRecordsAndTitle>[0],
+      ) => {
+        projectionReads.count++;
+        if (projectionReads.pause) {
+          const pause = projectionReads.pause;
+          projectionReads.pause = null;
+          await pause;
+        }
+        return actual.readManagedSessionRecordsAndTitle(options);
+      },
+    };
+  },
+);
 
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
@@ -35,6 +78,45 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     ...actual,
     open: vi.fn(actual.open),
     stat: async (...args: Parameters<typeof actual.stat>) => {
+      const target = String(args[0]);
+      const calls = (statFault.pathCalls.get(target) ?? 0) + 1;
+      statFault.pathCalls.set(target, calls);
+      if (
+        statFault.beforeCall &&
+        statFault.beforeCall.path === target &&
+        statFault.beforeCall.call === calls
+      ) {
+        const { action } = statFault.beforeCall;
+        statFault.beforeCall = null;
+        await action();
+      }
+      if (statFault.pauseNext) {
+        const pause = statFault.pauseNext;
+        statFault.pauseNext = null;
+        await pause;
+      }
+      if (statFault.failNextWith) {
+        const code = statFault.failNextWith;
+        statFault.failNextWith = null;
+        const error = new Error(
+          `injected stat failure ${code}`,
+        ) as NodeJS.ErrnoException;
+        error.code = code;
+        throw error;
+      }
+      if (
+        statFault.failOnCall &&
+        statFault.failOnCall.path === target &&
+        statFault.failOnCall.call === calls
+      ) {
+        const code = statFault.failOnCall.code;
+        statFault.failOnCall = null;
+        const error = new Error(
+          `injected stat failure ${code}`,
+        ) as NodeJS.ErrnoException;
+        error.code = code;
+        throw error;
+      }
       const result = await actual.stat(...args);
       if (statFault.zeroInode) {
         Object.defineProperty(result, 'ino', { value: 0 });
@@ -99,6 +181,7 @@ import {
   setSessionTranscriptExpandedPageBytesForTest,
   setSessionTranscriptIndexBuildCompleteHookForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
+  setSessionTranscriptIndexCacheOversizedMaxBytesForTest,
   setSessionTranscriptSelectedLineReadHookForTest,
   SessionTranscriptCursorCodec,
   SessionTranscriptSnapshotUnavailableError,
@@ -219,6 +302,12 @@ describe('SessionTranscriptReader', () => {
 
   afterEach(async () => {
     statFault.zeroInode = false;
+    statFault.failNextWith = null;
+    statFault.pauseNext = null;
+    statFault.pathCalls.clear();
+    statFault.failOnCall = null;
+    statFault.beforeCall = null;
+    projectionReads.pause = null;
     resetSessionTranscriptIndexCacheForTest();
     Storage.setRuntimeBaseDir(null);
     await fs.rm(runtimeDir, { recursive: true, force: true });
@@ -602,6 +691,59 @@ describe('SessionTranscriptReader', () => {
     const fixed = new Date('2026-02-02T02:02:02.000Z');
     return fs.utimes(filePath, fixed, fixed);
   };
+
+  /** A Managed log with these records committed; the caller closes the authority. */
+  async function openManagedFixture(
+    texts: Array<{ uuid: string; parent: string | null; text: string }>,
+  ) {
+    const file = await writeRawTranscript('');
+    const sessionKey = localManagedSessionKey(workspaceDir, sessionId);
+    const store = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: runtimeDir,
+      sessionKey,
+    });
+    const lease = await LocalManagedSessionAuthority.acquireWriter({
+      runtimeBaseDir: runtimeDir,
+      sessionId,
+      transcriptPath: file,
+    });
+    const reference = {
+      resourceId: 'test-ref',
+      kind: 'test',
+      schemaVersion: 1,
+      byteLength: 4,
+      digest: 'e'.repeat(64),
+    };
+    const authority = await LocalManagedSessionAuthority.open({
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
+      sessionKey,
+      cwd: workspaceDir,
+      version: 'test',
+      resources: store,
+      create: {
+        definitionRef: reference,
+        rootSnapshotRef: reference,
+        createdBy: 'daemon',
+      },
+    });
+    const projection = new ManagedSessionMessageProjection(authority, store);
+    const commit = (uuid: string, parent: string | null, text: string) =>
+      projection.commit(
+        {
+          operation: 'commitMessage',
+          commandId: uuid,
+          sessionKey,
+          contentDigest: 'e'.repeat(64),
+        },
+        { record: record(uuid, parent, text) },
+        { class: 'trusted_entry' },
+      );
+    for (const item of texts) await commit(item.uuid, item.parent, item.text);
+    return { file, authority, commit };
+  }
 
   /** Same inode, byte length and (pinned) mtime, but u1 renamed to x1. */
   async function renameU1InPlace(filePath: string, initial: string) {
@@ -3173,6 +3315,7 @@ describe('SessionTranscriptReader', () => {
   it('shares an oversized in-flight index without retaining its completion', async () => {
     const filePath = await writeRecords(chain('hello', 'reply'));
     setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
     const builds = countBuilds(filePath);
     const reader = newReader();
     const [first, second] = await Promise.all([
@@ -3185,7 +3328,7 @@ describe('SessionTranscriptReader', () => {
   });
 
   it('does not evict cached indexes when a new index exceeds the byte budget alone', async () => {
-    const { reader, state } = await firstPage('hello', 'reply');
+    const { filePath, reader, state } = await firstPage('hello', 'reply');
     const warmCache = getSessionTranscriptIndexCacheStatsForTest();
     expect(warmCache.entries).toBe(1);
     setSessionTranscriptIndexCacheMaxBytesForTest(warmCache.byteSize + 1);
@@ -3196,13 +3339,1827 @@ describe('SessionTranscriptReader', () => {
       otherSessionId,
     );
     await reader.readPage(otherSessionId, { limit: 1 });
+    // The oversized index is retained in its own budget class; the warm
+    // shared entry keeps its place and its bytes.
     const afterOversizedRead = getSessionTranscriptIndexCacheStatsForTest();
-    expect(afterOversizedRead.entries).toBe(1);
-    expect(afterOversizedRead.byteSize).toBe(warmCache.byteSize);
+    expect(afterOversizedRead.entries).toBe(2);
+    expect(afterOversizedRead.byteSize).toBeGreaterThan(warmCache.byteSize);
 
+    const builds = countBuilds(filePath);
     const second = await readAfter(reader, state, { limit: 1 });
     expect(uuids(second.records)).toEqual(['a1']);
+    expect(builds.count).toBe(0);
   });
+
+  it('retains an index above the shared byte budget and serves repeats without rebuilding (#17889)', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply'));
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const builds = countBuilds(filePath);
+    const reader = newReader();
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    const cached = getSessionTranscriptIndexCacheStatsForTest();
+    expect(cached.entries).toBe(1);
+    expect(cached.byteSize).toBeGreaterThan(1);
+
+    const repeat = await reader.readPage(sessionId, { limit: 1 });
+    const continuation = await readAfter(reader, first.nextCursorState!, {
+      limit: 1,
+    });
+    expect(builds.count).toBe(1);
+    expect(uuids(repeat.records)).toEqual(uuids(first.records));
+    expect(uuids(continuation.records)).toEqual(['a1']);
+  });
+
+  it('refuses a second oversized index that does not fit the oversized budget', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    await writeRecords(chain('hello', 'reply'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const firstBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+
+    const secondPath = await writeRecords(
+      linear(
+        'large-',
+        0,
+        19,
+        null,
+        (i) => `large transcript ${i}`,
+        otherSessionId,
+      ),
+      otherSessionId,
+    );
+    // Learn the second index's estimate under the default oversized budget,
+    // then cap the class so each index fits alone but not together.
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const secondBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - firstBytes;
+    expect(secondBytes).toBeGreaterThan(firstBytes);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(secondBytes + 1);
+
+    const builds = countBuilds(secondPath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(otherSessionId, { limit: 1 });
+    await reader.readPage(otherSessionId, { limit: 1 });
+    expect(builds.count).toBe(2);
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual({
+      entries: 1,
+      byteSize: firstBytes,
+    });
+  });
+
+  it('prunes oversized indexes by their own budget without touching shared ones', async () => {
+    const reader = newReader();
+    await writeRecords(chain('hello', 'reply'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const firstBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    setSessionTranscriptIndexCacheMaxBytesForTest(firstBytes);
+
+    await writeRecords(
+      linear(
+        'large-',
+        0,
+        19,
+        null,
+        (i) => `large transcript ${i}`,
+        otherSessionId,
+      ),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const both = getSessionTranscriptIndexCacheStatsForTest();
+    expect(both.entries).toBe(2);
+    const secondBytes = both.byteSize - firstBytes;
+    expect(secondBytes).toBeGreaterThan(firstBytes);
+
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual({
+      entries: 1,
+      byteSize: firstBytes,
+    });
+  });
+
+  it('invalidates a retained oversized index when the transcript is appended', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply'));
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const builds = countBuilds(filePath);
+    const reader = newReader();
+    await reader.readPage(sessionId, { limit: 1 });
+    await appendRecords(filePath, record('u2', 'a1', 'next prompt'));
+    const page = await reader.readPage(sessionId, { limit: 500 });
+    expect(builds.count).toBe(2);
+    expect(uuids(page.records)).toEqual(['u1', 'a1', 'u2']);
+  });
+
+  it('accounts admission against the entry class, not total bytes, with both classes warm', async () => {
+    const reader = newReader();
+    const thirdSessionId = '730e8400-e29b-41d4-a716-446655440000';
+    const large = (i: number) => `large transcript ${i}`;
+    await writeRecords(chain('hello', 'reply'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const sharedBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await writeRecords(
+      linear('large-', 0, 19, null, large, otherSessionId),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const secondLargePath = await writeRecords(
+      linear('large-', 0, 19, null, large, thirdSessionId),
+      thirdSessionId,
+    );
+    await reader.readPage(thirdSessionId, { limit: 1 });
+    const warm = getSessionTranscriptIndexCacheStatsForTest();
+    expect(warm.entries).toBe(3);
+
+    // Each class fits its own entries exactly; the total exceeds the
+    // oversized budget, so total-byte accounting would refuse the re-read.
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheMaxBytesForTest(sharedBytes);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      warm.byteSize - sharedBytes,
+    );
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const builds = countBuilds(secondLargePath);
+    await reader.readPage(thirdSessionId, { limit: 1 });
+    await reader.readPage(thirdSessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual(warm);
+  });
+
+  it('offers a restore-built oversized index to the cache for later pages (#17889)', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply'));
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    const cached = getSessionTranscriptIndexCacheStatsForTest();
+    expect(cached.entries).toBe(1);
+    expect(cached.byteSize).toBeGreaterThan(1);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(0);
+  });
+
+  it.each([
+    ['oversized', true],
+    ['shared', false],
+  ] as const)(
+    'rejects a frozen cursor after an equal-size in-place rewrite (%s class)',
+    async (_label, forceOversized) => {
+      const filePath = await writeRecords(chain('hello', 'reply', 'third'));
+      if (forceOversized) setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      const reader = newReader();
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const state = first.nextCursorState!;
+      const raw = await fs.readFile(filePath, 'utf8');
+      const rewritten = raw
+        .replace('"text":"reply"', '"text":"REPLY"')
+        .replace('"uuid":"u2"', '"uuid":"x2"');
+      expect(Buffer.byteLength(rewritten, 'utf8')).toBe(
+        Buffer.byteLength(raw, 'utf8'),
+      );
+      await fs.writeFile(filePath, rewritten, 'utf8');
+      const stats = await fs.stat(filePath);
+      await fs.utimes(filePath, stats.atime, new Date(stats.mtimeMs + 1000));
+      await expect(
+        readAfter(reader, state, { limit: 1 }),
+      ).rejects.toMatchObject({
+        name: 'SessionTranscriptSnapshotUnavailableError',
+      });
+    },
+  );
+
+  it.each([
+    ['oversized', true],
+    ['shared', false],
+  ] as const)(
+    'rejects a frozen snapshot anchor after an equal-size in-place rewrite (%s class)',
+    async (_label, forceOversized) => {
+      const filePath = await writeRecords(chain('hello', 'reply', 'third'));
+      if (forceOversized) setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      const reader = newReader();
+      const { snapshot } = await reader.readTurnIndexPage(sessionId);
+      await reader.readPage(sessionId, { limit: 1 });
+      const raw = await fs.readFile(filePath, 'utf8');
+      // Text-only equal-length edit: uuids and the leaf stay intact, so only
+      // the mtime guard can fail this closed.
+      const rewritten = raw.replace('"text":"reply"', '"text":"REPLY"');
+      expect(Buffer.byteLength(rewritten, 'utf8')).toBe(
+        Buffer.byteLength(raw, 'utf8'),
+      );
+      await fs.writeFile(filePath, rewritten, 'utf8');
+      const stats = await fs.stat(filePath);
+      await fs.utimes(filePath, stats.atime, new Date(stats.mtimeMs + 1000));
+      await expect(
+        reader.readPage(sessionId, { snapshot, atRecordId: 'u1' }),
+      ).rejects.toMatchObject({
+        name: 'SessionTranscriptSnapshotUnavailableError',
+      });
+    },
+  );
+
+  it('makes room for a newer snapshot of the same file when the class budget is full', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    // Calibrate the new snapshot's estimate under the default budget, then
+    // tighten the class so one snapshot fits but two do not.
+    await reader.readPage(sessionId, { limit: 1 });
+    const newBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    expect(newBytes).toBeGreaterThan(0);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(newBytes + 1);
+    await readAfter(reader, oldState, { limit: 1 });
+
+    const builds = countBuilds(filePath);
+    const newFirst = await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    await reader.readPage(sessionId, { limit: 1 });
+    const continuation = await readAfter(reader, newFirst.nextCursorState!, {
+      limit: 1,
+    });
+    expect(builds.count).toBe(1);
+    expect(uuids(continuation.records)).toEqual(['large-1']);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      newBytes,
+    );
+    // The superseded frozen cursor still reads its original prefix; its
+    // index may rebuild, but the page contract holds.
+    const oldPage = await readAfter(reader, oldState, { limit: 1 });
+    expect(uuids(oldPage.records)).toEqual(['large-1']);
+  });
+
+  it('accounts a retained Managed projection against the index budget class', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { authority } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'short reply' },
+      { uuid: 'u2', parent: 'a1', text: bigText },
+    ]);
+    await authority.close();
+
+    const reader = newReader();
+    // readTurnHooksPage caches the physical index without projecting the
+    // Managed log (it reports unsupported), so the calibration below measures
+    // the physical hints alone.
+    await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+    const physicalBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    expect(physicalBytes).toBeGreaterThan(0);
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    // Room for the physical index but not for the decoded message bodies.
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      physicalBytes + 1024,
+    );
+    projectionReads.count = 0;
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      physicalBytes,
+    );
+    const tightPage = await reader.readPage(sessionId, { limit: 3 });
+    expect(uuids(tightPage.records)).toEqual(['u1', 'a1', 'u2']);
+    // The bodies do not fit the class budget, so the projection is not
+    // retained and the next page projects the log again.
+    expect(projectionReads.count).toBe(2);
+
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+    projectionReads.count = 0;
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(1);
+    expect(
+      getSessionTranscriptIndexCacheStatsForTest().byteSize,
+    ).toBeGreaterThan(physicalBytes + bigText.length);
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(1);
+  });
+
+  it('evicts an equal-size rewrite orphan to admit the live snapshot when the class is full', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 1);
+    const raw = await fs.readFile(filePath, 'utf8');
+    const rewritten = raw.replace(
+      '"text":"large transcript 5"',
+      '"text":"LARGE transcript 5"',
+    );
+    expect(Buffer.byteLength(rewritten, 'utf8')).toBe(
+      Buffer.byteLength(raw, 'utf8'),
+    );
+    await fs.writeFile(filePath, rewritten, 'utf8');
+    const stats = await fs.stat(filePath);
+    await fs.utimes(filePath, stats.atime, new Date(stats.mtimeMs + 1000));
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      oldBytes,
+    );
+  });
+
+  it('does not let a stale equal-size build evict the live newer entry', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    let releaseBuild: (() => void) | undefined;
+    const buildBlocked = new Promise<void>((resolve) => {
+      releaseBuild = resolve;
+    });
+    let firstBuild = true;
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (builtPath === filePath && firstBuild) {
+        firstBuild = false;
+        await buildBlocked;
+      }
+    });
+    const staleRead = reader.readPage(sessionId, { limit: 1 });
+    await vi.waitFor(() => expect(firstBuild).toBe(false));
+    const raw = await fs.readFile(filePath, 'utf8');
+    const rewritten = raw.replace(
+      '"text":"large transcript 5"',
+      '"text":"LARGE transcript 5"',
+    );
+    expect(Buffer.byteLength(rewritten, 'utf8')).toBe(
+      Buffer.byteLength(raw, 'utf8'),
+    );
+    await fs.writeFile(filePath, rewritten, 'utf8');
+    const stats = await fs.stat(filePath);
+    await fs.utimes(filePath, stats.atime, new Date(stats.mtimeMs + 1000));
+    await reader.readPage(sessionId, { limit: 1 });
+    const liveBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(liveBytes);
+    releaseBuild!();
+    // The stale build fails closed instead of serving its torn snapshot,
+    // and it must not evict the live newer entry on its way out.
+    await expect(staleRead).rejects.toMatchObject({
+      name: 'SessionTranscriptSnapshotUnavailableError',
+    });
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      liveBytes,
+    );
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(0);
+  });
+
+  it.each(['resident', 'entry-cleared', 'over-cap'] as const)(
+    'fails every sharer of a rebuild closed when the frozen snapshot is rewritten under it (%s)',
+    async (condition) => {
+      if (condition === 'over-cap') {
+        setSessionTranscriptIndexCacheMaxBytesForTest(1);
+        setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+      }
+      const filePath = await writeRecords(chain('hello', 'reply', 'third'));
+      const reader = newReader();
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const state = first.nextCursorState!;
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      let releaseBuild: (() => void) | undefined;
+      const buildBlocked = new Promise<void>((resolve) => {
+        releaseBuild = resolve;
+      });
+      let firstBuild = true;
+      setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+        if (builtPath === filePath && firstBuild) {
+          firstBuild = false;
+          await buildBlocked;
+        }
+      });
+      const initiator = readAfter(reader, state, { limit: 1 });
+      await vi.waitFor(() => expect(firstBuild).toBe(false));
+      // A second request with the same frozen cursor shares the pending build.
+      const waiter = readAfter(reader, state, { limit: 1 });
+      // Mark both promises handled before releasing the build so no
+      // rejection window is left unhandled; the assertions follow below.
+      void initiator.catch(() => {});
+      void waiter.catch(() => {});
+      // Wait until the waiter has actually taken the pending-hit path; on a
+      // loaded runner its stat can lag, and clearing before it shares would
+      // let it start a second build against the not-yet-rewritten file.
+      await vi.waitFor(() =>
+        expect(
+          mockDebugLogger.debug.mock.calls.some((call) =>
+            String(call[0]).includes('index cache pending hit'),
+          ),
+        ).toBe(true),
+      );
+      if (condition === 'entry-cleared') {
+        // The placeholder loses its cache slot mid-build (via the test clear
+        // seam; count-cap eviction of in-flight placeholders is prevented by
+        // design). The completion must still verify for every sharer instead
+        // of serving the torn build uncached.
+        clearSessionTranscriptIndexCacheEntriesForTest();
+      }
+      const raw = await fs.readFile(filePath, 'utf8');
+      const rewritten = raw.replace('"text":"reply"', '"text":"REPLY"');
+      expect(Buffer.byteLength(rewritten, 'utf8')).toBe(
+        Buffer.byteLength(raw, 'utf8'),
+      );
+      await fs.writeFile(filePath, rewritten, 'utf8');
+      const stats = await fs.stat(filePath);
+      await fs.utimes(filePath, stats.atime, new Date(stats.mtimeMs + 1000));
+      releaseBuild!();
+      await expect(initiator).rejects.toMatchObject({
+        name: 'SessionTranscriptSnapshotUnavailableError',
+      });
+      await expect(waiter).rejects.toMatchObject({
+        name: 'SessionTranscriptSnapshotUnavailableError',
+      });
+    },
+  );
+
+  it('retains an in-flight build placeholder under count pressure and admits its completion', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply', 'third'));
+    const reader = newReader();
+    let releaseBuild: (() => void) | undefined;
+    const buildBlocked = new Promise<void>((resolve) => {
+      releaseBuild = resolve;
+    });
+    let firstBuild = true;
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (builtPath === filePath && firstBuild) {
+        firstBuild = false;
+        await buildBlocked;
+      }
+    });
+    const pendingRead = reader.readPage(sessionId, { limit: 1 });
+    await vi.waitFor(() => expect(firstBuild).toBe(false));
+    // Admit more distinct sessions than the count cap while the build is
+    // awaited: the placeholder must survive the LRU prune (it holds no
+    // bytes and its build is still in flight).
+    for (let i = 0; i < 33; i++) {
+      const sid = `770e8400-e29b-41d4-a716-${String(i).padStart(12, '0')}`;
+      await writeRecords(
+        linear('f-', 0, 1, null, () => 'filler', sid),
+        sid,
+      );
+      await reader.readPage(sid, { limit: 1 });
+    }
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+    releaseBuild!();
+    await pendingRead;
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    // The completion admitted the index instead of returning it uncached.
+    expect(builds.count).toBe(0);
+  });
+
+  it('moves a completing placeholder to the MRU tail instead of self-evicting it', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply', 'third'));
+    const secondSessionId = '880e8400-e29b-41d4-a716-446655440000';
+    const secondPath = await writeRecords(
+      linear('s-', 0, 1, null, () => 'second', secondSessionId),
+      secondSessionId,
+    );
+    const reader = newReader();
+    const releases = new Map<string, () => void>();
+    const started = new Map<string, boolean>();
+    const blockFor = (target: string) => {
+      const blocked = new Promise<void>((resolve) => {
+        releases.set(target, resolve);
+      });
+      return blocked;
+    };
+    const targetBlocked = blockFor(filePath);
+    const secondBlocked = blockFor(secondPath);
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (started.has(builtPath)) return;
+      if (builtPath === filePath) {
+        started.set(builtPath, true);
+        await targetBlocked;
+      } else if (builtPath === secondPath) {
+        started.set(builtPath, true);
+        await secondBlocked;
+      }
+    });
+    const pendingRead = reader.readPage(sessionId, { limit: 1 });
+    await vi.waitFor(() => expect(started.has(filePath)).toBe(true));
+    for (let i = 0; i < 33; i++) {
+      const sid = `770e8400-e29b-41d4-a716-${String(i).padStart(12, '0')}`;
+      await writeRecords(
+        linear('f-', 0, 1, null, () => 'filler', sid),
+        sid,
+      );
+      await reader.readPage(sid, { limit: 1 });
+    }
+    // A second in-flight placeholder pushes the map past the count cap, so
+    // the completion's prune must evict a value entry — and the completing
+    // key, still at its placeholder insertion position without a delete
+    // before set, would be the first value the prune sees.
+    const pendingSecond = reader.readPage(secondSessionId, { limit: 1 });
+    await vi.waitFor(() => expect(started.has(secondPath)).toBe(true));
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(33);
+    releases.get(filePath)!();
+    await pendingRead;
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    // The completion survived its own prune.
+    expect(builds.count).toBe(0);
+    // The next unrelated admission evicts the true LRU value, not the
+    // freshly completed entry.
+    const lateSid = '990e8400-e29b-41d4-a716-446655440000';
+    await writeRecords(
+      linear('late-', 0, 1, null, () => 'late', lateSid),
+      lateSid,
+    );
+    await reader.readPage(lateSid, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(0);
+    releases.get(secondPath)!();
+    await pendingSecond;
+  });
+
+  it('evicts a same-mtime smaller prefix to admit the live snapshot when the class is full', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    // Pin a whole-millisecond mtime and restore it after the append, so the
+    // equal-mtime/smaller-size arm (a same-millisecond append) is the only
+    // one that can reclaim the old prefix.
+    await pinMtime(filePath);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    await fs.utimes(filePath, frozen.atime, frozen.mtime);
+    // Fits the grown snapshot alone, but not it plus the old prefix.
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 2048);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+    // The superseded frozen prefix still reads its original content.
+    const oldPage = await readAfter(reader, oldState, { limit: 1 });
+    expect(uuids(oldPage.records)).toEqual(['large-1']);
+  });
+
+  it('evicts a shorter prefix by length when an append restored an older mtime', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    // An in-place sync that appends and then restores an older source
+    // timestamp: the live snapshot's mtime is older than the prefix's.
+    await fs.utimes(filePath, frozen.atime, new Date(frozen.mtimeMs - 60000));
+    // Fits the grown snapshot alone, but not it plus the old prefix.
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 2048);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    // Length decides supersession, not mtime order: the live snapshot
+    // reclaims the shorter prefix and repeats hit.
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+    // The superseded frozen prefix rebuilds on demand (the second build),
+    // and its admission must not evict the live index even though the
+    // live mtime is older: the following live read still hits.
+    const oldPage = await readAfter(reader, oldState, { limit: 1 });
+    expect(uuids(oldPage.records)).toEqual(['large-1']);
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(2);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+  });
+
+  it('does not let a frozen-prefix admission reclaim the live newer index', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const large = (i: number) => `large transcript ${i}`;
+    const filePath = await writeRecords(linear('large-', 0, 19, null, large));
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const frozenBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const liveBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - frozenBytes;
+    await writeRecords(
+      linear('other-', 0, 19, null, large, otherSessionId),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const fillerBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize -
+      frozenBytes -
+      liveBytes;
+    // Tighten so the class holds live + filler exactly; the LRU prune drops
+    // the frozen prefix, whose rebuild must not reclaim the live index.
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      liveBytes + fillerBytes,
+    );
+    const builds = countBuilds(filePath);
+    // The frozen prefix rebuilds, but its admission must not reclaim the
+    // live newer index (which is newer in time, though larger in size).
+    const oldPage = await readAfter(reader, oldState, { limit: 1 });
+    expect(uuids(oldPage.records)).toEqual(['large-1']);
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      liveBytes + fillerBytes,
+    );
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+  });
+
+  it('admits a shared build whose snapshot was only appended under it', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply', 'third'));
+    const reader = newReader();
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const state = first.nextCursorState!;
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    let releaseBuild: (() => void) | undefined;
+    const buildBlocked = new Promise<void>((resolve) => {
+      releaseBuild = resolve;
+    });
+    let firstBuild = true;
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (builtPath === filePath && firstBuild) {
+        firstBuild = false;
+        await buildBlocked;
+      }
+    });
+    const initiator = readAfter(reader, state, { limit: 1 });
+    await vi.waitFor(() => expect(firstBuild).toBe(false));
+    const waiter = readAfter(reader, state, { limit: 1 });
+    // A pure append under the build: allowAppend keeps the frozen prefix
+    // valid, so both sharers resolve and the index is admitted.
+    await appendRecords(filePath, record('u3', 'u2', 'appended'));
+    releaseBuild!();
+    const [initPage, waitPage] = await Promise.all([initiator, waiter]);
+    expect(uuids(initPage.records)).toEqual(['a1']);
+    expect(uuids(waitPage.records)).toEqual(['a1']);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+    const builds = countBuilds(filePath);
+    await readAfter(reader, state, { limit: 1 });
+    expect(builds.count).toBe(0);
+  });
+
+  it('serves a built page uncached when the admission stat fails transiently', async () => {
+    const filePath = await writeRecords(chain('hello', 'reply'));
+    const reader = newReader();
+    setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
+      if (builtPath === filePath) statFault.failNextWith = 'EACCES';
+    });
+    const page = await reader.readPage(sessionId, { limit: 1 });
+    expect(uuids(page.records)).toEqual(['u1']);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(0);
+  });
+
+  it('runs the reclaim branch without a second stat that can fail uncaught', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    await reader.readPage(sessionId, { limit: 1 });
+    const targetBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    await writeRecords(
+      linear(
+        'filler-',
+        0,
+        19,
+        null,
+        (i) => `filler transcript ${i}`,
+        otherSessionId,
+      ),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const fillerBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    // The class holds the filler but not filler + target, so admission
+    // enters the reclaim branch and refuses (no superseded same-file
+    // entry). The third stat on this path would be a second admission
+    // stat after readPage's and the re-verification's; the synchronous
+    // tail never issues it, so the injected fault must not fire.
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      fillerBytes + targetBytes - 1,
+    );
+    statFault.pathCalls.delete(filePath);
+    statFault.failOnCall = { path: filePath, call: 3, code: 'EIO' };
+    const page = await reader.readPage(sessionId, { limit: 1 });
+    expect(uuids(page.records)).toEqual(['large-0']);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+    expect(
+      mockDebugLogger.debug.mock.calls.some((call) =>
+        String(call[0]).includes('index cache skipped byte-budget admission'),
+      ),
+    ).toBe(true);
+  });
+
+  it('serves frozen sharers the frozen snapshot when a rewrite lands after the re-verification', async () => {
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const warm = await reader.readPage(sessionId, { limit: 1 });
+    const state = warm.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await writeRecords(
+      linear(
+        'filler-',
+        0,
+        19,
+        null,
+        (i) => `filler transcript ${i}`,
+        otherSessionId,
+      ),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const fillerBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    await reader.readPage(otherSessionId, { limit: 1 });
+    // The filler occupies the class so the stale completion enters the
+    // reclaim branch; a second admission stat there would suspend after
+    // the re-verification already passed.
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      fillerBytes + oldBytes - 1,
+    );
+    let releaseBuild: (() => void) | undefined;
+    const buildBlocked = new Promise<void>((resolve) => {
+      releaseBuild = resolve;
+    });
+    let firstBuild = true;
+    let newerBuilds = 0;
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (builtPath !== filePath) return;
+      if (firstBuild) {
+        firstBuild = false;
+        await buildBlocked;
+        return;
+      }
+      newerBuilds++;
+    });
+    const initiator = readAfter(reader, state, { limit: 6 });
+    await vi.waitFor(() => expect(firstBuild).toBe(false));
+    const waiter = readAfter(reader, state, { limit: 6 });
+    void initiator.catch(() => {});
+    void waiter.catch(() => {});
+    await vi.waitFor(() =>
+      expect(
+        mockDebugLogger.debug.mock.calls.some((call) =>
+          String(call[0]).includes('index cache pending hit'),
+        ),
+      ).toBe(true),
+    );
+    // The second stat on this path after the reset would be a reclaim
+    // stat issued after the re-verification already passed. Before it
+    // runs, rewrite the file equal-size at an advanced mtime and read the
+    // newer snapshot, exactly the reviewer's interleaving. The
+    // synchronous tail never issues that stat, so the rewrite can only
+    // land before the re-verification (which fails every sharer closed)
+    // or after the admission (the documented live-body residual).
+    statFault.pathCalls.delete(filePath);
+    statFault.beforeCall = {
+      path: filePath,
+      call: 2,
+      action: async () => {
+        const raw = await fs.readFile(filePath, 'utf8');
+        const rewritten = raw.replace(
+          '"text":"large transcript 5"',
+          '"text":"LARGE transcript 5"',
+        );
+        expect(Buffer.byteLength(rewritten, 'utf8')).toBe(
+          Buffer.byteLength(raw, 'utf8'),
+        );
+        await fs.writeFile(filePath, rewritten, 'utf8');
+        await fs.utimes(filePath, new Date(), new Date(Date.now() + 60000));
+        await reader.readPage(sessionId, { limit: 1 });
+        await reader.readPage(sessionId, { limit: 1 });
+      },
+    };
+    releaseBuild!();
+    const [initPage, waitPage] = await Promise.all([initiator, waiter]);
+    statFault.beforeCall = null;
+    // The frozen pages serve the frozen snapshot, and the newer snapshot
+    // was never built under the stale completion.
+    expect(uuids(initPage.records)).toEqual([
+      'large-1',
+      'large-2',
+      'large-3',
+      'large-4',
+      'large-5',
+      'large-6',
+    ]);
+    expect(initPage.records[4]!.message?.parts?.[0]).toMatchObject({
+      text: 'large transcript 5',
+    });
+    expect(uuids(waitPage.records)).toEqual(uuids(initPage.records));
+    expect(newerBuilds).toBe(0);
+    // The refusal keeps the filler; the frozen build returns uncached.
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual({
+      entries: 1,
+      byteSize: fillerBytes,
+    });
+  });
+
+  it('evicts an equal-size replacement orphan at a new inode to admit the live snapshot', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    // Whole-millisecond mtime: utimes rounds sub-ms precision, which would
+    // let the mtime arm see the replacement and mask the identity arm.
+    await pinMtime(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    // Same-size replacement at a new inode with the mtime pinned to the
+    // frozen value: only the identity arm of the orphan predicate sees it.
+    const raw = await fs.readFile(filePath, 'utf8');
+    const replaced = raw.replace(
+      '"text":"large transcript 5"',
+      '"text":"LARGE transcript 5"',
+    );
+    expect(Buffer.byteLength(replaced, 'utf8')).toBe(
+      Buffer.byteLength(raw, 'utf8'),
+    );
+    const tempPath = `${filePath}.replacement`;
+    await fs.writeFile(tempPath, replaced, 'utf8');
+    await fs.utimes(tempPath, frozen.atime, frozen.mtime);
+    await fs.rename(tempPath, filePath);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 1);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual({
+      entries: 1,
+      byteSize: oldBytes,
+    });
+  });
+
+  it('evicts a truncated longer prefix to admit the live snapshot when the class is full', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    // Pin the mtime and restore it after the truncation: a same-millisecond
+    // truncation keeps the mtime on fast filesystems, so the reclaim must
+    // come from the current-file-length clause, not temporal order.
+    await pinMtime(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    const raw = await fs.readFile(filePath, 'utf8');
+    const lines = raw.trimEnd().split('\n');
+    await fs.writeFile(filePath, lines.slice(0, 10).join('\n') + '\n');
+    await fs.utimes(filePath, frozen.atime, frozen.mtime);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 1);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    const after = getSessionTranscriptIndexCacheStatsForTest();
+    expect(after.entries).toBe(1);
+    expect(after.byteSize).toBeLessThan(oldBytes);
+  });
+
+  it('evicts a truncated longer prefix at advanced mtime to admit the live snapshot', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    await pinMtime(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    const raw = await fs.readFile(filePath, 'utf8');
+    const lines = raw.trimEnd().split('\n');
+    await fs.writeFile(filePath, lines.slice(0, 10).join('\n') + '\n');
+    await fs.utimes(filePath, frozen.atime, new Date(frozen.mtimeMs + 60000));
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 1);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+  });
+
+  it('evicts a backup replacement that restored an older mtime', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    await pinMtime(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    // Grown replacement at a new inode whose backup mtime is older than
+    // the original: neither temporal order nor the size/mtime clauses can
+    // see it (the entry is smaller than the current file and older-mtime
+    // comparisons point the wrong way); only the identity clause can.
+    const raw = await fs.readFile(filePath, 'utf8');
+    const grown =
+      raw +
+      JSON.stringify(record('u21', 'large-19', 'replacement extra')) +
+      '\n';
+    const tempPath = `${filePath}.replacement`;
+    await fs.writeFile(tempPath, grown, 'utf8');
+    await fs.utimes(tempPath, frozen.atime, new Date(frozen.mtimeMs - 60000));
+    await fs.rename(tempPath, filePath);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 2048);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+  });
+
+  it('evicts an equal-size rewrite whose mtime moved backwards', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    await pinMtime(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const frozen = await fs.stat(filePath);
+    const raw = await fs.readFile(filePath, 'utf8');
+    const replaced = raw.replace(
+      '"text":"large transcript 5"',
+      '"text":"LARGE transcript 5"',
+    );
+    await fs.writeFile(filePath, replaced, 'utf8');
+    await fs.utimes(filePath, frozen.atime, new Date(frozen.mtimeMs - 60000));
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(oldBytes + 1);
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+  });
+
+  it('evicts a superseded shared-class prefix of the same file', async () => {
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const v1Bytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const v2Bytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - v1Bytes;
+    expect(v2Bytes).toBeGreaterThan(v1Bytes);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    // Both snapshots stay shared-class; together they exceed the budget.
+    setSessionTranscriptIndexCacheMaxBytesForTest(v2Bytes + 1);
+    await readAfter(reader, oldState, { limit: 1 });
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(v2Bytes);
+  });
+
+  it('does not evict a shared prefix of the same file when admitting an oversized snapshot', async () => {
+    const reader = newReader();
+    const filePath = await writeRecords(chain('hello', 'reply'));
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const sharedBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await writeRecords(
+      linear(
+        'large-',
+        0,
+        19,
+        null,
+        (i) => `large transcript ${i}`,
+        otherSessionId,
+      ),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const largeBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - sharedBytes;
+    await appendRecords(
+      filePath,
+      ...linear('grow-', 0, 19, 'a1', (i) => `grown ${i}`),
+    );
+    // Calibrate under the default budget: the grown small-file index must fit
+    // the oversized cap alone (so admission reaches the class-total eviction
+    // branch, not the single-entry cap) while the other file's index fills it.
+    await reader.readPage(sessionId, { limit: 1 });
+    const newBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize -
+      sharedBytes -
+      largeBytes;
+    expect(newBytes).toBeGreaterThan(0);
+    expect(newBytes).toBeGreaterThan(largeBytes);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheMaxBytesForTest(sharedBytes);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(newBytes + 1);
+    await readAfter(reader, oldState, { limit: 1 });
+    await reader.readPage(otherSessionId, { limit: 1 });
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      sharedBytes + largeBytes,
+    );
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      sharedBytes + largeBytes,
+    );
+    const oldPage = await readAfter(reader, oldState, { limit: 1 });
+    expect(uuids(oldPage.records)).toEqual(['a1']);
+  });
+
+  it('evicts a superseded prefix when a restore-built index is offered under a full class budget', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const newBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(newBytes + 1);
+    await readAfter(reader, oldState, { limit: 1 });
+    const builds = countBuilds(filePath);
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      newBytes,
+    );
+  });
+
+  it.each([
+    ['oversized', true],
+    ['shared', false],
+  ] as const)(
+    'keeps a superseded prefix cached when the newer snapshot cannot fit even after reclaiming it (%s class)',
+    async (_label, forceOversized) => {
+      const reader = newReader();
+      const large = (i: number) => `large transcript ${i}`;
+      const filePath = await writeRecords(linear('large-', 0, 19, null, large));
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const oldState = first.nextCursorState!;
+      const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      await writeRecords(
+        linear('other-', 0, 19, null, large, otherSessionId),
+        otherSessionId,
+      );
+      await reader.readPage(otherSessionId, { limit: 1 });
+      const otherBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+      await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+      // Calibrate the grown estimate under the default budget: it exceeds
+      // the old prefix, so the class budget that fits old+other exactly
+      // cannot admit the new snapshot even after reclaiming the old one.
+      await reader.readPage(sessionId, { limit: 1 });
+      const newBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize -
+        oldBytes -
+        otherBytes;
+      expect(newBytes).toBeGreaterThan(oldBytes);
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      if (forceOversized) {
+        setSessionTranscriptIndexCacheMaxBytesForTest(1);
+        setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+          oldBytes + otherBytes,
+        );
+      } else {
+        setSessionTranscriptIndexCacheMaxBytesForTest(oldBytes + otherBytes);
+      }
+      await readAfter(reader, oldState, { limit: 1 });
+      await reader.readPage(otherSessionId, { limit: 1 });
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        oldBytes + otherBytes,
+      );
+      const builds = countBuilds(filePath);
+      await reader.readPage(sessionId, { limit: 1 });
+      expect(builds.count).toBe(1);
+      // The refusal must not evict the superseded prefix: its frozen cursor
+      // still reads the original prefix without a rebuild.
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        oldBytes + otherBytes,
+      );
+      const oldPage = await readAfter(reader, oldState, { limit: 1 });
+      expect(builds.count).toBe(1);
+      expect(uuids(oldPage.records)).toEqual(['large-1']);
+    },
+  );
+
+  it('evicts a superseded shared-class prefix when a restore-built index is offered under a full shared budget', async () => {
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const newBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    expect(newBytes).toBeGreaterThan(oldBytes);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    // Both snapshots stay shared-class; together they exceed the budget.
+    setSessionTranscriptIndexCacheMaxBytesForTest(newBytes + 1);
+    await readAfter(reader, oldState, { limit: 1 });
+    const builds = countBuilds(filePath);
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      newBytes,
+    );
+  });
+
+  it('keeps a superseded prefix cached when a restore offer cannot fit even after reclaiming it', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const large = (i: number) => `large transcript ${i}`;
+    const filePath = await writeRecords(linear('large-', 0, 19, null, large));
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await writeRecords(
+      linear('other-', 0, 19, null, large, otherSessionId),
+      otherSessionId,
+    );
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const otherBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const newBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize -
+      oldBytes -
+      otherBytes;
+    expect(newBytes).toBeGreaterThan(oldBytes);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      oldBytes + otherBytes,
+    );
+    await readAfter(reader, oldState, { limit: 1 });
+    await reader.readPage(otherSessionId, { limit: 1 });
+    const builds = countBuilds(filePath);
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    // The offer builds the new index once but must not evict the old prefix
+    // it cannot replace.
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      oldBytes + otherBytes,
+    );
+    await readAfter(reader, oldState, { limit: 1 });
+    expect(builds.count).toBe(1);
+  });
+
+  it.each(['shared', 'oversized'] as const)(
+    'offers a newer snapshot into a full count cap by reclaiming the superseded entry (%s class)',
+    async (klass) => {
+      if (klass === 'oversized') {
+        setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      }
+      const reader = newReader();
+      const filePath = await writeRecords(chain('hello', 'reply'));
+      await reader.readPage(sessionId, { limit: 1 });
+      // Fill the global 32-entry count cap (the byte budget stays roomy).
+      for (let i = 0; i < 31; i++) {
+        const sid = `770e8400-e29b-41d4-a716-${String(i).padStart(12, '0')}`;
+        await writeRecords(
+          linear('f-', 0, 1, null, () => 'filler', sid),
+          sid,
+        );
+        await reader.readPage(sid, { limit: 1 });
+      }
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+      await appendRecords(filePath, record('u2', 'a1', 'appended'));
+      const builds = countBuilds(filePath);
+      await expect(
+        reader.readRestoreProjection(sessionId, NONE),
+      ).resolves.toBeDefined();
+      // The offer reclaimed the superseded slot instead of overflowing the
+      // cap (the offer door does not run the count prune itself).
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+      // The next page hits the offered index.
+      await reader.readPage(sessionId, { limit: 1 });
+      expect(builds.count).toBe(1);
+    },
+  );
+
+  it('offers into a full count cap by reclaiming a superseded entry in the other class', async () => {
+    const reader = newReader();
+    const large = (i: number) => `large transcript ${i}`;
+    const filePath = await writeRecords(linear('large-', 0, 1999, null, large));
+    const oldRaw = await fs.readFile(filePath, 'utf8');
+    await reader.readPage(sessionId, { limit: 1 });
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    // Truncate to half the records: the new estimate is shared-class once
+    // the shared budget is tightened below the old oversized estimate.
+    const lines = oldRaw.trimEnd().split('\n');
+    const newRaw = lines.slice(0, 1000).join('\n') + '\n';
+    await fs.writeFile(filePath, newRaw);
+    await reader.readPage(sessionId, { limit: 1 });
+    const newBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    // 31 one-record fillers, all shared-class. Calibrate the filler
+    // estimate from a single read: reading all 31 here would push the map
+    // past the count cap and LRU-evict the old/new entries being measured.
+    const fillerSids: string[] = [];
+    for (let i = 0; i < 31; i++) {
+      fillerSids.push(`770e8400-e29b-41d4-a716-${String(i).padStart(12, '0')}`);
+    }
+    const beforeFiller = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await writeRecords(
+      linear('f-', 0, 0, null, () => 'filler', fillerSids[0]),
+      fillerSids[0],
+    );
+    await reader.readPage(fillerSids[0], { limit: 1 });
+    const fillerBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - beforeFiller;
+    const fillersTotal = fillerBytes * 31;
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    // Shared budget fits the new index plus the fillers exactly, and stays
+    // below the old estimate so the old prefix is oversized-class.
+    setSessionTranscriptIndexCacheMaxBytesForTest(newBytes + fillersTotal);
+    expect(oldBytes).toBeGreaterThan(newBytes + fillersTotal);
+    // Re-cache the old (oversized) prefix, then fill the count cap.
+    await fs.writeFile(filePath, oldRaw);
+    await reader.readPage(sessionId, { limit: 1 });
+    for (const sid of fillerSids) {
+      await writeRecords(
+        linear('f-', 0, 0, null, () => 'filler', sid),
+        sid,
+      );
+      await reader.readPage(sid, { limit: 1 });
+    }
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+    // Truncate again and offer the new shared-class snapshot: the count
+    // slot must come from the superseded oversized entry (other class).
+    await fs.writeFile(filePath, newRaw);
+    const builds = countBuilds(filePath);
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(32);
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+  });
+
+  it('accounts a restore-offered Managed projection against the index budget class', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { authority } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'short reply' },
+      { uuid: 'u2', parent: 'a1', text: bigText },
+    ]);
+    await authority.close();
+
+    const reader = newReader();
+    await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+    const physicalBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    expect(physicalBytes).toBeGreaterThan(0);
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+      physicalBytes + 1024,
+    );
+    // Clear so the restore offer does not early-return on an existing key.
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    projectionReads.count = 0;
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    expect(projectionReads.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      physicalBytes,
+    );
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(2);
+
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+    projectionReads.count = 0;
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    expect(projectionReads.count).toBe(1);
+    expect(
+      getSessionTranscriptIndexCacheStatsForTest().byteSize,
+    ).toBeGreaterThan(physicalBytes + bigText.length);
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(1);
+  });
+
+  it('retains a projection that moves its entry from the shared into the oversized class', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { authority } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'short reply' },
+      { uuid: 'u2', parent: 'a1', text: bigText },
+    ]);
+    await authority.close();
+
+    const reader = newReader();
+    await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+    const physicalBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    expect(physicalBytes).toBeGreaterThan(0);
+    // The physical index fits the shared budget; the decoded bodies push
+    // the combined entry past it while the oversized class has room. The
+    // class must follow the post-add total, or every page re-projects.
+    setSessionTranscriptIndexCacheMaxBytesForTest(physicalBytes + 1024);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    projectionReads.count = 0;
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(1);
+    const accounted = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    expect(accounted).toBeGreaterThan(physicalBytes + bigText.length);
+    expect(accounted).toBeGreaterThan(physicalBytes + 1024);
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(1);
+
+    // The restore-offer door accounts the same crossing.
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    projectionReads.count = 0;
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    expect(projectionReads.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      accounted,
+    );
+    await reader.readPage(sessionId, { limit: 3 });
+    expect(projectionReads.count).toBe(1);
+  });
+
+  it('accounts projections decoded by concurrent pages against the class budget', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { file, authority } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'short reply' },
+      { uuid: 'u2', parent: 'a1', text: bigText },
+    ]);
+    try {
+      const reader = newReader();
+      await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+      const physicalBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      expect(physicalBytes).toBeGreaterThan(0);
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+        physicalBytes + 1024,
+      );
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      // Pause the admission stat so a second page shares the pending build
+      // and can attach its projection before the index is admitted.
+      let releaseVerify: (() => void) | undefined;
+      const verifyBlocked = new Promise<void>((resolve) => {
+        releaseVerify = resolve;
+      });
+      let armed = true;
+      setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
+        if (builtPath === file && armed) {
+          armed = false;
+          statFault.pauseNext = verifyBlocked;
+        }
+      });
+      projectionReads.count = 0;
+      const first = reader.readPage(sessionId, { limit: 3 });
+      await vi.waitFor(() => expect(armed).toBe(false));
+      const second = reader.readPage(sessionId, { limit: 3 });
+      releaseVerify!();
+      await Promise.all([first, second]);
+      // The bodies do not fit the class budget: the entry stays at the
+      // physical estimate and the next page must re-decode them.
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes,
+      );
+      expect(projectionReads.count).toBe(2);
+      await reader.readPage(sessionId, { limit: 3 });
+      expect(projectionReads.count).toBe(3);
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes,
+      );
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('reclaims a superseded projection when a newer snapshot crosses into the oversized class', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { authority, commit } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'short reply' },
+      { uuid: 'u2', parent: 'a1', text: bigText },
+    ]);
+    try {
+      const reader = newReader();
+      await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+      const physicalBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      expect(physicalBytes).toBeLessThan(32 * 1024);
+      setSessionTranscriptIndexCacheMaxBytesForTest(32 * 1024);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(700 * 1024);
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      projectionReads.count = 0;
+      await reader.readPage(sessionId, { limit: 3 });
+      const oldTotal = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      expect(oldTotal).toBeGreaterThan(32 * 1024);
+      expect(oldTotal).toBeLessThan(700 * 1024);
+      await reader.readPage(sessionId, { limit: 3 });
+      expect(projectionReads.count).toBe(1);
+      // Append a short message: the new physical index fits the shared
+      // class, but its projection crosses into the oversized class the old
+      // snapshot holds; the crossing must reclaim the superseded entry.
+      await commit('a2', 'u2', 'short appended reply');
+      await reader.readPage(sessionId, { limit: 4 });
+      const newTotal = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      expect(newTotal).toBeGreaterThan(oldTotal);
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+      const readsAfterNew = projectionReads.count;
+      await reader.readPage(sessionId, { limit: 4 });
+      expect(projectionReads.count).toBe(readsAfterNew);
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        newTotal,
+      );
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('does not let a frozen projection retention evict the live newer index', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { file, authority, commit } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'short reply' },
+      { uuid: 'u2', parent: 'a1', text: bigText },
+    ]);
+    try {
+      const reader = newReader();
+      await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+      const physicalBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      // Cache the old physical index without its projection: the bodies
+      // do not fit the tightened class, so retention is refused.
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+        physicalBytes + 1024,
+      );
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const oldState = first.nextCursorState!;
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes,
+      );
+      setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+      // Append and cache the live snapshot with its projection retained.
+      await commit('a2', 'u2', 'short appended reply');
+      await reader.readPage(sessionId, { limit: 1 });
+      const liveTotal =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize - physicalBytes;
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      // Room for the old physical index plus the live entry exactly; the
+      // frozen projection on top does not fit.
+      setSessionTranscriptIndexCacheMaxBytesForTest(physicalBytes + liveTotal);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+      const builds = countBuilds(file);
+      projectionReads.count = 0;
+      await readAfter(reader, oldState, { limit: 1 });
+      // Retention is refused without evicting the live newer index.
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes + liveTotal,
+      );
+      await reader.readPage(sessionId, { limit: 1 });
+      expect(builds.count).toBe(0);
+      // The projection was not retained: the next frozen read re-decodes.
+      expect(projectionReads.count).toBe(1);
+      await readAfter(reader, oldState, { limit: 1 });
+      expect(projectionReads.count).toBe(2);
+    } finally {
+      await authority.close();
+    }
+  });
+
+  it('does not let frozen projection retention evict the live index after an mtime-regressing append', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { file, authority, commit } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'short reply' },
+      { uuid: 'u2', parent: 'a1', text: bigText },
+    ]);
+    let closed = false;
+    try {
+      const reader = newReader();
+      await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+      const physicalBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+        physicalBytes + 1024,
+      );
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const oldState = first.nextCursorState!;
+      setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+      // Append, then restore an older source timestamp (in-place sync):
+      // the live snapshot's mtime is older than the frozen prefix's.
+      const frozen = await fs.stat(file);
+      await commit('a2', 'u2', 'short appended reply');
+      // Close the writer before restoring the timestamp: the lease seals
+      // against the transcript state its own commits produced.
+      await authority.close();
+      closed = true;
+      await fs.utimes(file, frozen.atime, new Date(frozen.mtimeMs - 60000));
+      await reader.readPage(sessionId, { limit: 1 });
+      const liveTotal =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize - physicalBytes;
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      setSessionTranscriptIndexCacheMaxBytesForTest(physicalBytes + liveTotal);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+      const builds = countBuilds(file);
+      projectionReads.count = 0;
+      await readAfter(reader, oldState, { limit: 1 });
+      // Length, not mtime order: the longer live index is protected even
+      // though its mtime is older than the frozen snapshot's.
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes + liveTotal,
+      );
+      await reader.readPage(sessionId, { limit: 1 });
+      expect(builds.count).toBe(0);
+      expect(projectionReads.count).toBe(1);
+    } finally {
+      if (!closed) await authority.close();
+    }
+  });
+
+  it('does not let a frozen projection retention evict a replaced live index at a new inode', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { file, authority, commit } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: 'short reply' },
+      { uuid: 'u2', parent: 'a1', text: bigText },
+    ]);
+    let closed = false;
+    try {
+      const reader = newReader();
+      await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+      const physicalBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+        physicalBytes + 1024,
+      );
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const oldState = first.nextCursorState!;
+      setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+      // Pause the frozen projection decode; while it is suspended, grow
+      // the transcript and replace it at a new inode, then cache the live
+      // snapshot. The decode's accounting must not treat the frozen
+      // identity as the current file state.
+      let releaseDecode: (() => void) | undefined;
+      const decodeBlocked = new Promise<void>((resolve) => {
+        releaseDecode = resolve;
+      });
+      projectionReads.pause = decodeBlocked;
+      projectionReads.count = 0;
+      const frozenRead = readAfter(reader, oldState, { limit: 1 });
+      await vi.waitFor(() => expect(projectionReads.count).toBe(1));
+      await commit('a2', 'u2', 'short appended reply');
+      // Close the writer before the replacement: the lease seals against
+      // the transcript state its own commits produced.
+      await authority.close();
+      closed = true;
+      const raw = await fs.readFile(file, 'utf8');
+      const temp = `${file}.replacement`;
+      await fs.writeFile(temp, raw, 'utf8');
+      await fs.rename(temp, file);
+      await reader.readPage(sessionId, { limit: 1 });
+      const liveTotal =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize - physicalBytes;
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      setSessionTranscriptIndexCacheMaxBytesForTest(physicalBytes + liveTotal);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+      const builds = countBuilds(file);
+      releaseDecode!();
+      await frozenRead;
+      // The live index at the new inode survives the refused retention.
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes + liveTotal,
+      );
+      await reader.readPage(sessionId, { limit: 1 });
+      expect(builds.count).toBe(0);
+    } finally {
+      if (!closed) await authority.close();
+    }
+  });
+
+  it('does not let frozen projection retention evict a shorter replacement live index', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    // The big body sits in the SECOND record: dropping the last record's
+    // wrapper pair keeps it in the replacement, and the dropped record's
+    // projection bytes are dwarfed by the replacement's physical index,
+    // so the frozen growth stays in the shared class and the reclaim
+    // branch examines the live entry.
+    const { file, authority } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: bigText },
+      ...Array.from({ length: 18 }, (_, i) => ({
+        uuid: `u${i + 2}`,
+        parent: i ? `u${i + 1}` : 'a1',
+        text: `filler ${i}`,
+      })),
+    ]);
+    let closed = false;
+    try {
+      const reader = newReader();
+      await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+      const physicalBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+        physicalBytes + 1024,
+      );
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const oldState = first.nextCursorState!;
+      setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(256 * 1024 * 1024);
+      await authority.close();
+      closed = true;
+      // Pause the frozen projection decode; while it is suspended, replace
+      // the transcript at a new inode with a SHORTER prefix and cache the
+      // live snapshot. The foreign-identity entry is shorter than the
+      // frozen snapshot, but it may be the live index: retention must
+      // protect it, not reclaim it by length.
+      let releaseDecode: (() => void) | undefined;
+      const decodeBlocked = new Promise<void>((resolve) => {
+        releaseDecode = resolve;
+      });
+      projectionReads.pause = decodeBlocked;
+      projectionReads.count = 0;
+      const frozenRead = readAfter(reader, oldState, { limit: 1 });
+      await vi.waitFor(() => expect(projectionReads.count).toBe(1));
+      const raw = await fs.readFile(file, 'utf8');
+      const lines = raw.trimEnd().split('\n');
+      // Drop the last record's event+commit wrapper pair: a shorter,
+      // still-valid managed log at a new inode.
+      const short = lines.slice(0, lines.length - 2).join('\n') + '\n';
+      const temp = `${file}.replacement`;
+      await fs.writeFile(temp, short, 'utf8');
+      await fs.rename(temp, file);
+      await reader.readPage(sessionId, { limit: 1 });
+      const liveTotal =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize - physicalBytes;
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      setSessionTranscriptIndexCacheMaxBytesForTest(physicalBytes + liveTotal);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+      const builds = countBuilds(file);
+      releaseDecode!();
+      // The frozen page still serves from the cached old index; the
+      // retention accounting ran against the replacement's live entry.
+      await frozenRead;
+      // The shorter live index at the new inode survives the refusal.
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes + liveTotal,
+      );
+      await reader.readPage(sessionId, { limit: 1 });
+      expect(builds.count).toBe(0);
+    } finally {
+      if (!closed) await authority.close();
+    }
+  });
+
+  it.each([false, true])(
+    'does not let frozen projection retention evict the current index after an in-place truncation (statFault=%s)',
+    async (statFaultArm) => {
+      const bigText = 'x'.repeat(256 * 1024);
+      const { file, authority } = await openManagedFixture([
+        { uuid: 'u1', parent: null, text: 'short prompt' },
+        { uuid: 'a1', parent: 'u1', text: bigText },
+        ...Array.from({ length: 18 }, (_, i) => ({
+          uuid: `u${i + 2}`,
+          parent: i ? `u${i + 1}` : 'a1',
+          text: `filler ${i}`,
+        })),
+      ]);
+      let closed = false;
+      try {
+        const reader = newReader();
+        await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+        const physicalBytes =
+          getSessionTranscriptIndexCacheStatsForTest().byteSize;
+        setSessionTranscriptIndexCacheMaxBytesForTest(1);
+        setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+          physicalBytes + 1024,
+        );
+        clearSessionTranscriptIndexCacheEntriesForTest();
+        const first = await reader.readPage(sessionId, { limit: 1 });
+        const oldState = first.nextCursorState!;
+        setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+        setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+          256 * 1024 * 1024,
+        );
+        await authority.close();
+        closed = true;
+        let releaseDecode: (() => void) | undefined;
+        const decodeBlocked = new Promise<void>((resolve) => {
+          releaseDecode = resolve;
+        });
+        projectionReads.pause = decodeBlocked;
+        projectionReads.count = 0;
+        const frozenRead = readAfter(reader, oldState, { limit: 1 });
+        await vi.waitFor(() => expect(projectionReads.count).toBe(1));
+        // Truncate the last record's wrapper pair IN PLACE (same inode):
+        // the current full index is shorter than the frozen snapshot at
+        // the same identity — the live index, not a historical prefix.
+        const raw = await fs.readFile(file, 'utf8');
+        const lines = raw.trimEnd().split('\n');
+        const kept = lines.slice(0, lines.length - 2).join('\n') + '\n';
+        await fs.truncate(file, Buffer.byteLength(kept));
+        await reader.readPage(sessionId, { limit: 1 });
+        const liveTotal =
+          getSessionTranscriptIndexCacheStatsForTest().byteSize - physicalBytes;
+        expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+        setSessionTranscriptIndexCacheMaxBytesForTest(
+          physicalBytes + liveTotal,
+        );
+        setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+        const builds = countBuilds(file);
+        if (statFaultArm) {
+          // The next stat is the frozen reclaim context's: a transient
+          // failure must refuse retention, not reclaim blind.
+          statFault.failNextWith = 'EIO';
+        }
+        releaseDecode!();
+        await frozenRead;
+        // The current index survives the refused retention.
+        expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+        expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+          physicalBytes + liveTotal,
+        );
+        await reader.readPage(sessionId, { limit: 1 });
+        expect(builds.count).toBe(0);
+        // The frozen cursor now lies beyond the truncated file: the door
+        // guard rejects it (the first frozen read passed its guard before
+        // the truncation, which is why its retention accounting ran).
+        await expect(
+          readAfter(reader, oldState, { limit: 1 }),
+        ).rejects.toMatchObject({
+          name: 'SessionTranscriptSnapshotUnavailableError',
+        });
+      } finally {
+        if (!closed) await authority.close();
+      }
+    },
+  );
 
   it('accounts for retained projection hints in the cache byte estimate', async () => {
     const reader = newReader();
