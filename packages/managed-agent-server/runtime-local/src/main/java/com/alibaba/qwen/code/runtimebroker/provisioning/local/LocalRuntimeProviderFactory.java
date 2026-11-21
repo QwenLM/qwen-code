@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributes;
 import java.util.List;
 import java.util.Set;
 
@@ -173,9 +174,19 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
             if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
                 try {
                     requireRecoveryDirectoryOutsideWorkspaces(broker, absolute);
-                    // Validate the absolute path create() uses: the canonical
-                    // check compares against toRealPath(), which is absolute.
-                    RuntimeStateFiles.validateDirectory(absolute);
+                    // Judge canonicality, type and mode identity-independently.
+                    // The checker may run as a different account than the Broker
+                    // (root --check is recommended), so the owner operand is the
+                    // directory's own principal, not the checking process's; the
+                    // server still validates ownership as its own account at
+                    // wiring. Validate the absolute path create() uses: the
+                    // canonical check compares against toRealPath().
+                    if (!absolute.equals(absolute.toRealPath())) {
+                        throw new IOException("Recovery path is not canonical");
+                    }
+                    PosixFileAttributes attributes = Files.readAttributes(
+                            absolute, PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                    RuntimeStateFiles.validate(absolute, true, attributes.owner());
                 } catch (IOException | RuntimeException error) {
                     return new Check(name, Status.FAIL,
                             path + " is not a valid durable state directory: " + error.getMessage(),

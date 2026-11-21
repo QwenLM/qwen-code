@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.local;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.host.RuntimeStateFiles;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import org.junit.jupiter.api.Test;
@@ -9,8 +10,12 @@ import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.nio.file.attribute.UserPrincipal;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -180,6 +185,7 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
     }
 
     @Test
+    @EnabledOnOs(OS.LINUX)
     void durableAbsentUnderAbsentParentFailsPreflight() {
         Path state = directory.resolve("absent-parent").resolve("state");
         assertThat(new LocalRuntimeProviderFactory().preflight(durableSettings(state)))
@@ -192,6 +198,7 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
     }
 
     @Test
+    @EnabledOnOs(OS.LINUX)
     void durableAbsentUnderExistingParentWarnsWithWiringTiming() {
         Path state = directory.resolve("durable-state");
         assertThat(new LocalRuntimeProviderFactory().preflight(durableSettings(state)))
@@ -255,6 +262,7 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
     }
 
     @Test
+    @EnabledOnOs(OS.LINUX)
     void durableAbsentUnderNonReadableParentFailsPreflight() throws Exception {
         Path parent = Files.createDirectory(directory.resolve("wx-parent"));
         Path state = parent.resolve("state");
@@ -274,6 +282,7 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
     }
 
     @Test
+    @EnabledOnOs(OS.LINUX)
     void durableAbsentInsideWorkspaceCwdFailsPreflight() {
         Path state = directory.resolve("state");
         var settings = durableSettings(state);
@@ -338,10 +347,9 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
         // A relative configured path resolves against the process working
         // directory, exactly as create() absolutizes it; the canonical check
         // must run on the absolute path, not the relative spelling.
-        Path relative = Path.of("target", "durable-rel-state");
+        Path relative = Path.of("target", "durable-rel-state-" + UUID.randomUUID());
         Files.createDirectories(relative);
-        Files.setPosixFilePermissions(relative,
-                java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        Files.setPosixFilePermissions(relative, PosixFilePermissions.fromString("rwx------"));
         try {
             var settings = durableSettings(relative);
             settings.getRuntimeBroker().setWorkspaceCwd(directory.toString());
@@ -353,6 +361,33 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
         } finally {
             Files.deleteIfExists(relative);
         }
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    void durableForeignOwnedPrivateDirectoryPassesPreflight() throws Exception {
+        // The checker may run as a different account than the Broker (root
+        // --check is recommended): a canonical 0700 directory owned by the
+        // service account must not FAIL just because the checker is not that
+        // owner. Requires privilege to chown to a foreign principal; skips
+        // where that is not permitted.
+        Path state = Files.createDirectory(directory.resolve("foreign-owned"));
+        Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwx------"));
+        UserPrincipal foreign = state.getFileSystem().getUserPrincipalLookupService()
+                .lookupPrincipalByName("nobody");
+        assumeTrue(!foreign.equals(RuntimeStateFiles.processOwner()), "checker is not nobody");
+        try {
+            Files.setOwner(state, foreign);
+        } catch (IOException | UnsupportedOperationException denied) {
+            assumeTrue(false, "chown to a foreign principal requires privilege");
+        }
+        assumeTrue(!Files.getOwner(state).equals(RuntimeStateFiles.processOwner()),
+                "directory owner differs from the checker");
+        assertThat(new LocalRuntimeProviderFactory().preflight(durableSettings(state)))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> assertThat(check.status())
+                        .isEqualTo(RuntimeProviderFactory.Status.PASS));
     }
 
     private static ManagedAgentProperties settings(Path state) {
