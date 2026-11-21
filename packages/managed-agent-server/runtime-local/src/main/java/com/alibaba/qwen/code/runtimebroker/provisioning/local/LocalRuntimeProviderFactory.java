@@ -11,10 +11,12 @@ import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.attribute.PosixFileAttributes;
+import java.nio.file.attribute.UserPrincipal;
+import java.nio.file.attribute.UserPrincipalNotFoundException;
 import java.util.List;
 import java.util.Set;
 
@@ -100,7 +102,7 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
     public List<Check> preflight(ManagedAgentSettings settings) {
         var broker = settings.getRuntimeBroker();
         return List.of(directoryCheck("broker-state", broker.getStateDirectory(),
-                        broker.isDurableLocalProcess(), broker),
+                        broker.isDurableLocalProcess(), broker, settings.getServiceUser()),
                 executableCheck("node", broker.getNodeExecutable()),
                 readableCheck("worker-entry", broker.getWorkerEntry()));
     }
@@ -159,8 +161,16 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                 + " and QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false";
     }
 
+    private static UserPrincipal expectedOwner(String serviceUser) throws IOException {
+        if (StringUtils.isBlank(serviceUser)) {
+            return RuntimeStateFiles.processOwner();
+        }
+        return FileSystems.getDefault().getUserPrincipalLookupService()
+                .lookupPrincipalByName(serviceUser);
+    }
+
     private static Check directoryCheck(String name, String path, boolean durable,
-            ManagedAgentSettings.RuntimeBroker broker) {
+            ManagedAgentSettings.RuntimeBroker broker, String serviceUser) {
         if (StringUtils.isBlank(path)) {
             return new Check(name, Status.FAIL, "not configured",
                     "set the directory");
@@ -174,24 +184,26 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
             if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
                 try {
                     requireRecoveryDirectoryOutsideWorkspaces(broker, absolute);
-                    // Judge canonicality, type and mode identity-independently.
-                    // The checker may run as a different account than the Broker
-                    // (root --check is recommended), so the owner operand is the
-                    // directory's own principal, not the checking process's; the
-                    // server still validates ownership as its own account at
-                    // wiring. Validate the absolute path create() uses: the
-                    // canonical check compares against toRealPath().
                     if (!absolute.equals(absolute.toRealPath())) {
                         throw new IOException("Recovery path is not canonical");
                     }
-                    PosixFileAttributes attributes = Files.readAttributes(
-                            absolute, PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-                    RuntimeStateFiles.validate(absolute, true, attributes.owner());
+                    // Judge ownership against the account the Broker runs as,
+                    // not the checker: root --check is recommended, so the owner
+                    // operand is the configured service account (the launching
+                    // account when none is set). The store enforces the same
+                    // ownership as its own process at startup, so a directory
+                    // the Broker cannot own must not pass here.
+                    RuntimeStateFiles.validate(absolute, true, expectedOwner(serviceUser));
+                } catch (UserPrincipalNotFoundException unknown) {
+                    return new Check(name, Status.WARN,
+                            path + " cannot be judged: service account " + serviceUser
+                                    + " does not exist",
+                            "create the account, or correct QWEN_MANAGED_AGENT_SERVICE_USER");
                 } catch (IOException | RuntimeException error) {
                     return new Check(name, Status.FAIL,
                             path + " is not a valid durable state directory: " + error.getMessage(),
-                            "use a canonical, owner-private rwx------ directory outside the"
-                                    + " Workspace roots");
+                            "use a canonical, owner-private rwx------ directory owned by the"
+                                    + " service account, outside the Workspace roots");
                 }
                 return new Check(name, Status.PASS, path, null);
             }

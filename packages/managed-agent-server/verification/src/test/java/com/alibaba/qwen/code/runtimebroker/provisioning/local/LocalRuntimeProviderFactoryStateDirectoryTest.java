@@ -367,10 +367,10 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
     @EnabledOnOs(OS.LINUX)
     void durableForeignOwnedPrivateDirectoryPassesPreflight() throws Exception {
         // The checker may run as a different account than the Broker (root
-        // --check is recommended): a canonical 0700 directory owned by the
-        // service account must not FAIL just because the checker is not that
-        // owner. Requires privilege to chown to a foreign principal; skips
-        // where that is not permitted.
+        // --check is recommended): ownership is judged against the configured
+        // service account, not the checker, so a canonical 0700 directory owned
+        // by that account passes even when the checker is root. Requires
+        // privilege to chown to a foreign principal; skips where denied.
         Path state = Files.createDirectory(directory.resolve("foreign-owned"));
         Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwx------"));
         UserPrincipal foreign = state.getFileSystem().getUserPrincipalLookupService()
@@ -383,11 +383,76 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
         }
         assumeTrue(!Files.getOwner(state).equals(RuntimeStateFiles.processOwner()),
                 "directory owner differs from the checker");
-        assertThat(new LocalRuntimeProviderFactory().preflight(durableSettings(state)))
+        var settings = durableSettings(state);
+        settings.setServiceUser("nobody");
+        assertThat(new LocalRuntimeProviderFactory().preflight(settings))
                 .filteredOn(check -> check.name().equals("broker-state"))
                 .singleElement()
                 .satisfies(check -> assertThat(check.status())
                         .isEqualTo(RuntimeProviderFactory.Status.PASS));
+    }
+
+    @Test
+    void durableDirectoryOwnedByAnotherAccountFailsPreflight() throws Exception {
+        // F11: the Broker runs as the service account, so a directory owned by
+        // a different account must not pass preflight even though it is 0700
+        // and the checker (this process) can read it. The store refuses it at
+        // startup. No chown needed: the directory stays owned by the checker
+        // while the configured service account is a different principal.
+        Path state = Files.createDirectory(directory.resolve("foreign-service"));
+        Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwx------"));
+        UserPrincipal foreign;
+        try {
+            foreign = state.getFileSystem().getUserPrincipalLookupService()
+                    .lookupPrincipalByName("nobody");
+        } catch (IOException absent) {
+            foreign = null;
+        }
+        assumeTrue(foreign != null && !foreign.equals(Files.getOwner(state)),
+                "nobody exists and differs from the directory owner");
+        var settings = durableSettings(state);
+        settings.setServiceUser("nobody");
+        assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.FAIL);
+                    assertThat(check.detail()).contains("is not a valid durable state directory");
+                });
+    }
+
+    @Test
+    void durableDirectoryOwnedByTheServiceAccountPassesPreflight() throws Exception {
+        // R4-1: ownership is judged against the configured service account, so
+        // a canonical 0700 directory owned by that account passes regardless of
+        // who runs the check. Unconditional: the service account is this
+        // process's own account, which always resolves.
+        Path state = Files.createDirectory(directory.resolve("service-owned"));
+        Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwx------"));
+        var settings = durableSettings(state);
+        settings.setServiceUser(System.getProperty("user.name"));
+        assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> assertThat(check.status())
+                        .isEqualTo(RuntimeProviderFactory.Status.PASS));
+    }
+
+    @Test
+    void durableDirectoryWithUnknownServiceAccountWarnsPreflight() throws Exception {
+        // When the configured service account cannot be resolved, ownership
+        // cannot be judged; the row warns rather than passes or fails.
+        Path state = Files.createDirectory(directory.resolve("unknown-service"));
+        Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwx------"));
+        var settings = durableSettings(state);
+        settings.setServiceUser("qwen-no-such-account-" + UUID.randomUUID());
+        assertThat(new LocalRuntimeProviderFactory().preflight(settings))
+                .filteredOn(check -> check.name().equals("broker-state"))
+                .singleElement()
+                .satisfies(check -> {
+                    assertThat(check.status()).isEqualTo(RuntimeProviderFactory.Status.WARN);
+                    assertThat(check.detail()).contains("does not exist");
+                });
     }
 
     private static ManagedAgentProperties settings(Path state) {
