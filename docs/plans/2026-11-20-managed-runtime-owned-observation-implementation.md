@@ -71,9 +71,24 @@ Design §7, §10. H2 alone is not acceptance: the staging, settlement, wake and 
 - **Real-process quiet exit** (`packages/cli/src/serve/managed-background-delivery.process.test.ts`): a real `bash` child exits silently while the publisher is detached; the worker holds the terminal entry, a fresh applier re-attaches at a newer writer generation, and the record settles with exit proof and a manifest declaring zero bytes on every stream. This is the §10 "Quiet exit" case on real pipes rather than synthetic sink writes.
 - **Delivery batch bound (defect found by acceptance).** A revision used to carry up to 1024 segments of 256 KiB, so one output entry could exceed `MANAGED_DELIVERY_REQUEST_LIMIT_BYTES` (512 KiB) once base64-encoded. `deliverRpc` rejects an oversized request **before** any HTTP call, so such an entry could never be pushed and the run stayed in held mode forever — a violation of §11's "budgets bounded below by the largest flush batch". Background capture now uses 128 KiB segments with one segment per page, so a revision carries a single segment (~175 KB encoded) and even both streams sealing into one entry stays well under the limit. Output visibility improves as a side effect: a revision per 128 KiB instead of per page of 1024 segments.
 
-### Environment (decided: remote Linux host)
+### Real MySQL 8.4 — LANDED
 
-Real MySQL 8.4 will run on the user's remote Linux test machine; the `*MySqlIT` suites read `mysql.url` / `mysql.user` / `mysql.password` and create a disposable database through `IsolatedManagedSchemaMySqlTestDatabase`. Connection details are still needed before that lane can run. This machine has no usable local 8.4 (Homebrew `mysql` is 26.7.0 with a broken `mysqld`, `mysql@8.4` absent, no Docker).
+`mysql@8.4` (8.4.11) was already installed at `/opt/homebrew/opt/mysql@8.4`; the default `mysql` keg (26.7.0) has a broken `mysqld`, so nothing needed installing. A disposable instance ran on port 3307 with its own socket and data directory, and was shut down and deleted after the run.
+
+- **`ManagedSchemaMySqlIT` 3/3** — the Slice 2/3 schema additions (`ma_runtime_stage` with `staged_bytes`, the `observation_*` binding claim columns, `wake_seal_background` and its boolean CHECK) initialize and validate on real 8.4, including the system-catalog and strict-mode refusals.
+- **`RuntimeStageMySqlIT` 4/4 (new)** — on real 8.4: the single staging transaction (PUBLISHED segment, REFERENCED page/manifest under `RUNTIME_STAGE`, wake hint pulled due-now, `:process` settlement) with an idempotent replay; the detach→seal fence plus `recordPending(false)` refusal and the clean clear once drained; the watermark wake, hard cap and reserved terminal slot; and retirement clearing rows and refs with a trailing batch that still settles the row.
+
+Run recipe (focused, from `packages/managed-agent-server`, with the isolated repository):
+
+```bash
+mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
+  -Dtest=WakeSealStampTest -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dit.test=RuntimeStageMySqlIT -Dfailsafe.failIfNoSpecifiedTests=false \
+  -Dmysql.url='jdbc:mysql://127.0.0.1:3307/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false' \
+  -Dmysql.user=root verify
+```
+
+`-Dspotbugs.skip=true` is needed for this focused lane only: the full `verify` lifecycle trips a **pre-existing** SpotBugs `NP_NULL_ON_SOME_PATH` finding in `ToolPublicationAdmissionStore.acknowledgementReceiptCatalog`, a file this PR does not touch (last changed by the merged #17907). The gate still runs in CI.
 
 ### Remaining fault cases and the precise next step
 

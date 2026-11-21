@@ -71,9 +71,24 @@
 - **真实进程静默退出**（`packages/cli/src/serve/managed-background-delivery.process.test.ts`）：真实 `bash` 子进程在 publisher 已摘除时静默退出；worker 保留 terminal 条目，新 applier 以更新的 writer generation 重挂，记录带退出证据结算，且 manifest 声明每个流零字节。这是 §10「Quiet exit」在真实管道（而非合成 sink 写入）上的用例。
 - **投递批次上界（验收发现的缺陷）。** 原先一个 revision 最多携带 1024 个 256 KiB 段，base64 后单个 output 条目即可超过 `MANAGED_DELIVERY_REQUEST_LIMIT_BYTES`（512 KiB）。`deliverRpc` 在发出任何 HTTP 之前就拒绝超限请求，因此该条目永远推不出去、run 永久停在 held——违反 §11「预算下界为最大 flush 批次」。背景采集现改为 128 KiB 段、每段一页，使一个 revision 只携带单个段（编码后约 175 KB），即使两个流同时封页进同一条目也远低于上限。副作用是输出可见性提升：每 128 KiB 一个 revision，而非每 1024 段一页。
 
-### 环境（已决定：远端 Linux 主机）
+### 真实 MySQL 8.4 — 已落地
 
-真实 MySQL 8.4 将跑在用户的远端 Linux 测试机上；`*MySqlIT` 套件读 `mysql.url` / `mysql.user` / `mysql.password`，并经 `IsolatedManagedSchemaMySqlTestDatabase` 建一次性库。该车道开跑前仍需连接信息。本机没有可用的本地 8.4（Homebrew `mysql` 为 26.7.0 且 `mysqld` 损坏，`mysql@8.4` 未装，无 Docker）。
+`mysql@8.4`（8.4.11）本来就已装在 `/opt/homebrew/opt/mysql@8.4`；默认 `mysql` keg（26.7.0）的 `mysqld` 已损坏，因此无需安装任何东西。一次性实例跑在 3307 端口、独立 socket 与数据目录，跑完已 shutdown 并删除。
+
+- **`ManagedSchemaMySqlIT` 3/3** — 切片 2/3 的 schema 新增（带 `staged_bytes` 的 `ma_runtime_stage`、`observation_*` binding claim 列、`wake_seal_background` 及其 boolean CHECK）在真实 8.4 上初始化与校验通过，含系统 catalog 与 strict-mode 拒绝路径。
+- **`RuntimeStageMySqlIT` 4/4（新增）** — 真实 8.4 上：单 staging 事务（PUBLISHED 段、`RUNTIME_STAGE` 下 REFERENCED 页/manifest、wake 提示拉近至 now、`:process` 结算）与幂等重放；detach→seal 围栏加 `recordPending(false)` 拒绝、排空后干净清除；水位线 wake、硬上限与保留 terminal 槽位；退役清理行与 ref，且尾随批次仍结算执行行。
+
+运行配方（聚焦，在 `packages/managed-agent-server` 下，带隔离仓库）：
+
+```bash
+mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
+  -Dtest=WakeSealStampTest -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dit.test=RuntimeStageMySqlIT -Dfailsafe.failIfNoSpecifiedTests=false \
+  -Dmysql.url='jdbc:mysql://127.0.0.1:3307/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false' \
+  -Dmysql.user=root verify
+```
+
+仅该聚焦车道需要 `-Dspotbugs.skip=true`：完整 `verify` 生命周期会撞上 `ToolPublicationAdmissionStore.acknowledgementReceiptCatalog` 里**既有**的 SpotBugs `NP_NULL_ON_SOME_PATH`，该文件本 PR 未触碰（最后改动来自已合并的 #17907）。该门在 CI 仍会跑。
 
 ### 剩余故障用例与精确下一步
 
