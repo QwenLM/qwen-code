@@ -120,12 +120,15 @@ say explicitly what each one should read and whether it may edit files.
   resolves to the validated object. The schema must be a JSON Schema object
   whose root accepts an object, and it is compiled strictly. A schema that is
   not an object, fails strict compilation (for example an unknown keyword),
-  uses `$async`, or that no object can satisfy (such as a root `type` other
-  than object, or a required property its own object forbids) makes agent()
-  resolve to null without starting the agent. Each failed submission hands its
-  error back to the agent, and the third failed submission stops it. With no
-  valid result agent() resolves to null and the failure states how many
-  submissions failed and the last error; check for null.
+  uses `$async`, or carries a contradiction the pre-flight check can prove (a
+  root `type`/`const`/`enum` that excludes objects, or a required property its
+  own object forbids) makes agent() resolve to null without starting the agent.
+  A contradiction behind `$ref`, `allOf`/`anyOf`/`oneOf`, `not` or `if` is not
+  detected up front: the agent is dispatched and the failure arrives as failed
+  submissions. Each failed submission hands its error back to the agent, and
+  the third failed submission stops it. With no valid result agent() resolves
+  to null and the failure states how many submissions failed and the last
+  error; check for null.
 - `agentType` (string) — resolves against the declarative-agents registry
   (`.qwen/agents/<name>.md`, project then user then built-in). Unresolved names
   make the admitted agent() resolve to null and record "agent({agentType}):
