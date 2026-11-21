@@ -63,4 +63,4 @@
 1. **运行时网络拉取**：首次通过 `npx` 启动时需访问 npm 官方镜像源，网络隔离环境需具备公共 registry 访问权限。
 2. **环境变量可读性**：本地 stdio 启动的 MCP 服务会继承当前会话导出的环境变量与 API 凭据。
 3. **仓库声明策略**：项目级配置文件（`.pkgdietrc.json`、`pkgdiet.config.json`）在存在时会覆盖默认评估阈值。
-4. **配置作用域限制**：pkgdiet 白名单仅在用户作用域配置文件中强制执行。在托管或多用户环境中，源自 SystemDefaults、系统作用域（System scope）、`--mcp-config` CLI 标志或会话注入的 ACP/IDE 运行时的配置均超出本技能的检查与验证范围。
+4. **配置作用域限制**：pkgdiet 白名单仅在用户作用域配置文件中强制执行。在托管或多用户环境中，源自 SystemDefaults、系统作用域（System scope）、`--mcp-config` CLI 标志、扩展提供（extension-contributed）或会话注入的 ACP/IDE 运行时的配置均超出本技能的检查与验证范围。
