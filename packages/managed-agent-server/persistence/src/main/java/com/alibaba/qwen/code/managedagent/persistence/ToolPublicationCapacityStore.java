@@ -31,6 +31,7 @@ final class ToolPublicationCapacityStore {
         var totals = jdbc.query(
                 "SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes +"
                 + " admission_held_bytes), 0) AS reserved,"
+                + " COALESCE(SUM(capture_used_bytes + producer_used_bytes + admission_used_bytes), 0) AS used,"
                 + " COALESCE(SUM(CASE WHEN state = 'OPEN' AND"
                 + " producer_phase IN ('OPEN', 'FINISHING') THEN 1 ELSE 0"
                 + " END), 0) AS captures FROM ma_output_capture WHERE"
@@ -38,9 +39,14 @@ final class ToolPublicationCapacityStore {
                 (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), tenantKey).getFirst();
         long reserved = ((Number) totals.get("reserved")).longValue();
         long count = ((Number) totals.get("captures")).longValue();
-        Long sessionReserved = jdbc.queryForObject("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
-                + " + admission_held_bytes), 0) FROM ma_output_capture"
-                + " WHERE scope_key = ? AND state <> 'NOT_STARTED'", Long.class, scope);
+        var sessionTotals = jdbc.query("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
+                + " + admission_held_bytes), 0) AS reserved,"
+                + " COALESCE(SUM(capture_used_bytes + producer_used_bytes + admission_used_bytes), 0) AS used,"
+                + " COALESCE(SUM(CASE WHEN producer_phase <> 'FINISHING' THEN capture_used_bytes"
+                + " + producer_used_bytes + admission_used_bytes ELSE 0 END), 0) AS retained"
+                + " FROM ma_output_capture WHERE scope_key = ? AND state <> 'NOT_STARTED'",
+                (row, index) -> ManagedSchemaRows.read(row), scope).getFirst();
+        long sessionReserved = ((Number) sessionTotals.get("reserved")).longValue();
         // A full tenant or Session is not a malformed request: it answers
         // its own code and names the limit that refused. Captures hold
         // more than they use until they finish, are fenced, expire or are
@@ -51,9 +57,9 @@ final class ToolPublicationCapacityStore {
         boolean tenantFull = reserved > capacity.tenantBytes() - allocation;
         boolean sessionFull = sessionReserved > capacity.sessionBytes() - allocation;
         if (tenantFull || sessionFull) {
-            long tenantUsed = usedBytes("tenant_key", tenantKey);
-            long sessionUsed = usedBytes("scope_key", scope);
-            long admits = admits(scope, allocation);
+            long tenantUsed = ((Number) totals.get("used")).longValue();
+            long sessionUsed = ((Number) sessionTotals.get("used")).longValue();
+            long admits = admits(((Number) sessionTotals.get("retained")).longValue(), allocation);
             if (tenantUsed > capacity.tenantBytes() - allocation) {
                 throw reservationRefused("tenant_bytes", true, tenantKey, scope, reserved, tenantUsed,
                         allocation, capacity.tenantBytes(), admits);
@@ -70,7 +76,7 @@ final class ToolPublicationCapacityStore {
         }
         if (count >= capacity.activeCaptures()) {
             throw reservationRefused("active_captures", false, tenantKey, scope, count, 0, 1,
-                    capacity.activeCaptures(), admits(scope, allocation));
+                    capacity.activeCaptures(), admits(((Number) sessionTotals.get("retained")).longValue(), allocation));
         }
     }
 
@@ -98,17 +104,8 @@ final class ToolPublicationCapacityStore {
     // pending finish can still give its terminal back, an open capture
     // gives back what it holds beyond its used bytes, and other Sessions
     // retire, so none of those comes off.
-    private long admits(String scope, long allocation) {
-        long retained = jdbc.queryForObject("SELECT COALESCE(SUM(capture_used_bytes + producer_used_bytes"
-                + " + admission_used_bytes), 0) FROM ma_output_capture WHERE scope_key = ?"
-                + " AND state <> 'NOT_STARTED' AND producer_phase <> 'FINISHING'", Long.class, scope);
+    private long admits(long retained, long allocation) {
         long bytes = Math.min(capacity.tenantBytes(), capacity.sessionBytes()) - retained;
         return Math.min(capacity.activeCaptures(), Math.max(0, bytes) / allocation);
-    }
-
-    private long usedBytes(String column, String key) {
-        return jdbc.queryForObject("SELECT COALESCE(SUM(capture_used_bytes + producer_used_bytes"
-                + " + admission_used_bytes), 0) FROM ma_output_capture WHERE " + column + " = ?"
-                + " AND state <> 'NOT_STARTED'", Long.class, key);
     }
 }

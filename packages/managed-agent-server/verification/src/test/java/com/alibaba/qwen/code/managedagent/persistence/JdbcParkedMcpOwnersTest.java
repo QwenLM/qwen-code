@@ -43,9 +43,9 @@ class JdbcParkedMcpOwnersTest {
     private void head(String state, long sealedForMillis) {
         long now = System.currentTimeMillis();
         jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, tenant_key, harness_key,"
-                + " head_kind, state, storage_version, writer_generation, journal_revision, committed_sequence,"
+                + " head_kind, state, writer_generation, journal_revision, committed_sequence,"
                 + " activation_epoch, gmt_create, gmt_modified) VALUES (?, 'session', 'session', ?, ?,"
-                + " 'MANAGED_SESSION', ?, 1, 1, 0, 0, 0, ?, ?)",
+                + " 'MANAGED_SESSION', ?, 1, 0, 0, 0, ?, ?)",
                 TENANT, RuntimeAdmissionFences.harnessDrainKey(TENANT), RuntimeAdmissionFences.harnessDrainKey("session"),
                 state, now, now - sealedForMillis);
     }

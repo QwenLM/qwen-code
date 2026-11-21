@@ -44,16 +44,16 @@ class ManagedSchemaTest {
             Map.entry("ma_output_capture", List.of("scope_key", "publication_id")),
             Map.entry("ma_artifact", List.of("artifact_id")),
             Map.entry("ma_request_receipt", List.of("receipt_key")),
-            Map.entry("ma_memory_store", List.of("store_key")),
+            Map.entry("ma_memory_store", List.of("tenant_id", "memory_store_id")),
             Map.entry("ma_memory_entry", List.of("entry_key")),
             Map.entry("ma_side_query", List.of("query_key")),
             Map.entry("ma_operation", List.of("operation_key")),
             Map.entry("ma_operation_work", List.of("operation_key", "work_kind", "target_key")),
             Map.entry("ma_workspace", List.of("tenant_id", "workspace_id")),
             Map.entry("ma_workspace_access", List.of("tenant_id", "workspace_id", "actor_id")),
-            Map.entry("ma_extension_package", List.of("package_key")),
+            Map.entry("ma_extension_package", List.of("scope_key", "extension_id", "package_revision")),
             Map.entry("ma_extension_source_import", List.of("import_key")),
-            Map.entry("ma_extension_settings", List.of("settings_key")),
+            Map.entry("ma_extension_settings", List.of("scope_key", "extension_id", "settings_revision")),
             Map.entry("ma_extension_operation", List.of("operation_key")),
             Map.entry("ma_storage", List.of("alias_key")),
             Map.entry("ma_runtime_slot", List.of("request_key")),
@@ -61,7 +61,7 @@ class ManagedSchemaTest {
             Map.entry("ma_runtime_session", List.of("scope_key", "runtime_session_id")),
             Map.entry("ma_tool_execution", List.of("execution_call_id_hash")),
             Map.entry("ma_storage_owner", List.of("storage_key")),
-            Map.entry("ma_tenant_guard", List.of("tenant_key", "guard_domain")),
+            Map.entry("ma_tenant_guard", List.of("tenant_id", "guard_domain")),
             Map.entry("ma_read_lease", List.of("lease_id")),
             Map.entry("ma_channel_instance", List.of("tenant_id", "channel_id")),
             Map.entry("ma_channel_binding", List.of("tenant_id", "channel_id", "route_id")),
@@ -73,7 +73,40 @@ class ManagedSchemaTest {
             Map.entry("ma_session_worktree", List.of("tenant_id", "session_id")),
             Map.entry("ma_client_files_binding", List.of("session_scope_key")),
             Map.entry("ma_client_files_request", List.of("request_key")),
-            Map.entry("ma_journal_pack", List.of("session_scope_key", "from_revision")));
+            Map.entry("ma_journal_pack", List.of("pack_id")));
+
+    @Test
+    void journalPackRangesRemainUniqueUntilRetired() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection();
+                var insert = connection.prepareStatement("INSERT INTO ma_journal_pack"
+                        + " (pack_id, session_scope_key, tenant_id, workspace_id, session_id, from_revision, through_revision,"
+                        + " manifest_resource_key, object_key, state, byte_length, sha256, builder_id, gmt_create, gmt_modified)"
+                        + " VALUES (?, ?, 'tenant', 'workspace', 'session', 1, 1, '', 'object', 'BUILDING', 1, ?, 'builder', 1, 1)");
+                var statement = connection.createStatement()) {
+            insert.setString(1, "old");
+            insert.setString(2, "a".repeat(64));
+            insert.setString(3, "b".repeat(64));
+            insert.executeUpdate();
+            insert.setString(1, "replacement");
+            assertThrows(SQLException.class, insert::executeUpdate);
+            statement.executeUpdate("UPDATE ma_journal_pack SET state = 'RETIRED' WHERE pack_id = X'6f6c64'");
+            insert.executeUpdate();
+            assertThrows(SQLException.class, () -> statement.executeUpdate(
+                    "UPDATE ma_journal_pack SET state = 'PUBLISHED' WHERE pack_id = X'7265706c6163656d656e74'"));
+            statement.executeUpdate("UPDATE ma_journal_pack SET is_put_closed = 1, state = 'PUBLISHED' WHERE pack_id = X'7265706c6163656d656e74'");
+            statement.executeUpdate("UPDATE ma_journal_pack SET state = 'RETIRED' WHERE pack_id = X'7265706c6163656d656e74'");
+            insert.setString(1, "next");
+            insert.executeUpdate();
+            try (var rows = statement.executeQuery("SELECT COUNT(*) FROM ma_journal_pack WHERE active_from_revision IS NULL")) {
+                assertTrue(rows.next());
+                assertEquals(2, rows.getInt(1));
+            }
+            insert.setString(1, "old");
+            assertThrows(SQLException.class, insert::executeUpdate);
+        }
+        ManagedSchema.validate(source);
+    }
 
     @Test
     void generatesRowIdentitiesWithoutWeakeningBusinessUniqueness() throws Exception {
@@ -502,8 +535,8 @@ class ManagedSchemaTest {
                     SQLException.class,
                     () -> statement.execute("UPDATE ma_session_head SET journal_revision = 0"));
             statement.execute(
-                    "INSERT INTO ma_storage (alias_key,tenant_key,storage_key,tenant_id,storage_id)"
-                            + " VALUES ('alias','tenant','storage','tenant','storage')");
+                    "INSERT INTO ma_storage (alias_key,tenant_id,storage_id)"
+                            + " VALUES ('alias','tenant','storage')");
             try (var row =
                     statement.executeQuery(
                             "SELECT registration_state,physical_key FROM ma_storage")) {

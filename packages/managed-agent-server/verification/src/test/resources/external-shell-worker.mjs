@@ -14,6 +14,7 @@
 //     horizon and the identical captured input.
 import { Buffer } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import process from 'node:process';
 
@@ -52,8 +53,16 @@ const value = (name) => {
 };
 // Each stream's payload, so a case can drive a multi-block copy and an empty
 // stderr without the stand-in inventing output of its own.
-const stdout = Buffer.from(value('stdout') ?? 'witness\n', 'utf8');
-const stderr = Buffer.from(value('stderr') ?? '', 'utf8');
+const stdoutFile = value('stdout-file');
+const stdout =
+  stdoutFile === undefined
+    ? Buffer.from(value('stdout') ?? 'witness\n', 'utf8')
+    : readFileSync(stdoutFile);
+const stderrFile = value('stderr-file');
+const stderr =
+  stderrFile === undefined
+    ? Buffer.from(value('stderr') ?? '', 'utf8')
+    : readFileSync(stderrFile);
 const exitCode = Number(value('exit-code') ?? '0');
 // The storage revision this worker registered with. A request carrying any
 // other revision is the closed-lane refusal, as on the shipped worker.

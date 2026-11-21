@@ -116,17 +116,17 @@ class WorkspaceQueryScaleMySqlIT {
                             ManagedSchemaKeys.key(id), alias});
                     children.add(new Object[] {ManagedSchemaKeys.key("child-operation", id), ManagedSchemaKeys.key("other-tenant"), "child-" + id,
                             ManagedSchemaKeys.key("child", id), alias, index % 2 == 0 ? JdbcChildWorkspaceStore.MERGED : JdbcChildWorkspaceStore.DISCARDED});
-                    owners.add(new Object[] {ManagedSchemaKeys.key("old-physical", id), ManagedSchemaKeys.key("old-physical", id)});
+                    owners.add(new Object[] {ManagedSchemaKeys.key("old-physical", id)});
                 }
                 jdbc.batchUpdate("INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, workspace_storage_id,"
                         + " is_resource_gc_completed, retirement_generation, retired_at, gmt_create, gmt_modified) VALUES ('other-tenant', ?, 'CONTROL', ?, ?, ?, 'other-storage', TRUE, 1, 1, 1, 1)", sessions);
-                jdbc.batchUpdate("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, session_id, harness_session_id, head_kind, workspace_id, storage_version, state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, ?, 'other-tenant', ?, ?, 'MANAGED_SESSION', 'other-workspace', 1, 'DELETED', 1, 0, 0, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")", heads);
+                jdbc.batchUpdate("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, session_id, harness_session_id, head_kind, workspace_id, state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, ?, 'other-tenant', ?, ?, 'MANAGED_SESSION', 'other-workspace', 'DELETED', 1, 0, 0, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")", heads);
                 jdbc.batchUpdate("INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id, workspace_id, workspace_generation, canonical_cwd, capability_digest, isolation_class, provisioner_kind, storage_id, storage_alias_key, runtime_generation, binding_state, attestation_generation, is_drain_requested, operation_generation, record_version, last_active_at) VALUES (?, ?, ?, 'other-tenant', 'other-workspace', '1', '/scale', 'digest', 'workspace', 'local-process', 'other-storage', ?, 1, 'FAILED', 0, FALSE, 0, 0, " + ManagedSchemaTime.SQL_NOW + ")", bindings);
                 jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, target_kind, target_key, storage_key, state, phase, request_digest, request_json, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, 'STORAGE_MIGRATION', ?, 'other-tenant', 'STORAGE', ?, ?, 'COMPLETED', 'COMPLETED', 'digest', '{}', 1, 1)", operations);
                 jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, target_kind, target_key, storage_key, state, phase, request_digest, request_json, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, 'CHILD_WORKSPACE', ?, 'other-tenant', 'STORAGE', ?, ?, ?, 'SETTLED', 'digest', '{}', 1, 1)", children);
-                jdbc.batchUpdate("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind) VALUES (?, ?, 'LOCAL')", owners);
+                jdbc.batchUpdate("INSERT INTO ma_storage_owner (storage_key, storage_kind) VALUES (?, 'LOCAL')", owners);
                 jdbc.execute("ANALYZE TABLE ma_session, ma_session_head, ma_workspace, ma_runtime_binding, ma_operation, ma_storage_owner");
                 var session = new Query(LocalStorageOwners.SESSION_AUTHORITY_SQL, new Object[] {"other-tenant", "other-storage"});
                 assertThat(jdbc.queryForList(session.sql(), Integer.class, session.arguments())).isEmpty();

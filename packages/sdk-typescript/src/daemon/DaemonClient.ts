@@ -105,6 +105,10 @@ import type {
   DaemonSessionCatalogResult,
   DaemonSessionLiveStateBatchRequest,
   DaemonSessionLiveStateBatchResult,
+  DaemonRestartRecoveryBatchRequest,
+  DaemonRestartRecoveryBatchResult,
+  DaemonRestartRecoveryContinueRequest,
+  DaemonRestartRecoveryContinueBatchResult,
   DaemonSessionSearchOptions,
   DaemonSessionSearchResult,
   DaemonWorkspaceSessionInfo,
@@ -248,6 +252,8 @@ import type {
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionRecapResult,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
@@ -3809,6 +3815,74 @@ export class DaemonClient {
     );
   }
 
+  /** Deadline for the whole recovery batch. Explicit per-request/global values
+   * win. Otherwise each member gets the restore budget, capped by the platform
+   * timer limit; zero means no deadline.
+   */
+  private resolveRestartRecoveryTimeoutMs(
+    perRequestTimeoutMs: number | undefined,
+    memberCount: number,
+  ): number {
+    if (perRequestTimeoutMs !== undefined || this.hasExplicitFetchTimeout) {
+      return this.resolveRestoreTimeoutMs(perRequestTimeoutMs);
+    }
+    const perMember = this.resolveRestoreTimeoutMs(undefined);
+    if (perMember === 0) return 0;
+    const deadline = perMember * Math.max(1, memberCount);
+    return Math.min(MAX_TIMER_DELAY_MS, deadline);
+  }
+
+  /**
+   * List sessions whose newest prompt did not settle, via
+   * `POST /sessions/recovery`. Read-only: no session is loaded and the
+   * response carries no prompt content. Requires a daemon new enough to
+   * serve the route.
+   */
+  getRestartRecoveries(
+    request: DaemonRestartRecoveryBatchRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonRestartRecoveryBatchResult> {
+    return this.jsonRequest<DaemonRestartRecoveryBatchResult>(
+      '/sessions/recovery',
+      'POST /sessions/recovery',
+      {
+        method: 'POST',
+        body: request,
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: this.resolveRestartRecoveryTimeoutMs(
+          opts?.timeoutMs,
+          request.workspaces.length,
+        ),
+      },
+    );
+  }
+
+  /**
+   * Continue selected restart-interrupted sessions via
+   * `POST /sessions/recovery/continue`. The daemon serializes the batch,
+   * loads each session when needed, and returns one result per session.
+   */
+  continueRestartRecoveries(
+    request: DaemonRestartRecoveryContinueRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonRestartRecoveryContinueBatchResult> {
+    return this.jsonRequest<DaemonRestartRecoveryContinueBatchResult>(
+      '/sessions/recovery/continue',
+      'POST /sessions/recovery/continue',
+      {
+        method: 'POST',
+        body: request,
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: this.resolveRestartRecoveryTimeoutMs(
+          opts?.timeoutMs,
+          request.sessions.length,
+        ),
+      },
+    );
+  }
+
   async listSessionGroups(
     workspaceCwd: string,
   ): Promise<DaemonSessionGroupCatalog> {
@@ -4918,6 +4992,33 @@ export class DaemonClient {
     return (await res.json()) as DaemonSessionRecapResult;
   }
 
+  /**
+   * Ask a live session's Mods for a transcript row over REST. Check for
+   * `session_mod_rows` in `capabilities.features` before calling. The daemon
+   * waits for the row's `ui.render` hooks, which can take as long as a model
+   * call. `signal` aborts only the local fetch.
+   */
+  async askSessionModRow(
+    sessionId: string,
+    row: DaemonModRow,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonModRowAnswer> {
+    const res = await this._fetch(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mod-row`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify(row),
+        signal: opts?.signal,
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/mod-row');
+    return (await res.json()) as DaemonModRowAnswer;
+  }
+
   async *generateSessionContent(
     sessionId: string,
     prompt: string,
@@ -5622,8 +5723,11 @@ export class DaemonClient {
   /**
    * Ask the daemon to deliver the session's queued mid-turn messages now
    * instead of at the agent's next tool boundary: a model response that a
-   * foreground turn is streaming is cut short unless it has started a tool
-   * call, and running tools still finish first. Otherwise, as in a channel,
+   * foreground turn is streaming is cut short, and once that response has
+   * started a tool call, or while its tools run, the turn ends as `cancelled`
+   * and the daemon promotes the messages when the prompt FIFO permits it.
+   * An earlier queued prompt can take the messages at a tool boundary, or
+   * they can be promoted when that prompt settles. Otherwise, as in a channel,
    * cron or background turn, the messages are delivered as without the
    * request, at a tool boundary or by promotion when the turn ends; the
    * protocol reference lists the narrow windows where neither happens.
@@ -8227,6 +8331,8 @@ export class DaemonClient {
     sessionId: string,
     metadata: {
       displayName?: string;
+      /** Best-effort initial title for a session without a custom title. */
+      initialDisplayName?: string;
       pr?: Omit<DaemonSessionPrInfo, 'issues'>;
     },
     clientId?: string,
@@ -10014,6 +10120,17 @@ export class WorkspaceDaemonClient {
           : {}),
       },
       opts?.clientId,
+    );
+  }
+
+  setVisionBridgeSettings(
+    model: string,
+    timeoutMs: number,
+  ): Promise<DaemonSettingUpdateResult> {
+    return this.post(
+      '/settings/vision-bridge',
+      'POST /workspaces/:workspace/settings/vision-bridge',
+      { model, timeoutMs },
     );
   }
 

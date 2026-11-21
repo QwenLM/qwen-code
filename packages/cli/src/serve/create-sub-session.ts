@@ -36,6 +36,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { lstatSync, realpathSync } from 'node:fs';
 import { basename } from 'node:path';
 import {
   createDebugLogger,
@@ -51,6 +52,7 @@ import {
   APPROVAL_MODES,
   ApprovalMode,
 } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { readWorktreeSessionStrict } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
@@ -71,6 +73,7 @@ import {
   isReservedStandaloneSessionSourceType,
   isScheduledTaskRunSource,
 } from '@qwen-code/acp-bridge/sessionSource';
+import { isWithinRoot } from '../config/path-comparison.js';
 import { normalizeSessionIdForLookup } from '../config/session-id.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
@@ -507,8 +510,7 @@ type IsolatedWorkspace = NonNullable<
 >;
 
 /** A readable, control-char-free session name (the bridge's title guard rejects
- * control chars, silently dropping an unsanitized rename). Prefixed with a
- * thread glyph so sub-sessions are recognizable in the list. */
+ * control chars, silently dropping an unsanitized rename). */
 // Unicode Bidi_Control marks — ALM (U+061C), LRM/RLM (U+200E/200F), the
 // embedding/override set (U+202A..U+202E), and the isolates (U+2066..U+2069): a
 // Trojan-Source-style reordering defense for the session list, mirroring the
@@ -519,19 +521,16 @@ const BIDI_CONTROL_MARKS = new RegExp(
   'g',
 );
 
-function subSessionName(label: string, includeThreadGlyph = true): string {
+function subSessionName(label: string): string {
   const cleaned = stripTerminalControlSequences(label)
     .replace(BIDI_CONTROL_MARKS, '')
     .trim()
     .replace(/\s+/g, ' ');
-  let short = cleaned;
-  if (cleaned.length > MAX_NAME_LENGTH) {
-    let cut = MAX_NAME_LENGTH - 1;
-    const boundary = cleaned.charCodeAt(cut - 1);
-    if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
-    short = `${cleaned.slice(0, cut)}…`;
-  }
-  return includeThreadGlyph ? `🧵 ${short}` : short;
+  if (cleaned.length <= MAX_NAME_LENGTH) return cleaned;
+  let cut = MAX_NAME_LENGTH - 1;
+  const boundary = cleaned.charCodeAt(cut - 1);
+  if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
+  return `${cleaned.slice(0, cut)}…`;
 }
 
 function sentCompletionStatus(
@@ -589,10 +588,7 @@ function buildSentCompletionNotification(
     (workspaceCwd
       ? `?${new URLSearchParams({ workspace: workspaceCwd })}`
       : '');
-  const sessionLink =
-    personMessage === undefined
-      ? `[🧵 ${sessionId.slice(0, 8)}](${sessionUrl})`
-      : `[${sessionId.slice(0, 8)}](${sessionUrl})`;
+  const sessionLink = `[${sessionId.slice(0, 8)}](${sessionUrl})`;
   const safeResult =
     result.trim() || `No text output (stopReason: ${stopReason}).`;
   const modelSessionId = truncateCodePoints(sessionId, 256);
@@ -1288,38 +1284,32 @@ export function createSubSessionLauncher(
   };
 
   /**
-   * Restore a sub-session the caller created in this workspace, so a
-   * follow-up prompt can be queued on it. The lineage is checked before the
-   * session is touched, from the live entry or, for one that was reaped,
-   * from its transcript: the recorded parent must be the caller, and the
-   * session must carry no source marker. Side tasks and scheduled-task runs
-   * also record the session they came from as their parent, but they carry
-   * a source, and a person or a schedule started them, not this tool.
-   * A person's send may name any session but the caller itself: the person
-   * could type into it directly. Either way the session keeps its own
-   * lineage.
+   * Restore an existing session in this workspace, so a follow-up prompt can
+   * be queued on it. Any session but the caller itself can be named; its
+   * metadata comes from the live entry or, for one that was reaped, from its
+   * transcript, and the session keeps its own lineage.
    */
-  const resumeOwnSubSession = async (
+  const resumeExistingSession = async (
     bridge: AcpSessionBridge,
     sessionId: string,
     callerSessionId: string,
-    anySession: boolean,
-  ): Promise<BridgeSession> => {
-    const notOwn = new Error(
-      `Session ${sessionId} is not a sub-session this session created in ` +
-        `${boundWorkspace}. If it lives in another workspace, also pass that ` +
-        '`workspace`.',
-    );
+    byPerson: boolean,
+  ): Promise<{
+    session: BridgeSession;
+    assertWorktreeReady(sessionId: string): void;
+  }> => {
     if (sessionId === normalizeSessionIdForLookup(callerSessionId)) {
-      throw anySession
-        ? new Error('A session cannot send a message to itself.')
-        : notOwn;
+      throw new Error('A session cannot send a message to itself.');
     }
+    const service = new SessionService(boundWorkspace, { runtimeBaseDir });
+    const storedId = await resolveSessionIdForRestore(service, sessionId);
     let metadata:
       | { parentSessionId?: string; sourceType?: string; sourceId?: string }
       | undefined;
+    let isLive = false;
     try {
       const live = bridge.getSessionSummary(sessionId);
+      isLive = true;
       metadata = {
         ...(live.parentSessionId !== undefined
           ? { parentSessionId: live.parentSessionId }
@@ -1331,8 +1321,6 @@ export function createSubSessionLauncher(
       };
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) throw error;
-      const service = new SessionService(boundWorkspace, { runtimeBaseDir });
-      const storedId = await resolveSessionIdForRestore(service, sessionId);
       if (storedId !== undefined) {
         metadata = await service.readCreationMetadataIfReadable(
           storedId,
@@ -1340,25 +1328,84 @@ export function createSubSessionLauncher(
         );
       }
     }
-    if (anySession && !metadata) {
-      throw new Error(`No active session ${sessionId} in ${boundWorkspace}.`);
+    if (!metadata) {
+      throw new Error(
+        `No active session ${sessionId} in ${boundWorkspace}.` +
+          (byPerson
+            ? ''
+            : ' If it lives in another workspace, also pass that `workspace`.'),
+      );
     }
+    // A preceding turn can create or replace the sidecar without updating
+    // the bridge. Recheck its identity at the guarded write.
+    const sidecarVersion = (sidecarPath: string) => {
+      const stat = lstatSync(sidecarPath, {
+        bigint: true,
+        throwIfNoEntry: false,
+      });
+      return stat && `${stat.dev}:${stat.ino}:${stat.ctimeNs}`;
+    };
+    const sidecars = [...new Set([sessionId, storedId ?? sessionId])].map(
+      (id) => {
+        const path = service.getWorktreeSessionPath(id);
+        return { path, version: sidecarVersion(path) };
+      },
+    );
+    const worktrees = await Promise.all(
+      sidecars.map(({ path }) => readWorktreeSessionStrict(path)),
+    );
+    const sidecarsUnchanged = () =>
+      sidecars.every(({ path, version }) => sidecarVersion(path) === version);
     if (
-      !anySession &&
-      (metadata?.parentSessionId === undefined ||
-        normalizeSessionIdForLookup(metadata.parentSessionId) !==
-          normalizeSessionIdForLookup(callerSessionId) ||
-        (metadata.sourceType !== undefined &&
-          metadata.sourceType !== 'default') ||
-        metadata.sourceId !== undefined)
+      !sidecarsUnchanged() ||
+      worktrees.some(
+        ({ state }) => state === 'invalid' || (!isLive && state === 'valid'),
+      )
     ) {
-      throw notOwn;
+      throw new Error(
+        'Open the destination worktree session before sending a follow-up.',
+      );
     }
-    return bridge.resumeSession({
+    const persistedPaths = worktrees.flatMap((result) =>
+      result.state === 'valid' ? [result.session.worktreePath] : [],
+    );
+    let checkedRoot: string | undefined;
+    const assertWorktreeReady = (targetId: string) => {
+      if (!sidecarsUnchanged()) {
+        throw new Error(
+          'The destination worktree changed. Retry the follow-up.',
+        );
+      }
+      const { effectiveCwd, worktree } =
+        bridge.getSessionExecutionSnapshot(targetId);
+      const worktreePath = worktree?.path ?? persistedPaths[0] ?? checkedRoot;
+      if (!worktreePath) return;
+      let ready = false;
+      try {
+        const root = realpathSync.native(worktreePath);
+        ready =
+          (checkedRoot === undefined || checkedRoot === root) &&
+          persistedPaths.every((path) => root === realpathSync.native(path)) &&
+          isWithinRoot(realpathSync.native(effectiveCwd), root);
+        if (ready) checkedRoot = root;
+      } catch {
+        // A path that cannot be resolved is not ready.
+      }
+      if (!ready) {
+        throw new Error(
+          'The destination session has not restored its worktree directory. Open the destination session and retry the follow-up.',
+        );
+      }
+    };
+    // Recheck live targets after reading storage. If one closed in the
+    // meantime, do not let the bridge fall back to restoring it cold.
+    if (isLive) assertWorktreeReady(sessionId);
+    const session = await bridge.resumeSession({
       sessionId,
       workspaceCwd: boundWorkspace,
       ...metadata,
     });
+    return { session, assertWorktreeReady };
   };
 
   const run = async (
@@ -1414,34 +1461,43 @@ export function createSubSessionLauncher(
         throw new Error('This session cannot follow up a sub-session.');
       }
     }
-    if (byPerson && bridge.permissionPolicy === 'consensus') {
-      // The target starts before the side panel is attached, too late to
-      // join the approval's fixed voter set. A follow-up also registers a
-      // daemon-only client that can raise the quorum without casting a vote.
-      throw new Error(
-        'This workspace uses consensus approvals and does not support /send. Open or start the destination session and send the message there.',
-      );
-    }
     const followUpSessionId =
       info.sessionId === undefined
         ? undefined
         : normalizeSessionIdForLookup(info.sessionId);
     const reusing = followUpSessionId !== undefined;
+    if ((byPerson || reusing) && bridge.permissionPolicy === 'consensus') {
+      // The target starts before the side panel is attached, too late to
+      // join the approval's fixed voter set. A follow-up also registers a
+      // daemon-only client that can raise the quorum without casting a vote.
+      throw new Error(
+        byPerson
+          ? 'This workspace uses consensus approvals and does not support /send. Open or start the destination session and send the message there.'
+          : 'This workspace uses consensus approvals and does not support tool follow-ups. Open the destination session and send the message there.',
+      );
+    }
     const report =
       info.completion === 'sent' &&
       (notifySentCompletion || remote || reusing || byPerson)
         ? (remote?.report ?? localReport)
         : undefined;
-    if ((reusing || byPerson) && !remote && info.completion === 'sent') {
+    const localToolFollowUp = reusing && !byPerson && !remote;
+    const reportsLocalCompletion =
+      (reusing || byPerson) && !remote && info.completion === 'sent';
+    const localCallerApproval =
+      localToolFollowUp || reportsLocalCompletion
+        ? await readApprovalMode(bridge, info.callerSessionId)
+        : undefined;
+    if (
+      reportsLocalCompletion &&
+      !localCallerApproval?.canAcceptBackgroundNotifications
+    ) {
       // The completion comes back as a background turn, which the caller
       // can only take while it records its chat.
-      const callerStatus = await readApprovalMode(bridge, info.callerSessionId);
-      if (!callerStatus.canAcceptBackgroundNotifications) {
-        throw new Error(
-          'A sub-session that reports back needs chat recording in the ' +
-            'caller. Use first-turn to wait for the result.',
-        );
-      }
+      throw new Error(
+        'A sub-session that reports back needs chat recording in the ' +
+          'caller. Use first-turn to wait for the result.',
+      );
     }
 
     // Per-caller concurrency key. Always a real, bridge-authenticated session
@@ -1535,13 +1591,16 @@ export function createSubSessionLauncher(
     let promptAdmission: Promise<void> | undefined;
     const prepareAndQueue = async (): Promise<BridgeSession> => {
       let sub: BridgeSession;
+      let assertWorktreeReady: (() => void) | undefined;
       if (followUpSessionId !== undefined) {
-        sub = await resumeOwnSubSession(
+        const resumed = await resumeExistingSession(
           bridge,
           followUpSessionId,
           info.callerSessionId,
           byPerson,
         );
+        sub = resumed.session;
+        assertWorktreeReady = () => resumed.assertWorktreeReady(sub.sessionId);
         // The bridge keys the session by the id it resumed, which can differ
         // in spelling from the one the caller passed.
         if (sub.clientId !== undefined) {
@@ -1610,7 +1669,7 @@ export function createSubSessionLauncher(
             approvalModeBeforeStart?: ApprovalMode;
           }
         | undefined;
-      if (remote) {
+      if (remote || localToolFollowUp) {
         let childApproval = await readApprovalMode(bridge, sessionId);
         const originalMode = childApproval.mode;
         if (originalMode === undefined) {
@@ -1618,10 +1677,21 @@ export function createSubSessionLauncher(
             'The sub-session did not report its approval mode; it was not used.',
           );
         }
-        remote.assertCurrent();
-        const mode = remote.byPerson
+        const callerMode = remote?.approvalMode ?? localCallerApproval?.mode;
+        if (callerMode === undefined) {
+          throw new Error(
+            'The calling session did not report its approval mode.',
+          );
+        }
+        remote?.assertCurrent();
+        const mode = byPerson
           ? originalMode
-          : delegatedApprovalMode(remote.approvalMode, originalMode);
+          : delegatedApprovalMode(callerMode, originalMode);
+        if (localToolFollowUp && mode !== originalMode) {
+          throw new Error(
+            `Follow-up requires a compatible approval mode. The target is in "${originalMode}", but the delegated mode is "${mode}".`,
+          );
+        }
         if (!reusing && mode !== originalMode) {
           const change = await bridge.setSessionApprovalMode(sessionId, mode, {
             persist: false,
@@ -1638,7 +1708,9 @@ export function createSubSessionLauncher(
         }
         dispatchApproval = {
           assertCanDispatch() {
-            remote.assertCurrent();
+            assertLocalCurrent?.();
+            remote?.assertCurrent();
+            localCallerApproval?.assertCurrent();
             childApproval.assertCurrent();
           },
           expectedApprovalMode: mode,
@@ -1652,13 +1724,7 @@ export function createSubSessionLauncher(
       if (!reusing) {
         try {
           bridge.updateSessionMetadata(sessionId, {
-            // A per-run scheduled task child is titled like its manual-run
-            // sibling (see the scheduled-task route), and a person's send
-            // like any session they start: flat, no thread glyph.
-            displayName: subSessionName(
-              info.name ?? info.prompt,
-              !isScheduledTaskRunSource(info) && !byPerson,
-            ),
+            displayName: subSessionName(info.name ?? info.prompt),
             titleSource: 'auto',
           });
         } catch (err) {
@@ -1672,6 +1738,7 @@ export function createSubSessionLauncher(
 
       if (!standalone) {
         assertLocalCurrent?.();
+        assertWorktreeReady?.();
         if (remote && stopAc.signal.aborted) {
           throw new Error('The target workspace stopped before dispatch.');
         }
@@ -1694,6 +1761,8 @@ export function createSubSessionLauncher(
           : remote
             ? remote.source
             : promptSource(bridge, info.callerSessionId, boundWorkspace);
+        const assertApprovalCurrent =
+          dispatchApproval?.assertCanDispatch ?? assertLocalCurrent;
         turn = bridge.sendPrompt(
           sessionId,
           {
@@ -1718,8 +1787,13 @@ export function createSubSessionLauncher(
                   },
                 }
               : {}),
-            assertCanDispatch: assertLocalCurrent,
             ...dispatchApproval,
+            assertCanDispatch: assertWorktreeReady
+              ? () => {
+                  assertApprovalCurrent?.();
+                  assertWorktreeReady();
+                }
+              : assertApprovalCurrent,
           },
         );
         queuedTurn = turn;
@@ -1821,7 +1895,7 @@ export function createSubSessionLauncher(
         // A person sending to an existing session knows it by its title.
         const label =
           (byPerson && reusing ? sessionTitle(bridge, sessionId) : undefined) ??
-          subSessionName(info.name ?? info.prompt, false);
+          subSessionName(info.name ?? info.prompt);
         // A person's message goes into the caller's conversation as a record;
         // the reply comes back as a turn in which the caller's model tells the
         // person what the target said, named by where it came from.
@@ -2273,7 +2347,7 @@ export function createSubSessionLauncher(
     info: CreateSubSessionInfo,
     byPerson: boolean,
   ): Promise<CreateSubSessionResult> => {
-    const { workspace, workspaceGeneration, ...local } = info;
+    const { workspace, workspaceGeneration, requiresYolo, ...local } = info;
     const report = outgoingReport(info.callerSessionId);
     if (workspace === undefined)
       return run(local, undefined, undefined, byPerson, report);
@@ -2288,15 +2362,23 @@ export function createSubSessionLauncher(
     ) {
       throw new Error('The workspace target changed. Request approval again.');
     }
+    const isLocal = target.launcher === launcher;
+    const callerApproval =
+      !isLocal || requiresYolo
+        ? await readApprovalMode(bridge, info.callerSessionId)
+        : undefined;
+    if (requiresYolo && callerApproval?.mode !== ApprovalMode.YOLO) {
+      throw new Error('A named workspace requires one-time approval.');
+    }
     const assertTargetCurrent = () => {
       assertCallerCurrent();
       target.assertCurrent();
+      if (!byPerson) callerApproval?.assertCurrent();
     };
-    if (target.launcher === launcher) {
+    if (isLocal) {
       return run(local, undefined, assertTargetCurrent, byPerson, report);
     }
-    const callerApproval = await readApprovalMode(bridge, info.callerSessionId);
-    if (callerApproval.mode === undefined) {
+    if (callerApproval?.mode === undefined) {
       throw new Error(
         'This session did not report its approval mode, so it cannot run ' +
           'sub-sessions in another workspace.',
@@ -2325,11 +2407,7 @@ export function createSubSessionLauncher(
       return await target.launcher.launchForRemoteCaller(local, {
         approvalMode: callerApproval.mode,
         ...(byPerson ? { byPerson: true } : {}),
-        assertCurrent() {
-          assertTargetCurrent();
-          // A person's send does not depend on the caller's mode.
-          if (!byPerson) callerApproval.assertCurrent();
-        },
+        assertCurrent: assertTargetCurrent,
         deliverCompletion: async (notification) => {
           assertCallerCurrent();
           await deliverSentCompletion(

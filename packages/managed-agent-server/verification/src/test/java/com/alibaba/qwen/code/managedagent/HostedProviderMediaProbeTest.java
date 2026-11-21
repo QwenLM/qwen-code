@@ -141,10 +141,10 @@ class HostedProviderMediaProbeTest {
                 + " execution_storage_key)"
                 + " VALUES (?, 'runtime', ?, 'workspace', '1', '/', 'capability', 'process', 'harness',"
                 + " 'tool', 'binding', 1, 'READY', 1, ?, ?)", "e".repeat(64), tenant, System.currentTimeMillis(), physical);
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key)"
-                + " VALUES (?, ?, ?, ?, 'storage-0', ?)",
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, physical_key)"
+                + " VALUES (?, ?, 'storage-0', ?)",
                 RuntimeAdmissionFences.storageAliasKey(tenant, "storage-0"),
-                "f".repeat(64), "0".repeat(64), tenant, physical);
+                tenant, physical);
         jdbc.update("INSERT INTO ma_storage_owner (storage_key) VALUES (?)", physical);
         var probe = mock(HostedProviderMediaProbe.class, CALLS_REAL_METHODS);
         ReflectionTestUtils.setField(probe, "jdbc", jdbc);

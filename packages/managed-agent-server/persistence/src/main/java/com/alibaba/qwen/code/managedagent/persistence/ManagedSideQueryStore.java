@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.*;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels;
 import com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels.*;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -54,7 +53,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         this.json = json;
         this.sessions = new AgentStoreRows(rules, jdbc, json);
         this.sessionQueries = new AgentSessionQueries(sessions, null, jdbc, List.of());
-        this.journal = new JournalStoreRows(StorageReadPolicy.inProcess(), jdbc, null);
+        this.journal = new JournalStoreRows(jdbc, null);
         this.workspaces = workspaces;
         this.models = models;
         this.retention = new ToolPublicationRetentionStore(jdbc, manager);
@@ -531,7 +530,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     private SessionRecord authorize(String tenant, String actor, String session, boolean execute) {
-        SessionRecord visible = sessions.requireLegacySessionForUpdate(tenant, session);
+        SessionRecord visible = sessions.requireSessionForUpdate(tenant, session);
         if ("DELETED".equals(visible.status()) || visible.deletedAt() != null) {
             throw error(404, "session_not_found");
         }
@@ -562,21 +561,16 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     private void lockRoot(String tenant, String session) {
-        sessions.requireLegacySessionForUpdate(tenant, session);
+        sessions.requireSessionForUpdate(tenant, session);
     }
 
     private Prefix prefix(String tenant, String session) {
-        var heads = jdbc.queryForList("SELECT journal_revision,committed_sequence,last_commit_digest,storage_version FROM ma_session_head"
+        var heads = jdbc.queryForList("SELECT journal_revision,committed_sequence,last_commit_digest FROM ma_session_head"
                 + " WHERE tenant_id=? AND session_id=? AND head_kind='MANAGED_SESSION' FOR UPDATE", tenant, session);
         if (heads.size() != 1) {
             throw error(409, "side_query_history_unavailable");
         }
         var head = heads.getFirst();
-        int storageVersion = ((Number) head.get("storage_version")).intValue();
-        if (storageVersion < 1 || storageVersion
-                > com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED) {
-            throw error(409, "side_query_history_unavailable");
-        }
         return SideQueryConversation.capture(jdbc, tenant, session, ((Number) head.get("journal_revision")).longValue(),
                 ((Number) head.get("committed_sequence")).longValue(), (String) head.get("last_commit_digest"), packs);
     }

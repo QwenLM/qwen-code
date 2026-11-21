@@ -3,6 +3,7 @@ import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/
 import {
   WEB_SHELL_LANGUAGES,
   LOCAL_FILES_MESSAGE_KEYS,
+  RESTART_RECOVERY_MESSAGE_KEYS,
   getTranslator,
   languageLabel,
   languageSettingToWebShellLanguage,
@@ -877,6 +878,10 @@ describe('web-shell ru locale', () => {
     expect(t('welcome.prompt')).toBe('Что вы хотите сделать?');
     expect(t('session.new')).toBe('Новая сессия');
     expect(t('sidebar.project')).toBe('Рабочие области');
+    expect(t('settings.category.General')).toBe('Общие');
+    expect(t('settings.label.ui.theme')).toBe('Тема');
+    expect(t('hooks.status.success')).toBe('Успешно');
+    expect(t('hooks.status.running')).not.toBe(en('hooks.status.running'));
     expect(t('sidebar.recentSessions')).toBe('Недавние');
     expect(t('activity.title')).toBe('Активность');
     expect(
@@ -941,6 +946,18 @@ describe('web-shell zh-TW locale', () => {
     // Script wins over region: zh-Hant-CN stays Traditional.
     expect(normalizeLanguage('zh-Hant-CN')).toBe('zh-TW');
     expect(languageSettingToWebShellLanguage('zh-Hant-CN')).toBe('zh-TW');
+  });
+
+  it('covers every restart-recovery message key without relying on fallbacks', () => {
+    expect(
+      Object.keys(ZH_TW)
+        .filter((key) => key.startsWith('restartRecovery.'))
+        .sort(),
+    ).toEqual([...RESTART_RECOVERY_MESSAGE_KEYS].sort());
+    for (const key of RESTART_RECOVERY_MESSAGE_KEYS) {
+      expect(getTranslator('en')(key)).not.toBe(key);
+      expect(getTranslator('zh-TW')(key)).not.toBe(key);
+    }
   });
 
   it('carries no Simplified-only vocabulary in any entry', () => {
