@@ -511,6 +511,28 @@
   overflow-wrap: anywhere;
 }
 
+/* The sheet is portaled out of .editorShell, so the mobile composer's 44px
+   overrides never reach its controls. The section row keeps its own taller
+   floor. The sheet also stands in for the popover in narrow desktop windows,
+   where a mouse needs none of this, so the floor is keyed on the pointer. */
+@media (hover: none) and (pointer: coarse) {
+  :global([data-web-shell-model-sheet]) .dropdownItem:not(.sheetSectionRow),
+  :global([data-web-shell-model-sheet]) .reasoningThinkingRow,
+  :global([data-web-shell-model-sheet]) .reasoningEffortRow,
+  :global([data-web-shell-model-sheet]) [data-web-shell-model-sheet-done],
+  :global([data-web-shell-model-sheet]) .dropdownSearchRow > button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* The Thinking row is not itself a control: its switch is. Growing the row
+     alone would add dead space, so the switch's own hit rect grows with it. */
+  :global([data-web-shell-model-sheet])
+    [data-web-shell-thinking-toggle]::after {
+    inset-block: -13px;
+  }
+}
+
 .slashPanel {
   max-height: min(
     460px,

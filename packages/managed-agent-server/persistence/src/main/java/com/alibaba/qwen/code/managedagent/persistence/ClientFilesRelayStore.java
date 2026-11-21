@@ -215,12 +215,13 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         // the generation and a new connection may reuse it, so an old connection's
         // in-flight response must not settle the new connection's request.
         return jdbc.update("UPDATE ma_client_files_request SET state=?,response_json=?,gmt_modified=?"
-                        + " WHERE session_scope_key=? AND binding_generation=? AND request_id=?"
+                        + " WHERE request_key=? AND session_scope_key=? AND binding_generation=? AND request_id=?"
                         + " AND state=? AND expires_at>?"
                         + " AND EXISTS (SELECT 1 FROM ma_client_files_binding b"
                         + " WHERE b.session_scope_key=ma_client_files_request.session_scope_key"
                         + " AND b.connection_id=? AND b.state=?)",
                 ClientFilesModels.REQUEST_ANSWERED, responseJson, now,
+                ManagedSchemaKeys.key(ManagedSchemaKeys.key(tenantId, sessionId), generation + ":" + requestId),
                 ManagedSchemaKeys.key(tenantId, sessionId), generation, requestId,
                 ClientFilesModels.REQUEST_QUEUED, now, connectionId, ClientFilesModels.STATE_ACTIVE) > 0;
     }
@@ -229,12 +230,13 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     public boolean fail(String tenantId, String sessionId, long generation, String connectionId,
             String requestId, String errorCode, long now) {
         return jdbc.update("UPDATE ma_client_files_request SET state=?,error_code=?,gmt_modified=?"
-                        + " WHERE session_scope_key=? AND binding_generation=? AND request_id=?"
+                        + " WHERE request_key=? AND session_scope_key=? AND binding_generation=? AND request_id=?"
                         + " AND state=? AND expires_at>?"
                         + " AND EXISTS (SELECT 1 FROM ma_client_files_binding b"
                         + " WHERE b.session_scope_key=ma_client_files_request.session_scope_key"
                         + " AND b.connection_id=? AND b.state=?)",
                 ClientFilesModels.REQUEST_FAILED, errorCode, now,
+                ManagedSchemaKeys.key(ManagedSchemaKeys.key(tenantId, sessionId), generation + ":" + requestId),
                 ManagedSchemaKeys.key(tenantId, sessionId), generation, requestId,
                 ClientFilesModels.REQUEST_QUEUED, now, connectionId, ClientFilesModels.STATE_ACTIVE) > 0;
     }
