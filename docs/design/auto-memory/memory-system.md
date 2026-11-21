@@ -273,7 +273,9 @@ flowchart TD
     E -- 是 --> F[跳过: same_session]
     E -- 否 --> G{elapsedHours ≥ 24h\n或从未 dream?}
     G -- 否 --> H[跳过: min_hours]
-    G -- 是 --> I{距上次 session scan\n< 10 分钟?}
+    G -- 是 --> G2{距上次失败的 Dream 尝试\n< 1h?}
+    G2 -- 是 --> G3[跳过: failure_backoff]
+    G2 -- 否 --> I{距上次 session scan\n< 10 分钟?}
     I -- 是 --> J[跳过: min_sessions\n等待下次扫描窗口]
     I -- 否 --> K[扫描 chats/*.jsonl mtime\n统计上次 Dream 后的新会话数]
     K --> L{新会话数 ≥ 5?}
@@ -290,12 +292,13 @@ flowchart TD
 
 **门控参数**：
 
-| 参数                       | 默认值   | 说明                          |
-| -------------------------- | -------- | ----------------------------- |
-| `minHoursBetweenDreams`    | 24 小时  | 两次 Dream 之间的最小时间间隔 |
-| `minSessionsBetweenDreams` | 5 个会话 | 触发 Dream 所需的最小新会话数 |
-| `SESSION_SCAN_INTERVAL_MS` | 10 分钟  | 会话文件扫描的节流间隔        |
-| `DREAM_LOCK_STALE_MS`      | 1 小时   | lock 文件被视为过期的时间阈值 |
+| 参数                                       | 默认值   | 说明                                                                                                                                                                          |
+| ------------------------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `minHoursBetweenDreams`                    | 24 小时  | 两次 Dream 之间的最小时间间隔                                                                                                                                                 |
+| `minSessionsBetweenDreams`                 | 5 个会话 | 触发 Dream 所需的最小新会话数                                                                                                                                                 |
+| `SESSION_SCAN_INTERVAL_MS`                 | 10 分钟  | 会话文件扫描的节流间隔                                                                                                                                                        |
+| `DREAM_LOCK_STALE_MS`                      | 1 小时   | lock 文件被视为过期的时间阈值                                                                                                                                                 |
+| `DEFAULT_AUTO_DREAM_FAILURE_BACKOFF_HOURS` | 1 小时   | Dream 失败后的退避窗口：失败时间写入 `meta.json` 的 `lastDreamAttemptAt`，窗口内跳过（`failure_backoff`），避免每轮重复拉起同一个失败的 Dream。用户取消不算失败，也不写该标记 |
 
 **锁机制**：
 
