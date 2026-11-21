@@ -1129,12 +1129,18 @@ export function registerSessionRoutes(
     readerCodec: SessionTranscriptCursorCodec | undefined,
     encodeCursor: (state: SessionTranscriptCursorState) => string,
     assertRuntimeGenerationOpen?: () => void,
+    recheckLoadable = true,
   ) => {
     const { limit, cursor, direction, beforeRecordId, atRecordId, snapshot } =
       opts;
     return runWithWorkspaceRuntimeStorage(runtime, async () => {
       const service = createWorkspaceRuntimeSessionService(runtime);
-      if (cursor === undefined) {
+      // The default route's resolution already asserted loadability (with the
+      // stricter allowActiveConflict:false); the readPage ENOENT mapping below
+      // still distinguishes archived/conflict/missing, so it skips the redundant
+      // re-check. The workspace route's resolution does not assert, so it keeps
+      // the re-check.
+      if (recheckLoadable && cursor === undefined) {
         await assertSessionLoadable(
           runtime.workspaceCwd,
           sessionId,
@@ -7400,6 +7406,7 @@ export function registerSessionRoutes(
             (state) =>
               encodeSessionTranscriptCursor(state, runtime.workspaceCwd),
             assertRuntimeGenerationOpen,
+            false,
           );
         }),
       );
