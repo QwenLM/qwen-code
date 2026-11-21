@@ -4069,6 +4069,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       cancelHeartbeat();
       combinedSignal.removeEventListener('abort', onAbort);
       if (exposePromotion) setPromoteAbortControllerCallback?.(undefined);
+      if (!result?.promoted && promoteAbortController.signal.aborted) {
+        const promoteReason = promoteAbortController.signal.reason as Partial<
+          Extract<ShellAbortReason, { kind: 'background' }>
+        >;
+        promoteReason?.onRefused?.();
+      }
     }
 
     // Background-promote path: the user pressed Ctrl+B (PR-3 wires the

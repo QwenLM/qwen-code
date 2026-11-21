@@ -635,9 +635,9 @@ interface MovableShell {
   /** The turn whose tool batch runs the shell. */
   turn: AbortSignal;
   promote?: AbortController;
-  /** Resolves once the shell's tool call settles. */
-  settled: Promise<void>;
-  settle(): void;
+  /** Resolves when promotion is refused or the moved tool call settles. */
+  settled: Promise<boolean>;
+  settle(moved: boolean): void;
   move?: { shellId?: string; stopRequested?: true };
 }
 /** The failure a Goal turn stopped by loop protection pauses with. */
@@ -4130,11 +4130,13 @@ export class Session implements SessionContext {
       pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
       return;
     }
-    if ((this.openToolCalls?.() ?? Infinity) <= moving.length) return;
-    // Other tools remain. A moved shell's result says where it went, so the
-    // turn ends only once those results are recorded.
-    void Promise.all(moving.map((shell) => shell.settled)).then(() => {
-      if (shouldInterrupt()) pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
+    const hasOtherCalls = (this.openToolCalls?.() ?? Infinity) > moving.length;
+    // Preserve accepted handoffs before interrupting other tools. A refused
+    // handoff is ready to interrupt before its PostToolUse runs.
+    void Promise.all(moving.map((shell) => shell.settled)).then((moved) => {
+      if ((hasOtherCalls || moved.includes(false)) && shouldInterrupt()) {
+        pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
+      }
     });
   }
 
@@ -4152,8 +4154,8 @@ export class Session implements SessionContext {
       return;
     }
     if (shell?.promote === promote) return;
-    let settle!: () => void;
-    const settled = new Promise<void>((resolve) => (settle = resolve));
+    let settle!: (moved: boolean) => void;
+    const settled = new Promise<boolean>((resolve) => (settle = resolve));
     this.movableShells.set(callId, { turn, promote, settled, settle });
   }
 
@@ -4161,7 +4163,7 @@ export class Session implements SessionContext {
     const shell = this.movableShells.get(callId);
     if (!shell) return;
     this.movableShells.delete(callId);
-    shell.settle();
+    shell.settle(shell.move?.shellId !== undefined);
   }
 
   /** A settled tool batch leaves no shell of its turn movable. */
@@ -4203,6 +4205,7 @@ export class Session implements SessionContext {
               this.config.getBackgroundShellRegistry().requestCancel(shellId);
             }
           },
+          onRefused: () => shell.settle(false),
         } satisfies ShellAbortReason);
       }
       if (shell.move) moving.push(shell);

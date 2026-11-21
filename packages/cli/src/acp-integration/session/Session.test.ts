@@ -34606,11 +34606,14 @@ describe('Session', () => {
             kind: string;
             forUserMessage: boolean;
             onRegistered: (shellId: string) => void;
+            onRefused: () => void;
           };
 
           /** A shell that runs until it is moved to the background or
            * cancelled; a move settles once `moved` resolves. */
-          function useShell(moved: Promise<void> = Promise.resolve()) {
+          function useShell(
+            moved: Promise<boolean | void> = Promise.resolve(),
+          ) {
             const state: { reason?: BackgroundReason; signal?: AbortSignal } =
               {};
             let markRunning!: () => void;
@@ -34633,7 +34636,15 @@ describe('Session', () => {
                     () => {
                       state.reason = promote.signal.reason as BackgroundReason;
                       setPromote(undefined);
-                      void moved.then(() => {
+                      void moved.then((accepted) => {
+                        if (accepted === false) {
+                          state.reason!.onRefused();
+                          resolve({
+                            llmContent: 'process exited',
+                            returnDisplay: '',
+                          });
+                          return;
+                        }
                         state.reason!.onRegistered(shellId);
                         resolve({
                           llmContent: `moved as ${shellId}`,
@@ -34727,6 +34738,7 @@ describe('Session', () => {
               kind: 'background',
               forUserMessage: true,
               onRegistered: expect.any(Function),
+              onRefused: expect.any(Function),
             });
             expect(state.signal?.aborted).toBe(false);
             const next = sentMessage(1);
@@ -34996,6 +35008,22 @@ describe('Session', () => {
 
             await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
             expect(promote.signal.aborted).toBe(false);
+          });
+
+          it('interrupts the turn when promotion is refused before PostToolUse', async () => {
+            const { running, requestCancel } = useShell(Promise.resolve(false));
+            usePostToolHook(new Promise(() => {}));
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(createStreamWithChunks([shellCall()]))
+              .mockResolvedValue(createEmptyStream());
+
+            const done = startPrompt();
+            await running;
+            session.sendMidTurnInputNow();
+
+            await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
+            expect(requestCancel).not.toHaveBeenCalled();
           });
 
           it('cancels an already registered background shell before PostToolUse settles', async () => {

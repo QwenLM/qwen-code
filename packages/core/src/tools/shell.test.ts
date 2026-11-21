@@ -5821,7 +5821,8 @@ describe('ShellTool', () => {
           | AbortController
           | undefined;
         expect(promoteAc).toBeInstanceOf(AbortController);
-        promoteAc!.abort({ kind: 'background', shellId: 'bg_late' });
+        const onRefused = vi.fn();
+        promoteAc!.abort({ kind: 'background', onRefused });
         resolveShellExecution({
           output: 'oops too late\n',
           exitCode: null,
@@ -5830,6 +5831,7 @@ describe('ShellTool', () => {
           pid: 33333,
         });
         const result = await promise;
+        expect(onRefused).toHaveBeenCalledExactlyOnceWith();
 
         // Not "timed out": the benign race is explained so the agent doesn't
         // retry it as a cancellation/timeout, and the output is preserved.

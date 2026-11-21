@@ -116,7 +116,9 @@ agent 收到立即发送请求时，按当前回合在做什么分三种情况�
    还在运行。尚未启动进程或进程已退出的 shell、嵌套在 `exec` 里的调用、模拟执行的
    `sed` 编辑和 Managed runtime 的调用按 PR 1 打断。
 2. 立即发送请求到达时，对每个句柄调用
-   `abort({ kind: 'background', forUserMessage: true, onRegistered })`。core 分配
+   `abort({ kind: 'background', forUserMessage: true, onRegistered, onRefused })`。
+   如果进程已退出，执行服务拒绝转后台，core 会在后处理前调用 `onRefused`。会话等已接受
+   转移的结果记下后，按 PR 1 打断回合。转移被接受时，core 分配
    `bg_` ID，登记任务后通过 `onRegistered` 把 ID 交给会话。批次统计未结算的顶层可执行
    调用，包括已调度但尚未执行的调用，跳过嵌套调用和重放。批次只剩正在转后台的 shell
    时，批次结束后在工具边界取队列，同一轮回应。还有其他工具时，等转后台的 shell 的

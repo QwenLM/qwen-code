@@ -169,6 +169,8 @@ export type ShellAbortReason =
       forUserMessage?: boolean;
       /** Called once the promoted process is registered and can be stopped. */
       onRegistered?: (shellId: string) => void;
+      /** Called if execution settles without accepting the promotion. */
+      onRefused?: () => void;
     };
 
 /**

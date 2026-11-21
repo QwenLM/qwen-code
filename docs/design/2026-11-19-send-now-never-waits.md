@@ -156,7 +156,10 @@ then interrupts the other tools.
    whose process has exited, calls nested in `exec`, simulated `sed` edits,
    and Managed runtime calls follow the PR 1 interrupt path.
 2. When a Send now request arrives, each handle gets
-   `abort({ kind: 'background', forUserMessage: true, onRegistered })`. Core
+   `abort({ kind: 'background', forUserMessage: true, onRegistered, onRefused })`.
+   If the process has exited and the service refuses the move, core calls
+   `onRefused` before post-processing. The session interrupts the turn as in
+   PR 1 once any accepted moves' results are recorded. For accepted moves, core
    assigns a `bg_` ID and returns it to the session through `onRegistered`
    once the task is in the registry. The batch counts pending top-level
    executable calls, including scheduled calls awaiting execution. Nested
