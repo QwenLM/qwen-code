@@ -20,43 +20,22 @@ import {
   assertSuccessfulCompletion,
 } from './test-helper.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
-import {
-  CONTAINER_SANDBOX_NO_PROXY,
-  fakeServerHostOptions,
-  IS_CONTAINER_SANDBOX,
-} from '../test-helper.js';
+import { fakeModelOptions, fakeServerHostOptions } from '../test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
-const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
-  ? CONTAINER_SANDBOX_NO_PROXY
-  : '127.0.0.1,localhost';
 const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
-
-function fakeModelOptions(baseUrl: string) {
-  return {
-    model: 'fake-model',
-    authType: 'openai' as const,
-    env: {
-      NO_PROXY: LOCAL_OPENAI_NO_PROXY,
-      no_proxy: LOCAL_OPENAI_NO_PROXY,
-      OPENAI_API_KEY: 'fake-key',
-      OPENAI_BASE_URL: baseUrl,
-      OPENAI_MODEL: 'fake-model',
-      QWEN_MODEL: 'fake-model',
-    },
-  };
-}
 
 describe('Session ID Support (E2E)', () => {
   let helper: SDKTestHelper;
   let testDir: string;
   let fakeServer: Awaited<ReturnType<typeof startFakeOpenAIServer>>;
 
-  function testOptions() {
-    return {
+  function testOptions(extraEnv: Record<string, string> = {}) {
+    const base = {
       ...SHARED_TEST_OPTIONS,
       ...fakeModelOptions(fakeServer.baseUrl),
     };
+    return { ...base, env: { ...base.env, ...extraEnv } };
   }
 
   beforeEach(async () => {
@@ -422,12 +401,9 @@ describe('Session ID Support (E2E)', () => {
       const q1 = query({
         prompt: 'Say hello',
         options: {
-          ...testOptions(),
+          ...testOptions({ SANDBOX_SET_UID_GID: 'true' }),
           cwd: testDir,
           sessionId: customSessionId,
-          env: {
-            SANDBOX_SET_UID_GID: 'true',
-          },
         },
       });
 
@@ -439,6 +415,7 @@ describe('Session ID Support (E2E)', () => {
       } finally {
         await q1.close();
       }
+      expect(fakeServer.requests.length).toBeGreaterThan(0);
 
       // Second query: try to use the same session ID
       // This should fail because the session ID is already in use
@@ -446,12 +423,9 @@ describe('Session ID Support (E2E)', () => {
       const q2 = query({
         prompt: 'Say hello again',
         options: {
-          ...testOptions(),
+          ...testOptions({ SANDBOX_SET_UID_GID: 'true' }),
           cwd: testDir,
           sessionId: customSessionId,
-          env: {
-            SANDBOX_SET_UID_GID: 'true',
-          },
         },
       });
 
@@ -475,12 +449,9 @@ describe('Session ID Support (E2E)', () => {
       const q1 = query({
         prompt: 'Say hello',
         options: {
-          ...testOptions(),
+          ...testOptions({ SANDBOX_SET_UID_GID: 'true' }),
           cwd: testDir,
           sessionId: customSessionId,
-          env: {
-            SANDBOX_SET_UID_GID: 'true',
-          },
         },
       });
 
@@ -491,18 +462,16 @@ describe('Session ID Support (E2E)', () => {
       } finally {
         await q1.close();
       }
+      expect(fakeServer.requests.length).toBeGreaterThan(0);
 
       // Second query with same session ID
       // When using the same session ID, CLI will detect the duplicate and exit with code 1
       const q2 = query({
         prompt: 'Say hello again',
         options: {
-          ...testOptions(),
+          ...testOptions({ SANDBOX_SET_UID_GID: 'true' }),
           cwd: testDir,
           sessionId: customSessionId,
-          env: {
-            SANDBOX_SET_UID_GID: 'true',
-          },
         },
       });
 
