@@ -87,7 +87,12 @@ A browser check ran against the real Web Shell, with two turns:
 - Expanded, the standalone thought showed render #1, and it still showed #1 after being collapsed and expanded again. The folded thoughts showed #2 and #3.
 - After a reload and in a second tab, all three showed their first renders, and the Mod's log still counted three renders.
 
-The export renderer grew by 343 bytes, from 2,146,831 to 2,147,174 of its 2,148,200-byte budget.
+These builds measured the export renderer's JavaScript separately from its CSS. Both exceeded their size warning threshold.
+
+| Build                                | Commit       | Renderer JS (bytes) | Hard limit (bytes) | Remaining (bytes) |
+| ------------------------------------ | ------------ | ------------------: | -----------------: | ----------------: |
+| Linux CI, Node 22                    | `7dc70aadde` |           2,147,983 |          2,148,200 |               217 |
+| Local macOS merge candidate, Node 22 | `1ff6ea271a` |           2,151,016 |          2,151,577 |               561 |
 
 Acceptance: in the Web Shell, with `experimental.mods` on and a Mod that rewrites `Thinking`:
 
@@ -100,4 +105,3 @@ Acceptance: in the Web Shell, with `experimental.mods` on and a Mod that rewrite
 - A thought whose hook awaits a model call shows the original when expanded, then changes height when the answer arrives.
 - A workflow summary keeps its lines mounted when collapsed. Its thoughts resume their expansion state when the summary reopens and draw any cached answers.
 - The page knows a thought was rewritten only once it has drawn the rewrite. A collapsed thought therefore shows the translate button until it is expanded, including after a reload, though the session already keeps its answer.
-- The export renderer is 1,026 bytes under its budget after this step.
