@@ -43,6 +43,7 @@ import {
   isSatisfiesExpression,
   isSetAccessorDeclaration,
   isShorthandPropertyAssignment,
+  isSpreadAssignment,
   isStringLiteral,
   isVariableDeclaration,
   isVariableStatement,
@@ -129,13 +130,19 @@ const literalText = (node) =>
 
 // The classifier delegation, as placement. The decision itself is executed
 // elsewhere; what is pinned here is only where the delegation sits and that
-// nothing answers beside it. Four review rounds measured that every data-flow
+// nothing answers beside it. Five review rounds measured that every data-flow
 // clause layered on top of this — provenance through rebinds and shadows, gate
 // recognition, fall-through tracking — grew a fresh evasion and a fresh false
 // red for each one closed, because it is hand-written semantic analysis over an
 // unbounded rewrite space. Those checks are retired by decision, not by
 // oversight: the design record enumerates what this pin deliberately does not
 // cover, and which of those the packaged arms were measured to catch.
+//
+// Placement has ONE notion of arm. A fake's arm is read at its
+// `startFakeOpenAIServer` call site, a delegation's arm comes from the fake it
+// sits in, and both inventories are filtered by that set in a second pass —
+// reading the arm at the callback's declaration, or keeping two different
+// notions for fakes and delegations, is what priced correct rewrites as defects.
 const classifierDelegation = (text) => {
   const file = createSourceFile('runner.ts', text, ScriptTarget.Latest, true);
   const isFn = (node) =>
@@ -152,69 +159,6 @@ const classifierDelegation = (text) => {
     }
     return undefined;
   };
-  const fakeCallbacks = new Set();
-  const isFakeCallback = (fn) => fakeCallbacks.has(fn);
-  // The nearest enclosing flag around a delegation, so one gated by the
-  // sibling flag inside this arm's fake is not credited to it. The fake
-  // inventory uses the outermost flag instead; see outerArmFlag.
-  const armFlag = (node) => {
-    for (let current = node?.parent; current; current = current.parent) {
-      if (isIfStatement(current) && isIdentifier(current.expression)) {
-        return current.expression.text;
-      }
-    }
-    return undefined;
-  };
-  // The outermost arm flag, for the fake inventory: a fire block nested inside
-  // the skill block belongs to the skill arm, because it is never reached when
-  // only the fire flag is set.
-  const outerArmFlag = (node) => {
-    let found;
-    for (let current = node?.parent; current; current = current.parent) {
-      if (isIfStatement(current) && isIdentifier(current.expression)) {
-        found = current.expression.text;
-      }
-    }
-    return found;
-  };
-  // A delegation wrapped in a closure the callback declares is still that
-  // fake's delegation. The chain continues through arrows and function
-  // expressions only: a class member or a named declaration is a separate
-  // callable that something must invoke, so it does not credit the fake.
-  const inFake = (node) => {
-    for (let fn = enclosingFn(node); fn !== undefined; fn = enclosingFn(fn)) {
-      if (isFakeCallback(fn)) return true;
-      if (!isArrowFunction(fn) && !isFunctionExpression(fn)) return false;
-    }
-    return false;
-  };
-  const inLoopArm = (node) => {
-    for (let fn = enclosingFn(node); fn !== undefined; fn = enclosingFn(fn)) {
-      if (isFakeCallback(fn) && armFlag(fn) !== undefined) return true;
-    }
-    return false;
-  };
-  // Single-declaration initialisers, so a hoisted `toolCalls` array can be
-  // read where it was declared. Ambiguous names are left unresolved: an
-  // acceptance must not guess which declaration a scope-insensitive lookup
-  // happened to find.
-  const initialisers = new Map();
-  const collectInitialisers = (node) => {
-    if (
-      isVariableDeclaration(node) &&
-      isIdentifier(node.name) &&
-      node.initializer !== undefined
-    ) {
-      const name = node.name.text;
-      initialisers.set(
-        name,
-        initialisers.has(name) ? undefined : node.initializer,
-      );
-    }
-    forEachChild(node, collectInitialisers);
-  };
-  // A callback passed by reference is the same fake as an inline one, so the
-  // argument is resolved to its declaration before being recognised.
   const unwrap = (node) => {
     let current = node;
     while (
@@ -228,74 +172,169 @@ const classifierDelegation = (text) => {
     }
     return current;
   };
+  // Every declaration of a name counts, with an initializer or not: a bare
+  // `let toolCalls;` elsewhere still makes the name ambiguous, and an
+  // acceptance must not guess which binding a lookup happened to find.
+  const declarations = new Map();
+  const collectDeclarations = (node) => {
+    if (isVariableDeclaration(node) && isIdentifier(node.name)) {
+      const name = node.name.text;
+      const seen = declarations.get(name);
+      declarations.set(name, {
+        count: (seen?.count ?? 0) + 1,
+        initializer: seen === undefined ? node.initializer : undefined,
+      });
+    }
+    forEachChild(node, collectDeclarations);
+  };
+  // Follows an identifier chain, so a shorthand of a hoisted alias of an array
+  // resolves to the array. Ambiguous or cyclic names resolve to nothing.
+  const resolve = (node) => {
+    const seen = new Set();
+    let current = unwrap(node);
+    while (current !== undefined && isIdentifier(current)) {
+      if (seen.has(current.text)) return undefined;
+      seen.add(current.text);
+      const entry = declarations.get(current.text);
+      if (entry === undefined || entry.count !== 1) return undefined;
+      current = unwrap(entry.initializer);
+    }
+    return current;
+  };
+  // An arm flag is a boolean local tested directly or against a literal
+  // boolean. Nothing inside a larger expression is credited as a flag.
+  const flagName = (test) => {
+    const inner = unwrap(test);
+    if (inner === undefined) return undefined;
+    if (isIdentifier(inner)) return inner.text;
+    if (
+      isBinaryExpression(inner) &&
+      (inner.operatorToken.kind === SyntaxKind.EqualsEqualsEqualsToken ||
+        inner.operatorToken.kind === SyntaxKind.ExclamationEqualsEqualsToken)
+    ) {
+      for (const [a, b] of [
+        [inner.left, inner.right],
+        [inner.right, inner.left],
+      ]) {
+        const id = unwrap(a);
+        const lit = unwrap(b);
+        if (
+          id !== undefined &&
+          isIdentifier(id) &&
+          lit !== undefined &&
+          (lit.kind === SyntaxKind.TrueKeyword ||
+            lit.kind === SyntaxKind.FalseKeyword)
+        ) {
+          return id.text;
+        }
+      }
+    }
+    return undefined;
+  };
+  const enclosingFlags = (node) => {
+    const names = [];
+    for (let current = node?.parent; current; current = current.parent) {
+      if (isIfStatement(current)) {
+        const name = flagName(current.expression);
+        if (name !== undefined) names.push(name);
+      }
+    }
+    return names;
+  };
+  const nearestFlag = (node) => enclosingFlags(node)[0];
+  // A fake's arm is read where it is STARTED, so a callback declared above the
+  // flag and passed inside the block still belongs to that arm.
+  const fakeArm = new Map();
+  const fakeFlags = new Map();
   const collectFakes = (node) => {
     if (
       isCallExpression(node) &&
       isIdentifier(node.expression) &&
       node.expression.text === 'startFakeOpenAIServer'
     ) {
-      const arg = unwrap(node.arguments[0]);
-      const fn =
-        arg !== undefined && isIdentifier(arg)
-          ? unwrap(initialisers.get(arg.text))
-          : arg;
-      if (fn !== undefined && isFn(fn)) fakeCallbacks.add(fn);
+      const fn = resolve(node.arguments[0]);
+      if (fn !== undefined && isFn(fn)) {
+        fakeArm.set(fn, nearestFlag(node));
+        fakeFlags.set(fn, enclosingFlags(node));
+      }
     }
     forEachChild(node, collectFakes);
   };
-  // The request binding is whatever the callback's own first parameter names
-  // it, so renaming `({ body })` to `({ body: req })` is not a defect.
-  const bodyNames = (fn) => {
-    const names = new Set();
-    const walk = (node) => {
-      if (isBindingElement(node) && isIdentifier(node.name)) {
-        names.add(node.name.text);
-      }
-      forEachChild(node, walk);
-    };
-    const param = fn?.parameters?.[0];
-    if (param !== undefined) {
-      if (isIdentifier(param.name)) names.add(param.name.text);
-      else walk(param.name);
-    }
-    return names;
-  };
+  // The fake a node sits in. The chain continues through arrows and function
+  // expressions and declarations; a class member is a separate callable that
+  // something must invoke, so it does not credit the fake.
   const fakeOf = (node) => {
     for (let fn = enclosingFn(node); fn !== undefined; fn = enclosingFn(fn)) {
-      if (isFakeCallback(fn)) return fn;
-      if (!isArrowFunction(fn) && !isFunctionExpression(fn)) return undefined;
+      if (fakeArm.has(fn)) return fn;
+      if (
+        isMethodDeclaration(fn) ||
+        isGetAccessorDeclaration(fn) ||
+        isSetAccessorDeclaration(fn) ||
+        isConstructorDeclaration(fn)
+      ) {
+        return undefined;
+      }
     }
     return undefined;
   };
-  const calls = [];
-  const fakes = [];
-  const loopAnswerSites = [];
-  const loopHandBuilt = [];
-  // Each hit carries its line and source text: a bare clause name would leave
-  // a maintainer bisecting a 7,900-line runner to find which construct tripped.
-  const sites = [];
-  const record = (clause, node) => {
-    sites.push({
-      clause,
-      line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
-      text: node.getText(file).slice(0, 80),
-    });
+  // Only the binding element that binds the `body` property names the request;
+  // a sibling field of the same handler context does not.
+  const bodyNames = (fn) => {
+    const names = new Set();
+    const param = fn?.parameters?.[0];
+    if (param === undefined) return names;
+    const walk = (node) => {
+      if (isBindingElement(node) && isIdentifier(node.name)) {
+        const property = node.propertyName ?? node.name;
+        if (isIdentifier(property) && property.text === 'body') {
+          names.add(node.name.text);
+        }
+      }
+      forEachChild(node, walk);
+    };
+    walk(param.name);
+    return names;
   };
   const isFakeToolCall = (node) =>
     isCallExpression(node) &&
     isIdentifier(node.expression) &&
     node.expression.text === 'fakeToolCall';
-  // A `toolCalls` member reached through an object, whether it is being
-  // assigned, indexed or pushed to: the answer is built after construction,
-  // so no property-literal inventory can see it.
-  const touchesToolCallsMember = (node) => {
+  const MUTATORS = new Set([
+    'push',
+    'unshift',
+    'splice',
+    'fill',
+    'sort',
+    'reverse',
+    'copyWithin',
+  ]);
+  const IN_PLACE = new Set([
+    'assign',
+    'defineProperty',
+    'defineProperties',
+    'set',
+  ]);
+  const isToolCallsMember = (node) =>
+    (isPropertyAccessExpression(node) && node.name.text === 'toolCalls') ||
+    (isElementAccessExpression(node) &&
+      literalText(node.argumentExpression) === 'toolCalls');
+  const mentionsToolCallsMember = (node) => {
+    let found = false;
+    const walk = (child) => {
+      if (isToolCallsMember(child)) found = true;
+      forEachChild(child, walk);
+    };
+    if (node !== undefined) walk(node);
+    return found;
+  };
+  // An element-access key the inventory cannot read is as unattributable as a
+  // computed property key, so both fail closed.
+  const unreadableMemberKey = (node) => {
     let found = false;
     const walk = (child) => {
       if (
-        (isPropertyAccessExpression(child) &&
-          child.name.text === 'toolCalls') ||
-        (isElementAccessExpression(child) &&
-          literalText(child.argumentExpression) === 'toolCalls')
+        isElementAccessExpression(child) &&
+        literalText(child.argumentExpression) === undefined
       ) {
         found = true;
       }
@@ -304,84 +343,110 @@ const classifierDelegation = (text) => {
     if (node !== undefined) walk(node);
     return found;
   };
+  const calls = [];
+  const answers = [];
+  const sites = [];
+  const record = (clause, node, fake) => {
+    answers.push({ clause, fake });
+    sites.push({
+      clause,
+      line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
+      text: node.getText(file).slice(0, 80),
+    });
+  };
   const visit = (node) => {
-    if (isFn(node) && isFakeCallback(node)) fakes.push(node);
     if (
       isCallExpression(node) &&
       isIdentifier(node.expression) &&
       node.expression.text === 'loopClassifierResponse'
     ) {
-      const fn = enclosingFn(node);
+      const fake = fakeOf(node);
+      const arg = node.arguments[0];
       calls.push({
         callId: literalText(node.arguments[1]),
-        arg0: isIdentifier(node.arguments[0])
-          ? node.arguments[0].text
-          : undefined,
-        bodyNamed: bodyNames(fakeOf(node)).has(
-          isIdentifier(node.arguments[0]) ? node.arguments[0].text : '',
-        ),
-        fn: fn === undefined ? -1 : fn.pos,
-        fake: inFake(node),
-        // The nearest flag around the delegation itself, so one gated by the
-        // sibling arm's flag inside this arm's fake is not credited to it.
-        arm: armFlag(node),
+        fn: fake === undefined ? -1 : fake.pos,
+        fake: fake !== undefined,
+        arm: fake === undefined ? undefined : fakeArm.get(fake),
+        // A flag around the delegation itself that disagrees with its fake's
+        // arm means this arm's fake never runs it.
+        gated: (() => {
+          const near = nearestFlag(node);
+          const own = fake === undefined ? undefined : fakeArm.get(fake);
+          return near !== undefined && own !== undefined && near !== own;
+        })(),
+        bodyNamed: isIdentifier(arg) && bodyNames(fake).has(arg.text),
       });
     }
-    // Answer constructions inside a loop arm's fake, by element rather than by
-    // call spelling: a hand-built element is invisible to a fakeToolCall count,
-    // and a non-inline toolCalls source cannot be enumerated at all.
-    if (inLoopArm(node)) {
+    const fake = fakeOf(node);
+    if (fake !== undefined) {
       const assigned =
         isBinaryExpression(node) &&
         node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
         node.operatorToken.kind <= SyntaxKind.LastAssignment;
-      const mutated =
+      if (
+        assigned &&
+        (mentionsToolCallsMember(node.left) || unreadableMemberKey(node.left))
+      ) {
+        record('no-loop-hand-built', node, fake);
+      }
+      // A call on a toolCalls member only counts when it mutates: reading
+      // `.filter(...)` or `.length` builds no answer.
+      if (
         isCallExpression(node) &&
         isPropertyAccessExpression(node.expression) &&
-        touchesToolCallsMember(node.expression.expression);
-      if ((assigned && touchesToolCallsMember(node.left)) || mutated) {
-        loopHandBuilt.push(node.pos);
-        record('no-loop-hand-built', node);
+        MUTATORS.has(node.expression.name.text) &&
+        mentionsToolCallsMember(node.expression.expression)
+      ) {
+        record('no-loop-hand-built', node, fake);
+      }
+      // In-place writers reach the member through an argument, not a receiver.
+      if (
+        isCallExpression(node) &&
+        isPropertyAccessExpression(node.expression) &&
+        IN_PLACE.has(node.expression.name.text) &&
+        node.arguments.some(
+          (a) => literalText(a) === 'toolCalls' || mentionsToolCallsMember(a),
+        )
+      ) {
+        record('no-loop-hand-built', node, fake);
+      }
+      if (isSpreadAssignment(node)) {
+        record('no-loop-hand-built', node, fake);
       }
       if (
         isFakeToolCall(node) &&
         literalText(node.arguments[0]) === 'respond_in_schema'
       ) {
-        loopAnswerSites.push(node.pos);
-        record('no-loop-answer-site', node);
+        record('no-loop-answer-site', node, fake);
       }
       if (isPropertyAssignment(node) || isShorthandPropertyAssignment(node)) {
         const key = isIdentifier(node.name)
           ? node.name.text
           : literalText(node.name);
-        // A key the inventory cannot read is failed closed: it may be
-        // `toolCalls` spelled as a computed expression.
         if (key === undefined) {
-          loopHandBuilt.push(node.pos);
-          record('no-loop-hand-built', node);
+          record('no-loop-hand-built', node, fake);
         } else if (key === 'toolCalls') {
           const declared = isShorthandPropertyAssignment(node)
-            ? undefined
+            ? node.name
             : node.initializer;
-          // A hoisted array is the same answer as an inline one, so read it
-          // where it was declared rather than pricing the hoist as a defect.
           const source =
             declared !== undefined && isIdentifier(declared)
-              ? initialisers.get(declared.text)
+              ? resolve(declared)
               : declared;
           if (source === undefined || !isArrayLiteralExpression(source)) {
-            loopHandBuilt.push(node.pos);
-            record('no-loop-hand-built', node);
+            record('no-loop-hand-built', node, fake);
           } else {
             for (const element of source.elements) {
-              // A computed tool name is as unattributable as a hand-built
-              // element: neither can be told apart from a classifier answer.
               if (
                 !isFakeToolCall(element) ||
                 literalText(element.arguments[0]) === undefined
               ) {
-                loopHandBuilt.push(element.pos);
-                record('no-loop-hand-built', element);
+                record('no-loop-hand-built', element, fake);
+              } else if (
+                literalText(element.arguments[0]) === 'respond_in_schema'
+              ) {
+                // A hoisted allow is the same answer as an inline one.
+                record('no-loop-answer-site', element, fake);
               }
             }
           }
@@ -390,19 +455,39 @@ const classifierDelegation = (text) => {
     }
     forEachChild(node, visit);
   };
-  collectInitialisers(file);
+  collectDeclarations(file);
   collectFakes(file);
   visit(file);
-  // The arms are the flags that guard the delegations, not a pair of literal
-  // names: renaming both flags is a behaviour-preserving refactor. Only fakes
-  // under those flags count, so the durable-failover fake stays out.
+  // The arms are the flags of the fakes that actually delegate. Filtering by
+  // that set keeps the durable-failover fake out of both inventories.
   const armNames = new Set(
     calls.map((call) => call.arm).filter((arm) => arm !== undefined),
   );
-  const fakeArms = fakes
-    .map((fn) => outerArmFlag(fn))
-    .filter((arm) => arm !== undefined && armNames.has(arm));
-  return { calls, fakeArms, loopAnswerSites, loopHandBuilt, sites };
+  const fakeArms = [...fakeArm.values()].filter(
+    (arm) => arm !== undefined && armNames.has(arm),
+  );
+  const inArm = (hit) => {
+    const arm = fakeArm.get(hit.fake);
+    return arm !== undefined && armNames.has(arm);
+  };
+  // A fake started under two different arm flags is nested inside the other
+  // arm, so it never runs when only its own flag is set. A wrapper flag that
+  // no delegation reports is not an arm and does not count.
+  const nestedFakes = [...fakeFlags.values()].filter(
+    (flags) => new Set(flags.filter((f) => armNames.has(f))).size > 1,
+  );
+  return {
+    calls,
+    fakeArms,
+    loopAnswerSites: answers.filter(
+      (a) => a.clause === 'no-loop-answer-site' && inArm(a),
+    ),
+    loopHandBuilt: answers.filter(
+      (a) => a.clause === 'no-loop-hand-built' && inArm(a),
+    ),
+    nestedFakes,
+    sites,
+  };
 };
 
 // The pin's judgement, named clause by clause so one predicate serves both the
@@ -421,23 +506,23 @@ const delegationViolations = (delegation) => {
   if (new Set(delegation.calls.map((call) => call.fn)).size !== 2) {
     violations.push('distinct-callbacks');
   }
-  // One delegation per loop arm, judged on the arms rather than on which id
-  // each arm happens to pass: the ids are labels nothing else reads, so
-  // exchanging them between the arms is behaviour-preserving.
+  // One delegation per arm, and each delegation must belong to the arm its own
+  // fake runs under: a flag around the delegation that disagrees with its fake
+  // means that arm never delegates.
   if (
-    delegation.calls.some((call) => !call.fake) ||
+    delegation.calls.some((call) => !call.fake || call.gated) ||
     new Set(delegation.calls.map((call) => call.arm)).size !== 2 ||
     delegation.calls.some((call) => call.arm === undefined)
   ) {
     violations.push('arm-scoping');
   }
-  // One fake per arm: a second fake wrapped in the same flag would let a
-  // delegation sit in the durable failover server while borrowing the arm.
-  // The set is what catches the nested form: a fire block inside the skill
-  // arm gives two fakes with the same outer flag, so a bare count passes.
+  // One fake per arm: a second fake under the same flag would let a delegation
+  // sit in the durable failover server while borrowing the arm. The set is what
+  // catches the nested form, where a bare count passes.
   if (
     delegation.fakeArms.length !== 2 ||
-    new Set(delegation.fakeArms).size !== 2
+    new Set(delegation.fakeArms).size !== 2 ||
+    delegation.nestedFakes.length > 0
   ) {
     violations.push('one-fake-per-arm');
   }
@@ -451,9 +536,7 @@ const delegationViolations = (delegation) => {
     violations.push('no-loop-hand-built');
   }
   return [...new Set(violations)];
-};
-
-// The minted-id call sites and their loud-failure fallbacks, as structure: a
+}; // The minted-id call sites and their loud-failure fallbacks, as structure: a
 // raw-text match over the whole runner is satisfied by a commented-out copy or
 // a duplicate in another arm, neither of which wires anything. The parser
 // cannot see comments, and each site carries the binding it initializes and
@@ -4350,16 +4433,16 @@ describe('managed-agent-server e2e runner', () => {
         'no-loop-hand-built',
         withSkill(SKILL + '\n' + write + "\nif (body['x']) return answer;"),
       ]),
-      // Two fakes under one arm's flag, the sibling delegation nested inside.
+      // Two fakes under ONE arm's flag, each holding one delegation: the count
+      // is satisfied and only the set distinguishes this from two arms.
       [
         'one-fake-per-arm',
         [
           decision,
-          skill(''),
-          'if (loopSkill) {\nfake2 = await startFakeOpenAIServer(({ body }) => {\nif (loopFire) {\n' +
+          skill(SKILL),
+          'if (loopSkill) {\nfake2 = await startFakeOpenAIServer(({ body }) => {\n' +
             FIRE +
-            '\n}\n});\n}',
-          fire(FIRE),
+            '\n});\n}',
         ].join('\n'),
       ],
       // The fire arm's whole block nested inside the skill arm: it is never
@@ -4370,6 +4453,90 @@ describe('managed-agent-server e2e runner', () => {
           decision,
           skill(SKILL),
           'if (loopSkill) {\n' + fire(FIRE) + '\n}',
+        ].join('\n'),
+      ],
+      // A delegation whose own flag disagrees with its fake's arm: that arm's
+      // fake never runs it, so the arm answers nothing.
+      [
+        'arm-scoping',
+        [
+          decision,
+          skill(''),
+          'if (loopFire) {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+            'const skillRespond = () => {\nif (loopSkill) {\n' +
+            SKILL +
+            '\n}\n};\nvoid skillRespond;\n' +
+            'const fireRespond = () => {\n' +
+            FIRE +
+            '\n};\nvoid fireRespond;\n});\n}',
+        ].join('\n'),
+      ],
+      // A sibling field of the same handler context is not the request body.
+      [
+        'argument-provenance',
+        [
+          decision,
+          'if (loopSkill) {\nfake = await startFakeOpenAIServer(({ body, requestIndex }) => {\n' +
+            SKILL.replace('(body,', '(requestIndex,') +
+            '\n});\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // A bare redeclaration elsewhere makes the name ambiguous, so the
+      // shorthand must not resolve to the one array that happens to be found.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst toolCalls = [fakeToolCall('cron_list', {}, 'c')];\n{ let toolCalls; toolCalls = [" +
+            HAND +
+            "];\nif (body['x']) return { toolCalls }; }",
+        ),
+      ],
+      // An indexed write through a computed key is as unattributable as a
+      // computed property key.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst KEY = 'toolCalls';\nconst answer = { content: 'f' };\nanswer[KEY] = [" +
+            HAND +
+            "];\nif (body['x']) return answer;",
+        ),
+      ],
+      // In-place writers reach the member through an argument, not a receiver.
+      ...[
+        "Reflect.set(answer, 'toolCalls', [" + HAND + ']);',
+        "Object.defineProperty(answer, 'toolCalls', { value: [" +
+          HAND +
+          '] });',
+      ].map((write) => [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst answer = { content: 'f' };\n" +
+            write +
+            "\nif (body['x']) return answer;",
+        ),
+      ]),
+      // An allow hoisted outside the fake is the same answer as an inline one.
+      [
+        'no-loop-answer-site',
+        [
+          decision,
+          "const bypassCalls = [fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')];",
+          skill(SKILL + "\nif (body['x']) return { toolCalls: bypassCalls };"),
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // A spread carries properties the inventory cannot enumerate.
+      [
+        'no-loop-hand-built',
+        [
+          decision,
+          'const FORGED = { toolCalls: [' + HAND + '] };',
+          skill(SKILL + "\nif (body['x']) return { ...FORGED };"),
+          fire(FIRE),
         ].join('\n'),
       ],
     ];
@@ -4491,6 +4658,82 @@ describe('managed-agent-server e2e runner', () => {
             '\n};\nfake = await startFakeOpenAIServer(skillFake);\n}',
           fire(FIRE),
         ].join('\n'),
+      ],
+      // Both arm blocks wrapped in one more flag: the wrapper is not an arm,
+      // because no delegation reports it.
+      [
+        'extra wrapper flag',
+        [
+          decision,
+          'if (loopArm) {\n' + skill(SKILL) + '\n' + fire(FIRE) + '\n}',
+        ].join('\n'),
+      ],
+      // A by-reference callback declared ABOVE the flag: the arm is read where
+      // the fake is started, not where the callback is written.
+      [
+        'callback declared above the flag',
+        [
+          decision,
+          'const skillFake = ({ body }) => {\n' + SKILL + '\n};',
+          'if (loopSkill) {\nfake = await startFakeOpenAIServer(skillFake);\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // A named function declaration is the same closure as an arrow here.
+      [
+        'function-declaration closure',
+        withSkill(
+          'function respond() {\n' +
+            SKILL +
+            '\n}\nconst classified2 = respond();\nvoid classified2;',
+        ),
+      ],
+      // The flag tested against a literal boolean is the same flag.
+      [
+        'comparison-spelled guard',
+        [
+          decision,
+          'if (loopSkill === true) {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+            SKILL +
+            '\n});\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // A shorthand of a hoisted alias of the cron array: same emitted bytes.
+      [
+        'shorthand hoist',
+        withSkill(
+          SKILL +
+            "\nconst cronListCalls = [fakeToolCall('cron_list', {}, 'loop-cron-list')];\nconst toolCalls = cronListCalls;\nif (body['x']) return { toolCalls };",
+        ),
+      ],
+      // Reading a toolCalls member builds no answer.
+      [
+        'read-only member call',
+        withSkill(
+          SKILL +
+            "\nconst ids = history.toolCalls.filter((c) => c.id === 'loop-create');\nvoid ids;",
+        ),
+      ],
+      // A fake under a flag that no delegation reports is not a loop arm, so
+      // its answers are outside this pin's reach — the durable-failover shape.
+      [
+        'hand-built under a non-arm flag',
+        good +
+          '\nif (durableFailover) {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+          "if (body['x']) return { toolCalls: [" +
+          HAND +
+          '] };\n});\n}',
+      ],
+      // A hand-built element in a fake with no arm flag is outside this pin's
+      // reach, exactly as the not-covered table says.
+      [
+        'hand-built in an unflagged fake',
+        good +
+          '\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+          "if (body['x']) return { toolCalls: [" +
+          HAND +
+          '] };\n});',
       ],
     ];
     for (const [label, source] of equivalent) {
