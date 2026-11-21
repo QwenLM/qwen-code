@@ -25,7 +25,7 @@
 
 ### 2.2 注册与存储范围
 
-- **用户作用域注册**：通过 `"${QWEN_CODE_CLI:-qwen}" mcp add --scope user pkgdiet npx -y pkgdiet@2.0.0 mcp` 注册至用户全局作用域（`$QWEN_HOME/settings.json` 或 `~/.qwen/settings.json`），并在配置文件中显式将 `mcpServers.pkgdiet.cwd` 设置为工作区外的独立目录（如 `$QWEN_HOME` 或用户主目录），防止受仓库本地 `.npmrc` 或 `node_modules` 干扰。
+- **用户作用域注册**：在用户全局作用域配置文件（`$QWEN_HOME/settings.json`，若未设置则为 `~/.qwen/settings.json`）中，通过单次原子写入将 `mcpServers.pkgdiet` 写入，同时包含 `command: "npx"`、`args: ["-y", "pkgdiet@2.0.0", "mcp"]` 以及工作区外的显式独立 `cwd`（如 `$QWEN_HOME` 或用户主目录），既隔离评估器免受仓库本地 `.npmrc` 或 `node_modules` 干扰，又避免热重载（hot-reload）文件协调时产生暂时缺少 `cwd` 的服务条目。
 - **进程与环境模型**：MCP 服务作为会话同级的本地 stdio 子进程运行，继承会话环境变量（`sanitizeChildEnv` 保留第三方开发凭据）。该行为在技能声明与用户确认弹窗中均作明确披露。
 - **运行时解析**：`npx -y pkgdiet@2.0.0 mcp` 在运行时动态从 npm 解析 2.x 依赖树。
 
@@ -63,3 +63,4 @@
 1. **运行时网络拉取**：首次通过 `npx` 启动时需访问 npm 官方镜像源，网络隔离环境需具备公共 registry 访问权限。
 2. **环境变量可读性**：本地 stdio 启动的 MCP 服务会继承当前会话导出的环境变量与 API 凭据。
 3. **仓库声明策略**：项目级配置文件（`.pkgdietrc.json`、`pkgdiet.config.json`）在存在时会覆盖默认评估阈值。
+4. **配置作用域限制**：pkgdiet 白名单仅在用户作用域配置文件中强制执行。在托管或多用户环境中，源自 SystemDefaults、系统作用域（System scope）、`--mcp-config` CLI 标志或会话注入的 ACP/IDE 运行时的配置均超出本技能的检查与验证范围。
