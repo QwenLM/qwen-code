@@ -146,6 +146,55 @@ describe('compressFastCommand', () => {
     expect(mockTryCompressChatFast).toHaveBeenCalledWith();
   });
 
+  it.each<[boolean, boolean, string]>([
+    [false, true, 'Context compressed (200 -> ~100).'],
+    [true, false, 'Context compressed (~200 -> 100).'],
+  ])(
+    'should pair ACP counts with their estimate flags (original=%s, new=%s)',
+    async (
+      originalTokenCountIsEstimated,
+      newTokenCountIsEstimated,
+      expectedContent,
+    ) => {
+      context.executionMode = 'acp';
+      mockTryCompressChatFast.mockResolvedValue({
+        originalTokenCount: 200,
+        newTokenCount: 100,
+        originalTokenCountIsEstimated,
+        newTokenCountIsEstimated,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      } satisfies ChatCompressionInfo);
+
+      const result = await compressFastCommand.action!(context, '');
+      expect(result?.type).toBe('stream_messages');
+      const messages = [];
+      if (result?.type === 'stream_messages') {
+        for await (const message of result.messages) {
+          messages.push(message);
+        }
+      }
+
+      expect(messages).toEqual([
+        {
+          messageType: 'info',
+          content: 'Compressing context (fast)...',
+          contextCompression: { phase: 'progress' },
+        },
+        {
+          messageType: 'info',
+          content: expectedContent,
+          contextCompression: {
+            phase: 'done',
+            originalTokenCount: 200,
+            newTokenCount: 100,
+            originalTokenCountIsEstimated,
+            newTokenCountIsEstimated,
+          },
+        },
+      ]);
+    },
+  );
+
   it('should mark the ACP no-op result as terminal', async () => {
     mockTryCompressChatFast.mockResolvedValue({
       originalTokenCount: 100,

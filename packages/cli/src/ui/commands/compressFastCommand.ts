@@ -10,11 +10,7 @@ import { MessageType } from '../types.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-
-// Estimated counts (#9309) get a '~' prefix so structured/headless consumers
-// don't treat locally estimated numbers as API-reported token counts.
-const formatTokenCount = (count: number, isEstimated?: boolean) =>
-  isEstimated ? `~${count}` : String(count);
+import { formatCompressionTokenCount } from '../utils/compression-text.js';
 
 export const compressFastCommand: SlashCommand = {
   name: 'compress-fast',
@@ -94,7 +90,7 @@ export const compressFastCommand: SlashCommand = {
           }
           yield {
             messageType: 'info' as const,
-            content: `Context compressed (${formatTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).`,
+            content: `Context compressed (${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).`,
             contextCompression: {
               phase: 'done' as const,
               originalTokenCount: compressed.originalTokenCount,
@@ -173,7 +169,7 @@ export const compressFastCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: `Context compressed (${formatTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).`,
+        content: `Context compressed (${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).`,
       };
     } catch (e) {
       if (executionMode === 'interactive') {
