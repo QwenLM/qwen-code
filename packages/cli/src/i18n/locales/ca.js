@@ -1362,6 +1362,24 @@ export default {
   'Welcome back! (Last updated: {{timeAgo}})':
     'Benvingut de nou! (Darrera actualització: {{timeAgo}})',
   'Overall Goal:': 'Objectiu general:',
+  'Sign in with Google': 'Inicia la sessió amb Google',
+  'Use your personal Google account with Gemini Code Assist':
+    'Utilitza el teu compte personal de Google amb Gemini Code Assist',
+  'Open the authorization URL and enter the returned code.':
+    "Obriu l'URL d'autorització i introduïu el codi que hagi tornat.",
+  'Complete Google authorization and wait for Code Assist setup…':
+    "Completeu l'autorització de Google i espereu la configuració de Code Assist…",
+  'c to copy link · Esc to cancel':
+    "c per copiar l'enllaç · Esc per cancel·lar",
+  'Authorization code': "Codi d'autorització",
+  'Esc to cancel and return to provider selection':
+    'Esc per cancel·lar i tornar a la selecció del proveïdor',
+  'Enter to retry · Esc to go back':
+    'Intro per tornar-ho a provar · Esc per tornar',
+  'Signed in with Google ({{tier}}).':
+    'Heu iniciat la sessió amb Google ({{tier}}).',
+  'Could not remove local Google credentials. Check local file permissions.':
+    "No s'han pogut suprimir les credencials locals de Google. Comproveu els permisos dels fitxers locals.",
   'Connect a Provider': 'Connectar un proveïdor',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'Cal connectar un proveïdor per continuar. Premeu Ctrl+C de nou per sortir.',

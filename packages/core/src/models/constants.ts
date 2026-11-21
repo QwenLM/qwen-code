@@ -6,6 +6,7 @@
 
 import { DEFAULT_QWEN_MODEL, MAINLINE_CODER_MODEL } from '../config/models.js';
 import { QWEN_SUBSCRIPTION_MODEL } from '../qwen/oauth-config.js';
+import { DEFAULT_GOOGLE_OAUTH_MODEL } from '../code_assist/constants.js';
 
 import type { ModelConfig } from './types.js';
 
@@ -121,12 +122,18 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: [],
     model: [],
   },
+  'google-oauth': {
+    apiKey: [],
+    baseUrl: [],
+    model: [],
+  },
 } as const satisfies Record<AuthType, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {
   openai: MAINLINE_CODER_MODEL,
   'qwen-oauth': DEFAULT_QWEN_MODEL,
   'qwen-subscription': QWEN_SUBSCRIPTION_MODEL,
+  'google-oauth': DEFAULT_GOOGLE_OAUTH_MODEL,
 } as Partial<Record<AuthType, string>>;
 
 /**
@@ -148,5 +155,24 @@ export const QWEN_OAUTH_MODELS: ModelConfig[] = [
  * This ensures single source of truth (SSOT).
  */
 export const QWEN_OAUTH_ALLOWED_MODELS = QWEN_OAUTH_MODELS.map(
+  (model) => model.id,
+) as readonly string[];
+
+export const GOOGLE_OAUTH_MODELS: ModelConfig[] = [
+  ...['argon', 'carbon', 'hydrogen'].map((variant) => ({
+    id: `gemini-4-${variant}`,
+    name: `Gemini 4 ${variant[0].toUpperCase()}${variant.slice(1)} (Code Assist)`,
+    description: 'Personal Google account via Gemini Code Assist',
+    capabilities: { vision: true },
+  })),
+  {
+    id: 'gemini-2.5-pro',
+    name: 'Gemini 2.5 Pro (Code Assist)',
+    description: 'Personal Google account via Gemini Code Assist',
+    capabilities: { vision: true },
+  },
+];
+
+export const GOOGLE_OAUTH_ALLOWED_MODELS = GOOGLE_OAUTH_MODELS.map(
   (model) => model.id,
 ) as readonly string[];

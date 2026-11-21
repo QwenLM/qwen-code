@@ -200,6 +200,8 @@ Use one of the built-in provider ids below, or map a custom id with `providerPro
 > [!warning]
 > A provider id that is neither a built-in protocol nor mapped via `providerProtocol` (e.g. a typo like `"openai-custom"`) cannot be routed, so its whole entry is **skipped** with a warning — its models simply won't appear in the `/model` picker. Use one of the supported auth type values above for built-in providers, or add a [`providerProtocol`](#custom-provider-ids-providerprotocol) mapping for a custom id.
 
+`google-oauth` is another built-in authentication type for personal Google accounts via Gemini Code Assist. It is **not** a generic Gemini-compatible provider: it has a fixed default model set (`gemini-4-argon`, `gemini-4-carbon`, `gemini-4-hydrogen`, and `gemini-2.5-pro`) and uses personal OAuth credentials with `loadCodeAssist` and `onboardUser`. Start it from **Sign in with Google** in `/auth`, not with `GEMINI_API_KEY` or an API-key provider entry. Custom `modelProviders` declarations or `providerProtocol` mappings cannot change its backend. For controlled tests, the endpoint may instead come from `CODE_ASSIST_ENDPOINT`; do not redirect it to an untrusted service that could receive your bearer credential.
+
 ### Custom provider ids (`providerProtocol`)
 
 Built-in provider ids (`openai`, `gemini`, `anthropic`, `vertex-ai`, `qwen-oauth`) are routed to their SDK protocol automatically. To use a **custom** provider id — for example to group several OpenAI-compatible endpoints under a friendlier name — declare it under `modelProviders` and map it to a built-in protocol with the top-level `providerProtocol` setting:

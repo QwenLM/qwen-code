@@ -232,6 +232,7 @@ export const QueryOptionsSchema = z
         'qwen-subscription',
         'gemini',
         'vertex-ai',
+        'google-oauth',
       ])
       .optional(),
     agents: z

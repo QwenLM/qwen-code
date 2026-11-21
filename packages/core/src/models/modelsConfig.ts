@@ -11,6 +11,7 @@ import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '../qwen/oauth-config.js';
+import { GOOGLE_OAUTH_TOKEN_PLACEHOLDER } from '../code_assist/constants.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { normalizeOpenAiWireBaseUrl } from '../core/openaiContentGenerator/constants.js';
 import { tokenLimit } from '../core/tokenLimits.js';
@@ -923,7 +924,10 @@ export class ModelsConfig {
   /**
    * Apply resolved model config to generation config
    */
-  private applyResolvedModelDefaults(model: ResolvedModelConfig): void {
+  private applyResolvedModelDefaults(
+    model: ResolvedModelConfig,
+    preserveGoogleGeneration = false,
+  ): void {
     this.strictModelProviderSelection = true;
     this.currentRegistryBaseUrl = model.registryBaseUrl ?? null;
     // We're explicitly applying modelProvider defaults now, so manual overrides
@@ -946,7 +950,15 @@ export class ModelsConfig {
     //
     // (OpenAI client instantiation requires an apiKey even though it will be
     // replaced later.)
-    if (
+    if (this.currentAuthType === AuthType.GOOGLE_OAUTH) {
+      this._generationConfig.apiKey = GOOGLE_OAUTH_TOKEN_PLACEHOLDER;
+      this.generationConfigSources['apiKey'] = {
+        kind: 'computed',
+        detail: 'Google OAuth placeholder token',
+      };
+      this._generationConfig.apiKeyEnvKey = undefined;
+      delete this.generationConfigSources['apiKeyEnvKey'];
+    } else if (
       this.currentAuthType === AuthType.QWEN_OAUTH ||
       this.currentAuthType === AuthType.QWEN_SUBSCRIPTION
     ) {
@@ -1011,6 +1023,12 @@ export class ModelsConfig {
     // Generation config: apply all fields from MODEL_GENERATION_CONFIG_FIELDS
     const gc = model.generationConfig;
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+      if (
+        preserveGoogleGeneration &&
+        (gc[field] === undefined ||
+          this.generationConfigSources[field]?.kind === 'settings')
+      )
+        continue;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this._generationConfig as any)[field] = gc[field];
       this.generationConfigSources[field] = {
@@ -1022,7 +1040,11 @@ export class ModelsConfig {
     }
 
     // contextWindowSize fallback: auto-detect from model when not set by provider
-    if (gc.contextWindowSize === undefined) {
+    if (
+      gc.contextWindowSize === undefined &&
+      (!preserveGoogleGeneration ||
+        this._generationConfig.contextWindowSize === undefined)
+    ) {
       this._generationConfig.contextWindowSize = tokenLimit(model.id, 'input');
       this.generationConfigSources['contextWindowSize'] = {
         kind: 'computed',
@@ -1031,7 +1053,11 @@ export class ModelsConfig {
     }
 
     // modalities fallback: auto-detect from model when not set by provider
-    if (gc.modalities === undefined) {
+    if (
+      gc.modalities === undefined &&
+      (!preserveGoogleGeneration ||
+        this._generationConfig.modalities === undefined)
+    ) {
       this._generationConfig.modalities = defaultModalities(model.id);
       this.generationConfigSources['modalities'] = {
         kind: 'computed',
@@ -1206,7 +1232,10 @@ export class ModelsConfig {
           : undefined
         : undefined;
 
-      this.applyResolvedModelDefaults(resolved);
+      this.applyResolvedModelDefaults(
+        resolved,
+        authType === AuthType.GOOGLE_OAUTH && isUnchanged,
+      );
 
       // Restore the previously-resolved apiKey if applyResolvedModelDefaults
       // cleared it (env var not found) and this is the same model.

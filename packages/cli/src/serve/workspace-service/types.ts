@@ -56,6 +56,13 @@ export type {
   WorkspaceSkillScope,
 } from '../workspace-skill-management.js';
 
+export type GoogleOAuthFlowCommand =
+  | 'qwen/google-oauth/start'
+  | 'qwen/google-oauth/status'
+  | 'qwen/google-oauth/code'
+  | 'qwen/google-oauth/cancel'
+  | 'qwen/google-oauth/logout';
+
 // ---------------------------------------------------------------------------
 // WorkspaceRequestContext
 // ---------------------------------------------------------------------------
@@ -305,6 +312,13 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
     options?: { subscriptionSignedOut?: boolean },
   ): Promise<ServeModelProviderRuntimeSyncResult>;
+
+  /** Execute one of the four supported personal Google OAuth flow commands. */
+  googleOAuthCommand<T>(
+    ctx: WorkspaceRequestContext,
+    method: GoogleOAuthFlowCommand,
+    params?: Record<string, unknown>,
+  ): Promise<T>;
 
   /** Drop cached skill status so extension skill changes are re-enumerated. */
   invalidateWorkspaceSkillsStatus(): void;

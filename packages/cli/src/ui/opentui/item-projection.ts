@@ -122,6 +122,8 @@ export function projectAbout(systemInfo: Record<string, unknown>): string {
     const matched = findProviderByCredentials(baseUrl, apiKeyEnvKey);
     if (selectedAuthType === 'qwen-subscription') {
       authLabel = 'Qwen Subscription';
+    } else if (selectedAuthType === 'google-oauth') {
+      authLabel = 'Google OAuth';
     } else if (matched && resolveMetadataKey(matched) && matched.label) {
       authLabel = matched.label;
     } else if (
@@ -135,7 +137,9 @@ export function projectAbout(systemInfo: Record<string, unknown>): string {
   }
   addField('Auth', authLabel);
   const isOAuth =
-    authLabel === 'Qwen OAuth' || authLabel.startsWith('Qwen OAuth');
+    authLabel === 'Qwen OAuth' ||
+    authLabel.startsWith('Qwen OAuth') ||
+    authLabel === 'Google OAuth';
   // ink's formatBaseUrl hides the line unless BOTH the auth type and the
   // base URL are present (systemInfoFields.ts).
   if (!isOAuth && selectedAuthType && baseUrl) {

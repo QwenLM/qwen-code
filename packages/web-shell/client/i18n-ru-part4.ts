@@ -455,6 +455,17 @@ export const RU_PART4: Record<
   'skilldesc.triage': 'Разбирать и ревьюить issue и PR Qwen Code',
   'local.approvalMode': 'Изменить режим подтверждения',
   'local.auth': 'Подключить поставщика LLM',
+  'auth.google.entryTitle': 'Войти через Google',
+  'auth.google.entryDescription':
+    'Использовать личный аккаунт Google через Gemini Code Assist',
+  'auth.google.title': 'Войти через Google',
+  'auth.google.instructions':
+    'Завершите авторизацию Google в браузере, затем введите полученный код.',
+  'auth.google.codeRequired': 'Введите код авторизации.',
+  'auth.google.codeLabel': 'Код авторизации',
+  'auth.google.submitCode': 'Продолжить',
+  'auth.google.connected': 'Вы вошли через Google.',
+  'auth.google.failed': 'Ошибка входа через Google. Повторите попытку.',
   'auth.title': 'Подключить поставщика',
   'auth.step.group': 'Тип',
   'auth.step.authorization': 'Авторизация',

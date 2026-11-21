@@ -689,6 +689,8 @@ export type {
   DaemonSubscriptionConfig,
   DaemonSubscriptionUserInfo,
   DaemonSubscriptionFlow,
+  DaemonGoogleOAuthFlow,
+  DaemonGoogleOAuthUserData,
   DaemonWeixinAccountStatus,
   DaemonWeixinLoginFlow,
   DaemonDeviceFlowStartResult,

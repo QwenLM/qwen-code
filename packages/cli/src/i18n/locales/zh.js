@@ -1784,6 +1784,20 @@ export default {
   'Welcome back! (Last updated: {{timeAgo}})':
     '欢迎回来！（最后更新：{{timeAgo}}）',
   'Overall Goal:': '总体目标：',
+  'Sign in with Google': '使用 Google 账号登录',
+  'Use your personal Google account with Gemini Code Assist':
+    '使用您的个人 Google 账号访问 Gemini Code Assist',
+  'Open the authorization URL and enter the returned code.':
+    '打开授权链接并输入返回的授权码。',
+  'Complete Google authorization and wait for Code Assist setup…':
+    '完成 Google 授权并等待 Code Assist 设置…',
+  'Authorization code': '授权码',
+  'Esc to cancel and return to provider selection':
+    '按 Esc 取消并返回服务商选择',
+  'Enter to retry · Esc to go back': '按 Enter 重试，按 Esc 返回',
+  'Signed in with Google ({{tier}}).': '已使用 Google 账号登录（{{tier}}）。',
+  'Could not remove local Google credentials. Check local file permissions.':
+    '无法删除本地 Google 凭据。请检查本地文件权限。',
   'Connect a Provider': '连接服务商',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     '必须连接一个服务商才能继续。再次按 Ctrl+C 退出',

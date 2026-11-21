@@ -304,6 +304,9 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
+import { activateGoogleOAuth } from '../ui/auth/activate-google-oauth.js';
+import { signOutGoogleOAuth } from '@qwen-code/qwen-code-core/code_assist/index.js';
+import type { DaemonGoogleOAuthFlow } from '@qwen-code/sdk/daemon';
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
 import { isUnprovenSweepReport } from '../runtime/managed-quarantine-report.js';
 import {
@@ -3979,9 +3982,17 @@ async function assertManagedConversationDirectoryIdentity(
   }
 }
 
+type GoogleOAuthFlowRecord = {
+  view: DaemonGoogleOAuthFlow;
+  controller: AbortController;
+  resolveCode?: (code: string) => void;
+  timer?: NodeJS.Timeout;
+};
+
 class QwenAgent implements Agent {
   private readonly workspaceSettings: LoadedSettings;
   private sessions: Map<string, Session> = new Map();
+  private readonly googleOAuthFlows = new Map<string, GoogleOAuthFlowRecord>();
   /**
    * Cross-session messaging for every session this process hosts.
    *
@@ -5474,6 +5485,11 @@ class QwenAgent implements Agent {
   async disposeSessions(): Promise<void> {
     this.activeWorkReporter?.dispose();
     this.activeWorkReporter = undefined;
+    for (const flow of this.googleOAuthFlows.values()) {
+      clearTimeout(flow.timer);
+      flow.controller.abort();
+    }
+    this.googleOAuthFlows.clear();
     for (const generation of this.generationControllers.values()) {
       generation.controller.abort();
     }
@@ -10324,6 +10340,125 @@ class QwenAgent implements Agent {
     }
   }
 
+  private async startGoogleOAuthFlow(): Promise<DaemonGoogleOAuthFlow> {
+    if (!this.settings.isTrusted) {
+      throw new Error('Workspace is not trusted.');
+    }
+    const enforced = this.settings.merged.security?.auth?.enforcedType;
+    if (enforced && enforced !== AuthType.GOOGLE_OAUTH) {
+      throw new Error('Authentication is restricted by policy.');
+    }
+    if (
+      [...this.googleOAuthFlows.values()].some(
+        (flow) =>
+          flow.view.status === 'waiting' ||
+          flow.view.status === 'awaiting-code',
+      )
+    ) {
+      throw new Error('A Google OAuth flow is already active.');
+    }
+    if (this.googleOAuthFlows.size >= 8) {
+      throw new Error('Too many Google OAuth flows.');
+    }
+
+    const id = randomUUID();
+    const controller = new AbortController();
+    const record: GoogleOAuthFlowRecord = {
+      view: { id, status: 'waiting' },
+      controller,
+    };
+    this.googleOAuthFlows.set(id, record);
+    const run = async () => {
+      const userData = await activateGoogleOAuth(
+        this.settings,
+        this.config,
+        controller.signal,
+        {
+          browser: 'manual',
+          onAuthorizationUrl: (authorizationUrl) => {
+            record.view = {
+              ...record.view,
+              authorizationUrl,
+              status: 'awaiting-code',
+            };
+          },
+          requestAuthorizationCode: () =>
+            new Promise<string>((resolve) => {
+              record.resolveCode = (code) => {
+                record.resolveCode = undefined;
+                record.view = { ...record.view, status: 'waiting' };
+                resolve(code);
+              };
+            }),
+        },
+      );
+      controller.signal.throwIfAborted();
+      record.view = {
+        ...record.view,
+        status: 'ready',
+        modelId: this.config.getModel(),
+        userData: {
+          projectId: userData.projectId,
+          userTier: userData.userTier,
+          ...(userData.userTierName
+            ? { userTierName: userData.userTierName }
+            : {}),
+          ...(userData.email ? { email: userData.email } : {}),
+        },
+      };
+    };
+    void run()
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          record.view = {
+            ...record.view,
+            status: 'error',
+            errorCode: 'google_oauth_failed',
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+          };
+        }
+      })
+      .finally(() => {
+        record.resolveCode = undefined;
+        record.timer = setTimeout(
+          () => this.googleOAuthFlows.delete(id),
+          60_000,
+        );
+        record.timer.unref();
+      });
+    return { ...record.view };
+  }
+
+  private googleOAuthFlow(id: string): GoogleOAuthFlowRecord {
+    const flow = this.googleOAuthFlows.get(id);
+    if (!flow) {
+      throw new Error('Google OAuth flow not found.');
+    }
+    return flow;
+  }
+
+  private submitGoogleOAuthCode(id: string, code: string): void {
+    const flow = this.googleOAuthFlow(id);
+    const resolveCode = flow.resolveCode;
+    if (flow.view.status !== 'awaiting-code' || !resolveCode) {
+      throw new Error('Google OAuth is not waiting for an authorization code.');
+    }
+    const trimmed = code.trim();
+    if (!trimmed) {
+      throw new Error('An authorization code is required.');
+    }
+    resolveCode(trimmed);
+  }
+
+  private cancelGoogleOAuthFlow(id: string): void {
+    const flow = this.googleOAuthFlows.get(id);
+    if (!flow) return;
+    clearTimeout(flow.timer);
+    flow.controller.abort();
+    this.googleOAuthFlows.delete(id);
+  }
+
   private async extMethodInternal(
     method: string,
     params: Record<string, unknown>,
@@ -10434,6 +10569,46 @@ class QwenAgent implements Agent {
         return {
           released: session.releaseTodoStopGuardQueuedPromptWait(promptId),
         };
+      }
+      case 'qwen/google-oauth/start': {
+        return { ...(await this.startGoogleOAuthFlow()) };
+      }
+      case 'qwen/google-oauth/status': {
+        const id = params['id'];
+        if (typeof id !== 'string' || id.length === 0) {
+          throw RequestError.invalidParams(undefined, 'Invalid flow id.');
+        }
+        return { ...this.googleOAuthFlow(id).view };
+      }
+      case 'qwen/google-oauth/code': {
+        const id = params['id'];
+        const code = params['code'];
+        if (
+          typeof id !== 'string' ||
+          id.length === 0 ||
+          typeof code !== 'string'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid flow id or authorization code.',
+          );
+        }
+        this.submitGoogleOAuthCode(id, code);
+        return { accepted: true };
+      }
+      case 'qwen/google-oauth/cancel': {
+        const id = params['id'];
+        if (typeof id !== 'string' || id.length === 0) {
+          throw RequestError.invalidParams(undefined, 'Invalid flow id.');
+        }
+        this.cancelGoogleOAuthFlow(id);
+        return { cancelled: true };
+      }
+      case 'qwen/google-oauth/logout': {
+        for (const id of [...this.googleOAuthFlows.keys()]) {
+          this.cancelGoogleOAuthFlow(id);
+        }
+        return { signedOut: await signOutGoogleOAuth(this.config) };
       }
       case 'qwen/providers/list': {
         return {

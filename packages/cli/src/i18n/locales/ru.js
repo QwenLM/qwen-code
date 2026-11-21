@@ -1279,6 +1279,20 @@ export default {
   'Welcome back! (Last updated: {{timeAgo}})':
     'С возвращением! (Последнее обновление: {{timeAgo}})',
   'Overall Goal:': 'Общая цель:',
+  'Sign in with Google': 'Войти через Google',
+  'Use your personal Google account with Gemini Code Assist':
+    'Использовать личный аккаунт Google в Gemini Code Assist',
+  'Open the authorization URL and enter the returned code.':
+    'Откройте URL авторизации и введите полученный код.',
+  'Complete Google authorization and wait for Code Assist setup…':
+    'Завершите авторизацию Google и дождитесь настройки Code Assist…',
+  'Authorization code': 'Код авторизации',
+  'Esc to cancel and return to provider selection':
+    'Esc — отменить и вернуться к выбору провайдера',
+  'Enter to retry · Esc to go back': 'Enter — повторить · Esc — назад',
+  'Signed in with Google ({{tier}}).': 'Вы вошли через Google ({{tier}}).',
+  'Could not remove local Google credentials. Check local file permissions.':
+    'Не удалось удалить локальные учетные данные Google. Проверьте права доступа к локальным файлам.',
   'Connect a Provider': 'Подключить провайдера',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'Необходимо подключить провайдера для продолжения. Нажмите Ctrl+C снова для выхода.',

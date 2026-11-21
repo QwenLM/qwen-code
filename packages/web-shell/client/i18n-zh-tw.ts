@@ -2926,6 +2926,17 @@ export const ZH_TW: Record<string, MessageValue> = {
   'skilldesc.triage': '把關和審查 Qwen Code 的 issue 與 PR',
   'local.approvalMode': '切換審批模式',
   'local.auth': '連線模型供應商',
+  'auth.google.entryTitle': '使用 Google 帳號登入',
+  'auth.google.entryDescription':
+    '透過 Gemini Code Assist 使用個人 Google 帳號',
+  'auth.google.title': '使用 Google 帳號登入',
+  'auth.google.instructions':
+    '在瀏覽器完成 Google 授權，然後輸入返回的授權碼。',
+  'auth.google.codeRequired': '請輸入授權碼。',
+  'auth.google.codeLabel': '授權碼',
+  'auth.google.submitCode': '繼續',
+  'auth.google.connected': '已使用 Google 帳號登入。',
+  'auth.google.failed': 'Google 登入失敗，請重試。',
   'auth.title': '連線供應商',
   'auth.step.group': '型別',
   'auth.step.authorization': '授權',

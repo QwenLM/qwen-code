@@ -20,6 +20,11 @@ const { actions, ownerGuard, ownerState, sessionState, sessionActions } =
         getSubscriptionDefaultModel: vi.fn(),
         signOutSubscription: vi.fn(),
         activateSubscription: vi.fn(),
+        startGoogleOAuthLogin: vi.fn(),
+        getGoogleOAuthLogin: vi.fn(),
+        submitGoogleOAuthCode: vi.fn(),
+        cancelGoogleOAuthLogin: vi.fn(),
+        signOutGoogleOAuth: vi.fn(),
         loadProviders: vi.fn(),
         installAuthProvider: vi.fn(),
       },
@@ -79,6 +84,25 @@ beforeEach(() => {
     modelId: 'qwen3.8-max',
     runtimeSync: { status: 'applied' },
   });
+  actions.startGoogleOAuthLogin.mockReset().mockResolvedValue({
+    id: 'google-flow',
+    status: 'awaiting-code',
+    authorizationUrl: 'https://accounts.google.test/oauth',
+  });
+  actions.getGoogleOAuthLogin.mockReset().mockResolvedValue({
+    id: 'google-flow',
+    status: 'ready',
+    modelId: 'gemini-4-argon',
+    userData: {
+      projectId: 'managed-project',
+      userTier: 'free-tier',
+      userTierName: 'Free',
+      email: 'person@example.test',
+    },
+  });
+  actions.submitGoogleOAuthCode.mockReset().mockResolvedValue(undefined);
+  actions.cancelGoogleOAuthLogin.mockReset().mockResolvedValue(undefined);
+  actions.signOutGoogleOAuth.mockReset().mockResolvedValue(undefined);
   actions.getSubscriptionConfig
     .mockReset()
     .mockResolvedValue({ enabled: false });
@@ -826,6 +850,95 @@ describe('subscription development entry', () => {
       rerender,
     };
   }
+  it('completes Google OAuth and activates the selected model', async () => {
+    delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
+    const browser = vi.spyOn(window, 'open').mockReturnValue(null);
+    const { onClose, onModelActivated } = await openAuth(true);
+    const entry = document.querySelector(
+      'button[aria-label="Sign in with Google"]',
+    );
+    expect(entry).not.toBeNull();
+    await act(async () => (entry as HTMLButtonElement).click());
+
+    await vi.waitFor(
+      () =>
+        expect(onModelActivated).toHaveBeenCalledWith(
+          'gemini-4-argon(google-oauth)',
+        ),
+      { timeout: 3_000 },
+    );
+    expect(onClose).toHaveBeenCalled();
+    expect(actions.startGoogleOAuthLogin).toHaveBeenCalledWith({
+      workspace: '/workspace',
+    });
+    expect(browser).toHaveBeenCalledWith(
+      'https://accounts.google.test/oauth',
+      '_blank',
+      'noopener,noreferrer',
+    );
+    expect(actions.cancelGoogleOAuthLogin).not.toHaveBeenCalled();
+    //    expect(sessionActions.refreshModels).toHaveBeenCalledOnce();
+    expect(
+      sessionActions.refreshModels.mock.invocationCallOrder[0],
+    ).toBeLessThan(onModelActivated.mock.invocationCallOrder[0]);
+  });
+  it('starts Google OAuth through Next after focusing the entry', async () => {
+    await openAuth(true);
+    const entry = document.querySelector(
+      'button[aria-label="Sign in with Google"]',
+    ) as HTMLButtonElement;
+    await act(async () => entry.focus());
+    const next = [...document.querySelectorAll('button')].find(
+      (item) => item.textContent?.toLowerCase() === 'next',
+    ) as HTMLButtonElement;
+    expect(next).toBeDefined();
+    await act(async () => next.click());
+    await vi.waitFor(() =>
+      expect(actions.startGoogleOAuthLogin).toHaveBeenCalledWith({
+        workspace: '/workspace',
+      }),
+    );
+  });
+
+  it('returns focus to the Google entry after cancelling the flow', async () => {
+    actions.getGoogleOAuthLogin.mockImplementation(async () => ({
+      id: 'google-flow',
+      status: 'awaiting-code',
+      authorizationUrl: 'https://accounts.google.test/oauth',
+    }));
+    await openAuth(true);
+    const entry = document.querySelector(
+      'button[aria-label="Sign in with Google"]',
+    ) as HTMLButtonElement;
+    await act(async () => entry.focus());
+    await act(async () => entry.click());
+    await vi.waitFor(() =>
+      expect(actions.startGoogleOAuthLogin).toHaveBeenCalledOnce(),
+    );
+    const cancel = [...document.querySelectorAll('button')].find(
+      (item) => item.textContent === 'cancel',
+    ) as HTMLButtonElement;
+    await act(async () => cancel.click());
+    await vi.waitFor(() => {
+      expect(document.activeElement?.getAttribute('aria-label')).toBe(
+        'Sign in with Google',
+      );
+    });
+  });
+
+  it('keeps standalone Google OAuth on the process-global route', async () => {
+    await openAuth(false, 'en', () => undefined, true);
+    const entry = document.querySelector(
+      'button[aria-label="Sign in with Google"]',
+    ) as HTMLButtonElement;
+    await act(async () => entry.click());
+    await vi.waitFor(() =>
+      expect(actions.startGoogleOAuthLogin).toHaveBeenCalledWith({
+        workspace: undefined,
+      }),
+    );
+  });
+
   it('keeps Qwen authorization in provider step 2 and returns to the provider wizard', async () => {
     vi.spyOn(window, 'open').mockReturnValue(null);
     actions.getSubscriptionConfig.mockResolvedValue({

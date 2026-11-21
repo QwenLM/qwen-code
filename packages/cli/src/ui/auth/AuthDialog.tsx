@@ -31,6 +31,7 @@ import type { ProviderConfig } from '@qwen-code/qwen-code-core/providers/types.j
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 import { SubscriptionDialog } from './SubscriptionDialog.js';
+import { GoogleOAuthDialog } from './GoogleOAuthDialog.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,6 +39,7 @@ import { SubscriptionDialog } from './SubscriptionDialog.js';
 
 type ViewLevel =
   | 'subscription'
+  | 'google-oauth'
   | 'main'
   | 'qwencloud-select'
   | 'alibaba-select'
@@ -46,6 +48,7 @@ type ViewLevel =
 
 type MainOption =
   | 'QWEN_SUBSCRIPTION'
+  | 'GOOGLE_OAUTH'
   | 'QWENCLOUD'
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
@@ -89,6 +92,13 @@ const MAIN_ITEMS = [
       'Manually connect a local server, proxy, or unsupported provider',
     ),
     value: 'CUSTOM_PROVIDER' as MainOption,
+  },
+  {
+    key: 'GOOGLE_OAUTH',
+    title: t('Sign in with Google'),
+    label: t('Sign in with Google'),
+    description: t('Use your personal Google account with Gemini Code Assist'),
+    value: 'GOOGLE_OAUTH' as MainOption,
   },
 ];
 
@@ -232,8 +242,10 @@ export function AuthDialog(): React.JSX.Element {
   const {
     auth: {
       closeAuthDialog,
+      cancelAuthentication,
       handleProviderSubmit,
       handleSubscriptionSubmit,
+      handleGoogleOAuthSubmit,
       onAuthError,
     },
   } = useUIActions();
@@ -378,6 +390,9 @@ export function AuthDialog(): React.JSX.Element {
       case 'QWEN_SUBSCRIPTION':
         pushView('subscription');
         break;
+      case 'GOOGLE_OAUTH':
+        pushView('google-oauth');
+        break;
       case 'QWENCLOUD':
         pushView('qwencloud-select');
         break;
@@ -434,7 +449,7 @@ export function AuthDialog(): React.JSX.Element {
       }
     },
     {
-      isActive: viewLevel !== 'subscription',
+      isActive: viewLevel !== 'subscription' && viewLevel !== 'google-oauth',
     },
   );
 
@@ -457,6 +472,19 @@ export function AuthDialog(): React.JSX.Element {
   }, [viewLevel, setupFlow.state]);
 
   // -- Render ---------------------------------------------------------------
+
+  if (viewLevel === 'google-oauth') {
+    return (
+      <GoogleOAuthDialog
+        suppressBrowserLaunch={config.isBrowserLaunchSuppressed()}
+        onBack={() => {
+          cancelAuthentication();
+          goBack();
+        }}
+        onConnect={handleGoogleOAuthSubmit}
+      />
+    );
+  }
 
   if (viewLevel === 'subscription') {
     return (

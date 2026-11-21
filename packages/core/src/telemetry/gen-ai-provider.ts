@@ -13,6 +13,7 @@ export type GenAiAuthType =
   | 'openai-responses'
   | 'qwen-oauth'
   | 'qwen-subscription'
+  | 'google-oauth'
   | 'gemini'
   | 'vertex-ai'
   | 'anthropic';
@@ -144,6 +145,7 @@ export function resolveGenAiProviderName(
   switch (config.authType) {
     case 'anthropic':
       return 'anthropic';
+    case 'google-oauth':
     case 'gemini':
       return 'gcp.gemini';
     case 'vertex-ai':
@@ -156,7 +158,7 @@ export function resolveGenAiProviderName(
 export function resolveGenAiOperationName(
   authType: GenAiAuthType | undefined,
 ): GenAiOperationName {
-  return authType === 'gemini' || authType === 'vertex-ai'
+  return ['google-oauth', 'gemini', 'vertex-ai'].includes(authType ?? '')
     ? 'generate_content'
     : 'chat';
 }
@@ -170,7 +172,13 @@ export function resolveGenAiOutputType(
       }
     | undefined,
 ): GenAiOutputType | undefined {
-  if (authType !== 'gemini' && authType !== 'vertex-ai') return undefined;
+  if (
+    authType !== 'google-oauth' &&
+    authType !== 'gemini' &&
+    authType !== 'vertex-ai'
+  ) {
+    return undefined;
+  }
 
   const mimeType = config?.responseMimeType
     ?.split(';', 1)[0]

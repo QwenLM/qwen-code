@@ -119,6 +119,28 @@ vi.mock('../qwen/qwenContentGenerator.js', () => ({
   },
 }));
 
+const codeAssistState = vi.hoisted(() => ({
+  calls: 0,
+  error: null as Error | null,
+  config: null as ContentGeneratorConfig | null,
+}));
+
+vi.mock('../code_assist/index.js', () => ({
+  createCodeAssistContentGenerator: (config: ContentGeneratorConfig) => {
+    codeAssistState.config = config;
+    codeAssistState.calls += 1;
+    if (codeAssistState.error) throw codeAssistState.error;
+    return {
+      generateContent: async () => ({ responseId: 'code-assist-sentinel' }),
+      generateContentStream: async () =>
+        (async function* () {
+          yield {};
+        })(),
+      embedContent: async () => ({ embeddings: [] }),
+    };
+  },
+}));
+
 vi.mock('../utils/openaiLogger.js', () => ({
   OpenAILogger: class {
     constructor(customLogDir?: string, cwd?: string) {
@@ -164,6 +186,9 @@ function resetMockState() {
   qwenMockState.constructorCount = 0;
   qwenMockState.constructorModels = [];
   openaiLoggerMockState.constructorCalls = [];
+  codeAssistState.calls = 0;
+  codeAssistState.error = null;
+  codeAssistState.config = null;
 }
 
 describe('createContentGenerator', () => {
@@ -447,6 +472,48 @@ describe('createContentGenerator', () => {
     expect(qwenMockState.constructorCount).toBe(0);
   });
 
+  it('prepares Google OAuth before exposing the lazy content generator', async () => {
+    const generator = await createContentGenerator(
+      {
+        model: 'gemini-4-argon',
+        authType: AuthType.GOOGLE_OAUTH,
+        samplingParams: { temperature: 0.2 },
+      },
+      fakeConfig(false, {
+        getTelemetryUserId: () => undefined,
+        getTelemetryLogPromptsEnabled: () => false,
+        getTelemetrySensitiveSpanAttributeMaxLength: () => 1024,
+        getTelemetryIncludeSensitiveSpanAttributes: () => false,
+        getChatRecordingService: () => undefined,
+        notifyRequestLifecycle: () => undefined,
+      }),
+    );
+    expect(codeAssistState.calls).toBe(1);
+    expect(codeAssistState.config?.samplingParams).toEqual({
+      temperature: 0.2,
+    });
+    await expect(
+      generator.generateContent(
+        { model: 'gemini-4-argon', contents: 'hello' },
+        'prompt-1',
+      ),
+    ).resolves.toMatchObject({ responseId: 'code-assist-sentinel' });
+    expect(codeAssistState.calls).toBe(1);
+  });
+
+  it('rejects an unavailable cached Google session during refresh, not on first use', async () => {
+    codeAssistState.error = new Error(
+      'Cached Google OAuth credentials are missing',
+    );
+    await expect(
+      createContentGenerator(
+        { model: 'gemini-4-argon', authType: AuthType.GOOGLE_OAUTH },
+        fakeConfig(),
+      ),
+    ).rejects.toThrow('Cached Google OAuth credentials are missing');
+    expect(codeAssistState.calls).toBe(1);
+  });
+
   it('should throw when the config has no authType', async () => {
     await expect(
       createContentGenerator(
@@ -577,6 +644,7 @@ describe('validateModelConfig - Vertex AI Application Default Credentials', () =
   } as ContentGeneratorConfig;
 
   beforeEach(() => {
+    resetMockState();
     vi.stubEnv('GOOGLE_CLOUD_PROJECT', '');
   });
 
@@ -647,6 +715,17 @@ describe('validateModelConfig - Vertex AI Application Default Credentials', () =
     // The keyless hint is Vertex-specific: recommending a project to a Gemini
     // API user is the misleading-placeholder advice it exists to prevent.
     expect(result.errors[0].message).not.toContain('GOOGLE_CLOUD_PROJECT');
+  });
+
+  it('still requires a model for Google OAuth', () => {
+    const result = validateModelConfig({
+      model: '',
+      authType: AuthType.GOOGLE_OAUTH,
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.map((error) => error.message)).toEqual([
+      expect.stringContaining('model'),
+    ]);
   });
 
   it('keeps failing on the declared key variable when the entry has an envKey', () => {

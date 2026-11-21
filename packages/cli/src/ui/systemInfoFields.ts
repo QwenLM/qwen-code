@@ -98,6 +98,9 @@ function formatAuth(info: ExtendedSystemInfo): string {
   if (info.selectedAuthType === 'qwen-subscription') {
     return 'Qwen Subscription';
   }
+  if (info.selectedAuthType === 'google-oauth') {
+    return 'Google OAuth';
+  }
 
   const managedProvider = findProviderByCredentials(
     info.baseUrl,
@@ -124,7 +127,8 @@ function formatBaseUrl(info: ExtendedSystemInfo): string {
 
   if (
     info.selectedAuthType.startsWith('oauth') ||
-    info.selectedAuthType === 'qwen-oauth'
+    info.selectedAuthType === 'qwen-oauth' ||
+    info.selectedAuthType === 'google-oauth'
   ) {
     return '';
   }

@@ -259,9 +259,14 @@ export function DialogShell({
               focusTarget?.focus({ preventScroll: true });
               return;
             }
-            const preferred = getFocusable(panelRef.current).find(
-              (element) => !element.hasAttribute('data-dialog-close'),
-            );
+            const candidates = getFocusable(panelRef.current);
+            const preferred =
+              candidates.find((element) =>
+                element.hasAttribute('data-dialog-initial-focus'),
+              ) ??
+              candidates.find(
+                (element) => !element.hasAttribute('data-dialog-close'),
+              );
             (preferred ?? panelRef.current)?.focus();
           }}
           onCloseAutoFocus={(event) => event.preventDefault()}

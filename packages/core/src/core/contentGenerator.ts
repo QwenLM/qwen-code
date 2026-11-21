@@ -369,7 +369,7 @@ export function validateModelConfig(
 ): ModelConfigValidationResult {
   const errors: Error[] = [];
 
-  // Qwen OAuth doesn't need validation - it uses dynamic tokens
+  // OAuth providers validate and refresh dynamic tokens outside this field check.
   if (
     config.authType === AuthType.QWEN_OAUTH ||
     config.authType === AuthType.QWEN_SUBSCRIPTION
@@ -378,7 +378,11 @@ export function validateModelConfig(
   }
 
   // API key is required for all other auth types
-  if (!config.apiKey && !usesVertexApplicationDefaultCredentials(config)) {
+  if (
+    config.authType !== AuthType.GOOGLE_OAUTH &&
+    !config.apiKey &&
+    !usesVertexApplicationDefaultCredentials(config)
+  ) {
     if (isStrictModelProvider) {
       errors.push(
         new StrictMissingCredentialsError(
@@ -585,6 +589,15 @@ export async function createContentGenerator(
         }
         throw new Error(error instanceof Error ? error.message : String(error));
       }
+    } else if (authType === AuthType.GOOGLE_OAUTH) {
+      const { createCodeAssistContentGenerator } = await import(
+        '../code_assist/index.js'
+      );
+      const baseGenerator = await createCodeAssistContentGenerator(
+        generatorConfig,
+        config,
+      );
+      loadBaseGenerator = async () => baseGenerator;
     } else if (authType === AuthType.USE_ANTHROPIC) {
       loadBaseGenerator = async () => {
         const { createAnthropicContentGenerator } = await import(

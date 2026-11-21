@@ -41,6 +41,11 @@ import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscript
 import { BTW_STREAM_TIMEOUT_MS } from './btw-generation.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
 
+const googleOAuthActivationMock = vi.hoisted(() => vi.fn());
+vi.mock('../ui/auth/activate-google-oauth.js', () => ({
+  activateGoogleOAuth: googleOAuthActivationMock,
+}));
+
 const mockPrepareFileWatchersForProcessExit = vi.hoisted(() => vi.fn());
 vi.mock(
   '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js',
@@ -25538,6 +25543,113 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({ providerId: 'deepseek' }),
       expect.objectContaining({ settings }),
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('completes a manual Google OAuth flow through the ACP runner', async () => {
+    const settings = Object.assign(makeSessionSettings(), { isTrusted: true });
+    let callbacks: Record<string, unknown> | undefined;
+    let exchangedCode = '';
+    googleOAuthActivationMock.mockImplementation(
+      async (
+        _settings: unknown,
+        _config: unknown,
+        _signal: AbortSignal,
+        options: Record<string, unknown>,
+      ) => {
+        callbacks = options;
+        await (options['onAuthorizationUrl'] as (url: string) => Promise<void>)(
+          'https://accounts.google.test/oauth',
+        );
+        exchangedCode = await (
+          options['requestAuthorizationCode'] as () => Promise<string>
+        )();
+        return {
+          projectId: 'managed-project',
+          userTier: 'free-tier',
+          userTierName: 'Free',
+          email: 'person@example.test',
+        };
+      },
+    );
+    mockConfig.getModel = vi.fn(() => 'gemini-4-argon');
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const started = await agent.extMethod('qwen/google-oauth/start', {});
+    const id = started['id'] as string;
+    expect(id).toBeTruthy();
+    await vi.waitFor(async () => {
+      const view = await agent.extMethod('qwen/google-oauth/status', { id });
+      expect(view['status']).toBe('awaiting-code');
+      expect(view['authorizationUrl']).toBe(
+        'https://accounts.google.test/oauth',
+      );
+    });
+    expect((callbacks?.['browser'] as string | undefined) ?? undefined).toBe(
+      'manual',
+    );
+
+    await expect(
+      agent.extMethod('qwen/google-oauth/code', {
+        id,
+        code: 'manual-code',
+      }),
+    ).resolves.toEqual({ accepted: true });
+    await vi.waitFor(async () => {
+      const view = await agent.extMethod('qwen/google-oauth/status', { id });
+      expect(view).toMatchObject({
+        status: 'ready',
+        modelId: 'gemini-4-argon',
+        userData: {
+          projectId: 'managed-project',
+          userTier: 'free-tier',
+          email: 'person@example.test',
+        },
+      });
+    });
+    expect(exchangedCode).toBe('manual-code');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('cancels a pending Google OAuth flow and rejects duplicate starts', async () => {
+    const settings = Object.assign(makeSessionSettings(), { isTrusted: true });
+    let signal: AbortSignal | undefined;
+    googleOAuthActivationMock.mockImplementation(
+      async (_settings: unknown, _config: unknown, nextSignal: AbortSignal) => {
+        signal = nextSignal;
+        return new Promise(() => undefined);
+      },
+    );
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const started = await agent.extMethod('qwen/google-oauth/start', {});
+    const id = started['id'] as string;
+    await expect(
+      agent.extMethod('qwen/google-oauth/start', {}),
+    ).rejects.toThrow('A Google OAuth flow is already active.');
+    await expect(
+      agent.extMethod('qwen/google-oauth/cancel', { id }),
+    ).resolves.toEqual({ cancelled: true });
+    expect(signal?.aborted).toBe(true);
+    await expect(
+      agent.extMethod('qwen/google-oauth/status', { id }),
+    ).rejects.toThrow('Google OAuth flow not found.');
 
     mockConnectionState.resolve();
     await agentPromise;

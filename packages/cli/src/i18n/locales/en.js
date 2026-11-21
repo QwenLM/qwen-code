@@ -1867,6 +1867,20 @@ export default {
   'Welcome back! (Last updated: {{timeAgo}})':
     'Welcome back! (Last updated: {{timeAgo}})',
   'Overall Goal:': 'Overall Goal:',
+  'Sign in with Google': 'Sign in with Google',
+  'Use your personal Google account with Gemini Code Assist':
+    'Use your personal Google account with Gemini Code Assist',
+  'Open the authorization URL and enter the returned code.':
+    'Open the authorization URL and enter the returned code.',
+  'Complete Google authorization and wait for Code Assist setup…':
+    'Complete Google authorization and wait for Code Assist setup…',
+  'Authorization code': 'Authorization code',
+  'Esc to cancel and return to provider selection':
+    'Esc to cancel and return to provider selection',
+  'Enter to retry · Esc to go back': 'Enter to retry · Esc to go back',
+  'Signed in with Google ({{tier}}).': 'Signed in with Google ({{tier}}).',
+  'Could not remove local Google credentials. Check local file permissions.':
+    'Could not remove local Google credentials. Check local file permissions.',
   'Connect a Provider': 'Connect a Provider',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'You must connect a provider to proceed. Press Ctrl+C again to exit.',

@@ -3144,6 +3144,17 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'skilldesc.triage': 'Triage and review Qwen Code issues and PRs',
   'local.approvalMode': 'Change approval mode',
   'local.auth': 'Connect an LLM provider',
+  'auth.google.entryTitle': 'Sign in with Google',
+  'auth.google.entryDescription':
+    'Use your personal Google account with Gemini Code Assist',
+  'auth.google.title': 'Sign in with Google',
+  'auth.google.instructions':
+    'Complete Google authorization in your browser, then enter the returned code.',
+  'auth.google.codeRequired': 'Enter the authorization code.',
+  'auth.google.codeLabel': 'Authorization code',
+  'auth.google.submitCode': 'Continue',
+  'auth.google.connected': 'Signed in with Google.',
+  'auth.google.failed': 'Google sign-in failed. Please try again.',
   'auth.title': 'Connect a Provider',
   'auth.step.group': 'Type',
   'auth.step.authorization': 'Authorization',

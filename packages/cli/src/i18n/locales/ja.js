@@ -1107,6 +1107,22 @@ export default {
   'Welcome back! (Last updated: {{timeAgo}})':
     'おかえりなさい!(最終更新: {{timeAgo}})',
   'Overall Goal:': '全体目標:',
+  'Sign in with Google': 'Google でログイン',
+  'Use your personal Google account with Gemini Code Assist':
+    '個人の Google アカウントで Gemini Code Assist を使用する',
+  'Open the authorization URL and enter the returned code.':
+    '認証 URL を開き、返されたコードを入力してください。',
+  'Complete Google authorization and wait for Code Assist setup…':
+    'Google 認証を完了し、Code Assist のセットアップを待っています…',
+  'c to copy link · Esc to cancel': 'c でリンクをコピー · Esc でキャンセル',
+  'Authorization code': '認証コード',
+  'Esc to cancel and return to provider selection':
+    'Esc でキャンセルしてプロバイダー選択に戻る',
+  'Enter to retry · Esc to go back': 'Enter で再試行 · Esc で戻る',
+  'Signed in with Google ({{tier}}).':
+    'Google でログインしました（{{tier}}）。',
+  'Could not remove local Google credentials. Check local file permissions.':
+    'ローカルの Google 認証情報を削除できませんでした。ローカルファイルの権限を確認してください。',
   'Connect a Provider': 'プロバイダーに接続',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     '続行するにはプロバイダーに接続してください。Ctrl+C をもう一度押すと終了します',

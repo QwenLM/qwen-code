@@ -50,6 +50,7 @@ import type {
   DaemonSubscriptionConfig,
   DaemonSubscriptionUserInfo,
   DaemonSubscriptionFlow,
+  DaemonGoogleOAuthFlow,
   DaemonBrand,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
@@ -7789,6 +7790,99 @@ export class DaemonClient {
             res,
             'DELETE /auth/subscription/flows/:id',
           );
+      },
+    );
+  }
+
+  private googleOAuthBaseRoute(workspace?: string): string {
+    if (workspace === '') {
+      throw new Error('workspace must not be empty when provided');
+    }
+    return workspace === undefined
+      ? '/auth/google'
+      : `/workspaces/${urlEncode(workspace)}/auth/google`;
+  }
+
+  async startGoogleOAuthLogin(
+    opts: { workspace?: string; signal?: AbortSignal } = {},
+  ): Promise<DaemonGoogleOAuthFlow> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${this.googleOAuthBaseRoute(opts.workspace)}/flows`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+        signal: opts.signal,
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'POST /auth/google/flows');
+        return (await res.json()) as DaemonGoogleOAuthFlow;
+      },
+    );
+  }
+
+  async getGoogleOAuthLogin(
+    id: string,
+    opts: { workspace?: string; signal?: AbortSignal } = {},
+  ): Promise<DaemonGoogleOAuthFlow> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${this.googleOAuthBaseRoute(opts.workspace)}/flows/${urlEncode(id)}`,
+      { headers: this.headers({}), signal: opts.signal },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /auth/google/flows/:id');
+        return (await res.json()) as DaemonGoogleOAuthFlow;
+      },
+    );
+  }
+
+  async submitGoogleOAuthCode(
+    id: string,
+    code: string,
+    opts: { workspace?: string; signal?: AbortSignal } = {},
+  ): Promise<void> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${this.googleOAuthBaseRoute(opts.workspace)}/flows/${urlEncode(id)}/code`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ code }),
+        signal: opts.signal,
+      },
+      async (res) => {
+        if (res.status !== 202) {
+          throw await this.failOnError(res, 'POST /auth/google/flows/:id/code');
+        }
+      },
+    );
+  }
+
+  async cancelGoogleOAuthLogin(
+    id: string,
+    opts: { workspace?: string } = {},
+  ): Promise<void> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${this.googleOAuthBaseRoute(opts.workspace)}/flows/${urlEncode(id)}`,
+      { method: 'DELETE', headers: this.headers({}) },
+      async (res) => {
+        if (res.status !== 204 && res.status !== 404) {
+          throw await this.failOnError(res, 'DELETE /auth/google/flows/:id');
+        }
+      },
+    );
+  }
+
+  async signOutGoogleOAuth(
+    opts: { workspace?: string; signal?: AbortSignal } = {},
+  ): Promise<void> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${this.googleOAuthBaseRoute(opts.workspace)}`,
+      { method: 'DELETE', headers: this.headers({}), signal: opts.signal },
+      async (res) => {
+        if (res.status !== 204) {
+          throw await this.failOnError(res, 'DELETE /auth/google');
+        }
       },
     );
   }

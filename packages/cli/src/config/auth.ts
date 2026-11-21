@@ -354,6 +354,10 @@ export function validateAuthMethod(
     return null;
   }
 
+  if (authMethod === AuthType.GOOGLE_OAUTH) {
+    return null;
+  }
+
   if (authMethod === AuthType.USE_GEMINI) {
     const apiKeyError = getApiKeyError(authMethod, settings.merged, config);
     if (apiKeyError) {

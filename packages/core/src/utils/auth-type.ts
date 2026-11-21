@@ -13,4 +13,5 @@ export enum AuthType {
   USE_GEMINI = 'gemini',
   USE_VERTEX_AI = 'vertex-ai',
   USE_ANTHROPIC = 'anthropic',
+  GOOGLE_OAUTH = 'google-oauth',
 }
