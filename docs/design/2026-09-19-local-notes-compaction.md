@@ -265,7 +265,10 @@ payload. Evidence outside those boundaries and in sibling JSON fields remains
 available; an unquoted trailing phrase without a structural boundary is
 ambiguous and is omitted with the payload. JSON string tokens, including object
 keys and nested JSON-encoded strings, receive the same media redaction without
-round-tripping numeric literals or unrelated evidence.
+round-tripping numeric literals or unrelated evidence. The same rules apply
+to complete JSON documents embedded in ordinary tool output, including
+objects, arrays and JSON-encoded containers. Quoted MIME parameter values are
+part of the data URL header.
 Standalone media strings and strings containing non-base64 media data URLs
 (such as raw SVG) are omitted as a whole: quotes, spaces, and nested markup
 make the raw payload boundary ambiguous. Other JSON fields remain available.

@@ -184,7 +184,6 @@ class EventTransportBrokerGate {
                 .build();
         opened.add(producer);
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.activateForWake(anyString(), anyString())).thenReturn(true);
         doAnswer(invocation -> {
             Outcome outcome = (Outcome) invocation.callRealMethod();
             ManagedEventEnvelope envelope = invocation.getArgument(0);
@@ -269,7 +268,7 @@ class EventTransportBrokerGate {
         await().atMost(DELIVERY).untilAsserted(() ->
                 assertThat(outcomes.get(session)).containsExactly(
                         Outcome.SCHEDULED, Outcome.DUPLICATE));
-        verify(harness, timeout(10_000).times(1)).activateForWake(TENANT,
+        verify(harness, timeout(10_000).times(1)).recoverForWake(TENANT,
                 session);
         assertThat(wakeWatermark(session)).isEqualTo(3);
     }
@@ -286,7 +285,7 @@ class EventTransportBrokerGate {
         await().atMost(DELIVERY).untilAsserted(() ->
                 assertThat(outcomes.get(session)).containsExactly(
                         Outcome.SCHEDULED, Outcome.DUPLICATE));
-        verify(harness, timeout(10_000).times(1)).activateForWake(TENANT,
+        verify(harness, timeout(10_000).times(1)).recoverForWake(TENANT,
                 session);
         assertThat(wakeWatermark(session)).isEqualTo(5);
     }
@@ -381,7 +380,7 @@ class EventTransportBrokerGate {
 
         await().atMost(DELIVERY).until(() -> staleSaw.contains(wakeBody));
         assertThat(staleAnswers).containsOnly(ConsumeResult.SUCCESS);
-        verify(staleHarness, never()).activateForWake(anyString(),
+        verify(staleHarness, never()).recoverForWake(anyString(),
                 anyString());
         assertThat(wakeWatermark(session)).isNull();
 
@@ -419,7 +418,7 @@ class EventTransportBrokerGate {
                 TENANT, session);
         inject(bootstrapLiteTopic(), wake);
         verify(harness, timeout(DELIVERY.toMillis()).times(1))
-                .activateForWake(TENANT, session);
+                .recoverForWake(TENANT, session);
         assertThat(wakeWatermark(session)).isEqualTo(3);
     }
 

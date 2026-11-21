@@ -44,43 +44,113 @@ interface HistoryCursor {
   action: 'list' | 'search';
 }
 
-function redactRecordedMediaText(text: string): string {
-  const omitted = '[Recorded media omitted]';
-  if (/^\s*[{["]/u.test(text)) {
-    try {
-      const parsed: unknown = JSON.parse(
-        text,
-        (_key, value: unknown, context?: { source?: string }) =>
-          typeof value === 'number' && context?.source
-            ? (
-                JSON as typeof JSON & { rawJSON(source: string): unknown }
-              ).rawJSON(context.source)
-            : value,
-      );
-      // Keep numeric spellings and precision when redacting a JSON transcript.
-      const redacted = JSON.stringify(parsed, redactRecordedMediaValue).replace(
-        /"(?:\\.|[^"\\])*"/gu,
-        (literal) => {
-          const decoded = JSON.parse(literal) as string;
-          const value = redactRecordedMediaText(decoded);
-          return value === decoded ? literal : JSON.stringify(value);
-        },
-      );
-      return redacted === JSON.stringify(parsed) ? text : redacted;
-    } catch (error) {
-      // A redaction resource failure must not expose valid JSON as plain text.
-      if (!(error instanceof SyntaxError)) return omitted;
-      // Ordinary text can begin with a brace without containing valid JSON.
-    }
+const RECORDED_MEDIA_OMITTED = '[Recorded media omitted]';
+
+function redactRecordedJson(text: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(
+      text,
+      (_key, value: unknown, context?: { source?: string }) =>
+        typeof value === 'number' && context?.source
+          ? (
+              JSON as typeof JSON & { rawJSON(source: string): unknown }
+            ).rawJSON(context.source)
+          : value,
+    );
+    // Keep numeric spellings and precision when redacting a JSON transcript.
+    const redacted = JSON.stringify(parsed, redactRecordedMediaValue).replace(
+      /"(?:\\.|[^"\\])*"/gu,
+      (literal) => {
+        const decoded = JSON.parse(literal) as string;
+        const value = redactRecordedMediaText(decoded);
+        return value === decoded ? literal : JSON.stringify(value);
+      },
+    );
+    return redacted === JSON.stringify(parsed) ? text : redacted;
+  } catch (error) {
+    // A redaction resource failure must not expose valid JSON as plain text.
+    if (!(error instanceof SyntaxError)) return RECORDED_MEDIA_OMITTED;
+    return undefined;
   }
+}
+
+function redactEmbeddedRecordedJson(text: string): string {
+  const starts = /\{(?=\s*["}])|\[(?=\s*[{"[\]tfn0-9-])|"/gu;
+  const chunks: string[] = [];
+  let copied = 0;
+  // A malformed enclosing fragment can force retries from inner openings.
+  // Bound that overlapping work and omit the value instead of leaking it.
+  let remaining = 4 * text.length;
+  for (let start = starts.exec(text); start; start = starts.exec(text)) {
+    const isString = start[0] === '"';
+    let inString = isString;
+    let hasEscape = false;
+    let depth = isString ? 0 : 1;
+    let end: number | undefined;
+    for (let i = start.index + 1; i < text.length; i++) {
+      if (--remaining < 0) return RECORDED_MEDIA_OMITTED;
+      const char = text[i];
+      if (inString) {
+        if (char === '\\') {
+          hasEscape = true;
+          i++;
+        } else if (char === '"') {
+          if (isString) {
+            end = i + 1;
+            break;
+          }
+          inString = false;
+        }
+      } else if (char === '"') {
+        inString = true;
+      } else if (char === '{' || char === '[') {
+        depth++;
+      } else if ((char === '}' || char === ']') && --depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+    if (end === undefined || (isString && !hasEscape)) continue;
+
+    const fragment = text.slice(start.index, end);
+    // This quote can instead be the first JSON key or array item in prose.
+    if (isString && /[{[]\s*"$/u.test(fragment)) continue;
+    const redacted = redactRecordedJson(fragment);
+    if (redacted === undefined) continue;
+    if (redacted !== fragment) {
+      chunks.push(text.slice(copied, start.index), redacted);
+      copied = end;
+    }
+    // An unchanged scalar may have ended at the start of an encoded value.
+    starts.lastIndex = isString && redacted === fragment ? end - 1 : end;
+  }
+  return chunks.length ? chunks.join('') + text.slice(copied) : text;
+}
+
+function redactRecordedMediaText(text: string): string {
+  if (/^\s*[{["]/u.test(text)) {
+    const redacted = redactRecordedJson(text);
+    if (redacted !== undefined) return redacted;
+  }
+
+  const jsonRedacted = redactEmbeddedRecordedJson(text);
+  let standalone = false;
+  const redacted = jsonRedacted.replace(
+    /data:(?:[^=,:"'<>]|=(?:[ \t\r\n]*"[^"\\]*(?:\\[\s\S][^"\\]*)*"|(?![ \t\r\n]*")))*;base64,[^"'<>)\]}]*/giu,
+    (_match, offset: number) => {
+      standalone ||= offset === 0;
+      return RECORDED_MEDIA_OMITTED;
+    },
+  );
   // Raw media (for example SVG) can contain quotes, spaces and nested markup;
   // its boundary inside ordinary text cannot be inferred safely.
   if (
-    /^data:(?:[^,]*;base64,|(?:image|audio|video)\/[^,]*,)/iu.test(text) ||
-    /data:(?:image|audio|video)\/(?![^,:]*;base64,)[^,:]*,/iu.test(text)
+    standalone ||
+    /^data:(?:[^,]*;base64,|(?:image|audio|video)\/[^,]*,)/iu.test(redacted) ||
+    /data:(?:image|audio|video)\/[^,:]*,/iu.test(redacted)
   )
-    return omitted;
-  return text.replace(/data:[^,:"'<>]*;base64,[^"'<>)\]}]*/giu, omitted);
+    return RECORDED_MEDIA_OMITTED;
+  return redacted;
 }
 
 function redactRecordedMediaValue(key: string, entry: unknown): unknown {
@@ -93,10 +163,9 @@ function redactRecordedMediaValue(key: string, entry: unknown): unknown {
     ].includes(key)
   )
     return undefined;
-  if (/^(?:inline|file)[_-]?data$/iu.test(key))
-    return '[Recorded media omitted]';
+  if (/^(?:inline|file)[_-]?data$/iu.test(key)) return RECORDED_MEDIA_OMITTED;
   if (key === 'b64_json' || key === 'bytesBase64Encoded')
-    return '[Recorded media omitted]';
+    return RECORDED_MEDIA_OMITTED;
   if (
     entry &&
     typeof entry === 'object' &&
@@ -110,7 +179,7 @@ function redactRecordedMediaValue(key: string, entry: unknown): unknown {
       'input_audio',
     ].includes(String(entry.type))
   )
-    return '[Recorded media omitted]';
+    return RECORDED_MEDIA_OMITTED;
   if (
     entry &&
     typeof entry === 'object' &&
@@ -120,7 +189,7 @@ function redactRecordedMediaValue(key: string, entry: unknown): unknown {
     ) ||
       ('type' in entry && entry.type === 'base64'))
   )
-    return '[Recorded media omitted]';
+    return RECORDED_MEDIA_OMITTED;
   if (typeof entry === 'string') return redactRecordedMediaText(entry);
   return entry;
 }

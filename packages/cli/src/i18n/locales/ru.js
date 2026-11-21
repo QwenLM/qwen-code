@@ -503,7 +503,7 @@ export default {
   'Skip Startup Context': 'Пропустить начальный контекст',
   'Enable OpenAI Logging': 'Включить логирование OpenAI',
   'OpenAI Logging Directory': 'Директория логов OpenAI',
-  Timeout: 'Таймаут',
+  Timeout: 'Тайм-аут',
   'Max Retries': 'Макс. количество попыток',
   'Load Memory From Include Directories':
     'Загружать память из включенных директорий',
@@ -1308,7 +1308,7 @@ export default {
     'Пожалуйста, посетите этот URL для авторизации:',
   'Waiting for authorization': 'Ожидание авторизации',
   'Time remaining:': 'Осталось времени:',
-  'Qwen OAuth Authentication Timeout': 'Таймаут авторизации Qwen OAuth',
+  'Qwen OAuth Authentication Timeout': 'Тайм-аут авторизации Qwen OAuth',
   'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
     'Токен OAuth истек (более {{seconds}} секунд). Пожалуйста, выберите метод авторизации снова.',
   'Press any key to return to authentication type selection.':
@@ -2613,6 +2613,15 @@ export default {
   '↓ more below': '↓ ещё ниже',
   '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.':
     '⚠ Устанавливайте, обновляйте и используйте только те расширения, которым доверяете. Мы не можем проверить, какие MCP-серверы, файлы или другое ПО входит в расширение и работает ли оно как заявлено. Подробности — на домашней странице расширения.',
+  'Chat Compression Strategy': 'Способ сжатия контекста',
+  Summary: 'Сводка',
+  'Notes and History': 'Заметки и история',
+  'Choose summary compression or local notes with history recovery. Restart Qwen Code to apply.':
+    'Выберите сжатие с помощью сводки или локальные заметки с восстановлением истории. Перезапустите Qwen Code, чтобы применить изменения.',
+  'toolDisplayName.SessionNotes': 'Заметки сессии',
+  'toolDisplayName.SessionHistory': 'История сессии',
+  'toolDisplayName.GetContextRemaining': 'Остаток контекста',
+  'toolDisplayName.NewContext': 'Новый контекст',
   'toolDisplayName.Exec': 'Выполнение кода',
   'toolDisplayName.Edit': 'Правка',
   'toolDisplayName.WriteFile': 'Запись файла',
@@ -2775,7 +2784,7 @@ export default {
     'Включён минимальный режим, поэтому хуки в этой сессии не выполняются.',
   'All hooks are disabled by the disableAllHooks setting.':
     'Все хуки отключены настройкой disableAllHooks.',
-  'Timeout:': 'Таймаут:',
+  'Timeout:': 'Тайм-аут:',
   'Status message:': 'Сообщение о статусе:',
   'Condition:': 'Условие:',
   'Options:': 'Параметры:',

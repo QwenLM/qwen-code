@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import path from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import type { Config } from '../config/config.js';
 import type {
@@ -375,6 +376,43 @@ describe('LspTool', () => {
     });
 
     describe('hover operation', () => {
+      it('does not start a query if the invocation was cancelled', async () => {
+        const client = createMockClient();
+        const reason = new Error('Turn cancelled');
+
+        await expect(
+          createTool(client)
+            .build(hoverParams())
+            .execute(AbortSignal.abort(reason)),
+        ).rejects.toBe(reason);
+        expect(client.hover).not.toHaveBeenCalled();
+      });
+
+      it('cancels the invocation while the server reply is pending', async () => {
+        const client = createMockClient();
+        let reply = () => {};
+        client.hover.mockReturnValueOnce(
+          new Promise((resolve) => {
+            reply = () => resolve({ contents: 'Late reply' });
+          }),
+        );
+        const controller = new AbortController();
+        const reason = 'send-now';
+        const result = createTool(client)
+          .build(hoverParams())
+          .execute(controller.signal);
+
+        expect(client.hover).toHaveBeenCalledOnce();
+        controller.abort(reason);
+        try {
+          await expect(
+            Promise.race([result, setImmediate('pending')]),
+          ).rejects.toBe(reason);
+        } finally {
+          reply();
+        }
+      });
+
       it('dispatches to hover and formats results', async () => {
         const { client, result } = await run(hoverParams(), (c) =>
           c.hover.mockResolvedValue({

@@ -5,7 +5,7 @@ import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.Sched
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import org.springframework.jdbc.core.RowMapper;
 
-/** SQL fragments and row mappers for the automation ledger reads. */
+/** SQL fragments, row mappers, and the shared lease/fence proof for the automation ledger. */
 final class AutomationLedgerRows {
     private AutomationLedgerRows() { }
 

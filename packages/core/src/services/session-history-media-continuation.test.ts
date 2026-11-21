@@ -67,6 +67,55 @@ describe('session history media continuations', () => {
     return `${uuid}:0`;
   }
 
+  function textProjection(
+    kind: 'text' | 'call' | 'response' | 'nested-json',
+    text: string,
+  ): Part {
+    const value = { output: text, evidence: 'OUTSIDE_JSON_EVIDENCE' };
+    if (kind === 'text') return { text };
+    if (kind === 'call')
+      return { functionCall: { name: 'read_file', args: value } };
+    if (kind === 'response')
+      return { functionResponse: { name: 'read_file', response: value } };
+    return { text: JSON.stringify(value) };
+  }
+
+  async function projectionViolations(
+    part: Part,
+    canary: string,
+    evidence: string[],
+  ) {
+    const ref = await append(
+      part.functionResponse ? 'tool_result' : 'user',
+      part,
+    );
+    const violations: string[] = [];
+    for (const request of [
+      { action: 'list' as const },
+      { action: 'read' as const, ref },
+      { action: 'search' as const, query: evidence[0] },
+    ]) {
+      const result = await service.query(request, signal);
+      if (result.includes(canary)) violations.push(`${request.action}: leaked`);
+      if (
+        request.action !== 'search' &&
+        !result.includes('[Recorded media omitted]')
+      )
+        violations.push(`${request.action}: no omission marker`);
+      for (const retained of request.action === 'search'
+        ? evidence.slice(0, 1)
+        : evidence) {
+        if (!result.includes(retained))
+          violations.push(`${request.action}: lost ${retained}`);
+      }
+    }
+    const search = JSON.parse(
+      await service.query({ action: 'search', query: canary }, signal),
+    );
+    if (search.entries.length) violations.push('search: payload matched');
+    return violations;
+  }
+
   it('keeps an ordinary recovery key searchable', async () => {
     await append('user', { text: 'RECOVERY_KEY_12345' });
     const result = await service.query(
@@ -115,6 +164,36 @@ describe('session history media continuations', () => {
       expect(JSON.parse(search).entries).toEqual([]);
     },
   );
+
+  for (const mime of [
+    'image/png',
+    'audio/wav',
+    'video/mp4',
+    'application/pdf',
+  ]) {
+    it.each(['text', 'call', 'response', 'nested-json'] as const)(
+      `R12 omits quoted ${mime} data URL parameters in %s`,
+      async (kind) => {
+        const violations: string[][] = [];
+        for (const parameters of [
+          'charset="utf-8";name="asset.bin"',
+          'name="asset;part,2:3.bin"',
+        ]) {
+          const text =
+            `BEFORE_QUOTED_MEDIA data:${mime};${parameters};` +
+            'base64,R12_QUOTED_MEDIA_CANARY"> AFTER_QUOTED_MEDIA';
+          violations.push(
+            await projectionViolations(
+              textProjection(kind, text),
+              'R12_QUOTED_MEDIA_CANARY',
+              ['BEFORE_QUOTED_MEDIA', 'AFTER_QUOTED_MEDIA'],
+            ),
+          );
+        }
+        expect(violations).toEqual([[], []]);
+      },
+    );
+  }
 
   it.each(['text', 'response', 'json-response'] as const)(
     'redacts media keys without changing numeric evidence in %s',
@@ -197,6 +276,132 @@ describe('session history media continuations', () => {
       field: '"payload":[{"type":"image","data":"R9_MEDIA_CANARY"}]',
     },
   ];
+
+  const jsonWrappers = [
+    (json: string) => `Result: ${json}`,
+    (json: string) => `<result>${json}</result>`,
+    (json: string) => 'Result: C:\\' + json,
+    (json: string) => ['Status 200', '```json', json, '```'].join('\n'),
+    (json: string) => `{"status":"ok"}\n${json}`,
+  ];
+
+  for (const media of mediaJsonFields) {
+    it.each(['text', 'call', 'response', 'nested-json'] as const)(
+      `R12 omits embedded ${media.name} JSON in %s`,
+      async (kind) => {
+        const json =
+          '{"request_id":9007199254740993,"amount":1.2300e+4,' +
+          String.raw`"syntax":"braces } ] and escaped quote \" {",` +
+          '"evidence":"EMBEDDED_JSON_EVIDENCE",' +
+          media.field.replaceAll('R9_MEDIA_CANARY', 'R12_EMBEDDED_CANARY') +
+          '}';
+        const violations: string[][] = [];
+        for (const wrap of jsonWrappers) {
+          violations.push(
+            await projectionViolations(
+              textProjection(kind, wrap(json)),
+              'R12_EMBEDDED_CANARY',
+              ['EMBEDDED_JSON_EVIDENCE', '9007199254740993', '1.2300e+4'],
+            ),
+          );
+        }
+        expect(violations).toEqual(jsonWrappers.map(() => []));
+      },
+    );
+  }
+
+  it.each(['text', 'call', 'response', 'nested-json'] as const)(
+    'R12 omits prefixed encoded JSON scalars in %s',
+    async (kind) => {
+      const json =
+        '{"inline_data":{"mime_type":"image/png","data":"R12_SCALAR_CANARY"},' +
+        '"request_id":9007199254740993,"amount":1.2300e+4,' +
+        '"evidence":"ENCODED_SCALAR_EVIDENCE"}';
+      const violations: string[][] = [];
+      const inputs = [
+        'Result: ' + JSON.stringify(json),
+        'Result: ' + JSON.stringify(`Status 200 ${JSON.stringify(json)}`),
+        'Result: ' + JSON.stringify({ wrapped: JSON.stringify(json) }),
+        'Result: "a\\"b ' + JSON.stringify(json) + '" END',
+      ];
+      for (const input of inputs) {
+        violations.push(
+          await projectionViolations(
+            textProjection(kind, input),
+            'R12_SCALAR_CANARY',
+            ['ENCODED_SCALAR_EVIDENCE', '9007199254740993', '1.2300e+4'],
+          ),
+        );
+      }
+      expect(violations).toEqual(inputs.map(() => []));
+    },
+  );
+
+  it.each(['text', 'call', 'response', 'nested-json'] as const)(
+    'R12 omits malformed overlapping quoted fragments in %s',
+    async (kind) => {
+      const text =
+        'Result: ' +
+        '["'.repeat(256) +
+        '\\'.repeat(8000) +
+        'R12_MALFORMED_CANARY';
+      const ref = await append(
+        kind === 'response' ? 'tool_result' : 'user',
+        textProjection(kind, text),
+      );
+      for (const request of [
+        { action: 'list' as const },
+        { action: 'read' as const, ref },
+        { action: 'search' as const, query: '[Recorded media omitted]' },
+      ]) {
+        const result = await service.query(request, signal);
+        expect(result).not.toContain('R12_MALFORMED_CANARY');
+        expect(result).toContain('[Recorded media omitted]');
+        if (kind !== 'text') expect(result).toContain('OUTSIDE_JSON_EVIDENCE');
+      }
+      expect(
+        JSON.parse(
+          await service.query(
+            { action: 'search', query: 'R12_MALFORMED_CANARY' },
+            signal,
+          ),
+        ).entries,
+      ).toEqual([]);
+    },
+  );
+
+  it.each(['text', 'call', 'response', 'nested-json'] as const)(
+    'R12 preserves ordinary embedded JSON and malformed logs in %s',
+    async (kind) => {
+      for (const text of [
+        ...jsonWrappers.map((wrap) =>
+          wrap(
+            '{"request_id":9007199254740993,"amount":1.2300e+4,' +
+              '"text":"braces } ] and escaped quote \\" are evidence"}',
+          ),
+        ),
+        `Result: ${JSON.stringify('ordinary "quoted" recovery evidence')}`,
+        `Result: ${JSON.stringify('Status 200 ' + JSON.stringify({ evidence: 'RECOVERY_KEY' }))}`,
+        'Result: {request failed: MALFORMED_LOG_RECOVERY_KEY',
+      ]) {
+        const part = textProjection(kind, text);
+        const ref = await append(
+          kind === 'response' ? 'tool_result' : 'user',
+          part,
+        );
+        const expected =
+          kind === 'text'
+            ? text
+            : kind === 'nested-json'
+              ? part.text
+              : `read_file\n${JSON.stringify({ output: text, evidence: 'OUTSIDE_JSON_EVIDENCE' })}`;
+        const result = JSON.parse(
+          await service.query({ action: 'read', ref }, signal),
+        );
+        expect(result.entries[0].text).toBe(expected);
+      }
+    },
+  );
 
   for (const media of mediaJsonFields) {
     it.each(['text', 'read-file-output', 'mcp-text', 'nested-json'] as const)(

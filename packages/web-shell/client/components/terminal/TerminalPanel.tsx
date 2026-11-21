@@ -5,10 +5,9 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
+import type { Terminal } from '@xterm/xterm';
+import type { FitAddon } from '@xterm/addon-fit';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
-import '@xterm/xterm/css/xterm.css';
 import { useTheme } from '../../themeContext';
 import { getDaemonToken } from '../../config/daemon';
 import { useI18n } from '../../i18n';
@@ -23,6 +22,7 @@ import {
   WS_BEARER_SUBPROTOCOL_PREFIX,
   xtermTheme,
 } from './terminal-protocol';
+import { useTerminalRuntime } from './use-terminal-runtime';
 
 interface TerminalPanelProps {
   /** Stable id shared with the backend PTY session; reconnects reuse it. */
@@ -136,6 +136,7 @@ export function TerminalPanel({
   const { baseUrl } = useWorkspace();
   const { t } = useI18n();
   const availability = useDaemonAvailabilityController();
+  const runtime = useTerminalRuntime(enabled);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -151,7 +152,7 @@ export function TerminalPanel({
   }, [theme]);
 
   useEffect(() => {
-    if (!enabled) {
+    if (!runtime || runtime === 'failed') {
       const release = () =>
         releaseDetachedWebTerminal(baseUrl, terminalId, cwd);
       releaseCallbacks.set(terminalId, release);
@@ -162,6 +163,7 @@ export function TerminalPanel({
       };
     }
     if (!containerRef.current) return;
+    const { Terminal, FitAddon } = runtime;
 
     function createTerminal(handlesPrimaryDa = false) {
       const term = new Terminal({
@@ -481,7 +483,7 @@ export function TerminalPanel({
       wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, availability]);
+  }, [enabled, runtime, availability]);
 
   useEffect(() => {
     const term = termRef.current;
@@ -519,6 +521,7 @@ export function TerminalPanel({
         background: theme !== 'light' ? '#0a0a0a' : '#ffffff',
       }}
     >
+      {runtime && runtime !== 'failed' && <style>{runtime.styles}</style>}
       <div
         ref={containerRef}
         style={{
@@ -526,7 +529,13 @@ export function TerminalPanel({
           overflow: 'hidden',
           padding: '0.25rem 0.5rem',
         }}
-      />
+      >
+        {enabled && (!runtime || runtime === 'failed') && (
+          <div role={runtime === 'failed' ? 'alert' : 'status'}>
+            {t(runtime === 'failed' ? 'common.failedToLoad' : 'common.loading')}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

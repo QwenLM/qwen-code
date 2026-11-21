@@ -393,6 +393,14 @@ class ManagedSchemaMySqlIT {
                 statement.execute("ALTER TABLE ma_tenant_guard ENGINE=InnoDB");
             }
             ManagedSchema.initialize(source);
+            try (var rs = statement.executeQuery(
+                    "SELECT CHARACTER_MAXIMUM_LENGTH, COLLATION_NAME FROM information_schema.columns"
+                            + " WHERE table_schema = DATABASE() AND table_name = 'ma_tenant_guard'"
+                            + " AND column_name = 'tenant_id'")) {
+                org.junit.jupiter.api.Assertions.assertTrue(rs.next());
+                org.junit.jupiter.api.Assertions.assertEquals(96L, rs.getLong(1));
+                org.junit.jupiter.api.Assertions.assertEquals("utf8mb4_0900_bin", rs.getString(2));
+            }
         }
     }
 
