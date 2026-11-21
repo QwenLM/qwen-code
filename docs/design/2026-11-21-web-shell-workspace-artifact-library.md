@@ -32,8 +32,11 @@ Session-scoped surfaces (local daemon):
   [early session-artifact entry](2026-11-15-early-session-artifact-entry.md)),
   and the session list carries `artifactCount` / `artifactCountPending`
   (scope B, [session-list artifact summary](2026-11-17-session-list-artifact-summary.md)).
-- All of these require a loaded session; `useSessionArtifacts` gates refresh
-  on connection, `catchingUp`, and the `session_artifacts` capability.
+- Browsing the artifacts themselves requires a loaded session;
+  `useSessionArtifacts` gates refresh on connection, `catchingUp`, and the
+  `session_artifacts` capability. The session-list count is sidebar metadata
+  hydrated without loading the session, but it is a count, not a browsable
+  list.
 
 Workspace-level backend (built for DAC, unconsumed by Web Shell):
 
@@ -48,8 +51,9 @@ Workspace-level backend (built for DAC, unconsumed by Web Shell):
   archived sessions without attach/spawn/unarchive; progressive SSE
   (`start` / `session` / `session_error` / `complete` / `error`); bounded
   per-runtime cache; JSON full scans skip nonexistent or foreign sessions.
-- No SDK wrapper (the backend design deferred it) and no artifact-library
-  consumption in `packages/web-shell`.
+- No SDK wrapper (the backend design deferred it) and no consumption of
+  these daemon routes in `packages/web-shell` — the managed library below
+  reads the Java control plane, not the daemon.
 
 Managed precedent:
 
@@ -274,9 +278,9 @@ Content paths:
   progressive display without session load (no attach/spawn), archived
   artifacts visible, workspace-file preview without load, cold managed jump
   loads then previews, session-label jump including unarchive,
-  capability-absent hides the entry, persistence-unavailable and
-  corrupt-transcript partial failures, disconnect-without-complete partial
-  banner.
+  capability-absent hides the entry, persistence-unavailable and corrupt- or
+  oversized-transcript (`413 transcript_too_large`) partial failures,
+  disconnect-without-complete partial banner.
 - Regression: session panel, chips, header entry, and session-list counts
   unchanged; managed library untouched; build, typecheck, bundle, lint,
   format.

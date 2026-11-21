@@ -25,8 +25,9 @@ Web Shell 的本地 daemon 模式只在会话内展示产物：按轮芯片、�
   内嵌产物列表（[早会话产物头部入口](2026-11-15-early-session-artifact-entry.zh-CN.md)
   的范围 A），会话列表携带 `artifactCount` / `artifactCountPending`
   （范围 B，[会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)）。
-- 以上全部要求会话已加载；`useSessionArtifacts` 的刷新受连接、`catchingUp`
-  与 `session_artifacts` 能力门控。
+- 浏览产物本身要求会话已加载；`useSessionArtifacts` 的刷新受连接、
+  `catchingUp` 与 `session_artifacts` 能力门控。会话列表数量是免加载回填的
+  侧栏元数据，但只是数量，不是可浏览的列表。
 
 工作区级后端（为 DAC 而建，Web Shell 未消费）：
 
@@ -40,8 +41,8 @@ Web Shell 的本地 daemon 模式只在会话内展示产物：按轮芯片、�
   不 attach/spawn/解归档；渐进 SSE（`start` / `session` / `session_error` /
   `complete` / `error`）；按 runtime 的有界缓存；JSON 全量扫描跳过不存在或
   属于其他项目的会话。
-- 没有 SDK 封装（后端设计明确延期），`packages/web-shell` 也没有任何
-  artifact-library 消费。
+- 没有 SDK 封装（后端设计明确延期），`packages/web-shell` 也不消费这些
+  daemon 路由——下文的 managed 产物库读的是 Java 控制面，不是 daemon。
 
 Managed 先例：
 
@@ -216,8 +217,9 @@ Managed 先例：
 - E2E（headless 对真实 daemon；计划在 `.qwen/e2e-tests/`）：含运行中、冷、
   归档会话且带产物的工作区——渐进显示且不加载会话（无 attach/spawn）、归档
   产物可见、workspace 文件免加载预览、冷 managed 跳转后加载再预览、会话标签
-  跳转含解归档、能力缺席隐藏入口、持久化不可用与损坏转录的部分失败、未收到
-  `complete` 断连的部分横幅。
+  跳转含解归档、能力缺席隐藏入口、持久化不可用与损坏/超大转录
+  （`413 transcript_too_large`）的部分失败、未收到 `complete` 断连的部分
+  横幅。
 - 回归：会话面板、芯片、头部入口、会话列表数量不变；managed 产物库不受影响；
   build、typecheck、bundle、lint、format。
 
