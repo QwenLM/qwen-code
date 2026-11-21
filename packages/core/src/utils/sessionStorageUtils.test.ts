@@ -292,6 +292,36 @@ describe('sessionStorageUtils', () => {
       expect(scan(`${create('old')}${torn}${clear}`, true)).toEqual(hit());
     });
 
+    it('recovers suffix record when torn prefix ends mid-string on comma or colon', () => {
+      // Punctuation inside torn string does not reject candidate suffix
+      const tornEndingInComma =
+        '{"type":"user","content":"some text with comma,';
+      expect(
+        scan(`${create('old')}${tornEndingInComma}${create('new')}`, true),
+      ).toEqual(hit('new'));
+      expect(
+        scan(`${create('old')}${tornEndingInComma}${clear}`, true),
+      ).toEqual(hit());
+
+      const tornEndingInColon =
+        '{"type":"user","content":"some text with colon:';
+      expect(
+        scan(`${create('old')}${tornEndingInColon}${create('new')}`, true),
+      ).toEqual(hit('new'));
+
+      // Custom title reader witness from review
+      const titleTorn =
+        '{"type":"custom_title","customTitle":"Session A,{"type":"custom_title","customTitle":"B"}';
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          titleTorn,
+          'custom_title',
+          'customTitle',
+          true,
+        ),
+      ).toEqual({ matched: true, value: 'B' });
+    });
+
     it('rejects a nested marker when the containing record does not match', () => {
       expect(scan(nestedMarkerLine, true, isGoalStateRecord)).toEqual(MISS);
     });

@@ -25,9 +25,11 @@ import {
   _getFileLockCountForTest,
   _recoverObjectsFromLine,
   _resetEnsuredDirsCacheForTest,
+  canStartRecoveredSuffix,
   countLines,
   exists,
   parseLineTolerant,
+  parseLineTolerantWithIntegrity,
   read,
   readLines,
   readLinesWithIntegrity,
@@ -286,6 +288,148 @@ describe('_recoverObjectsFromLine', () => {
   it('returns empty array when nothing balanced can be parsed', () => {
     expect(_recoverObjectsFromLine('not json at all')).toEqual([]);
     expect(_recoverObjectsFromLine('{"unterminated":')).toEqual([]);
+  });
+
+  it('salvages complete suffix record after torn mid-string prefix (issue report shape)', () => {
+    const tornLine =
+      '{"backgroundTurn":{"taskId":"Explore_call","sess{"uuid":"c2fdde8f","type":"system","content":"ok"}';
+    expect(_recoverObjectsFromLine<{ uuid: string }>(tornLine)).toEqual([
+      { uuid: 'c2fdde8f', type: 'system', content: 'ok' },
+    ]);
+  });
+
+  it('preserves earlier recovered records when salvaging suffix (monotonicity)', () => {
+    const gluedTriple = '{"a":1}{"b":"torn...{"c":2}';
+    expect(
+      _recoverObjectsFromLine<{ a?: number; b?: string; c?: number }>(
+        gluedTriple,
+      ),
+    ).toEqual([{ a: 1 }, { c: 2 }]);
+
+    expect(
+      parseLineTolerantWithIntegrity(gluedTriple, '/tmp/test.jsonl'),
+    ).toEqual({
+      records: [{ a: 1 }, { c: 2 }],
+      complete: false,
+    });
+  });
+
+  it('salvages suffix records with nested objects', () => {
+    const lineWithNestedSuffix =
+      '{"backgroundTurn":{"taskId":"Explore_call","sess{"uuid":"c2fdde8f","meta":{"nested":true}}';
+    expect(_recoverObjectsFromLine(lineWithNestedSuffix)).toEqual([
+      { uuid: 'c2fdde8f', meta: { nested: true } },
+    ]);
+  });
+
+  it('salvages suffix records containing literal braces inside strings', () => {
+    const lineWithBracesInString =
+      '{"backgroundTurn":{"sess{"uuid":"c2fdde8f","content":"with { inner } brace"}';
+    expect(_recoverObjectsFromLine(lineWithBracesInString)).toEqual([
+      { uuid: 'c2fdde8f', content: 'with { inner } brace' },
+    ]);
+  });
+
+  it('salvages suffix record when torn string ends in comma or colon', () => {
+    const lineComma =
+      '{"backgroundTurn":{"content":"prefix ending with comma,{"uuid":"c2fdde8f"}';
+    expect(_recoverObjectsFromLine(lineComma)).toEqual([{ uuid: 'c2fdde8f' }]);
+
+    const lineColon =
+      '{"backgroundTurn":{"content":"prefix ending with colon:{"uuid":"c2fdde8f"}';
+    expect(_recoverObjectsFromLine(lineColon)).toEqual([{ uuid: 'c2fdde8f' }]);
+  });
+
+  it('rejects candidate suffix following punctuation outside string', () => {
+    const line = '{"a":1,{"b":2}';
+    expect(_recoverObjectsFromLine(line)).toEqual([]);
+  });
+
+  it('bounds suffix recovery attempts on brace-dense torn lines', () => {
+    // 16,000 unclosed braces inside a torn string (~100-200 KB)
+    const braceDenseLine = '{"torn":"' + '{'.repeat(16000);
+    const parseSpy = vi.spyOn(JSON, 'parse');
+    try {
+      parseSpy.mockClear();
+      const result = _recoverObjectsFromLine(braceDenseLine);
+      expect(result).toEqual([]);
+      // Must not re-parse for every brace in the line (at most bounded attempts)
+      expect(parseSpy.mock.calls.length).toBeLessThanOrEqual(64);
+    } finally {
+      parseSpy.mockRestore();
+    }
+  });
+
+  it('salvages complete suffix record containing 16 or more nested object opens', () => {
+    // A torn prefix glued to a record with 20 nested object opens
+    const items = Array.from({ length: 20 }, (_, i) => ({ i }));
+    const suffixRecord = { uuid: 'c2fdde8f', type: 'turn', items };
+    const line = '{"backgroundTurn":{"sess' + JSON.stringify(suffixRecord);
+    expect(_recoverObjectsFromLine(line)).toEqual([suffixRecord]);
+  });
+
+  it('salvages complete suffix record when torn prefix contains more than 64 braces', () => {
+    const items = Array.from({ length: 20 }, (_, i) => ({ i }));
+    const suffixRecord = { uuid: 'c2fdde8f', type: 'turn', items };
+    const line = '{"torn":"' + '{'.repeat(100) + JSON.stringify(suffixRecord);
+    expect(_recoverObjectsFromLine(line)).toEqual([suffixRecord]);
+  });
+
+  it('salvages suffix record when prefix ends in backslash before candidate brace', () => {
+    const line =
+      '{"type":"user","content":"path C:\\\\{"type":"custom_title","customTitle":"B"}';
+    expect(_recoverObjectsFromLine(line)).toEqual([
+      { type: 'custom_title', customTitle: 'B' },
+    ]);
+  });
+
+  it('canStartRecoveredSuffix accepts brace after backslash in string', () => {
+    const line =
+      '{"type":"user","content":"path C:\\\\{"type":"custom_title","customTitle":"B"}';
+    expect(canStartRecoveredSuffix(line, 35)).toBe(true);
+  });
+
+  it('rejects fieldless empty object {} from torn string content', () => {
+    expect(
+      _recoverObjectsFromLine('{"type":"assistant","content":"let x = {}'),
+    ).toEqual([]);
+  });
+
+  it('preserves complete: false when recovering suffix after torn prefix in parseLineTolerantWithIntegrity', () => {
+    const tornLine =
+      '{"backgroundTurn":{"taskId":"Explore_call","sess{"uuid":"c2fdde8f"}';
+    expect(parseLineTolerantWithIntegrity(tornLine, '/tmp/test.jsonl')).toEqual(
+      {
+        records: [{ uuid: 'c2fdde8f' }],
+        complete: false,
+      },
+    );
+  });
+
+  it('leaves complete: true for balanced concatenated objects', () => {
+    expect(
+      parseLineTolerantWithIntegrity('{"a":1}{"b":2}', '/tmp/test.jsonl'),
+    ).toEqual({
+      records: [{ a: 1 }, { b: 2 }],
+      complete: true,
+    });
+  });
+
+  it('does not falsely extract nested objects inside complete records', () => {
+    const nested = '{"outer":{"inner":"value"}}';
+    expect(_recoverObjectsFromLine(nested)).toEqual([
+      { outer: { inner: 'value' } },
+    ]);
+  });
+
+  it('returns empty records when suffix is also unrecoverable', () => {
+    const bothTorn = '{"torn_prefix":"unclosed{"also_torn":';
+    expect(parseLineTolerantWithIntegrity(bothTorn, '/tmp/test.jsonl')).toEqual(
+      {
+        records: [],
+        complete: false,
+      },
+    );
   });
 });
 
@@ -2179,6 +2323,41 @@ describe('writeLine / writeLineSync / write', () => {
     expect(fs.statSync(file).size).toBe(0);
     expect(await read(file)).toEqual([]);
     expect(exists(file)).toBe(false);
+  });
+
+  it('does not salvage orphan record whose parentUuid was torn and missing from file', async () => {
+    // Witness R4-1: u1(root) / a1(parent u1) / <torn u2 mid-string glued with complete a2; a2.parentUuid = u2>
+    const file = tmpFile(
+      '{"uuid":"u1","parentUuid":null,"type":"user"}\n' +
+        '{"uuid":"a1","parentUuid":"u1","type":"assistant"}\n' +
+        '{"uuid":"u2","content":"torn mid-str{"uuid":"a2","parentUuid":"u2","type":"assistant"}',
+    );
+
+    const records = await read<{ uuid?: string }>(file);
+    expect(records.map((r) => r.uuid)).toEqual(['u1', 'a1']);
+  });
+
+  it('salvages complete sibling whose parentUuid resolves to an earlier record in the file', async () => {
+    // Issue #17747: sibling whose parent resolves in file closes the parent-chain gap
+    const file = tmpFile(
+      '{"uuid":"u1","parentUuid":null,"type":"user"}\n' +
+        '{"uuid":"a1","parentUuid":"u1","type":"assistant"}\n' +
+        '{"backgroundTurn":{"sess{"uuid":"a2","parentUuid":"a1","type":"assistant"}',
+    );
+
+    const records = await read<{ uuid?: string }>(file);
+    expect(records.map((r) => r.uuid)).toEqual(['u1', 'a1', 'a2']);
+  });
+
+  it('does not salvage sibling carrying parentUuid: null when earlier records exist', async () => {
+    const file = tmpFile(
+      '{"uuid":"u1","parentUuid":null,"type":"user"}\n' +
+        '{"uuid":"a1","parentUuid":"u1","type":"assistant"}\n' +
+        '{"torn_prefix":"unclosed{"uuid":"b1","parentUuid":null,"type":"assistant"}',
+    );
+
+    const records = await read<{ uuid?: string }>(file);
+    expect(records.map((r) => r.uuid)).toEqual(['u1', 'a1']);
   });
 
   it('write() creates parent dirs when missing', () => {

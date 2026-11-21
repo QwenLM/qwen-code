@@ -70,13 +70,59 @@ function getFileLock(filePath: string): Mutex {
 }
 
 /**
+ * Determines whether a given character offset `recordStart` in a physical line
+ * can be the starting `{` of a recovered suffix JSON object.
+ *
+ * Scans lexical state from 0 to `recordStart` to verify:
+ * 1. String boundaries and escape sequences.
+ * 2. When outside a string (`!inString`), structural punctuation delimiters
+ *    (`[`, `,`, `:`) immediately preceding `recordStart` reject the candidate
+ *    (preventing candidate extraction from within arrays, comma-delimited
+ *    elements, or property values). Inside a string (`inString`), punctuation
+ *    rejection does not apply because commas and colons inside string literals
+ *    are character content, not syntax delimiters.
+ * 3. Inside a string (`inString`) or at top-level depth (`depth === 0`),
+ *    candidate suffix recovery is permitted.
+ */
+export function canStartRecoveredSuffix(
+  line: string,
+  recordStart: number,
+): boolean {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < recordStart; i++) {
+    const char = line[i];
+    if (escape) {
+      escape = false;
+    } else if (inString) {
+      if (char === '\\') escape = true;
+      else if (char === '"') inString = false;
+    } else if (char === '"') {
+      inString = true;
+    } else if (char === '{' || char === '[') {
+      depth++;
+    } else if (char === '}' || char === ']') {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+
+  if (!inString) {
+    const previous = line.slice(0, recordStart).trimEnd().at(-1);
+    if (previous === '[' || previous === ',' || previous === ':') return false;
+  }
+
+  return inString || depth === 0;
+}
+
+/**
  * Recovers parsed objects from a single physical line that may contain one
  * or more concatenated top-level JSON objects (i.e. a missing newline
- * separator left two records glued together as `}{`). Walks the line with a
- * brace-depth counter that respects string boundaries and `\` escapes, then
- * tries `JSON.parse` on each balanced top-level fragment. Fragments that
- * still fail to parse are skipped silently — the caller decides whether to
- * warn.
+ * separator left two records glued together as `}{`), or an unclosed/torn
+ * prefix followed by a complete suffix record (`inString || depth === 0`).
+ * Walks the line with a brace-depth counter that respects string boundaries
+ * and `\` escapes, then tries `JSON.parse` on each balanced top-level fragment.
+ * Fragments that still fail to parse are skipped silently.
  *
  * **Limitation**: only top-level `{...}` records are recovered. A glued line
  * whose records are top-level arrays (`[...][...]`) will not split. All
@@ -92,15 +138,34 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
   let escape = false;
   let start = -1;
   let complete = true;
+  let lastNonWs = '';
+  let candidateSuffixStarts: number[] = [];
+
+  const recordCandidate = (offset: number) => {
+    if (candidateSuffixStarts.length >= 64) {
+      candidateSuffixStarts.shift();
+    }
+    candidateSuffixStarts.push(offset);
+  };
+
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (escape) {
       escape = false;
+      if (c === '{' && i > 0) {
+        recordCandidate(i);
+      }
       continue;
     }
     if (inString) {
-      if (c === '\\') escape = true;
-      else if (c === '"') inString = false;
+      if (c === '\\') {
+        escape = true;
+      } else if (c === '"') {
+        inString = false;
+        lastNonWs = '"';
+      } else if (c === '{' && i > 0) {
+        recordCandidate(i);
+      }
       continue;
     }
     if (c === '"') {
@@ -109,14 +174,26 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
       continue;
     }
     if (c === '{') {
+      if (
+        i > 0 &&
+        depth === 0 &&
+        lastNonWs !== '[' &&
+        lastNonWs !== ',' &&
+        lastNonWs !== ':'
+      ) {
+        recordCandidate(i);
+      }
       if (depth === 0) start = i;
       depth++;
+      lastNonWs = '{';
     } else if (c === '}') {
       depth--;
       if (depth === 0 && start >= 0) {
         const fragment = line.slice(start, i + 1);
         try {
           out.push(JSON.parse(fragment) as T);
+          // A complete record was consumed; suffix candidates must follow it.
+          candidateSuffixStarts = [];
         } catch {
           complete = false;
           // Skip un-parseable fragment; caller may still recover others.
@@ -129,10 +206,54 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
         depth = 0;
         start = -1;
       }
-    } else if (depth === 0 && !/\s/.test(c)) {
-      complete = false;
+      lastNonWs = '}';
+    } else if (!/\s/.test(c)) {
+      if (depth === 0) complete = false;
+      lastNonWs = c;
     }
   }
+
+  // If normal forward scanning found records and consumed the line cleanly, return them.
+  if (out.length > 0 && depth === 0 && !inString && start === -1) {
+    return {
+      records: out,
+      complete,
+    };
+  }
+
+  // If a torn prefix or unparseable fragment prevented clean consumption,
+  // attempt candidates from the last consumed position forward to reach
+  // the record's start brace directly. Attempts are bounded to keep recovery
+  // linear even on brace-dense unclosed strings.
+  const MAX_SUFFIX_ATTEMPTS = 64;
+  let attempts = 0;
+  for (
+    let idx = 0;
+    idx < candidateSuffixStarts.length && attempts < MAX_SUFFIX_ATTEMPTS;
+    idx++
+  ) {
+    attempts++;
+    const candidate = candidateSuffixStarts[idx];
+    if (canStartRecoveredSuffix(line, candidate)) {
+      try {
+        const parsed = JSON.parse(line.slice(candidate));
+        if (
+          parsed !== null &&
+          typeof parsed === 'object' &&
+          !Array.isArray(parsed) &&
+          Object.keys(parsed).length > 0
+        ) {
+          return {
+            records: [...out, parsed as T],
+            complete: false,
+          };
+        }
+      } catch {
+        // Suffix was not valid JSON; try next candidate brace.
+      }
+    }
+  }
+
   return {
     records: out,
     complete:
@@ -188,6 +309,28 @@ export function parseLineTolerant<T>(line: string, filePath: string): T[] {
   return parseLineTolerantWithIntegrity<T>(line, filePath).records;
 }
 
+function isOrphanTranscriptSalvage(
+  obj: unknown,
+  knownUuids: Set<string>,
+  hasPriorRecords: boolean,
+): boolean {
+  if (
+    typeof obj === 'object' &&
+    obj !== null &&
+    'uuid' in obj &&
+    typeof (obj as { uuid: unknown }).uuid === 'string'
+  ) {
+    const parentUuid = (obj as { parentUuid?: unknown }).parentUuid;
+    if (typeof parentUuid === 'string') {
+      return !knownUuids.has(parentUuid);
+    }
+    if (hasPriorRecords && (parentUuid === null || parentUuid === undefined)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function closeLineReader(
   rl: readline.Interface | undefined,
   fileStream: fs.ReadStream | undefined,
@@ -223,6 +366,7 @@ async function readLinesWithIntegrityInternal<T = unknown>(
     });
 
     const results: T[] = [];
+    const knownUuids = new Set<string>();
     let complete = true;
     let scannedLines = 0;
     for await (const line of rl) {
@@ -239,6 +383,20 @@ async function readLinesWithIntegrityInternal<T = unknown>(
       complete &&= parsed.complete;
       for (const obj of parsed.records) {
         if (budget === 'records' && results.length >= count) break;
+        if (
+          !parsed.complete &&
+          isOrphanTranscriptSalvage(obj, knownUuids, results.length > 0)
+        ) {
+          continue;
+        }
+        if (
+          typeof obj === 'object' &&
+          obj !== null &&
+          'uuid' in obj &&
+          typeof (obj as { uuid: unknown }).uuid === 'string'
+        ) {
+          knownUuids.add((obj as { uuid: string }).uuid);
+        }
         results.push(obj);
       }
       if (
@@ -310,12 +468,29 @@ export async function read<T = unknown>(
     });
 
     const results: T[] = [];
+    const knownUuids = new Set<string>();
     for await (const line of rl) {
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
       const parsed = parseLineTolerantWithIntegrity<T>(trimmed, filePath);
       if (!parsed.complete) options.onIncompleteRead?.();
-      for (const obj of parsed.records) results.push(obj);
+      for (const obj of parsed.records) {
+        if (
+          !parsed.complete &&
+          isOrphanTranscriptSalvage(obj, knownUuids, results.length > 0)
+        ) {
+          continue;
+        }
+        if (
+          typeof obj === 'object' &&
+          obj !== null &&
+          'uuid' in obj &&
+          typeof (obj as { uuid: unknown }).uuid === 'string'
+        ) {
+          knownUuids.add((obj as { uuid: string }).uuid);
+        }
+        results.push(obj);
+      }
     }
 
     return results;
