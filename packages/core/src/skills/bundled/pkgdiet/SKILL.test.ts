@@ -131,6 +131,12 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       "Check the active npm registry in the evaluator's non-project cwd",
     );
+    expect(normalizedBody).toContain(
+      "Determine the evaluator's non-project `cwd`",
+    );
+    expect(normalizedBody).toContain(
+      'In that evaluator `cwd`, run `npm config get registry` (e.g. `(cd "<cwd>" && npm config get registry)`)',
+    );
     expect(normalizedBody).toContain('npm config get registry');
     expect(normalizedBody).toContain(
       'If the command exits non-zero, report that npm could not be executed to inspect the registry in the evaluator `cwd`, and stop',
