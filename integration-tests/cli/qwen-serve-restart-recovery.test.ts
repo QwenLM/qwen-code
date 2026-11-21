@@ -446,6 +446,19 @@ describeDaemon('qwen serve — restart recovery', () => {
       async () => fakeServer.requests.length > 0,
       30_000,
     );
+    // The transcript is created empty and appended asynchronously, so the
+    // model request alone does not make the prompt recoverable across a kill.
+    await waitFor(
+      'recorded prompt',
+      async () => {
+        const transcriptPath = findSessionFile(workspace, sessionId, '.jsonl');
+        if (!transcriptPath) return false;
+        return readFileSync(transcriptPath, 'utf8').includes(
+          'E2E restart recovery',
+        );
+      },
+      30_000,
+    );
 
     const oldDaemon = daemon;
     await stopDaemon(oldDaemon);
@@ -465,7 +478,9 @@ describeDaemon('qwen serve — restart recovery', () => {
         if (record?.['code'] === 'daemon_runtime_starting') return false;
         expect(scan.status).toBe(200);
         scanItems = recoveryItems(scan.body);
-        return scanItems !== undefined;
+        return (
+          scanItems?.some((entry) => entry.sessionId === sessionId) ?? false
+        );
       },
       60_000,
     );
