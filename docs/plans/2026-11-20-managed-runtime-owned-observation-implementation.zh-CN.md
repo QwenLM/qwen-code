@@ -75,6 +75,15 @@
 
 - **投递批次上界（验收发现的缺陷）。** 原先一个 revision 最多携带 1024 个 256 KiB 段，base64 后单个 output 条目即可超过 `MANAGED_DELIVERY_REQUEST_LIMIT_BYTES`（512 KiB）。`deliverRpc` 在发出任何 HTTP 之前就拒绝超限请求，因此该条目永远推不出去、run 永久停在 held——违反 §11「预算下界为最大 flush 批次」。背景采集现改为 128 KiB 段、每段一页，使一个 revision 只携带单个段（编码后约 175 KB），即使两个流同时封页进同一条目也远低于上限。副作用是输出可见性提升：每 128 KiB 一个 revision，而非每 1024 段一页。
 
+- **背压下强制停止（验收发现的缺陷）。** outbox 满且 run 处于 held 时，采集的写队列停驻在 `waitForRoom` 内，stop 的 `finish`/`finalize` 排在其后——保留的 terminal 槽位根本不可达，registry 的 completion 协程会永久挂起、Runtime hold 永不释放。这正是 §4.4 的违反（「满 outbox 绝不能让已停止的进程产不出退出证明」）；此前「broken capture 的终态 manifest 无法 chain」的假设在其下游——terminal 条目从未发出。修复落实设计的丢尾契约：
+  - `WorkerBackgroundCaptureSink.setStopRequested()` 调用 `BackgroundDeliveryRun.requestStop()`，释放所有停驻的 room 等待者，stop 绝不等停驻队列。
+  - `waitForRoom` 仅在 stopping **且** outbox 确实满时丢弃条目；首次丢弃门闩 `tailDropped`，使被丢的尾巴是一段连续后缀，后续条目绝不能越过它恢复入队（否则破坏消费方强制的序列连续性）。outbox 尚有空间的 stop 照旧投递与封口——既有 stop 用例仍见 `complete`。
+  - 被丢条目不消耗 `deliverySeq`：序号在实际入队时才抽取，而非构造时，因此 terminal 条目与最后入队的条目保持连续。
+  - sink 的 revision 钩子在首个被丢 revision 上以新增的 `cancelled` 原因标记 capture broken（`LocalShellStreamCapture.cancelCapture()`），冻结缓冲尾巴；终态 revision 经 `missingRanges` 声明缺口。
+  - 资源 marker 仅在条目实际入队时前进，因此 terminal 条目携带终态 manifest 所指一切资源的完整闭包——含被丢 revision 的段、页与 manifest。applier 无需改动：终态 manifest 从最后应用的 revision 链接（`isToolResultManifestChainLink` 容许 revision 缺口），结算校验每个携带的 ref。
+
+  验收用例（同一进程测试文件）用真实无界生产者填满 held outbox，等到写队列停驻（生产者仍在写而条目数稳定不变），以 SIGSTOP 冻结生产者再 SIGKILL 强杀，然后按 registry 的 completion 顺序执行。结算后的记录为 `cancelled`/`stop_requested` 且无退出状态；manifest 为 `partial`/`cancelled`，保留前缀的 digest 与生产者精确字节一致，被丢尾巴是声明出的缺口。装置陷阱：在 outbox 停驻之前就冻结生产者，可能恰好落在段边界上、无尾可丢——capture 会诚实地封口为 `complete`，因此用例等待停驻信号而非固定条目数。
+
 ### 真实 MySQL 8.4 — 已落地
 
 `mysql@8.4`（8.4.11）本来就已装在 `/opt/homebrew/opt/mysql@8.4`；默认 `mysql` keg（26.7.0）的 `mysqld` 已损坏，因此无需安装任何东西。一次性实例跑在 3307 端口、独立 socket 与数据目录，跑完已 shutdown 并删除。
@@ -94,11 +103,11 @@ mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
 
 仅该聚焦车道需要 `-Dspotbugs.skip=true`：完整 `verify` 生命周期会撞上 `ToolPublicationAdmissionStore.acknowledgementReceiptCatalog` 里**既有**的 SpotBugs `NP_NULL_ON_SOME_PATH`，该文件本 PR 未触碰（最后改动来自已合并的 #17907）。该门在 CI 仍会跑。
 
-### 剩余故障用例与精确下一步
+### 剩余故障用例
 
-- **背压下强制停止。** 唯一剩余用例。用 `SIGSTOP` 冻结无界生产者再强杀后，terminal 条目带停止原因发出、run 报告 closed/terminal，但重挂后 40s 内记录仍不结算。管道链停驻在一个永远拿不到 outbox 空间的 write 上，因此 capture 以 partial/broken 收尾；当前假设是其终态 manifest 无法通过 `isToolResultManifestChainLink`，或 broken capture 的结算走的是与装置预期不同的路径。下一步：在装置里包住 `HostedShellPublisher.prototype['applyDelivery']` 捕获抛出的错误（express 处理器把错误丢弃，只回 `hosted_shell_publication_failed`），再判断是 applier 还是预期错了。未以红测试提交。
 - **带在途 pull 的 re-attach/drain、挂起期间首条观测、detach→seal 窗口、挂起期间 monitor 策略停止、边界/水位线 wake、挂起资格矩阵、worker 丢失、跨 Broker 重启/副本围栏、删除挂起 Session** — Java 侧已由 H2 上的 `RuntimeStageStoreTest`、`RuntimeObservationPullerTest`、`WakeSealStampTest`、`SessionRecoveryServiceTest`、`HostedCleanupDebtStoreTest`、`RuntimeBrokerServiceTest` 覆盖；各自仍需 MySQL 8.4 运行与 daemon 级 E2E。
-- **§7 度量** — pull 成本/延迟、活跃输出下的 staging 行数与字节、1/100/10,000 条观测的 drain 成本、常驻等价性；这些确定 pull 等待、staged-bytes 水位线、硬上限与 outbox 预算（§11 开放问题 1 与 3）。
+- **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。
+- **§7 度量** — pull 成本/延迟、活跃输出下的 staging 行数与字节、1/100/10,000 条观测的 drain 成本、常驻等价性；这些确定 pull 等待、staged-bytes 水位线、硬上限与 outbox 预算（§11 开放问题 1 与 3）。已在手的度量发现：每页一个 128 KiB 段时，`maxPagesPerStream`（64）把 worker 自持采集的**总**输出上限定在 8 MiB（超过即 `size_limit` break），而前台 lane 的 512 段页可达 ~32 GiB。§7 须据此定 `segmentsPerPage`/`segmentBytes`——每页 2 段（编码后约 341 KB）仍合请求上限且上限翻倍；manifest 自身 64 KiB 上界无论如何把页列表限在 ~280 项附近。
 
 ## 验证命令
 
@@ -115,4 +124,5 @@ cd packages/core && npx vitest run src/managed-runtime/local-shell-stream-captur
 - 即便 worker 模式，applier 仍要求经 `HostedShellPublisher.register()` 注册采集（prepare RPC 被跳过，但 `applyDelivery` 查找已注册采集）。生产在 `hosted-workspace-tool-turn.ts` 的后台准入处注册。
 - 测试资源 store 必须将字节落到 session 资源根布局（`<runtimeBaseDir>/resources/<sessionId>/<kind>/<resourceId>`）并经 `session.resources` 读取，否则 authority 的 `verifyExtensionResources` 拒绝记录 ref。
 - `LocalManagedSessionResourceStore.publish` 总是生成 UUID； honoring 客户端选定 ID 的 `DurableToolResultResourceStore` 须直接写该布局（见测试 double）。
+- 疑似潜在环（既有、本切片未复现也未修）：若 Monitor 的**尾**窗口恰是跨过 `maxEvents` 的那个，`flushTail → flush → autoStop → terminate` 会等待 registry completion，而后者正在等 `flushTail`（`registry.terminate` 返回 `entry.completion`）。正常 quota 路径从窗口 flush 触发、尾窗口为空，不触环。修复前需先单独复现。
 - 本仓库不要对活跃 PR rebase/force-push；改为 merge `origin/main`。
