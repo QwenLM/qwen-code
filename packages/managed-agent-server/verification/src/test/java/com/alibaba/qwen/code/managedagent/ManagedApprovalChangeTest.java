@@ -14,7 +14,6 @@ import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -121,10 +120,9 @@ class ManagedApprovalChangeTest {
         var admitted = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "live-turn", "digest",
                 session, input, SubmitHarnessTurn.computePayloadDigest(input)));
         var turn = store.findTurn(tenant, session, admitted.turnId()).orElseThrow();
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,"
+        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
-                + " VALUES (?,?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)",
-                ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
+                + " VALUES (?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)", "a".repeat(64), tenant, session,
                 "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         assertThat(service.queryWebShellSessionApproval(tenant, "actor", session).liveSupported()).isTrue();
         assertThat(change("actor", "live-change", "yolo", 0).approvalRevision()).isEqualTo(1);
@@ -723,10 +721,9 @@ class ManagedApprovalChangeTest {
             when(harness.supportsApprovalSelection()).thenReturn(false);
         }
         if (shape.equals("approval")) {
-            jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,"
+            jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
                     + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
-                    + " VALUES (?,?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)",
-                    ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
+                    + " VALUES (?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)", "a".repeat(64), tenant, session,
                     "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         }
         if (shape.equals("recovery")) {

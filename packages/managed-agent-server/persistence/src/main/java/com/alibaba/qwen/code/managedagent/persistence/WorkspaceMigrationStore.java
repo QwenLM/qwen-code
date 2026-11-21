@@ -373,7 +373,7 @@ public final class WorkspaceMigrationStore {
         // hostage: its acceptance is unknown and its task may still use this
         // storage, so the move waits for the reconciler (D7-2).
         check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_operation o"
-                + " ON o.session_scope_key = s.session_scope_key AND o.tenant_id = s.tenant_id AND o.session_id = s.session_id WHERE s.tenant_id = ?"
+                + " ON o.tenant_id = s.tenant_id AND o.session_id = s.session_id AND s.session_scope_key IS NOT NULL WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL') AND o.state NOT IN ('COMPLETED', 'FAILED')"),
                 "migration_work_unsettled");
         check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_request_receipt c"
@@ -408,7 +408,7 @@ public final class WorkspaceMigrationStore {
                 break;
             }
         }
-        check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_session_head h ON h.tenant_key = s.tenant_key AND h.harness_key = s.session_key AND h.tenant_id = s.tenant_id AND h.session_id = s.session_id WHERE s.tenant_id = ? AND s.workspace_storage_id = ? AND h.state = 'ACTIVE' AND (h.writer_lease_until IS NULL OR h.writer_lease_until > " + ManagedSchemaTime.SQL_NOW + ")"),
+        check(!existsIn(reader, "SELECT 1 FROM ma_session s JOIN ma_session_head h ON h.tenant_id = s.tenant_id AND h.session_id = s.session_id AND s.session_scope_key IS NOT NULL WHERE s.tenant_id = ? AND s.workspace_storage_id = ? AND h.state = 'ACTIVE' AND (h.writer_lease_until IS NULL OR h.writer_lease_until > " + ManagedSchemaTime.SQL_NOW + ")"),
                 "migration_writer_active");
     }
 

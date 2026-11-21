@@ -101,8 +101,10 @@ final class ToolPublicationSealManifest {
         Timestamp current = now();
         insertCaptureResource(scope, publicationId, slot, resourceId, "managed-tool-seal-manifest",
                 bytes.length, sha, null, operationId, current);
-        String sessionScope = jdbc.queryForObject("SELECT session_scope_key FROM ma_resource WHERE scope_key = ?"
-                + " AND publication_id = ? AND slot_key = ?", String.class, scope, publicationId, slot);
+        var owner = jdbc.query("SELECT tenant_id, session_id FROM ma_resource WHERE scope_key = ?"
+                + " AND publication_id = ? AND slot_key = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                scope, publicationId, slot).getFirst();
+        String sessionScope = ManagedSessionStore.sessionScopeKey((String) owner.get("tenant_id"), (String) owner.get("session_id"));
         String resourceKey = ManagedSchemaKeys.key(sessionScope, resourceId);
         jdbc.update("UPDATE ma_resource SET inline_bytes = ?, capture_state = 'VERIFIED', last_verified_at = ?"
                 + " WHERE resource_key = ? AND capture_state = 'CANDIDATE'", bytes, current, resourceKey);
@@ -119,17 +121,17 @@ final class ToolPublicationSealManifest {
             resourceId = "capture-segment-" + ManagedSchemaKeys.key(scope, publicationId, slot);
         }
         String resourceKey = ManagedSchemaKeys.key(sessionScope, resourceId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id,"
                         + " scope_key, publication_id, slot_key, resource_id, kind, schema_version, byte_length, sha256,"
                         + " storage_kind, capture_object_key, state, capture_state, operation_id, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'PUBLISHED', 'CANDIDATE', ?, ?)",
-                resourceKey, sessionScope, tenant, capture.get("workspace_id"), session, scope, publicationId, slot,
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'PUBLISHED', 'CANDIDATE', ?, ?)",
+                resourceKey, tenant, capture.get("workspace_id"), session, scope, publicationId, slot,
                 resourceId, kind == null ? "managed-tool-segment" : kind, length, digest,
                 objectKey == null ? "MYSQL_INLINE" : "TOOL_PUBLICATION", objectKey, operationId, createdAt);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision,"
                         + " resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create)"
-                        + " VALUES (?, 'CAPTURE', ?, 0, ?, ?, ?, ?, ?, ?)",
-                sessionScope, ManagedSchemaKeys.key("capture", scope, publicationId), resourceKey,
+                        + " VALUES ('CAPTURE', ?, 0, ?, ?, ?, ?, ?, ?)",
+                ManagedSchemaKeys.key("capture", scope, publicationId), resourceKey,
                 tenant, capture.get("workspace_id"), session, resourceId, createdAt);
     }
 
