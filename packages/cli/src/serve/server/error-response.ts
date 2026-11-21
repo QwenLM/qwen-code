@@ -69,6 +69,7 @@ import {
   WorkspaceMismatchError,
   WorkspaceDrainingError,
   TotalSessionLimitExceededError,
+  SystemOverloadedError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import { workflowRequestErrorStatus } from '../workflow-errors.js';
@@ -995,6 +996,26 @@ export function sendBridgeError(
       code: 'session_limit_exceeded',
       limit: err.limit,
       scope: err.scope,
+    });
+    return;
+  }
+  if (err instanceof SystemOverloadedError) {
+    daemonLog?.warn('load admission rejected', {
+      ...(ctx?.route ? { route: ctx.route } : {}),
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+      reason: err.reason,
+      loadRatio: err.loadRatio,
+      eventLoopLagP99Ms: err.eventLoopLagP99Ms,
+    });
+    // Host load drains more slowly than a session slot frees, so the hint
+    // is longer than the count gates' 5s.
+    res.set('Retry-After', '15');
+    res.status(503).json({
+      error: err.message,
+      code: 'system_overloaded',
+      reason: err.reason,
+      loadRatio: err.loadRatio,
+      eventLoopLagP99Ms: err.eventLoopLagP99Ms,
     });
     return;
   }

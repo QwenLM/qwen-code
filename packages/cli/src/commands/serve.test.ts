@@ -391,6 +391,13 @@ describe('serve command args', () => {
     expect(buildParser().parseSync('--no-web')['web']).toBe(false);
   });
 
+  it('parses --load-admission (default true) and --no-load-admission', () => {
+    expect(buildParser().parseSync('')['load-admission']).toBe(true);
+    expect(
+      buildParser().parseSync('--no-load-admission')['load-admission'],
+    ).toBe(false);
+  });
+
   it('parses --open (default false)', () => {
     expect(buildParser().parseSync('')['open']).toBe(false);
     expect(buildParser().parseSync('--open')['open']).toBe(true);
