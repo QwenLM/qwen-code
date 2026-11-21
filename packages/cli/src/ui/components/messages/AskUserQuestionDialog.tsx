@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type {
@@ -69,6 +69,15 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     Record<number, string>
   >({});
   const customInputValuesRef = useRef<Record<number, string>>({});
+  const advanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (advanceTimerRef.current !== null) {
+        clearTimeout(advanceTimerRef.current);
+      }
+    },
+    [],
+  );
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [multiSelectedOptions, setMultiSelectedOptions] = useState<
     Record<number, string[]>
@@ -161,7 +170,10 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   };
 
   // Select a value for the current question, then submit (single question) or advance to the next tab (multi-question).
+  // A second answer inside the 150 ms pause is dropped: two armed timers would
+  // skip the question between them. Same armed-timer lock as the OpenTUI port.
   const selectAndAdvance = (value: string) => {
+    if (advanceTimerRef.current !== null) return;
     setSelectedOptions((prev) => ({ ...prev, [currentQuestionIndex]: value }));
 
     if (!hasMultipleQuestions) {
@@ -169,10 +181,18 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         answers: { [currentQuestionIndex]: value },
       });
     } else if (currentQuestionIndex < totalTabs - 1) {
-      setTimeout(() => {
+      advanceTimerRef.current = setTimeout(() => {
+        advanceTimerRef.current = null;
         setCurrentQuestionIndex((prev) => Math.min(prev + 1, totalTabs - 1));
         setSelectedIndex(0);
       }, 150);
+    }
+  };
+
+  const cancelPendingAdvance = () => {
+    if (advanceTimerRef.current !== null) {
+      clearTimeout(advanceTimerRef.current);
+      advanceTimerRef.current = null;
     }
   };
 
@@ -239,10 +259,8 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
           void onConfirm(ToolConfirmationOutcome.Cancel);
           return;
         }
-        if (key.name === 'return') {
-          handleCustomInputSubmit();
-          return;
-        }
+        // Return belongs to TextInput, whose onSubmit already runs
+        // handleCustomInputSubmit; handling it here too advanced twice.
         return;
       }
 
@@ -251,6 +269,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
       // Tab navigation (left/right arrows)
       if (key.name === 'left' && hasMultipleQuestions) {
         if (currentQuestionIndex > 0) {
+          cancelPendingAdvance();
           setCurrentQuestionIndex(currentQuestionIndex - 1);
           setSelectedIndex(0);
         }
@@ -258,6 +277,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
       }
       if (key.name === 'right' && hasMultipleQuestions) {
         if (currentQuestionIndex < totalTabs - 1) {
+          cancelPendingAdvance();
           setCurrentQuestionIndex(currentQuestionIndex + 1);
           setSelectedIndex(0);
         }
