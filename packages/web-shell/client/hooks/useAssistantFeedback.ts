@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import {
+  MAX_ASSISTANT_FEEDBACK_SESSIONS,
   readAssistantFeedbackStore,
   setAssistantFeedbackRating,
   writeAssistantFeedbackStore,
@@ -56,7 +57,11 @@ export function useAssistantFeedback(
       // pane's full snapshot may predate another pane's additions or removals.
       let next = readAssistantFeedbackStore();
       const own = storeRef.current[sessionId];
-      if (own && !next[sessionId]) {
+      if (
+        own &&
+        !next[sessionId] &&
+        Object.keys(next).length >= MAX_ASSISTANT_FEEDBACK_SESSIONS
+      ) {
         next = { ...next, [sessionId]: { ...own } };
       }
       for (const change of pendingChanges.current) {

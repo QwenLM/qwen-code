@@ -230,8 +230,25 @@ describe('useAssistantFeedback through the answer footer', () => {
     }
   });
 
+  it('does not restore the last cleared rating in a shared session', () => {
+    writeAssistantFeedbackStore({
+      'shared-session': { 'turn-a': 'up' },
+    });
+    mountPair('shared-session', 'shared-session');
+    try {
+      rateInPane('first', 'Satisfied');
+      rateInPane('second', 'Not satisfied');
+
+      expect(readAssistantFeedbackStore()).toEqual({
+        'shared-session': { 'turn-b': 'down' },
+      });
+    } finally {
+      unmount();
+    }
+  });
+
   it("retries local edits after storage becomes writable without losing another pane's changes", () => {
-    mountPair('session-a', 'session-b');
+    mountPair('session-a', 'session-a');
     try {
       const write = vi
         .spyOn(Storage.prototype, 'setItem')
@@ -250,7 +267,7 @@ describe('useAssistantFeedback through the answer footer', () => {
               <Transcript sessionId="session-a" turnId="turn-c" />
             </section>
             <section data-pane="second">
-              <Transcript sessionId="session-b" turnId="turn-b" />
+              <Transcript sessionId="session-a" turnId="turn-b" />
             </section>
           </I18nProvider>,
         );
@@ -258,8 +275,11 @@ describe('useAssistantFeedback through the answer footer', () => {
       rateInPane('first', 'Not satisfied');
 
       expect(readAssistantFeedbackStore()).toEqual({
-        'session-a': { 'turn-a': 'up', 'turn-c': 'down' },
-        'session-b': { 'turn-b': 'down' },
+        'session-a': {
+          'turn-a': 'up',
+          'turn-b': 'down',
+          'turn-c': 'down',
+        },
       });
     } finally {
       unmount();
