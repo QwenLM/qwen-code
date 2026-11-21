@@ -29,7 +29,7 @@ import {
 } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
-import { createUntil } from './wait.js';
+import { permissionsCaseOptions, until } from './tui-editor-parity-budget.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
@@ -53,7 +53,7 @@ const keys = {
   editor: '\x18',
 };
 
-const until = createUntil(12_000);
+const PERMISSIONS_CASE_OPTIONS = permissionsCaseOptions(process.env);
 
 function lastUser(server: FakeOpenAIServer): string {
   const messages = server.requests.at(-1)?.body['messages'];
@@ -894,6 +894,7 @@ it('vim-insert-controls-and-disable', () =>
 
 it(
   'permissions-edits-and-completes-without-model',
+  PERMISSIONS_CASE_OPTIONS,
   () =>
     scenario(
       'permissions-edits-and-completes-without-model',
@@ -1023,11 +1024,11 @@ it(
         expect(server.requests).toHaveLength(0);
       },
     ),
-  90_000,
 );
 
 it(
   'permissions-clear-undo-replace-without-model',
+  PERMISSIONS_CASE_OPTIONS,
   () =>
     scenario(
       'permissions-clear-undo-replace-without-model',
@@ -1131,11 +1132,11 @@ it(
         expect(server.requests).toHaveLength(0);
       },
     ),
-  90_000,
 );
 
 it(
   'permissions-second-control-c-exits-without-model',
+  PERMISSIONS_CASE_OPTIONS,
   () =>
     scenario(
       'permissions-second-control-c-exits-without-model',
@@ -1181,5 +1182,4 @@ it(
         expect(server.requests).toHaveLength(0);
       },
     ),
-  90_000,
 );
