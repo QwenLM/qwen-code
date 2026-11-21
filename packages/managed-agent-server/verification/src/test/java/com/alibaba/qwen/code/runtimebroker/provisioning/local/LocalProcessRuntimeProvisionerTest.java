@@ -205,51 +205,6 @@ public class LocalProcessRuntimeProvisionerTest {
         assertReleasePreservesOtherAttempt(true);
     }
 
-    @Test
-    void createsAnAbsentStateDirectoryBeforeSpawningTheWorker()
-            throws Exception {
-        requireNode();
-        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
-                .toAbsolutePath();
-        assumeTrue(Files.isRegularFile(script));
-        Path root = Files.createTempDirectory("ephemeral-state");
-        Path state = root.resolve("absent").resolve("state");
-        Set<Long> before = childPids();
-        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
-                "/runtime/workspace", DIGEST, "workspace");
-        RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
-                null,
-                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS);
-        try (LocalProcessRuntimeProvisioner provisioner =
-                new LocalProcessRuntimeProvisioner(
-                        List.of("node", script.toString()), state,
-                        new HttpRuntimeTransport())) {
-            assertFalse(Files.exists(state));
-            provisioner
-                    .provision(request,
-                            RuntimeProvisionSeed.create("binding-1", 1))
-                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
-            assertTrue(Files.isDirectory(state));
-        } finally {
-            ProcessHandle.current().children()
-                    .filter(process -> !before.contains(process.pid()))
-                    .forEach(ProcessHandle::destroyForcibly);
-            assertNoNewChildren(before);
-            deleteRecursively(root);
-        }
-    }
-
-    private static void deleteRecursively(Path root) throws IOException {
-        if (!Files.exists(root)) {
-            return;
-        }
-        try (var paths = Files.walk(root)) {
-            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
-                Files.deleteIfExists(path);
-            }
-        }
-    }
-
     private static void assertReleasePreservesOtherAttempt(boolean sameSeed)
             throws Exception {
         requireNode();

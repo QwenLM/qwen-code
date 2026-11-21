@@ -15,6 +15,8 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.UserPrincipal;
+import java.nio.file.attribute.UserPrincipalNotFoundException;
 import java.util.List;
 import java.util.Set;
 
@@ -51,6 +53,12 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
         Path stateDirectory = Path.of(broker.getStateDirectory()).toAbsolutePath().normalize();
         if (broker.isDurableLocalProcess()) {
             requireRecoveryDirectoryOutsideWorkspaces(broker, stateDirectory);
+        } else if (!canCreateDirectory(stateDirectory)) {
+            // Refuse at wiring time, without creating anything, so a state
+            // path that can never hold the directory is diagnosed here with
+            // its path instead of at every later provision.
+            throw new IllegalStateException(
+                    "Runtime Broker state directory is unavailable: " + stateDirectory);
         }
         LocalProcessRuntimeProvisioner provider = broker.isDurableLocalProcess()
                 ? LocalProcessRuntimeProvisioner.durable(command, stateDirectory, http(transport),
@@ -93,7 +101,8 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
     @Override
     public List<Check> preflight(ManagedAgentSettings settings) {
         var broker = settings.getRuntimeBroker();
-        return List.of(stateDirectoryCheck(broker),
+        return List.of(directoryCheck("broker-state", broker.getStateDirectory(),
+                        broker.isDurableLocalProcess(), broker, settings.getServiceUser()),
                 executableCheck("node", broker.getNodeExecutable()),
                 readableCheck("worker-entry", broker.getWorkerEntry()));
     }
@@ -111,39 +120,43 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
         }
     }
 
+    private static boolean canCreateDirectory(Path directory) {
+        Path existing = directory.toAbsolutePath().normalize();
+        // NOFOLLOW_LINKS: a dangling symlink is not an absent path —
+        // createDirectories can never create through it. Creating a child
+        // needs write and search on the nearest existing ancestor.
+        while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+            existing = existing.getParent();
+        }
+        return existing != null && Files.isDirectory(existing)
+                && Files.isWritable(existing) && Files.isExecutable(existing);
+    }
+
     private static void requireRecoveryDirectoryOutsideWorkspaces(ManagedAgentSettings.RuntimeBroker broker,
             Path directory) {
         try {
-            if (recoveryDirectoryUnderWorkspaceRoot(broker, directory)) {
+            Path candidate = Files.exists(directory) ? directory.toRealPath()
+                    : directory.getParent().toRealPath().resolve(directory.getFileName());
+            // A blank `workspace-cwd` means "no Workspace cwd configured", as it
+            // does in ManagedAgentPreflight; `Path.of("")` would otherwise resolve
+            // to this process's own directory and make the verdict caller-cwd
+            // dependent.
+            if (!StringUtils.isBlank(broker.getWorkspaceCwd())
+                    && candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
                 throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
+            }
+            if (!broker.getWorkspaceCreationRoot().isBlank()
+                    && candidate.startsWith(Path.of(broker.getWorkspaceCreationRoot()).toRealPath())) {
+                throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
+            }
+            for (var mount : broker.getWorkspaceMounts()) {
+                if (candidate.startsWith(Path.of(mount.root()).toRealPath())) {
+                    throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
+                }
             }
         } catch (IOException error) {
             throw new IllegalStateException("Runtime recovery directory could not be verified", error);
         }
-    }
-
-    private static boolean recoveryDirectoryUnderWorkspaceRoot(ManagedAgentSettings.RuntimeBroker broker,
-            Path directory) throws IOException {
-        Path candidate = Files.exists(directory) ? directory.toRealPath()
-                : directory.getParent().toRealPath().resolve(directory.getFileName());
-        // A blank `workspace-cwd` means "no Workspace cwd configured", as it
-        // does in ManagedAgentPreflight; `Path.of("")` would otherwise resolve
-        // to this process's own directory and make the verdict caller-cwd
-        // dependent.
-        if (!StringUtils.isBlank(broker.getWorkspaceCwd())
-                && candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
-            return true;
-        }
-        if (!broker.getWorkspaceCreationRoot().isBlank()
-                && candidate.startsWith(Path.of(broker.getWorkspaceCreationRoot()).toRealPath())) {
-            return true;
-        }
-        for (var mount : broker.getWorkspaceMounts()) {
-            if (candidate.startsWith(Path.of(mount.root()).toRealPath())) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static String recoveryDirectoryOutsideRootsMessage() {
@@ -153,110 +166,114 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                 + " and QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false";
     }
 
-    private static Check stateDirectoryCheck(ManagedAgentSettings.RuntimeBroker broker) {
-        String path = broker.getStateDirectory();
-        if (StringUtils.isBlank(path)) {
-            return new Check("broker-state", Status.FAIL, "not configured",
-                    "set the directory");
+    private static UserPrincipal expectedOwner(String serviceUser) throws IOException {
+        if (StringUtils.isBlank(serviceUser)) {
+            return RuntimeStateFiles.processOwner();
         }
-        Path directory = Path.of(path).toAbsolutePath().normalize();
-        if (broker.isDurableLocalProcess()) {
-            // `create()` refuses a durable state directory under any Workspace
-            // root, so --check must not PASS or WARN a configuration whose
-            // first start cannot succeed. An unresolvable path is reported by
-            // the component checks below.
-            try {
-                if (recoveryDirectoryUnderWorkspaceRoot(broker, directory)) {
-                    return new Check("broker-state", Status.FAIL,
-                            path + " is inside a Workspace root",
-                            recoveryDirectoryOutsideRootsMessage());
-                }
-            } catch (IOException ignored) {
-                // resolution failure: the absent/existing checks name the cause
-            }
-        }
-        if (Files.isDirectory(directory)) {
-            if (!Files.isWritable(directory)) {
-                return new Check("broker-state", Status.FAIL, path + " is not writable",
-                        "grant write access to the service account");
-            }
-            return searchable(directory)
-                    ? new Check("broker-state", Status.PASS, path, null)
-                    : new Check("broker-state", Status.FAIL, path + " is not searchable",
-                            "grant execute access to the service account");
-        }
-        if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
-            return new Check("broker-state", Status.FAIL,
-                    path + " exists but is not a directory",
-                    "remove the file or link at " + path);
-        }
-        if (!broker.isDurableLocalProcess()) {
-            // The ephemeral spawn creates the directory, so an idle broker is
-            // healthy with it absent; only a component that prevents creation
-            // is a hard failure.
-            Path ancestor = directory.getParent();
-            while (ancestor != null && !Files.exists(ancestor, LinkOption.NOFOLLOW_LINKS)) {
-                ancestor = ancestor.getParent();
-            }
-            if (ancestor == null || !Files.isDirectory(ancestor)) {
-                return new Check("broker-state", Status.FAIL,
-                        (ancestor == null ? path : ancestor.toString()) + " is not a directory",
-                        "replace it with a directory");
-            }
-            if (!Files.isWritable(ancestor)) {
-                return new Check("broker-state", Status.FAIL,
-                        ancestor + " is not writable",
-                        "grant write access to the service account");
-            }
-            return searchable(ancestor)
-                    ? new Check("broker-state", Status.WARN,
-                            path + " (absent; created on the first Runtime spawn)",
-                            "run --check as the Broker's service account to verify creation access")
-                    : new Check("broker-state", Status.FAIL,
-                            ancestor + " is not searchable",
-                            "grant execute access to the service account");
-        }
-        // Durable mode creates the directory owner-private (0700) on its first
-        // start, one level deep, and refuses a symlinked path.
-        Path parent = directory.getParent();
-        Path component = parent;
-        while (component != null) {
-            if (Files.isSymbolicLink(component)) {
-                return new Check("broker-state", Status.FAIL,
-                        component + " is a symlink",
-                        "point the state directory at a real path");
-            }
-            component = component.getParent();
-        }
-        if (parent == null || !Files.isDirectory(parent)) {
-            return new Check("broker-state", Status.FAIL,
-                    (parent == null ? path : parent.toString()) + " is not a directory",
-                    "replace it with a directory");
-        }
-        if (!Files.isReadable(parent)) {
-            // `LocalRuntimeStore.syncDirectory` opens the parent for reading
-            // right after it creates the state directory.
-            return new Check("broker-state", Status.FAIL,
-                    parent + " is not readable",
-                    "grant read access to the service account");
-        }
-        if (!Files.isWritable(parent)) {
-            return new Check("broker-state", Status.FAIL,
-                    parent + " is not writable",
-                    "grant write access to the service account");
-        }
-        return searchable(parent)
-                ? new Check("broker-state", Status.WARN,
-                        path + " (absent; created owner-private on the first start)",
-                        "run --check as the Broker's service account to verify creation access")
-                : new Check("broker-state", Status.FAIL,
-                        parent + " is not searchable",
-                        "grant execute access to the service account");
+        return FileSystems.getDefault().getUserPrincipalLookupService()
+                .lookupPrincipalByName(serviceUser);
     }
 
-    private static boolean searchable(Path directory) {
-        return !FileSystems.getDefault().supportedFileAttributeViews().contains("posix")
-                || Files.isExecutable(directory);
+    private static Check directoryCheck(String name, String path, boolean durable,
+            ManagedAgentSettings.RuntimeBroker broker, String serviceUser) {
+        if (StringUtils.isBlank(path)) {
+            return new Check(name, Status.FAIL, "not configured",
+                    "set the directory");
+        }
+        Path directory = Path.of(path);
+        if (durable) {
+            // Delegate to the same checks create() runs instead of re-deriving
+            // them: the store validates an existing directory itself, and both
+            // shapes must lie outside the Workspace roots.
+            Path absolute = directory.toAbsolutePath().normalize();
+            if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+                try {
+                    requireRecoveryDirectoryOutsideWorkspaces(broker, absolute);
+                    if (!absolute.equals(absolute.toRealPath())) {
+                        throw new IOException("Recovery path is not canonical");
+                    }
+                    // Judge ownership against the account the Broker runs as,
+                    // not the checker: root --check is recommended, so the owner
+                    // operand is the configured service account. The store
+                    // enforces the same ownership as its own process at startup.
+                    // With no service account configured the Broker runs as its
+                    // launcher, which a checker that does not own the directory
+                    // (root --check of a bare deployment) cannot be assumed to
+                    // be: ownership is then unjudgeable, so it warns instead of
+                    // failing, while type, mode and canonicality still fail.
+                    if (StringUtils.isBlank(serviceUser)) {
+                        UserPrincipal owner = Files.getOwner(absolute);
+                        if (!owner.equals(RuntimeStateFiles.processOwner())) {
+                            RuntimeStateFiles.validate(absolute, true, owner);
+                            return new Check(name, Status.WARN,
+                                    path + " is owned by " + owner.getName()
+                                            + ", not the checking account",
+                                    "set QWEN_MANAGED_AGENT_SERVICE_USER to the account that"
+                                            + " launches the Broker, or run --check as that"
+                                            + " account");
+                        }
+                    }
+                    RuntimeStateFiles.validate(absolute, true, expectedOwner(serviceUser));
+                } catch (UserPrincipalNotFoundException unknown) {
+                    return new Check(name, Status.WARN,
+                            path + " cannot be judged: service account " + serviceUser
+                                    + " does not exist",
+                            "create the account, or correct QWEN_MANAGED_AGENT_SERVICE_USER");
+                } catch (IOException | RuntimeException error) {
+                    return new Check(name, Status.FAIL,
+                            path + " is not a valid durable state directory: " + error.getMessage(),
+                            "use a canonical, owner-private rwx------ directory owned by the"
+                                    + " service account, outside the Workspace roots");
+                }
+                return new Check(name, Status.PASS, path, null);
+            }
+            // The store refuses a symlinked recovery path and creates the leaf
+            // single-level, then fsyncs the parent for READ: the parent must
+            // already exist, be readable, writable and searchable, and the
+            // path must be symlink-free.
+            for (Path current = absolute; current != null; current = current.getParent()) {
+                if (Files.isSymbolicLink(current)) {
+                    return new Check(name, Status.FAIL, path + " is under a symbolic link",
+                            "point the state directory at a canonical path; the durable store"
+                                    + " refuses a symlinked recovery path");
+                }
+            }
+            Path parent = absolute.getParent();
+            if (parent == null || !Files.isDirectory(parent)
+                    || !Files.isReadable(parent) || !Files.isWritable(parent)
+                    || !Files.isExecutable(parent)) {
+                return new Check(name, Status.FAIL, path + " cannot be created",
+                        "ensure the parent directory " + parent
+                                + " exists and is readable, writable and searchable");
+            }
+            try {
+                requireRecoveryDirectoryOutsideWorkspaces(broker, absolute);
+            } catch (RuntimeException error) {
+                return new Check(name, Status.FAIL, path + " " + error.getMessage(), null);
+            }
+            return new Check(name, Status.WARN,
+                    path + " does not exist yet; created during Broker wiring", null);
+        }
+        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            // The ephemeral provisioner creates the state directory at first
+            // spawn, so an absent but creatable path no longer refuses the
+            // deployment.
+            if (canCreateDirectory(directory)) {
+                return new Check(name, Status.WARN,
+                        path + " does not exist yet; created at first Runtime spawn", null);
+            }
+            return new Check(name, Status.FAIL,
+                    path + " cannot be created", "create it or fix the parent directory permissions");
+        }
+        if (!Files.isDirectory(directory)) {
+            return new Check(name, Status.FAIL,
+                    path + " is not a directory", "create it");
+        }
+        if (!Files.isWritable(directory) || !Files.isExecutable(directory)) {
+            return new Check(name, Status.FAIL, path + " is not writable and searchable",
+                    "grant write and search access to the service account");
+        }
+        return new Check(name, Status.PASS, path, null);
     }
 
     private static Check executableCheck(String name, String path) {

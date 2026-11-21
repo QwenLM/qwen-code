@@ -28,6 +28,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -708,12 +709,27 @@ public final class LocalProcessRuntimeProvisioner
     }
 
     private ProcessBuilder workerProcess() {
+        // The ephemeral provisioner has no durable store to create the state
+        // directory, and ProcessBuilder.start fails on a missing working
+        // directory. Ensure it here, immediately before spawn, so create()
+        // stays side-effect-free while a deployment that never pre-created
+        // the directory can still start a Runtime.
         try {
-            // The durable store creates the directory while it records the
-            // resource; the ephemeral path has no store, so the spawn owns it.
-            Files.createDirectories(workingDirectory);
+            // Create a missing directory owner-private (rwx------), matching
+            // the durable store's convention; an existing directory is not
+            // re-moded. The attestation worker does not inspect its cwd, but
+            // the workspace-upload bootstrap requires the state directory to
+            // be canonical and owner-private. Fall back to default attributes
+            // where POSIX is unsupported.
+            if (workingDirectory.getFileSystem().supportedFileAttributeViews().contains("posix")) {
+                Files.createDirectories(workingDirectory, PosixFilePermissions.asFileAttribute(
+                        PosixFilePermissions.fromString("rwx------")));
+            } else {
+                Files.createDirectories(workingDirectory);
+            }
         } catch (IOException error) {
-            throw new IllegalStateException("Runtime Broker state directory is unavailable", error);
+            throw new IllegalStateException(
+                    "Runtime Broker state directory is unavailable: " + workingDirectory, error);
         }
         ProcessBuilder builder = new ProcessBuilder(command).directory(workingDirectory.toFile())
                 .redirectError(ProcessBuilder.Redirect.DISCARD);
