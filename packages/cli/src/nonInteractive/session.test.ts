@@ -827,6 +827,10 @@ describe('runNonInteractiveStreamJson', () => {
 
   it('initializes session and processes initialize control request', async () => {
     const initRequest = createControlRequest('initialize');
+    const sendSdkMcpMessage = vi.fn();
+    mockDispatcher.sdkMcpController.createSendSdkMcpMessage.mockReturnValue(
+      sendSdkMcpMessage,
+    );
 
     mockInputReader.read = async function* () {
       yield initRequest;
@@ -835,6 +839,10 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest, true);
+    expect(config.initialize).toHaveBeenCalledExactlyOnceWith({
+      agentTeamHostSupported: true,
+      sendSdkMcpMessage,
+    });
   });
 
   it('keeps MCP responses flowing while a Workflow mode getter awaits readiness', async () => {
@@ -1356,6 +1364,9 @@ describe('runNonInteractiveStreamJson', () => {
 
     await runNonInteractiveStreamJson(config, '');
 
+    expect(config.initialize).toHaveBeenCalledExactlyOnceWith({
+      agentTeamHostSupported: true,
+    });
     expect(runNonInteractiveMock.mock.calls.map((call) => call[2])).toEqual([
       'First message',
       'Second message',

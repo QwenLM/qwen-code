@@ -360,6 +360,74 @@ function setupAcpTest(
 }
 
 (IS_SANDBOX ? describe.skip : describe)('acp integration', () => {
+  it('withholds Agent Team tools from ACP even with the experiment enabled', async () => {
+    const teamTools = [
+      'team_create',
+      'team_delete',
+      'team_plan_approval',
+      'request_shutdown',
+      'task_create',
+      'task_update',
+      'task_list',
+    ];
+    const rig = new TestRig();
+    await rig.setup('ACP Agent Team host admission', {
+      settings: { tools: { visible: ['agent', ...teamTools] } },
+    });
+    const fakeServer = await startFakeOpenAIServer(() => ({
+      content: 'Hello.',
+    }));
+    const { sendRequest, cleanup } = setupAcpTest(rig, {
+      env: {
+        QWEN_CODE_ENABLE_AGENT_TEAM: '1',
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+      },
+    });
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: { _meta: { 'qwen.agentTeam': true } },
+      });
+      await sendRequest('authenticate', { methodId: 'openai' });
+      const { sessionId } = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+      const prompt = 'Say hello and finish the Agent Team admission probe.';
+      await sendRequest('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: prompt }],
+      });
+
+      const request = fakeServer.requests.find(
+        ({ body }) =>
+          body['stream'] === true &&
+          JSON.stringify(body['messages']).includes(prompt),
+      );
+      expect(request).toBeDefined();
+      const tools = request?.body['tools'] as Array<{
+        function: { name: string; parameters: { properties: object } };
+      }>;
+      const names = tools.map((tool) => tool.function.name);
+      const agent = tools.find((tool) => tool.function.name === 'agent');
+      expect(agent).toBeDefined();
+      expect(names.filter((name) => teamTools.includes(name))).toEqual([]);
+      expect(
+        Object.keys(agent!.function.parameters.properties).filter((name) =>
+          ['name', 'plan_mode_required', 'read_only'].includes(name),
+        ),
+      ).toEqual([]);
+    } finally {
+      await cleanup();
+      await fakeServer.close();
+    }
+  });
+
   it('basic smoke test', async () => {
     const rig = new TestRig();
     await rig.setup('acp load session');

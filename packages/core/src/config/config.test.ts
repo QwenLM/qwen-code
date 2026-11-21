@@ -3515,6 +3515,7 @@ describe('Server Config (config.ts)', () => {
       try {
         const config = new Config({
           ...parameters(),
+          agentTeamEnabled: true,
           bundledGeneratedUi: {
             enabled: true,
             server: {
@@ -3530,7 +3531,8 @@ describe('Server Config (config.ts)', () => {
           config.getExtensionManager(),
           'refreshCache',
         );
-        await config.initialize();
+        await config.initialize({ agentTeamHostSupported: true });
+        expect(config.isAgentTeamEnabled()).toBe(false);
         expect(probe).toHaveBeenCalledWith(admittedPolicy, undefined);
         expect(config.getShellExecutionSandbox()).toBe(resolvedPolicy);
         expect(config.getBundledGeneratedUiStatus()).toEqual({
@@ -11406,18 +11408,74 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toEqual(BARE_TOOLS);
     });
 
+    const teamToolNames: readonly string[] = [
+      ToolNames.TEAM_CREATE,
+      ToolNames.TEAM_DELETE,
+      ToolNames.TEAM_PLAN_APPROVAL,
+      ToolNames.REQUEST_SHUTDOWN,
+      ToolNames.TASK_CREATE,
+      ToolNames.TASK_UPDATE,
+      ToolNames.TASK_LIST,
+    ];
+
+    it.each`
+      hostSupported | setting  | environment  | registered
+      ${false}      | ${true}  | ${undefined} | ${false}
+      ${false}      | ${false} | ${'1'}       | ${false}
+      ${true}       | ${true}  | ${undefined} | ${true}
+      ${true}       | ${false} | ${'1'}       | ${true}
+      ${true}       | ${false} | ${undefined} | ${false}
+    `(
+      'sets Team tools to $registered with host support $hostSupported, setting $setting and environment $environment',
+      async ({ hostSupported, setting, environment, registered }) => {
+        vi.stubEnv('QWEN_CODE_ENABLE_AGENT_TEAM', environment);
+        try {
+          await initConfig(
+            { agentTeamEnabled: setting },
+            hostSupported ? { agentTeamHostSupported: true } : undefined,
+          );
+          const names = registeredToolNames();
+          expect(names.filter((name) => teamToolNames.includes(name))).toEqual(
+            registered ? teamToolNames : [],
+          );
+          expectTools(names, [
+            ToolNames.AGENT,
+            ToolNames.LIST_AGENTS,
+            ToolNames.SEND_MESSAGE,
+            ToolNames.TASK_STOP,
+          ]);
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      },
+    );
+
+    it('keeps the first host declaration when another initializer joins', async () => {
+      const config = makeConfig({ agentTeamEnabled: true });
+      await Promise.all([
+        config.initialize(),
+        config.initialize({ agentTeamHostSupported: true }),
+      ]);
+      expect(config.isAgentTeamEnabled()).toBe(false);
+      expectTools(registeredToolNames(), [ToolNames.AGENT], teamToolNames);
+    });
+
     // The leader-only property of request_shutdown is "enforced by absence":
     // a teammate's registry never contains it, so the call cannot be formed.
     // That only holds if the skip actually fires, which nothing asserted.
     it('registers request_shutdown for a leader but not for a subagent', async () => {
-      const config = await initConfig({ agentTeamEnabled: true });
+      const config = await initConfig(
+        { agentTeamEnabled: true },
+        { agentTeamHostSupported: true },
+      );
       expect(registeredToolNames()).toContain(ToolNames.REQUEST_SHUTDOWN);
 
       registerFactory().mockClear();
-      await rebuildForSubAgent(config);
+      await rebuildForSubAgent(deriveConfig(config));
 
       const subagentNames = registeredToolNames();
       expect(subagentNames).not.toContain(ToolNames.REQUEST_SHUTDOWN);
+      expect(subagentNames).toContain(ToolNames.TASK_LIST);
       // The rest of the team surface still registers — only the leader-only
       // control tool is withheld.
       expect(subagentNames).toContain(ToolNames.SEND_MESSAGE);

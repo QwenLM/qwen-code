@@ -1615,7 +1615,7 @@ export async function main() {
     // that must be in place before discovery runs (see session.ts).
     if (inputFormat !== InputFormat.STREAM_JSON) {
       profileCheckpoint('config_initialize_start');
-      await config.initialize();
+      await config.initialize({ agentTeamHostSupported: true });
       for (const warning of config.getWarnings()) {
         if (emittedStartupWarnings.has(warning)) continue;
         emittedStartupWarnings.add(warning);

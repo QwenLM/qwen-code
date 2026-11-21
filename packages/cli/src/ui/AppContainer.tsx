@@ -1177,7 +1177,7 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     (async () => {
       profileCheckpoint('config_initialize_start');
-      await config.initialize();
+      await config.initialize({ agentTeamHostSupported: true });
       // Bound the goal-runtime gate: under session-writer lease contention
       // (a crashed/sibling process holding the lease) getGoalRuntimeReady()
       // never settles, which used to hang startup here and leave the command

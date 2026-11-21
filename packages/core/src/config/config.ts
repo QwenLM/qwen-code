@@ -2363,6 +2363,8 @@ function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
  * Options for Config.initialize()
  */
 export interface ConfigInitializeOptions {
+  /** The host wires leader reports and teammate approvals for this Config. */
+  agentTeamHostSupported?: true;
   /** Cancels request-scoped initialization without becoming a session signal. */
   signal?: AbortSignal;
   /**
@@ -3310,6 +3312,7 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
+  private agentTeamHostSupported = false;
   private readonly unifiedAgentLoopEnabled: boolean | undefined;
   private readonly eventBusAgentLoopEnabled: boolean | undefined;
   private readonly modelAvailabilityTracking: boolean;
@@ -4203,6 +4206,7 @@ export class Config {
       throw Error('Config is shutting down');
     }
     options?.signal?.throwIfAborted();
+    this.agentTeamHostSupported = options?.agentTeamHostSupported === true;
     this.initialized = true;
     const initialization = this.initializeOnce(options);
     this.initializationPromise = initialization;
@@ -10947,7 +10951,8 @@ export class Config {
   }
 
   isAgentTeamEnabled(): boolean {
-    if (this.shellExecutionSandbox) return false;
+    if (!this.agentTeamHostSupported || this.shellExecutionSandbox)
+      return false;
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
     return this.agentTeamEnabled;

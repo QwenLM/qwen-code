@@ -212,7 +212,10 @@ class Session {
       // as missing the initialize phase entirely, which made the MCP
       // discovery timings look like they happened "before init".
       profileCheckpoint('config_initialize_start');
-      await this.config.initialize(options);
+      await this.config.initialize({
+        ...options,
+        agentTeamHostSupported: true,
+      });
       profileCheckpoint('config_initialize_end');
       for (const warning of this.config.getWarnings()) {
         if (emittedWarnings.has(warning)) continue;
