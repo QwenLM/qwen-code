@@ -740,23 +740,42 @@ Build the task in this order and stop at the first failure:
    order, and `--start --artifact-dir` is still accepted, so nothing forces the
    upgrade. Re-creating it through the standard install does not work: step 3 is
    blocked by the probe cursor as well as the claim, and `--release` clears only
-   the claim — so such a watch keeps the old order until it is manually migrated
-   (a residual tracked in #17371). Do not delete another session's live watch to
-   make room; the claim guard forbids it. To migrate this PR's own `verify-pr`
-   watch in place after `cron_delete`, run
+   the claim — so such a watch keeps the old order until it is manually migrated.
+   Do not delete another session's live watch to make room; the claim guard
+   forbids it. To migrate this PR's own `verify-pr`
+   watch in place, first run `cron_delete` for this watch task and confirm the
+   deletion succeeded (do not touch any cursor if deletion fails), and check
+   `cron_list` (not merely absence of `.qwen/tmp/autofix-pr-<n>-state.json`,
+   since `autofix-pr cleanup` deletes the state file while leaving the gate
+   cursor behind) to confirm no `autofix-pr` watch is running. Then run
    `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor`
    (which unlinks the cursor before releasing the `verify-pr` ownership claim,
-   prints the cursor's last `headSha`, and refuses when `autofix-pr` state
-   exists) and re-run steps 3–4 — if the PR head moved during migration,
-   register the live head with `--start` because a fresh cursor's first tick
-   records the current head as its baseline without emitting an event. If an
+   prints the cursor's last `headSha`, and refuses with exit 3 when
+   `.qwen/tmp/autofix-pr-<n>-state.json` exists). If `--release --reset-cursor`
+   exits 3 due to `autofix-pr` state, stop migrating and do **not** remove the
+   cursor or re-run steps 3–4 — run
+   `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release` to drop only
+   this watch's claim until the `autofix-pr` consumer is retired. If an
    earlier plain `--release` already removed `verify-pr-watch-<n>.owner.json`
-   and stranded `.qwen/tmp/autofix-pr-<n>-gate.json`, confirm no `autofix-pr`
-   watch is active (`.qwen/tmp/autofix-pr-<n>-state.json` is absent) and remove
-   `.qwen/tmp/autofix-pr-<n>-gate.json` in `<clone>`'s main worktree before
-   re-running steps 3–4. When a `resync` event fires, the gate pre-records its
-   `headSha` in `deferredHeads` before waking the model whenever the state lock
-   and state file allow it.
+   and stranded `.qwen/tmp/autofix-pr-<n>-gate.json`, confirm via `cron_list`
+   (and state-file absence) that no `autofix-pr` watch is active before
+   removing `.qwen/tmp/autofix-pr-<n>-gate.json` in `<clone>`'s main worktree.
+   Before re-running steps 3–4, inspect `.qwen/tmp/verify-pr-watch-<n>.json` in
+   `<clone>`'s main worktree for any dead round in `inFlightHeads` and release
+   it with
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <dead head> [--round <r>] --repo <owner>/<repo>`
+   (or `--restart` if immediately resuming that head) so `"one round per PR"`
+   does not block the migrated watch. After re-running steps 3–4, check the
+   live PR head (`gh pr view <n> --repo <owner>/<repo> --json headRefOid`) and
+   the printed `last head` against `.qwen/tmp/verify-pr-watch-<n>.json`: if the
+   live head is neither verified nor in flight — whether it moved during
+   migration or sat unverified under the prior cursor — register and run a
+   round for it with `--start` because a fresh cursor's first tick records the
+   live head as its baseline without emitting an event. When a `resync` event
+   fires, the gate pre-records its `headSha` in `deferredHeads` before waking
+   the model whenever the state lock and state file allow it, narrowing the
+   silent-drop window to the hop between the probe child's cursor write and
+   pre-recording.
 
 The prompt consumes the gate's JSON and nothing else. On
 `head_moved_externally`, take `headSha` and run the round for that sha.
@@ -891,16 +910,23 @@ refused (exit 3), including when no markers exist at all: check
 refused (exit 1), never silently rewritten: inspect or remove it before the
 next round.
 
-On `action: "stop"` (merged or closed), delete the task with `cron_delete`,
-drop the claim and probe cursor with
+On `action: "stop"` (merged or closed), run `cron_delete` and confirm the
+deletion succeeded before touching any cursor, drop the claim and probe cursor
+with
 `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor`
 (so reopening the PR later does not run into a stranded cursor; if it exits 3
 because `.qwen/tmp/autofix-pr-<n>-state.json` exists, drop only this watch's
 claim with `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release` and
-leave the shared cursor to the `autofix-pr` consumer), and stop watching; drop
-the claim when task creation fails (or use `--release --reset-cursor`, falling
-back to plain `--release` if `autofix-pr` state exists). Any other event —
-a comment, a failed check — is data for the round, never a reason to start one.
+leave the shared cursor to the `autofix-pr` consumer), clear any dead round's
+`inFlightHeads` entry in `.qwen/tmp/verify-pr-watch-<n>.json` (when no round is
+still running) with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <dead head> [--round <r>] --repo <owner>/<repo>`
+so reopening the PR later does not stay blocked by `"one round per PR"`, and
+stop watching; when task creation fails, drop the claim with
+`node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor`
+(falling back to `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`
+if `autofix-pr` state causes exit 3). Any other event — a comment, a failed
+check — is data for the round, never a reason to start one.
 
 The probe's cursor lives under the **clone's main worktree**
 (`.qwen/tmp/autofix-pr-<n>-gate.json`), not the worktree a round runs in. One

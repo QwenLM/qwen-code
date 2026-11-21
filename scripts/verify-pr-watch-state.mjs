@@ -924,9 +924,10 @@ export function releaseRound(stateRoot, { pr, head, round, repo }) {
 
 /**
  * Records a gate-delivered `resync` head in `deferredHeads` before the gate
- * emits output to wake the model, closing the silent-drop window between
- * cursor advance and `--start`. No-ops for already-verified, in-flight, or
- * terminal (`not-covered`) heads.
+ * emits output to wake the model, narrowing the silent-drop window between
+ * cursor advance and `--start` down to the probe-cursor-write -> pre-record
+ * hop (full closure requires writing the marker before the cursor advances).
+ * No-ops for already-verified, in-flight, or terminal (`not-covered`) heads.
  */
 export function recordDelivery(
   stateRoot,

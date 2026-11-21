@@ -243,15 +243,16 @@ existing dead-round recovery (`--release` for a round that died after
 
 - `scripts/verify-pr-watch-state.mjs` — `parseArgs` requirement removed; HELP
   real fallback; `completeRound` returns the resolved dir; a non-inconclusive
-  null-dir completion warns; later #17371 closure adds `recordDelivery` (gate
+  null-dir completion warns; later #17371 follow-up adds `recordDelivery` (gate
   pre-delivery into `deferredHeads`) and `restartRound` (`--restart`, atomic
   dead-round replacement requiring a strictly higher `--round`).
-- `scripts/verify-pr-watch-gate.mjs` — later #17371 closure adds
+- `scripts/verify-pr-watch-gate.mjs` — later #17371 follow-up adds
   `deliverGateOutput` + `resolveDeliveryRoot` (pre-records `resync` `headSha`
   from the script's git worktree without cwd fallback before stdout emission,
-  failing open on state lock/corrupt/repo errors) and `resetWatchCursor`
-  (`--release --reset-cursor`, cursor-first unlink with `headSha` reporting and
-  ownership/`autofix-pr` guards).
+  spawns the probe child with `cwd` aligned to that resolved root, requires an
+  absolute `--state-root`, and fails open on state lock/corrupt/repo errors) and
+  `resetWatchCursor` (`--release --reset-cursor`, cursor-first unlink with
+  `headSha` reporting and ownership/`autofix-pr` guards).
 - `scripts/verify-capture.mjs` — opt-in `--allow-cwd-modules` fallback when
   `@xterm/headless` or `sharp` is absent next to the script (refuses `cwd`
   resolution by default so isolated `/trusted-scripts` copies never execute
@@ -271,12 +272,13 @@ existing dead-round recovery (`--release` for a round that died after
 
 ## Scope boundaries
 
-- The initial PR #17185 change covered registration ordering and `--start`
-  argument relaxation while leaving watch-gate ownership/cursor, dedup/defer,
-  and release semantics untouched. The follow-up closure recorded below extends
-  `verify-pr-watch-gate.mjs` and `verify-pr-watch-state.mjs` specifically to
-  address the three #17371 watch liveness residuals (and `verify-capture.mjs`'s
-  opt-in cwd dependency resolution).
+- PR #17185 introduced `scripts/verify-pr-watch-state.mjs` and its watch-state
+  dedup/defer/release semantics; PR #17550 added the registration-ahead-of-prepare
+  ordering and `--start` argument relaxation while leaving watch-gate
+  ownership/cursor and atomic restart unchanged. The follow-up recorded below
+  extends `verify-pr-watch-gate.mjs` and `verify-pr-watch-state.mjs`
+  specifically to address the three #17371 watch liveness residuals (and
+  `verify-capture.mjs`'s opt-in cwd dependency resolution).
 - Trust-boundary checks (R17-1, closed by #17375) and the remaining
   below-Critical deferred items (D17-4…14, R5-2, round-7/8 deferred) stay
   out of scope here.
@@ -286,29 +288,37 @@ existing dead-round recovery (`--release` for a round that died after
 - None blocking. The liveness gain is observability/recoverability: a head
   delivered then killed in prepare now leaves an in-flight marker an operator
   or the next head move can recover, instead of vanishing. The three residuals
-  formerly tracked in #17371 are now closed as follows:
+  formerly tracked in #17371 are addressed as follows (residual 1 is narrowed
+  rather than completely closed):
   1. `scripts/verify-pr-watch-gate.mjs` (`deliverGateOutput` + `resolveDeliveryRoot`
-     → `recordDelivery` in `scripts/verify-pr-watch-state.mjs`) pre-records a
-     delivered `resync` `headSha` into `deferredHeads` before writing stdout to
-     wake the model (`startRound` promotes that entry at its preserved `seq`).
-     By design, pre-recording is **fail-open** so a transient state failure
-     never suppresses an already-consumed cursor event: when the state lock is
-     held, on a `repo` mismatch, on a corrupt state file, or when an isolated
-     script copy has no git worktree root (it never falls back to `cwd`), the
-     gate logs a warning on stderr and still emits the event unrecorded.
+     → `recordDelivery` in `scripts/verify-pr-watch-state.mjs`) spawns the probe
+     child with `cwd` set to the resolved delivery root (so cursor, claim, and
+     state share the same tree) and pre-records a delivered `resync` `headSha`
+     into `deferredHeads` before writing stdout to wake the model (`startRound`
+     promotes that entry at its preserved `seq`). Because the probe writes its
+     gate cursor before exiting to `deliverGateOutput`, this **narrows** the
+     silent-drop window to the probe-cursor-write → pre-record hop rather than
+     closing it outright (full closure requires writing the marker before the
+     cursor advances). By design, pre-recording is **fail-open** so a transient
+     state failure never suppresses an already-consumed cursor event: when the
+     state lock is held, on a `repo` mismatch, on a corrupt state file, or when
+     an isolated script copy has no git worktree root (it never falls back to
+     `cwd`), the gate logs a warning on stderr and still emits the event
+     unrecorded.
   2. `scripts/verify-pr-watch-gate.mjs --release --reset-cursor`
      (`resetWatchCursor`) reads and reports the probe cursor's last `headSha`,
      unlinks `autofix-pr-<n>-gate.json` **before** removing the `verify-pr`
      ownership claim (so a failed unlink preserves ownership for retry), and
-     refuses whenever `autofix-pr-<n>-state.json` exists (in which case plain
-     `--release` drops only `verify-pr`'s claim while preserving the shared
-     cursor for `autofix-pr`) or the cursor lacks a `verify-pr` claim, enabling
-     clean stop teardown and in-place migration of existing `verify-pr` watches
-     without allowing cross-consumer cursor removal. All gate verbs
-     (`--check`/`--claim`/`--release`/`--release --reset-cursor` and
-     pre-delivery) resolve their default root from `SCRIPT_CLONE`'s main git
-     worktree rather than `process.cwd()` (exiting 2 on `--check`/`--release`
-     outside a git worktree).
+     refuses with exit 3 whenever `autofix-pr-<n>-state.json` exists — pointing
+     the caller at plain `--release` to drop only `verify-pr`'s claim while
+     preserving the shared cursor for `autofix-pr` — or when the cursor lacks a
+     `verify-pr` claim, enabling clean stop teardown and in-place migration of
+     existing `verify-pr` watches without allowing cross-consumer cursor removal.
+     All gate verbs (`--check`/`--claim`/`--release`/`--release --reset-cursor`,
+     the probe spawn `cwd`, and pre-delivery) resolve their default root from
+     `SCRIPT_CLONE`'s main git worktree rather than `process.cwd()` (exiting 2
+     on `--check`/`--release` outside a git worktree and requiring an absolute
+     `--state-root`).
   3. `scripts/verify-pr-watch-state.mjs --restart --head <oid> [--from-round <r>] --round <r+1>`
      (`restartRound`) atomically replaces a dead round's in-flight marker under
      one state lock, performs the same lower-seq deferral retirement sweep into

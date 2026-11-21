@@ -11,6 +11,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -62,6 +63,24 @@ function makeRoot() {
   const dir = mkdtempSync(join(tmpdir(), 'verify-pr-watch-gate-'));
   tmpDirs.push(dir);
   return dir;
+}
+
+function makeGitEnv(homeDir) {
+  const emptyConfig = join(homeDir, '.gitconfig-empty');
+  writeFileSync(emptyConfig, '');
+  return {
+    ...process.env,
+    HOME: homeDir,
+    GIT_CONFIG_COUNT: '0',
+    GIT_CONFIG_GLOBAL: emptyConfig,
+    GIT_CONFIG_SYSTEM: emptyConfig,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_AUTHOR_NAME: 'Test',
+    GIT_AUTHOR_EMAIL: 'test@example.com',
+    GIT_COMMITTER_NAME: 'Test',
+    GIT_COMMITTER_EMAIL: 'test@example.com',
+  };
 }
 
 describe('filterGateOutput', () => {
@@ -320,7 +339,7 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
     expect(existsSync(statePath(root, 123))).toBe(false);
   });
 
-  it('still returns kept output and leaves corrupt or locked state unmutated', () => {
+  it('still returns kept output, invokes emit, and leaves corrupt or locked state unmutated', () => {
     const moved = JSON.stringify({
       headSha: HEAD,
       action: 'resync',
@@ -329,25 +348,31 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
     const corruptRoot = makeRoot();
     mkdirSync(join(corruptRoot, '.qwen', 'tmp'), { recursive: true });
     writeFileSync(statePath(corruptRoot, 123), '{corrupt');
+    const corruptEmitted = [];
     expect(
       deliverGateOutput(moved, {
         stateRoot: corruptRoot,
         pr: 123,
         repo: 'QwenLM/qwen-code',
+        emit: (line) => corruptEmitted.push(line),
       }),
     ).toBe(moved);
+    expect(corruptEmitted).toEqual([moved]);
     expect(readFileSync(statePath(corruptRoot, 123), 'utf8')).toBe('{corrupt');
 
     const lockedRoot = makeRoot();
     mkdirSync(join(lockedRoot, '.qwen', 'tmp'), { recursive: true });
     writeFileSync(`${statePath(lockedRoot, 123)}.lock`, '99999:held\n');
+    const lockedEmitted = [];
     expect(
       deliverGateOutput(moved, {
         stateRoot: lockedRoot,
         pr: 123,
         repo: 'QwenLM/qwen-code',
+        emit: (line) => lockedEmitted.push(line),
       }),
     ).toBe(moved);
+    expect(lockedEmitted).toEqual([moved]);
     expect(existsSync(statePath(lockedRoot, 123))).toBe(false);
   });
 
@@ -406,44 +431,60 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
 
       // Script inside its own git repo (plus a linked worktree), cwd inside an
       // unrelated git repo -> every verb resolves to cloneRoot, never cwd.
+      const gitEnv = makeGitEnv(makeRoot());
       const cloneRoot = makeRoot();
-      expect(spawnSync('git', ['init', cloneRoot]).status).toBe(0);
-      const cloneGate = stageScripts(cloneRoot);
-      expect(spawnSync('git', ['-C', cloneRoot, 'add', '.']).status).toBe(0);
       expect(
-        spawnSync('git', [
-          '-C',
-          cloneRoot,
-          '-c',
-          'user.email=test@example.com',
-          '-c',
-          'user.name=Test',
-          'commit',
-          '-m',
-          'init',
-        ]).status,
+        spawnSync('git', ['init', cloneRoot], { env: gitEnv }).status,
+      ).toBe(0);
+      const cloneGate = stageScripts(cloneRoot);
+      expect(
+        spawnSync('git', ['-C', cloneRoot, 'add', '.'], { env: gitEnv }).status,
+      ).toBe(0);
+      expect(
+        spawnSync(
+          'git',
+          [
+            '-C',
+            cloneRoot,
+            '-c',
+            'user.email=test@example.com',
+            '-c',
+            'user.name=Test',
+            'commit',
+            '-m',
+            'init',
+          ],
+          { env: gitEnv },
+        ).status,
       ).toBe(0);
       const linkedWt = makeRoot();
       rmSync(linkedWt, { recursive: true, force: true });
       expect(
-        spawnSync('git', [
-          '-C',
-          cloneRoot,
-          'worktree',
-          'add',
-          linkedWt,
-          '-b',
-          'wt-branch',
-        ]).status,
+        spawnSync(
+          'git',
+          ['-C', cloneRoot, 'worktree', 'add', linkedWt, '-b', 'wt-branch'],
+          { env: gitEnv },
+        ).status,
       ).toBe(0);
       const linkedGate = join(linkedWt, 'scripts', 'verify-pr-watch-gate.mjs');
 
       const otherCwd = makeRoot();
-      expect(spawnSync('git', ['init', otherCwd]).status).toBe(0);
+      expect(spawnSync('git', ['init', otherCwd], { env: gitEnv }).status).toBe(
+        0,
+      );
+      const pwdLogA = join(otherCwd, 'probe-pwd.txt');
+      const [gateName] = ownedStateFiles(123);
       const cliA = join(otherCwd, 'stub-qwen');
-      writeFileSync(cliA, `#!/usr/bin/env bash\nprintf '%s\\n' '${moved}'\n`, {
-        mode: 0o755,
-      });
+      writeFileSync(
+        cliA,
+        `#!/usr/bin/env bash
+pwd -P > '${pwdLogA}'
+mkdir -p "$(pwd -P)/.qwen/tmp"
+printf '{"headSha":"abc1234"}' > "$(pwd -P)/.qwen/tmp/${gateName}"
+printf '%s\\n' '${moved}'
+`,
+        { mode: 0o755 },
+      );
 
       // --check --claim from unrelated cwd still claims in cloneRoot.
       const claimRes = spawnSync(
@@ -462,20 +503,19 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
       );
       expect(resA.status).toBe(0);
       expect(resA.stdout.trim()).toBe(moved);
+      expect(realpathSync(readFileSync(pwdLogA, 'utf8').trim())).toBe(
+        realpathSync(cloneRoot),
+      );
+      const gateFileInClone = join(cloneRoot, '.qwen', 'tmp', gateName);
+      expect(existsSync(gateFileInClone)).toBe(true);
+      expect(existsSync(join(otherCwd, '.qwen', 'tmp', gateName))).toBe(false);
       expect(
         readState(cloneRoot, 123).deferredHeads.map((e) => e.head),
       ).toEqual([HEAD]);
       expect(existsSync(statePath(otherCwd, 123))).toBe(false);
 
-      // R2-1: --release --reset-cursor from unrelated otherCwd removes claim &
-      // cursor in cloneRoot instead of silently succeeding against otherCwd.
-      const gateFileInClone = join(
-        cloneRoot,
-        '.qwen',
-        'tmp',
-        ownedStateFiles(123)[0],
-      );
-      writeFileSync(gateFileInClone, '{"headSha":"abc1234"}');
+      // R2-1 / R3-1: --release --reset-cursor from unrelated otherCwd removes
+      // the probe-written cursor & claim in cloneRoot instead of otherCwd.
       const resetFromOther = spawnSync(
         process.execPath,
         [cloneGate, '123', '--release', '--reset-cursor'],
@@ -494,7 +534,9 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
       const nonGitRoot = makeRoot();
       const isolatedGate = stageScripts(nonGitRoot);
       const cwdGit = makeRoot();
-      expect(spawnSync('git', ['init', cwdGit]).status).toBe(0);
+      expect(spawnSync('git', ['init', cwdGit], { env: gitEnv }).status).toBe(
+        0,
+      );
       expect(resolveDeliveryRoot(null, nonGitRoot)).toMatchObject({
         root: null,
       });
@@ -528,10 +570,126 @@ describe('deliverGateOutput and #17371 pre-delivery', () => {
       expect(resB.stderr).toContain('is not a git worktree');
       expect(existsSync(statePath(cwdGit, 123))).toBe(false);
 
-      // Empty --state-root is rejected as usage error.
+      // R3-2: reject empty, flag-like, or relative --state-root (plus sibling flag usage errors).
+      const isolatedCwd = makeRoot();
+      for (const [badArgs, pattern] of [
+        [['123', '--check', '--state-root', ''], /must be an absolute path/],
+        [
+          ['123', '--check', '--state-root', '--claim'],
+          /must be an absolute path/,
+        ],
+        [
+          ['123', '--check', '--state-root', 'relroot'],
+          /must be an absolute path/,
+        ],
+        [['123', '--repo', '--cli', 'qwen'], /--repo requires/],
+        [['123', '--repo', 'QwenLM/qwen-code', '--cli', ''], /--cli requires/],
+        [['123', '--unknown-flag'], /unknown option/],
+      ]) {
+        const res = spawnSync(process.execPath, [GATE_SCRIPT, ...badArgs], {
+          cwd: isolatedCwd,
+          encoding: 'utf8',
+        });
+        expect(res.status, badArgs.join(' ')).toBe(2);
+        expect(res.stderr, badArgs.join(' ')).toMatch(pattern);
+      }
+      expect(existsSync(ownershipPath(isolatedCwd, 123))).toBe(false);
+      expect(existsSync(join(isolatedCwd, 'relroot'))).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'spawns the probe child in --state-root with expected argv and propagates failing probe exit codes',
+    () => {
+      const moved = JSON.stringify({
+        headSha: HEAD,
+        action: 'resync',
+        events: [{ type: 'head_moved_externally', sha: HEAD }],
+      });
+      const gitEnv = makeGitEnv(makeRoot());
+      const stateRoot = makeRoot();
+      const callerCwd = makeRoot();
       expect(
-        runGateCli(['123', '--check', '--state-root', '']).status,
-      ).not.toBe(0);
+        spawnSync('git', ['init', callerCwd], { env: gitEnv }).status,
+      ).toBe(0);
+
+      const pwdLog = join(stateRoot, 'child-pwd.txt');
+      const argvLog = join(stateRoot, 'child-argv.txt');
+      const [gateName] = ownedStateFiles(123);
+      const cli = join(callerCwd, 'stub-qwen');
+      writeFileSync(
+        cli,
+        `#!/usr/bin/env bash
+pwd -P > '${pwdLog}'
+printf '%s\\n' "$@" > '${argvLog}'
+mkdir -p "$(pwd -P)/.qwen/tmp"
+printf '{"headSha":"${HEAD}"}' > "$(pwd -P)/.qwen/tmp/${gateName}"
+printf '%s\\n' '${moved}'
+`,
+        { mode: 0o755 },
+      );
+
+      const ok = spawnSync(
+        process.execPath,
+        [
+          GATE_SCRIPT,
+          '123',
+          '--repo',
+          'QwenLM/qwen-code',
+          '--cli',
+          cli,
+          '--state-root',
+          stateRoot,
+        ],
+        { cwd: callerCwd, encoding: 'utf8' },
+      );
+      expect(ok.status).toBe(0);
+      expect(ok.stdout.trim()).toBe(moved);
+      expect(realpathSync(readFileSync(pwdLog, 'utf8').trim())).toBe(
+        realpathSync(stateRoot),
+      );
+      expect(readFileSync(argvLog, 'utf8').trim().split('\n')).toEqual([
+        'autofix-pr',
+        'snapshot',
+        '123',
+        '--gate',
+        '--repo',
+        'QwenLM/qwen-code',
+      ]);
+      expect(existsSync(join(stateRoot, '.qwen', 'tmp', gateName))).toBe(true);
+      expect(existsSync(join(callerCwd, '.qwen', 'tmp', gateName))).toBe(false);
+      expect(
+        readState(stateRoot, 123).deferredHeads.map((e) => e.head),
+      ).toEqual([HEAD]);
+
+      const failRoot = makeRoot();
+      const failCli = join(callerCwd, 'failing-qwen');
+      writeFileSync(
+        failCli,
+        `#!/usr/bin/env bash
+printf 'probe boom\\n' >&2
+exit 3
+`,
+        { mode: 0o755 },
+      );
+      const failed = spawnSync(
+        process.execPath,
+        [
+          GATE_SCRIPT,
+          '123',
+          '--repo',
+          'QwenLM/qwen-code',
+          '--cli',
+          failCli,
+          '--state-root',
+          failRoot,
+        ],
+        { cwd: callerCwd, encoding: 'utf8' },
+      );
+      expect(failed.status).toBe(3);
+      expect(failed.stderr).toContain('probe boom');
+      expect(failed.stdout).toBe('');
+      expect(existsSync(statePath(failRoot, 123))).toBe(false);
     },
   );
 });
@@ -649,5 +807,45 @@ describe('resetWatchCursor and --release --reset-cursor', () => {
     const bad = runGateCli(['123', '--reset-cursor', '--state-root', root]);
     expect(bad.status).not.toBe(0);
     expect(bad.stderr).toContain('--reset-cursor requires --release');
+  });
+
+  it('supports plain --release when autofix-pr cursor and state exist without touching autofix files', () => {
+    const root = makeRoot();
+    claimOwnership(root, 123);
+    const [gateName, stateName] = ownedStateFiles(123);
+    const gateFile = join(root, '.qwen', 'tmp', gateName);
+    const autofixState = join(root, '.qwen', 'tmp', stateName);
+    writeFileSync(gateFile, '{"headSha":"abc"}');
+    writeFileSync(autofixState, '{"owner":"autofix"}');
+
+    const res = runGateCli(['123', '--release', '--state-root', root]);
+    expect(res.status).toBe(0);
+    expect(res.stderr).toContain('released PR 123');
+    expect(existsSync(ownershipPath(root, 123))).toBe(false);
+    expect(readFileSync(gateFile, 'utf8')).toBe('{"headSha":"abc"}');
+    expect(readFileSync(autofixState, 'utf8')).toBe('{"owner":"autofix"}');
+  });
+
+  it('removes an unreadable or headless probe cursor alongside releasing the claim', () => {
+    for (const payload of ['not json', '{}']) {
+      const root = makeRoot();
+      claimOwnership(root, 123);
+      const [gateName] = ownedStateFiles(123);
+      const gateFile = join(root, '.qwen', 'tmp', gateName);
+      writeFileSync(gateFile, payload);
+
+      const res = runGateCli([
+        '123',
+        '--release',
+        '--reset-cursor',
+        '--state-root',
+        root,
+      ]);
+      expect(res.status).toBe(0);
+      expect(res.stderr).toContain('removed probe cursor');
+      expect(res.stderr).not.toContain('last head');
+      expect(existsSync(ownershipPath(root, 123))).toBe(false);
+      expect(existsSync(gateFile)).toBe(false);
+    }
   });
 });

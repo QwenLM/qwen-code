@@ -35,7 +35,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntryPoint } from './lib/entry-point.js';
 import { recordDelivery } from './verify-pr-watch-state.mjs';
@@ -351,15 +351,43 @@ function parseArgs(argv) {
     else if (arg === '--claim') out.claim = true;
     else if (arg === '--release') out.release = true;
     else if (arg === '--reset-cursor') out.resetCursor = true;
-    else if (arg === '--repo') out.repo = argv[++i];
-    else if (arg === '--cli') out.cli = argv[++i];
-    else if (arg === '--state-root') {
+    else if (arg === '--repo') {
       const value = argv[++i];
-      if (typeof value !== 'string' || value.trim() === '') {
-        throw new Error('usage: --state-root requires a non-empty path');
+      if (
+        typeof value !== 'string' ||
+        value.trim() === '' ||
+        value.startsWith('-')
+      ) {
+        throw new Error('usage: --repo requires <owner>/<repo>');
+      }
+      out.repo = value;
+    } else if (arg === '--cli') {
+      const value = argv[++i];
+      if (
+        typeof value !== 'string' ||
+        value.trim() === '' ||
+        value.startsWith('-')
+      ) {
+        throw new Error('usage: --cli requires a command or path');
+      }
+      out.cli = value;
+    } else if (arg === '--state-root') {
+      const value = argv[++i];
+      if (
+        typeof value !== 'string' ||
+        value.trim() === '' ||
+        value.startsWith('-') ||
+        !isAbsolute(value)
+      ) {
+        throw new Error('usage: --state-root must be an absolute path');
       }
       out.stateRoot = value;
-    } else if (!arg.startsWith('-') && out.pr === null) out.pr = Number(arg);
+    } else if (arg.startsWith('-')) {
+      throw new Error(`usage: unknown option ${arg}`);
+    } else if (out.pr === null) out.pr = Number(arg);
+    else {
+      throw new Error(`usage: unexpected argument ${arg}`);
+    }
   }
   if (!Number.isInteger(out.pr) || out.pr <= 0) {
     throw new Error(
@@ -385,7 +413,13 @@ function refuse(prNumber, conflicts) {
 }
 
 function main() {
-  const args = parseArgs(process.argv.slice(2));
+  let args;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (error) {
+    process.stderr.write(`verify-pr watch: ${error.message}\n`);
+    process.exit(2);
+  }
   const delivery = resolveDeliveryRoot(args.stateRoot);
 
   if ((args.release || args.check) && !delivery.root) {
@@ -451,17 +485,23 @@ function main() {
   }
 
   if (!args.repo) {
-    throw new Error(
-      '--repo <owner>/<repo> is required unless --check/--release is used',
+    process.stderr.write(
+      'verify-pr watch: --repo <owner>/<repo> is required unless --check/--release is used\n',
     );
+    process.exit(2);
   }
   const probe = spawnSync(
     args.cli,
     ['autofix-pr', 'snapshot', String(args.pr), '--gate', '--repo', args.repo],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', cwd: delivery.root ?? undefined },
   );
   if (probe.status !== 0) {
     if (probe.stderr) process.stderr.write(probe.stderr);
+    else if (probe.error) {
+      process.stderr.write(
+        `verify-pr watch: failed to spawn probe (${args.cli}): ${probe.error.message}\n`,
+      );
+    }
     // A failing probe is reported by the scheduler once per streak; its
     // failure must not look like a quiet tick.
     process.exit(probe.status ?? 1);
