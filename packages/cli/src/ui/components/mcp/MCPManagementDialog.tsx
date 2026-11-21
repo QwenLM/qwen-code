@@ -55,7 +55,9 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
   const config = useConfig();
 
   const [servers, setServers] = useState<MCPServerDisplayInfo[]>([]);
-  const [selectedServerIndex, setSelectedServerIndex] = useState<number>(-1);
+  const [selectedServerName, setSelectedServerName] = useState<string | null>(
+    null,
+  );
   const [selectedTool, setSelectedTool] = useState<MCPToolDisplayInfo | null>(
     null,
   );
@@ -239,11 +241,9 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
 
   // Selected server
   const selectedServer = useMemo(() => {
-    if (selectedServerIndex >= 0 && selectedServerIndex < servers.length) {
-      return servers[selectedServerIndex];
-    }
-    return null;
-  }, [servers, selectedServerIndex]);
+    if (selectedServerName === null) return null;
+    return servers.find((server) => server.name === selectedServerName) ?? null;
+  }, [servers, selectedServerName]);
 
   // Current step
   const getCurrentStep = useCallback(
@@ -267,8 +267,8 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
 
   // Select server
   const handleSelectServer = useCallback(
-    (index: number) => {
-      setSelectedServerIndex(index);
+    (server: MCPServerDisplayInfo) => {
+      setSelectedServerName(server.name);
       handleNavigateToStep(MCP_MANAGEMENT_STEPS.SERVER_DETAIL);
     },
     [handleNavigateToStep],
