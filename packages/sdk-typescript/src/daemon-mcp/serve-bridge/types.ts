@@ -53,7 +53,7 @@ export interface SessionEventStream {
   abortCtrl: AbortController;
   /** Current active prompt collector (null when idle). */
   activeCollector: PromptCollector | null;
-  /** Timestamp of last activity (prompt sent or chunk received). */
+  /** Timestamp of last activity (prompt sent/settled or chunk received). */
   lastActivityMs: number;
 }
 

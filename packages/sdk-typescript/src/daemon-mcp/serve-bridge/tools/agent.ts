@@ -132,6 +132,7 @@ export function agentTools(state: BridgeState): any[] {
         } finally {
           // Clear the collector regardless of outcome.
           stream.activeCollector = null;
+          stream.lastActivityMs = Date.now();
         }
       }),
     ),
