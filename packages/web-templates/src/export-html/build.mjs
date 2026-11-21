@@ -361,7 +361,7 @@ const rendererDelegateIntegrity =
 const rendererDelegateCssIntegrity =
   process.env.QWEN_EXPORT_RENDERER_CSS_INTEGRITY?.trim() || undefined;
 const rendererDelegateSchemaOverride =
-  process.env.QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION?.trim();
+  process.env.QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION?.trim() || undefined;
 if (rendererDelegateSchemaOverride && !rendererDelegateIdentity) {
   throw new Error(
     'QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION requires QWEN_EXPORT_RENDERER_IDENTITY.',

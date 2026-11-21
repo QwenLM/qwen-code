@@ -108,7 +108,15 @@ function completedTurnEvents(): WebShellDaemonScenario['events'] {
   ];
 }
 
-async function expectNoHorizontalOverflow(cards: Locator): Promise<void> {
+async function expectNoHorizontalOverflow(
+  page: Page,
+  cards: Locator,
+): Promise<void> {
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
   expect(await cards.count()).toBeGreaterThan(0);
   expect(
     await cards.evaluateAll((elements) =>
@@ -174,7 +182,7 @@ test('cron and loop prompts use compact expandable cards @smoke', async ({
   const compactHeight = (await cron.boundingBox())?.height;
   expect(compactHeight).toBeDefined();
   expect(compactHeight!).toBeLessThan(140);
-  await expectNoHorizontalOverflow(cards);
+  await expectNoHorizontalOverflow(page, cards);
   const desktopPath = testInfo.outputPath('automatic-desktop.png');
   await page.screenshot({ path: desktopPath, animations: 'disabled' });
   await testInfo.attach('automatic-desktop', {
@@ -204,8 +212,13 @@ test('cron and loop prompts use compact expandable cards @smoke', async ({
   await expect(instructions).toHaveCount(0);
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await cron.getByRole('button', { name: 'Show more', exact: true }).click();
+  await expect(
+    cron.locator('[data-web-shell-automatic-trigger-instructions]'),
+  ).toHaveText(cronPrompt);
+  await cron.getByRole('button', { name: 'Collapse', exact: true }).click();
   await loop.scrollIntoViewIfNeeded();
-  await expectNoHorizontalOverflow(cards);
+  await expectNoHorizontalOverflow(page, cards);
   const mobilePath = testInfo.outputPath('automatic-mobile.png');
   await page.screenshot({ path: mobilePath, animations: 'disabled' });
   await testInfo.attach('automatic-mobile', {
@@ -217,7 +230,7 @@ test('cron and loop prompts use compact expandable cards @smoke', async ({
   await expect(
     loop.locator('[data-web-shell-automatic-trigger-instructions]'),
   ).toHaveText(loopPrompt);
-  await expectNoHorizontalOverflow(cards);
+  await expectNoHorizontalOverflow(page, cards);
   const expandedPath = testInfo.outputPath('automatic-mobile-expanded.png');
   await page.screenshot({ path: expandedPath, animations: 'disabled' });
   await testInfo.attach('automatic-mobile-expanded', {
@@ -240,6 +253,9 @@ test('preserves an unknown tasks-from source label @smoke', async ({
     '[data-web-shell-automatic-trigger-message][data-source="cron"]',
   );
   await expect(card).toBeVisible();
+  await expect(
+    card.locator('[data-web-shell-automatic-trigger-summary]'),
+  ).toHaveText(content);
   await card.getByRole('button', { name: 'Show more', exact: true }).click();
   await expect(
     card.locator('[data-web-shell-automatic-trigger-instructions]'),
@@ -423,6 +439,25 @@ test('keeps the automatic-trigger calendar with its summary @smoke', async ({
   await page.setViewportSize({ width: 390, height: 844 });
   await expectAutomaticHeaderOnOneRow(cronCard);
   await expectAutomaticHeaderOnOneRow(echoCard);
+  const cards = page.locator('[data-web-shell-automatic-trigger-message]');
+  await expectNoHorizontalOverflow(page, cards);
+  const overflowCanaryId = 'attachment-row-overflow-canary';
+  try {
+    await page.locator('body').evaluate((body, id) => {
+      const probe = document.createElement('span');
+      probe.id = id;
+      probe.textContent = 'Attachment row overflow canary';
+      probe.style.cssText =
+        'display:block;width:calc(100vw + 120px);white-space:nowrap';
+      body.appendChild(probe);
+    }, overflowCanaryId);
+    await expect(expectNoHorizontalOverflow(page, cards)).rejects.toThrow();
+  } finally {
+    await page.locator(`#${overflowCanaryId}`).evaluateAll((elements) => {
+      for (const element of elements) element.remove();
+    });
+  }
+  await expect(page.locator(`#${overflowCanaryId}`)).toHaveCount(0);
   const image = testInfo.outputPath('automatic-header-mobile-390.png');
   await page.screenshot({ path: image });
   await testInfo.attach('automatic-header-mobile-390', {

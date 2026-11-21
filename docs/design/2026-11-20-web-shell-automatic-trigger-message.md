@@ -32,13 +32,15 @@ The existing `ScheduledTaskRunMessage` handles the structured prompt of an indep
 
 ### Message wiring
 
-`MessageItem` passes the existing `message.source` to `UserMessage`, and `MessageList` shares the same source predicate so its timeline cannot disagree with the body. Its memo comparison also compares filenames, MIME types, text previews, attachment IDs, and Blob identities so file-only updates reach the disclosure. The existing outer `MessageTimestamp` remains the only timestamp display and keeps its current meaning.
+`MessageItem` passes the existing `message.source` to `UserMessage`, and `MessageList` shares the same source predicate so its timeline agrees with the default body's automatic-source classification. Its memo comparison also compares filenames, MIME types, text previews, attachment IDs, and Blob identities so file-only updates reach the disclosure. A host-provided content replacement keeps its previous complete ownership of the body and does not change this source classification or the existing outer `MessageTimestamp`, which remains the only timestamp display and keeps its current meaning.
 
 ### Versioned document-export source projection
 
+This slice follows the unified [transcript contract](web-shell/chat-transcript-contract-prevalidation.md) ([Chinese version](web-shell/chat-transcript-contract-prevalidation.zh-CN.md)).
+
 Offline replay restores a persisted cron subtype to `DaemonTextTranscriptBlock.meta.source`. Published V1 deliberately excludes that metadata, so V1 cannot show the automatic-trigger presentation for a real exported wakeup. Do not widen V1 in place: V2 permits only an optional user-block `meta.source: 'cron'`, derived from the unmodified V1 schema and used by new HTML output. The V1 producer and reader retain their existing closed field set and do not accept it; the renderer accepts both V1 and V2 documents and rejects other versions. The V2 tag carries no timestamp, source record ID, or other surrounding metadata, and the forbidden-field gate still admits only the exporter-generated single-key object. This changes the outbound HTML document envelope, not scheduling, transcript persistence, replay metadata generation, or daemon APIs. It does not change the meaning of `rendererVersion`, which remains an exact CLI version or content hash and is not the document's `schemaVersion`.
 
-`build.mjs` emits `EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION` alongside that identity. A local source build supports V2. A delegated renderer defaults to V1 so its previously published runtime can still open every exported document. To delegate a V2-capable renderer, the caller must explicitly set `QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION=2` and pin the renderer identity plus JS/CSS SRI hashes for that same capable runtime. The build measures the asset after injecting its identity, not the placeholder-bearing intermediate text.
+`build.mjs` emits `EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION` alongside that identity. A local source build supports V2. A delegated renderer defaults to V1 so its previously published runtime can still open every exported document. To delegate a V2-capable renderer, the caller must explicitly set `QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION=2` and pin the renderer identity plus JS/CSS SRI hashes for that same capable runtime. The low-level HTML renderer rejects a document whose `schemaVersion` exceeds that ceiling, rather than emitting a file the pinned renderer cannot open. The build measures the asset after injecting its identity, not the placeholder-bearing intermediate text.
 
 ### Automatic-trigger presentation
 
@@ -51,9 +53,9 @@ The card uses the same automatic-trigger label for both sources. Persisted repla
 
 The summary is the original display text with whitespace collapsed, truncated visually with CSS rather than by shortening stored or copied text. No schedule or task metadata is inferred from prompt text.
 
-Interactive and readonly views default to the compact summary. The existing Show more/Collapse disclosure reveals the complete display text through the existing user-content rendering pipeline, including annotations, links, slash highlighting, attachment references, and host customization. Even a short ordinary prompt keeps this control so a narrow layout never removes access to its full text.
+Interactive and readonly views default to the compact summary. The existing Show more/Collapse disclosure reveals the complete display text through the built-in user-content rendering pipeline, including annotations, links, slash highlighting, and attachment references. Host-provided replacements retain their previous ownership instead of being inserted inside the automatic card. Even a short ordinary prompt keeps this control so a narrow layout never removes access to its full text.
 
-Only the runtime's complete short echo forms—`Autonomous loop tick`, `Loop tick — tasks from project loop.md`, `Loop tick — tasks from home loop.md`, and `Loop tick — loop.md temporarily unavailable`—render as static compact cards with no disclosure. Their full labels wrap on narrow layouts rather than being ellipsized, so no extra disclosure is needed simply to read the label itself. A real prompt or unrecognized future source label that merely shares the `Loop tick — ` prefix keeps its disclosure in interactive and readonly views and its complete text in exported documents; the matcher fails open.
+Only these four exact Web Shell runtime echo forms—`Autonomous loop tick`, `Loop tick — tasks from project loop.md`, `Loop tick — tasks from home loop.md`, and `Loop tick — loop.md temporarily unavailable`—render as static compact cards with no disclosure. If another producer adds a prefix or suffix, the full available text keeps its disclosure rather than being treated as one of these plain labels. Their full labels wrap on narrow layouts rather than being ellipsized, so no extra disclosure is needed simply to read the label itself. A real prompt or unrecognized future source label that merely shares the `Loop tick — ` prefix keeps its disclosure in interactive and readonly views and its complete text in exported documents; the matcher fails open.
 
 Document mode follows `TranscriptDocumentExpandedContext`, whose default is expanded, and exposes no interactive disclosure. Detailed content is included by default; a short echo needs no duplicate body and is rejected before the built-in parser is invoked.
 
@@ -98,9 +100,9 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 - `packages/cli/src/ui/utils/export/index.ts` — export both versioned factories and document types alongside the existing V1 interface.
 - `packages/cli/src/ui/utils/export/formatters/html.ts` — select the HTML schema version from the renderer's declared ceiling and validate either supported version on read.
 - `packages/cli/src/ui/utils/export/export-transcript-document.test.ts` — V2 source and metadata-boundary coverage, non-cron sources, and V1 compatibility.
-- `packages/cli/src/ui/utils/export/formatters/html.test.ts` — default and delegated schema ceilings, standalone and legacy HTML output, and invalid configuration coverage.
-- `packages/web-templates/src/export-html/src/document-main.tsx` — accept V1 and V2 while rejecting other schema versions.
-- `docs/design/web-shell/chat-transcript-contract-prevalidation.md` — synchronized allowlist, versioning, and schema-production rules.
+- `packages/cli/src/ui/utils/export/formatters/html.test.ts` — default and delegated schema ceilings, standalone and legacy HTML output, invalid configuration, and default artifact restoration.
+- `packages/web-templates/src/export-html/src/document-main.tsx` — accept V1 and V2, reject other schema versions, V1 user `meta`, and unexpected metadata outside the canonical user Cron tag.
+- `docs/design/web-shell/chat-transcript-contract-prevalidation.md` and `.zh-CN.md` — synchronized allowlist, versioning, and schema-production rules in the complete English and Chinese contract pair.
 - `packages/web-shell/client/e2e/web-shell.automatic-trigger-message.spec.ts` — deterministic browser coverage and screenshots.
 
 ## Validation plan

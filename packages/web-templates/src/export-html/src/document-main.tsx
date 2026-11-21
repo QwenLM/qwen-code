@@ -55,20 +55,12 @@ function isOptionalNonNegativeNumber(
   );
 }
 
-function hasUnsupportedUserMetadata(
-  block: unknown,
-  schemaVersion: 1 | 2,
-): boolean {
-  if (
-    block === null ||
-    typeof block !== 'object' ||
-    !('kind' in block) ||
-    block['kind'] !== 'user' ||
-    !('meta' in block)
-  ) {
+function hasUnsupportedMetadata(block: unknown, schemaVersion: 1 | 2): boolean {
+  if (block === null || typeof block !== 'object' || !('meta' in block)) {
     return false;
   }
   if (schemaVersion === 1) return true;
+  if (!('kind' in block) || block['kind'] !== 'user') return true;
   const metadata = block['meta'];
   if (
     metadata === null ||
@@ -131,7 +123,7 @@ function parseDocument(): ExportTranscriptDocument {
   }
   if (
     value.blocks.some((block) =>
-      hasUnsupportedUserMetadata(block, value.schemaVersion),
+      hasUnsupportedMetadata(block, value.schemaVersion),
     )
   ) {
     throw new Error('Transcript document has unsupported user metadata.');

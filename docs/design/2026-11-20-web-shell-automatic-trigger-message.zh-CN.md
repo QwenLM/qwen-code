@@ -32,13 +32,15 @@ Web Shell 目前把所有 user 角色记录都交给普通 `UserMessage` 气泡�
 
 ### 消息接线
 
-`MessageItem` 将已有的 `message.source` 传给 `UserMessage`，`MessageList` 复用同一来源 predicate，使时间线与正文分类一致。其 memo 还比较文件名、MIME 类型、预览文本、附件 ID 和 Blob 引用，确保仅附件变化也能进入展开区。现有外层 `MessageTimestamp` 仍是唯一的时间展示，并保持当前语义。
+`MessageItem` 将已有的 `message.source` 传给 `UserMessage`，`MessageList` 复用同一来源 predicate，使时间线与默认正文的自动来源分类一致。其 memo 还比较文件名、MIME 类型、预览文本、附件 ID 和 Blob 引用，确保仅附件变化也能进入展开区。宿主提供的内容替换仍完整控制正文，不改变这个来源分类或现有外层 `MessageTimestamp`；时间戳仍是唯一的时间展示，并保持当前语义。
 
 ### document 导出的版本化 source 投影
 
+本切片遵循统一 [transcript 总契约](web-shell/chat-transcript-contract-prevalidation.md)（[中文版](web-shell/chat-transcript-contract-prevalidation.zh-CN.md)）。
+
 离线回放把持久化的 cron subtype 恢复为 `DaemonTextTranscriptBlock.meta.source`。已发布的 V1 刻意排除这段 metadata，因此无法在真实导出的自动输入上启用新展示。不能原地放宽 V1：V2 仅允许既有 user block 携带可选的 `meta.source: 'cron'`，其 schema 从未修改的 V1 派生，新的 HTML 输出采用 V2。V1 的产生方和读取方仍保持封闭的字段集合，不接受该新增字段；renderer 同时接受 V1 与 V2，其它版本值仍被拒绝。V2 标签不带 timestamp、source record ID 或其它外围 metadata，既有 forbidden-field 防护门仍只允许 exporter 构造的单键对象。这里改变的是向外的 HTML document envelope，不改变调度、transcript 持久化、回放 metadata 生成或 daemon API；`rendererVersion` 仍然是精确的 CLI 版本或内容 hash，不与之混同的是 document 的 `schemaVersion`。
 
-`build.mjs` 在该身份旁生成 `EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION`。本地源码构建支持 V2；委托 renderer 默认输出 V1，使已经发布的旧 runtime 始终能打开导出的 document。若委托的 renderer 已支持 V2，必须由调用方显式设置 `QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION=2`，并为同一受支持 runtime 固定 renderer 身份与 JS/CSS 的 SRI 摘要。体积预算在注入身份后测量，不再测量带占位符的中间文本。
+`build.mjs` 在该身份旁生成 `EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION`。本地源码构建支持 V2；委托 renderer 默认输出 V1，使已经发布的旧 runtime 始终能打开导出的 document。若委托的 renderer 已支持 V2，必须由调用方显式设置 `QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION=2`，并为同一受支持 runtime 固定 renderer 身份与 JS/CSS 的 SRI 摘要。低层 HTML renderer 拒绝 `schemaVersion` 高于该上限的 document，而不输出固定 runtime 无法打开的文件。体积预算在注入身份后测量，不再测量带占位符的中间文本。
 
 ### 自动触发展示
 
@@ -51,9 +53,9 @@ Web Shell 目前把所有 user 角色记录都交给普通 `UserMessage` 气泡�
 
 摘要由原始展示文本折叠空白后生成，并通过 CSS 在视觉上截断，不缩短已存储或复制的文本。不从 prompt 文本推断调度或任务元数据。
 
-interactive 和 readonly 视图默认显示紧凑摘要。既有“显示更多/收起”控件通过现有用户内容渲染管线显示完整展示文本，保留 annotations、链接、slash 高亮、附件引用与宿主定制。普通短 prompt 也保留该控件，避免窄屏布局使用户无法查看全文。
+interactive 和 readonly 视图默认显示紧凑摘要。既有“显示更多/收起”控件通过内置用户内容渲染管线显示完整展示文本，保留 annotations、链接、slash 高亮与附件引用。宿主替换保持对正文的既有所有权，不插入自动卡片内部。普通短 prompt 也保留该控件，避免窄屏布局使用户无法查看全文。
 
-仅运行时的完整短 echo——`Autonomous loop tick`、`Loop tick — tasks from project loop.md`、`Loop tick — tasks from home loop.md` 和 `Loop tick — loop.md temporarily unavailable`——显示为无展开控件的静态紧凑卡片。标签在窄布局中换行展示完整文本，不省略为 hover 才可读的内容，因此不必仅为阅读 echo 本身增加展开入口。仅以 `Loop tick — ` 开头的真实 prompt，或带未知未来 source label 的真实指令，仍在 interactive 与 readonly 视图保留展开控件，并在 document 导出中保留完整正文；匹配器按 fail-open 处理。
+仅以下四种与 Web Shell runtime 完全一致的短 echo——`Autonomous loop tick`、`Loop tick — tasks from project loop.md`、`Loop tick — tasks from home loop.md` 和 `Loop tick — loop.md temporarily unavailable`——显示为无展开控件的静态紧凑卡片。若其它 producer 添加前缀或后缀，完整可用文本仍保留展开控件，不会被当成这些纯标签。标签在窄布局中换行展示完整文本，不省略为 hover 才可读的内容，因此不必仅为阅读 echo 本身增加展开入口。仅以 `Loop tick — ` 开头的真实 prompt，或带未知未来 source label 的真实指令，仍在 interactive 与 readonly 视图保留展开控件，并在 document 导出中保留完整正文；匹配器按 fail-open 处理。
 
 document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且不显示交互式展开控件。详细内容默认包含；短 echo 不需要重复正文，并在调用内置 parser 前即被排除。
 
@@ -69,17 +71,17 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 
 ## 关键设计决策
 
-| 决策                                              | 理由                                                                                                                            |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| 修改 `UserMessage` 展示变体，不改 transcript role | user 角色记录仍是 turn 起点，现有编辑、删除、重试、时间线和 tool-call 消费者继续看到同一条消息。                                |
-| 在 `UserMessage` 内部接入                         | 保留附件、自定义内容渲染、编辑、失败处理与 per-run 卡片，不建立平行消息路径。                                                   |
-| 优先使用现有 per-run 卡片                         | 其结构化任务名、cron、task ID、触发方式和 session mode 比通用自动卡信息更完整。                                                 |
-| 使用与 source 无关的可见标签                      | 回放把持久化自动记录映射为 `cron`；同一次 tick 不能在重载后被重新标成别的类型。                                                 |
-| 只保留现有外层时间戳                              | 当前值是投影/执行时间，不一定是调度触发时间；卡片内再显示一次会重复并夸大其含义。                                               |
-| 短 echo 不显示冗余展开控件                        | 短 echo 已完整可见，而完整模型输入不能由当前投影提供；“展开完整指令”既无意义也有误导性。                                        |
-| 按需构造详情内容                                  | 长会话不应为了显示紧凑摘要而解析或宿主渲染每一条隐藏指令。                                                                      |
-| 不按 wakeup ID 分组                               | 自调节 rearm 会创建新的 one-shot ID，它不是稳定的 Loop 链身份。                                                                 |
-| 升级 document schema，而非放宽 V1                 | V1 的 allowlist 是安全契约。V2 仅在 user block 中带来已有的规范化 cron 路由标签，不带其它 metadata，renderer 同时读取两种格式。 |
+| 决策                                              | 理由                                                                                                                                                                                                 |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 修改 `UserMessage` 展示变体，不改 transcript role | user 角色记录仍是 turn 起点，现有编辑、删除、重试、时间线和 tool-call 消费者继续看到同一条消息。                                                                                                     |
+| 在 `UserMessage` 内部接入                         | 保留附件、自定义内容渲染、编辑、失败处理与 per-run 卡片，不建立平行消息路径。                                                                                                                        |
+| 优先使用现有 per-run 卡片                         | 其结构化任务名、cron、task ID、触发方式和 session mode 比通用自动卡信息更完整。                                                                                                                      |
+| 使用与 source 无关的可见标签                      | 回放把持久化自动记录映射为 `cron`；同一次 tick 不能在重载后被重新标成别的类型。                                                                                                                      |
+| 只保留现有外层时间戳                              | 当前值是投影/执行时间，不一定是调度触发时间；卡片内再显示一次会重复并夸大其含义。                                                                                                                    |
+| 短 echo 不显示冗余展开控件                        | 短 echo 已完整可见，而完整模型输入不能由当前投影提供；“展开完整指令”既无意义也有误导性。                                                                                                             |
+| 按需构造详情内容                                  | 长会话不应为了显示紧凑摘要而解析或宿主渲染每一条隐藏指令。                                                                                                                                           |
+| 不按 wakeup ID 分组                               | 自调节 rearm 会创建新的 one-shot ID，它不是稳定的 Loop 链身份。                                                                                                                                      |
+| 升级 document schema，而非放宽 V1                 | V1 的 allowlist 是安全契约。V2 仅在 user block 中带来已有的规范化 cron 路由标签，不带其它 metadata。writer 按 renderer 声明的 schema 上限选择版本：当前本地 renderer 输出 V2，pre-V2 委托仍输出 V1。 |
 
 ## 涉及文件
 
@@ -98,9 +100,9 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 - `packages/cli/src/ui/utils/export/index.ts` — 在既有 V1 接口旁导出两个版本的工厂与 document 类型。
 - `packages/cli/src/ui/utils/export/formatters/html.ts` — 按 renderer 声明的 schema 上限选择 HTML 版本，并在读取时校验两种受支持的版本。
 - `packages/cli/src/ui/utils/export/export-transcript-document.test.ts` — V2 来源与 metadata 边界、非 cron 来源以及 V1 兼容性覆盖。
-- `packages/cli/src/ui/utils/export/formatters/html.test.ts` — 产品端 V2 输出与旧 V1 渲染覆盖。
-- `packages/web-templates/src/export-html/src/document-main.tsx` — 接受 V1 与 V2，拒绝其它 schema 版本。
-- `docs/design/web-shell/chat-transcript-contract-prevalidation.md` — 同步 allowlist、版本规则和生产 schema 的约定。
+- `packages/cli/src/ui/utils/export/formatters/html.test.ts` — 默认和委托 schema 上限、委托及旧版 HTML 输出、非法配置与默认产物恢复覆盖。
+- `packages/web-templates/src/export-html/src/document-main.tsx` — 接受 V1 与 V2，但拒绝其它 schema 版本、V1 用户 metadata，以及 user Cron 标签以外的异常 metadata。
+- `docs/design/web-shell/chat-transcript-contract-prevalidation.md` 与 `.zh-CN.md` — 完整英中规范文档中的 allowlist、版本规则和生产 schema 约定。
 - `packages/web-shell/client/e2e/web-shell.automatic-trigger-message.spec.ts` — 确定性浏览器覆盖与截图。
 
 ## 验证计划

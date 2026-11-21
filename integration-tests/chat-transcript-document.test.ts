@@ -11,6 +11,7 @@ import {
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
   createExportTranscriptDocumentV1,
+  createExportTranscriptDocumentV2,
   type ExportTranscriptBlockV1,
   type ExportTranscriptDocumentV1,
 } from '../packages/cli/src/ui/utils/export/export-transcript-document.js';
@@ -677,6 +678,64 @@ describe('ExportTranscriptDocument browser gate', () => {
     }
   });
 
+  it('renders valid Cron metadata in a V2 document', async () => {
+    const prompt = '/loop 60 seconds: continue with verified metadata';
+    const document = createExportTranscriptDocumentV2(
+      [
+        {
+          ...record('valid-cron-metadata', null, 'user', prompt),
+          subtype: 'cron',
+          systemPayload: { displayText: prompt },
+        },
+      ],
+      {
+        startTime: '2026-08-16T00:00:00.000Z',
+        metadata: {
+          sessionId: 'valid-cron-metadata',
+          startTime: '2026-08-16T00:00:00.000Z',
+          exportTime: EXPORTED_AT,
+          cwd: '/workspace/project',
+          promptCount: 1,
+          uniqueFiles: [],
+        },
+      },
+      { rendererVersion: RENDERER_VERSION, exportedAt: EXPORTED_AT },
+    );
+    const html = renderExportTranscriptDocumentToHtml(document);
+    expect(html).toContain('"schemaVersion":2');
+
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const probe = await installNetworkAndCspProbe(page);
+    await page.setContent(html, { waitUntil: 'load' });
+    await expect
+      .poll(() => page.locator('body').getAttribute('data-render-complete'))
+      .toBe('true');
+    const card = page.locator('[data-web-shell-automatic-trigger-message]');
+    expect(await card.count()).toBe(1);
+    expect(
+      await card
+        .locator('[data-web-shell-automatic-trigger-summary]')
+        .textContent(),
+    ).toBe(prompt);
+    const instructions = card.locator(
+      '[data-web-shell-automatic-trigger-instructions]',
+    );
+    expect(await instructions.isVisible()).toBe(true);
+    expect(await instructions.innerText()).toBe(prompt);
+    expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
+    expect(probe.allowedStyleRequests).toEqual([RENDERER_CSS_URL]);
+    expect(probe.unexpectedRequests).toHaveLength(
+      expectedNetwork.unexpectedRequests,
+    );
+    expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
+      expectedNetwork.cspViolations,
+    );
+    await page.close();
+    await browser.close();
+    browser = undefined;
+  });
+
   it.each([
     {
       caseName: 'V1 with injected cron metadata',
@@ -693,11 +752,30 @@ describe('ExportTranscriptDocument browser gate', () => {
       schemaVersion: 2,
       meta: { source: 'cron', additionalKey: 'not-allowed' },
     },
+    {
+      caseName: 'V2 with metadata on an assistant block',
+      schemaVersion: 2,
+      meta: { source: 'cron' },
+      metaIndex: 1,
+    },
+    {
+      caseName: 'an unsupported schema version',
+      schemaVersion: 3,
+      meta: { source: 'cron' },
+    },
   ])(
     'rejects $caseName from a static document reader',
-    async ({ schemaVersion, meta }) => {
+    async ({ schemaVersion, meta, metaIndex = 0 }) => {
       const document = createExportTranscriptDocumentV1(
-        [record('metadata-error', null, 'user', 'Untrusted metadata marker')],
+        [
+          record('metadata-error', null, 'user', 'Untrusted metadata marker'),
+          record(
+            'assistant-marker',
+            'metadata-error',
+            'assistant',
+            'Assistant metadata marker',
+          ),
+        ],
         {
           startTime: '2026-08-16T00:00:00.000Z',
           metadata: {
@@ -711,11 +789,14 @@ describe('ExportTranscriptDocument browser gate', () => {
         },
         { rendererVersion: RENDERER_VERSION, exportedAt: EXPORTED_AT },
       );
+      expect(document.blocks.map(({ kind }) => kind)).toEqual([
+        'user',
+        'assistant',
+      ]);
       const invalidDocument = {
-        ...document,
         schemaVersion,
         blocks: document.blocks.map((block, index) =>
-          index === 0 ? { ...block, meta } : block,
+          index === metaIndex ? { ...block, meta } : block,
         ),
       };
       const html = replaceDocumentEnvelope(

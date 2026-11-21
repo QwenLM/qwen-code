@@ -33,6 +33,11 @@ export function injectDocumentIntoHtmlTemplate(
 export function renderExportTranscriptDocumentToHtml(
   document: ExportTranscriptDocumentV1 | ExportTranscriptDocumentV2,
 ): string {
+  if (document.schemaVersion > EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION) {
+    throw new Error(
+      `Export transcript schema version ${document.schemaVersion} exceeds the renderer ceiling of ${EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION}.`,
+    );
+  }
   if (document.schemaVersion === 1) {
     assertExportTranscriptDocumentV1(document);
   } else {
