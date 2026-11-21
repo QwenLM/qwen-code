@@ -146,8 +146,9 @@ customization.assistantFeedback?: {
 
 - 标记以会话 + 轮次为键，两者都必须有。没有会话 id 的 transcript 不提供标记，而不是接受
   一次存不下来的点击。
-- 两个标签页、或分屏的两个 pane，不会实时同步，而且每次写入都会替换整份存储：各自按挂载
-  时读到的存储渲染，一个实例里的标记可能被另一个实例的写入抹掉。
+- 两个标签页、或分屏的两个 pane，不会实时同步。每次写入都会把该 pane 待落盘的标记与取消
+  合并到最新读取的持久化存储上，因此两者都能在另一个 pane 写入后保留。跨标签页的
+  读-改-写仍可能竞争；写入失败后，该 pane 会在下一次打标记时重试。
 - 会话被删除、回退或分叉后，它的标记会留到被"10 个会话"上限挤掉为止，且绝不会显示在
   别的会话里。
 
@@ -184,7 +185,9 @@ customization.assistantFeedback?: {
 - `adapters/transcriptToMessages.test.ts`：prompt id 后处理会把带戳块上的值盖到消息上，
   且不会给没有戳的块编造一个。
 - `hooks/useAssistantFeedback.test.tsx`：没有宿主动调时标记即刻生效、回调带
-  `previousRating`、重复点击取消、重新挂载后标记恢复、标记按会话隔离。
+  `previousRating`、重复点击取消、重新挂载后标记恢复、标记按会话隔离。并发用例覆盖两个
+  pane 与不同轮次的保留、取消标记不被复活、写入失败重试时不丢另一个 pane 的修改，以及
+  存储把会话挤出后仍保留已挂载 pane 的早先标记。
 - `components/messages/AssistantMessage.test.tsx`：未开启时不渲染、`aria-pressed` 投影、
   按方向的着色类名、指针点击与键盘激活的焦点差异、点击回调载荷、中英标题。
 

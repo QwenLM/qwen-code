@@ -43,7 +43,7 @@ afterEach(() => {
 describe('readAssistantFeedbackStore', () => {
   it('round-trips what writeAssistantFeedbackStore persisted', () => {
     const store = setAssistantFeedbackRating({}, 'session-1', 'turn-1', 'down');
-    writeAssistantFeedbackStore(store);
+    expect(writeAssistantFeedbackStore(store)).toBe(true);
     expect(readAssistantFeedbackStore()).toEqual({
       'session-1': { 'turn-1': 'down' },
     });
@@ -92,9 +92,7 @@ describe('writeAssistantFeedbackStore', () => {
         throw new Error('quota exceeded');
       });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(() =>
-      writeAssistantFeedbackStore(storeOf(['session-1'])),
-    ).not.toThrow();
+    expect(writeAssistantFeedbackStore(storeOf(['session-1']))).toBe(false);
     expect(setItem).toHaveBeenCalled();
     expect(warn).toHaveBeenCalled();
   });

@@ -55,6 +55,10 @@ export function useAssistantFeedback(
       // Rebase only this pane's edits on the latest saved marks. A mounted
       // pane's full snapshot may predate another pane's additions or removals.
       let next = readAssistantFeedbackStore();
+      const own = storeRef.current[sessionId];
+      if (own && !next[sessionId]) {
+        next = { ...next, [sessionId]: { ...own } };
+      }
       for (const change of pendingChanges.current) {
         next = setAssistantFeedbackRating(
           next,

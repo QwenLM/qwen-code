@@ -13,8 +13,10 @@ import { AssistantMessage } from '../components/messages/AssistantMessage';
 import { I18nProvider } from '../i18n';
 import {
   ASSISTANT_FEEDBACK_STORAGE_KEY,
+  MAX_ASSISTANT_FEEDBACK_SESSIONS,
   readAssistantFeedbackStore,
   writeAssistantFeedbackStore,
+  type AssistantFeedbackStore,
 } from '../utils/assistantFeedback';
 import { useAssistantFeedback } from './useAssistantFeedback';
 
@@ -62,6 +64,7 @@ function Transcript({
 function mount(
   sessionId = 'session-1',
   onHostRate?: (call: HostCall) => void,
+  turnId = TURN_ID,
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -69,7 +72,11 @@ function mount(
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <Transcript sessionId={sessionId} onHostRate={onHostRate} />
+        <Transcript
+          sessionId={sessionId}
+          turnId={turnId}
+          onHostRate={onHostRate}
+        />
       </I18nProvider>,
     );
   });
@@ -254,6 +261,43 @@ describe('useAssistantFeedback through the answer footer', () => {
         'session-a': { 'turn-a': 'up', 'turn-c': 'down' },
         'session-b': { 'turn-b': 'down' },
       });
+    } finally {
+      unmount();
+    }
+  });
+
+  it("keeps a mounted pane's earlier marks after storage ages its session out", () => {
+    const stored: AssistantFeedbackStore = {};
+    for (let index = 0; index < MAX_ASSISTANT_FEEDBACK_SESSIONS; index++) {
+      stored[`session-${index}`] = { 'turn-1': 'up' };
+    }
+    stored['session-0'] = {
+      'turn-1': 'up',
+      'turn-2': 'up',
+      'turn-3': 'up',
+    };
+    writeAssistantFeedbackStore(stored);
+    mount('session-0', undefined, 'turn-4');
+    try {
+      writeAssistantFeedbackStore({
+        ...stored,
+        'session-10': { 'turn-1': 'up' },
+        'session-11': { 'turn-1': 'up' },
+      });
+      expect(readAssistantFeedbackStore()['session-0']).toBeUndefined();
+
+      act(() => button('Satisfied')?.click());
+
+      const persisted = readAssistantFeedbackStore();
+      expect(persisted['session-0']).toEqual({
+        'turn-1': 'up',
+        'turn-2': 'up',
+        'turn-3': 'up',
+        'turn-4': 'up',
+      });
+      expect(Object.keys(persisted)).toHaveLength(
+        MAX_ASSISTANT_FEEDBACK_SESSIONS,
+      );
     } finally {
       unmount();
     }
