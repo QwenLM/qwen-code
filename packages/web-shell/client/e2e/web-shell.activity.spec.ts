@@ -116,16 +116,18 @@ async function activityFixture(
     options.unavailableCwd ? [options.unavailableCwd] : [],
   );
   const secondaryResponseDelayMs = options.secondaryResponseDelayMs ?? 0;
+  const delaySecondary = async (cwd: string) => {
+    if (cwd !== secondary || secondaryResponseDelayMs === 0) return;
+    await new Promise((resolve) =>
+      setTimeout(resolve, secondaryResponseDelayMs),
+    );
+  };
   let revision = 1;
   await page.route(/\/workspaces?\/[^/]+\/sessions(?:\?|$)/, async (route) => {
     const url = new URL(route.request().url());
     const cwd = decodeURIComponent(url.pathname.split('/')[2]!);
     catalogReads.push({ cwd, failed: unavailable.has(cwd) });
-    if (cwd === secondary && secondaryResponseDelayMs > 0) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, secondaryResponseDelayMs),
-      );
-    }
+    await delaySecondary(cwd);
     if (unavailable.has(cwd)) {
       await route.fulfill({
         status: 503,
