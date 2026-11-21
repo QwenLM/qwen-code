@@ -467,7 +467,6 @@ final class AgentSessionAdmissions {
             String parentSessionId, String idempotencyKey,
             String requestDigest) {
         storeRows.requireSessionForUpdate(tenantId, parentSessionId);
-        storeRows.requireLegacyMutation(tenantId, parentSessionId);
         List<ChildSessionAdmissions.WorkspaceCommand> existing = childSessionAdmissions.findWorkspaceCommand(tenantId,
                 ChildSessionAdmissions.childActorOf(parentSessionId), idempotencyKey);
         if (existing.isEmpty()) {

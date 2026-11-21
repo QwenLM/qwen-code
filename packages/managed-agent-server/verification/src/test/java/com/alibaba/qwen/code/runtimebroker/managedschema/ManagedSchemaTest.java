@@ -45,16 +45,16 @@ class ManagedSchemaTest {
             Map.entry("ma_output_capture", List.of("scope_key", "publication_id")),
             Map.entry("ma_artifact", List.of("artifact_id")),
             Map.entry("ma_request_receipt", List.of("receipt_key")),
-            Map.entry("ma_memory_store", List.of("store_key")),
+            Map.entry("ma_memory_store", List.of("tenant_id", "memory_store_id")),
             Map.entry("ma_memory_entry", List.of("entry_key")),
             Map.entry("ma_side_query", List.of("query_key")),
             Map.entry("ma_operation", List.of("operation_key")),
             Map.entry("ma_operation_work", List.of("operation_key", "work_kind", "target_key")),
             Map.entry("ma_workspace", List.of("tenant_id", "workspace_id")),
             Map.entry("ma_workspace_access", List.of("tenant_id", "workspace_id", "actor_id")),
-            Map.entry("ma_extension_package", List.of("package_key")),
+            Map.entry("ma_extension_package", List.of("scope_key", "extension_id", "package_revision")),
             Map.entry("ma_extension_source_import", List.of("import_key")),
-            Map.entry("ma_extension_settings", List.of("settings_key")),
+            Map.entry("ma_extension_settings", List.of("scope_key", "extension_id", "settings_revision")),
             Map.entry("ma_extension_operation", List.of("operation_key")),
             Map.entry("ma_storage", List.of("alias_key")),
             Map.entry("ma_runtime_slot", List.of("request_key")),
@@ -62,7 +62,7 @@ class ManagedSchemaTest {
             Map.entry("ma_runtime_session", List.of("scope_key", "runtime_session_id")),
             Map.entry("ma_tool_execution", List.of("execution_call_id_hash")),
             Map.entry("ma_storage_owner", List.of("storage_key")),
-            Map.entry("ma_tenant_guard", List.of("tenant_key", "guard_domain")),
+            Map.entry("ma_tenant_guard", List.of("tenant_id", "guard_domain")),
             Map.entry("ma_read_lease", List.of("lease_id")),
             Map.entry("ma_channel_instance", List.of("tenant_id", "channel_id")),
             Map.entry("ma_channel_binding", List.of("tenant_id", "channel_id", "route_id")),
@@ -536,8 +536,8 @@ class ManagedSchemaTest {
                     SQLException.class,
                     () -> statement.execute("UPDATE ma_session_head SET journal_revision = 0"));
             statement.execute(
-                    "INSERT INTO ma_storage (alias_key,tenant_key,storage_key,tenant_id,storage_id)"
-                            + " VALUES ('alias','tenant','storage','tenant','storage')");
+                    "INSERT INTO ma_storage (alias_key,tenant_id,storage_id)"
+                            + " VALUES ('alias','tenant','storage')");
             try (var row =
                     statement.executeQuery(
                             "SELECT registration_state,physical_key FROM ma_storage")) {

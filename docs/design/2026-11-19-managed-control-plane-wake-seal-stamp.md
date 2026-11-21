@@ -2,7 +2,7 @@
 
 [English](2026-11-19-managed-control-plane-wake-seal-stamp.md) | [简体中文](2026-11-19-managed-control-plane-wake-seal-stamp.zh-CN.md)
 
-Status: proposal, pre-implementation. Date: 2026-11-19. Addendum to the [Phase 3 control-plane wake design](2026-11-19-managed-control-plane-wake.md) (#17805), checked against `main` at `adca3e7ddc`. It replaces the 3a wake-scheduling mechanism of that design — the commit-path head due-time hint, the separate due dispatcher, and the control-plane cold re-derivation of the unattempted proof — with a stamp the suspending writer writes in its seal. It does not change 3b, the passive-only wake verb, the seal-time unattempted proof of §4.3, or the load-counting invariants. §5 lists every parent section it supersedes.
+Status: accepted; implementation in progress. Date: 2026-11-19. Addendum to the [Phase 3 control-plane wake design](2026-11-19-managed-control-plane-wake.md) (#17805), checked against `main` at `adca3e7ddc`. It replaces the 3a wake-scheduling mechanism of that design — the commit-path head due-time hint, the separate due dispatcher, and the control-plane cold re-derivation of the unattempted proof — with a stamp the suspending writer writes in its seal. It does not change 3b, the passive-only wake verb, the seal-time unattempted proof of §4.3, or the load-counting invariants. §5 lists every parent section it supersedes.
 
 ## 1. Problem
 
@@ -25,7 +25,7 @@ The suspending Harness already holds the full committed prefix and already compu
 `ma_session_head` gains one nullable column, `wake_seal_revision`: the journal revision at which a clean suspension sealed the head and certified its wake projection.
 
 - **Acquire.** The generation-incrementing writer acquisition (`JournalWriterLifecycle.java:288`) also writes `wake_seal_revision = NULL` and caps `wake_retry_at` at one claim delay from now (`LEAST(wake_retry_at, NOW + RETRY_MS)`). Any new writer — a wake, a user request, a load that later refuses — invalidates the previous stamp. The cap removes a stamped future due time, so a writer that accepts an immediate input and then crashes is recovered by the backstop on today's schedule; it never lowers the delay a claim just set, so a load that keeps refusing is still retried at the claim pace, not on every scan.
-- **Suspension seal.** `/writers:seal` (`http-managed-session-store.ts:2947`; `SealWriterRequest`, `ManagedSessionStoreModels.java:164`) gains an optional `wake` object `{revision, pending, dueAt}` that only the suspension teardown sends (`hosted-harness-session.ts:5124`). Immediately before the seal the Harness recomputes, over the committed prefix, exactly what the pump would pick: `pending` is whether any deliverable wake input remains; `dueAt` is `0` if one is due now, otherwise the earliest deferred `notBefore`. The seal UPDATE (`JournalWriterLifecycle.java:399`), already fenced by writer token and generation, additionally requires `journal_revision = revision` and writes `wake_seal_revision = revision`, `is_wake_pending = pending`, `wake_head_revision = revision`, and, when pending, `wake_retry_at = dueAt`. A revision mismatch refuses the seal; the teardown treats it as a failed step, recomputing the stamp on each precise retry and escalating at the existing cap.
+- **Suspension seal.** `/writers:seal` (`http-managed-session-store.ts:2947`; `SealWriterRequest`, `ManagedSessionStoreModels.java:164`) gains an optional `wake` object `{revision, pending, dueAt}` that only the suspension teardown sends (`hosted-harness-session.ts:5124`). Immediately before the seal the Harness recomputes, over the committed prefix, exactly what the pump would pick: `pending` is whether any deliverable wake input remains; `dueAt` is `0` if one is due now, otherwise the earliest deferred `notBefore`. The seal UPDATE (`JournalWriterLifecycle.java:399`), already fenced by writer token and generation, additionally requires `journal_revision = revision` and writes `wake_seal_revision = revision`, `is_wake_pending = pending`, `wake_head_revision = revision`, and, when pending, `wake_retry_at = dueAt`. The Harness store client fills `revision` from its writer grant. A revision mismatch refuses the seal (`409 managed_session_wake_stamp_stale`); the teardown treats it as a failed step, recomputing the stamp on each precise retry and escalating at the existing cap.
 - Every other seal — a refused load's `managed.close()`, a bare `writers:seal`, the ownership release — sends no stamp, and the acquisition before it has already cleared any earlier one.
 
 The stamp is authoritative because it is written by the authority that wrote the journal, from the full prefix, under the head lock at the exact revision; it cannot go stale because nothing commits until the next acquisition clears it.
@@ -42,17 +42,19 @@ The crash path is out of scope and unchanged: an unstamped head left by a crashe
 
 ### 3.3 Recovery view
 
-The `ready` arm replaces `wakeProven` (`SessionRecoveryService.java:147`) with `wake_seal_revision == journal_revision`; its other guards stay: sealed writer, released activation, current activation projection, no unsettled work.
+The `ready` arm accepts `wake_seal_revision == journal_revision` beside `wakeProven` (`SessionRecoveryService.java:147`); its other guards stay: sealed writer, released activation, current activation projection, no unsettled work. `wakeProven` is kept because a Harness without the capability sends no stamp, and its clean suspensions would otherwise stop reporting `ready`; it still cannot hold for a head with a pending input, so a stamped pending head becomes `ready` only through the stamp.
+
+The stamp arm has no session-kind or compaction guard, so it widens `ready` beyond what the scan-based proof covers (recovery view addendum §3): a stamped child Session reports `ready` like a public one. The widening is intended, since the writer's certification does not depend on scan eligibility. Compaction runs only on a deleted head, so a compacted journal never reaches this arm for an `ACTIVE` Session.
 
 Only a clean suspension writes the stamp, after the per-input unattempted proof; every acquisition clears it, so the seal of a load that refuses can never inherit an earlier stamp; and any commit moves `journal_revision`. This is the positive proof the recovery view addendum §2 requires, read from one column, with no journal replay and no message-body read on the read path. As a side effect, a suspension with nothing pending reports `ready` right after its seal rather than after the backstop's next proof.
 
 ### 3.4 Transport notice
 
-The parent §4.2 due recheck stays and becomes a head-column condition in the wake fence (`TransportWakeActivator.java:125-139`): a head with `wake_seal_revision = journal_revision` and `wake_retry_at > NOW` has its next attempt already owned by the backstop at `wake_retry_at`, so the notice is dropped. The verb stays passive, as in the parent.
+The parent §4.2 due recheck stays and becomes a head-column condition in the wake fence (`TransportWakeActivator.java:125-139`): a head with `wake_seal_revision = journal_revision AND (is_wake_pending = 0 OR wake_retry_at > NOW)` either has nothing deliverable or has its next attempt already owned by the backstop at `wake_retry_at`, so the notice is dropped (`NOT_DUE`). Because the stamp certifies the whole projection, the `is_wake_pending = 0` arm is as safe as the future-due arm, and it covers a notice delayed past a seal whose input had already settled. A notice for a due stamped head, like any other notice the fence admits, loads through the passive `recoverForWake` the backstop uses (parent §4.2 step 3); it no longer takes the active `activateForWake`, whose takeover load could drive a crashed Session's Runtime recovery.
 
 ### 3.5 Rollout
 
-The Harness relaxes the `pendingInputs` gate (parent §4.3) and sends the stamp only when the control plane advertises the wake-dispatch capability (`qwen.managed-agent.wake-dispatch.enabled`, default off; the parent's key), which it advertises only where the backstop runs. Disabling it stops new relaxed suspensions; heads already stamped are still delivered by the backstop at their due time, and a control plane without the §3.2 branch delivers them through the ordinary proof. 3a therefore needs no rollback ordering; the parent's producer/consumer ordering applies to 3b staging only.
+The Harness relaxes the `pendingInputs` gate (parent §4.3) and sends the stamp only when the control plane advertises the wake-dispatch capability (`qwen.managed-agent.wake-dispatch.enabled`, default off; the parent's key), which it advertises only where the backstop runs. The advertisement is `wakeDispatch: true` in the writer grant that `writers:acquire` and `writers:renew` return, beside `activationLeaseRenewal`: the Store that issues the grant is the one that consumes the stamp, the backstop runs wherever that Store is enabled, and an older Harness ignores the field. The relaxed gate admits only deferred, unattempted wake inputs: a non-wake input or one with a transcript attempt keeps its existing recovery (the ownership release's predicate), a due input is the pump's to run now, and a stopped run's message waits for the relay's stop, whose flag is not durable. A due or stopped-message stamp, items (c) and (d) of §7, therefore comes only from an input committed between the gate's last check and the seal. Disabling it stops new relaxed suspensions; heads already stamped are still delivered by the backstop at their due time, and a control plane without the §3.2 branch delivers them through the ordinary proof. 3a therefore needs no rollback ordering; the parent's producer/consumer ordering applies to 3b staging only.
 
 ## 4. Decisions
 
@@ -97,7 +99,8 @@ Replaces the parent §9 items listed in §5.
 - **Due dispatch without replay**: at `T` a stamped head is loaded through passive `recoverForWake` with zero journal reads; an unstamped crashed head follows the existing proof path.
 - **Child invalidation**: a stamped child whose parent run is terminal or stop-requested has its hint cleared without a load.
 - **Recovery view**: (a) a clean suspension with an unattempted deferred input returns `nextTurnAllowed=true` right after its seal; (b) an attempted input with a refused load is not `ready`; (c) a clean suspension followed by a load that refuses without committing is not `ready`, because the acquisition cleared the stamp.
-- **Transport**: a delayed notice for a stamped head due in an hour causes zero cold opens before `T`.
+- **Transport**: a delayed notice for (a) a stamped head due in an hour causes zero cold opens before `T`; (b) a stamped head with `pending=0` causes no cold open; (c) a stamped head that is due, or whose stamp names an older revision, loads as today.
+- **Child scope**: the backstop scan selects a stamped child Session at its due time, and the recovery view reports a cleanly stamped child `ready`.
 - **Rollback**: disabling the capability after stamped suspensions still delivers each input once at its due time.
 - **MySQL**: the stamp, acquire cap and backstop branch pass the selected `mysql-integration` cases on MySQL 8.4; H2 alone is not acceptance.
 
@@ -106,10 +109,12 @@ Replaces the parent §9 items listed in §5.
 Replace parent §10 items 1–3.
 
 1. The backstop scan period, page and transient-refusal retry delay, chosen by §6.
-2. The exact `wake` field shape on `writers:seal` and how the capability is advertised to the Harness.
+2. Resolved: `writers:seal` takes `wake: {revision, pending, dueAt}`, and the capability rides the writer grant (§3.5).
 3. Whether the crash path should also set `wake_retry_at` to the earliest deferred `notBefore` after a complete deferred-only proof, removing its 30 s re-claims. 3a does not need it.
 
 ## 9. Review items closed
 
 - **Parent §9 head-hint unknown state measures an arm that cannot run** (raised after merge): the unknown state no longer exists, and the criterion is withdrawn.
 - **Steady-state backstop replay cost under no-caching** (raised after merge on parent §4.1): the no-cache rule is withdrawn, and stamped heads are never replayed before their due time (§1 item 1, §7).
+- **Transport drop condition misses a stamped `pending=0` head** (raised after merge on §3.4): the condition gains the `is_wake_pending = 0` arm, with an acceptance arm in §7.
+- **The stamp widens `ready` to heads the scan-based proof does not cover** (raised after merge on §3.3): §3.3 states the widening, and §7 adds the child-scope arm.

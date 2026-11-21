@@ -191,11 +191,9 @@ class ManagedWorkspaceAdmissionTest {
         grant(tenant, "ws-ssh-child", "actor-a", true);
         // An open (unfenced) SSH storage registration naming the granted node.
         jdbc.update("INSERT INTO ma_storage"
-                        + " (alias_key,tenant_key,storage_key,tenant_id,storage_id,storage_kind,registration_json,fence_operation_id)"
-                        + " VALUES (?,?,?,?,?,?,?,NULL)",
+                        + " (alias_key,tenant_id,storage_id,storage_kind,registration_json,fence_operation_id)"
+                        + " VALUES (?,?,?,?,?,NULL)",
                 RuntimeAdmissionFences.storageAliasKey(tenant, "storage-ssh-child"),
-                RuntimeAdmissionFences.storageFenceKey(tenant),
-                RuntimeAdmissionFences.storageFenceKey("storage-ssh-child"),
                 tenant, "storage-ssh-child", "SSH_LOCAL", "{\"nodeId\":\"remote\"}");
         var node = new com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings.Node(
                 "remote", "Remote", "remote-host", "/node", "/cli.js", "/state",
@@ -3322,11 +3320,9 @@ class ManagedWorkspaceAdmissionTest {
 
     private void fenceStorage(String tenant, String storageId) {
         jdbc.update("INSERT INTO ma_storage"
-                        + " (alias_key,tenant_key,storage_key,tenant_id,storage_id,fence_operation_id)"
-                        + " VALUES (?,?,?,?,?,?)",
+                        + " (alias_key,tenant_id,storage_id,fence_operation_id)"
+                        + " VALUES (?,?,?,?)",
                 RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
-                RuntimeAdmissionFences.storageFenceKey(tenant),
-                RuntimeAdmissionFences.storageFenceKey(storageId),
                 tenant, storageId, UUID.randomUUID().toString());
     }
 

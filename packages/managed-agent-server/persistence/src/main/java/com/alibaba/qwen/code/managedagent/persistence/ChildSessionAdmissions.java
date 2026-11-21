@@ -148,7 +148,6 @@ final class ChildSessionAdmissions {
         } else if (snapshot != null) {
             throw new ManagedAgentException(409, "child_launch_snapshot_invalid", "The parent has no public child admission");
         }
-        storeRows.requireLegacyMutation(tenantId, parentSessionId);
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }

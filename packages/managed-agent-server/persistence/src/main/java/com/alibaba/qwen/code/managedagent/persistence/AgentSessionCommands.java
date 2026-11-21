@@ -90,7 +90,7 @@ final class AgentSessionCommands {
         // No tenant guard: the Session lock comes first (ordering against
         // lifecycle begin and migration fencing), so this transaction's
         // snapshot follows it and nothing later takes the guard.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         sessionPolicies.requirePublicChildImmutable(session);
         if (session.workspace() == null) {
             requireWriteAuthority(tenantId, sessionId, principal, actorId);
@@ -204,7 +204,7 @@ final class AgentSessionCommands {
     private Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, SessionPrincipal principal, String actorId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             requireWriteAuthority(tenantId, sessionId, principal, actorId);
         }
@@ -315,7 +315,7 @@ final class AgentSessionCommands {
         // No tenant guard, as in changeSessionModel: settlement writes no delivery row, so no
         // operation range is locked. The Session lock comes first, so the replay probe's snapshot
         // follows it; a racing Session reusing the key loses on the receipt's unique key.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent() && sessionId.equals(previous.get().sessionId())) {
             requireMutationReceiptGrant(tenantId, session, previous.get(), actorId, principal);
@@ -357,7 +357,7 @@ final class AgentSessionCommands {
         // read that misses gap-locks the tenant-shared receipt index, and concurrent admissions
         // of different keys would deadlock inserting into that gap. A racing Session reusing the
         // tenant-scoped key loses on the receipt's unique key instead (see insertCommand below).
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             if (principal != null) {
                 ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId, principal);
@@ -490,7 +490,7 @@ final class AgentSessionCommands {
     SessionRecord completeSessionMutation(String tenantId,
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -561,7 +561,6 @@ final class AgentSessionCommands {
 
     void abandonSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         // Keep the digest and receipt for replay and concurrent completion.
         // A completed outcome must never be overwritten by a failing sibling.
         jdbc.update("UPDATE ma_request_receipt SET state = 'FAILED',"
@@ -879,7 +878,7 @@ final class AgentSessionCommands {
 
     // Automation-verb session boot-id bind (#14548); fill only when still empty.
     void bindSessionHarness(String tenantId, String sessionId, String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (harnessBootId.equals(session.harnessBootId())) {
             return;
         }

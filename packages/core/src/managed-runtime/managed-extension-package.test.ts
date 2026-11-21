@@ -181,6 +181,7 @@ describe('Managed extension apply commands', () => {
           byteLength: 4096,
           digest: 'a'.repeat(64),
         },
+        degradedComponents: ['mcp', 'hooks'],
       })),
       mcpServers: Array.from({ length: 32 }, (_, index) =>
         pin(widestId('live-', index)),
@@ -192,5 +193,127 @@ describe('Managed extension apply commands', () => {
     expect(bytes).toBeLessThanOrEqual(
       managedSessionInlineResourceBytes('managed-extension-config-bundle'),
     );
+  });
+
+  it('pins the fully-optioned byte boundary and the reachable content-only shape', () => {
+    const widestId = (prefix: string, index: number) =>
+      `${prefix}${index}`.padEnd(128, 'x');
+    const pin = (serverId: string) => ({
+      serverId,
+      serverRevision: 9_007_199_254_740_990,
+      definitionDigest: 'a'.repeat(64),
+    });
+    const bundle = (contentOnly: boolean) => ({
+      kind: 'managed-extension-config-bundle',
+      formatVersion: 1,
+      configRevision: 1,
+      executionMode: 'linux-cgroup',
+      mcpRevision: 1,
+      independentMcpSelections: Array.from({ length: 96 }, (_, index) => ({
+        ...pin(widestId(index < 32 ? 'live-' : 'removed-', index)),
+        state: index === 0 ? 'enabled' : index < 32 ? 'disabled' : 'removed',
+      })),
+      baseMcpServers: Array.from({ length: 16 }, (_, index) =>
+        pin(widestId('base-', index)),
+      ),
+      baseHookCatalog: null,
+      packages: Array.from({ length: 32 }, (_, index) => ({
+        pin: {
+          extensionId: widestId('package-', index),
+          packageRevision: 9_007_199_254_740_990,
+          packageDigest: 'a'.repeat(64),
+          settingsRevision: 9_007_199_254_740_990,
+        },
+        assetRoot: `extension://${widestId('package-', index)}/`,
+        contributionsRef: {
+          resourceId: widestId('contributions-', index),
+          kind: 'managed-extension-contributions',
+          schemaVersion: 1,
+          byteLength: 4096,
+          digest: 'a'.repeat(64),
+        },
+        degradedComponents: ['mcp', 'hooks'],
+      })),
+      mcpServers: contentOnly
+        ? []
+        : Array.from({ length: 32 }, (_, index) =>
+            pin(widestId('live-', index)),
+          ),
+      hookCatalog: null,
+    });
+    const limit = managedSessionInlineResourceBytes(
+      'managed-extension-config-bundle',
+    );
+    // The fully-optioned staged shape (settingsRevision on every package pin
+    // plus a full effective MCP list) exceeds the inline bound; the
+    // publish-time capacity guard rejects that corner fail-closed, as it did
+    // before this field existed for other oversized shapes.
+    const fullyOptioned = parseManagedExtensionEffectiveBundle(bundle(false));
+    expect(Buffer.byteLength(JSON.stringify(fullyOptioned))).toBe(66259);
+    expect(66259).toBeGreaterThan(limit);
+    // Content-only always prepares an empty effective MCP list, so its
+    // reachable worst case stays inside the bound.
+    const contentOnly = parseManagedExtensionEffectiveBundle(bundle(true));
+    expect(Buffer.byteLength(JSON.stringify(contentOnly))).toBe(57812);
+    expect(57812).toBeLessThanOrEqual(limit);
+  });
+});
+
+describe('Managed extension package degradation', () => {
+  const packageView = (degraded?: unknown) => ({
+    pin,
+    assetRoot: `extension://${pin.extensionId}/`,
+    contributionsRef: {
+      resourceId: 'contributions-1',
+      kind: 'managed-extension-contributions',
+      schemaVersion: 1,
+      byteLength: 64,
+      digest: 'b'.repeat(64),
+    },
+    ...(degraded === undefined ? {} : { degradedComponents: degraded }),
+  });
+  const bundleWith = (packages: unknown[]) => ({
+    kind: 'managed-extension-config-bundle',
+    formatVersion: 1,
+    configRevision: 1,
+    executionMode: 'developer-process-group',
+    mcpRevision: 0,
+    independentMcpSelections: [],
+    baseMcpServers: [],
+    baseHookCatalog: null,
+    packages,
+    mcpServers: [],
+    hookCatalog: null,
+  });
+
+  it('normalizes degraded components to canonical order', () => {
+    const bundle = parseManagedExtensionEffectiveBundle(
+      bundleWith([packageView(['hooks', 'mcp'])]),
+    );
+    expect(bundle.packages[0]!.degradedComponents).toEqual(['mcp', 'hooks']);
+    expect(
+      parseManagedExtensionEffectiveBundle(bundleWith([packageView(['hooks'])]))
+        .packages[0]!.degradedComponents,
+    ).toEqual(['hooks']);
+  });
+
+  it('omits the field for packages without degradation', () => {
+    const bundle = parseManagedExtensionEffectiveBundle(
+      bundleWith([packageView()]),
+    );
+    expect(bundle.packages[0]!.degradedComponents).toBeUndefined();
+    expect(JSON.stringify(bundle)).not.toContain('degradedComponents');
+  });
+
+  it.each([
+    [['skills']],
+    [['mcp', 'mcp']],
+    [['mcp', 'hooks', 'mcp']],
+    ['mcp'],
+    [[null]],
+  ])('rejects invalid degradation %j', (degraded) => {
+    expect(() =>
+      parseManagedExtensionEffectiveBundle(bundleWith([packageView(degraded)])),
+    ).toThrow(/degradation/u);
   });
 });
