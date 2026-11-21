@@ -21,7 +21,14 @@
 
 ## 2. 方案
 
-复用现有 `properties.channel` 维度，不新增 payload 键。`getChannel()` 经复核没有任何行为消费方（只有 telemetry 读取），channel 是纯上报维度，扩展其取值无副作用。
+复用现有 `properties.channel` 维度，不新增 payload 键。`getChannel()` 有四个读取点，`managed` 在各面的取值决定如下：
+
+- **usage 遥测**（qwen-logger RUM `properties.channel`）：`managed`——本设计新增的桶。
+- **DashScope 请求体 `metadata.channel`**（provider `buildMetadata`）：原始解析值，与既有取值同一透传契约；`managed` 现在会出现在该字段。
+- **`X-DashScope-Source-Config` 的 `t1` 标签**（`buildDashScopeSourceConfig`）：`desktop` → `qwen-code-desktop`；其余取值（含 `managed`、`daemon`）→ `qwen-code-cli`。本设计有意不扩展线上标签，平台枚举保持原样。
+- **会话导出元数据**（`Channel` 行）：导出 daemon 自身解析出的 channel，default profile 回退 `daemon`。导出路由不再硬编码 `daemon`，Hosted Harness 导出写 `managed`、桌面 shell 导出写 `desktop`。
+
+因此扩展 channel 取值只改变这些面上的上报标签；没有任何控制流读取 channel。
 
 daemon 在每个子进程环境中设置 `QWEN_CODE_SERVE=1` 标记，覆盖两个 spawn 点：
 
@@ -40,18 +47,18 @@ CLI 的 ACP channel 回退（`packages/cli/src/config/acp-channel-fallback.ts`�
 
 归因矩阵：
 
-| 场景                                              | properties.channel           |
-| ------------------------------------------------- | ---------------------------- |
-| 交互/无头 CLI                                     | （无）                       |
-| 三方直接 ACP                                      | `ACP`                        |
-| VS Code 伴生                                      | `VSCode`                     |
-| Electron 桌面端（直连，不走 daemon）              | `desktop`                    |
-| SDK `query()` 直连（TS/Python/Java，不走 daemon） | `SDK`（SDK 自带，不变）      |
-| daemon 会话（SDK daemon 客户端、Web Shell 等）    | `daemon`                     |
-| daemon 会话（Tauri desktop shell）                | `desktop`                    |
-| Managed Agent 会话（Hosted Harness，两种引擎）    | `managed`                    |
-| docker/podman sandbox 内的 daemon 会话            | 继承外层 `daemon`/`desktop`  |
-| daemon channel worker                             | worker 名（如 feishu，不变） |
+| 场景                                              | properties.channel                                 |
+| ------------------------------------------------- | -------------------------------------------------- |
+| 交互/无头 CLI                                     | （无）                                             |
+| 三方直接 ACP                                      | `ACP`                                              |
+| VS Code 伴生                                      | `VSCode`                                           |
+| Electron 桌面端（直连，不走 daemon）              | `desktop`                                          |
+| SDK `query()` 直连（TS/Python/Java，不走 daemon） | `SDK`（SDK 自带，不变）                            |
+| daemon 会话（SDK daemon 客户端、Web Shell 等）    | `daemon`                                           |
+| daemon 会话（Tauri desktop shell）                | `desktop`                                          |
+| Managed Agent 会话（Hosted Harness，两种引擎）    | `managed`                                          |
+| docker/podman sandbox 内的 daemon 会话            | 继承外层会话的取值（`daemon`/`desktop`/`managed`） |
+| daemon channel worker                             | worker 名（如 feishu，不变）                       |
 
 ### Managed Agent 归因（`managed`）
 

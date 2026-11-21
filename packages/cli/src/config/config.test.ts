@@ -1667,6 +1667,18 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe('SDK');
   });
 
+  it('resolves the launcher-marker channel for the deprecated experimentalAcp alias', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, {
+      experimentalAcp: true,
+      sessionId: 'channel-fallback-alias-test',
+      sessionIdGenerated: true,
+    } as CliArgs);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'managed',
+    );
+  });
+
   it('leaves the channel unset for non-ACP argv even under a marker', async () => {
     vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
     await loadCliConfig({}, {} as CliArgs);

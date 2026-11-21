@@ -3058,9 +3058,10 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : settings.stopHookBlockingCap,
     // Synthesized ACP argv (the Hosted Harness per-turn configs) never passes
     // through parseArguments, so resolve the same launcher-marker fallback
-    // here; an explicit --channel still wins.
+    // here; an explicit --channel still wins. isAcpMode covers the deprecated
+    // experimentalAcp alias exactly like the parseArguments copy.
     channel:
-      argv.channel ?? (argv.acp ? resolveAcpChannelFallback() : undefined),
+      argv.channel ?? (isAcpMode ? resolveAcpChannelFallback() : undefined),
     // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
     // equivalent — fd passing is a spawn-time concern). `--json-file` and
     // `--input-file` fall back to settings.dualOutput.* when the flag is

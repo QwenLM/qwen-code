@@ -13,6 +13,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
 import {
+  QWEN_CODE_SERVE_ENV,
+  resolveAcpChannelFallback,
+} from '../../config/acp-channel-fallback.js';
+import {
   hashDaemonWorkspace,
   withDaemonSpan,
 } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
@@ -1721,7 +1725,17 @@ export function registerSessionRoutes(
               sessionId,
               format,
               archiveState: target.archiveState,
-              config: { getChannel: () => 'daemon' },
+              // This process is itself a daemon: assert the serve marker so
+              // the default profile resolves to daemon while launcher
+              // markers (desktop, managed) still win. Hardcoding 'daemon'
+              // mislabeled Hosted Harness and desktop-shell exports.
+              config: {
+                getChannel: () =>
+                  resolveAcpChannelFallback({
+                    ...process.env,
+                    [QWEN_CODE_SERVE_ENV]: '1',
+                  }),
+              },
             });
           });
         })(),

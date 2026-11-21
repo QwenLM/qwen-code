@@ -21,7 +21,14 @@ But the `qwen serve` (daemon) spawn factory starts `qwen --acp` children without
 
 ## 2. Solution
 
-Reuse the existing `properties.channel` dimension; add no payload keys. A review confirmed `getChannel()` has no behavioral consumers (only telemetry reads it), so channel is a pure reporting dimension and extending its values has no side effects.
+Reuse the existing `properties.channel` dimension; add no payload keys. `getChannel()` has four read sites, and the decided value of `managed` on each is:
+
+- **Usage telemetry** (qwen-logger RUM `properties.channel`): `managed` — the new bucket this design adds.
+- **DashScope request body `metadata.channel`** (provider `buildMetadata`): the raw resolved value, the same pass-through contract as the existing values; `managed` now appears there.
+- **`X-DashScope-Source-Config` `t1` tag** (`buildDashScopeSourceConfig`): `desktop` → `qwen-code-desktop`; every other value, including `managed` and `daemon`, → `qwen-code-cli`. The wire tag is intentionally not extended by this design; the platform enum stays as-is.
+- **Session export metadata** (the `Channel` line): the exporting daemon's resolved channel, with `daemon` as the default-profile fallback. The export route no longer hardcodes `daemon`, so Hosted Harness exports say `managed` and desktop-shell exports say `desktop`.
+
+Extending the channel values therefore changes reporting labels on these surfaces only; no control flow reads the channel.
 
 The daemon sets a `QWEN_CODE_SERVE=1` marker in every child's environment, covering both spawn sites:
 
@@ -40,18 +47,18 @@ The CLI's ACP channel fallback (`packages/cli/src/config/acp-channel-fallback.ts
 
 Attribution matrix:
 
-| Scenario                                                      | properties.channel                   |
-| ------------------------------------------------------------- | ------------------------------------ |
-| Interactive/headless CLI                                      | (none)                               |
-| Direct third-party ACP                                        | `ACP`                                |
-| VS Code companion                                             | `VSCode`                             |
-| Electron desktop (direct, not through the daemon)             | `desktop`                            |
-| SDK `query()` direct (TS/Python/Java, not through the daemon) | `SDK` (passed by the SDK, unchanged) |
-| Daemon sessions (SDK daemon clients, Web Shell, etc.)         | `daemon`                             |
-| Daemon sessions (Tauri desktop shell)                         | `desktop`                            |
-| Managed Agent sessions (Hosted Harness, both engines)         | `managed`                            |
-| Daemon sessions inside a docker/podman sandbox                | inherits outer `daemon`/`desktop`    |
-| Daemon channel workers                                        | worker name (e.g. feishu, unchanged) |
+| Scenario                                                      | properties.channel                                                |
+| ------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Interactive/headless CLI                                      | (none)                                                            |
+| Direct third-party ACP                                        | `ACP`                                                             |
+| VS Code companion                                             | `VSCode`                                                          |
+| Electron desktop (direct, not through the daemon)             | `desktop`                                                         |
+| SDK `query()` direct (TS/Python/Java, not through the daemon) | `SDK` (passed by the SDK, unchanged)                              |
+| Daemon sessions (SDK daemon clients, Web Shell, etc.)         | `daemon`                                                          |
+| Daemon sessions (Tauri desktop shell)                         | `desktop`                                                         |
+| Managed Agent sessions (Hosted Harness, both engines)         | `managed`                                                         |
+| Daemon sessions inside a docker/podman sandbox                | inherits the outer session's value (`daemon`/`desktop`/`managed`) |
+| Daemon channel workers                                        | worker name (e.g. feishu, unchanged)                              |
 
 ### Managed Agent attribution (`managed`)
 

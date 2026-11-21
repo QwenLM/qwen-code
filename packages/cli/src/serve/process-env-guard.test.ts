@@ -561,6 +561,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/routes/session.ts',
+    {
+      reason:
+        "The transcript export labels the session with the daemon's own resolved channel: one whole-object read of the launch environment feeds the ACP fallback with the serve marker asserted (this process is a daemon), so launcher markers (desktop, managed) win over the daemon default instead of a hardcoded label.",
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/routes/workspace-extensions-controller.ts',
     {
       reason:

@@ -7747,6 +7747,47 @@ describe('runQwenServe deployment profiles', () => {
       }
     }
   });
+
+  it('restores an inherited marker when a default-profile startup fails inside the stamp window', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-default-early-restore-')),
+    );
+    const originalMarker = process.env['QWEN_CODE_MANAGED_RUNTIME'];
+    process.env['QWEN_CODE_MANAGED_RUNTIME'] = '1';
+    const scrubSpy = vi
+      .spyOn(sharedEnvKeysModule, 'acquireInheritedLoaderEnvScrub')
+      .mockImplementationOnce(() => {
+        throw new Error('loader scrub acquire failed');
+      });
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace,
+            serveWebShell: false,
+          },
+          {
+            bridge: makeRuntimeBridge(),
+            daemonLogBaseDir: path.join(workspace, 'debug'),
+          },
+        ),
+      ).rejects.toThrow('loader scrub acquire failed');
+      // The default profile dropped the inherited marker at boot; the early
+      // restore must bring it back so the embedded caller's env is intact.
+      expect(process.env['QWEN_CODE_MANAGED_RUNTIME']).toBe('1');
+    } finally {
+      scrubSpy.mockRestore();
+      fs.rmSync(workspace, { recursive: true, force: true });
+      if (originalMarker === undefined) {
+        delete process.env['QWEN_CODE_MANAGED_RUNTIME'];
+      } else {
+        process.env['QWEN_CODE_MANAGED_RUNTIME'] = originalMarker;
+      }
+    }
+  });
 });
 
 /**
