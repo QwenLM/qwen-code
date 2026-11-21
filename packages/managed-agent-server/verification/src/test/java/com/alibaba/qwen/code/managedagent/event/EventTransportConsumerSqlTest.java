@@ -383,14 +383,13 @@ public class EventTransportConsumerSqlTest {
                 + " writer_generation, writer_id, writer_lease_until,"
                 + " journal_revision, committed_sequence, activation_epoch,"
                 + " compacted_through_revision, recovery_status, gmt_create,"
-                + " gmt_modified, tenant_key, harness_key, harness_session_id, head_kind)"
+                + " gmt_modified, harness_session_id, head_kind)"
                 + " VALUES (?, ?, ?, ?, 1, 'writer', "
                 + (leaseOffsetSeconds == null ? "NULL"
                         : "(" + ManagedSchemaTime.SQL_NOW + " + " + leaseOffsetSeconds * 1000L + ")")
-                + ", 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, 'MANAGED_SESSION')",
+                + ", 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, 'MANAGED_SESSION')",
                 TENANT, workspace, session, state, committed,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(TENANT),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(session), session);
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(TENANT));
     }
 
     private void event(String session, long sequence, String type) {

@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -295,10 +294,10 @@ class HostedChannelGateSupport {
         // raw tenant+session form scans the lane's accumulated ma_resource rows.
         var resources = jdbc.queryForList(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) AS body FROM"
-                        + " ma_resource WHERE session_scope_key = ?"
+                        + " ma_resource WHERE tenant_id = ? AND session_id = ?"
                         + " AND resource_id = ? AND tenant_id = ?"
                         + " AND session_id = ?",
-                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+                tenant, sessionId,
                 projection.get("record_resource_id"), tenant, sessionId);
         assertThat(resources).hasSize(1);
         return JSON.readTree(resources.getFirst().get("body").toString());

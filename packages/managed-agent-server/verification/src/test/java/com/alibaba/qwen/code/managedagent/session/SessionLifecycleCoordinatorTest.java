@@ -559,29 +559,27 @@ class SessionLifecycleCoordinatorTest {
     private static void jdbcLiveScope(JdbcTemplate jdbc, String session,
             String resourceBody, String taskKind) {
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, 'tenant',"
+                        + " VALUES (?, 'tenant',"
                         + " 'workspace', ?, 'child_run', 'run-1', 'h', 1,"
                         + " 'res-run-1', '" + taskKind + "', 'running', 'session',"
                         + " 'planned', 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", session),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(session, "child_run", "run-1"), session);
         byte[] bytes = resourceBody.getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource"
-                        + " (resource_key, session_scope_key, tenant_id, workspace_id,"
+                        + " (resource_key, tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes,"
                         + " publish_command_id, state, gmt_create)"
-                        + " VALUES (?, ?, 'tenant', 'workspace', ?,"
+                        + " VALUES (?, 'tenant', 'workspace', ?,"
                         + " 'res-run-1', 'managed-input', 1, ?,"
                         + " '" + "b".repeat(64) + "', 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSessionStore.resourceKey(
-                        ManagedSessionStore.sessionScopeKey("tenant", session), "res-run-1"),
-                ManagedSessionStore.sessionScopeKey("tenant", session), session, bytes.length, bytes);
+                        ManagedSessionStore.sessionScopeKey("tenant", session), "res-run-1"), session, bytes.length, bytes);
     }
 
     private String childCloseOperation(World world) {
@@ -830,14 +828,13 @@ class SessionLifecycleCoordinatorTest {
         World world = closingWorld("team-");
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " gmt_create)"
-                        + " VALUES (?, ?, 'tenant',"
+                        + " VALUES (?, 'tenant',"
                         + " 'workspace', ?, 'team_state', 'team-1', 'h', 2,"
                         + " 'res-team-1', 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", world.session),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(world.session, "team_state", "team-1"), world.session);
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
@@ -1860,14 +1857,13 @@ class SessionLifecycleCoordinatorTest {
      * (journalTurns), for the cascade's message-stop tests (#13875). */
     private static void pendingSessionMessage(World world) {
         world.jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " gmt_create)"
-                        + " VALUES (?, ?, 'tenant', 'workspace', ?,"
+                        + " VALUES (?, 'tenant', 'workspace', ?,"
                         + " 'session_message', 'msg_1:message', 'h', 1,"
                         + " 'res-msg-1', 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", world.child),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(world.child, "session_message", "msg_1:message"),
                 world.child);
         byte[] journal = ("{\"subtype\":\"managed_session_event_v1\","

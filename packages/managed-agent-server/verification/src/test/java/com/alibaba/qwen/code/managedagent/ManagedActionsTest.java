@@ -407,9 +407,9 @@ class ManagedActionsTest {
                     .isEqualTo(ManagedSessionStore.sessionScopeKey(tenant, session));
         }
         // Keep the foreign writer's real scope; only corrupt its denormalized Session identity.
-        assertThat(jdbc.update("UPDATE ma_session_record SET session_id = ? WHERE session_scope_key = ?"
+        assertThat(jdbc.update("UPDATE ma_session_record SET session_id = ? WHERE tenant_id = ? AND session_id = ?"
                         + " AND record_kind = 'ACTION' AND action_id = ?", childRow ? child : root,
-                ManagedSessionStore.sessionScopeKey(tenant, other), foreign.id)).isEqualTo(1);
+                tenant, other, foreign.id)).isEqualTo(1);
         assertThat(actions.listWithChildren(tenant, root, null, null, null, 10))
                 .extracting(row -> row.sessionId() + ":" + row.action().id())
                 .containsExactly(child + ":" + nested.id, root + ":" + own.id);

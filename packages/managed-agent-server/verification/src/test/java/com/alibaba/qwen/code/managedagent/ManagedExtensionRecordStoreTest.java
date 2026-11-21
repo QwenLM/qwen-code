@@ -346,8 +346,8 @@ class ManagedExtensionRecordStoreTest {
         commitDomain(journal, "run-1", "automation_run", run, List.of());
         if (!taskKind) {
             jdbc.update("UPDATE ma_session_record SET task_kind = NULL, task_state = NULL"
-                            + " WHERE session_scope_key = ? AND record_key = ?",
-                    ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
+                            + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?",
+                    TENANT, sessionId,
                     ManagedExtensionProjection.recordKey(sessionId, "automation_run", decision.runId()));
         }
         run.withObject("/run").put("state", "running");
@@ -362,8 +362,8 @@ class ManagedExtensionRecordStoreTest {
             status.setRollbackOnly();
         });
         assertThat(jdbc.queryForObject("SELECT task_state FROM ma_session_record"
-                        + " WHERE session_scope_key = ? AND record_key = ?", String.class,
-                ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
+                        + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?", String.class,
+                TENANT, sessionId,
                 ManagedExtensionProjection.recordKey(sessionId, "automation_run", decision.runId())))
                 .isEqualTo(taskKind ? "running" : null);
         if (occurrenceFirst) {
