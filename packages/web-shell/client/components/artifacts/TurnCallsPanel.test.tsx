@@ -2470,3 +2470,26 @@ it('resolves a prompt-only history identity using the shared turn-index page siz
     'wanted-record',
   );
 });
+
+it('bounds expanded invisible-character output and displays its truncation notice remains within the 4000 character bound', () => {
+  transcript.blocks = [
+    userBlock('u1', 1),
+    toolBlock({
+      id: 'edit',
+      toolCallId: 'edit',
+      toolName: 'edit',
+      rawOutput: {
+        fileDiff: '@@ -0,0 +1,1 @@\n' + '+' + '\u200b'.repeat(1000) + '\n',
+      },
+    }),
+  ];
+  const view = render(<TurnCallsPanel turnId="u1" />);
+  act(() => view.querySelector<HTMLButtonElement>('li > button')!.click());
+  const rows = view.querySelector('[aria-label="File diff"]')!;
+  const textLength = Array.from(rows.children).reduce(
+    (n, row) => n + row.lastElementChild!.textContent!.length,
+    0,
+  );
+  expect(textLength).toBeLessThanOrEqual(4000);
+  expect(view.textContent).toContain('Diff truncated');
+});

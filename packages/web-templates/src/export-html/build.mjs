@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_154_703;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -186,7 +186,14 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
 // 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
 // 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
 // above the local measurement.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_151_577;
+// Merging main 2421ad2c3b into this context-diff branch (parent cb14101723),
+// including the CRLF verdict fix, measures 2,153,990 JS bytes with a frozen
+// lockfile install on Windows / Node 24.20.0 (CSS 2,426,376, separate). The
+// forbidden-input guard passes. The old cb14101723 Linux / Node 22.23.4 CI
+// measurement was already 2,151,544, above this branch's former 2,151,000 cap;
+// retaining an older tree's budget therefore failed the merged build. Track
+// this merged measurement with main's 713- and 1,713-byte margins instead.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_155_703;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

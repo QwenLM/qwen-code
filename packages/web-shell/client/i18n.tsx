@@ -658,6 +658,7 @@ const EN: Messages = {
   'gitDiff.noDiff': 'No changes to display',
   'gitDiff.fileError': 'Failed to load this diff',
   'gitDiff.truncated': 'Diff truncated — the file is too large to show in full',
+  'gitDiff.escapedCharacter': 'Invisible character',
   'gitDiff.hidden': (v) => `${v?.count ?? 0} more file(s) not shown`,
   'gitDiff.expand': (v) => `Show changes for ${v?.path ?? 'file'}`,
   'gitDiff.collapse': (v) => `Hide changes for ${v?.path ?? 'file'}`,
@@ -1108,6 +1109,10 @@ const EN: Messages = {
   'approval.goal.failed': 'Could not submit your choice. Please try again.',
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
+  'approval.diffOmitted':
+    'Diff omitted because it is too large to display safely.',
+  'approval.trailingNewlineAdded': 'Trailing newline added at end of file.',
+  'approval.trailingNewlineRemoved': 'Trailing newline removed at end of file.',
   'approval.launchAgentQuestion': 'Launch this agent?',
   'approval.explain': 'Explain',
   'approval.explanation': 'Command explanation',
