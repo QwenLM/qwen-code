@@ -23,17 +23,24 @@ import {
   forEachChild,
   isArrayLiteralExpression,
   isArrowFunction,
+  isAsExpression,
   isBinaryExpression,
+  isBindingElement,
   isCallExpression,
   isConstructorDeclaration,
   isFunctionDeclaration,
   isFunctionExpression,
   isGetAccessorDeclaration,
+  isElementAccessExpression,
   isIdentifier,
   isIfStatement,
   isMethodDeclaration,
+  isNonNullExpression,
   isNoSubstitutionTemplateLiteral,
+  isParenthesizedExpression,
+  isPropertyAccessExpression,
   isPropertyAssignment,
+  isSatisfiesExpression,
   isSetAccessorDeclaration,
   isShorthandPropertyAssignment,
   isStringLiteral,
@@ -122,13 +129,13 @@ const literalText = (node) =>
 
 // The classifier delegation, as placement. The decision itself is executed
 // elsewhere; what is pinned here is only where the delegation sits and that
-// nothing answers beside it. Three review rounds measured that every data-flow
+// nothing answers beside it. Four review rounds measured that every data-flow
 // clause layered on top of this — provenance through rebinds and shadows, gate
 // recognition, fall-through tracking — grew a fresh evasion and a fresh false
 // red for each one closed, because it is hand-written semantic analysis over an
 // unbounded rewrite space. Those checks are retired by decision, not by
-// oversight: the packaged arms own the wiring behaviourally, and the design
-// record enumerates what this pin deliberately does not cover.
+// oversight: the design record enumerates what this pin deliberately does not
+// cover, and which of those the packaged arms were measured to catch.
 const classifierDelegation = (text) => {
   const file = createSourceFile('runner.ts', text, ScriptTarget.Latest, true);
   const isFn = (node) =>
@@ -145,53 +152,150 @@ const classifierDelegation = (text) => {
     }
     return undefined;
   };
-  const isFakeCallback = (fn) => {
-    const parent = fn?.parent;
-    return (
-      parent !== undefined &&
-      isCallExpression(parent) &&
-      isIdentifier(parent.expression) &&
-      parent.expression.text === 'startFakeOpenAIServer' &&
-      parent.arguments[0] === fn
-    );
-  };
-  // The nearest enclosing arm flag. Called with the callback for the fake
-  // inventory and with the delegation itself for its arm, so a delegation
-  // gated by the sibling flag inside this arm's fake is not credited to it.
+  const fakeCallbacks = new Set();
+  const isFakeCallback = (fn) => fakeCallbacks.has(fn);
+  // The nearest enclosing flag around a delegation, so one gated by the
+  // sibling flag inside this arm's fake is not credited to it. The fake
+  // inventory uses the outermost flag instead; see outerArmFlag.
   const armFlag = (node) => {
     for (let current = node?.parent; current; current = current.parent) {
-      if (
-        isIfStatement(current) &&
-        isIdentifier(current.expression) &&
-        (current.expression.text === 'loopSkill' ||
-          current.expression.text === 'loopFire')
-      ) {
+      if (isIfStatement(current) && isIdentifier(current.expression)) {
         return current.expression.text;
       }
     }
     return undefined;
   };
-  // Anywhere inside a loop arm's fake, including a closure it declares: an
-  // answer built one function down is still an answer that arm can send.
+  // The outermost arm flag, for the fake inventory: a fire block nested inside
+  // the skill block belongs to the skill arm, because it is never reached when
+  // only the fire flag is set.
+  const outerArmFlag = (node) => {
+    let found;
+    for (let current = node?.parent; current; current = current.parent) {
+      if (isIfStatement(current) && isIdentifier(current.expression)) {
+        found = current.expression.text;
+      }
+    }
+    return found;
+  };
+  // A delegation wrapped in a closure the callback declares is still that
+  // fake's delegation. The chain continues through arrows and function
+  // expressions only: a class member or a named declaration is a separate
+  // callable that something must invoke, so it does not credit the fake.
+  const inFake = (node) => {
+    for (let fn = enclosingFn(node); fn !== undefined; fn = enclosingFn(fn)) {
+      if (isFakeCallback(fn)) return true;
+      if (!isArrowFunction(fn) && !isFunctionExpression(fn)) return false;
+    }
+    return false;
+  };
   const inLoopArm = (node) => {
     for (let fn = enclosingFn(node); fn !== undefined; fn = enclosingFn(fn)) {
       if (isFakeCallback(fn) && armFlag(fn) !== undefined) return true;
     }
     return false;
   };
+  // Single-declaration initialisers, so a hoisted `toolCalls` array can be
+  // read where it was declared. Ambiguous names are left unresolved: an
+  // acceptance must not guess which declaration a scope-insensitive lookup
+  // happened to find.
+  const initialisers = new Map();
+  const collectInitialisers = (node) => {
+    if (
+      isVariableDeclaration(node) &&
+      isIdentifier(node.name) &&
+      node.initializer !== undefined
+    ) {
+      const name = node.name.text;
+      initialisers.set(
+        name,
+        initialisers.has(name) ? undefined : node.initializer,
+      );
+    }
+    forEachChild(node, collectInitialisers);
+  };
+  // A callback passed by reference is the same fake as an inline one, so the
+  // argument is resolved to its declaration before being recognised.
+  const unwrap = (node) => {
+    let current = node;
+    while (
+      current !== undefined &&
+      (isParenthesizedExpression(current) ||
+        isAsExpression(current) ||
+        isNonNullExpression(current) ||
+        isSatisfiesExpression(current))
+    ) {
+      current = current.expression;
+    }
+    return current;
+  };
+  const collectFakes = (node) => {
+    if (
+      isCallExpression(node) &&
+      isIdentifier(node.expression) &&
+      node.expression.text === 'startFakeOpenAIServer'
+    ) {
+      const arg = unwrap(node.arguments[0]);
+      const fn =
+        arg !== undefined && isIdentifier(arg)
+          ? unwrap(initialisers.get(arg.text))
+          : arg;
+      if (fn !== undefined && isFn(fn)) fakeCallbacks.add(fn);
+    }
+    forEachChild(node, collectFakes);
+  };
+  // The request binding is whatever the callback's own first parameter names
+  // it, so renaming `({ body })` to `({ body: req })` is not a defect.
+  const bodyNames = (fn) => {
+    const names = new Set();
+    const walk = (node) => {
+      if (isBindingElement(node) && isIdentifier(node.name)) {
+        names.add(node.name.text);
+      }
+      forEachChild(node, walk);
+    };
+    const param = fn?.parameters?.[0];
+    if (param !== undefined) {
+      if (isIdentifier(param.name)) names.add(param.name.text);
+      else walk(param.name);
+    }
+    return names;
+  };
+  const fakeOf = (node) => {
+    for (let fn = enclosingFn(node); fn !== undefined; fn = enclosingFn(fn)) {
+      if (isFakeCallback(fn)) return fn;
+      if (!isArrowFunction(fn) && !isFunctionExpression(fn)) return undefined;
+    }
+    return undefined;
+  };
   const calls = [];
-  const fakeArms = [];
+  const fakes = [];
   const loopAnswerSites = [];
   const loopHandBuilt = [];
   const isFakeToolCall = (node) =>
     isCallExpression(node) &&
     isIdentifier(node.expression) &&
     node.expression.text === 'fakeToolCall';
+  // A `toolCalls` member reached through an object, whether it is being
+  // assigned, indexed or pushed to: the answer is built after construction,
+  // so no property-literal inventory can see it.
+  const touchesToolCallsMember = (node) => {
+    let found = false;
+    const walk = (child) => {
+      if (
+        (isPropertyAccessExpression(child) &&
+          child.name.text === 'toolCalls') ||
+        (isElementAccessExpression(child) &&
+          literalText(child.argumentExpression) === 'toolCalls')
+      ) {
+        found = true;
+      }
+      forEachChild(child, walk);
+    };
+    if (node !== undefined) walk(node);
+    return found;
+  };
   const visit = (node) => {
-    if (isFn(node) && isFakeCallback(node)) {
-      const arm = armFlag(node);
-      if (arm !== undefined) fakeArms.push(arm);
-    }
+    if (isFn(node) && isFakeCallback(node)) fakes.push(node);
     if (
       isCallExpression(node) &&
       isIdentifier(node.expression) &&
@@ -203,8 +307,11 @@ const classifierDelegation = (text) => {
         arg0: isIdentifier(node.arguments[0])
           ? node.arguments[0].text
           : undefined,
+        bodyNamed: bodyNames(fakeOf(node)).has(
+          isIdentifier(node.arguments[0]) ? node.arguments[0].text : '',
+        ),
         fn: fn === undefined ? -1 : fn.pos,
-        fake: isFakeCallback(fn),
+        fake: inFake(node),
         // The nearest flag around the delegation itself, so one gated by the
         // sibling arm's flag inside this arm's fake is not credited to it.
         arm: armFlag(node),
@@ -214,31 +321,53 @@ const classifierDelegation = (text) => {
     // call spelling: a hand-built element is invisible to a fakeToolCall count,
     // and a non-inline toolCalls source cannot be enumerated at all.
     if (inLoopArm(node)) {
+      const assigned =
+        isBinaryExpression(node) &&
+        node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
+        node.operatorToken.kind <= SyntaxKind.LastAssignment;
+      const mutated =
+        isCallExpression(node) &&
+        isPropertyAccessExpression(node.expression) &&
+        touchesToolCallsMember(node.expression.expression);
+      if ((assigned && touchesToolCallsMember(node.left)) || mutated) {
+        loopHandBuilt.push(node.pos);
+      }
       if (
         isFakeToolCall(node) &&
         literalText(node.arguments[0]) === 'respond_in_schema'
       ) {
         loopAnswerSites.push(node.pos);
       }
-      if (
-        (isPropertyAssignment(node) || isShorthandPropertyAssignment(node)) &&
-        (isIdentifier(node.name) ? node.name.text : literalText(node.name)) ===
-          'toolCalls'
-      ) {
-        const source = isShorthandPropertyAssignment(node)
-          ? undefined
-          : node.initializer;
-        if (source === undefined || !isArrayLiteralExpression(source)) {
+      if (isPropertyAssignment(node) || isShorthandPropertyAssignment(node)) {
+        const key = isIdentifier(node.name)
+          ? node.name.text
+          : literalText(node.name);
+        // A key the inventory cannot read is failed closed: it may be
+        // `toolCalls` spelled as a computed expression.
+        if (key === undefined) {
           loopHandBuilt.push(node.pos);
-        } else {
-          for (const element of source.elements) {
-            // A computed tool name is as unattributable as a hand-built
-            // element: neither can be told apart from a classifier answer.
-            if (
-              !isFakeToolCall(element) ||
-              literalText(element.arguments[0]) === undefined
-            ) {
-              loopHandBuilt.push(element.pos);
+        } else if (key === 'toolCalls') {
+          const declared = isShorthandPropertyAssignment(node)
+            ? undefined
+            : node.initializer;
+          // A hoisted array is the same answer as an inline one, so read it
+          // where it was declared rather than pricing the hoist as a defect.
+          const source =
+            declared !== undefined && isIdentifier(declared)
+              ? initialisers.get(declared.text)
+              : declared;
+          if (source === undefined || !isArrayLiteralExpression(source)) {
+            loopHandBuilt.push(node.pos);
+          } else {
+            for (const element of source.elements) {
+              // A computed tool name is as unattributable as a hand-built
+              // element: neither can be told apart from a classifier answer.
+              if (
+                !isFakeToolCall(element) ||
+                literalText(element.arguments[0]) === undefined
+              ) {
+                loopHandBuilt.push(element.pos);
+              }
             }
           }
         }
@@ -246,7 +375,18 @@ const classifierDelegation = (text) => {
     }
     forEachChild(node, visit);
   };
+  collectInitialisers(file);
+  collectFakes(file);
   visit(file);
+  // The arms are the flags that guard the delegations, not a pair of literal
+  // names: renaming both flags is a behaviour-preserving refactor. Only fakes
+  // under those flags count, so the durable-failover fake stays out.
+  const armNames = new Set(
+    calls.map((call) => call.arm).filter((arm) => arm !== undefined),
+  );
+  const fakeArms = fakes
+    .map((fn) => outerArmFlag(fn))
+    .filter((arm) => arm !== undefined && armNames.has(arm));
   return { calls, fakeArms, loopAnswerSites, loopHandBuilt };
 };
 
@@ -271,8 +411,8 @@ const delegationViolations = (delegation) => {
   // exchanging them between the arms is behaviour-preserving.
   if (
     delegation.calls.some((call) => !call.fake) ||
-    [...delegation.calls.map((call) => call.arm)].sort().join() !==
-      'loopFire,loopSkill'
+    new Set(delegation.calls.map((call) => call.arm)).size !== 2 ||
+    delegation.calls.some((call) => call.arm === undefined)
   ) {
     violations.push('arm-scoping');
   }
@@ -280,10 +420,13 @@ const delegationViolations = (delegation) => {
   // delegation sit in the durable failover server while borrowing the arm.
   // The count is enough — which arms the two delegations sit in is already
   // judged by arm-scoping, so a multiset here would be a second copy of it.
-  if (delegation.fakeArms.length !== 2) {
+  if (
+    delegation.fakeArms.length !== 2 ||
+    new Set(delegation.fakeArms).size !== 2
+  ) {
     violations.push('one-fake-per-arm');
   }
-  if (delegation.calls.some((call) => call.arg0 !== 'body')) {
+  if (delegation.calls.some((call) => !call.bodyNamed)) {
     violations.push('argument-provenance');
   }
   if (delegation.loopAnswerSites.length > 0) {
@@ -3849,19 +3992,26 @@ describe('managed-agent-server e2e runner', () => {
       ],
     });
     // The whole response, so the tool name, the call id and the payload are
-    // pinned as one mapping rather than as separate counts.
-    const response = (callId, answer) => ({
-      toolCalls: [
-        {
-          id: callId,
-          type: 'function',
-          function: {
-            name: 'respond_in_schema',
-            arguments: JSON.stringify(answer),
+    // pinned as one mapping rather than as separate counts. The payload is
+    // compared parsed: `fakeToolCall` serialises it, and comparing the string
+    // would pin the answer's key insertion order rather than its value.
+    const expectResponse = (actual, callId, answer) => {
+      expect(actual).toEqual({
+        toolCalls: [
+          {
+            id: callId,
+            type: 'function',
+            function: {
+              name: 'respond_in_schema',
+              arguments: expect.any(String),
+            },
           },
-        },
-      ],
-    });
+        ],
+      });
+      expect(JSON.parse(actual.toolCalls[0].function.arguments)).toEqual(
+        answer,
+      );
+    };
     const stage1 = { shouldBlock: { type: 'boolean' } };
     const stage2 = {
       shouldBlock: { type: 'boolean' },
@@ -3869,11 +4019,15 @@ describe('managed-agent-server e2e runner', () => {
       reason: { type: 'string' },
     };
     for (const callId of ['loop-classifier', 'loop-fire-classifier']) {
-      expect(loopClassifierResponse(schemaBody(stage1), callId)).toEqual(
-        response(callId, { shouldBlock: false }),
+      expectResponse(
+        loopClassifierResponse(schemaBody(stage1), callId),
+        callId,
+        { shouldBlock: false },
       );
-      expect(loopClassifierResponse(schemaBody(stage2), callId)).toEqual(
-        response(callId, { shouldBlock: false, thinking: '', reason: '' }),
+      expectResponse(
+        loopClassifierResponse(schemaBody(stage2), callId),
+        callId,
+        { shouldBlock: false, thinking: '', reason: '' },
       );
       // Non-block side queries also emit respond_in_schema and must fall
       // through, never be answered with a schema-invalid allow.
@@ -3927,12 +4081,14 @@ describe('managed-agent-server e2e runner', () => {
       ).toBeUndefined();
     }
     // A malformed element must not lose the allow for a block schema behind it.
-    expect(
+    expectResponse(
       loopClassifierResponse(
         { tools: [null, schemaBody(stage1).tools[0]] },
         'loop-classifier',
       ),
-    ).toEqual(response('loop-classifier', { shouldBlock: false }));
+      'loop-classifier',
+      { shouldBlock: false },
+    );
     // Several schema tools: the first match wins, so a later block schema does
     // not rescue an earlier non-block one. Documented by assertion, not prose.
     expect(
@@ -3989,6 +4145,8 @@ describe('managed-agent-server e2e runner', () => {
     const good = [decision, skill(SKILL), fire(FIRE)].join('\n');
     const withSkill = (lines) =>
       [decision, skill(lines), fire(FIRE)].join('\n');
+    const HAND =
+      "{ id: 'x', type: 'function', function: { name: 'respond_in_schema', arguments: '{\"shouldBlock\":false}' } }";
     const answer = (element) =>
       withSkill(
         SKILL + "\nif (body['x']) return { toolCalls: [" + element + '] };',
@@ -4131,6 +4289,15 @@ describe('managed-agent-server e2e runner', () => {
             "\nconst toolCalls = [{ id: 'x' }];\nif (body['x']) return { toolCalls };",
         ),
       ],
+      // A hoisted source that resolves to something other than an array: the
+      // hoist acceptance must not turn an unenumerable answer into a pass.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst forged = buildCalls();\nif (body['x']) return { toolCalls: forged };",
+        ),
+      ],
       // A computed tool name is as unattributable as a hand-built element.
       [
         'no-loop-hand-built',
@@ -4138,6 +4305,51 @@ describe('managed-agent-server e2e runner', () => {
           SKILL +
             "\nconst name = 'respond_in_schema';\nif (body['x']) return { toolCalls: [fakeToolCall(name, { shouldBlock: false }, 'x')] };",
         ),
+      ],
+      // A key the inventory cannot read is failed closed, not skipped.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nif (body['x']) return { ['tool' + 'Calls']: [" +
+            HAND +
+            '] };',
+        ),
+      ],
+      // The answer built after construction: assigned, indexed, or pushed.
+      ...[
+        "const answer = { content: 'f' };\nanswer.toolCalls = [" + HAND + '];',
+        "const answer = { toolCalls: [fakeToolCall('cron_list', {}, 'c')] };\nanswer.toolCalls[0] = " +
+          HAND +
+          ';',
+        "const answer = { toolCalls: [fakeToolCall('cron_list', {}, 'c')] };\nanswer.toolCalls.push(" +
+          HAND +
+          ');',
+      ].map((write) => [
+        'no-loop-hand-built',
+        withSkill(SKILL + '\n' + write + "\nif (body['x']) return answer;"),
+      ]),
+      // Two fakes under one arm's flag, the sibling delegation nested inside.
+      [
+        'one-fake-per-arm',
+        [
+          decision,
+          skill(''),
+          'if (loopSkill) {\nfake2 = await startFakeOpenAIServer(({ body }) => {\nif (loopFire) {\n' +
+            FIRE +
+            '\n}\n});\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // The fire arm's whole block nested inside the skill arm: it is never
+      // reached when only the fire flag is set.
+      [
+        'one-fake-per-arm',
+        [
+          decision,
+          skill(SKILL),
+          'if (loopSkill) {\n' + fire(FIRE) + '\n}',
+        ].join('\n'),
       ],
     ];
     for (const [clause, source] of cases) {
@@ -4161,7 +4373,6 @@ describe('managed-agent-server e2e runner', () => {
         'if (classified != null) return classified;',
         "if (typeof classified !== 'undefined') return classified;",
         'if (Boolean(classified)) return classified;',
-        'return classified ?? other;',
       ].map((gate) => [
         'gate spelling',
         withSkill(
@@ -4197,13 +4408,57 @@ describe('managed-agent-server e2e runner', () => {
             "\nif (body['x']) return { toolCalls: [fakeToolCall('cron_list', {}, 'loop-cron-list')] };",
         ),
       ],
+      // The same cron answer hoisted into a named array: same emitted bytes.
+      [
+        'hoisted cron array',
+        withSkill(
+          SKILL +
+            "\nconst cronListCalls = [fakeToolCall('cron_list', {}, 'loop-cron-list')];\nif (body['x']) return { toolCalls: cronListCalls };",
+        ),
+      ],
+      // Both arm flags renamed: they are module locals, not a contract.
+      [
+        'renamed arm flags',
+        [decision, arm('skillArm', SKILL), arm('fireArm', FIRE)].join('\n'),
+      ],
+      // The request binding renamed with the delegation that reads it.
+      [
+        'renamed request binding',
+        [
+          decision,
+          'if (loopSkill) {\nfake = await startFakeOpenAIServer(({ body: req }) => {\n' +
+            SKILL.replace('(body,', '(req,') +
+            '\n});\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // The delegation wrapped in a closure the callback declares.
+      [
+        'closure-wrapped delegation',
+        withSkill(
+          "const respond = () => loopClassifierResponse(body, 'loop-classifier');\nconst classified = respond();\nif (classified !== undefined) return classified;",
+        ),
+      ],
+      // The arm callback hoisted into a named binding and passed by reference.
+      [
+        'named hoisted callback',
+        [
+          decision,
+          'if (loopSkill) {\nconst skillFake = ({ body }) => {\n' +
+            SKILL +
+            '\n};\nfake = await startFakeOpenAIServer(skillFake);\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
     ];
     for (const [label, source] of equivalent) {
       expect(delegationViolations(classifierDelegation(source)), label).toEqual(
         [],
       );
     }
-  }); // The fake-side minted-id extraction is executed, not counted as source
+  });
+
+  // The fake-side minted-id extraction is executed, not counted as source
   // spelling: dropping the structured call-id filter or replacing the
   // extraction with a fabricated literal reddens these directions, while a
   // behaviour-preserving consolidation into the helper stays green.

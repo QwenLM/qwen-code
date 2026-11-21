@@ -55,7 +55,7 @@ Replace the retired inventories with one small **placement** pin, judged by a si
 - the first argument the callback's own `body` parameter;
 - inside a loop arm's fake — **including any closure it declares** — no `respond_in_schema` answer, and no `toolCalls` element that is not a `fakeToolCall` with a literal tool name. The inventory is judged **per element**, not per property, because both arms legitimately build `toolCalls` for the cron fixtures.
 
-The fake inventory keys the arm on the callback; a delegation's own arm is the nearest flag around it, so one gated by the sibling arm's flag inside this arm's fake is not credited to it. A second fake borrowing the arm is caught by the count, which is why that clause is a count and not a second copy of the arm multiset. Every clause has a hostile case that was measured to pass the weaker form it replaces, and the behaviour-preserving rewrites — arm order, id exchange, every gate spelling, an arrow-const decision, a legitimate third fake, a legitimate cron answer — are positive controls.
+Placement is resolved, not spelled. The **arms are the flags that guard the delegations**, so renaming both flags is accepted; only fakes under those flags count, which keeps the durable-failover fake out. A fake passed **by reference** is resolved to its declaration. The request binding is whatever the callback's **own first parameter** names it. A delegation wrapped in a **closure** the callback declares still belongs to that fake, while a class member does not — the chain continues through arrows and function expressions only. A **hoisted** `toolCalls` array is read where it was declared, and only when that name has a single declaration, so an acceptance never guesses between ambiguous bindings. A key the inventory **cannot read** is failed closed rather than skipped, and an answer built **after construction** — assigned, indexed or pushed onto a `toolCalls` member — is inventoried too. Every clause has a hostile case that was measured to pass the weaker form it replaces, and the behaviour-preserving rewrites — arm order, id exchange, every gate spelling, an arrow-const decision, a legitimate third fake, a legitimate cron answer — are positive controls.
 
 ### What the pin deliberately does not cover
 
@@ -72,8 +72,12 @@ So the data-flow clauses are **retired by decision**, and the following are expl
 | provenance beyond the parameter's name         | `body` rebound or shadowed before the call                                                                     |
 | an alias of the bound name                     | `const alias = classified; return alias;`                                                                      |
 | an answer built by a helper the callback calls | `return bypass(body);` — no `toolCalls` property at the call site                                              |
+| an answer in a fake outside the loop arms      | the durable-failover fake answering with a loop call id                                                        |
+| the request body's schema being mutated        | an arm writing `shouldBlock` into `body.tools[0]…properties` before delegating                                 |
 
-The packaged arms own all of these behaviourally, and that ownership is measured rather than asserted: with only the skill arm's delegation changed, discarding the decision's result and swallowing the fall-through each fail the packaged skill arm, while the committed delegation passes. The fast pin is a cheap smoke check on placement; it is not a second copy of the decision and not a substitute for the arms.
+**Which of these the packaged arms actually catch is measured, not assumed.** With only the skill arm's delegation changed, discarding the decision's result and swallowing the fall-through each fail the packaged skill arm (`Cron schedule admission denied: Classifier stage 1 unavailable` and `Managed Turn terminal event did not become ready`), while the committed delegation passes. Two rows are **not** arm-verified: mutating the request body's schema before delegating was run on the packaged skill arm and it **passed** (rc=0, modelRounds 6, cronCreate true), and an answer in the durable-failover fake is not exercised by the skill arm at all. Those two are uncovered by both lanes today, and are listed as such rather than folded into the arm-owned claim. Closing the body-mutation one would need alias tracking — the write lands on a binding derived from `body`, not on `body` itself — which is the data-flow family this pin stopped judging.
+
+The fast pin is a cheap smoke check on placement; it is not a second copy of the decision and not a substitute for the arms.
 
 ## Key design decisions
 
@@ -98,6 +102,14 @@ Two of round 3's shapes were placement bugs rather than data flow, and are fixed
 The decision, taken by the maintainer after round 3, was to stop growing the pin and shrink it to placement. Two measurements supported it: the pin had grown to roughly 370 lines of AST analysis guarding a two-line delegation, and each round's fixes had produced the next round's findings. The reduced pin is about 150 lines and scans the runner in a median 63.9 ms against 95.6 ms for the round-2 version, measured over seven runs of `classifierDelegation` alone.
 
 One earlier mutation survived and was attributed rather than papered over: a constraint requiring each return in a gate's branches to read the binding _and nothing else_ had no isolating fixture, because it false-reddened `return classified ?? other` — a dead fallback under the gate. It was removed rather than justified with an invented fixture. That was the same signal the third round confirmed at scale.
+
+## Review round 4: placement had the same spelling problem
+
+A fourth review at the reduced pin returned 0 Critical and six Suggestions. Two were about the record itself rather than the predicate: a positive control listed a shape the record classifies as behaviour-breaking, and a spliced closing brace had swallowed the next test's leading comment. One was about the executed test: comparing the payload as a pre-serialised JSON string pinned the answer's **key insertion order**, so reordering three keys in `classifierBlockAnswer` reddened a behaviour-preserving rewrite; the payload is now compared parsed.
+
+The other three measured five evasions and five false reds in the placement clauses. All ten were reproduced first. The five false reds — renamed arm flags, a renamed request binding, a hoisted cron array, a closure-wrapped delegation and a callback passed by reference — are **gone**, because placement is now resolved rather than matched. Six of the evasions are closed: a computed `toolCalls` key, the three post-construction member writes, two fakes under one arm's flag, and a fire block nested inside the skill arm. The remaining two are added to the not-covered table above. The body-mutation one was then run on the packaged skill arm and **passed**, so it is recorded as uncovered by both lanes rather than as arm-owned; closing it would need alias tracking, which is the retired data-flow family.
+
+One earlier attribution was wrong and is corrected here: the fake-arm multiset was removed in round 3 as "a second copy of arm-scoping". Round 4's two-fakes-under-one-flag shape shows it was not — the delegations' arms can look right while the fakes' arms do not. It is restored, and that shape is its isolating fixture.
 
 ## Files affected
 
