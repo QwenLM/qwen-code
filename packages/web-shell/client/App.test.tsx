@@ -4674,8 +4674,15 @@ describe('task activity key', () => {
       }),
     );
     const { container } = renderApp();
-    await flush();
-    await flush();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[role="tab"][title="Stored review"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[role="tab"][title="Artifacts"]'),
+      ).not.toBeNull();
+    });
     expect(
       container.querySelector('[data-web-shell-artifacts-entry]'),
     ).toBeNull();

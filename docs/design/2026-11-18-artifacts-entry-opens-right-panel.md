@@ -3,8 +3,8 @@
 [English](2026-11-18-artifacts-entry-opens-right-panel.md) | [简体中文](2026-11-18-artifacts-entry-opens-right-panel.zh-CN.md)
 
 Status: implemented. Local verification: web-shell typecheck, client vite build,
-the full root build, focused unit/DOM tests, and headless-browser E2E against a
-live daemon all pass.
+focused unit/DOM tests, and headless-browser E2E against a live daemon all
+pass; the full root build and `npm run bundle` remain unverified.
 
 ## Problem statement
 
