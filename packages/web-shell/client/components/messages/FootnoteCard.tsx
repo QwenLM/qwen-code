@@ -227,7 +227,7 @@ function FootnoteCard({
                 setSelectedId(notes[index - 1].id);
               }}
             >
-              <ChevronLeftIcon />
+              <ChevronLeftIcon className="rtl:-scale-x-100" />
             </Button>
             <span className="text-xs text-muted-foreground" aria-live="polite">
               {index + 1} / {notes.length}
@@ -243,7 +243,7 @@ function FootnoteCard({
                 setSelectedId(notes[index + 1].id);
               }}
             >
-              <ChevronRightIcon />
+              <ChevronRightIcon className="rtl:-scale-x-100" />
             </Button>
           </div>
         )}

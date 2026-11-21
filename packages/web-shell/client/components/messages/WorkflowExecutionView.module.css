@@ -170,6 +170,10 @@
   box-shadow: inset 2px 0 0 var(--agent-blue-500);
 }
 
+:global([dir='rtl']) .historyRun[data-selected='true'] {
+  box-shadow: inset -2px 0 0 var(--agent-blue-500);
+}
+
 .historyRunSelect {
   display: grid;
   min-width: 0;
@@ -184,7 +188,7 @@
   font: inherit;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  text-align: left;
+  text-align: start;
 }
 
 .historyRunSelect:focus-visible {
@@ -195,7 +199,7 @@
 .historyDeleteButton,
 .confirmDeleteButton {
   align-self: center;
-  margin-right: 8px;
+  margin-inline-end: 8px;
   padding: 3px 8px;
   border: 1px solid transparent;
   border-radius: 5px;
@@ -289,12 +293,12 @@
 .comparison > * {
   min-width: 0;
   padding: 6px 12px;
-  border-right: 1px solid var(--border);
+  border-inline-end: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
 }
 
 .comparison > :nth-child(3n) {
-  border-right: 0;
+  border-inline-end: 0;
 }
 
 .comparison > :nth-last-child(-n + 3) {
@@ -474,7 +478,7 @@
 
 .laneHeading small {
   flex: 0 0 auto;
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--muted-foreground);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -562,15 +566,16 @@
   grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
   gap: 9px;
-  padding: 0 10px 0 9px;
+  padding-block: 0;
+  padding-inline: 9px 10px;
   border: 1px solid var(--border);
-  border-left: 3px solid var(--workflow-node-accent);
+  border-inline-start: 3px solid var(--workflow-node-accent);
   border-radius: 6px;
   background: var(--background);
   color: var(--foreground);
   cursor: pointer;
   font: inherit;
-  text-align: left;
+  text-align: start;
   transition:
     border-color 120ms ease,
     background-color 120ms ease,
@@ -579,7 +584,7 @@
 
 .node:hover {
   border-color: color-mix(in srgb, var(--foreground) 28%, var(--border));
-  border-left-color: var(--workflow-node-accent);
+  border-inline-start-color: var(--workflow-node-accent);
 }
 
 .node:focus-visible {
@@ -626,7 +631,7 @@
 
 .node[data-status='queued'] {
   border-style: dashed;
-  border-left-style: solid;
+  border-inline-start-style: solid;
 }
 
 .node[data-path-emphasis='related'] {
@@ -720,7 +725,7 @@
   flex-direction: column;
   gap: 12px;
   padding: 12px 14px 14px;
-  border-left: 1px solid var(--border);
+  border-inline-start: 1px solid var(--border);
   background: var(--background);
 }
 
@@ -771,7 +776,7 @@
 .inspectorPrompt {
   max-height: 140px;
   margin: 0;
-  padding-right: 4px;
+  padding-inline-end: 4px;
   overflow-y: auto;
   overscroll-behavior: contain;
   color: var(--muted-foreground);
@@ -891,7 +896,7 @@
 
     .inspector {
       border-top: 1px solid var(--border);
-      border-left: 0;
+      border-inline-start: 0;
     }
   }
 }

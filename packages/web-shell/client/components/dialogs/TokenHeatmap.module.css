@@ -59,7 +59,7 @@
 .weekday {
   font-size: 10px;
   color: var(--muted-foreground);
-  padding-right: 6px;
+  padding-inline-end: 6px;
   display: flex;
   align-items: center;
   justify-content: flex-end;

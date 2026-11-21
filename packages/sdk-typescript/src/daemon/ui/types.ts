@@ -320,6 +320,8 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   subagentSessionReady?: boolean;
   toolCallId: string;
   title?: string;
+  /** Provenance of this event's title, not of the tool itself. */
+  titleIsMachine?: boolean;
   status?: string;
   toolName?: string;
   /**
@@ -1185,6 +1187,7 @@ export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
   kind: 'tool';
   toolCallId: string;
   title: string;
+  titleIsMachine?: boolean;
   status: string;
   toolName?: string;
   /** Server-measured call timing; absent in older recordings. */

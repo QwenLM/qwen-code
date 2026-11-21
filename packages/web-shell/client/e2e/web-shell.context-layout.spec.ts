@@ -436,7 +436,9 @@ for (const theme of ['light', 'dark']) {
           .locator('[class*="value"]');
         await expect(usedValue).toHaveText('120.0k (>100%)');
         await expect(usedValue).toHaveCSS('color', errorColor);
-        await expect(usedValue).toHaveCSS('text-align', 'right');
+        // Logical alignment: Chromium reports the keyword, not the edge it
+        // resolves to, so the RTL-capable value reads back as `end`.
+        await expect(usedValue).toHaveCSS('text-align', 'end');
       }
     }
   });

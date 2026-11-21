@@ -66,7 +66,7 @@ export function AskUserQuestion({
     /Mac|iPhone|iPad|iPod/i.test(navigator.platform ?? '')
       ? '⌘↵'
       : 'Ctrl↵';
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const questions = useMemo(
     () =>
       Array.isArray(request.rawInput?.questions)
@@ -522,12 +522,14 @@ export function AskUserQuestion({
       const isOptionTarget = (e.target as HTMLElement).closest(
         '[data-web-shell-ask-option]',
       );
+      const prevKey = isRtl ? 'ArrowRight' : 'ArrowLeft';
+      const nextKey = isRtl ? 'ArrowLeft' : 'ArrowRight';
       if (!isOptionTarget) {
         if (!current) return;
-        if (e.key === 'ArrowLeft') {
+        if (e.key === prevKey) {
           e.preventDefault();
           handlePrevious();
-        } else if (e.key === 'ArrowRight') {
+        } else if (e.key === nextKey) {
           e.preventDefault();
           handleNext();
         } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -538,10 +540,10 @@ export function AskUserQuestion({
       }
       if (!current) return;
       const total = current.options.length + 1;
-      if (e.key === 'ArrowLeft') {
+      if (e.key === prevKey) {
         e.preventDefault();
         handlePrevious();
-      } else if (e.key === 'ArrowRight') {
+      } else if (e.key === nextKey) {
         e.preventDefault();
         handleNext();
       } else if (e.key === 'ArrowDown' || e.key === 'j') {
@@ -601,6 +603,7 @@ export function AskUserQuestion({
       handlePrevious,
       handleSubmit,
       isMulti,
+      isRtl,
       moveSelection,
       selectedMulti,
       selectIndex,

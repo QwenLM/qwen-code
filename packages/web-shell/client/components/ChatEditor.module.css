@@ -623,7 +623,7 @@
   background: transparent;
   color: var(--foreground);
   font: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -645,7 +645,7 @@
   .slashDescription {
   display: none;
   overflow-wrap: anywhere;
-  text-align: left;
+  text-align: start;
   white-space: normal;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -733,7 +733,7 @@
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
-  text-align: left;
+  text-align: start;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -780,7 +780,7 @@
 .atPanel[data-web-shell-compact-overlay] .atItemSubtitle {
   justify-self: start;
   overflow-wrap: anywhere;
-  text-align: left;
+  text-align: start;
   text-overflow: clip;
   white-space: normal;
 }
@@ -962,7 +962,7 @@
   background: transparent;
   color: var(--foreground);
   font: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -1047,7 +1047,7 @@
 .atItemSubtitle {
   color: var(--muted-foreground);
   justify-self: end;
-  text-align: right;
+  text-align: end;
 }
 
 @keyframes at-item-icon-spin {
@@ -1164,7 +1164,7 @@
   width: 12px;
   height: 12px;
   flex: 0 0 auto;
-  margin-left: 7px;
+  margin-inline-start: 7px;
   background: currentColor;
   mask: var(--composer-tag-icon-url) center / contain no-repeat;
   -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
@@ -1179,26 +1179,28 @@
 }
 
 .tagLabel {
-  padding: 3px 0 3px 7px;
+  padding-block: 3px;
+  padding-inline: 7px 0;
   color: var(--chat-editor-accent-color);
 }
 
 .tagIcon + .tagLabel {
-  padding-left: 0.5ch;
+  padding-inline-start: 0.5ch;
 }
 
 .tagValue {
   max-width: 32ch;
-  padding: 3px 0 3px 0.5ch;
+  padding-block: 3px;
+  padding-inline: 0.5ch 0;
   color: var(--foreground, #e4e4e4);
   opacity: 1;
 }
 
-/* The label and value carry no right padding of their own; the remove button
-   supplies that edge when it is present. A chip without one ends on the
-   content box, so it needs the inset itself. */
+/* The label and value carry no trailing padding of their own; the remove
+   button supplies that edge when it is present. A chip without one ends on
+   the content box, so it needs the inset itself. */
 .tagContent:last-child {
-  padding-right: 7px;
+  padding-inline-end: 7px;
 }
 
 .tagRemove {
@@ -1381,12 +1383,12 @@
 }
 
 .toolbarLeading {
-  margin-left: -5px;
+  margin-inline-start: -5px;
   min-width: 0;
 }
 
 .editorShell[data-web-shell-compact-composer] .toolbarLeading {
-  margin-left: 0;
+  margin-inline-start: 0;
 }
 
 .toolbar[data-mobile-voice-active='true'] .toolbarLeading,
@@ -1395,7 +1397,7 @@
 }
 
 .toolbar[data-mobile-voice-active='true'] .toolbarRight {
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .toolbarStart {
@@ -1484,7 +1486,7 @@
 .gitBranchBadgeDot {
   position: absolute;
   top: var(--git-branch-badge-offset, -2px);
-  right: var(--git-branch-badge-offset, -3px);
+  inset-inline-end: var(--git-branch-badge-offset, -3px);
   width: var(--git-branch-badge-size, 7px);
   height: var(--git-branch-badge-size, 7px);
   border-radius: 50%;
@@ -1619,12 +1621,12 @@
 
 .toolbarRight {
   flex-shrink: 0;
-  margin-right: -5px;
+  margin-inline-end: -5px;
 }
 
 .editorShell[data-web-shell-compact-composer] .toolbarRight {
   gap: 0;
-  margin-right: 0;
+  margin-inline-end: 0;
 }
 
 .editorShell[data-web-shell-compact-composer]
@@ -1767,7 +1769,7 @@
   font-size: 14px;
   font-weight: 400;
   line-height: 22px;
-  text-align: left;
+  text-align: start;
   border-radius: 4px;
   cursor: pointer;
   white-space: nowrap;
@@ -1955,7 +1957,7 @@
   background: transparent;
   color: var(--foreground);
   font: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -2360,7 +2362,7 @@
 
 .contextTooltipStats dd {
   margin: 0;
-  text-align: right;
+  text-align: end;
   font-variant-numeric: tabular-nums;
 }
 
@@ -2465,7 +2467,7 @@
   align-items: center;
   justify-content: center;
   padding: 0;
-  margin-left: 4px;
+  margin-inline-start: 4px;
   transition: all 0.2s ease;
 }
 
@@ -2673,7 +2675,7 @@
 .imageRemove {
   position: absolute;
   top: 2px;
-  right: 2px;
+  inset-inline-end: 2px;
 }
 
 .imageRemove svg,
@@ -2735,7 +2737,7 @@
   min-width: 0;
   flex-direction: column;
   gap: 3px;
-  text-align: left;
+  text-align: start;
 }
 
 .fileChipTitle {
@@ -2750,7 +2752,7 @@
   font-size: 14px;
   font-weight: 500;
   line-height: 20px;
-  text-align: left;
+  text-align: start;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2819,7 +2821,8 @@
   box-sizing: border-box;
   width: 272px;
   max-width: 100%;
-  padding: 8px 32px 8px 8px;
+  padding-block: 8px;
+  padding-inline: 8px 32px;
   border: 1px solid var(--chat-editor-border-color);
   border-radius: 16px;
   color: var(--chat-editor-text-primary);
@@ -2855,7 +2858,7 @@
 .fileChipRemove {
   position: absolute;
   top: 8px;
-  right: 8px;
+  inset-inline-end: 8px;
   z-index: 1;
   width: 20px;
   height: 20px;
@@ -2934,7 +2937,7 @@
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.4;
-  text-align: left;
+  text-align: start;
   white-space: nowrap;
   cursor: pointer;
 }
@@ -3031,7 +3034,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: left;
+  text-align: start;
 }
 
 .uploadRowPreview:disabled {
@@ -3135,7 +3138,7 @@
 
 .fileTagIcon {
   flex: 0 0 auto;
-  margin-left: 8px;
+  margin-inline-start: 8px;
   color: var(--muted-foreground);
 }
 
@@ -3173,13 +3176,13 @@
 
 .editorShell[data-web-shell-mobile-composer] .toolbarLeading {
   max-width: 100%;
-  margin-left: 0;
+  margin-inline-start: 0;
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolbarRight {
   gap: 0;
-  margin-left: auto;
-  margin-right: 0;
+  margin-inline-start: auto;
+  margin-inline-end: 0;
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolbarLeft {

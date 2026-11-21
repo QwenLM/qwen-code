@@ -375,7 +375,7 @@ describe('ManagedSessionsPage', () => {
 
   async function render(
     sessionId?: string,
-    language: 'en' | 'zh-CN' | 'zh-TW' | 'ru' = 'en',
+    language: 'en' | 'zh-CN' | 'zh-TW' | 'ru' | 'ar' = 'en',
     managedAgentProvider: ManagedAgentProvider | null = provider,
     navigationTarget?: HTMLElement | null,
     interactive = true,
@@ -1620,6 +1620,7 @@ describe('ManagedSessionsPage', () => {
     ['zh-TW', 'model_service_unavailable', '模型介面', '服務暫不可用'],
     ['zh-TW', 'model_request_failed', '模型介面', '檢查服務日誌'],
     ['zh-TW', 'hosted_turn_failed', '本輪執行失敗', '定位具體原因'],
+    ['ar', 'model_payment_required', 'HTTP 402', 'رصيد'],
   ] as const)(
     '%s: explains a %s failure without submitting another prompt',
     async (language, code, status, guidance) => {

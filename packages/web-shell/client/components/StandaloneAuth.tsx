@@ -228,6 +228,43 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     retry: 'Повторить',
     hint: 'Этот токен даёт полный доступ к демону. Вводите его только на странице, которую вы открыли из терминала демона или по его QR-коду.',
   },
+  ar: {
+    pairingFailed:
+      'فشل الاقتران أو انتهت صلاحية رمز QR. امسح رمز QR جديداً، أو أدخل رمز الخادم الخفي.',
+    heading: 'الاتصال بـ Qwen Code',
+    connecting: 'جارٍ الاتصال…',
+    starting: 'الخادم الخفي قيد التشغيل…',
+    unreachable: 'تعذر الوصول إلى الخادم الخفي. جارٍ إعادة المحاولة…',
+    remoteUnreachable:
+      'تعذر الوصول إلى الخادم الخفي. جارٍ إعادة المحاولة… لا يستطيع المتصفح التمييز بين فشل الشبكة أو الشهادة أو المصادر المشتركة. راجع إعداد الاتصال البعيد أدناه.',
+    notReady: 'الخادم الخفي غير جاهز بعد. جارٍ إعادة المحاولة…',
+    startFailed: 'فشل بدء تشغيل الخادم الخفي.',
+    invalidToken:
+      'الرمز غير صالح أو منتهي الصلاحية. انسخ الرمز الحالي من إعدادات الاتصال البعيد للخادم أو مخرجات البدء.',
+    enterToken:
+      'أدخل bearer token من إعدادات الاتصال البعيد للخادم أو مخرجات البدء.',
+    policyBlocked:
+      'رفض الخادم أو الوكيل الطلب (HTTP 403). تحقق من قواعد الوصول وسياسة Host وأصول الصفحات المسموح بها في إعدادات الاتصال البعيد.',
+    invalidAddress: 'عنوان الخادم الخفي غير صالح. أدخل أصل HTTP أو HTTPS.',
+    mixedContent:
+      'لا يمكن لهذه الصفحة الآمنة HTTPS الاتصال بخادم خفي بعيد عبر HTTP. استخدم عنوان HTTPS للخدمة البعيدة.',
+    addressChanged:
+      'تم إيقاف الاتصال مؤقتاً. اختر اتصال لاستخدام العنوان المُدخل.',
+    confirmTarget:
+      'تشير هذه الصفحة إلى خادم خفي لم يتصل به هذا المتصفح من قبل. اتصل فقط إذا كنت تثق به.',
+    remoteHint:
+      'يُرسل الرمز إلى العنوان المعروض أعلاه. أدخل فقط رمزاً صادراً عن ذلك الخادم الخفي.',
+    switchUnavailable:
+      'تخزين المتصفح غير متاح، لذا تعذر نقل الرمز إلى ذلك الخادم الخفي.',
+    addressLabel: 'عنوان الخادم الخفي',
+    tokenLabel: 'Bearer token (اختياري)',
+    connect: 'اتصال',
+    local: 'العودة إلى مساحات العمل المحلية',
+    remoteAddCancel: 'إلغاء إضافة مساحة العمل',
+    connectionAddCancel: 'إلغاء إضافة الاتصال',
+    retry: 'إعادة المحاولة',
+    hint: 'يمنح هذا الرمز صلاحية الوصول الكاملة للخادم الخفي. أدخله فقط في صفحة فتحتها من طرفية الخادم الخفي أو رمز QR الخاص به.',
+  },
 };
 
 /** `Retry-After` in milliseconds (delta-seconds or HTTP-date), or undefined. */
@@ -500,6 +537,8 @@ export function StandaloneAuth({
         data-web-shell-root
         data-web-shell-shadcn
         data-web-shell-gate
+        lang={language}
+        dir={language === 'ar' ? 'rtl' : 'ltr'}
         className={`flex min-h-screen items-center justify-center bg-background p-6 text-foreground ${
           theme === WebShellThemeId.Light
             ? AppStyles.themeLight
@@ -526,6 +565,8 @@ export function StandaloneAuth({
       data-web-shell-root
       data-web-shell-shadcn
       data-web-shell-gate
+      lang={language}
+      dir={language === 'ar' ? 'rtl' : 'ltr'}
       className={`flex min-h-screen items-center justify-center bg-background p-6 text-foreground ${
         theme === WebShellThemeId.Light
           ? AppStyles.themeLight
@@ -536,7 +577,7 @@ export function StandaloneAuth({
         <CardHeader className="items-center text-center">
           <CardTitle className="text-2xl">{copy.heading}</CardTitle>
           {normalizedAddress && (
-            <CardDescription className="font-mono text-xs break-all">
+            <CardDescription className="font-mono text-xs break-all" dir="ltr">
               {normalizedAddress}
             </CardDescription>
           )}
@@ -598,6 +639,7 @@ export function StandaloneAuth({
               <Label htmlFor="daemon-address">{copy.addressLabel}</Label>
               <Input
                 id="daemon-address"
+                dir="ltr"
                 type="url"
                 inputMode="url"
                 autoComplete="url"
@@ -621,6 +663,7 @@ export function StandaloneAuth({
               <Label htmlFor="daemon-bearer-token">{copy.tokenLabel}</Label>
               <Input
                 id="daemon-bearer-token"
+                dir="ltr"
                 type="password"
                 autoComplete="off"
                 autoFocus={needsToken}

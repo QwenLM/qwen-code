@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTranslator } from '../i18n';
 import {
+  LIVE_MESSAGES_AR,
   LIVE_MESSAGES_EN,
   LIVE_MESSAGES_RU,
   LIVE_MESSAGES_ZH,
@@ -53,14 +54,17 @@ describe('Live Voice messages', () => {
     }
     expect(Object.keys(LIVE_MESSAGES_ZH).sort()).toEqual([...en].sort());
     expect(Object.keys(LIVE_MESSAGES_RU).sort()).toEqual([...en].sort());
+    expect(Object.keys(LIVE_MESSAGES_AR).sort()).toEqual([...en].sort());
   });
 
   it('are replaced by a stub of the same shape in the transcript build', () => {
     expect(Object.keys(transcriptStub).sort()).toEqual([
+      'LIVE_MESSAGES_AR',
       'LIVE_MESSAGES_EN',
       'LIVE_MESSAGES_RU',
       'LIVE_MESSAGES_ZH',
     ]);
+    expect(transcriptStub.LIVE_MESSAGES_AR).toEqual({});
     expect(transcriptStub.LIVE_MESSAGES_EN).toEqual({});
     expect(transcriptStub.LIVE_MESSAGES_ZH).toEqual({});
     expect(transcriptStub.LIVE_MESSAGES_RU).toEqual({});

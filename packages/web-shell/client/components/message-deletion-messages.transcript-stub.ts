@@ -7,3 +7,4 @@
 export const MESSAGE_DELETION_MESSAGES_EN = {};
 export const MESSAGE_DELETION_MESSAGES_ZH = {};
 export const MESSAGE_DELETION_MESSAGES_RU = {};
+export const MESSAGE_DELETION_MESSAGES_AR = {};

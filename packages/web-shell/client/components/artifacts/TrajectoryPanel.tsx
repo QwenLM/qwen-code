@@ -330,7 +330,7 @@ export function TrajectoryPanel({
   loadPage,
   historyGapRevision = 0,
 }: TrajectoryPanelProps) {
-  const { t, language } = useI18n();
+  const { t, language, isRtl } = useI18n();
   const panelRef = useRef<HTMLDivElement>(null);
   // The same tier the container queries pick, for the code that has to choose
   // between covering the list and sitting beside it.
@@ -1015,7 +1015,8 @@ export function TrajectoryPanel({
         layout?.groups.has(activeVisualKey) &&
         (hiddenCounts.get(activeVisualKey) ?? 0) > 0
       ) {
-        const wantsCollapsed = event.key === 'ArrowLeft';
+        const wantsCollapsed =
+          event.key === (isRtl ? 'ArrowRight' : 'ArrowLeft');
         if (collapsed.has(activeVisualKey) !== wantsCollapsed) {
           event.preventDefault();
           toggleGroup(activeVisualKey);
@@ -1054,6 +1055,7 @@ export function TrajectoryPanel({
       layout,
       hiddenCounts,
       collapsed,
+      isRtl,
       toggleGroup,
       pauseFollowing,
     ],
@@ -2149,7 +2151,11 @@ function FoldButton({
       }}
     >
       {collapsed ? (
-        <ChevronRightIcon size={13} aria-hidden="true" />
+        <ChevronRightIcon
+          size={13}
+          className="rtl:-scale-x-100"
+          aria-hidden="true"
+        />
       ) : (
         <ChevronDownIcon size={13} aria-hidden="true" />
       )}

@@ -1,5 +1,6 @@
 .message {
-  margin: 0 0 12px 14px;
+  margin-block: 0 12px;
+  margin-inline: 14px 0;
   padding: 2px 0;
 }
 
@@ -13,7 +14,7 @@
   margin-bottom: 4px;
   background: none;
   border: none;
-  text-align: left;
+  text-align: start;
   font: inherit;
 }
 

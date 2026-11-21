@@ -81,7 +81,7 @@
 }
 
 .tooltipValue {
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--foreground);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
@@ -129,7 +129,7 @@
 
 /* Peak marker floats to the row's end as a secondary reference. */
 .peak {
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;

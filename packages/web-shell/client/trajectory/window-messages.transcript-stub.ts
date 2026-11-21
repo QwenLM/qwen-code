@@ -7,3 +7,4 @@
 export const TRAJECTORY_WINDOW_MESSAGES_EN = {};
 export const TRAJECTORY_WINDOW_MESSAGES_ZH = {};
 export const TRAJECTORY_WINDOW_MESSAGES_RU = {};
+export const TRAJECTORY_WINDOW_MESSAGES_AR = {};

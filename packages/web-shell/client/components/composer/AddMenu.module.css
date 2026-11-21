@@ -26,7 +26,7 @@
   flex: 1;
   flex-direction: column;
   gap: 3px;
-  text-align: left;
+  text-align: start;
   white-space: normal;
 }
 

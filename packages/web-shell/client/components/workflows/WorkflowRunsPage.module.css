@@ -76,7 +76,8 @@
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
-  padding: 6px 12px 6px 6px;
+  padding-block: 6px;
+  padding-inline: 6px 12px;
 }
 
 /* The identity block is the disclosure control for the definition detail. */
@@ -92,7 +93,7 @@
   color: inherit;
   cursor: pointer;
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 .savedIdentity:hover {
@@ -116,6 +117,10 @@
   transform: rotate(90deg);
 }
 
+:global([dir='rtl']) .savedEntry:not([data-expanded]) .savedChevron {
+  transform: scaleX(-1);
+}
+
 .savedIdentityText {
   min-width: 0;
   display: flex;
@@ -127,7 +132,8 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 4px 14px 14px 32px;
+  padding-block: 4px 14px;
+  padding-inline: 32px 14px;
   border-top: 1px solid var(--border);
   font-size: 12px;
   line-height: 1.5;
@@ -265,7 +271,7 @@
 
 .detailLink {
   align-self: flex-start;
-  margin-left: -8px;
+  margin-inline-start: -8px;
 }
 
 .detailSourceBar {

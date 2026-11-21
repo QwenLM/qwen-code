@@ -42,4 +42,12 @@ describe('managed recovery copy', () => {
       ),
     ).toBe('原會話需要運維處理');
   });
+  it('preserves the Arabic table after adding Traditional Chinese', () => {
+    const { result } = renderHook(() => useManagedRecoveryText(), {
+      wrapper: ({ children }: PropsWithChildren) => (
+        <I18nProvider language="ar">{children}</I18nProvider>
+      ),
+    });
+    expect(result.current('managed.recovery.title')).toBe('استرداد الجلسة');
+  });
 });

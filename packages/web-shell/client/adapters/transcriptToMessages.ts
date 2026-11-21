@@ -1269,6 +1269,11 @@ export function transcriptBlocksToDaemonMessages(
               permissionToolCall.endTime = permBlock.updatedAt;
             }
           }
+          // The approval's display title is a fallback, not a replacement
+          // for a real call title whose producer supplied provenance.
+          if (existingPermission.titleIsMachine !== undefined) {
+            permissionToolCall.title = undefined;
+          }
           mergeToolCall(existingPermission, permissionToolCall);
           if (
             isTerminalToolStatus(previousStatus) ||
@@ -1444,7 +1449,9 @@ export function transcriptBlocksToDaemonMessages(
 
   for (const tool of toolsByCallId.values()) {
     const permissionInfo = permissionToolInfoByCallId.get(tool.callId);
-    if (permissionInfo?.title) tool.title = permissionInfo.title;
+    if (tool.titleIsMachine === undefined && permissionInfo?.title) {
+      tool.title = permissionInfo.title;
+    }
     if (!Array.isArray(tool.args?.questions) && permissionInfo?.args) {
       tool.args = permissionInfo.args;
     }
@@ -1662,7 +1669,10 @@ function mergeToolCall(
   } = {},
 ): void {
   target.status = source.status ?? target.status;
-  target.title = source.title ?? target.title;
+  if (source.title !== undefined) {
+    target.title = source.title;
+    target.titleIsMachine = source.titleIsMachine;
+  }
   target.toolName = source.toolName ?? target.toolName;
   target.generatedUiToolCallId =
     source.generatedUiToolCallId ?? target.generatedUiToolCallId;
@@ -1769,6 +1779,7 @@ export function daemonToolBlockToToolCall(
     generatedUiToolCallId: block.toolCallId,
     toolName,
     title: block.title === block.toolName ? toolName : block.title,
+    titleIsMachine: block.titleIsMachine,
     status:
       (forceBackgroundPending ? 'pending' : statusMap[block.status]) ||
       (block.status as DaemonMessageToolCallStatus) ||

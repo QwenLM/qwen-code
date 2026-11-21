@@ -363,13 +363,13 @@ export const RU_PART4: Record<
   'slash.category.system': 'Системные команды',
   'language.changed': (v) => `Язык UI изменён на ${v?.language ?? ''}`,
   'language.current': (v) => `Текущий язык UI: ${v?.language ?? ''}`,
-  'language.invalid': 'Недопустимый язык. Доступно: en, zh-CN, zh-TW, ru',
+  'language.invalid': 'Недопустимый язык. Доступно: en, zh-CN, zh-TW, ru, ar',
   'language.options': 'Доступные варианты:',
   'language.set': 'Задать язык UI',
   'language.refreshFailed':
     'Язык UI сохранён, но не удалось применить его полностью.',
   'language.usage':
-    'Использование: /language ui [en|zh-CN|zh-TW|ru] [--project|--global] | output <language>',
+    'Использование: /language ui [en|zh-CN|zh-TW|ru|ar] [--project|--global] | output <language>',
   'localCommand.noSession':
     'Пока нет активной сессии. Отправьте первое сообщение, прежде чем использовать эту команду.',
   'localCommand.diffNoWorkspace':

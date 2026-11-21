@@ -13,7 +13,7 @@
 
 .activityList {
   margin: 0;
-  padding-left: 18px;
+  padding-inline-start: 18px;
   color: var(--muted-foreground);
   font-size: 14px;
   line-height: 22px;

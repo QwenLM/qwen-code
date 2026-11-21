@@ -5,6 +5,8 @@ import {
   LOCAL_FILES_MESSAGE_KEYS,
   RESTART_RECOVERY_MESSAGE_KEYS,
   getTranslator,
+  isRtlLanguage,
+  languageDirection,
   languageLabel,
   languageSettingToWebShellLanguage,
   normalizeLanguage,
@@ -497,6 +499,10 @@ describe('web-shell i18n catalog', () => {
       'ru',
       'Недельный лимит кредитов исчерпан. Ожидается сброс через 2 дня и 1 час. Повторите попытку после сброса.',
     ],
+    [
+      'ar',
+      'لقد استنفدت رصيدك الأسبوعي ومن المتوقع إعادة تعيين رصيدك خلال يومين وساعة واحدة. يُرجى المحاولة مرة أخرى بعد إعادة التعيين.',
+    ],
   ] as const)(
     'formats quota data through the %s catalog',
     (language, expected) => {
@@ -759,20 +765,108 @@ describe('web-shell ru locale', () => {
     expect(languageSettingToWebShellLanguage('fr')).toBeUndefined();
   });
 
-  it('lists ru in the picker with the "Русский [ru]" label', () => {
-    expect(WEB_SHELL_LANGUAGES).toEqual(['en', 'zh-CN', 'zh-TW', 'ru']);
+  it('lists ru and ar in the picker with their native labels', () => {
+    expect(WEB_SHELL_LANGUAGES).toEqual(['en', 'zh-CN', 'zh-TW', 'ru', 'ar']);
     expect(languageLabel('ru')).toBe('Русский [ru]');
+    expect(languageLabel('ar')).toBe('العربية [ar]');
   });
 
   it('lists every shipped language in the /language error and usage copy', () => {
     // The /language gate, help and completions derive from WEB_SHELL_LANGUAGES;
-    // the error/usage copy must carry the same set in every locale.
+    // the error/usage copy must carry the same set, in every locale.
+    const en = getTranslator('en');
     for (const language of WEB_SHELL_LANGUAGES) {
       const t = getTranslator(language);
-      expect(t('language.invalid')).toContain('en, zh-CN, zh-TW, ru');
-      expect(t('language.usage')).toContain('en|zh-CN|zh-TW|ru');
+      expect(t('language.invalid')).toContain('en, zh-CN, zh-TW, ru, ar');
+      expect(t('language.usage')).toContain('en|zh-CN|zh-TW|ru|ar');
       expect(t('language.usage')).toContain('[--project|--global]');
+      if (language !== 'en') {
+        // The EN copy derives from the same list, so containment alone is
+        // satisfied by the fallback; each locale must carry its own copy.
+        expect(t('language.invalid')).not.toBe(en('language.invalid'));
+        expect(t('language.usage')).not.toBe(en('language.usage'));
+      }
     }
+  });
+
+  it('normalizes Arabic locale tags and settings without colliding with prefix neighbors', () => {
+    for (const value of [
+      'ar',
+      'AR',
+      'ar-SA',
+      'ar-EG',
+      'ar_sa',
+      'arabic',
+      'العربية',
+      'عربي',
+    ]) {
+      expect(normalizeLanguage(value)).toBe('ar');
+      expect(languageSettingToWebShellLanguage(value)).toBe('ar');
+    }
+    for (const nonArabic of ['armenian', 'aragonese']) {
+      expect(normalizeLanguage(nonArabic)).toBe('en');
+      expect(languageSettingToWebShellLanguage(nonArabic)).toBeUndefined();
+      expect(isRtlLanguage(nonArabic)).toBe(false);
+      expect(languageDirection(nonArabic)).toBe('ltr');
+    }
+    expect(isRtlLanguage('ar')).toBe(true);
+    expect(isRtlLanguage('ar-SA')).toBe(true);
+    expect(languageDirection('ar')).toBe('rtl');
+    expect(languageDirection('ar-EG')).toBe('rtl');
+    expect(isRtlLanguage('en')).toBe(false);
+    expect(languageDirection('en')).toBe('ltr');
+    expect(languageDirection('zh-CN')).toBe('ltr');
+  });
+
+  it('pluralizes Arabic transcript and interactive counters across all six CLDR forms', () => {
+    const t = getTranslator('ar');
+    expect(t('{{count}} days', { count: 0 })).toBe('0 أيام');
+    expect(t('{{count}} days', { count: 1 })).toBe('يوم واحد');
+    expect(t('{{count}} days', { count: 2 })).toBe('يومين');
+    expect(t('{{count}} hours', { count: 2 })).toBe('ساعتين');
+    expect(t('{{count}} days', { count: 3 })).toBe('3 أيام');
+    expect(t('{{count}} days', { count: 11 })).toBe('11 يوماً');
+    expect(t('{{count}} days', { count: 100 })).toBe('100 يوم');
+    expect(t('{{count}} days', { count: 102 })).toBe('102 يوم');
+    expect(t('{{count}} days', { count: 103 })).toBe('103 أيام');
+    expect(t('{{count}} days', { count: 111 })).toBe('111 يوماً');
+
+    expect(t('goal.turns', { count: 0 })).toBe('0 جولات');
+    expect(t('goal.turns', { count: 1 })).toBe('جولة واحدة');
+    expect(t('goal.turns', { count: 2 })).toBe('جولتان');
+    expect(t('goal.turns', { count: 5 })).toBe('5 جولات');
+    expect(t('goal.turns', { count: 15 })).toBe('15 جولة');
+    expect(t('goal.turns', { count: 100 })).toBe('100 جولة');
+
+    expect(t('goals.count', { count: 0 })).toBe('0 أهداف نشطة');
+    expect(t('goals.count', { count: 1 })).toBe('هدف نشط واحد');
+    expect(t('goals.count', { count: 2 })).toBe('هدفان نشطان');
+    expect(t('goals.count', { count: 3 })).toBe('3 أهداف نشطة');
+    expect(t('goals.count', { count: 11 })).toBe('11 هدفًا نشطًا');
+    expect(t('goals.count', { count: 100 })).toBe('100 هدف نشط');
+
+    expect(t('goals.dropped', { count: 1 })).toBe(
+      'تعذر الوصول إلى جلسة واحدة — أي أهداف تشغّلها مفقودة من هذه القائمة.',
+    );
+    expect(t('goals.dropped', { count: 2 })).toBe(
+      'تعذر الوصول إلى جلستين — أي أهداف تشغّلها مفقودة من هذه القائمة.',
+    );
+    expect(t('goal.tokens', { used: 42 })).toBe('42 رمز');
+    expect(t('goal.tokensOfBudget', { used: 10, budget: 20 })).toBe(
+      '10 / 20 رمز',
+    );
+  });
+
+  it('labels the cached-token figure with the cache term, not the timer', () => {
+    const t = getTranslator('ar');
+    expect(
+      t('tokenUsage.bar.detailTokens', {
+        total: 9,
+        input: 5,
+        cached: 3,
+        output: 4,
+      }),
+    ).toBe('الإجمالي 9 · الإدخال 5 (الذاكرة المؤقتة 3) · الإخراج 4');
   });
 
   it('localizes activity grouping options in Russian', () => {

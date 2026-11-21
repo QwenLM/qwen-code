@@ -107,3 +107,34 @@ export const TRAJECTORY_FILTER_MESSAGES_RU: Record<string, FilterMessage> = {
     `Часть записанного текста исключена из поиска (${v?.count ?? 0} ${ruPlural(v?.count, 'запись', 'записи', 'записей')}).`,
   'trajectory.filter.hidden': 'Эта запись не соответствует текущим фильтрам.',
 };
+
+export const TRAJECTORY_FILTER_MESSAGES_AR: Record<string, FilterMessage> = {
+  'trajectory.filter.search': 'البحث في السجلات المحمّلة…',
+  'trajectory.filter.type': 'نوع السجل',
+  'trajectory.filter.type.all': 'كل الأنواع',
+  'trajectory.filter.type.request': 'الطلبات',
+  'trajectory.filter.type.tool': 'الأدوات',
+  'trajectory.filter.type.user': 'إدخال المستخدم',
+  'trajectory.filter.type.message': 'الرسائل',
+  'trajectory.filter.type.other': 'أخرى',
+  'trajectory.filter.status': 'حالة التنفيذ',
+  'trajectory.filter.status.all': 'كل الحالات',
+  'trajectory.filter.status.success': 'نجح',
+  'trajectory.filter.status.error': 'فشل',
+  'trajectory.filter.status.cancelled': 'ملغى',
+  'trajectory.filter.status.running': 'قيد التنفيذ',
+  'trajectory.filter.status.unknown': 'غير معروف',
+  'trajectory.filter.count': (v) => `${v?.count ?? 0} تطابق`,
+  'trajectory.filter.position': (v) =>
+    `${v?.position ?? 0} من ${v?.count ?? 0}`,
+  'trajectory.filter.button': 'تصفية',
+  'trajectory.filter.active': (v) => `${v?.count ?? 0} نشط`,
+  'trajectory.filter.clearSearch': 'مسح البحث',
+  'trajectory.filter.previous': 'السابق',
+  'trajectory.filter.next': 'التالي',
+  'trajectory.filter.clear': 'مسح الفلاتر',
+  'trajectory.filter.empty': 'لا توجد تطابقات في نطاق البحث الحالي.',
+  'trajectory.filter.truncated': (v) =>
+    `بعض النصوص المسجلة مستبعدة من البحث (${v?.count ?? 0} سجل).`,
+  'trajectory.filter.hidden': 'لا يطابق هذا السجل الفلاتر الحالية.',
+};

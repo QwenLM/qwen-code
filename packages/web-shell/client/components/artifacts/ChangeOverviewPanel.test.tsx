@@ -78,10 +78,11 @@ const units: ChangeOverviewState['units'] = [
   },
 ];
 
-function renderPanel() {
+function renderPanel(language: 'en' | 'ar' = 'en') {
+  container.dir = language === 'ar' ? 'rtl' : 'ltr';
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <ChangeOverviewPanel workspaceCwd="/work" sessionId="s1" />
       </I18nProvider>,
     );
@@ -457,6 +458,32 @@ describe('ChangeOverviewPanel', () => {
     );
   });
 
+  it('moves selection and focus visually in RTL, wrapping both ways', () => {
+    renderPanel('ar');
+    const chips = container.querySelectorAll('[role="tab"]');
+
+    pressKey(chips[0], 'ArrowLeft');
+    expect(chips[1].getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(chips[1]);
+
+    pressKey(chips[1], 'ArrowRight');
+    expect(chips[0].getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(chips[0]);
+
+    pressKey(chips[0], 'ArrowRight');
+    expect(chips[2].getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(chips[2]);
+
+    pressKey(chips[2], 'ArrowLeft');
+    expect(chips[0].getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(chips[0]);
+
+    pressKey(chips[0], 'End');
+    expect(chips[2].getAttribute('aria-selected')).toBe('true');
+    pressKey(chips[2], 'Home');
+    expect(chips[0].getAttribute('aria-selected')).toBe('true');
+  });
+
   it('moves selection and focus with ArrowRight, wrapping at the end', () => {
     renderPanel();
     const chips = container.querySelectorAll('[role="tab"]');
@@ -564,22 +591,25 @@ describe('ChangeOverviewPanel', () => {
     );
   });
 
-  it('leaves modified arrow keys to the browser (Alt+Left/Right is navigation)', () => {
-    renderPanel();
-    const chips = container.querySelectorAll('[role="tab"]');
-    act(() => {
-      chips[0].dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'ArrowRight',
-          altKey: true,
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-    });
-    expect(chips[0].getAttribute('aria-selected')).toBe('true');
-    expect(chips[1].getAttribute('aria-selected')).toBe('false');
-  });
+  it.each(['en', 'ar'] as const)(
+    'leaves modified arrow keys to the browser in %s',
+    (language) => {
+      renderPanel(language);
+      const chips = container.querySelectorAll('[role="tab"]');
+      act(() => {
+        chips[0].dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'ArrowRight',
+            altKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+      expect(chips[0].getAttribute('aria-selected')).toBe('true');
+      expect(chips[1].getAttribute('aria-selected')).toBe('false');
+    },
+  );
 
   it('gives the tabpanel a tab stop so its body is keyboard-scrollable', () => {
     renderPanel();

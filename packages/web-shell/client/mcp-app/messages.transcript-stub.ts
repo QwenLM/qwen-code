@@ -7,3 +7,4 @@
 export const MCP_APP_MESSAGES_EN = {};
 export const MCP_APP_MESSAGES_ZH = {};
 export const MCP_APP_MESSAGES_RU = {};
+export const MCP_APP_MESSAGES_AR = {};

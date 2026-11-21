@@ -20,6 +20,7 @@ import type {
   WebShellUnavailableModelTooltipHandle,
   WebShellUnavailableModelTooltipMount,
 } from '../unavailableModels';
+import { useI18n } from '../i18n';
 import {
   Popover,
   PopoverAnchor,
@@ -47,6 +48,8 @@ export function UnavailableModelTooltip({
   children: ReactElement;
 }) {
   const canOpen = enabled && Boolean(mount || model.tooltip);
+  const { isRtl } = useI18n();
+  const rtlSide = side === 'left' ? 'right' : side === 'right' ? 'left' : side;
   const [open, setOpen] = useState(false);
   const isOpen = open && canOpen;
   const id = useId();
@@ -209,7 +212,7 @@ export function UnavailableModelTooltip({
       <PopoverContent
         id={id}
         ref={contentRef}
-        side={side}
+        side={isRtl ? rtlSide : side}
         align="start"
         sideOffset={10}
         collisionPadding={8}

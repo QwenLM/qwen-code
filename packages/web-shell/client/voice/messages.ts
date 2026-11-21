@@ -160,3 +160,55 @@ export const VOICE_MESSAGES_RU: Record<string, VoiceMessage> = {
   'voice.closeReason.voiceError': 'голосовая транскрипция не удалась',
   'voice.closeReason.unknown': 'неизвестная причина',
 };
+
+export const VOICE_MESSAGES_AR: Record<string, VoiceMessage> = {
+  'voice.noSpeech': 'لم يتم اكتشاف أي كلام.',
+  'voice.stopDictation': 'إيقاف الإملاء',
+  'voice.transcribing': 'جارٍ النسخ…',
+  'voice.starting': 'جارٍ البدء…',
+  'voice.errorRetry': (v) =>
+    `خطأ صوتي — انقر لإعادة المحاولة${v?.message ? `: ${v.message}` : ''}`,
+  'voice.noSpeechRetry': 'لم يتم اكتشاف أي كلام — انقر لإعادة المحاولة',
+  'voice.startDictation': 'بدء الإملاء الصوتي',
+  'voice.error': 'خطأ صوتي',
+  'voice.dismissFeedback': 'إغلاق رسالة الصوت',
+  'voice.error.noModel': 'لم يتم تهيئة نموذج صوتي لمساحة العمل هذه.',
+  'voice.error.transcription': 'فشل نسخ الصوت. يُرجى المحاولة مجدداً.',
+  'voice.error.tooManySessions':
+    'عدد جلسات الصوت الجارية كبير جداً؛ حاول بعد قليل.',
+  'voice.error.microphoneBlocked':
+    'الميكروفون محظور. انقر على أيقونة الكاميرا/القفل في شريط العنوان للسماح بالميكروفون لهذا الموقع، وفعّل متصفحك ضمن إعدادات النظام ← الخصوصية ← الميكروفون، ثم أعد المحاولة.',
+  'voice.error.noMicrophone':
+    'لم يتم العثور على ميكروفون. وصّل واحداً وأعد المحاولة.',
+  'voice.error.microphoneInUse':
+    'الميكروفون قيد الاستخدام بواسطة تطبيق آخر. أغلقه وأعد المحاولة.',
+  'voice.error.unsupportedBrowser':
+    'التقاط الميكروفون غير مدعوم في هذا المتصفح.',
+  'voice.error.insecureContext':
+    'يتطلب الميكروفون سياقاً آمناً — افتح Web Shell عبر localhost/127.0.0.1 أو https.',
+  'voice.error.sampleRate': (v) =>
+    `معدل صوت المتصفح ${v?.actual} Hz لا يطابق المطلوب ${v?.required} Hz.`,
+  'voice.error.startTimeout': 'انتهت مهلة التقاط الصوت أثناء البدء.',
+  'voice.error.bufferLimit': 'بلغ مخزن التقاط الصوت حده أثناء البدء.',
+  'voice.error.noResponse':
+    'لا توجد استجابة من الخادم. تحقق من أن نموذج الصوت يعمل.',
+  'voice.error.capacityUnavailable':
+    'سعة الصوت غير متاحة مؤقتاً. أعد المحاولة بعد قليل.',
+  'voice.error.connectionClosed': (v) =>
+    `أُغلق اتصال الصوت (الرمز=${v?.code}، السبب=${v?.reason}).`,
+  'voice.error.transcriptionTimeout': 'انتهت مهلة النسخ الصوتي.',
+  'voice.error.finalize': 'فشل إنهاء النسخ الصوتي.',
+  'voice.error.sessionTimeLimit': 'تجاوزت الجلسة الصوتية الحد الزمني.',
+  'voice.error.recordingTooLong':
+    'التسجيل طويل جداً للنسخ (الحد الأقصى ~5 دقائق).',
+  'voice.error.queueLimit': 'تجاوز الصوت المنتظر حد الذاكرة.',
+  'voice.closeReason.none': 'لم يُقدَّم سبب',
+  'voice.closeReason.busy': 'خدمة الصوت مشغولة',
+  'voice.closeReason.connectionLimit': 'تم بلوغ حد الاتصالات',
+  'voice.closeReason.serverShutdown': 'الخادم قيد الإيقاف',
+  'voice.closeReason.workspaceRemoved': 'تمت إزالة مساحة العمل',
+  'voice.closeReason.trustChanged': 'تغيّرت إعدادات موثوقية مساحة العمل',
+  'voice.closeReason.runtimeChanged': 'أُعيدت تهيئة بيئة تشغيل مساحة العمل',
+  'voice.closeReason.voiceError': 'فشل نسخ الصوت',
+  'voice.closeReason.unknown': 'سبب غير معروف',
+};

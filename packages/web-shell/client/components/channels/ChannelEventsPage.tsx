@@ -180,7 +180,7 @@ export function ChannelEventsPage({
             onClick={onClose}
             aria-label={t('common.back')}
           >
-            <ArrowLeftIcon />
+            <ArrowLeftIcon className="rtl:-scale-x-100" />
           </Button>
         )}
         <h1 ref={initialFocusRef} tabIndex={-1} className={styles.title}>

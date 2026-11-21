@@ -4,7 +4,7 @@ import { StrictMode, act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { I18nProvider, type WebShellLanguage } from '../../i18n';
+import { getTranslator, I18nProvider, type WebShellLanguage } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import { InteractionBlockContext } from '../../interactionBlockContext';
 import { immediateClipboardWrite } from '../../test/reactHarness';
@@ -122,28 +122,31 @@ function renderTable(
   );
 }
 
-function renderWideTable(): HTMLElement {
-  return renderTableContent([
-    <thead key="head">
-      <tr>
-        <th>Team</th>
-        <th>Region</th>
-        <th>Score</th>
-      </tr>
-    </thead>,
-    <tbody key="body">
-      <tr>
-        <td>Alpha</td>
-        <td>US</td>
-        <td>10</td>
-      </tr>
-      <tr>
-        <td>Beta</td>
-        <td>EMEA</td>
-        <td>2</td>
-      </tr>
-    </tbody>,
-  ]);
+function renderWideTable(language: WebShellLanguage = 'en'): HTMLElement {
+  return renderTableContent(
+    [
+      <thead key="head">
+        <tr>
+          <th>Team</th>
+          <th>Region</th>
+          <th>Score</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td>US</td>
+          <td>10</td>
+        </tr>
+        <tr>
+          <td>Beta</td>
+          <td>EMEA</td>
+          <td>2</td>
+        </tr>
+      </tbody>,
+    ],
+    language,
+  );
 }
 
 function click(el: Element): void {
@@ -2324,6 +2327,60 @@ describe('EnhancedMarkdownTable', () => {
     expect(scroller.scrollTop).toBe(stoppedAt);
   });
 
+  // jsdom applies no `direction`, so the RTL column order is supplied as
+  // geometry: the DOM-first cell is the rightmost one. Reading the bounds off
+  // DOM order there inverts them, and the drag stops extending as soon as it
+  // auto-scrolls.
+  it('keeps extending a selection while auto-scrolling an RTL table', async () => {
+    const container = renderTable('ar');
+    const scroller = container.querySelector<HTMLElement>('[tabindex="0"]')!;
+    vi.spyOn(scroller, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(0, 0, 200, 100),
+    );
+    const firstCell = container.querySelector<HTMLTableCellElement>(
+      'tbody [data-row-index][data-column-index]',
+    )!;
+    const rowCells = firstCell.parentElement!.querySelectorAll<HTMLElement>(
+      '[data-column-index]',
+    );
+    const columnWidth = 160 / rowCells.length;
+    rowCells.forEach((cell, index) => {
+      vi.spyOn(cell, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(200 - (index + 1) * columnWidth, 0, columnWidth, 48),
+      );
+    });
+    const lastCell = dataCell(container, 2, 0);
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: () => lastCell,
+    });
+
+    act(() => {
+      dataCell(container, 0, 0).dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+          clientY: 96,
+        }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      );
+    });
+
+    expect(scroller.scrollTop).toBeGreaterThan(0);
+    expect(container.textContent).toContain(
+      `${getTranslator('ar')('markdownTable.selection.selected')} 3`,
+    );
+
+    act(() => {
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+  });
+
   it('does not poll layout while a selection stays away from the edges', async () => {
     const container = renderTable();
     const scroller = container.querySelector<HTMLElement>('[tabindex="0"]')!;
@@ -2447,6 +2504,108 @@ describe('EnhancedMarkdownTable', () => {
       container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
         ?.style.left,
     ).toBe('280px');
+  });
+
+  // Markdown.tsx renders this table inside a `dir="auto"` box, so an unpinned
+  // shell takes its layout direction from the first strong character of the
+  // content while the resize/freeze branches take theirs from the UI locale.
+  // Pinning the shell is what keeps those two from disagreeing.
+  it.each([
+    ['en', 'ltr'],
+    ['ar', 'rtl'],
+  ] as const)(
+    'pins the table shell to the %s UI direction',
+    (language, dir) => {
+      const container = renderTable(language);
+      const shell = container.querySelector<HTMLElement>(
+        '[class*="tableShell"]',
+      )!;
+      expect(shell.getAttribute('dir')).toBe(dir);
+    },
+  );
+
+  it('positions the RTL frozen shadow outside the left edge of the frozen column', () => {
+    const container = renderWideTable('ar');
+    const shell = container.querySelector<HTMLElement>(
+      '[class*="tableShell"]',
+    )!;
+    const header = container.querySelectorAll('thead th')[1];
+    Object.defineProperty(shell, 'clientLeft', {
+      configurable: true,
+      value: 1,
+    });
+    Object.defineProperty(shell, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 20, right: 421 }) as DOMRect,
+    });
+    Object.defineProperty(header, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 261, right: 381 }) as DOMRect,
+    });
+    openColumnMenu(container, 'Team');
+    click(
+      textButton(
+        container,
+        getTranslator('ar')('markdownTable.freezeFirstColumn'),
+      ),
+    );
+    expect(
+      container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+        ?.style.left,
+    ).toBe('226px');
+  });
+
+  it('repositions the frozen shadow when the language changes to RTL', () => {
+    const children = [
+      <thead key="head">
+        <tr>
+          <th>Team</th>
+          <th>Score</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td>10</td>
+        </tr>
+      </tbody>,
+    ];
+    const container = renderTableContent(children);
+    const { root, portalRoot } = mounted[mounted.length - 1];
+    const shell = container.querySelector<HTMLElement>(
+      '[class*="tableShell"]',
+    )!;
+    const header = container.querySelectorAll('thead th')[1];
+    Object.defineProperty(shell, 'clientLeft', {
+      configurable: true,
+      value: 1,
+    });
+    Object.defineProperty(shell, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 20, right: 421 }) as DOMRect,
+    });
+    Object.defineProperty(header, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 261, right: 381 }) as DOMRect,
+    });
+    freezeFirstColumn(container);
+    expect(
+      container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+        ?.style.left,
+    ).toBe('360px');
+    act(() =>
+      root.render(
+        <WebShellPortalRootContext.Provider value={portalRoot!}>
+          <I18nProvider language="ar">
+            <EnhancedMarkdownTable>{children}</EnhancedMarkdownTable>
+          </I18nProvider>
+        </WebShellPortalRootContext.Provider>,
+      ),
+    );
+    expect(
+      container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+        ?.style.left,
+    ).toBe('226px');
   });
 
   it('repositions the frozen shadow when the ResizeObserver fires', () => {

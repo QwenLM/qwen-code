@@ -23,7 +23,8 @@
   box-sizing: border-box;
   align-items: center;
   gap: 6px;
-  padding: 0 10px 0 8px;
+  padding-block: 0;
+  padding-inline: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--background);
@@ -145,7 +146,7 @@
   color: var(--foreground);
   font: inherit;
   font-size: 13px;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 

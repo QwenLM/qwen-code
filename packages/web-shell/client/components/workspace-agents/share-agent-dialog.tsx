@@ -79,8 +79,8 @@ function Copyable({ label, text }: { label: string; text: string }) {
   return (
     <div className="flex flex-col gap-1.5 text-sm">
       <span className="font-medium">{label}</span>
-      <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 py-1.5 pr-1.5 pl-3">
-        <code className="min-w-0 flex-1 truncate font-mono text-xs">
+      <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 py-1.5 pe-1.5 ps-3">
+        <code className="min-w-0 flex-1 truncate font-mono text-xs" dir="ltr">
           {text}
         </code>
         <Button
@@ -198,7 +198,7 @@ export function ShareAgentDialog({
               >
                 <span className="min-w-0 flex-1 truncate">
                   {entry.callerId}
-                  <span className="ml-2 text-xs text-muted-foreground">
+                  <span className="ms-2 text-xs text-muted-foreground">
                     {entry.expiresAt
                       ? t('collab.share.until', {
                           date: new Date(entry.expiresAt).toLocaleDateString(),

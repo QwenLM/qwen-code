@@ -804,6 +804,7 @@ export function ToolApproval({
           {execWarningsText && (
             <pre
               className={styles.content}
+              dir="ltr"
               id={contentId}
               title={execWarningsDisplay}
             >

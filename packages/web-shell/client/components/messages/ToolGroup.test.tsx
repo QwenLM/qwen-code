@@ -143,13 +143,834 @@ describe('ReadFile output availability', () => {
     expect(container.textContent).toContain('No output');
     expect(container.textContent).not.toContain('unavailable');
   });
+
+  it('leaves the Arabic placeholder unpinned, read content auto and edit content LTR', () => {
+    const outputDir = (container: HTMLElement) =>
+      container.querySelector('[class*="expandedOutput"]')?.getAttribute('dir');
+    const waiting = renderToolLine(
+      makeTool({ toolName: 'ReadFile', status: 'in_progress' }),
+      { forceExpanded: true },
+      {},
+      'ar',
+    );
+    expect(outputDir(waiting)).toBeNull();
+    const read = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        args: { file_path: '/workspace/README' },
+        content: [
+          { type: 'content', content: { type: 'text', text: 'alpha\nbeta' } },
+        ],
+      }),
+      { forceExpanded: true },
+      {},
+      'ar',
+    );
+    expect(outputDir(read)).toBe('auto');
+    const edit = renderToolLine(
+      makeTool({
+        toolName: 'Edit',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'replaced line' } },
+        ],
+      }),
+      { forceExpanded: true },
+      {},
+      'ar',
+    );
+    expect(outputDir(edit)).toBe('ltr');
+  });
+});
+
+describe('tool header description direction', () => {
+  it.each([
+    [
+      'write_file',
+      'WriteFile: Writing to مجلد/ملف.ts',
+      { file_path: '/workspace/مجلد/ملف.ts' },
+    ],
+    [
+      'edit',
+      'Edit: Create مجلد/ملف.ts',
+      { file_path: '/workspace/مجلد/ملف.ts' },
+    ],
+    [
+      'list_directory',
+      `ListFiles: مجلد/...${'/intermediate'.repeat(5)}/src`,
+      { path: `/workspace/مجلد${'/intermediate'.repeat(10)}/src` },
+    ],
+  ] as const)(
+    'uses explicit provenance for the %s compact and expanded header',
+    (toolName, title, args) => {
+      for (const forceExpanded of [false, true]) {
+        const props = { workspaceCwd: '/workspace', forceExpanded };
+        const inDetail = forceExpanded && toolName === 'list_directory';
+        const machine = renderToolLine(
+          makeTool({ toolName, title, args, titleIsMachine: true }),
+          props,
+          {},
+          'ar',
+        );
+        expect(
+          machine.querySelector(
+            inDetail
+              ? '[class*="expandedCardDetail"] bdi[dir="ltr"]'
+              : 'bdi[class*="lineArg"][dir="ltr"]',
+          ),
+        ).not.toBeNull();
+        const prose = renderToolLine(
+          makeTool({ toolName, title, args, titleIsMachine: false }),
+          props,
+          {},
+          'ar',
+        );
+        const proseLabel = prose.querySelector(
+          inDetail
+            ? 'span[class*="expandedCardDetail"][dir="auto"]'
+            : 'span[class*="lineArg"][dir="auto"]',
+        );
+        expect(proseLabel).not.toBeNull();
+        expect(proseLabel?.querySelector('bdi')).toBeNull();
+      }
+    },
+  );
+
+  // Legacy rows and exported transcripts carry no producer flag, and the
+  // daemon frames the path ("Writing to …", "Create …") or elides it.
+  it.each([
+    {
+      toolName: 'write_file',
+      title: 'WriteFile: Writing to مجلد/ملف.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'Writing to مجلد/ملف.ts',
+      tag: 'BDI',
+      dir: 'ltr',
+    },
+    {
+      toolName: 'edit',
+      title: 'Edit: Create مجلد/ملف.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'Create مجلد/ملف.ts',
+      tag: 'BDI',
+      dir: 'ltr',
+    },
+    {
+      toolName: 'list_directory',
+      title: 'ListFiles: استعراض المجلد',
+      args: {},
+      shown: 'استعراض المجلد',
+      tag: 'SPAN',
+      dir: 'auto',
+    },
+    {
+      toolName: 'write_file',
+      title: 'WriteFile: Writing to مجلد/آخر.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'Writing to مجلد/آخر.ts',
+      tag: 'SPAN',
+      dir: 'auto',
+    },
+    {
+      toolName: 'edit',
+      title: 'Edit: No file changes to مجلد/ملف.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'No file changes to مجلد/ملف.ts',
+      tag: 'BDI',
+      dir: 'ltr',
+    },
+    {
+      toolName: 'custom_tool',
+      title: 'Explain مجلد/ملف.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'Explain مجلد/ملف.ts',
+      tag: 'SPAN',
+      dir: 'auto',
+    },
+    {
+      toolName: 'write_file',
+      title: 'Please review مجلد/ملف.ts',
+      args: { file_path: '/workspace/مجلد/ملف.ts' },
+      shown: 'Please review مجلد/ملف.ts',
+      tag: 'SPAN',
+      dir: 'auto',
+    },
+  ])(
+    'classifies a legacy $toolName title by its payload: $title',
+    ({ toolName, title, args, shown, tag, dir }) => {
+      const container = renderToolLine(
+        makeTool({ toolName, title, args }),
+        { workspaceCwd: '/workspace' },
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.tagName).toBe(tag);
+      expect(arg?.getAttribute('dir')).toBe(dir);
+      expect(arg?.textContent).toBe(shown);
+    },
+  );
+
+  it('isolates a legacy middle-elided ListFiles title', () => {
+    const file = 'مجلد/' + 'directory/'.repeat(8) + 'ملف.ts';
+    const shown = 'مجلد/.../' + 'directory/'.repeat(6) + 'ملف.ts';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'list_directory',
+        title: `ListFiles: ${shown}`,
+        args: { path: `/workspace/${file}` },
+      }),
+      { workspaceCwd: '/workspace' },
+      {},
+      'ar',
+    );
+    expect(
+      container.querySelector('bdi[class*="lineArg"][dir="ltr"]')?.textContent,
+    ).toBe(shown);
+  });
+
+  it.each([{ filePath: './مجلد/ملف.ts' }, { filePath: 'مجلد/فرعي/../ملف.ts' }])(
+    'isolates a daemon ReadFile title whose file_path has dot segments: $filePath',
+    ({ filePath }) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'read_file',
+          title: 'ReadFile: مجلد/ملف.ts',
+          args: { file_path: filePath },
+        }),
+        {},
+        {},
+        'ar',
+      );
+      expect(
+        container.querySelector('bdi[class*="lineArg"][dir="ltr"]')
+          ?.textContent,
+      ).toBe('مجلد/ملف.ts');
+    },
+  );
+
+  it.each(['CustomTool', 'mcp__server__lookup', 'Shell'])(
+    'keeps Arabic semantic %s descriptions auto-direction',
+    (toolName) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName,
+          args: {
+            description: 'شرح عربي للعملية',
+            ...(toolName === 'Shell' ? { command: 'echo ok' } : {}),
+          },
+        }),
+        {},
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.textContent).toBe('شرح عربي للعملية');
+      expect(arg?.getAttribute('dir')).toBe('auto');
+      expect(arg?.querySelector('bdi')).toBeNull();
+    },
+  );
+
+  it.each(['مجلد/run.sh --name "ملف"', '  مجلد/run.sh\necho ok  '])(
+    'isolates a known shell command fallback: %s',
+    (command) => {
+      const container = renderToolLine(
+        makeTool({ toolName: 'Shell', args: { command } }),
+        {},
+        {},
+        'ar',
+      );
+      expect(
+        container.querySelector('bdi[class*="lineArg"][dir="ltr"]')
+          ?.textContent,
+      ).toBe(command);
+      expect(
+        container.querySelector('[class*="lineName"]')?.hasAttribute('dir'),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    {
+      name: 'background shell command',
+      toolName: 'Shell',
+      args: { command: 'tail -f /tmp/سجل/server.log', is_background: true },
+      expected: 'tail -f /tmp/سجل/server.log [background]',
+    },
+    {
+      name: 'shell command with a timeout',
+      toolName: 'Shell',
+      args: { command: 'tail -f /tmp/سجل/server.log', timeout: 5000 },
+      expected: 'tail -f /tmp/سجل/server.log',
+    },
+    {
+      name: 'shell command in another directory',
+      toolName: 'run_shell_command',
+      args: { command: 'tail -f server.log', directory: '/tmp/سجل' },
+      expected: 'tail -f server.log [in سجل]',
+    },
+    {
+      name: 'Arabic grep pattern',
+      toolName: 'Grep',
+      args: { pattern: 'سجل' },
+      expected: "'سجل' in path './'",
+    },
+    {
+      name: 'Arabic glob pattern',
+      toolName: 'Glob',
+      args: { pattern: '**/سجل/*.ts' },
+      expected: "'**/سجل/*.ts'",
+    },
+    {
+      name: 'Arabic fetch URL',
+      toolName: 'WebFetch',
+      args: { url: 'https://example.com/سجل' },
+      expected: 'https://example.com/سجل',
+    },
+  ])(
+    'isolates machine descriptions carrying producer metadata: $name',
+    ({ toolName, args, expected }) => {
+      const container = renderToolLine(
+        makeTool({ toolName, args }),
+        {},
+        {},
+        'ar',
+      );
+      expect(
+        container.querySelector('bdi[class*="lineArg"][dir="ltr"]')
+          ?.textContent,
+      ).toBe(expected);
+    },
+  );
+
+  it.each([
+    {
+      title: "Grep: 'نمط|pattern' in مجلد (filter: '*.ts')",
+      args: { path: 'مجلد', glob: '*.ts' },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    { title: "Grep: 'نمط|pattern'", args: {}, dir: 'ltr', tag: 'BDI' },
+    { title: "Grep: 'نمط|pattern' in .", args: {}, dir: 'ltr', tag: 'BDI' },
+    // GrepInvocation.getDescription's formatDisplayPath emits "src" for both.
+    {
+      title: "Grep: 'نمط|pattern' in src",
+      args: { path: './src' },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      title: "Grep: 'نمط|pattern' in src (filter: '*.ts')",
+      args: { path: 'src/', glob: '*.ts' },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      title: 'Grep: اعثر على الملاحظات',
+      args: { path: './src' },
+      dir: 'auto',
+      tag: 'SPAN',
+    },
+    // A failed ACP invocation can put prose in a machine-shaped title.
+    {
+      title: "Grep: 'نمط|pattern' in the text you provided",
+      args: {
+        path: './src',
+        limit: 0,
+        description: "'نمط|pattern' in the text you provided",
+      },
+      dir: 'auto',
+      tag: 'SPAN',
+    },
+    {
+      title: "Grep: 'نمط|pattern' in path './src'",
+      args: {
+        path: './src',
+        limit: 0,
+        description: "'نمط|pattern' in path './src'",
+      },
+      dir: 'auto',
+      tag: 'SPAN',
+    },
+    {
+      title: "Grep: 'نمط|pattern' in ~/other/src",
+      args: { path: '/home/worker/other/src' },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      title:
+        "Grep: 'نمط|pattern' in first/.../intermediate/intermediate/intermediate/intermediate/intermediate/src",
+      args: { path: './first/' + 'intermediate/'.repeat(10) + 'src' },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      title:
+        "Grep: 'نمط|pattern' in ~/.../intermediate/intermediate/intermediate/intermediate/intermediate/src",
+      args: {
+        path: '/home/worker/other/' + 'intermediate/'.repeat(10) + 'src',
+      },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      title: 'Grep: اعثر على الملاحظات',
+      args: { path: 'مجلد', glob: '*.ts' },
+      dir: 'auto',
+      tag: 'SPAN',
+    },
+  ])(
+    'keeps direction appropriate for daemon grep title $title',
+    ({ title, args, dir, tag }) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'grep_search',
+          title,
+          args: { pattern: 'نمط|pattern', ...args },
+        }),
+        {},
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.tagName).toBe(tag);
+      expect(arg?.getAttribute('dir')).toBe(dir);
+      expect(arg?.textContent).toBe(title.slice('Grep: '.length));
+    },
+  );
+
+  // core resolves a relative path outside the root to an absolute one, which
+  // the browser then basenames; the daemon title is still machine text.
+  it.each([
+    { path: '../other', daemonPath: '/home/worker/other', shown: 'other' },
+    {
+      path: '../other/deep/dir',
+      daemonPath: '/home/worker/other/deep/dir',
+      shown: 'dir',
+    },
+  ])(
+    'isolates a grep path outside the workspace root: $path',
+    ({ path, daemonPath, shown }) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'grep_search',
+          title: `Grep: 'نمط|pattern' in ${daemonPath}`,
+          args: { pattern: 'نمط|pattern', path },
+        }),
+        {},
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.tagName).toBe('BDI');
+      expect(arg?.getAttribute('dir')).toBe('ltr');
+      expect(arg?.textContent).toBe(`'نمط|pattern' in ${shown}`);
+    },
+  );
+
+  it.each([
+    { file: 'a.ts', args: { offset: 0, limit: 50 }, suffix: '(lines 1-50)' },
+    { file: 'a.ts', args: { limit: 100 }, suffix: '(first 100 lines)' },
+    { file: 'a.ts', args: { offset: 19 }, suffix: '(from line 20)' },
+    { file: 'a.pdf', args: { pages: '2' }, suffix: '(pages 2)' },
+    { file: 'a.pdf', args: { pages: '2-4' }, suffix: '(pages 2-4)' },
+  ])(
+    'isolates a daemon ReadFile title with $suffix',
+    ({ file, args, suffix }) => {
+      const path = `مجلد/${file}`;
+      const title = `${path} ${suffix}`;
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'read_file',
+          title: `ReadFile: ${title}`,
+          args: { file_path: `/workspace/${path}`, ...args },
+        }),
+        { workspaceCwd: '/workspace' },
+        {},
+        'ar',
+      );
+      expect(
+        container.querySelector('bdi[class*="lineArg"][dir="ltr"]')
+          ?.textContent,
+      ).toBe(title);
+    },
+  );
+
+  it.each([
+    {
+      file: 'مجلد/' + 'directory/'.repeat(8) + 'ملف.ts',
+      title: 'مجلد/.../' + 'directory/'.repeat(6) + 'ملف.ts',
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      file: 'مجلد/' + 'ا'.repeat(90) + '.ts',
+      title: 'مجلد/' + 'ا'.repeat(33) + '...' + 'ا'.repeat(35) + '.ts',
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    {
+      file: 'مجلد/' + 'directory/'.repeat(8) + 'ملف.ts',
+      title: 'مجلد/.../unrelated/ملف.ts',
+      dir: 'auto',
+      tag: 'SPAN',
+    },
+  ])(
+    'preserves direction for middle-elided ReadFile title $title',
+    ({ file, title, dir, tag }) => {
+      const description = `${title} (lines 1-50)`;
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'read_file',
+          title: `ReadFile: ${description}`,
+          args: { file_path: `/workspace/${file}`, offset: 0, limit: 50 },
+        }),
+        { workspaceCwd: '/workspace' },
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.textContent).toBe(description);
+      expect(arg?.tagName).toBe(tag);
+      expect(arg?.getAttribute('dir')).toBe(dir);
+    },
+  );
+
+  it.each([
+    { description: "'نمط/*.ts' in مجلد", dir: 'ltr', tag: 'BDI' },
+    { description: 'اعثر على الملفات', dir: 'auto', tag: 'SPAN' },
+    { description: "'other/*.ts' in مجلد", dir: 'auto', tag: 'SPAN' },
+    {
+      description: "'نمط/*.ts' in the text you provided",
+      explicit: "'نمط/*.ts' in the text you provided",
+      dir: 'auto',
+      tag: 'SPAN',
+    },
+  ])(
+    'preserves direction for daemon Glob title $description',
+    ({ description, explicit, dir, tag }) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'glob',
+          title: `Glob: ${description}`,
+          args: {
+            pattern: 'نمط/*.ts',
+            path: './مجلد',
+            ...(explicit ? { description: explicit } : {}),
+          },
+        }),
+        { workspaceCwd: '/workspace' },
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.textContent).toBe(description);
+      expect(arg?.tagName).toBe(tag);
+      expect(arg?.getAttribute('dir')).toBe(dir);
+    },
+  );
+
+  it('isolates a middle-elided Windows ReadFile title without changing it', () => {
+    const file = 'مجلد\\' + 'directory\\'.repeat(8) + 'ملف.ts';
+    const title =
+      'مجلد\\...\\' + 'directory\\'.repeat(6) + 'ملف.ts (lines 1-50)';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'read_file',
+        title: `ReadFile: ${title}`,
+        args: { file_path: `C:\\workspace\\${file}`, offset: 0, limit: 50 },
+      }),
+      { workspaceCwd: 'C:\\workspace' },
+      {},
+      'ar',
+    );
+    expect(
+      container.querySelector('bdi[class*="lineArg"][dir="ltr"]')?.textContent,
+    ).toBe(title);
+  });
+
+  it('isolates a replayed ReadFile title using only the exported preview', () => {
+    const title = 'مجلد/a.ts (lines 1-50)';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        title,
+        args: { path: 'مجلد/a.ts', range: [1, 50] },
+      }),
+      {},
+      {},
+      'ar',
+    );
+    expect(
+      container.querySelector('bdi[class*="lineArg"][dir="ltr"]')?.textContent,
+    ).toBe(title);
+  });
+
+  it.each([
+    {
+      name: 'explicit prose matching the title framing',
+      args: {
+        path: 'مجلد/a.ts',
+        range: [1, 50],
+        description: 'مجلد/a.ts (lines 1-50)',
+      },
+      title: 'مجلد/a.ts (lines 1-50)',
+    },
+    {
+      name: 'a title inconsistent with the requested range',
+      args: { file_path: 'مجلد/a.ts', offset: 0, limit: 50 },
+      title: 'مجلد/a.ts (lines 1-51)',
+    },
+  ])('keeps ReadFile $name auto-direction', ({ args, title }) => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', title: `ReadFile: ${title}`, args }),
+      {},
+      {},
+      'ar',
+    );
+    expect(
+      container.querySelector('span[class*="lineArg"][dir="auto"]')
+        ?.textContent,
+    ).toBe(title);
+  });
+
+  it('keeps a fetch URL with a prose prompt auto-direction', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'WebFetch',
+        args: { url: 'https://example.com/سجل', prompt: 'لخص الصفحة' },
+      }),
+      {},
+      {},
+      'ar',
+    );
+    const arg = container.querySelector('[class*="lineArg"]');
+    expect(arg?.getAttribute('dir')).toBe('auto');
+    expect(arg?.querySelector('bdi')).toBeNull();
+  });
+
+  it('isolates a path longer than the description cap', () => {
+    const path = 'مجلد/' + 'nested/'.repeat(400) + 'file.ts';
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', args: { file_path: path } }),
+      {},
+      {},
+      'ar',
+    );
+    expect(
+      container.querySelector('bdi[class*="lineArg"][dir="ltr"]')?.textContent,
+    ).toBe(`${path.slice(0, 2000)}...`);
+  });
+
+  it('isolates an Arabic-first path fallback without treating prose as a path', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', args: { file_path: 'مجلد/file.ts' } }),
+      {},
+      {},
+      'ar',
+    );
+    const arg = container.querySelector('[class*="lineArg"]');
+    expect(arg?.getAttribute('dir')).toBe('ltr');
+    expect(arg?.tagName).toBe('BDI');
+    expect(arg?.textContent).toBe('مجلد/file.ts');
+    const prose = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        args: { file_path: 'مجلد/file.ts', description: 'قراءة الملف العربي' },
+      }),
+      {},
+      {},
+      'ar',
+    );
+    expect(prose.querySelector('[class*="lineArg"]')?.textContent).toBe(
+      'قراءة الملف العربي',
+    );
+    expect(prose.querySelector('[class*="lineArg"] bdi')).toBeNull();
+  });
+
+  it('keeps long paths isolated in expanded document details', () => {
+    const path = 'مجلد/' + 'nested/'.repeat(25) + 'file.ts';
+    const container = renderToolGroup(
+      [makeTool({ toolName: 'WriteFile', args: { file_path: path } })],
+      {},
+      undefined,
+      'document',
+      undefined,
+      undefined,
+      'ar',
+    );
+    expect(
+      container.querySelector('[class*="expandedCardDetail"] bdi[dir="ltr"]')
+        ?.textContent,
+    ).toBe(path);
+    expect(container.textContent).not.toContain('[object Object]');
+  });
+});
+
+describe('tool result row direction', () => {
+  it('renders quota notices and arbitrary summaries with auto direction', () => {
+    const quota = renderToolLine(
+      makeTool({
+        toolName: 'CustomTool',
+        status: 'failed',
+        rawOutput: { type: 'subscription_quota', memberType: 'pro' },
+      }),
+      {},
+      {},
+      'ar',
+    );
+    const quotaRow = quota.querySelector('[class*="lineOutput"]');
+    expect(quotaRow?.getAttribute('dir')).toBe('auto');
+    expect(quotaRow?.textContent).toContain('لقد استنفدت رصيدك');
+
+    const machine = renderToolLine(
+      makeTool({
+        toolName: 'CustomTool',
+        status: 'completed',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'health OK' } },
+        ],
+      }),
+      {},
+      {},
+      'ar',
+    );
+    const machineRow = machine.querySelector('[class*="lineOutput"]');
+    expect(machineRow?.textContent).toBe('health OK');
+    expect(machineRow?.getAttribute('dir')).toBe('auto');
+  });
+
+  it.each(['CustomTool', 'mcp__server__lookup', 'TodoWrite'])(
+    'resolves Arabic %s summaries in interactive and document mode',
+    (toolName) => {
+      for (const mode of ['interactive', 'document'] as const) {
+        const tool = makeTool({
+          toolName,
+          status: 'completed',
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'نتيجة عربية من الأداة' },
+            },
+          ],
+        });
+        const container =
+          mode === 'interactive'
+            ? renderToolLine(tool, {}, {}, 'ar')
+            : renderToolGroup(
+                [tool],
+                {},
+                undefined,
+                'document',
+                undefined,
+                undefined,
+                'ar',
+              );
+        const row = container.querySelector(
+          '[class*="lineOutput"], pre[dir="auto"]',
+        );
+        expect(row?.textContent).toContain('نتيجة عربية');
+        expect(row?.getAttribute('dir')).toBe('auto');
+      }
+    },
+  );
+
+  it('keeps the quota notice auto-direction in the todo fallback row', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'TodoWrite',
+        status: 'failed',
+        rawOutput: { type: 'subscription_quota', memberType: 'pro' },
+      }),
+      {},
+      {},
+      'ar',
+    );
+    const row = container.querySelector('[class*="lineOutput"]');
+    expect(row?.getAttribute('dir')).toBe('auto');
+    expect(row?.textContent).toContain('لقد استنفدت رصيدك');
+  });
+});
+
+describe('expanded tool text direction', () => {
+  it.each([
+    { toolName: 'ask_user_question', text: 'Answers: {"mode":"safe"}' },
+    { toolName: 'skill', text: 'نطاق المراجعة: src/components' },
+  ])(
+    'renders expanded $toolName output auto-direction',
+    ({ toolName, text }) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName,
+          content: [{ type: 'content', content: { type: 'text', text } }],
+        }),
+        { forceExpanded: true },
+        {},
+        'ar',
+      );
+      const output = container.querySelector('pre[class*="expandedOutput"]');
+      expect(output?.textContent).toBe(text);
+      expect(output?.getAttribute('dir')).toBe('auto');
+    },
+  );
+
+  it('renders an over-limit Arabic document auto-direction, like its shorter self', () => {
+    const line = 'هذا سطر من مستند عربي.';
+    const read = (lines: number) =>
+      renderToolLine(
+        makeTool({
+          toolName: 'ReadFile',
+          args: { file_path: '/workspace/notes.md' },
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: Array.from({ length: lines }, () => line).join('\n'),
+              },
+            },
+          ],
+        }),
+        { forceExpanded: true },
+        {},
+        'ar',
+      );
+
+    // Past the line budget the same bytes fall back to a plain <pre>, so the
+    // two renders must not disagree on direction.
+    const long = read(1001);
+    const pre = long.querySelector('[class*="expandedOutput"]');
+    expect(pre?.textContent).toContain(line);
+    expect(pre?.getAttribute('dir')).toBe('auto');
+
+    const short = read(999);
+    expect(short.querySelector('[class*="expandedOutput"]')).toBeNull();
+    expect(
+      short.querySelector('[class*="expandedRead"] > [dir="auto"]'),
+    ).not.toBeNull();
+  });
+
+  it('renders a plain-text tool payload auto-direction', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__echo',
+        rawOutput: 'تم إنشاء الملف بنجاح.',
+      }),
+      { forceExpanded: true },
+      {},
+      'ar',
+    );
+    const payload = container.querySelector('[class*="payloadText"]');
+    expect(payload?.textContent).toBe('تم إنشاء الملف بنجاح.');
+    expect(payload?.getAttribute('dir')).toBe('auto');
+  });
 });
 
 function renderToolLine(
   tool: ACPToolCall,
   props: Partial<Parameters<typeof ToolLine>[0]> = {},
   customization = {},
-  language: 'en' | 'zh-CN' = 'en',
+  language: 'en' | 'zh-CN' | 'ar' = 'en',
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -182,7 +1003,7 @@ function renderToolGroup(
     | boolean = 'interactive',
   onOpenSubagent?: (tool: ACPToolCall) => void,
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
-  language: 'en' | 'zh-CN' | 'zh-TW' = 'en',
+  language: 'en' | 'zh-CN' | 'zh-TW' | 'ar' = 'en',
   generateContent?: SessionContentGenerator,
   mcpAppHostUrl?: string,
   documentExpanded = true,

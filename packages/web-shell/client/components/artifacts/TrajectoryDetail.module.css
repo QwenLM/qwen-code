@@ -16,7 +16,7 @@
 }
 
 .detail[data-presentation='side'] {
-  border-left: 1px solid var(--border);
+  border-inline-start: 1px solid var(--border);
 }
 
 .header {
@@ -26,7 +26,8 @@
   gap: 6px;
   min-width: 0;
   min-height: 40px;
-  padding: 6px 8px 6px 10px;
+  padding-block: 6px;
+  padding-inline: 10px 8px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -57,7 +58,7 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .pill {
@@ -230,6 +231,10 @@ summary.sectionTitle svg {
 
 details[open] > summary.sectionTitle svg {
   transform: rotate(90deg);
+}
+
+:global([dir='rtl']) details:not([open]) > summary.sectionTitle svg {
+  transform: scaleX(-1);
 }
 
 .ids {

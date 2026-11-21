@@ -46,7 +46,7 @@
 }
 
 .historyRetryButton {
-  margin-left: 8px;
+  margin-inline-start: 8px;
   padding: 2px 10px;
   background: transparent;
   border: 1px solid var(--border);
@@ -220,13 +220,13 @@
 .sessionTimelinePanel {
   position: absolute;
   top: 50%;
-  left: 0;
+  inset-inline-start: 0;
   width: clamp(
     20px,
     calc((100% - var(--chat-responsive-content-width, 1000px)) / 2),
     86px
   );
-  padding-left: 5px;
+  padding-inline-start: 5px;
   overflow: visible;
   color: var(--muted-foreground);
   pointer-events: none;
@@ -287,7 +287,8 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin: 0 32px 0 0;
+  margin-block: 0;
+  margin-inline: 0 32px;
   padding: 32px 0;
   list-style: none;
 }
@@ -444,7 +445,7 @@
   color: var(--foreground);
   font-family: var(--font-sans, system-ui, sans-serif);
   pointer-events: none;
-  text-align: left;
+  text-align: start;
   opacity: 1;
 }
 
@@ -452,6 +453,31 @@
   from {
     opacity: 0;
     transform: translate3d(-4px, -50%, 0) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, -50%, 0) scale(1);
+  }
+}
+
+/* The hovered tick grows from its inline start, so the RTL card anchor's
+   28px inward offset only holds while the origin mirrors with it. */
+:global([dir='rtl']) .sessionTimelineTick {
+  transform-origin: right center;
+}
+
+/* The card is portaled to the dir-carrying portal root, so the slide-in and
+   its scale origin mirror to open from the right edge in RTL. */
+:global([dir='rtl']) .sessionTimelineDetails {
+  transform-origin: right center;
+  animation-name: sessionTimelineDetailsInRtl;
+}
+
+@keyframes sessionTimelineDetailsInRtl {
+  from {
+    opacity: 0;
+    transform: translate3d(4px, -50%, 0) scale(0.98);
   }
 
   to {
@@ -510,13 +536,13 @@
 
 .deletionMode [data-web-shell-message-row] {
   position: relative;
-  padding-left: 32px;
+  padding-inline-start: 32px;
   box-sizing: border-box;
 }
 
 .deletionCheckbox {
   position: absolute;
-  left: 0;
+  inset-inline-start: 0;
   top: 12px;
 }
 

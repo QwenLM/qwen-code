@@ -1,3 +1,4 @@
+import { MachineText } from '../ui/machine-text';
 import {
   memo,
   useCallback,
@@ -74,6 +75,7 @@ import {
   getTaskExecutionRecord,
   getShellToolSemanticDescription,
   getToolDescription,
+  isMachineToolDescription,
   getAdvisorDisplayText,
   getToolSummaryDescription,
   getToolResultSummary,
@@ -280,7 +282,9 @@ function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
   return (
     <div className={styles.expandedRead}>
       {plainText ? (
-        <pre className={styles.expandedOutput}>{content}</pre>
+        <pre className={styles.expandedOutput} dir="auto">
+          {content}
+        </pre>
       ) : (
         <Markdown content={fencedCodeBlock(language, content)} />
       )}
@@ -330,7 +334,9 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
       {diff ? (
         <DiffView diff={diff} />
       ) : (
-        <pre className={styles.expandedOutput}>{text}</pre>
+        <pre className={styles.expandedOutput} dir="ltr">
+          {text}
+        </pre>
       )}
     </div>
   );
@@ -345,7 +351,7 @@ function ToolExpandedCard({
 }: {
   title: string;
   action?: ReactNode;
-  detail?: string;
+  detail?: ReactNode;
   status?: ACPToolCall['status'];
   children?: ReactNode;
 }) {
@@ -357,7 +363,11 @@ function ToolExpandedCard({
           <span className={styles.expandedCardTitle}>{title}</span>
           {action}
         </span>
-        {detail && <span className={styles.expandedCardDetail}>{detail}</span>}
+        {detail && (
+          <span className={styles.expandedCardDetail} dir="auto">
+            {detail}
+          </span>
+        )}
       </div>
       {children && <div className={styles.expandedCardBody}>{children}</div>}
     </div>
@@ -393,7 +403,7 @@ function ToolPayloadBlock({
           <Markdown content={fencedCodeBlock('json', shown)} />
         </div>
       ) : (
-        <pre className={styles.payloadText}>
+        <pre className={styles.payloadText} dir="auto">
           {payload.json ? shown : renderWithSessionLinks(shown, renderMode)}
         </pre>
       )}
@@ -588,7 +598,7 @@ function WorkflowToolDetail({
 }: {
   tool: ACPToolCall;
   displayName: string;
-  detail: string;
+  detail: ReactNode;
   result: string;
 }) {
   const { t } = useI18n();
@@ -699,7 +709,11 @@ export function shouldAutoExpand(tool: ACPToolCall): boolean {
 
 function ExpandedAskUserQuestionOutput({ tool }: { tool: ACPToolCall }) {
   const text = extractText(tool) || '';
-  return <pre className={styles.expandedOutput}>{text}</pre>;
+  return (
+    <pre className={styles.expandedOutput} dir="auto">
+      {text}
+    </pre>
+  );
 }
 
 function ExpandedSkillOutput({ tool }: { tool: ACPToolCall }) {
@@ -709,7 +723,11 @@ function ExpandedSkillOutput({ tool }: { tool: ACPToolCall }) {
       ? tool.args.args.trim()
       : (tool.title ?? ''));
 
-  return <pre className={styles.expandedOutput}>{content}</pre>;
+  return (
+    <pre className={styles.expandedOutput} dir="auto">
+      {content}
+    </pre>
+  );
 }
 
 function getFirstToolContentText(tool: ACPToolCall): string {
@@ -736,13 +754,22 @@ export function getToolHeaderKind(tool: ACPToolCall): ToolHeaderKind {
 function DefaultToolHeaderExtra({
   description,
   elapsed,
+  machine = false,
 }: {
   description: string;
   elapsed: string;
+  machine?: boolean;
 }) {
   return (
     <>
-      {description && <span className={styles.lineArg}>{description}</span>}
+      {description &&
+        (machine ? (
+          <MachineText className={styles.lineArg}>{description}</MachineText>
+        ) : (
+          <span className={styles.lineArg} dir="auto">
+            {description}
+          </span>
+        ))}
       {elapsed && <span className={styles.lineElapsed}>{elapsed}</span>}
     </>
   );
@@ -755,6 +782,11 @@ function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
   return (
     <DefaultToolHeaderExtra
       description={info.description}
+      machine={isMachineToolDescription(
+        info.tool,
+        info.description,
+        info.workspaceCwd,
+      )}
       elapsed={
         info.kind === 'agent' || isActiveToolStatus(info.tool.status)
           ? info.elapsed
@@ -1560,10 +1592,12 @@ export const ToolLine = memo(function ToolLine({
   const fullDescription = getToolDescription(tool, workspaceCwd);
   // Document exports carry a bounded, safe text preview. Keep the full answer
   // in an expanded row instead of reducing it to the one-line header summary.
-  const result =
-    (tool.status === 'failed'
+  const quotaDisplay =
+    tool.status === 'failed'
       ? formatSubscriptionQuotaDisplay(tool.rawOutput, t)
-      : undefined) ??
+      : undefined;
+  const result =
+    quotaDisplay ??
     (transcriptRenderMode === 'document' && expanded
       ? (extractText(tool) ?? getToolResultSummary(tool))
       : getToolResultSummary(tool));
@@ -1644,7 +1678,15 @@ export const ToolLine = memo(function ToolLine({
   const useMarkdownDetail = isRead || isAdvisor;
   const hideDescriptionInHeader =
     showDescriptionInDetail && !isShell && !isSearch && !isRead;
-  const expandedCardDetail = fullDescription;
+  const expandedCardDetail = isMachineToolDescription(
+    tool,
+    fullDescription,
+    workspaceCwd,
+  ) ? (
+    <MachineText>{fullDescription}</MachineText>
+  ) : (
+    fullDescription
+  );
   // Contentless tools still get a titled card when the user opens them.
   const showExpandedSummaryPanel =
     expanded && !detailView && (!isTodo || (!hasTodoList && !result));
@@ -1791,7 +1833,7 @@ export const ToolLine = memo(function ToolLine({
         isTodo &&
         !hasTodoList &&
         result && (
-          <div className={styles.lineOutput}>
+          <div className={styles.lineOutput} dir="auto">
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
         )}
@@ -1832,6 +1874,7 @@ export const ToolLine = memo(function ToolLine({
                 ? `${styles.lineOutput} ${styles.expandedLineOutput}`
                 : styles.lineOutput
             }
+            dir="auto"
           >
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
@@ -1990,7 +2033,7 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
           {t(isStreaming ? 'thinking.running' : 'thinking.done')}
         </span>
       </button>
-      {(language === 'zh-CN' || language === 'zh-TW') &&
+      {(language === 'zh-CN' || language === 'zh-TW' || language === 'ar') &&
         translateContent !== undefined &&
         generateContent && (
           <ThinkingTranslateButton

@@ -15,7 +15,7 @@
 
 .num {
   flex-shrink: 0;
-  text-align: right;
+  text-align: end;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
@@ -74,15 +74,15 @@
   background: none;
   font: inherit;
   color: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
   font-size: 13px;
 }
 
 .detailChevron {
   flex-shrink: 0;
-  margin-left: auto;
-  padding-left: 8px;
+  margin-inline-start: auto;
+  padding-inline-start: 8px;
   color: var(--muted-foreground);
 }
 
@@ -91,9 +91,10 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin: 3px 0 6px 20px;
-  padding-left: 8px;
-  border-left: 1px solid var(--border);
+  margin-block: 3px 6px;
+  margin-inline: 20px 0;
+  padding-inline-start: 8px;
+  border-inline-start: 1px solid var(--border);
   font-size: 12px;
 }
 
@@ -116,7 +117,7 @@
   grid-template-columns: max-content auto;
   column-gap: 12px;
   row-gap: 1px;
-  padding-left: 10px;
+  padding-inline-start: 10px;
 }
 
 .detailLabel {

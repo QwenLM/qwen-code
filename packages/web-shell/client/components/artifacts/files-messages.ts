@@ -112,3 +112,42 @@ export const FILES_MESSAGES_RU = {
   'files.sourceTooLarge':
     'Файл превышает лимит предпросмотра исходника 4 MiB. Используйте «Скачать» в меню файла, чтобы прочитать его локально.',
 };
+
+export const FILES_MESSAGES_AR = {
+  'files.delete': 'حذف الملف',
+  'files.deleteTitle': 'حذف الملف؟',
+  'files.deleteWarning':
+    'سيتم حذف هذا الملف نهائياً. لا يمكن التراجع عن هذا الإجراء.',
+  'files.copyRelativePath': 'نسخ المسار النسبي',
+  'files.copyAbsolutePath': 'نسخ المسار المطلق',
+  'files.reference': 'إشارة',
+  'files.title': 'الملفات',
+  'files.newFile': 'ملف جديد',
+  'files.newFolder': 'مجلد جديد',
+  'files.deleteMenu': 'حذف',
+  'files.deleteFolderTitle': 'حذف المجلد؟',
+  'files.deleteFolderWarning':
+    'سيتم حذف هذا المجلد وجميع محتوياته نهائياً. لا يمكن التراجع عن هذا الإجراء.',
+  'files.deleting': 'جارٍ الحذف…',
+  'files.name': 'الاسم',
+  'files.create': 'إنشاء',
+  'files.creating': 'جارٍ الإنشاء…',
+  'files.destination': 'إنشاء في',
+  'files.invalidName':
+    'أدخل اسماً واحداً دون شرطات مائلة أو محارف تحكم. لا يُسمح بـ “.” أو “..”.',
+  'files.uploadTo': 'أسقط الملفات للرفع إلى',
+  'files.description': 'تصفح ملفات مساحة العمل',
+  'files.filter': 'تصفية الملفات…',
+  'files.noMatches': 'لا توجد تطابقات في المسارات المحمّلة',
+  'files.resizeTree': 'تغيير حجم معاينة الملف وشجرة الملفات',
+  'files.toggleTree': 'تبديل شجرة الملفات',
+  'files.closePreview': 'إغلاق معاينة الملف',
+  'files.emptyDirectory': 'مجلد فارغ',
+  'files.truncated': 'يتم عرض أول 2,000 عنصر فقط',
+  'files.loadFailed': 'تعذر تحميل متصفح الملفات',
+  'files.reloadUnavailable':
+    'قد يؤدي إعادة التحميل إلى فقدان اتصالك أو حالة الصفحة المضيفة. أغلق الملفات وأعد فتحها بعد تحديث التطبيق.',
+  'files.close': 'إغلاق الملفات',
+  'files.sourceTooLarge':
+    'يتجاوز هذا الملف حد معاينة المصدر البالغ 4 MiB. استخدم التنزيل من قائمة الملف لقراءته محلياً.',
+};

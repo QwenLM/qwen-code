@@ -15,7 +15,7 @@
   padding: calc(12px + var(--web-shell-desktop-titlebar-height, 0px)) 12px 12px;
   overflow: hidden;
   background: var(--sidebar-background);
-  border-right: 1px solid var(--sidebar-border);
+  border-inline-end: 1px solid var(--sidebar-border);
   color: var(--sidebar-foreground);
   font-family: var(--font-sans);
   transition:
@@ -41,7 +41,7 @@
 
 .selectionRow {
   width: 100%;
-  text-align: left;
+  text-align: start;
 }
 
 .selectionRow:hover,
@@ -63,7 +63,7 @@
 .selectionCircle {
   position: absolute;
   top: 50%;
-  left: 4px;
+  inset-inline-start: 4px;
   transform: translateY(-50%);
   display: flex;
   align-items: center;
@@ -103,7 +103,7 @@
 }
 
 .selectionActions button + button {
-  border-left: 1px solid var(--sidebar-border);
+  border-inline-start: 1px solid var(--sidebar-border);
 }
 
 .collapsed {
@@ -312,7 +312,7 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 4px;
-  margin-left: auto;
+  margin-inline-start: auto;
   min-width: 0;
 }
 
@@ -461,7 +461,7 @@
 }
 
 .livePendingSession {
-  padding-left: 32px;
+  padding-inline-start: 32px;
   color: var(--muted-foreground);
 }
 
@@ -469,7 +469,7 @@ button.livePendingSession {
   width: 100%;
   border: 0;
   background: transparent;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -512,7 +512,7 @@ button.livePendingSession:hover {
   align-items: center;
   height: 32px;
   gap: 4px;
-  padding-left: 8px;
+  padding-inline-start: 8px;
   color: var(--muted-foreground);
 }
 
@@ -535,7 +535,7 @@ button.livePendingSession:hover {
 
 .projectsHeaderActions {
   display: flex;
-  margin-left: auto;
+  margin-inline-start: auto;
   align-items: center;
   gap: 2px;
 }
@@ -558,7 +558,7 @@ button.livePendingSession:hover {
 }
 
 .projectsHeaderActions .projectsHeaderAction {
-  margin-left: 0;
+  margin-inline-start: 0;
 }
 
 .projectsHeaderToggle {
@@ -589,7 +589,7 @@ button.livePendingSession:hover {
   display: inline-flex;
   width: 24px;
   height: 24px;
-  margin-left: auto;
+  margin-inline-start: auto;
   align-items: center;
   justify-content: center;
   border-radius: 6px;
@@ -628,8 +628,8 @@ button.livePendingSession:hover {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-right: -12px;
-  padding-right: 12px;
+  margin-inline-end: -12px;
+  padding-inline-end: 12px;
   /* End the scroll port above the footer overlay so rows can never sit
      under it (padding inside the scroll port would not: the port itself
      still reaches the footer and rows parked at its bottom edge stay
@@ -686,7 +686,7 @@ button.livePendingSession:hover {
 .workspaceHeaderActions {
   position: absolute;
   top: 50%;
-  right: 6px;
+  inset-inline-end: 6px;
   display: flex;
   align-items: center;
   gap: 1px;
@@ -743,7 +743,7 @@ button.livePendingSession:hover {
 }
 
 .projectIconButton:last-child {
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .projectHoverAction {
@@ -795,13 +795,14 @@ button.livePendingSession:hover {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 8px 0 20px;
+  padding-block: 0;
+  padding-inline: 20px 8px;
   border-radius: 8px;
   color: var(--muted-foreground);
   font-size: 13px;
   font-weight: 600;
   line-height: 20px;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -907,7 +908,7 @@ button.livePendingSession:hover {
 
 .showAllSessions {
   align-self: flex-start;
-  margin-left: 26px;
+  margin-inline-start: 26px;
   padding: 1px 0;
   border: 0;
   background: transparent;
@@ -933,22 +934,23 @@ button.livePendingSession:hover {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 2px 0 2px 26px;
+  padding-block: 2px;
+  padding-inline: 26px 0;
   border-radius: 8px;
   color: color-mix(in srgb, var(--sidebar-foreground) 78%, transparent);
   cursor: pointer;
 }
 
-/* A parent row keeps its chevron left of the title; a child row aligns its
+/* A parent row keeps its chevron at the start of the title; a child row aligns its
    title under the parent's, so the lineage reads as one block. */
 .sessionRow.sessionTreeRow {
-  padding-left: 40px;
+  padding-inline-start: 40px;
 }
 
 .sessionTreeToggle {
   position: absolute;
   top: 50%;
-  left: 25px;
+  inset-inline-start: 25px;
   width: 14px;
   height: 14px;
   display: inline-flex;
@@ -994,12 +996,12 @@ button.livePendingSession:hover {
   color: var(--sidebar-accent-foreground);
 }
 
-/* Active-row marker on the left edge, mirroring editor list conventions. */
+/* Active-row marker on the leading edge, mirroring editor list conventions. */
 .currentSession::before {
   content: '';
   position: absolute;
   top: 50%;
-  left: 3px;
+  inset-inline-start: 3px;
   width: 2px;
   height: 14px;
   border-radius: 1px;
@@ -1058,8 +1060,8 @@ button.livePendingSession:hover {
 }
 
 .sessionDetailsRowValue {
-  margin-left: auto;
-  padding-left: 16px;
+  margin-inline-start: auto;
+  padding-inline-start: 16px;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
@@ -1127,8 +1129,8 @@ button.livePendingSession:hover {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-left: auto;
-  padding-left: 16px;
+  margin-inline-start: auto;
+  padding-inline-start: 16px;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
@@ -1251,15 +1253,15 @@ button.livePendingSession:hover {
   flex: 0 0 auto;
   align-items: center;
   gap: 2px;
-  margin-left: auto;
-  padding-left: 8px;
+  margin-inline-start: auto;
+  padding-inline-start: 8px;
 }
 
 .sessionText {
   position: relative;
   min-width: 0;
   flex: 1 1 auto;
-  margin-right: 4px;
+  margin-inline-end: 4px;
   overflow: hidden;
   color: currentColor;
   font-size: 13px;
@@ -1272,6 +1274,15 @@ button.livePendingSession:hover {
   mask-image: linear-gradient(to right, #000 calc(100% - 10px), transparent);
   -webkit-mask-image: linear-gradient(
     to right,
+    #000 calc(100% - 10px),
+    transparent
+  );
+}
+
+:global([dir='rtl']) .sessionText[data-web-shell-title-overflow] {
+  mask-image: linear-gradient(to left, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(
+    to left,
     #000 calc(100% - 10px),
     transparent
   );
@@ -1305,7 +1316,7 @@ button.livePendingSession:hover {
 .sessionStatusSlot {
   position: absolute;
   top: 50%;
-  left: 7px;
+  inset-inline-start: 7px;
   width: 18px;
   height: 18px;
   display: inline-flex;
@@ -1350,7 +1361,7 @@ button.livePendingSession:hover {
 .collapsedSessionStatusDot {
   position: absolute;
   top: 1px;
-  right: 1px;
+  inset-inline-end: 1px;
   width: 6px;
   height: 6px;
   border-radius: 999px;
@@ -1403,7 +1414,7 @@ button.livePendingSession:hover {
   position: relative;
   flex: 0 0 auto;
   height: 30px;
-  margin-left: auto;
+  margin-inline-start: auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -1419,7 +1430,7 @@ button.livePendingSession:hover {
       .sessionSourceIcon
     )
   ) {
-    padding-right: 10px;
+    padding-inline-end: 10px;
   }
 }
 
@@ -1596,6 +1607,19 @@ button.livePendingSession:hover {
   }
 }
 
+@keyframes sessionTitleScrollRtl {
+  to {
+    transform: translateX(var(--session-title-scroll-distance, 0px));
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :global([dir='rtl']) .sessionRow:hover .sessionTextInner,
+  :global([dir='rtl']) .sessionRow:focus-within .sessionTextInner {
+    animation-name: sessionTitleScrollRtl;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sessionRow:hover .sessionTextInner,
   .sessionRow:focus-within .sessionTextInner {
@@ -1730,7 +1754,7 @@ button.livePendingSession:hover {
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 13px;
   line-height: 20px;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -1849,11 +1873,12 @@ button.livePendingSession:hover {
   color: var(--muted-foreground);
   font-size: 12px;
   line-height: 18px;
-  text-align: left;
+  text-align: start;
 }
 
 .notice {
-  padding: 4px 8px 4px 26px;
+  padding-block: 4px;
+  padding-inline: 26px 8px;
 }
 
 .retry {
@@ -1987,9 +2012,8 @@ button.livePendingSession:hover {
 .footer {
   position: absolute;
   z-index: 5;
-  right: 12px;
+  inset-inline: 12px;
   bottom: 4px;
-  left: 12px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -2006,9 +2030,8 @@ button.livePendingSession:hover {
 
 .footerVersion {
   position: absolute;
-  right: 0;
+  inset-inline: 0;
   bottom: calc(100% + 8px);
-  left: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2037,7 +2060,7 @@ button.livePendingSession:hover {
 
 .footerActions {
   flex: 0 0 auto;
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .footerButtonLabel {
@@ -2103,8 +2126,8 @@ button.livePendingSession:hover {
   align-items: center;
   width: 100%;
   gap: 2px;
-  margin-right: 0;
-  padding-right: 0;
+  margin-inline-end: 0;
+  padding-inline-end: 0;
   margin-bottom: 220px;
   scrollbar-gutter: auto;
   /* A visible scrollbar inside the 32px rail has no value and would
@@ -2129,8 +2152,8 @@ button.livePendingSession:hover {
 .collapsed .sessionList {
   align-items: center;
   width: 100%;
-  margin-right: 0;
-  padding-right: 0;
+  margin-inline-end: 0;
+  padding-inline-end: 0;
 }
 
 .collapsed .footer {
@@ -2140,14 +2163,13 @@ button.livePendingSession:hover {
 .collapsed .footerPrimary,
 .collapsed .footerActions {
   flex-direction: column;
-  margin-left: 0;
+  margin-inline-start: 0;
 }
 
 .sidebar:not(.railLayout) > .footer {
   position: relative;
-  right: auto;
+  inset-inline: auto;
   bottom: auto;
-  left: auto;
   width: 100%;
   margin-top: auto;
 }
@@ -2191,7 +2213,7 @@ button.livePendingSession:hover {
 .resizeHandle {
   position: absolute;
   top: 0;
-  right: -3px;
+  inset-inline-end: -3px;
   bottom: 0;
   width: 6px;
   cursor: col-resize;
@@ -2201,7 +2223,7 @@ button.livePendingSession:hover {
 .resizeHandle::after {
   position: absolute;
   top: 0;
-  right: 2px;
+  inset-inline-end: 2px;
   bottom: 0;
   width: 1px;
   background: transparent;
@@ -2258,7 +2280,7 @@ button.livePendingSession:hover {
   font: inherit;
   font-size: 13px;
   line-height: 20px;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -2365,7 +2387,7 @@ button.livePendingSession:hover {
 }
 
 .railLayout {
-  border-right: 0;
+  border-inline-end: 0;
   flex-direction: row;
   padding: 0;
   align-items: stretch;
@@ -2387,7 +2409,7 @@ button.livePendingSession:hover {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: none;
-  border-right: 1px solid var(--sidebar-border);
+  border-inline-end: 1px solid var(--sidebar-border);
 }
 
 .railLayout .railPrimary,
@@ -2450,7 +2472,7 @@ button.livePendingSession:hover {
   margin-top: auto;
 }
 .railLayout .homeColumn {
-  border-right: 1px solid var(--sidebar-border);
+  border-inline-end: 1px solid var(--sidebar-border);
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
@@ -2586,5 +2608,5 @@ button.livePendingSession:hover {
 
 .homePopover .homeColumn {
   padding: 12px;
-  border-right: 0;
+  border-inline-end: 0;
 }

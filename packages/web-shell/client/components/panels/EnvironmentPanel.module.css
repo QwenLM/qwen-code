@@ -4,7 +4,8 @@
   width: 320px;
   max-height: calc(100% - 24px);
   min-height: 0;
-  margin: 12px 12px 12px 0;
+  margin-block: 12px;
+  margin-inline: 0 12px;
   align-self: flex-start;
   overflow-y: auto;
   border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
@@ -16,7 +17,7 @@
 .floating {
   position: absolute;
   top: 12px;
-  right: 12px;
+  inset-inline-end: 12px;
   z-index: 30;
   width: min(320px, calc(100% - 24px));
   max-height: calc(100% - 24px);
@@ -53,7 +54,7 @@
   font: inherit;
   font-size: 13px;
   font-weight: 400;
-  text-align: left;
+  text-align: start;
 }
 
 .sectionHeaderRow {
@@ -120,15 +121,15 @@
   box-sizing: border-box;
   align-items: center;
   gap: 10px;
-  margin-right: -6px;
-  margin-left: -6px;
-  padding: 5px 12px 5px 6px;
+  margin-inline: -6px;
+  padding-block: 5px;
+  padding-inline: 6px 12px;
   border: 0;
   border-radius: 8px;
   background: transparent;
   color: var(--foreground);
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 button.row {
@@ -180,7 +181,7 @@ button.row:disabled {
 
 .value {
   min-width: 0;
-  margin-left: auto;
+  margin-inline-start: auto;
   overflow: hidden;
   color: var(--muted-foreground);
   font-size: 12px;
@@ -202,8 +203,7 @@ button.row:disabled {
   min-width: 0;
   align-items: center;
   gap: 8px;
-  margin-right: -6px;
-  margin-left: -6px;
+  margin-inline: -6px;
   padding: 6px;
   border: 0;
   border-radius: 8px;
@@ -212,7 +212,7 @@ button.row:disabled {
   cursor: pointer;
   font: inherit;
   font-size: 12px;
-  text-align: left;
+  text-align: start;
 }
 
 .task:hover,
@@ -322,8 +322,7 @@ button.row:disabled {
   min-width: 0;
   align-items: center;
   gap: 8px;
-  margin-right: -6px;
-  margin-left: -6px;
+  margin-inline: -6px;
   padding: 5px 6px;
   border: 0;
   border-radius: 8px;
@@ -332,7 +331,7 @@ button.row:disabled {
   cursor: pointer;
   font: inherit;
   font-size: 12px;
-  text-align: left;
+  text-align: start;
 }
 
 .attachmentFile:hover,

@@ -198,6 +198,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     JSON: 'json',
     STREAM_JSON: 'stream-json',
   },
+  ToolNames: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).ToolNames,
   Kind: {
     Read: 'read',
     Edit: 'edit',

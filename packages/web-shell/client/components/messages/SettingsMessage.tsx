@@ -587,7 +587,7 @@ function OutputLanguageCombobox({
         <div
           role="listbox"
           id={listId}
-          className="absolute left-0 top-full z-20 mt-1 max-h-64 w-[min(240px,80vw)] overflow-y-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
+          className="absolute start-0 top-full z-20 mt-1 max-h-64 w-[min(240px,80vw)] overflow-y-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
           // Keep focus in the input so clicking an option does not commit the
           // typed draft first.
           onMouseDown={(event) => event.preventDefault()}
@@ -598,7 +598,7 @@ function OutputLanguageCombobox({
               id={`${listId}-${index}`}
               role="option"
               aria-selected={index === activeIndex}
-              className={`flex w-full cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-sm ${
+              className={`flex w-full cursor-pointer items-center rounded-sm px-2 py-1.5 text-start text-sm ${
                 index === activeIndex
                   ? 'bg-accent text-accent-foreground'
                   : 'hover:bg-accent/60'
@@ -1181,7 +1181,7 @@ export function SettingsMessage({
           className="grid min-h-0 flex-1 grid-cols-[190px_minmax(0,1fr)] outline-none max-md:grid-cols-1"
         >
           <nav
-            className="flex min-h-0 flex-col gap-1 overflow-y-auto border-r border-border bg-muted/20 p-3 max-md:flex-row max-md:overflow-x-auto max-md:border-r-0 max-md:border-b"
+            className="flex min-h-0 flex-col gap-1 overflow-y-auto border-e border-border bg-muted/20 p-3 max-md:flex-row max-md:overflow-x-auto max-md:border-e-0 max-md:border-b"
             aria-label={t('settings.title')}
           >
             {categories.map((category) => (
@@ -1197,7 +1197,7 @@ export function SettingsMessage({
                 onClick={() => setActiveCategory(category.id)}
               >
                 <CategoryIcon category={category.id} />
-                <span className="min-w-0 flex-1 truncate text-left">
+                <span className="min-w-0 flex-1 truncate text-start">
                   {category.label}
                 </span>
                 {category.id !== 'Archived' && (

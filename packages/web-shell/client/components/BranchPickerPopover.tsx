@@ -2377,7 +2377,7 @@ function RemotesView({
           aria-label={t('branchPicker.remotes.back')}
           data-testid="remotes-back"
         >
-          <ArrowLeftIcon size={14} />
+          <ArrowLeftIcon size={14} className="rtl:-scale-x-100" />
         </button>
         <span className={styles.remotesTitle}>
           {t('branchPicker.remotes.title')}

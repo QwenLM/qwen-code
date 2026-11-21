@@ -7,3 +7,4 @@
 export const TOKEN_USAGE_MESSAGES_EN = {};
 export const TOKEN_USAGE_MESSAGES_ZH = {};
 export const TOKEN_USAGE_MESSAGES_RU = {};
+export const TOKEN_USAGE_MESSAGES_AR = {};

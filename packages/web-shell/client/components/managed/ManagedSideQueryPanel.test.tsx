@@ -52,6 +52,7 @@ describe('ManagedSideQueryPanel', () => {
     ['zh-CN', 'BTW 追问', '继续追问'],
     ['zh-TW', 'BTW 追問', '繼續追問'],
     ['ru', 'BTW', 'Задать уточняющий вопрос'],
+    ['ar', 'سؤال جانبي', 'اطرح سؤال متابعة'],
   ] as const)(
     'reads the %s column of the label table',
     (language, title, question) => {

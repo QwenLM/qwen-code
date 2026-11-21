@@ -1,9 +1,17 @@
+import { MachineText } from '../ui/machine-text';
 import {
   useDaemonAvailability,
   useDaemonAvailabilityController,
 } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskRuntime,
@@ -257,7 +265,7 @@ function rowLabel(
   task: DaemonSessionTaskStatus,
   blocking: boolean,
   workflowOnly = false,
-): string {
+): ReactNode {
   switch (task.kind) {
     case 'agent':
       // `blocking` comes from computeUserBlockingIds — an agent is tagged
@@ -267,7 +275,11 @@ function rowLabel(
       // a background parent blocks that parent, not the user).
       return blocking ? `[blocking] ${task.label}` : task.label;
     case 'shell':
-      return `[shell] ${task.command}`;
+      return (
+        <>
+          [shell] <MachineText>{task.command}</MachineText>
+        </>
+      );
     case 'monitor':
       return `[monitor] ${task.description}`;
     case 'workflow':
@@ -390,7 +402,7 @@ export function TasksStatusMessage({
   onOpenSubagent?: OpenSubagentDetails;
   onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
 }) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const available = useDaemonAvailability() === 'available';
   const availability = useDaemonAvailabilityController();
   const documentMode = useTranscriptRenderMode() === 'document';
@@ -755,7 +767,7 @@ export function TasksStatusMessage({
         return;
       }
 
-      if (event.key === 'ArrowLeft') {
+      if (event.key === (isRtl ? 'ArrowRight' : 'ArrowLeft')) {
         event.preventDefault();
         event.stopPropagation();
         if (step === 'detail') {
@@ -1052,7 +1064,7 @@ export function TasksStatusMessage({
                     className={styles.nameCell}
                     style={
                       indentLevels > 0
-                        ? { paddingLeft: `${indentLevels * 16}px` }
+                        ? { paddingInlineStart: `${indentLevels * 16}px` }
                         : undefined
                     }
                   >
@@ -1180,12 +1192,16 @@ export function TasksStatusMessage({
 function detailTitle(
   task: DaemonSessionTaskStatus,
   t: ReturnType<typeof useI18n>['t'],
-): string {
+): ReactNode {
   switch (task.kind) {
     case 'agent':
       return `${task.subagentType ? localizeAgentTypeName(task.subagentType, t) : t('common.agent')} › ${task.label}`;
     case 'shell':
-      return `${t('tasks.kind.shell')} › ${task.command}`;
+      return (
+        <>
+          {t('tasks.kind.shell')} › <MachineText>{task.command}</MachineText>
+        </>
+      );
     case 'monitor':
       return `${t('tasks.kind.monitor')} › ${task.description}`;
     case 'workflow':
@@ -1565,7 +1581,9 @@ export function ShellTaskDetail({
               label={t('tasks.detail.workingDir')}
             />
           </div>
-          <div className={styles.shellFieldValue}>{currentTask.cwd}</div>
+          <div className={styles.shellFieldValue} dir="ltr">
+            {currentTask.cwd}
+          </div>
         </div>
         {currentTask.outputFile && (
           <div className={styles.monitorCommandSection}>
@@ -1578,7 +1596,7 @@ export function ShellTaskDetail({
                 label={t('tasks.detail.outputFile')}
               />
             </div>
-            <div className={styles.shellFieldValue}>
+            <div className={styles.shellFieldValue} dir="ltr">
               {currentTask.outputFile}
             </div>
           </div>
@@ -2029,18 +2047,27 @@ function TaskDetail({
 
       {task.kind === 'shell' && (
         <>
-          <DetailField label={t('tasks.detail.workingDir')} value={task.cwd} />
+          <DetailField
+            label={t('tasks.detail.workingDir')}
+            value={task.cwd}
+            machine
+          />
           {task.outputFile && (
             <DetailField
               label={t('tasks.detail.outputFile')}
               value={task.outputFile}
+              machine
             />
           )}
         </>
       )}
 
       {task.kind === 'monitor' && (
-        <DetailField label={t('tasks.detail.command')} value={task.command} />
+        <DetailField
+          label={t('tasks.detail.command')}
+          value={task.command}
+          machine
+        />
       )}
 
       {task.kind === 'agent' && task.subagentType && (
@@ -2123,6 +2150,7 @@ function TaskDetail({
         <DetailField
           label={t('tasks.detail.outputFile')}
           value={task.outputFile}
+          machine
         />
       )}
 
@@ -2177,11 +2205,21 @@ function TaskDetail({
   );
 }
 
-function DetailField({ label, value }: { label: string; value: string }) {
+function DetailField({
+  label,
+  value,
+  machine = false,
+}: {
+  label: string;
+  value: string;
+  machine?: boolean;
+}) {
   return (
     <div className={styles.detailField}>
       <div className={styles.detailFieldLabel}>{label}</div>
-      <div className={styles.detailContent}>{value}</div>
+      <div className={styles.detailContent} dir={machine ? 'ltr' : undefined}>
+        {value}
+      </div>
     </div>
   );
 }

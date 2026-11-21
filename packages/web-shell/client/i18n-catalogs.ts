@@ -6,4 +6,5 @@ export const lazyCatalogs = new Map<WebShellLanguage, () => Promise<Messages>>([
   ['zh-CN', () => import('./i18n-zh-cn.js').then(({ ZH }) => ZH)],
   ['zh-TW', () => import('./i18n-zh-tw.js').then(({ ZH_TW }) => ZH_TW)],
   ['ru', () => import('./i18n-ru.js').then(({ RU }) => RU)],
+  ['ar', () => import('./i18n-ar.js').then(({ AR }) => AR)],
 ]);

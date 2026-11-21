@@ -530,7 +530,7 @@ export function ChannelsManagerPage({
             onClick={onClose}
             aria-label={t('channels.action.back')}
           >
-            <ArrowLeftIcon />
+            <ArrowLeftIcon className="rtl:-scale-x-100" />
           </Button>
         )}
         <h1 ref={initialFocusRef} tabIndex={-1} className={styles.title}>
@@ -937,7 +937,7 @@ export function ChannelsManagerPage({
               <Button
                 key={descriptor.type}
                 variant="outline"
-                className="h-auto flex-col items-start gap-1 whitespace-normal py-3 text-left"
+                className="h-auto flex-col items-start gap-1 whitespace-normal py-3 text-start"
                 onClick={() => {
                   setEditor({ workspaceCwd: activeWorkspaceCwd!, descriptor });
                   setMethodChoices(undefined);

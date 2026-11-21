@@ -27,7 +27,7 @@
   border-bottom: 1px solid var(--border);
   cursor: pointer;
   font: inherit;
-  text-align: left;
+  text-align: start;
   color: inherit;
   text-decoration: none;
 }
@@ -109,7 +109,7 @@
 }
 
 .prMeta {
-  padding-left: 20px;
+  padding-inline-start: 20px;
   font-size: 11px;
   color: var(--muted-foreground);
   overflow: hidden;

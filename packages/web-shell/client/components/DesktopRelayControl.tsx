@@ -225,6 +225,52 @@ const COPY = {
     'desktopRelay.error.unreachable':
       'Не удалось связаться с настольным реле на этом компьютере.',
   },
+  ar: {
+    'desktopRelay.title': 'هذا الحاسوب',
+    'desktopRelay.trigger': 'استخدام هذا الحاسوب',
+    'desktopRelay.hint':
+      'يتيح لهذه الجلسة تشغيل الكود ورؤية الشاشة والتحكم بها على هذا الحاسوب لاستخدام Computer Use. يتطلب كل اتصال موافقة في مربع الحوار الذي يظهر على هذا الحاسوب.',
+    'desktopRelay.connect': 'ربط هذا الحاسوب',
+    'desktopRelay.disconnect': 'قطع الاتصال',
+    'desktopRelay.checkAgain': 'إعادة الفحص',
+    'desktopRelay.copy': 'نسخ الأمر',
+    'desktopRelay.copied': 'تم النسخ',
+    'desktopRelay.setupHint':
+      'إذا لم يكن مثبّتاً، شغّل هذا الأمر مرة واحدة في طرفية على هذا الحاسوب ثم افحص مجدداً. وإذا كان مثبّتاً بالفعل، تحقق من أخطاء اتصال المتصفح. يسجّل مقبس launchd على macOS ولا يبقي أي عملية تعمل في الخلفية.',
+    'desktopRelay.approveHint':
+      'وافق على الطلب في مربع الحوار الذي فُتح على هذا الحاسوب.',
+    'desktopRelay.otherSessionHint':
+      'هذا الحاسوب متصل بجلسة أخرى. سيحل الاتصال هنا محل ذلك الاتصال.',
+    'desktopRelay.needsSessionHint':
+      'ابدأ جلسة أولاً. يرتبط الاتصال بجلسة واحدة فقط.',
+    'desktopRelay.status.checking': 'جارٍ الفحص…',
+    'desktopRelay.status.permissionRequired': 'مطلوب إذن المتصفح',
+    'desktopRelay.status.missing': 'لم يُكتشف المرحّل',
+    'desktopRelay.status.unknown': 'حالة الاتصال غير معروفة',
+    'desktopRelay.unknownHint':
+      'إذا كان متصلاً مسبقاً، فقد تتحكم تلك الجلسة بهذا الحاسوب ما دامت مفتوحة. لطلب فصل محلي دون المتصفح أو الشبكة، شغّل المرحّل المثبّت في طرفية على هذا الحاسوب (في التثبيتات المخصصة عدّل مسار الملف التنفيذي وأضف ‎--home <dir>):',
+    'desktopRelay.status.idle': 'غير متصل',
+    'desktopRelay.status.awaitingApproval': 'بانتظار الموافقة',
+    'desktopRelay.status.connecting': 'جارٍ الاتصال…',
+    'desktopRelay.status.connected': 'متصل',
+    'desktopRelay.status.otherSession': 'قيد الاستخدام في جلسة أخرى',
+    'desktopRelay.status.failed': 'فشل',
+    'desktopRelay.status.unavailable': 'غير متاح هنا',
+    'desktopRelay.status.needsSession': 'في انتظار جلسة',
+    'desktopRelay.blocker.insecureContext':
+      'يسمح المتصفح فقط للصفحة الآمنة بالوصول إلى هذا الحاسوب. افتح Web Shell عبر https، أو مرّر منفذ الخادم الخفي عبر SSH وافتح http://localhost:<port>.',
+    'desktopRelay.blocker.unsupportedDaemon':
+      'لا يعلن هذا الخادم الخفي عن قناة الأدوات العكسية (client_mcp_over_ws). شغّله مع QWEN_SERVE_CLIENT_MCP_OVER_WS=1.',
+    'desktopRelay.blocker.workspaceIneligible':
+      'لا يمكن لمساحة عمل هذه المحادثة استخدام هذا الحاسوب (مساحة عمل غير موثوقة أو live).',
+    'desktopRelay.blocker.workspaceResolving':
+      'لم يُعرف بعد أي مساحة عمل تنتمي إليها هذه المحادثة.',
+    'desktopRelay.permissionHint':
+      'اسمح بالوصول إلى الشبكة المحلية لهذا الموقع في نافذة المتصفح أو إعدادات الموقع، ثم افحص مجدداً.',
+    'desktopRelay.error.denied': 'تم رفض الطلب على هذا الحاسوب.',
+    'desktopRelay.error.unreachable':
+      'تعذر الوصول إلى مرحّل سطح المكتب على هذا الحاسوب.',
+  },
 } as const;
 
 type CopyKey = keyof (typeof COPY)['en'];
@@ -408,7 +454,7 @@ export function DesktopRelayPanel({
       <div className="flex items-center gap-2">
         {BUSY.includes(phase) ? <Spinner /> : null}
         <h2 className="text-sm font-medium">{t('desktopRelay.title')}</h2>
-        <span className="ml-auto text-xs text-muted-foreground">
+        <span className="ms-auto text-xs text-muted-foreground">
           {t(STATUS_KEY[phase])}
         </span>
       </div>
@@ -432,7 +478,10 @@ export function DesktopRelayPanel({
           <p className="text-xs text-muted-foreground">
             {t('desktopRelay.unknownHint')}
           </p>
-          <code className="block break-all rounded bg-muted px-2 py-1 font-mono text-xs">
+          <code
+            dir="ltr"
+            className="block break-all rounded bg-muted px-2 py-1 font-mono text-xs"
+          >
             ~/.qwen/desktop-relay/node_modules/.bin/node-repl-mcp desktop-relay
             disconnect
           </code>
@@ -454,7 +503,10 @@ export function DesktopRelayPanel({
           <p className="text-xs text-muted-foreground">
             {t('desktopRelay.setupHint')}
           </p>
-          <code className="block break-all rounded bg-muted px-2 py-1 font-mono text-xs">
+          <code
+            dir="ltr"
+            className="block break-all rounded bg-muted px-2 py-1 font-mono text-xs"
+          >
             {installCommand}
           </code>
           <div className="flex gap-2">
@@ -726,7 +778,7 @@ export function DesktopRelayControl({
             <span
               aria-hidden="true"
               className={cn(
-                'absolute right-1 bottom-1 h-1.5 w-1.5 rounded-full',
+                'absolute end-1 bottom-1 h-1.5 w-1.5 rounded-full',
                 status.phase === 'connected'
                   ? 'bg-primary'
                   : 'bg-muted-foreground',

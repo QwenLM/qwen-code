@@ -48,7 +48,7 @@
 .tip {
   position: absolute;
   bottom: 2px;
-  right: 4px;
+  inset-inline-end: 4px;
   z-index: 5;
   color: var(--muted-foreground);
   background: var(--background);
@@ -98,7 +98,7 @@
   align-items: center;
   gap: 4px;
   margin-top: -24px;
-  margin-right: 4px;
+  margin-inline-end: 4px;
   z-index: 5;
   opacity: 0;
   transition: opacity 0.12s ease;

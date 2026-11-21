@@ -326,8 +326,20 @@ describe('WebShellTranscript contract', () => {
       content: getTranslator('zh-CN')('request.cancelled'),
     });
 
+    view.render(<WebShellTranscript blocks={blocks} language="ar" />);
+    expect(latestObservation().props.messages[0]).toMatchObject({
+      content: getTranslator('ar')('request.cancelled'),
+    });
+
     view.render(<WebShellTranscript blocks={[]} language="zh-CN" />);
     expect(latestObservation().props.messages).toEqual([]);
+  });
+
+  it('sets dir="rtl" and lang="ar" when language is ar', () => {
+    mount(<WebShellTranscript blocks={[]} language="ar" />);
+    const root = document.querySelector<HTMLElement>('[data-web-shell-root]');
+    expect(root?.lang).toBe('ar');
+    expect(root?.dir).toBe('rtl');
   });
 
   it('contains failures from the message tree in the public root boundary', () => {

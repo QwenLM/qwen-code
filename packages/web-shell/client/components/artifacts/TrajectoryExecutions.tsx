@@ -379,7 +379,7 @@ export function TrajectoryExecutions({
                             undefined
                           }
                           style={{
-                            left: `${span > 0 ? ((point - from) / span) * 100 : 0}%`,
+                            insetInlineStart: `${span > 0 ? ((point - from) / span) * 100 : 0}%`,
                             width: `${span > 0 && end !== undefined && start !== undefined ? (Math.max(0, end - start) / span) * 100 : 0}%`,
                           }}
                         />

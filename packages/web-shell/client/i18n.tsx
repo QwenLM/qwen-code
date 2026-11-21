@@ -27,10 +27,22 @@ import {
   useSyncExternalStore,
   type PropsWithChildren,
 } from 'react';
+import { Direction } from 'radix-ui';
 import { eagerCatalogs, lazyCatalogs } from './i18n-catalogs.js';
-import { WEB_SHELL_LANGUAGES, type WebShellLanguage } from './i18n-language.js';
+import {
+  WEB_SHELL_LANGUAGES,
+  isRtlLanguage,
+  languageDirection,
+  type WebShellLanguage,
+} from './i18n-language.js';
 
-export { WEB_SHELL_LANGUAGES, type WebShellLanguage } from './i18n-language.js';
+export {
+  WEB_SHELL_LANGUAGES,
+  isRtlLanguage,
+  languageDirection,
+  type LanguageDirection,
+  type WebShellLanguage,
+} from './i18n-language.js';
 
 export type MessageValue =
   | string
@@ -5471,13 +5483,16 @@ const LANGUAGE_LABELS: Record<WebShellLanguage, string> = {
   'zh-CN': '中文 [zh-CN]',
   'zh-TW': '繁體中文 [zh-TW]',
   ru: 'Русский [ru]',
+  ar: 'العربية [ar]',
 };
 
 const Context = createContext<{
   language: WebShellLanguage;
+  isRtl: boolean;
   t: (key: string, vars?: Record<string, string | number>) => string;
 }>({
   language: 'en',
+  isRtl: false,
   t: (key) => key,
 });
 
@@ -5506,6 +5521,15 @@ function isSimplifiedChineseTag(normalized: string): boolean {
   );
 }
 
+function isArabicTag(normalized: string): boolean {
+  return (
+    isRtlLanguage(normalized) ||
+    normalized === 'arabic' ||
+    normalized === 'العربية' ||
+    normalized === 'عربي'
+  );
+}
+
 export function normalizeLanguage(
   value: string | undefined | null,
 ): WebShellLanguage {
@@ -5519,6 +5543,9 @@ export function normalizeLanguage(
   // must not fall through to en.
   if (normalized.startsWith('ru') || normalized === 'русский') {
     return 'ru';
+  }
+  if (isArabicTag(normalized)) {
+    return 'ar';
   }
   return 'en';
 }
@@ -5552,6 +5579,9 @@ export function languageSettingToWebShellLanguage(
   // (ru-UA, …) map to ru instead of an unknown setting.
   if (normalized.startsWith('ru') || normalized === 'русский') {
     return 'ru';
+  }
+  if (isArabicTag(normalized)) {
+    return 'ar';
   }
   if (
     normalized === 'en' ||
@@ -5599,10 +5629,20 @@ export function I18nProvider({
   language,
   children,
 }: PropsWithChildren<{ language: WebShellLanguage }>) {
+  const dir = languageDirection(language);
   const t = useTranslator(language);
-  const value = useMemo(() => ({ language, t }), [language, t]);
+  const value = useMemo(
+    () => ({ language, isRtl: dir === 'rtl', t }),
+    [dir, language, t],
+  );
 
-  return <Context.Provider value={value}>{children}</Context.Provider>;
+  return (
+    <Context.Provider value={value}>
+      <Direction.DirectionProvider dir={dir}>
+        {children}
+      </Direction.DirectionProvider>
+    </Context.Provider>
+  );
 }
 
 export function useI18n() {

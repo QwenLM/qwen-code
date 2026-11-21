@@ -32,7 +32,7 @@
   border: 0;
   cursor: pointer;
   font: inherit;
-  text-align: left;
+  text-align: start;
   color: inherit;
 }
 
@@ -105,6 +105,7 @@
 }
 
 .diffLine {
+  direction: ltr;
   display: flex;
   min-height: 18px;
   line-height: 18px;

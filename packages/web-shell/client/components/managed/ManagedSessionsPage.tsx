@@ -293,10 +293,7 @@ export function ManagedSessionsPage({
   return <p role="status">{t('managed.unavailable')}</p>;
 }
 
-const FAILURE_MESSAGES: Record<
-  string,
-  readonly [string, string, string, string]
-> = {
+const FAILURE_MESSAGES = {
   model_payment_required: [
     'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
     '模型接口要求支付（HTTP 402），可能是余额不足或计费受限。请检查供应商账户余额与计费状态后重试。',
@@ -351,6 +348,26 @@ const FAILURE_MESSAGES: Record<
     '本輪執行失敗，請根據當前會話檢查服務日誌以定位具體原因。',
     'Ход не удался. Проверьте журналы сервера для этой сессии, чтобы найти причину.',
   ],
+} as const satisfies Record<string, readonly [string, string, string, string]>;
+
+const FAILURE_AR_MESSAGES: Record<keyof typeof FAILURE_MESSAGES, string> = {
+  model_payment_required:
+    'يتطلب واجهة برمجة النموذج الدفع (HTTP 402). تحقق من رصيد حساب المزوّد والفوترة قبل إعادة المحاولة.',
+  model_authentication_failed:
+    'فشلت مصادقة واجهة برمجة النموذج (HTTP 401). تحقق من بيانات اعتماد المزوّد المهيأة.',
+  model_access_denied:
+    'تم رفض الوصول إلى واجهة برمجة النموذج (HTTP 403). تحقق من حساب المزوّد وأذونات النموذج.',
+  model_request_timeout:
+    'انتهت مهلة طلب واجهة برمجة النموذج. حاول مرة أخرى لاحقاً.',
+  model_rate_limited:
+    'تم تجاوز حد المعدل لواجهة برمجة النموذج (HTTP 429). انتظر وحاول لاحقاً.',
+  model_request_rejected:
+    'رفضت واجهة برمجة النموذج الطلب. تحقق من تهيئة النموذج والإدخال.',
+  model_service_unavailable:
+    'خدمة واجهة برمجة النموذج غير متاحة. حاول مرة أخرى لاحقاً.',
+  model_request_failed:
+    'فشل طلب واجهة برمجة النموذج. افحص سجلات الخادم لهذه الجلسة قبل إعادة المحاولة.',
+  hosted_turn_failed: 'فشل الدور. افحص سجلات الخادم لهذه الجلسة لتحديد السبب.',
 };
 
 function ManagedSessionsContent({
@@ -871,15 +888,21 @@ function ManagedSessionsContent({
     [messageProjector, detail.events, truncatedLabel],
   );
   const failureMessage = summary?.failure
-    ? (FAILURE_MESSAGES[summary.failure.code]?.[
-        language === 'zh-TW'
-          ? 2
-          : language === 'zh-CN'
-            ? 1
-            : language === 'ru'
-              ? 3
-              : 0
-      ] ?? summary.failure.message)
+    ? ((language === 'ar'
+        ? FAILURE_AR_MESSAGES[
+            summary.failure.code as keyof typeof FAILURE_MESSAGES
+          ]
+        : FAILURE_MESSAGES[
+            summary.failure.code as keyof typeof FAILURE_MESSAGES
+          ]?.[
+            language === 'zh-TW'
+              ? 2
+              : language === 'zh-CN'
+                ? 1
+                : language === 'ru'
+                  ? 3
+                  : 0
+          ]) ?? summary.failure.message)
     : undefined;
   const recoveryError =
     recovery.value &&
@@ -1401,7 +1424,9 @@ function ManagedSessionsContent({
               ? '此会话暂不支持 BTW/回顾。'
               : language === 'ru'
                 ? 'BTW/обзор недоступны для этой сессии.'
-                : 'BTW/recap is unavailable for this session.',
+                : language === 'ar'
+                  ? 'الأسئلة الجانبية والملخص غير متاحين لهذه الجلسة.'
+                  : 'BTW/recap is unavailable for this session.',
           true,
         );
         return;
@@ -1418,7 +1443,9 @@ function ManagedSessionsContent({
               ? 'BTW 仅支持文本问题，/recap 不接受参数。'
               : language === 'ru'
                 ? 'BTW принимает только текст; /recap не принимает аргументы.'
-                : 'BTW accepts text only; /recap accepts no arguments.',
+                : language === 'ar'
+                  ? 'يقبل BTW نصاً فقط؛ ولا يقبل /recap أي وسائط.'
+                  : 'BTW accepts text only; /recap accepts no arguments.',
           true,
         );
         return;
@@ -1436,7 +1463,9 @@ function ManagedSessionsContent({
               ? '此会话暂不支持 BTW/回顾生成。'
               : language === 'ru'
                 ? 'Генерация BTW/обзора недоступна для этой сессии.'
-                : 'BTW/recap generation is unavailable for this session.',
+                : language === 'ar'
+                  ? 'توليد الأسئلة الجانبية/الملخص غير متاح لهذه الجلسة.'
+                  : 'BTW/recap generation is unavailable for this session.',
           true,
         );
         return;
@@ -1698,7 +1727,9 @@ function ManagedSessionsContent({
                 ? '回顾'
                 : language === 'ru'
                   ? 'Обзор'
-                  : 'Recap'}
+                  : language === 'ar'
+                    ? 'ملخص'
+                    : 'Recap'}
           </Button>
         )}
       </>
@@ -2127,7 +2158,7 @@ function ManagedSessionsContent({
                       ? 'secondary'
                       : 'ghost'
                   }
-                  className="h-auto min-w-0 flex-1 shrink justify-start py-2 text-left"
+                  className="h-auto min-w-0 flex-1 shrink justify-start py-2 text-start"
                   aria-current={
                     navigationActive && sessionId === session.sessionId
                       ? 'page'
@@ -2717,7 +2748,7 @@ function ManagedSessionsContent({
                         type="button"
                         variant={selected ? 'secondary' : 'outline'}
                         aria-pressed={selected}
-                        className="h-auto max-w-full flex-col items-start whitespace-normal text-left"
+                        className="h-auto max-w-full flex-col items-start whitespace-normal text-start"
                         onClick={() => approvals.select(action)}
                       >
                         <span className="text-xs text-muted-foreground">
@@ -2939,7 +2970,9 @@ function ManagedSessionsContent({
                                 ? '私下继续追问当前会话'
                                 : language === 'ru'
                                   ? 'Задать частный уточняющий вопрос'
-                                  : 'Ask a private follow-up',
+                                  : language === 'ar'
+                                    ? 'طرح سؤال متابعة خاص'
+                                    : 'Ask a private follow-up',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -2956,7 +2989,9 @@ function ManagedSessionsContent({
                                 ? '回顾已完成的对话'
                                 : language === 'ru'
                                   ? 'Обзор завершённого разговора'
-                                  : 'Recap the completed conversation',
+                                  : language === 'ar'
+                                    ? 'تلخيص المحادثة المكتملة'
+                                    : 'Recap the completed conversation',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },

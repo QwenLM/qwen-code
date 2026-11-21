@@ -151,3 +151,41 @@ export const MCP_APP_MESSAGES_RU: Record<string, Message> = {
   'mcpApp.message.unknown':
     'Не удалось подтвердить приём. Перед повторной отправкой проверьте исходную сессию. Этот запрос не будет повторён автоматически.',
 };
+
+export const MCP_APP_MESSAGES_AR: Record<string, Message> = {
+  'mcpApp.generatedUi.reset': 'إعادة الفتح وإعادة الضبط',
+  'mcpApp.generatedUi.reopen': 'إعادة فتح العرض التفاعلي',
+  'mcpApp.generatedUi.openElsewhere': 'مفتوح بالفعل في مكان آخر.',
+  'mcpApp.generatedUi.reopenNotice':
+    'تبدأ إعادة الفتح من المحتوى الأصلي وتتجاهل التفاعلات السابقة. تحقق من الجلسة الأصلية أولاً: لن يتم سحب التحليلات المرسلة بالفعل أو إعادة إرسالها تلقائياً.',
+  'mcpApp.generatedUi.unavailable':
+    'طرق العرض التفاعلية معطلة لهذه الجلسة، لذا يتم عرض الملخص فقط.',
+  'mcpApp.generatedUi.title': 'عرض تفاعلي',
+  'mcpApp.generatedUi.contextTag': ({ title } = {}) =>
+    `قيم العرض التفاعلي: ${title}`,
+  'mcpApp.generatedUi.loading': 'جارٍ تحميل العرض التفاعلي…',
+  'mcpApp.loading': 'جارٍ تحميل MCP App…',
+  'toolName.mcp__generated-ui__generated_ui_show': 'عرض تفاعلي',
+  'mcpApp.message.title': 'مراجعة رسالة App',
+  'mcpApp.message.description':
+    'يأتي هذا النص من MCP App. يبدأ الإرسال طلباً عادياً في الجلسة أدناه؛ وتظل موافقات الأدوات الاعتيادية سارية.',
+  'mcpApp.message.server': 'الخادم',
+  'mcpApp.message.resource': 'المورد',
+  'mcpApp.message.session': 'الجلسة المستهدفة',
+  'mcpApp.message.receipt': 'إيصال الموجه',
+  'mcpApp.message.send': 'إرسال إلى الجلسة',
+  'mcpApp.message.stopWaiting': 'إيقاف انتظار الإيصال',
+  'mcpApp.message.busy':
+    'الجلسة مشغولة. انتظر انتهاءها ثم أرسل الرسالة مجدداً.',
+  'mcpApp.message.reviewing': 'راجع الرسالة كاملة قبل الإرسال.',
+  'mcpApp.message.preparing': 'جارٍ تحضير الرسالة. لا يزال بإمكانك الإلغاء.',
+  'mcpApp.message.dispatched': 'جارٍ الإرسال. في انتظار تأكيد الجلسة للاستلام.',
+  'mcpApp.message.accepted':
+    'قبلت الجلسة هذا الطلب. قد يكون التحليل لا يزال قيد التشغيل.',
+  'mcpApp.message.cancelled': 'تم الإلغاء قبل الإرسال.',
+  'mcpApp.message.expired':
+    'انتهت صلاحية المراجعة قبل الإرسال. اطلب مراجعة جديدة من التطبيق.',
+  'mcpApp.message.failed': 'لم يتم قبول الرسالة. النص محفوظ هنا.',
+  'mcpApp.message.unknown':
+    'تعذر تأكيد الاستلام. تحقق من الجلسة الأصلية قبل الإرسال مجدداً. لن تتم إعادة محاولة هذا الطلب تلقائياً.',
+};

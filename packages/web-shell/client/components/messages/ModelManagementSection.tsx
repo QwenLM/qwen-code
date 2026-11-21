@@ -210,7 +210,11 @@ export function ModelManagementSection({
                 <div className={styles.modelRow} key={rowKey}>
                   <div className={styles.modelInfo}>
                     <span className={styles.modelName}>
-                      {model.name || model.baseModelId}
+                      {model.name && model.name !== model.baseModelId ? (
+                        model.name
+                      ) : (
+                        <bdi dir="ltr">{model.baseModelId}</bdi>
+                      )}
                     </span>
                     {current && (
                       <span className={styles.currentBadge}>
@@ -228,9 +232,9 @@ export function ModelManagementSection({
                       </span>
                     )}
                     {model.name && model.name !== model.baseModelId && (
-                      <span className={styles.modelId}>
+                      <bdi className={styles.modelId} dir="ltr">
                         {model.baseModelId}
-                      </span>
+                      </bdi>
                     )}
                     {model.description && (
                       <div className={styles.modelDescription}>
@@ -238,9 +242,9 @@ export function ModelManagementSection({
                       </div>
                     )}
                     {model.baseUrl && (
-                      <span className={styles.modelBaseUrl}>
+                      <bdi className={styles.modelBaseUrl} dir="ltr">
                         {model.baseUrl.split(/[?#]/)[0]}
-                      </span>
+                      </bdi>
                     )}
                     {(model.contextLimit ||
                       model.modalities ||

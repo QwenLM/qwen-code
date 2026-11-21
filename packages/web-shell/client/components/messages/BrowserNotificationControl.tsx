@@ -73,7 +73,7 @@ export function BrowserNotificationControl() {
 
   return (
     <span
-      className="ml-auto inline-flex shrink-0"
+      className="ms-auto inline-flex shrink-0"
       data-web-shell-notification-open={open || undefined}
     >
       <Popover

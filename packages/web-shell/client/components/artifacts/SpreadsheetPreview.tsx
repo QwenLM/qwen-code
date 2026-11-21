@@ -34,7 +34,7 @@ export default function SpreadsheetPreview({
   data?: Blob;
   artifactVersion?: string;
 }) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const [workbook, setWorkbook] = useState<ExcelPreviewWorkbookInfo>();
   const [selectedSheet, setSelectedSheet] = useState<{
     index: number;
@@ -186,7 +186,7 @@ export default function SpreadsheetPreview({
             disabled={!!error || sheetTabStart === 0}
             onClick={() => setSheetIndex(sheetTabStart - 1)}
           >
-            <ChevronLeftIcon />
+            <ChevronLeftIcon className="rtl:-scale-x-100" />
           </Button>
         )}
         {workbook && workbook.sheetNames.length > 0 ? (
@@ -197,10 +197,12 @@ export default function SpreadsheetPreview({
             className="-mb-px min-w-0 flex-1 justify-start gap-1 overflow-x-auto p-0 group-data-horizontal/tabs:h-6"
             onKeyDownCapture={(event) => {
               if (error) return;
+              const nextKey = isRtl ? 'ArrowLeft' : 'ArrowRight';
+              const prevKey = isRtl ? 'ArrowRight' : 'ArrowLeft';
               const next =
-                event.key === 'ArrowRight'
+                event.key === nextKey
                   ? Math.min(sheetIndex + 1, workbook.sheetNames.length - 1)
-                  : event.key === 'ArrowLeft'
+                  : event.key === prevKey
                     ? Math.max(sheetIndex - 1, 0)
                     : event.key === 'Home'
                       ? 0
@@ -242,7 +244,7 @@ export default function SpreadsheetPreview({
             disabled={!!error || sheetTabEnd === workbook.sheetNames.length}
             onClick={() => setSheetIndex(sheetTabEnd)}
           >
-            <ChevronRightIcon />
+            <ChevronRightIcon className="rtl:-scale-x-100" />
           </Button>
         )}
         {downloadUrl ? (
@@ -376,6 +378,7 @@ function SpreadsheetTable({ sheet }: { sheet: ExcelPreviewSheet }) {
   return (
     <div
       ref={scrollRef}
+      dir="ltr"
       data-web-shell-excel-scroll
       className="min-h-0 flex-1 overflow-auto border-t border-border [overflow-anchor:none]"
       tabIndex={0}

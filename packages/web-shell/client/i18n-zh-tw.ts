@@ -2859,12 +2859,12 @@ export const ZH_TW: Record<string, MessageValue> = {
   'slash.category.system': '系統',
   'language.changed': (v) => `UI 語言已切換為 ${v?.language ?? ''}`,
   'language.current': (v) => `當前 UI 語言：${v?.language ?? ''}`,
-  'language.invalid': '語言無效。可用值：en, zh-CN, zh-TW, ru',
+  'language.invalid': '語言無效。可用值：en, zh-CN, zh-TW, ru, ar',
   'language.options': '可用選項：',
   'language.set': '設定 UI 語言',
   'language.refreshFailed': 'UI 語言已儲存，但未能完全生效。',
   'language.usage':
-    '用法：/language ui [en|zh-CN|zh-TW|ru] [--project|--global] | output <language>',
+    '用法：/language ui [en|zh-CN|zh-TW|ru|ar] [--project|--global] | output <language>',
   'localCommand.noSession':
     '當前還沒有會話。請先傳送第一條訊息，再使用這個命令。',
   'localCommand.diffNoWorkspace': '當前還沒有可用於檢視變更的工作區。',

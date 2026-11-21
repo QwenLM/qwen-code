@@ -98,6 +98,28 @@ const messages: Record<WebShellLanguage, Record<string, Message>> = {
     'chat.searchUser': 'Вы',
     'chat.searchAssistant': 'Ассистент',
   },
+  ar: {
+    'chat.searchConversation': 'البحث في هذه المحادثة',
+    'chat.searchConversationPlaceholder': 'ابحث في الرسائل والكود…',
+    'chat.searchConversationHint': 'أدخل كلمة مفتاحية للعثور على محتوى سابق.',
+    'chat.searchingConversation': 'جارٍ البحث في سجل المحادثة…',
+    'chat.searchLoadedOnly':
+      'الرسائل المحمّلة فقط متاحة للبحث. حدّث Qwen Code للبحث في السجل الكامل.',
+    'chat.searchResultPosition': (vars) =>
+      `${vars?.['current']} / ${vars?.['total']} نتائج`,
+    'chat.searchNoResults': 'لا توجد رسائل مطابقة.',
+    'chat.searchPrevious': 'النتيجة السابقة',
+    'chat.searchNext': 'النتيجة التالية',
+    'chat.searchResults': 'نتائج البحث',
+    'chat.searchResultsLimited': (vars) =>
+      `عرض أول ${vars?.['count']} نتيجة. حسّن بحثك لمطابقات أكثر تحديداً.`,
+    'chat.searchFailed':
+      'تعذر البحث في السجل الكامل. قد تكون النتائج غير مكتملة.',
+    'chat.searchLocateFailed':
+      'تعذر تحديد موقع هذه النتيجة. أعد البحث لتحديثها.',
+    'chat.searchUser': 'أنت',
+    'chat.searchAssistant': 'المساعد',
+  },
 };
 
 export function useConversationSearchI18n() {

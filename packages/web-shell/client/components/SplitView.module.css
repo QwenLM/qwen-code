@@ -44,7 +44,7 @@
 
 .addWrap {
   position: relative;
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 .pendingButton {
@@ -81,7 +81,7 @@
 .picker {
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
+  inset-inline-end: 0;
   z-index: 30;
   list-style: none;
   margin: 0;
@@ -100,7 +100,7 @@
   align-items: baseline;
   gap: 8px;
   width: 100%;
-  text-align: left;
+  text-align: start;
   padding: 7px 10px;
   border: none;
   border-radius: 6px;

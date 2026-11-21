@@ -19,7 +19,7 @@ import {
   WebShellCustomizationProvider,
   type WebShellCustomization,
 } from '../customization';
-import { I18nProvider } from '../i18n';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import {
   TranscriptRenderModeProvider,
   type TranscriptRenderMode,
@@ -414,6 +414,7 @@ function mount(
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
     onEditUserMessage?: (turnIndex: number, content: string) => void;
+    language?: WebShellLanguage;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -421,7 +422,7 @@ function mount(
   const root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={opts.language ?? 'en'}>
         <WebShellCustomizationProvider value={opts.customization ?? {}}>
           <CompactModeContext.Provider value={opts.compactMode ?? false}>
             <TranscriptRenderModeProvider
@@ -5082,6 +5083,62 @@ describe('MessageList — turn collapse (DOM)', () => {
         configurable: true,
         value: originalInnerHeight,
       });
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('anchors timeline details from the right edge in Arabic', async () => {
+    const rect = (
+      width: number,
+      height: number,
+      top: number,
+      left = 0,
+    ): DOMRect => ({
+      width,
+      height,
+      top,
+      right: left + width,
+      bottom: top + height,
+      left,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    });
+    // The RTL panel sits flush to the window's right edge, so the hovered
+    // button's tick is at its right (rect.right), not its left.
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.getAttribute('data-testid') === 'session-timeline-detail') {
+          return rect(350, 50, 28, 626);
+        }
+        const item = this.closest('[data-testid="session-timeline-entry"]');
+        if (item) return rect(58, 16, 20, 954);
+        if (this.hasAttribute('data-web-shell-message-row')) {
+          return rect(1072, 600, 0, 64);
+        }
+        return rect(1200, 600, 0);
+      });
+    const c = mount(simpleTurns(4), undefined, { language: 'ar' });
+    await nextFrame();
+
+    try {
+      const firstEntryButton = c.querySelector<HTMLButtonElement>(
+        '[data-turn-id="u1"] button',
+      );
+      expect(firstEntryButton).not.toBeNull();
+      focusIn(firstEntryButton!);
+
+      const detail = document.querySelector<HTMLElement>(
+        '[data-testid="session-timeline-detail"]',
+      );
+      expect(detail).not.toBeNull();
+      // right = innerWidth - (rect.right - 28 - 8) = 1024 - (1012 - 36) = 48,
+      // so the card's right edge lands at 976px, fully inside the viewport.
+      expect(detail?.style.right).toBe('48px');
+      expect(detail?.style.left).toBe('');
+      expect(detail?.style.top).toBe('28px');
+    } finally {
       rectSpy.mockRestore();
     }
   });

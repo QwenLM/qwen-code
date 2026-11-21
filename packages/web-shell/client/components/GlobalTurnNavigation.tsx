@@ -60,7 +60,7 @@ export function GlobalTurnNavigation({
   follow?: { start: number; end: number; current: number };
   onSelect: (ordinal: number) => void;
 }) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const viewport = useRef<HTMLDivElement>(null);
   const [top, setTop] = useState(0);
   const [height, setHeight] = useState(360);
@@ -183,12 +183,12 @@ export function GlobalTurnNavigation({
         {/* Allow hover ticks to expand past the gutter without covering message hit targets. */}
         <div
           ref={viewport}
-          className="-mr-8 min-h-0 overflow-y-auto overscroll-contain [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden"
+          className="-me-8 min-h-0 overflow-y-auto overscroll-contain [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden"
           style={{ height: Math.min(count * ROW_HEIGHT, 360) }}
           onScroll={(event) => setTop(event.currentTarget.scrollTop)}
         >
           <ol
-            className="relative my-0 mr-8 ml-0 list-none p-0"
+            className="relative my-0 me-8 ms-0 list-none p-0"
             style={{ height: count * ROW_HEIGHT }}
           >
             {Array.from({ length: end - start }, (_, index) => {
@@ -209,7 +209,7 @@ export function GlobalTurnNavigation({
                   aria-posinset={ordinal + 1}
                   aria-setsize={count}
                   data-in-current-range={inRange || undefined}
-                  className={`${timelineStyles.sessionTimelineItem} left-0 right-0`}
+                  className={`${timelineStyles.sessionTimelineItem} start-0 end-0`}
                   style={{
                     position: 'absolute',
                     top: ordinal * ROW_HEIGHT,
@@ -264,7 +264,7 @@ export function GlobalTurnNavigation({
                       </button>
                     </TooltipTrigger>
                     <TooltipContent
-                      side="right"
+                      side={isRtl ? 'left' : 'right'}
                       sideOffset={36 - triggerWidth}
                       collisionPadding={12}
                       className={`${timelineStyles.sessionTimelinePreview} !animate-none max-w-none ring-0 [&_[data-slot=tooltip-arrow]]:hidden!`}

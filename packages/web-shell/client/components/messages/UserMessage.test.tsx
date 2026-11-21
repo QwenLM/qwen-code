@@ -83,6 +83,14 @@ function findByTitle(container: HTMLElement, title: string): Element | null {
 }
 
 describe('UserMessage', () => {
+  it('renders content with dir="auto" for bidi isolation', () => {
+    const container = render(<UserMessage content="مرحبا world" />);
+    expect(container.textContent).toContain('مرحبا world');
+    expect(container.querySelector('[dir="auto"]')?.textContent).toContain(
+      'مرحبا world',
+    );
+  });
+
   it('names the session a message came from', () => {
     const container = render(
       <I18nProvider language="en">
@@ -689,6 +697,34 @@ describe('UserMessage', () => {
     expect(chip).not.toBeNull();
     expect(chip?.textContent).toBe('.qwen/');
     expect(container.textContent).toContain('list .qwen/ files');
+  });
+
+  it('keeps a file reference LTR and lets a host tag inherit text direction', () => {
+    const content = 'راجع @.qwen/ @context';
+    const container = render(
+      <UserMessage
+        content={content}
+        inputAnnotations={[
+          referenceAnnotation(content, '@.qwen/', {
+            id: 'file:@.qwen/',
+            kind: 'file',
+            value: '.qwen/',
+          }),
+          referenceAnnotation(content, '@context', {
+            id: 'host:context',
+            kind: 'host',
+            value: 'سياق المشروع',
+          }),
+        ]}
+      />,
+    );
+    const [file, host] = Array.from(
+      container.querySelectorAll('[class*="messageTagValue"]'),
+    );
+    expect(file?.textContent).toBe('.qwen/');
+    expect(file?.getAttribute('dir')).toBe('ltr');
+    expect(host?.textContent).toBe('سياق المشروع');
+    expect(host?.getAttribute('dir')).toBeNull();
   });
 
   it('uses configured composer tag icons for annotation chips', () => {

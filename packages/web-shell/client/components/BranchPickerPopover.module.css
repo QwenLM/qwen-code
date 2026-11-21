@@ -87,7 +87,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 12px 5px 20px;
+  padding-block: 5px;
+  padding-inline: 20px 12px;
   cursor: pointer;
   font-size: 13px;
   color: var(--foreground, #e0e0e0);
@@ -97,7 +98,7 @@
   border: none;
   background: none;
   width: 100%;
-  text-align: left;
+  text-align: start;
 }
 
 .item:hover,
@@ -167,7 +168,7 @@
   border: none;
   background: none;
   width: 100%;
-  text-align: left;
+  text-align: start;
 }
 
 .actionItem:hover,
@@ -196,7 +197,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px 4px 20px;
+  padding-block: 4px;
+  padding-inline: 20px 12px;
 }
 
 .inlineInputField {
@@ -331,7 +333,8 @@
 }
 
 .remoteGroupLabel {
-  padding: 3px 12px 1px 28px;
+  padding-block: 3px 1px;
+  padding-inline: 28px 12px;
   font-size: 11px;
   font-weight: 600;
   color: var(--muted-foreground, #666);
@@ -430,7 +433,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 12px 5px 20px;
+  padding-block: 5px;
+  padding-inline: 20px 12px;
   font-size: 13px;
   color: var(--foreground, #e0e0e0);
 }
@@ -514,7 +518,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 12px 6px 20px;
+  padding-block: 8px 6px;
+  padding-inline: 20px 12px;
   margin-top: 4px;
   border-top: 1px solid var(--border, rgba(128, 128, 128, 0.2));
   /* Wrap instead of overflowing the fixed-width popover, and stay pinned

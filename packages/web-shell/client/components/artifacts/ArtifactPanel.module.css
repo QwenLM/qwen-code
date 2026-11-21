@@ -1,7 +1,7 @@
 .panel {
   flex: 0 0 min(420px, 36vw);
   min-width: 320px;
-  border-left: 1px solid var(--border);
+  border-inline-start: 1px solid var(--border);
   background: var(--background);
   display: flex;
   flex-direction: column;
@@ -10,7 +10,7 @@
 
 .panelDrawer,
 .panelFullscreen {
-  border-left: 0;
+  border-inline-start: 0;
   flex: 1 1 auto;
   min-width: 0;
   width: 100%;
@@ -72,7 +72,8 @@
   font: inherit;
   font-size: 13px;
   min-width: 0;
-  padding: 5px 4px 5px 8px;
+  padding-block: 5px;
+  padding-inline: 8px 4px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -94,6 +95,15 @@
   );
 }
 
+:global([dir='rtl']) .tabTitle[data-web-shell-title-overflow] {
+  mask-image: linear-gradient(to left, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(
+    to left,
+    #000 calc(100% - 10px),
+    transparent
+  );
+}
+
 .tabTitleInner {
   display: inline-block;
   min-width: max-content;
@@ -108,6 +118,19 @@
 @keyframes artifactTabTitleScroll {
   to {
     transform: translateX(calc(var(--session-title-scroll-distance, 0px) * -1));
+  }
+}
+
+@keyframes artifactTabTitleScrollRtl {
+  to {
+    transform: translateX(var(--session-title-scroll-distance, 0px));
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :global([dir='rtl']) .tabItem:hover .tabTitleInner,
+  :global([dir='rtl']) .tabItem:focus-within .tabTitleInner {
+    animation-name: artifactTabTitleScrollRtl;
   }
 }
 
@@ -192,7 +215,7 @@
 
 .iconButton {
   appearance: none;
-  margin-left: auto;
+  margin-inline-start: auto;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--foreground);
@@ -214,14 +237,14 @@
 }
 
 .headerActions {
-  margin-left: auto;
+  margin-inline-start: auto;
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 
 .headerActions .iconButton {
-  margin-left: 0;
+  margin-inline-start: 0;
 }
 
 .explainBlock {
@@ -382,7 +405,7 @@
   color: var(--foreground);
   font: inherit;
   font-size: 14px;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -418,7 +441,7 @@
 
 .emptyActionHint {
   min-width: 0;
-  margin-left: auto;
+  margin-inline-start: auto;
   overflow: hidden;
   color: var(--muted-foreground);
   font-size: 12px;
@@ -431,6 +454,10 @@
   width: 14px;
   height: 14px;
   color: var(--muted-foreground);
+}
+
+:global([dir='rtl']) .emptyActionChevron {
+  transform: scaleX(-1);
 }
 
 .sideTaskListTitle {
@@ -468,7 +495,7 @@
   padding: 8px;
   display: grid;
   gap: 4px;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -653,7 +680,7 @@
 }
 
 .reviewContentListOnly .reviewList {
-  border-right: 0;
+  border-inline-end: 0;
 }
 
 .reviewContentStacked .reviewList {
@@ -666,7 +693,7 @@
   cursor: col-resize;
   position: relative;
   touch-action: none;
-  border-left: 1px solid var(--border);
+  border-inline-start: 1px solid var(--border);
 }
 
 .reviewSplitHandle::after {
@@ -702,7 +729,7 @@
   gap: 8px;
   align-items: center;
   padding: 8px 10px;
-  text-align: left;
+  text-align: start;
   position: relative;
 }
 
@@ -874,6 +901,7 @@
 }
 
 .codeMirrorDiff :global(.cm-editor) {
+  direction: ltr;
   font-size: 12px;
   background: var(--background);
   color: var(--foreground);
@@ -982,8 +1010,8 @@
   position: absolute;
   top: -2px;
   bottom: 8px;
-  left: var(--tree-children-line-left);
-  border-left: 1px dashed var(--border);
+  inset-inline-start: var(--tree-children-line-left);
+  border-inline-start: 1px dashed var(--border);
   pointer-events: none;
 }
 
@@ -992,7 +1020,7 @@
   border: 0;
   background: transparent;
   font: inherit;
-  text-align: left;
+  text-align: start;
   width: 100%;
   min-width: 0;
   height: 32px;
@@ -1000,7 +1028,7 @@
   grid-template-columns: 18px minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
-  padding-right: 10px;
+  padding-inline-end: 10px;
   color: var(--foreground);
   position: relative;
 }
@@ -1013,7 +1041,7 @@
 .treeRow[data-depth]:not([data-depth='0'])::before {
   content: '';
   position: absolute;
-  left: var(--tree-row-line-left);
+  inset-inline-start: var(--tree-row-line-left);
   top: 50%;
   width: 9px;
   border-top: 1px dashed var(--border);
@@ -1127,7 +1155,7 @@ button.treeRow:hover {
   position: absolute;
   z-index: 1;
   top: 12px;
-  right: 12px;
+  inset-inline-end: 12px;
   width: 32px;
   height: 32px;
   border: 1px solid var(--border);
@@ -1216,6 +1244,7 @@ button.treeRow:hover {
 }
 
 .codeMirrorFile :global(.cm-editor) {
+  direction: ltr;
   height: 100%;
   font-size: 12px;
   background: var(--background);
@@ -1232,11 +1261,16 @@ button.treeRow:hover {
 @media (max-width: 900px) {
   .panel:not(.panelDrawer):not(.panelFullscreen) {
     position: fixed;
-    inset: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) auto;
+    inset-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
+    inset-inline: auto 0;
     z-index: 60;
     width: min(420px, 100vw);
     max-width: 100vw;
     box-shadow: -12px 0 30px rgba(0, 0, 0, 0.18);
+  }
+
+  :global([dir='rtl']) .panel:not(.panelDrawer):not(.panelFullscreen) {
+    box-shadow: 12px 0 30px rgba(0, 0, 0, 0.18);
   }
 
   .reviewContent {
@@ -1248,7 +1282,7 @@ button.treeRow:hover {
   }
 
   .reviewList {
-    border-right: 0;
+    border-inline-end: 0;
     border-bottom: 1px solid var(--border);
     max-height: 220px;
   }

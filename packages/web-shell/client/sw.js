@@ -84,10 +84,11 @@ self.addEventListener('fetch', function (event) {
           '<!doctype html><html lang="en"><meta charset="utf-8">' +
             '<meta name="viewport" content="width=device-width,initial-scale=1">' +
             '<title>Qwen Code unavailable</title><body>' +
-            '<h1>Cannot reach Qwen Code / <span lang="zh-CN">无法连接 Qwen Code</span></h1>' +
+            '<h1>Cannot reach Qwen Code / <span lang="zh-CN">无法连接 Qwen Code</span> / <span lang="ar" dir="rtl">تعذر الوصول إلى Qwen Code</span></h1>' +
             '<p>Reconnect to the daemon, then reload this page. / ' +
-            '<span lang="zh-CN">请重新连接守护进程，然后重新加载此页面。</span></p>' +
-            '<a href="" onclick="location.reload();return false">Try again / <span lang="zh-CN">重试</span></a></body></html>',
+            '<span lang="zh-CN">请重新连接守护进程，然后重新加载此页面。</span> / ' +
+            '<span lang="ar" dir="rtl">أعد الاتصال بالخادم الخفي، ثم أعد تحميل هذه الصفحة.</span></p>' +
+            '<a href="" onclick="location.reload();return false">Try again / <span lang="zh-CN">重试</span> / <span lang="ar" dir="rtl">إعادة المحاولة</span></a></body></html>',
           {
             status: 503,
             headers: {

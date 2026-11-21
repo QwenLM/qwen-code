@@ -633,6 +633,20 @@ it('renders the zh-CN copy for an invalid token', async () => {
   expect(container.textContent).toContain('完整访问权限');
 });
 
+it('renders Arabic RTL copy for an invalid token', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount('wrong', 'ar');
+  const gate = container.querySelector('[data-web-shell-root]');
+  expect(gate?.getAttribute('lang')).toBe('ar');
+  expect(gate?.getAttribute('dir')).toBe('rtl');
+  expect(container.textContent).toContain('الاتصال بـ Qwen Code');
+  expect(container.textContent).toContain('الرمز غير صالح أو منتهي الصلاحية');
+  expect(container.textContent).not.toContain('Invalid or expired');
+});
+
 it('renders the zh-TW copy for an invalid token', async () => {
   vi.stubGlobal(
     'fetch',

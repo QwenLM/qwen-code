@@ -126,7 +126,7 @@ export const ComposerTaskChips = forwardRef<
   { tasks, includeAgents, onSelectTask, onExplainTask, onReturnToInput },
   ref,
 ) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const groups = useMemo(
     () => getComposerTaskChipGroups(tasks, { includeAgents }),
     [includeAgents, tasks],
@@ -264,7 +264,9 @@ export const ComposerTaskChips = forwardRef<
   ) => {
     if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
       event.preventDefault();
-      focusChipAt(index + (event.key === 'ArrowRight' ? 1 : -1));
+      const step =
+        event.key === 'ArrowRight' ? (isRtl ? -1 : 1) : isRtl ? 1 : -1;
+      focusChipAt(index + step);
       return;
     }
     if (event.key === 'Escape' && openGroup) {
@@ -295,14 +297,15 @@ export const ComposerTaskChips = forwardRef<
     }
   };
 
-  // The chip "?" sits after its chip, so the chip's index arithmetic would
-  // step ArrowLeft past the owning chip; left goes back to that chip instead.
+  // The chip "?" sits after its chip in reading order, so the chip's index
+  // arithmetic would step the back key past the owning chip; that key returns
+  // to the chip instead (ArrowLeft in LTR, ArrowRight in RTL).
   const handleChipExplainKeyDown = (
     event: KeyboardEvent<HTMLButtonElement>,
     kind: ComposerTaskChipKind,
     index: number,
   ) => {
-    if (event.key === 'ArrowLeft') {
+    if (event.key === (isRtl ? 'ArrowRight' : 'ArrowLeft')) {
       event.preventDefault();
       chipRefs.current.get(kind)?.focus({ preventScroll: true });
       return;

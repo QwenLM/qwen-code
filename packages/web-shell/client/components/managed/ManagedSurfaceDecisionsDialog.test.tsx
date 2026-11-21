@@ -3,7 +3,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import { ManagedSurfaceDecisionsDialog } from './ManagedSurfaceDecisionsDialog';
 import {
@@ -79,7 +79,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function render(language: 'en' | 'zh-CN' | 'zh-TW' | 'ru' = 'en') {
+async function render(language: WebShellLanguage = 'en') {
   await act(async () =>
     root.render(
       <I18nProvider language={language}>
@@ -107,7 +107,7 @@ async function setFilterValue(search: HTMLInputElement, value: string) {
   });
 }
 
-async function open(language: 'en' | 'zh-CN' | 'zh-TW' | 'ru' = 'en') {
+async function open(language: WebShellLanguage = 'en') {
   await render(language);
   const trigger = container.querySelector(
     '[data-managed-surface-decisions-trigger]',
@@ -117,6 +117,18 @@ async function open(language: 'en' | 'zh-CN' | 'zh-TW' | 'ru' = 'en') {
 }
 
 describe('ManagedSurfaceDecisionsDialog', () => {
+  it('uses the existing English fallback for Arabic without losing dialog content', async () => {
+    await open('ar');
+    expect(portal.textContent).toContain('Managed capabilities');
+    expect(portal.textContent).toContain(
+      MANAGED_SURFACE_DECISIONS[0]!.label[0],
+    );
+    expect(portal.querySelector('input')?.getAttribute('placeholder')).toBe(
+      'Search surfaces',
+    );
+    expect(portal.textContent).not.toContain('undefined');
+  });
+
   it('inventories all 35 unique groups in five categories with explicit owners', () => {
     expect(MANAGED_SURFACE_DECISIONS).toHaveLength(35);
     expect(

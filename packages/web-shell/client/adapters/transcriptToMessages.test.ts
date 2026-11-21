@@ -19,8 +19,93 @@ import {
   assistantBlockRendersAsSystemNotice,
   transcriptBlocksToDaemonMessages,
 } from './transcriptToMessages.js';
-import { getToolDescription } from '../components/messages/toolFormatting';
+import {
+  getToolDescription,
+  isMachineToolDescription,
+} from '../components/messages/toolFormatting';
 import { modReplyRows } from '../components/messages/mod-rows';
+
+it('keeps title provenance across status-only ACP updates, never across replacement titles', () => {
+  let state = createDaemonTranscriptState();
+  const emit = (update: Record<string, unknown>) => {
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: { sessionId: 'test', update: { toolCallId: 'edit', ...update } },
+      }),
+    );
+  };
+  const expectTitle = (title: string, titleIsMachine: boolean | undefined) => {
+    for (const safeToolProjection of [false, true]) {
+      const messages = transcriptBlocksToDaemonMessages(state.blocks, {
+        safeToolProjection,
+      });
+      expect(messages).toMatchObject([{ tools: [{ title, titleIsMachine }] }]);
+      const message = messages[0];
+      if (message?.role !== 'tool_group')
+        throw new Error('Missing tool message');
+      const tool = message.tools[0]!;
+      expect(isMachineToolDescription(tool, getToolDescription(tool))).toBe(
+        titleIsMachine === true,
+      );
+    }
+  };
+
+  const title = 'Edit: Create مجلد/ملف.ts';
+  emit({
+    sessionUpdate: 'tool_call',
+    title,
+    rawInput: { file_path: 'مجلد/ملف.ts' },
+    _meta: { toolName: 'edit', titleIsMachine: true },
+  });
+  expectTitle(title, true);
+  emit({
+    sessionUpdate: 'tool_call_update',
+    status: 'in_progress',
+    _meta: { titleIsMachine: false },
+  });
+  expectTitle(title, true);
+  emit({
+    sessionUpdate: 'tool_call_update',
+    title,
+    _meta: { titleIsMachine: false },
+  });
+  expectTitle(title, false);
+  emit({ sessionUpdate: 'tool_call_update', title: 'شرح رصد المشروع' });
+  expectTitle('شرح رصد المشروع', undefined);
+});
+
+it('does not replace a canonical title with permission display metadata', () => {
+  const title = 'Edit: Create مجلد/ملف.ts';
+  const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+    {
+      type: 'tool.update',
+      toolCallId: 'edit',
+      toolName: 'edit',
+      title,
+      titleIsMachine: true,
+    },
+    {
+      type: 'permission.request',
+      requestId: 'approval',
+      title: 'Create مجلد/ملف.ts',
+      options: [],
+      toolCall: {
+        toolCallId: 'edit',
+        title: 'Create مجلد/ملف.ts',
+        _meta: { toolName: 'edit' },
+      },
+    },
+    { type: 'permission.resolved', requestId: 'approval', outcome: 'accepted' },
+  ]);
+  for (const safeToolProjection of [false, true]) {
+    expect(
+      transcriptBlocksToDaemonMessages(state.blocks, { safeToolProjection }),
+    ).toMatchObject([{ tools: [{ title, titleIsMachine: true }] }]);
+  }
+});
 
 it('preserves marked quota data when projecting a terminal error', () => {
   const subscriptionQuota = { type: 'subscription_quota', memberType: 'pro' };

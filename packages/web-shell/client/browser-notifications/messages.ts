@@ -131,3 +131,43 @@ export const BROWSER_NOTIFICATION_MESSAGES_RU: Record<
   'browserNotifications.temporary':
     'Этот параметр сохраняется только для текущей страницы.',
 };
+
+export const BROWSER_NOTIFICATION_MESSAGES_AR: Record<
+  string,
+  BrowserNotificationMessage
+> = {
+  'browserNotifications.label': 'إشعارات المهام',
+  'browserNotifications.description':
+    'إرسال تنبيه عندما تنتهي المحادثة الحالية أو محادثة العرض المقسم أو تفشل أو تحتاج إلى موافقة أو تنتظر إجابتك أثناء وجود الصفحة في الخلفية أو خارج التركيز. تعرض الأدوار المكتملة مقتطفاً من الموجه والرد؛ وتعرض تذكيرات الإجراء عنوان الجلسة وحالة الانتظار. يُحفظ لهذا الموقع في المتصفح فقط؛ ويجب أن تبقى الصفحة مفتوحة.',
+  'browserNotifications.prompt': (v) => `الموجه: ${v?.text ?? ''}`,
+  'browserNotifications.reply': (v) => `الرد: ${v?.text ?? ''}`,
+  'browserNotifications.completed': 'اكتمل هذا الدور.',
+  'browserNotifications.failed': 'فشل هذا الدور. ارجع لعرض التفاصيل.',
+  'browserNotifications.ended': 'انتهى هذا الدور. ارجع للتحقق من النتيجة.',
+  'browserNotifications.approval':
+    'تحتاج هذه الجلسة إلى موافقتك. ارجع لمراجعة الطلب.',
+  'browserNotifications.question': 'تنتظر هذه الجلسة إجابتك. ارجع للرد.',
+  'browserNotifications.allow': 'السماح بالإشعارات',
+  'browserNotifications.enable': 'تفعيل الإشعارات',
+  'browserNotifications.helpEnabled': 'مفعّلة لهذا الموقع.',
+  'browserNotifications.helpWaiting': 'لم يُمنح إذن الإشعارات بعد.',
+  'browserNotifications.helpWhen':
+    'عند وجود الصفحة في الخلفية أو انتقالك إلى تبويب آخر، احصل على تذكيرات عندما تحتاج المحادثة الحالية إلى موافقة أو تنتظر إجابتك أو تنتهي أو تفشل. النقر على الإشعار يعيدك إلى المحادثة دون موافقة أو إجابة تلقائية.',
+  'browserNotifications.helpSystem':
+    'إذا لم تظهر التذكيرات، اتبع الخطوات أدناه لفحص إشعارات النظام.',
+  'browserNotifications.helpMac':
+    'افتح إعدادات النظام ← الإشعارات. اختر متصفحك (بالنسبة لـ Chrome تحقق أيضاً من Google Chrome Helper (Alerts) إن وُجد)، وفعّل الإشعارات وشعارات/تنبيهات سطح المكتب. تحقق من وضع التركيز وما إذا كانت الإشعارات مسموحة أثناء مشاركة الشاشة.',
+  'browserNotifications.helpWindows':
+    'افتح الإعدادات ← النظام ← الإشعارات (في Windows 10: الإشعارات والإجراءات). فعّل الإشعارات ومتصفحك بما في ذلك لافتات الإشعارات. أوقف عدم الإزعاج / مساعد التركيز، أو اسمح لمتصفحك ضمن قواعده.',
+  'browserNotifications.enabled': 'مفعّلة.',
+  'browserNotifications.disabled': 'معطّلة.',
+  'browserNotifications.waiting': 'في انتظار إذن المتصفح.',
+  'browserNotifications.denied':
+    'الإشعارات محظورة. اسمح بها في إعدادات الموقع بالمتصفح.',
+  'browserNotifications.unavailable':
+    'الإشعارات غير متوفرة في هذا المتصفح أو سياق الصفحة.',
+  'browserNotifications.requesting': 'في انتظار إذنك…',
+  'browserNotifications.error':
+    'تعذر تفعيل الإشعارات أو عرضها. تحقق من إعدادات المتصفح والنظام.',
+  'browserNotifications.temporary': 'تم حفظ هذا الإعداد للصفحة الحالية فقط.',
+};

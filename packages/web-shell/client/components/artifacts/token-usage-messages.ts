@@ -212,3 +212,70 @@ export const TOKEN_USAGE_MESSAGES_RU: Record<string, TokenUsageMessage> = {
   'tokenUsage.bar.detailTokens': (v) =>
     `Всего ${v?.total ?? 0} · Ввод ${v?.input ?? 0} (кэш ${v?.cached ?? 0}) · Вывод ${v?.output ?? 0}`,
 };
+
+export const TOKEN_USAGE_MESSAGES_AR: Record<string, TokenUsageMessage> = {
+  'tokenUsage.total': 'إجمالي الرموز',
+  'tokenUsage.shareTooltip': (v) => `حصة الرموز: ${v?.percent ?? '0.0'}%`,
+  'tokenUsage.avgLatency': 'متوسط الكمون',
+  'tokenUsage.firstToken': 'أول رمز',
+  'tokenUsage.generation': 'التوليد',
+  'tokenUsage.outputSpeed': 'سرعة الإخراج',
+  'tokenUsage.tokensPerSecond': (v) => `${v?.rate ?? ''} رمز/ث`,
+  'tokenUsage.valueWithRate': (v) =>
+    `${v?.count ?? 0} (${v?.percent ?? '0.0'}%)`,
+  'tokenUsage.cached': 'الذاكرة المؤقتة',
+  'tokenUsage.cachedDetail': (v) =>
+    `الذاكرة المؤقتة: ${v?.count ?? 0} (${v?.percent ?? '0.0'}%)`,
+  'tokenUsage.thoughtsDetail': (v) => `الاستدلال: ${v?.count ?? 0}`,
+  'tokenUsage.input': 'الإدخال',
+  'tokenUsage.inputWithCacheRate': (v) =>
+    `${v?.count ?? 0} (نسبة التخزين المؤقت: ${v?.percent ?? '0.0'}%)`,
+  'tokenUsage.loadError': 'فشل تحميل استهلاك الرموز.',
+  'tokenUsage.models': 'حسب النموذج',
+  'tokenUsage.noData': 'لا توجد استدعاءات API في هذه الجلسة بعد.',
+  'tokenUsage.noTools': 'لا توجد استدعاءات أدوات في هذه الجلسة بعد.',
+  'tokenUsage.open': 'استهلاك رموز الجلسة',
+  'tokenUsage.output': 'إجمالي الإخراج',
+  'tokenUsage.refresh': 'تحديث',
+  'tokenUsage.requests': 'الطلبات',
+  'tokenUsage.retry': 'إعادة المحاولة',
+  'tokenUsage.agents': 'حسب الوكيل',
+  'tokenUsage.mainAgent': 'الوكيل الرئيسي',
+  'tokenUsage.thoughts': 'الاستدلال',
+  'tokenUsage.title': 'استهلاك الرموز',
+  'tokenUsage.toolRow': (v) =>
+    `${v?.count ?? 0} استدعاءات · نجاح ${v?.rate ?? 0}% · ${v?.duration ?? ''}`,
+  'tokenUsage.tools': 'الأدوات',
+  'tokenUsage.updatedAt': (v) => `تم التحديث ${v?.time ?? ''}`,
+  'tokenUsage.successRate': 'معدل النجاح',
+  'tokenUsage.successRateHint':
+    'استدعاءات API التي عادت دون خطأ. كل إعادة محاولة تُحسب كاستدعاء.',
+  'tokenUsage.successDetail': (v) =>
+    String(v?.failed ?? '0') === '0'
+      ? `نجحت جميع الطلبات البالغة ${v?.requests ?? 0}`
+      : `فشل ${v?.failed} من أصل ${v?.requests ?? 0} طلبات`,
+  'tokenUsage.firstTokenDetail': (v) => `متوسط أول رمز ${v?.duration ?? ''}`,
+  'tokenUsage.modelSharesLabel': 'حصة الرموز حسب النموذج',
+  'tokenUsage.trendTitle': 'السرعة عبر الزمن',
+  'tokenUsage.trendSeconds': 'ثوانٍ',
+  'tokenUsage.trendFailed': 'فشل',
+  'tokenUsage.trendNote':
+    'كل نقطة تمثل طلباً واحداً؛ والخط يمثل الوسيط لخمس نقاط متجاورة. × يشير إلى طلب فاشل.',
+  'tokenUsage.trendSummary': (v) =>
+    `${v?.metric ?? ''} لكل طلب عبر الزمن. الوسيط: ${v?.models ?? ''}`,
+  'tokenUsage.trendFailure': (v) => `فشل · ${v?.kind ?? ''}`,
+  'tokenUsage.trendSpeed': (v) =>
+    `${v?.rate ?? ''} رمز/ث · أول رمز ${v?.ttft ?? ''}`,
+  'tokenUsage.trendTtftOnly': (v) => `أول رمز ${v?.ttft ?? ''}`,
+  'tokenUsage.trendOutput': (v) =>
+    `${v?.count ?? 0} رمز إخراج خلال ${v?.duration ?? ''}`,
+  'tokenUsage.speedSpread': (v) =>
+    `p50 ${v?.p50 ?? ''} · p10–p90 ${v?.p10 ?? ''}–${v?.p90 ?? ''} رمز/ث`,
+  'tokenUsage.failuresByKind': (v) => `فشل: ${v?.kinds ?? ''}`,
+  'tokenUsage.unavailable': 'استهلاك الرموز غير متوفر لهذه الجلسة.',
+  'tokenUsage.bar.turns': (v) => `${v?.count ?? 0} جولات`,
+  'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} رمز`,
+  'tokenUsage.bar.cacheHit': (v) => `إصابة التخزين المؤقت ${v?.percent ?? 0}%`,
+  'tokenUsage.bar.detailTokens': (v) =>
+    `الإجمالي ${v?.total ?? 0} · الإدخال ${v?.input ?? 0} (الذاكرة المؤقتة ${v?.cached ?? 0}) · الإخراج ${v?.output ?? 0}`,
+};

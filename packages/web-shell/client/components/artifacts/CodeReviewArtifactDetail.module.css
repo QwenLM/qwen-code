@@ -65,7 +65,7 @@
   align-items: baseline;
   gap: 10px;
   padding: 9px 11px;
-  border-left: 3px solid var(--border);
+  border-inline-start: 3px solid var(--border);
   background: color-mix(in srgb, var(--muted) 65%, transparent);
   font-size: 13px;
   overflow-wrap: anywhere;
@@ -153,7 +153,7 @@
   display: grid;
   gap: 3px;
   margin: 0;
-  padding-left: 20px;
+  padding-inline-start: 20px;
 }
 
 .detailBlock p,

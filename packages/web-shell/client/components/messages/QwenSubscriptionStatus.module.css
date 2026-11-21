@@ -54,7 +54,7 @@
   height: auto;
   padding: 0;
   font: inherit;
-  text-align: left;
+  text-align: start;
   white-space: normal;
   overflow-wrap: anywhere;
 }

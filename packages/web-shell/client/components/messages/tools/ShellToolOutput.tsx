@@ -157,7 +157,10 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
           </span>
         </div>
         <div className={styles.expandedCardBody}>
-          <pre className={styles.expandedOutput}>
+          <pre
+            className={styles.expandedOutput}
+            dir={output ? 'ltr' : undefined}
+          >
             {output ? sanitizeControlChars(output) : emptyOutput}
           </pre>
         </div>
@@ -200,7 +203,10 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
           <div className={styles.shellSection}>
             <details open>
               <summary>{t('shell.result.command')}</summary>
-              <pre className={`${styles.expandedOutput} ${styles.shellOutput}`}>
+              <pre
+                className={`${styles.expandedOutput} ${styles.shellOutput}`}
+                dir="ltr"
+              >
                 {sanitizeControlChars(command)}
               </pre>
             </details>
@@ -238,6 +244,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
                   el.scrollHeight - el.scrollTop - el.clientHeight < 24;
               }}
               className={`${styles.expandedOutput} ${styles.shellOutput}`}
+              dir={output ? 'ltr' : undefined}
             >
               {output
                 ? segments?.map((seg, i) => (
@@ -276,7 +283,10 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
         {result && result.notices.length > 0 && (
           <details className={styles.shellDetails} open>
             <summary>{t('shell.result.notices')}</summary>
-            <pre className={`${styles.expandedOutput} ${styles.shellOutput}`}>
+            <pre
+              className={`${styles.expandedOutput} ${styles.shellOutput}`}
+              dir="ltr"
+            >
               {sanitizeControlChars(result.notices.join('\n\n'))}
             </pre>
           </details>
@@ -287,7 +297,9 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
           </div>
         )}
         {result?.error && (
-          <pre className={styles.shellFailure}>{result.error}</pre>
+          <pre className={styles.shellFailure} dir="ltr">
+            {result.error}
+          </pre>
         )}
         {!!result?.signal && (
           <div className={styles.shellFailure}>
@@ -327,7 +339,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
               {result && (
                 <>
                   <dt>{t('shell.result.directory')}</dt>
-                  <dd>{sanitizeControlChars(result.directory)}</dd>
+                  <dd dir="ltr">{sanitizeControlChars(result.directory)}</dd>
                 </>
               )}
               {result?.exitCode != null &&
@@ -342,7 +354,9 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
               {result && result.outputFiles.length > 0 && (
                 <>
                   <dt>{t('shell.result.outputFiles')}</dt>
-                  <dd>{sanitizeControlChars(result.outputFiles.join('\n'))}</dd>
+                  <dd dir="ltr">
+                    {sanitizeControlChars(result.outputFiles.join('\n'))}
+                  </dd>
                 </>
               )}
               {result?.pid && (

@@ -342,7 +342,7 @@ function SearchableProviderSubmenu({
               <Button
                 key={item.id}
                 variant="ghost"
-                className="h-auto min-h-11 w-full justify-start whitespace-normal text-left"
+                className="h-auto min-h-11 w-full justify-start whitespace-normal text-start"
                 data-testid={`${testIdPrefix}-item`}
                 onClick={() => pick(item)}
               >
@@ -609,7 +609,7 @@ export function AddMenu({
     skills: t('composerAdd.skills.description'),
   };
   const mobileRowClass =
-    'h-auto min-h-11 w-full justify-start whitespace-normal text-left';
+    'h-auto min-h-11 w-full justify-start whitespace-normal text-start';
 
   return (
     <>
@@ -661,7 +661,7 @@ export function AddMenu({
                     onSkillsOpenChange?.(false);
                   }}
                 >
-                  <ArrowLeftIcon />
+                  <ArrowLeftIcon className="rtl:-scale-x-100" />
                 </Button>
               )}
               <DrawerTitle className="flex-1">{pageLabels[page]}</DrawerTitle>
@@ -902,7 +902,7 @@ export function AddMenu({
                       <span className={menuStyles.iconTile} aria-hidden="true">
                         <GitBranchIcon />
                       </span>
-                      <span className="min-w-0 flex-1 truncate text-left">
+                      <span className="min-w-0 flex-1 truncate text-start">
                         <span className={menuStyles.actionLabel}>
                           Workflow{workflowControl.mode?.requested ? ' ✓' : ''}
                         </span>

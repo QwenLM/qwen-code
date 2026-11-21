@@ -98,7 +98,7 @@
   flex-direction: column;
   justify-content: center;
   gap: 2px;
-  border-left: 1px solid var(--border);
+  border-inline-start: 1px solid var(--border);
 }
 
 .overviewStat span {
@@ -141,6 +141,7 @@
      and the reservation collapses regardless of the pitch. */
   --plan-edge-lanes: 0;
   --plan-edge-lane-height: 0px;
+  direction: ltr;
   position: relative;
   display: flex;
   align-items: center;
@@ -294,6 +295,14 @@
     box-shadow 160ms ease;
 }
 
+/* Text only: the canvas stays LTR, so edges still arrive on the physical
+   left and the output port still sits on the physical right. The status
+   rule is a physical border-left for the same reason: an inline start
+   would move it under the port in Arabic. */
+:global([dir='rtl']) .dagCanvas .node {
+  direction: rtl;
+}
+
 /* Only the outgoing port is drawn; an incoming edge already terminates in an
    arrowhead, which is the input marker. It also drops the accent: every node
    with an edge had one, so a permanently blue dot across most of the graph
@@ -378,7 +387,7 @@
   background: transparent;
   cursor: pointer;
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 @supports (selector(:has(*))) {
@@ -541,7 +550,7 @@
   color: var(--foreground);
   cursor: pointer;
   font-size: 11px;
-  text-align: left;
+  text-align: start;
   white-space: nowrap;
 }
 
@@ -581,7 +590,7 @@
   background: var(--secondary);
   cursor: pointer;
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 .executionHeading {
@@ -619,7 +628,7 @@
 }
 
 .executionActivity span {
-  margin-right: 4px;
+  margin-inline-end: 4px;
   color: var(--foreground);
   font-weight: 600;
 }
@@ -680,7 +689,7 @@ button.nestedExecution[aria-disabled='true'] {
   background: transparent;
   font: inherit;
   font-size: 11px;
-  text-align: left;
+  text-align: start;
 }
 
 button.nestedExecution:not(:disabled):not([aria-disabled='true']) {
@@ -752,7 +761,7 @@ button.nestedExecution:not(:disabled):focus-visible {
     }
 
     .overviewStat:nth-child(2) {
-      border-left: 0;
+      border-inline-start: 0;
     }
   }
 }

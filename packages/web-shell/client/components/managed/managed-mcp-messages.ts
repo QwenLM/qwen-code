@@ -121,3 +121,42 @@ export const MANAGED_MCP_MESSAGES_RU: Record<string, ManagedMcpMessage> = {
   'managed.mcp.noCatalog': 'Для этого сервера каталог не опубликован.',
   'managed.mcp.empty': 'Для этой сессии MCP-серверы не настроены.',
 };
+
+export const MANAGED_MCP_MESSAGES_AR: Record<string, ManagedMcpMessage> = {
+  'managed.mcp.manage': 'إدارة MCP',
+  'managed.mcp.selectSession': 'اختر جلسة Managed لإدارة خوادم MCP الخاصة بها.',
+  'managed.mcp.workspaceUnavailable': 'مساحة عمل الجلسة المحددة غير متوفرة.',
+  'managed.mcp.unsupported': 'إدارة MCP غير متوفرة لهذه الجلسة.',
+  'managed.mcp.sessionRevision': (v) =>
+    `الجلسة ${v?.sessionId} · مراجعة الإعدادات ${v?.revision}`,
+  'managed.mcp.sessionSettings':
+    'تسري التغييرات على هذه الجلسة. ويبقى تعريف الوكيل الأصلي ثابتاً.',
+  'managed.mcp.publishedOnly':
+    'اختر تعريفاً دقيقاً منشوراً لبيئة التشغيل ومساحة العمل هذه.',
+  'managed.mcp.definition': 'التعريف المنشور',
+  'managed.mcp.noPublished': 'لا توجد تعريفات منشورة متاحة لهذا الاختيار.',
+  'managed.mcp.apply': 'تطبيق',
+  'managed.mcp.action.add': 'إضافة خادم',
+  'managed.mcp.action.edit': 'تغيير التعريف',
+  'managed.mcp.action.remove': 'إزالة',
+  'managed.mcp.action.enable': 'تفعيل',
+  'managed.mcp.action.disable': 'تعطيل',
+  'managed.mcp.action.reload': 'إعادة التحميل',
+  'managed.mcp.action.restart': 'إعادة التشغيل',
+  'managed.mcp.state.enabled': 'مهيأ',
+  'managed.mcp.state.disabled': 'معطّل',
+  'managed.mcp.state.removed': 'مُزال',
+  'managed.mcp.drained': 'تم التفريغ',
+  'managed.mcp.operation.pending': 'قيد الانتظار',
+  'managed.mcp.operation.settled': 'مكتمل',
+  'managed.mcp.operation.failed': 'فشل',
+  'managed.mcp.operation.recovery_required': 'مطلوب استرداد',
+  'managed.mcp.unconfirmed':
+    'لا يزال الأمر الأصلي بحاجة إلى تأكيد. افحصه قبل بدء تغيير آخر.',
+  'managed.mcp.checkOperation': 'التحقق من الأمر الأصلي',
+  'managed.mcp.retryCommand': 'إعادة محاولة الأمر الأصلي',
+  'managed.mcp.metadataOnly':
+    'البيانات الوصفية للكتالوج لقطة محفوظة. نصوص الموارد وتوسيع الموجهات غير متاحة هنا.',
+  'managed.mcp.noCatalog': 'لم يُنشر كتالوج لهذا الخادم.',
+  'managed.mcp.empty': 'لم يتم تهيئة خوادم MCP لهذه الجلسة.',
+};

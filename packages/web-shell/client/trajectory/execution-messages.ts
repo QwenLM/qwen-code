@@ -94,3 +94,32 @@ export const TRAJECTORY_EXECUTION_MESSAGES_RU: Record<
   'trajectory.executions.status.interrupted': 'Прервано',
   'trajectory.executions.status.not_started': 'Не выполнено',
 };
+
+export const TRAJECTORY_EXECUTION_MESSAGES_AR: Record<
+  string,
+  ExecutionMessage
+> = {
+  'trajectory.executions.title': 'التنفيذات الأخيرة',
+  'trajectory.executions.outside': (v) =>
+    `${v?.count ?? 0} تنفيذات خارج الصفوف التاريخية`,
+  'trajectory.executions.omitted': (v) =>
+    `تم استبعاد ${v?.count ?? 0} سجلات إدخال بسبب حد العرض`,
+  'trajectory.executions.clock': 'وقت الساعة',
+  'trajectory.executions.elapsed': (v) => `انقضى نحو ${v?.duration ?? ''}`,
+  'trajectory.executions.uncertain': 'الوقت المنقضي غير متوفر',
+  'trajectory.executions.metadata':
+    'بيانات وصفية لدورة الحياة فقط؛ لم يتم توفير الوسائط والمخرجات.',
+  'trajectory.executions.locate': 'تحديد موقع السجل التاريخي',
+  'trajectory.executions.unlinked':
+    'المحتوى التاريخي غير مرتبط في هذه النافذة؛ حدّث السجل عند الحاجة.',
+  'trajectory.executions.outcome': 'النتيجة النهائية',
+  'trajectory.executions.executionStatus': 'حالة التنفيذ',
+  'trajectory.executions.status.running': 'قيد التشغيل',
+  'trajectory.executions.status.unknown': 'غير معروف',
+  'trajectory.executions.status.conflict': 'تعارض السجل',
+  'trajectory.executions.status.success': 'نجح',
+  'trajectory.executions.status.error': 'فشل',
+  'trajectory.executions.status.cancelled': 'ملغى',
+  'trajectory.executions.status.interrupted': 'تمت المقاطعة',
+  'trajectory.executions.status.not_started': 'لم يُنفَّذ',
+};

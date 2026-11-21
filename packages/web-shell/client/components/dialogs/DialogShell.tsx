@@ -266,7 +266,7 @@ export function DialogShell({
           }}
           onCloseAutoFocus={(event) => event.preventDefault()}
         >
-          <DialogHeader className="flex-row items-center gap-2 border-b px-4 py-2.5 text-left">
+          <DialogHeader className="flex-row items-center gap-2 border-b px-4 py-2.5 text-start">
             <div className="min-w-0 flex-1">
               <DialogTitle>{title}</DialogTitle>
               {subtitle && (

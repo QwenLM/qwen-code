@@ -499,7 +499,7 @@ export function TurnCallsPanel({
         <Button
           size="sm"
           variant="ghost"
-          className="ml-auto shrink-0"
+          className="ms-auto shrink-0"
           disabled={loading}
           onClick={() => setRetry((value) => value + 1)}
         >
@@ -514,7 +514,7 @@ export function TurnCallsPanel({
         <Select value={selectedType} onValueChange={setToolFilter}>
           <SelectTrigger
             size="sm"
-            className="ml-auto min-w-0 max-w-32 border-0 text-foreground"
+            className="ms-auto min-w-0 max-w-32 border-0 text-foreground"
             aria-label={t('turnCalls.filter')}
           >
             <SelectValue />
@@ -672,7 +672,7 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
             ) : (
               elapsedLabel
             ))}
-          <span className="ml-auto inline-flex shrink-0 items-center gap-1.5">
+          <span className="ms-auto inline-flex shrink-0 items-center gap-1.5">
             {isMcp && (
               <Badge variant="outline" className="text-[11px] font-normal">
                 MCP
