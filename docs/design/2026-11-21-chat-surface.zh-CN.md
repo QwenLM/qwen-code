@@ -89,6 +89,12 @@
 - **共享的准入未知外框（收敛，评审 R5-2）。** 三处手写的 unknown 准入渲染（`App`、
   `ChatPane`、`ChatSurface`）应共享纯展示外框 + 文案（动作仍为各表面的回调）；动作集允许
   合理地不同。
+- **单调转录 revision（SDK follow-up，verify-r4 发现 3）。** 拆分的载荷 revision 读块的
+  `updatedAt`，而 SDK reducer 用 `Date.now()` 盖章。同一 id 的两个 `permission.request`
+  重发若在同一毫秒内归约、且只改 option label 或 `rawInput`，签名不变、缓存 request 陈旧。
+  可达性很窄（同一毫秒内两个归约批次之间夹一次渲染），根因是 SDK 的墙钟 revision 粒度、
+  非本表面；`qwen-code/sdk` 的每-store 单调 revision 可闭合。option **id** 变化已被
+  revision 的 option-id 项捕获。
 
 ## 遵守的约束
 

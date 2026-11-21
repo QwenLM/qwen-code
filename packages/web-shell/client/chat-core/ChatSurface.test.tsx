@@ -324,6 +324,44 @@ describe('ChatSurface', () => {
     );
   });
 
+  it('reports a rejected stop admission, not only an unknown one', async () => {
+    const onError = vi.fn();
+    const controller = fakeController({
+      cancel: vi.fn(async () => ({
+        admission: 'rejected',
+        target: { sessionId: 's1' },
+      })),
+    });
+    mountReact(<ChatSurface controller={controller} onError={onError} />);
+    const onCancel = captured.editor?.onCancel as () => void;
+    await act(async () => {
+      onCancel();
+    });
+    await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+    expect((onError.mock.calls[0][0] as Error).message).toBe(
+      'localized:chat.stopNotConfirmed',
+    );
+  });
+
+  it('preserves the transport cause when a stop throws', async () => {
+    const onError = vi.fn();
+    const boom = new Error('cancel transport down');
+    const controller = fakeController({
+      cancel: vi.fn(async () => {
+        throw boom;
+      }),
+    });
+    mountReact(<ChatSurface controller={controller} onError={onError} />);
+    const onCancel = captured.editor?.onCancel as () => void;
+    await act(async () => {
+      onCancel();
+    });
+    await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+    const reported = onError.mock.calls[0][0] as Error;
+    expect(reported.message).toBe('localized:chat.stopNotConfirmed');
+    expect(reported.cause).toBe(boom);
+  });
+
   it('keeps the running affordance while submitting, running, or cancelling', () => {
     for (const phase of ['submitting', 'running', 'cancelling'] as const) {
       const controller = fakeController({ phase });

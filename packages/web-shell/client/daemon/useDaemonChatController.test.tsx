@@ -192,6 +192,30 @@ describe('useDaemonChatController', () => {
     expect(after).not.toBe(before);
   });
 
+  it('refreshes the cached request on a rawInput-only re-emit via the updatedAt term', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    expect(
+      (controller!.pendingApprovals[0].request.rawInput as { command?: string })
+        .command,
+    ).toBeUndefined();
+    // Same id, title and option ids; only toolCall.rawInput changes and the
+    // revision bumps. Only the updatedAt term can catch this shape, so dropping
+    // it from the revision must turn this red.
+    harness.pendingPermissions = [
+      {
+        ...permissionBlock('a1'),
+        toolCall: { rawInput: { command: 'pwd' } },
+        updatedAt: 2,
+      } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    expect(
+      (controller!.pendingApprovals[0].request.rawInput as { command?: string })
+        .command,
+    ).toBe('pwd');
+  });
+
   it('answers a question by voting its allow_once option with indexed answers', async () => {
     harness.pendingPermissions = [permissionBlock('q1', { questions: true })];
     mountReact(<Probe />);

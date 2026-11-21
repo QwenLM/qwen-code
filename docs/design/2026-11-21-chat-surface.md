@@ -120,6 +120,15 @@ revision` (`updatedAt + title + option ids`, no payload serialization): a
   unknown-admission renderings (`App`, `ChatPane`, `ChatSurface`) should share a
   presentational frame + copy (actions stay per-surface callbacks); the action sets may
   legitimately differ.
+- **Monotonic transcript revision (SDK follow-up, verify-r4 finding 3).** The split's
+  payload revision reads the block's `updatedAt`, which the SDK reducer stamps from
+  `Date.now()`. Two `permission.request` re-emits for the same id reduced in the same
+  millisecond that change only option labels or `rawInput` therefore leave an unchanged
+  signature and a stale cached request. The reachability is narrow (a render between two
+  reduce batches inside one millisecond) and the root cause is the SDK's wall-clock
+  revision granularity, not this surface; a monotonic per-store revision in
+  `qwen-code/sdk` would close it. Option-**id** changes are already caught by the
+  revision's option-id term.
 
 ## Constraints respected
 
