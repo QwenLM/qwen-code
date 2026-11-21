@@ -251,11 +251,9 @@ class ManagedActionStoreTest {
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_delivery_failed", 10, 0);
         // The resurrection arm's evidence that a new delivery must wait.
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
+        jdbc.update("INSERT INTO ma_storage (alias_key,"
+                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?)",
                 RuntimeAdmissionFences.storageAliasKey(TENANT, "storage"),
-                RuntimeAdmissionFences.storageFenceKey(TENANT),
-                RuntimeAdmissionFences.storageFenceKey("storage"),
                 TENANT, "storage", "op-fence");
 
         var replayed = admitAs("owner", "idem", "digest", response("allow"), 20);

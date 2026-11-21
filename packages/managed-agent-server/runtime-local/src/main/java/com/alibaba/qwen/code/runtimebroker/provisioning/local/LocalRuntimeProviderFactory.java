@@ -49,6 +49,12 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
         Path stateDirectory = Path.of(broker.getStateDirectory()).toAbsolutePath().normalize();
         if (broker.isDurableLocalProcess()) {
             requireRecoveryDirectoryOutsideWorkspaces(broker, stateDirectory);
+        } else {
+            // The durable store creates the directory while it records the
+            // resource; the ephemeral provisioner only spawns workers in it,
+            // so a deployment that never pre-created the state directory
+            // could not start a single Runtime.
+            ensureStateDirectory(stateDirectory);
         }
         LocalProcessRuntimeProvisioner provider = broker.isDurableLocalProcess()
                 ? LocalProcessRuntimeProvisioner.durable(command, stateDirectory, http(transport),
@@ -106,6 +112,14 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
     private static void require(String value, String name) {
         if (StringUtils.isBlank(value)) {
             throw new IllegalStateException(name + " is required");
+        }
+    }
+
+    private static void ensureStateDirectory(Path directory) {
+        try {
+            Files.createDirectories(directory);
+        } catch (IOException error) {
+            throw new IllegalStateException("Runtime Broker state directory is unavailable", error);
         }
     }
 

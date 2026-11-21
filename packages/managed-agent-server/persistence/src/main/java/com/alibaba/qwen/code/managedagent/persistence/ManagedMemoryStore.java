@@ -78,8 +78,8 @@ public class ManagedMemoryStore implements MemoryRepository {
         Store result = new Store("memstore_" + UUID.randomUUID(), clock.millis());
         try {
             transaction.executeWithoutResult(status -> jdbc.update("INSERT INTO ma_memory_store"
-                            + " (store_key,owner_key,tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create) VALUES (?,?,?,?,?,?,?)",
-                    ManagedSchemaKeys.key(tenant, result.id()), ManagedSchemaKeys.key(tenant, actor),
+                            + " (owner_key,tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create) VALUES (?,?,?,?,?,?)",
+                    ManagedSchemaKeys.key(tenant, actor),
                     tenant, result.id(), owner(tenant, actor), "managed_" + UUID.randomUUID(), result.createdAt()));
             return result;
         } catch (DuplicateKeyException duplicate) {
@@ -99,8 +99,8 @@ public class ManagedMemoryStore implements MemoryRepository {
             throw new IllegalStateException("Memory binding requires the Session creation transaction.");
         }
         if (!MemoryModels.text(store, 512) || jdbc.queryForObject("SELECT COUNT(*) FROM ma_memory_store"
-                + " WHERE store_key=? AND tenant_id=? AND memory_store_id=? AND owner_actor_key=?",
-                Integer.class, ManagedSchemaKeys.key(tenant, store), tenant, store, owner(tenant, actor)) != 1) {
+                + " WHERE tenant_id=? AND memory_store_id=? AND owner_actor_key=?",
+                Integer.class, tenant, store, owner(tenant, actor)) != 1) {
             throw unavailable();
         }
         if (jdbc.update("UPDATE ma_session SET memory_store_id=?,owner_only=1 WHERE tenant_id=? AND session_id=?"

@@ -2,7 +2,7 @@
 
 [English](2026-11-17-worktree-retention-snapshots.md) | [简体中文](2026-11-17-worktree-retention-snapshots.zh-CN.md)
 
-- 状态：U1–U3 已在本 PR 实现；U4/U5 仍由 #17237 跟踪。
+- 状态：U1–U3 已通过 [#17533](https://github.com/QwenLM/qwen-code/pull/17533) 合入，squash commit 为 [`17217d136a75a3070143cbded6de6b467039368c`](https://github.com/QwenLM/qwen-code/commit/17217d136a75a3070143cbded6de6b467039368c)；U4/U5 与 P7 仍由 [#17237](https://github.com/QwenLM/qwen-code/issues/17237) 跟踪。
 - 基于：`2026-11-14-web-shell-codex-worktree-parity.md` D7（快照是工作归档）、
   D3（dirty 携带），及 `2026-11-17-worktree-carry-metadata.md`（R9-6，sidecar
   `carriedEntries` 字段）。
@@ -16,14 +16,15 @@ Codex 保留最近的托管 worktree，且清理时绝不丢失工作：归档�
 回收，但含真实会话工作的 checkout 仍拒绝删除）。P6 对托管会话 worktree 以「先快照
 再删除」取代该拒绝，使清理把 work 保存在归档中，而非搁置 checkout。
 
-本 PR 交付的 U1–U3 切片保持普通 archive/unarchive 不具破坏性：已有有效 checkout、
+#17533 交付的 U1–U3 切片保持普通 archive/unarchive 不具破坏性：已有有效 checkout、
 其绑定及原始字节均保留。此切片中，先快照再移除的触发方是会话删除/孤儿清理路径。
 U4 按数量回收及 U5 重开恢复均未实现。上述目标和整体验收描述完整 P6 计划，不是
 本切片当前的 archive 行为。
 
 ## 分解
 
-P6 在 #17237 分支上分五个单元落地；每个可独立测试。
+P6 分为五个可独立测试的单元。U1–U3 已通过 #17533 合入；U4/U5
+仍计划在 #17237 落地。
 
 ### U1 — 快照捕获/恢复服务（core）
 
@@ -178,3 +179,9 @@ Web Shell 呈现入口（chat 头/会话概览）。i18n。同一 session 前缀
 
 - P7 可配置 worktree 根（`worktree.root`）——独立单元，安全敏感的包含性/shell-guard 重推导。
 - 托管（server）会话自身 worktree 设计对齐（后续）。
+
+## 交付与验证证据
+
+U1–U3 切片已通过 [#17533](https://github.com/QwenLM/qwen-code/pull/17533) 落地，squash commit 为 [`17217d136a75a3070143cbded6de6b467039368c`](https://github.com/QwenLM/qwen-code/commit/17217d136a75a3070143cbded6de6b467039368c)。实测运行时矩阵及其边界、独立审查和 squash commit 的产品 CI run，参见[搬运元数据的交付与验证证据](2026-11-17-worktree-carry-metadata.zh-CN.md#交付与验证证据)一节。
+
+U4/U5 仍是由 [#17237](https://github.com/QwenLM/qwen-code/issues/17237) 跟踪的未来工作；上述证据不改变目标和 P6 整体验收属于未来完整行为的范围。
