@@ -70,10 +70,8 @@ class StorageRowLockOrderMySqlIT {
         transactions = new TransactionTemplate(new DataSourceTransactionManager(database.source()));
         schema = jdbc.queryForObject("SELECT DATABASE()", String.class);
         threads = Executors.newFixedThreadPool(2);
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id)"
-                + " VALUES (?, ?, ?, ?, ?)", RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE),
-                RuntimeAdmissionFences.storageFenceKey(TENANT),
-                RuntimeAdmissionFences.storageFenceKey(STORAGE), TENANT, STORAGE);
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id)"
+                + " VALUES (?, ?, ?)", RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE), TENANT, STORAGE);
     }
 
     @AfterEach
@@ -242,7 +240,7 @@ class StorageRowLockOrderMySqlIT {
     @Test
     void migrationAbortClearsTheFenceThroughTheAliasIndex(@TempDir Path temp) throws Exception {
         // owner() locked the row through uk_ma_storage_business_key; clearing
-        // the fence through uk_ma_storage_alias would lock the row through a
+        // the fence through any other index would lock the row through a
         // second index inside the same transaction.
         String tenant = "lock-order-migration-tenant";
         String storage = "lock-order-migration-storage";
@@ -287,19 +285,18 @@ class StorageRowLockOrderMySqlIT {
     }
 
     private static void insertLocal(ManagedSchemaJdbcTemplate jdbc, String tenant, String physical) {
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, physical_key,"
                 + " registration_state, storage_kind, registration_revision, registration_json)"
-                + " VALUES (?, ?, ?, ?, ?, ?, 'REGISTERED', 'LOCAL', 1, '{}')",
-                RuntimeAdmissionFences.storageAliasKey(tenant, STORAGE), RuntimeAdmissionFences.storageFenceKey(tenant),
-                RuntimeAdmissionFences.storageFenceKey(STORAGE), tenant, STORAGE, physical);
+                + " VALUES (?, ?, ?, ?, 'REGISTERED', 'LOCAL', 1, '{}')",
+                RuntimeAdmissionFences.storageAliasKey(tenant, STORAGE), tenant, STORAGE, physical);
     }
 
     private void registerLocal() {
         jdbc.update("UPDATE ma_storage SET physical_key = ?, registration_state = 'REGISTERED', storage_kind = 'LOCAL',"
                 + " registration_revision = 1, registration_json = '{}' WHERE alias_key = ?", PHYSICAL,
                 RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE));
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state)"
-                + " VALUES (?, ?, 'LOCAL', 'READY')", PHYSICAL, PHYSICAL);
+        jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, mount_state)"
+                + " VALUES (?, 'LOCAL', 'READY')", PHYSICAL);
     }
 
     private static void admit(ManagedSchemaJdbcTemplate jdbc, boolean shared) {

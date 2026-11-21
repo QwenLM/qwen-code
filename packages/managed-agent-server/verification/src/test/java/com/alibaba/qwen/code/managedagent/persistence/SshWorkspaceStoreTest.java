@@ -405,7 +405,7 @@ class SshWorkspaceStoreTest {
         } else if ("registration".equals(mismatch)) {
             jdbc.update("UPDATE ma_storage_owner SET mount_registration_id = ?", UUID.randomUUID().toString());
         } else {
-            jdbc.update("UPDATE ma_storage_owner SET storage_key = 'replacement', physical_key = 'replacement'");
+            jdbc.update("UPDATE ma_storage_owner SET storage_key = 'replacement'");
         }
         assertThatThrownBy(() -> store.completeParked("tenant", intent.operationId()))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));

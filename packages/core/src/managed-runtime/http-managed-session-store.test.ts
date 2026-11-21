@@ -2900,6 +2900,36 @@ describe('HTTP Managed Session store', () => {
     expect(server.sealBodies.at(-1)).not.toHaveProperty('wake');
   });
 
+  it('refreshes the wake-dispatch capability on every ordinary writer renewal', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      expect(stores.supportsWakeDispatch()).toBe(false);
+      server.wakeDispatch = true;
+      await stores.assertWritable();
+      expect(stores.supportsWakeDispatch()).toBe(true);
+      server.wakeDispatch = false;
+      await stores.assertWritable();
+      expect(stores.supportsWakeDispatch()).toBe(false);
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
+
+  it('refreshes the wake-dispatch capability on an activation renewal', async () => {
+    const server = new FakeManagedSessionStore();
+    server.activationLeaseRenewal = true;
+    const { stores, authority } = await bootOriginalCsiAuthority(server);
+    try {
+      expect(stores.supportsWakeDispatch()).toBe(false);
+      server.wakeDispatch = true;
+      await authority.renewActivation({ leaseDurationMs: 60_000 });
+      expect(stores.supportsWakeDispatch()).toBe(true);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
   it('commits model statistics', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
