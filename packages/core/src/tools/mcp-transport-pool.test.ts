@@ -24,6 +24,14 @@ import { ResourceRegistry } from '../resources/resource-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { MCPServerStatus, updateMCPServerStatus } from './mcp-client.js';
+import {
+  addMCPStatusChangeListener,
+  getMCPServerStatus,
+  isMCPConnectionTeardownIntent,
+  isMCPServerTeardownIntent,
+  removeMCPServerStatus,
+  removeMCPStatusChangeListener,
+} from './mcp-status.js';
 import { WorkspaceMcpBudget } from './mcp-workspace-budget.js';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 import {
@@ -1042,6 +1050,82 @@ describe('McpTransportPool', () => {
       expect(message).toContain('descendantsSignaled=1');
       expect(message).toContain('pidSweepError=none');
       expect(message).toContain('orphan-process pressure');
+    });
+
+    it('does not certify the silent-drop cleanup as a deliberate teardown (issue #12160)', async () => {
+      // The pool's reactive sweep closes the transport after an unsolicited
+      // drop. `McpClient.disconnect()` used to record teardown intent for
+      // every caller, which told the abort repair hanging off the very same
+      // transition that the owner had stopped this server — so the repair
+      // declined on exactly the drop #12160 reports, and the surviving
+      // session never got the server back.
+      const { mocked } = await acquireOne();
+      // Remote transports expose no pid, so the sweep reaches
+      // `client.disconnect()` with no preceding await — the same shape the
+      // real HTTP/streamable path has.
+      const connection = (mocked as unknown as object) ?? {};
+
+      sdkOnError(mocked, new Error('EPIPE: connection lost'));
+
+      await vi.waitFor(() => {
+        expect(getMCPServerStatus('srv')).toBe(MCPServerStatus.DISCONNECTED);
+      });
+      // The sweep's disconnect must leave both markers clear: the
+      // name-keyed one and the per-connection one the repair actually reads.
+      expect(isMCPServerTeardownIntent('srv')).toBe(false);
+      expect(isMCPConnectionTeardownIntent(connection, 0)).toBe(false);
+      removeMCPServerStatus('srv');
+    });
+
+    it('does not certify a discarded pooled acquire failure as a deliberate teardown (issue #12160)', async () => {
+      // The catch that discards a failed acquire also calls
+      // `client.disconnect()`. Left at the default `deliberate: true` it
+      // mints the name-wide teardown marker, telling an abort repair that
+      // the owner stopped `srv` — and vetoing recovery for a live sibling
+      // connection registered under the same name.
+      const pool = mkPool();
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+      const mocked = mockMcpSuccess();
+      mocked.connect.mockRejectedValueOnce(new Error('spawn failed'));
+
+      await expect(acquire(pool, 'srv', cfg, 's1', r)).rejects.toThrow(
+        'spawn failed',
+      );
+
+      expect(isMCPServerTeardownIntent('srv')).toBe(false);
+      removeMCPServerStatus('srv');
+    });
+
+    it('certifies a pooled eviction as a deliberate teardown before its transition fires (issue #12160)', async () => {
+      // An abort repair reads the `DISCONNECTED` a deliberate teardown
+      // produces and must not revive the server. The ordering that guarantees
+      // it lives in `McpClient.disconnect()`: it records the intent before it
+      // publishes the status (`mcp-client.ts`), so every teardown path that
+      // goes through it — this eviction included — is covered without the
+      // caller marking anything itself.
+      const { pool, cfg } = await acquireOne();
+      const entry = entryOf(pool, cfg);
+      const seen: boolean[] = [];
+      const listener = (
+        serverName: string,
+        status: MCPServerStatus | undefined,
+      ) => {
+        if (serverName === 'srv' && status === MCPServerStatus.DISCONNECTED) {
+          seen.push(isMCPServerTeardownIntent('srv'));
+        }
+      };
+      addMCPStatusChangeListener(listener);
+      try {
+        await entry.forceShutdown('manual');
+      } finally {
+        removeMCPStatusChangeListener(listener);
+      }
+      // The eviction really publishes the transition, and the mark was
+      // already set when each notification was delivered.
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.every((marked) => marked)).toBe(true);
+      removeMCPServerStatus('srv');
     });
   });
 

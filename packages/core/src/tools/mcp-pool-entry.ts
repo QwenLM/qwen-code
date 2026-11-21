@@ -763,7 +763,7 @@ export class PoolEntry {
    * `failed`.
    */
   async forceShutdown(
-    reason: 'drain_timer' | 'max_idle' | 'manual',
+    reason: 'drain_timer' | 'max_idle' | 'manual' | 'failed_acquire',
   ): Promise<void> {
     if (this.state === 'closed' || this.state === 'failed') return;
     // flip state to
@@ -882,7 +882,14 @@ export class PoolEntry {
       );
     }
     try {
-      await this.client.disconnect();
+      // `silent_drop` and `failed_acquire` are the two sweeps nobody asked
+      // for: one closes a transport that was already dead, the other
+      // discards an acquire that never became live. Neither is the owner's
+      // intent, and certifying either would veto recovery for a live sibling
+      // connection under the same name (issue #12160).
+      await this.client.disconnect({
+        deliberate: reason !== 'silent_drop' && reason !== 'failed_acquire',
+      });
     } catch (err) {
       // Disconnect failure is rare (usually a transport bug worth
       // surfacing) and gets a structured error log here. No
