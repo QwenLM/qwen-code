@@ -15,12 +15,14 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionPrincipal;
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Command;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
@@ -288,6 +290,37 @@ class SessionPrincipalOwnershipTest {
             assertThat(f.jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id=? AND turn_id=?",
                     String.class, foreignSession, foreignTurn.turnId())).isEqualTo("ACCEPTED");
             assertThat(f.count("ma_turn")).isEqualTo(2);
+        });
+    }
+
+    // R9-1 (fix-induced): the widest principal the tenant filter admits can
+    // create a Session, and its submit/cancel must also reach the operation
+    // ledger. The 4099-byte receipt stamp does not fit ma_operation.actor_key
+    // (VARBINARY(2048) inside the unique request index), so the ledger keys an
+    // over-wide stamp by its SHA-256 digest while the receipt keeps the full
+    // stamp for the byte-for-byte replay comparison.
+    @Test
+    void filterCeilingPrincipalSubmitsAndCancelsThroughTheOperationLedger() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String widest = "𝄞".repeat(512);
+            var principal = SessionPrincipal.of("tenant", widest, widest);
+            String id = f.create(principal, "ceiling-create");
+            var input = List.of(new com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock("text", "hello"));
+            var turn = f.service.submitTurn(principal, "ceiling-submit", id, input);
+            assertThat(f.service.submitTurn(principal, "ceiling-submit", id, input).replayed()).isTrue();
+            f.service.cancelTurn(principal, "ceiling-cancel", id, turn.turnId());
+            byte[] stamp = principal.receiptActorKey();
+            assertThat(stamp).hasSize(4099);
+            assertThat(f.jdbc.queryForObject(
+                    "SELECT actor_id FROM ma_request_receipt WHERE operation='SUBMIT_TURN'",
+                    byte[].class)).isEqualTo(stamp);
+            byte[] ledgerKey = DigestUtils.sha256Hex(stamp).getBytes(StandardCharsets.UTF_8);
+            for (String kind : List.of("SUBMIT_INPUT", "CANCEL")) {
+                assertThat(f.jdbc.queryForObject(
+                        "SELECT actor_key FROM ma_operation WHERE operation_kind=?",
+                        byte[].class, kind)).isEqualTo(ledgerKey);
+            }
         });
     }
 

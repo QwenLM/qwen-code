@@ -724,7 +724,7 @@ CREATE TABLE ma_operation (
     target_id VARBINARY(2048) COMMENT 'Original identity of the operation target.',
     storage_key CHAR(64) COMMENT 'Storage identity key used for indexed lookup and coordination.',
     physical_key CHAR(64) COMMENT 'Canonical physical storage identity shared by logical aliases.',
-    actor_key VARBINARY(2048) COMMENT 'Encoded actor identity used for authorization and idempotency.',
+    actor_key VARBINARY(2048) COMMENT 'Encoded actor identity used for authorization and idempotency; a key wider than the column (the principal receipt stamp reaches 4099 bytes) is stored as its SHA-256 hex digest, while the full stamp stays on ma_request_receipt.actor_id.',
     actor_id VARBINARY(2048) COMMENT 'Actor identity associated with this record.',
     idempotency_key VARBINARY(2048) COMMENT 'Original key identifying retries of the same request.',
     idempotency_digest CHAR(64) COMMENT 'Digest of the idempotency key used in unique indexes.',

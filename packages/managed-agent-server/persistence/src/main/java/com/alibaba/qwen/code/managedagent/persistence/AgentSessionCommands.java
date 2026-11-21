@@ -610,7 +610,7 @@ final class AgentSessionCommands {
                 sessionId,
                 operationId,
                 kind.name(),
-                actorKey,
+                ManagedSessionPrincipal.operationActorKey(actorKey),
                 idempotencyKey,
                 requestDigest,
                 sessionStatus,
