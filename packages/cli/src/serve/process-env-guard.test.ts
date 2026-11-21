@@ -447,16 +447,15 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'One more whole-object read resolves serve.sessionPrWatch: its two environment overrides are boot-time operator ' +
         'contracts, read once beside the settings they override rather than per tick. ' +
         'QWEN_CODE_MANAGED_RUNTIME is the Managed Agent attribution marker: the serve entry reads the ' +
-        "launcher's previous value once, stamps '1' for the Hosted Harness profile (or deletes an inherited value " +
-        'for every other profile, so an independent daemon launched inside a Managed session does not attribute ' +
-        'its sessions to managed) before the base env freeze, and restores the previous value on close or startup ' +
-        'failure (delete when unset) so an embedded caller keeps no leftover marker — five accesses: read, stamp, ' +
-        'inherit-drop, restore-delete, restore-write.',
+        "launcher's previous value once, stamps '1' for the Hosted Harness profile under a refcount so co-resident " +
+        'embedded daemons restore the ambient value only at last close (delete when unset), and releases the same ' +
+        'refcount on startup failure — four accesses: read, stamp, restore-delete, restore-write. The inherit-drop ' +
+        'for other profiles applies to the per-daemon base env copy, not process.env.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
         'computed:HOSTED_CSI_SESSION_STORE_URL_ENV': 1,
-        'computed:QWEN_CODE_MANAGED_RUNTIME_ENV': 5,
+        'computed:QWEN_CODE_MANAGED_RUNTIME_ENV': 4,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
@@ -558,14 +557,6 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_CODE_CLI': 1,
         'key:QWEN_CODE_MANAGED_NPM_PIN': 1,
       },
-    },
-  ],
-  [
-    'packages/cli/src/serve/routes/session.ts',
-    {
-      reason:
-        "The transcript export labels the session with the daemon's own resolved channel: one whole-object read of the launch environment feeds the ACP fallback with the serve marker asserted (this process is a daemon), so launcher markers (desktop, managed) win over the daemon default instead of a hardcoded label.",
-      accesses: { whole: 1 },
     },
   ],
   [

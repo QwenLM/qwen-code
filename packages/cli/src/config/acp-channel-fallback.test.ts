@@ -10,7 +10,32 @@ import {
   QWEN_CODE_MANAGED_RUNTIME_ENV,
   QWEN_CODE_SERVE_ENV,
   resolveAcpChannelFallback,
+  resolveDaemonExportChannel,
 } from './acp-channel-fallback.js';
+
+describe('resolveDaemonExportChannel', () => {
+  it('labels hosted-harness daemons managed regardless of ambient markers', () => {
+    expect(resolveDaemonExportChannel('hosted-harness', {})).toBe('managed');
+    expect(
+      resolveDaemonExportChannel('hosted-harness', {
+        [QWEN_CODE_DESKTOP_ENV]: '1',
+      }),
+    ).toBe('managed');
+  });
+
+  it('labels desktop-shell daemons desktop and everything else daemon', () => {
+    expect(
+      resolveDaemonExportChannel(undefined, { [QWEN_CODE_DESKTOP_ENV]: '1' }),
+    ).toBe('desktop');
+    expect(resolveDaemonExportChannel(undefined, {})).toBe('daemon');
+    // A co-resident harness's marker must not relabel an independent daemon.
+    expect(
+      resolveDaemonExportChannel(undefined, {
+        [QWEN_CODE_MANAGED_RUNTIME_ENV]: '1',
+      }),
+    ).toBe('daemon');
+  });
+});
 
 describe('resolveAcpChannelFallback', () => {
   it('falls back to ACP for a direct launch without daemon markers', () => {

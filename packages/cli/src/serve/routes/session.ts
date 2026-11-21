@@ -13,10 +13,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
 import {
-  QWEN_CODE_SERVE_ENV,
-  resolveAcpChannelFallback,
-} from '../../config/acp-channel-fallback.js';
-import {
   hashDaemonWorkspace,
   withDaemonSpan,
 } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
@@ -372,6 +368,13 @@ interface RegisterSessionRoutesDeps {
   bridge: AcpSessionBridge;
   workspaceRegistry: WorkspaceRegistry;
   archiveCoordinator: SessionArchiveCoordinator;
+  /**
+   * Channel label for transcript exports, resolved once per daemon at boot
+   * (hosted-harness → managed, desktop shell → desktop, otherwise daemon).
+   * Reading the shared process.env marker at request time would let a
+   * co-resident daemon relabel this daemon's exports.
+   */
+  exportChannel?: string;
   requestedSessionIdAdmission?: RequestedSessionIdAdmission;
   /**
    * Fired after a load/resume makes a session live, so the PR watch can deliver
@@ -1725,17 +1728,7 @@ export function registerSessionRoutes(
               sessionId,
               format,
               archiveState: target.archiveState,
-              // This process is itself a daemon: assert the serve marker so
-              // the default profile resolves to daemon while launcher
-              // markers (desktop, managed) still win. Hardcoding 'daemon'
-              // mislabeled Hosted Harness and desktop-shell exports.
-              config: {
-                getChannel: () =>
-                  resolveAcpChannelFallback({
-                    ...process.env,
-                    [QWEN_CODE_SERVE_ENV]: '1',
-                  }),
-              },
+              config: { getChannel: () => deps.exportChannel ?? 'daemon' },
             });
           });
         })(),

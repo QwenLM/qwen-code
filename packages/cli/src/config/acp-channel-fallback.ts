@@ -34,6 +34,27 @@ export const QWEN_CODE_SERVE_ENV = 'QWEN_CODE_SERVE';
 export const QWEN_CODE_DESKTOP_ENV = 'QWEN_CODE_DESKTOP';
 export const QWEN_CODE_MANAGED_RUNTIME_ENV = 'QWEN_CODE_MANAGED_RUNTIME';
 
+/**
+ * Channel label for transcript exports, resolved once per daemon at boot.
+ * The hosted-harness profile gates its public API behind the private managed
+ * contract (Managed transcripts export through the control plane), so this
+ * label only surfaces on default-profile daemons; resolving it per daemon
+ * keeps co-resident daemons from relabeling each other's exports through the
+ * shared process.env marker slot.
+ */
+export function resolveDaemonExportChannel(
+  profile: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  if (profile === 'hosted-harness') {
+    return 'managed';
+  }
+  if (env[QWEN_CODE_DESKTOP_ENV] === '1') {
+    return 'desktop';
+  }
+  return 'daemon';
+}
+
 export function resolveAcpChannelFallback(
   env: NodeJS.ProcessEnv = process.env,
 ): string {

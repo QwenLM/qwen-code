@@ -3482,6 +3482,11 @@ function installServeBrokenPipeGuard(): void {
   process.stderr.on('error', ignoreEpipe);
 }
 
+// Refcount of co-resident hosted-harness daemons in this process; the shared
+// process.env marker is restored to the ambient value only at last release.
+let managedMarkerDepth = 0;
+let managedMarkerAmbient: string | undefined;
+
 async function runQwenServeImpl(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps,
@@ -3556,30 +3561,43 @@ async function runQwenServeImpl(
   // The Hosted Harness is the Managed Agent's session host. Stamp the
   // attribution marker before the base env freeze so the in-process Hosted
   // turns (loadCliConfig's ACP fallback reads process.env) and every spawned
-  // child inherit it. Any other profile drops an inherited marker instead:
-  // a shell tool inside a Managed session composes child envs with
-  // {...process.env}, so an independently launched daemon would otherwise
-  // attribute its sessions to managed (same rule as `qwen daemon start`'s
-  // START_ENV_DROP). Registered with the lifecycle immediately so a startup
-  // failure before the loader scrub still restores an embedded caller's env;
-  // the later scrubApplied registration supersedes this with the combined
-  // restore, and close() runs both.
+  // child inherit it. The stamp is refcounted: co-resident embedded daemons
+  // share process.env, so the ambient value is restored only when the last
+  // hosted harness closes. Other profiles never touch the shared slot; they
+  // drop an inherited marker from their own base env copy only, so an
+  // independent daemon's children do not inherit a co-resident harness's (or
+  // the launcher's) marker while the harness keeps its attribution (same
+  // rule as `qwen daemon start`'s START_ENV_DROP, applied per daemon).
+  // Registered with the lifecycle immediately so a startup failure before
+  // the loader scrub still restores an embedded caller's env. scrubApplied
+  // is a single-slot setter, so the later combined registration replaces
+  // this one for the startup-failure catch; the shutdown handler calls this
+  // restore explicitly next to the loader restore, so a successful close
+  // releases the refcount exactly once.
   const previousManagedRuntimeMarker =
     process.env[QWEN_CODE_MANAGED_RUNTIME_ENV];
   if (optsIn.profile === 'hosted-harness') {
+    if (managedMarkerDepth === 0) {
+      managedMarkerAmbient = previousManagedRuntimeMarker;
+    }
+    managedMarkerDepth += 1;
     process.env[QWEN_CODE_MANAGED_RUNTIME_ENV] = '1';
-  } else {
-    delete process.env[QWEN_CODE_MANAGED_RUNTIME_ENV];
   }
   const restoreManagedRuntimeMarker = (): void => {
-    if (previousManagedRuntimeMarker === undefined) {
+    if (optsIn.profile !== 'hosted-harness') return;
+    managedMarkerDepth -= 1;
+    if (managedMarkerDepth > 0) return;
+    if (managedMarkerAmbient === undefined) {
       delete process.env[QWEN_CODE_MANAGED_RUNTIME_ENV];
     } else {
-      process.env[QWEN_CODE_MANAGED_RUNTIME_ENV] = previousManagedRuntimeMarker;
+      process.env[QWEN_CODE_MANAGED_RUNTIME_ENV] = managedMarkerAmbient;
     }
   };
   loggerLifecycle.scrubApplied(restoreManagedRuntimeMarker);
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  if (optsIn.profile !== 'hosted-harness') {
+    delete baseEnv[QWEN_CODE_MANAGED_RUNTIME_ENV];
+  }
   const liveConversationWorkspace =
     deps.liveConversationWorkspace ??
     new ConversationWorkspace({
