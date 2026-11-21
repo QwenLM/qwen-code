@@ -24,6 +24,7 @@ import {
   LoopReason,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
+import { LEADER_NAME } from '@qwen-code/qwen-code-core/agents/team/types.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import {
   getToolResultErrorMessage,
@@ -2166,11 +2167,10 @@ export interface BackgroundNotificationQueueItem {
   taskId: string;
   status: string;
   /**
-   * `peer` is a message from another agent — today an Agent Team teammate's
-   * report to its leader. Core models the kind end to end (`GROUP_ORDER.peer`,
-   * `droppedNoun`, the `hasPeerLoss` accounting, and `background-turn-context`);
-   * the user- and model-facing nouns switch on the teammate `agent` identity so
-   * an in-session report is not announced as cross-session traffic. Like `cron`
+   * `peer` is a message from another agent session — today an Agent Team
+   * teammate's report to its leader. Core already models the kind end to end
+   * (`GROUP_ORDER.peer`, `droppedNoun` → "cross-session message", the
+   * `hasPeerLoss` accounting, and `background-turn-context`), and like `cron`
    * it names no task the model could go and read, so a dropped one is a real
    * loss rather than a pointer to a registry entry.
    */
@@ -2184,6 +2184,13 @@ export interface BackgroundNotificationQueueItem {
    * message structurally instead of parsing the sender out of the text.
    */
   agent?: AgentIdentity;
+  /**
+   * Structured fields for i18n rendering on the frontend. `author` and the
+   * tool fields serve inter-agent frames: OpenAI's Responses multi-agent
+   * contract identifies an `agent_message`'s direction with `author` and
+   * `recipient` — this wire spells them camelCase under `AgentIdentity`'s
+   * borrow-shape-not-spelling rule.
+   */
   /** Producer class retained when several senders share one queue item. */
   producer?: 'teammate';
   /** Structured fields for i18n rendering on the frontend. */
@@ -2192,6 +2199,21 @@ export interface BackgroundNotificationQueueItem {
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
+    author?: {
+      agentName: string;
+      depth: number;
+      kind: 'root' | 'teammate';
+    };
+    toolName?: string;
+    phase?: 'call' | 'result';
+    success?: boolean;
+    /**
+     * Members of a coalesced roster burst (one queued item per synchronous
+     * join/teardown wave). A client reconstructing membership reads the
+     * names structurally instead of parsing the prose, so a deleted team
+     * really does end with an empty roster (#15659 review, R1-3/R1-4).
+     */
+    rosterMembers?: Array<{ name: string; status?: string }>;
     fromSession?: { sessionId: string; workspaceCwd: string };
   };
 }
@@ -2215,11 +2237,12 @@ function persistedNotificationAgent(agent: AgentIdentity): {
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   channelWorkflowOrigin?: ChannelWorkflowOrigin;
   continuesTodoStopGuardWorkChain: boolean;
-  persisted?: true;
+  persisted?: boolean;
   /**
-   * Set once a no-recorder landing has counted this report as lost. The queue
-   * is landed again by `dispose()` after the pre-close flush, so without the
-   * mark one lost report is announced twice.
+   * Set once a no-recorder landing has counted this report as lost. The
+   * sealed-window cold copy also queues the report for the rollback re-drain,
+   * and `dispose()` lands the queue again, so without the mark one lost report
+   * is counted twice.
    */
   lossTallied?: boolean;
   turn?: BackgroundNotificationTurn;
@@ -2965,8 +2988,18 @@ export class Session implements SessionContext {
    * Set once the pre-close flush has landed the queue. Nothing may be enqueued
    * after that point: the recorder stops accepting writes when the writer
    * terminals start, so a late arrival is neither drained nor durable.
+   *
+   * Scoped to the close that set it, not to the session: `beginClose`'s
+   * release clears it again, because a close that fails or is cancelled leaves
+   * the session live and a permanent seal would silently divert every later
+   * notification.
    */
   private peerNotificationsSealed = false;
+  /**
+   * Peer items the pre-close flush landed as cold copies. A rolled-back close
+   * clears their `persisted` mark so the warm delivery is recorded too.
+   */
+  #peerItemsLandedByFlush = new Set<QueuedBackgroundNotification>();
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   /** Releases {@link ChatRecordingService.withholdTurnRecords} on rollback. */
   private releaseTurnRecordWithholding: (() => void) | undefined;
@@ -5563,16 +5596,26 @@ export class Session implements SessionContext {
       this.releaseTurnRecordWithholding?.();
       this.releaseTurnRecordWithholding = undefined;
       // The close was reversible and just got rolled back, so the session is
-      // live again: un-seal peer intake or every later teammate report takes
-      // the cold-copy branch above, never enters the queue and never reaches
-      // the leader — while its mailbox row is already marked read. The
-      // irreversible managed-shutdown path never runs this closure.
+      // live again: un-seal or every later notification takes the cold-copy
+      // branch below, never enters the queue and never reaches the leader or
+      // the client — while its mailbox row is already marked read. The
+      // irreversible managed-shutdown path never runs this closure, so its
+      // seal holds, and `disposed` returns above keep the terminal one.
       this.peerNotificationsSealed = false;
-      // Un-sealing is not enough: the pre-close flush also stopped the
-      // leader-inbox poll, and nothing else restarts it, so the reports would
-      // still never arrive. Resuming is idempotent and a no-op once the team is
-      // gone.
+      // The flush stopped leader-inbox intake before sealing; a rolled-back
+      // close makes the session live again, and `ensureLeaderInboxPolling`
+      // otherwise runs only when a teammate is spawned. Without this the
+      // session stays deaf for the rest of its life to reports that are
+      // already marked read in the mailbox.
       this.config.getTeamManager()?.resumeLeaderInboxPolling?.();
+      // The close was rolled back after a pre-close flush: those reports are
+      // about to be delivered warm, so their persisted mark must not suppress
+      // the warm record (R2-21). A cold copy alone describes a report the
+      // model was never told about.
+      for (const landed of this.#peerItemsLandedByFlush) {
+        landed.persisted = false;
+      }
+      this.#peerItemsLandedByFlush.clear();
       void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -5687,6 +5730,13 @@ export class Session implements SessionContext {
     const tallied = new Set<QueuedBackgroundNotification>();
     const recording = this.config.getChatRecordingService();
     if (!recording) {
+      // A hidden-workspace session has no recording service, so a report in
+      // this queue is already read on disk and can never be persisted here.
+      // Returning silently would erase the last trace of it, so record the
+      // drop the same way the overflow path does: the warning for the log and
+      // the tally for the leader's next turn. The tally goes through
+      // `toAdmissibleNotification` so the noun still follows the producer
+      // (`teammate report`, not `cross-session message`).
       for (const item of items) {
         if (
           item.producer !== 'teammate' ||
@@ -5742,6 +5792,10 @@ export class Session implements SessionContext {
    * read as it consumes it, and `notificationQueue` is the report's only
    * carrier after that, so a report consumed past the seal would be read on
    * disk, landed into a writer that no longer accepts records, and lost.
+   * `quiesceLeaderInbox` stops the interval, waits out a poll already in
+   * flight and drains once more, so everything a teammate wrote before the
+   * close is queued here and landed by the loop below. A report written after
+   * the quiesce lands through the sealed-window cold copy instead.
    *
    * The landing can also end in a tally rather than a record (no recorder,
    * hidden workspace). That tally is emitted here as the `queue` frame a drain
@@ -5751,6 +5805,13 @@ export class Session implements SessionContext {
   async flushPendingPeerNotifications(): Promise<void> {
     await this.config.getTeamManager()?.quiesceLeaderInbox?.();
     this.peerNotificationsSealed = true;
+    // Remember what this flush lands: the mark is cleared if the close is
+    // rolled back and the report is delivered warm afterwards (R2-21).
+    for (const item of this.notificationQueue) {
+      if (item.kind === 'peer' && !item.persisted) {
+        this.#peerItemsLandedByFlush.add(item);
+      }
+    }
     this.#landUndrainedPeerNotifications();
     // A landing with no recorder (hidden workspace) can only tally the loss,
     // and `dispose()` clears the tally. Emit here, while the client connection
@@ -14279,6 +14340,8 @@ export class Session implements SessionContext {
       injectLeaderNotice: (modelText, displayText) =>
         this.#enqueueTeamRuntimeNotice(modelText, displayText),
       reportRosterChange: (change) => this.#enqueueTeamRosterChange(change),
+      reportTeammateActivity: (activity) =>
+        this.#emitTeammateActivity(activity),
       // Not `#requestPermissionQueued`: a teammate approval is session-scoped,
       // so no leader turn ending bounds it — one ignored card left on the
       // shared tail would wedge every later prompt, including the leader's own.
@@ -14316,9 +14379,7 @@ export class Session implements SessionContext {
    * a message from anyone, so it must not enter the peer queue: that queue
    * seals on close, lands cold copies as peer records, and renders rows under
    * the peer label. It splices into the next ordinary turn as runtime context
-   * (the same live-history mechanism external agent records use) and records
-   * as a plain notification with no `backgroundTask`, so neither live nor
-   * reloaded transcripts present it as a peer report.
+   * and records as a plain notification with no `backgroundTask`.
    */
   #enqueueTeamRuntimeNotice(modelText: string, displayText: string): void {
     if (this.disposed) return;
@@ -14407,38 +14468,65 @@ export class Session implements SessionContext {
    * and idle pulses are deliberately not projected: they fire on every
    * transition and each would wake the leader into an automatic turn for noise.
    */
-  #pendingTeardownExits: Array<{ name: string; status?: string }> = [];
-  #teardownFlushScheduled = false;
+  #pendingRosterChanges: Array<{
+    type: 'joined' | 'exited';
+    name: string;
+    status?: string;
+  }> = [];
+  #rosterFlushScheduled = false;
 
-  #flushTeardownRosterExits(): void {
-    this.#teardownFlushScheduled = false;
-    const exits = this.#pendingTeardownExits.splice(0);
-    if (exits.length === 0 || this.disposed) return;
-    const names = exits.map((exit) => exit.name);
-    const head =
-      names.length === 1
-        ? `Teammate ${names[0]}`
-        : `Teammates ${names.join(', ')}`;
-    const tail = `left the team (${exits[0]?.status ?? 'cancelled'})`;
-    this.#enqueueBackgroundNotification({
-      kind: 'peer',
-      taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
-      status: 'exited',
-      modelText: `<peer-notification>\n${escapeXml(`${head} ${tail}.`)}\n</peer-notification>`,
-      displayText: `teammate ${names.join(', ')} ${tail}`,
-      producer: 'teammate',
-      ...(names.length === 1
-        ? {
-            agent: {
-              agentName: `${ROOT_AGENT_IDENTITY.agentName}/${names[0]}`,
-              depth: 1,
-              kind: 'teammate' as const,
-            },
-          }
-        : {}),
-      label: names.join(', '),
-      continuesTodoStopGuardWorkChain: false,
-    });
+  #flushRosterChanges(): void {
+    this.#rosterFlushScheduled = false;
+    const changes = this.#pendingRosterChanges.splice(0);
+    if (changes.length === 0 || this.disposed) return;
+    // One burst can carry both kinds (a re-created team), and an exit burst
+    // can mix statuses; split both dimensions so one member never takes
+    // another member's terminal state.
+    for (const type of ['joined', 'exited'] as const) {
+      const byStatus = new Map<string | undefined, typeof changes>();
+      for (const change of changes.filter((entry) => entry.type === type)) {
+        const key = type === 'exited' ? change.status : undefined;
+        byStatus.set(key, [...(byStatus.get(key) ?? []), change]);
+      }
+      for (const burst of byStatus.values()) {
+        const names = burst.map((change) => change.name);
+        const joined = type === 'joined';
+        const head =
+          names.length === 1
+            ? `Teammate ${names[0]}`
+            : `Teammates ${names.join(', ')}`;
+        const tail = joined
+          ? 'joined the team'
+          : `left the team (${burst[0]?.status ?? 'cancelled'})`;
+        const members = burst.map((change) => ({
+          name: change.name,
+          ...(change.status ? { status: change.status } : {}),
+        }));
+        this.#enqueueBackgroundNotification({
+          kind: 'peer',
+          taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+          status: type,
+          modelText: `<peer-notification>\n${escapeXml(`${head} ${tail}.`)}\n</peer-notification>`,
+          displayText: `teammate ${names.join(', ')} ${tail}`,
+          producer: 'teammate',
+          // A single-member burst keeps that member's identity chip; a
+          // multi-member frame carries every member structurally instead
+          // (#15659 review, R1-3).
+          ...(burst.length === 1
+            ? {
+                agent: {
+                  agentName: `${ROOT_AGENT_IDENTITY.agentName}/${names[0]}`,
+                  depth: 1,
+                  kind: 'teammate' as const,
+                },
+              }
+            : {}),
+          label: names.join(', '),
+          structured: { rosterMembers: members },
+          continuesTodoStopGuardWorkChain: false,
+        });
+      }
+    }
   }
 
   #enqueueTeamRosterChange(change: {
@@ -14450,39 +14538,114 @@ export class Session implements SessionContext {
     // Same reasoning as `#enqueueTeammateMessage`: a reversible close must not
     // swallow the notice, since the queue is drained when the gate releases.
     if (this.disposed) return;
-    if (change.type === 'exited' && change.teardown) {
-      // One `cleanup()` publishes an exit per surviving teammate (up to ten),
-      // and every queued peer item drains as its own automatic leader turn.
-      // Collect the synchronous burst and enqueue a single item instead; the
-      // per-teammate events still reach the wire and the approval retirement.
-      this.#pendingTeardownExits.push({
-        name: change.name,
-        status: change.status,
-      });
-      if (!this.#teardownFlushScheduled) {
-        this.#teardownFlushScheduled = true;
-        queueMicrotask(() => this.#flushTeardownRosterExits());
-      }
-      return;
+    // One `cleanup()` publishes an exit per surviving teammate and one
+    // `team_create` a join per spawned member (up to ten each), and every
+    // queued peer item drains as its own automatic leader turn. Collect the
+    // burst and enqueue a single item per kind instead; the per-teammate
+    // events still reach the wire and the approval retirement (#15659
+    // review, R1-4). Production joins arrive one per event-loop turn after
+    // each spawn's awaited persistTeamFile(), so the flush waits a short
+    // timer rather than a microtask — microtasks drain between the libuv
+    // callbacks and would coalesce nothing (R2-3).
+    this.#pendingRosterChanges.push({
+      type: change.type,
+      name: change.name,
+      status: change.status,
+    });
+    if (!this.#rosterFlushScheduled) {
+      this.#rosterFlushScheduled = true;
+      setTimeout(() => this.#flushRosterChanges(), 50);
     }
-    const joined = change.type === 'joined';
-    const tail = joined
-      ? 'joined the team'
-      : `left the team${change.status ? ` (${change.status})` : ''}`;
-    this.#enqueueBackgroundNotification({
-      kind: 'peer',
-      taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
-      status: change.type,
-      modelText: `<peer-notification>\n${escapeXml(`Teammate ${change.name} ${tail}.`)}\n</peer-notification>`,
-      displayText: `teammate ${change.name} ${tail}`,
-      producer: 'teammate',
-      agent: {
-        agentName: `${ROOT_AGENT_IDENTITY.agentName}/${change.name}`,
-        depth: 1,
-        kind: 'teammate',
+  }
+
+  /**
+   * Teammate progress and inter-teammate messages as display-only frames.
+   * Unlike roster changes and reports these never enter the notification
+   * queue — they carry nothing the leader must act on, and each would
+   * otherwise wake it into an automatic turn. Persistence is skipped for the
+   * same reason: the frames are ephemeral activity, while the report the
+   * teammate eventually sends is what the transcript must keep.
+   */
+  #emitTeammateActivity(activity: {
+    kind: 'tool' | 'message';
+    name: string;
+    toolName?: string;
+    phase?: 'call' | 'result';
+    success?: boolean;
+    description?: string;
+    from?: string;
+    to?: string;
+    message?: string;
+  }): void {
+    if (this.disposed || this.closing) return;
+    // The Web Shell system row switches `backgroundTask.status` on exactly
+    // `completed` / `failed` / `cancelled` and renders anything else with a
+    // neutral icon, so a failed tool result must not stay a raw phase string.
+    const toolFailed =
+      activity.phase === 'result' && activity.success === false;
+    const text =
+      activity.kind === 'tool'
+        ? `${activity.name} ${activity.phase === 'result' ? 'finished' : 'started'} ${activity.toolName ?? 'a tool'}${activity.description && (activity.phase === 'call' || toolFailed) ? `: ${activity.description}` : ''}`
+        : `${activity.from} → ${activity.to}: ${activity.message ?? ''}`;
+    // Inter-agent messages carry OpenAI's Responses multi-agent semantics —
+    // `agent_message` items identify direction with `author` and `recipient`,
+    // and the item's own `agent` names the recipient — spelled in this wire's
+    // camelCase, the same borrow-shape-not-spelling rule `AgentIdentity`
+    // documents.
+    const agentName = (name: string): string =>
+      name === LEADER_NAME
+        ? ROOT_AGENT_IDENTITY.agentName
+        : `${ROOT_AGENT_IDENTITY.agentName}/${name}`;
+    const recipient =
+      activity.kind === 'message' && activity.to ? activity.to : activity.name;
+    void this.#emitBackgroundNotificationDisplay(
+      {
+        displayText: text,
+        modelText: text,
+        taskId: `teammate-activity-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+        status:
+          activity.kind === 'tool'
+            ? toolFailed
+              ? 'failed'
+              : activity.phase === 'result'
+                ? 'completed'
+                : (activity.phase ?? 'call')
+            : 'message',
+        kind: 'peer',
+        agent: {
+          agentName: agentName(recipient),
+          depth: recipient === LEADER_NAME ? 0 : 1,
+          kind: recipient === LEADER_NAME ? 'root' : 'teammate',
+        },
+        structured: {
+          ...(activity.kind === 'message' &&
+          activity.from &&
+          activity.from !== 'unknown'
+            ? {
+                author: {
+                  agentName: agentName(activity.from),
+                  depth: activity.from === LEADER_NAME ? 0 : 1,
+                  kind:
+                    activity.from === LEADER_NAME
+                      ? ('root' as const)
+                      : ('teammate' as const),
+                },
+              }
+            : {}),
+          ...(activity.kind === 'tool'
+            ? {
+                toolName: activity.toolName,
+                phase: activity.phase,
+                ...(activity.success !== undefined
+                  ? { success: activity.success }
+                  : {}),
+              }
+            : {}),
+        },
       },
-      label: change.name,
-      continuesTodoStopGuardWorkChain: false,
+      'teammate_activity',
+    ).catch((error) => {
+      debugLogger.warn('Failed to publish teammate activity:', error);
     });
   }
 
@@ -14715,11 +14878,21 @@ export class Session implements SessionContext {
     // The pre-close flush already ran, so this queue will never be drained
     // again. Land the copy while the recorder still accepts writes rather than
     // parking it in a queue whose contents become unpersistable moments later.
-    // Peer reports only: a shell/monitor/agent/workflow completion still owes
-    // the client its display frame and `recordBackgroundTaskCompleted`, and
-    // the cold-copy branch below records neither.
+    // Peer reports only: `#landUndrainedPeerNotifications` skips every other
+    // kind, so an agent/shell/monitor/workflow/cron completion taken through
+    // this branch would lose its transcript record, its display frame and its
+    // dropped tally at once.
     if (this.peerNotificationsSealed && item.kind === 'peer') {
+      // A report that arrives after the pre-close flush was not in the queue
+      // that flush remembered, so the rollback cannot re-drain it. Remember it
+      // and queue it too: the cold copy lands now, and a rolled-back close
+      // clears its mark and delivers it warm. The queue admission limit still
+      // applies; at the cap the cold copy is the only record, as before.
+      this.#peerItemsLandedByFlush.add(item);
       this.#landUndrainedPeerNotifications([item]);
+      if (this.notificationQueue.length < MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+        this.notificationQueue.push(item);
+      }
       return;
     }
     const backgroundQueue = this.notificationQueue.filter(

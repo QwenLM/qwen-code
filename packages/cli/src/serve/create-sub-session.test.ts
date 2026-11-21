@@ -1312,6 +1312,7 @@ describe('sub-session launcher', () => {
     'background_task_completed',
     'background_notification',
     'background_notification_turn_started',
+    'teammate_activity',
   ])('excludes %s display prose from first-turn output', async (source) => {
     const fake = makeFakeBridge({
       events: (pid) => [

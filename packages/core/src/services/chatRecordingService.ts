@@ -678,6 +678,16 @@ export interface NotificationRecordPayload {
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
+    // Activity frames (author/toolName/phase/success) are display-only by
+    // design and never enter the queue, so the persisted payload must not
+    // declare them — they live on BackgroundNotificationQueueItem.structured
+    // alone (R2-6).
+    /**
+     * Members of a coalesced teammate roster burst: the structural names a
+     * client retires (or admits) without parsing the row's prose. Persisted
+     * so a reload keeps the same membership evidence as the live frame.
+     */
+    rosterMembers?: Array<{ name: string; status?: string }>;
     fromSession?: { sessionId: string; workspaceCwd: string };
   };
 }

@@ -22633,6 +22633,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getId: () => id,
       isIdle: () => true,
       cancelPendingPrompt: vi.fn(),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       getConfig: () => ({
         ...mockConfig,
         getTargetDir: vi.fn().mockReturnValue(admissionRoot),
@@ -22709,6 +22710,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getId: () => id,
       isIdle: () => true,
       cancelPendingPrompt: vi.fn(),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       getConfig: () => ({
         ...mockConfig,
         getTargetDir: vi.fn().mockReturnValue(admissionRoot),
@@ -33760,6 +33762,46 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('lands peer reports when the cancelled turn never settles during managed shutdown', async () => {
+    // A cancelled turn that never settles rejects the bounded wait. The flush
+    // must still run: the report was already marked read on disk, and the
+    // writer close below turns a later landing into a no-op. A second,
+    // duplicated wait would restart the bound and send the rejection into the
+    // flush's own guard, so the flush would never run at all.
+    const innerConfig = makeRestoreInnerConfig();
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
+      waitForActiveTurnsToSettle: vi
+        .fn()
+        .mockRejectedValue(new Error('turn never settles')),
+      flushPendingPeerNotifications: vi.fn().mockResolvedValue(undefined),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    // `sessions` is private and the test seeds it to stand in for a load.
+    const sessions = (agent as unknown as { sessions: Map<string, unknown> })
+      .sessions;
+    sessions.set('persisted-1', liveSession);
+
+    await agent.beginManagedShutdown().writerShutdown;
+
+    expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
+    expect(liveSession.waitForActiveTurnsToSettle).toHaveBeenCalledOnce();
+    expect(
+      liveSession.flushPendingPeerNotifications.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(innerConfig.closeSessionWriter).mock.invocationCallOrder[0],
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('still closes the writers when a peer flush throws during managed shutdown', async () => {
     const innerConfig = makeRestoreInnerConfig();
     const liveSession = {
@@ -33781,13 +33823,18 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       liveSession,
     );
 
-    // An unguarded throw would abort the session loop before this session's
-    // Config reached the writer-close loop, leaving its writer open.
+    // Promise.allSettled already contains a rejected flush; the try/catch's
+    // observable effect is the diagnostic, so pin that too (R3-2).
     await agent.beginManagedShutdown().writerShutdown;
 
     expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
       handoff: true,
     });
+    expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'peer notification flush during managed shutdown failed: mailbox write failed',
+      ),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -34744,11 +34791,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       cancelPromptAdmission: vi.fn(
         (controller: AbortController, reason: string) =>
           controller.abort(reason),
       ),
-      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       isTurnIdle: vi.fn().mockReturnValue(true),
       dispose: replacementDispose,
       takeQueuedPeerDeliveries: () => [],

@@ -621,6 +621,30 @@ export function transcriptBlocksToDaemonMessages(
     const blockTeammate = teammateOfAgent(
       (block as DaemonTextTranscriptBlock).agent,
     );
+    if (block.kind === 'status' && block.source === 'teammate_activity') {
+      const activityData = getRecord(block.data);
+      // On an inter-agent message the wire's `agent` names the *recipient*; the
+      // author travels structurally in `data.author` (the frame's own text is
+      // already `author → recipient`). Chip the author so the chip and the row
+      // text cannot disagree, and chip nothing when a message row has no
+      // trustworthy author — never fall back to the recipient.
+      const activityTeammate =
+        activityData?.['status'] === 'message'
+          ? teammateOfAuthor(activityData['author'])
+          : (teammateOfAuthor(activityData?.['author']) ?? blockTeammate);
+      messages.push({
+        id: block.id,
+        role: 'system',
+        content: block.text,
+        variant: 'info',
+        source: block.source,
+        data: activityData,
+        ...(activityTeammate ? { teammate: activityTeammate } : {}),
+        timestamp: blockTime,
+        sourceBlockIds: [block.id],
+      });
+      continue;
+    }
     const promptId = backgroundTurn?.turnId ?? block.promptId;
     if (
       promptId !== undefined &&
@@ -826,7 +850,7 @@ export function transcriptBlocksToDaemonMessages(
             role: 'system',
             content: textBlock.text,
             variant: 'info',
-            source: 'background_notification',
+            source: notice.source,
             data: notice.data,
             ...(blockTeammate ? { teammate: blockTeammate } : {}),
             timestamp: blockTime,
@@ -1951,6 +1975,20 @@ function getToolCallRawInput(
     getRecord(toolCall['input']) ??
     getRecord(toolCall['args'])
   );
+}
+
+/**
+ * Teammate author of an inter-agent message, from the frame's structured
+ * `data.author`. The leader (`kind: 'root'`) and an unknown sender stay
+ * unchipped, the same way subagent frames do.
+ */
+function teammateOfAuthor(value: unknown): { name: string } | undefined {
+  const author = getRecord(value);
+  if (!author || author['kind'] !== 'teammate') return undefined;
+  const agentName = author['agentName'];
+  if (typeof agentName !== 'string') return undefined;
+  const name = agentName.split('/').filter(Boolean).pop();
+  return name ? { name } : undefined;
 }
 
 /**

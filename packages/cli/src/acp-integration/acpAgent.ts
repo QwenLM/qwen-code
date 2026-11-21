@@ -4331,6 +4331,10 @@ class QwenAgent implements Agent {
               // intake settles is what lost the report.
               await session.flushPendingPeerNotifications?.();
             } catch (error) {
+              // A flush failure is contained so the surrounding loop keeps
+              // collecting Configs; the diagnostic is the guard's observable
+              // effect. `dispose()` runs `#landUndrainedPeerNotifications` as
+              // the last resort.
               debugLogger.debug(
                 `Session ${session.getId()} peer notification flush during managed shutdown failed: ${
                   error instanceof Error ? error.message : String(error)

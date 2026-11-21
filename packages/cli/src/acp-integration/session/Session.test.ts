@@ -1546,6 +1546,8 @@ describe('Session', () => {
         'teammate_approval_request',
         'teammate_joined',
         'teammate_exited',
+        'teammate_activity',
+        'message_sent',
       ]);
 
       manager.leaderCallback?.(
@@ -1895,18 +1897,21 @@ describe('Session', () => {
             timestamp: i,
           });
         }
-        // Peer items do not consume overflow admission slots (#17436), so
-        // every report and roster exit stays in the queue as a hold.
+        // The exit burst coalesces into ONE queued roster item (#15659
+        // R1-4) on the timer-bounded flush (R2-3); peer items do not consume
+        // overflow admission slots (#17436), so every report plus the merged
+        // roster entry stays in the queue as a hold.
+        await new Promise((resolve) => setTimeout(resolve, 80));
         expect(
           session
             .collectActiveWorkHolds()
             .filter((hold) => hold.category === 'notification'),
-        ).toHaveLength(reportCount + 10);
+        ).toHaveLength(reportCount + 1);
         await session.flushPendingPeerNotifications();
         session.dispose();
         const landed = vi.mocked(mockChatRecordingService.recordNotification)
           .mock.calls;
-        expect(landed).toHaveLength(reportCount + 10);
+        expect(landed).toHaveLength(reportCount + 1);
         for (const report of reports) {
           expect(
             landed.filter(([parts]) =>
@@ -2279,7 +2284,7 @@ describe('Session', () => {
       session.dispose();
     });
 
-    it('un-seals peer intake when a reversible close is rolled back', async () => {
+    it('un-seals notifications when a reversible close is rolled back', async () => {
       // `beginClose`'s release restores `closing` and re-drains, so the session
       // is live again. A latch left set diverts every later report to a cold
       // record: never queued, never delivered, while its mailbox row is
@@ -2294,6 +2299,9 @@ describe('Session', () => {
         mockClient,
         mockSettings,
       );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
       const releaseClose = session.beginClose();
       await session.flushPendingPeerNotifications();
       vi.mocked(
@@ -2302,33 +2310,129 @@ describe('Session', () => {
       vi.mocked(mockChatRecordingService.recordNotification).mockClear();
 
       releaseClose();
-      // Un-sealing alone leaves the session deaf: the pre-close flush also
-      // stopped the real leader-inbox poll and nothing else restarts it, so the
-      // rollback has to resume intake as well. Pinned end to end against a real
-      // TeamManager in
-      // packages/core/src/agents/team/TeamManager.leader-inbox.test.ts.
-      expect(manager.intakeCalls).toContain('resumeLeaderInboxPolling');
+      // A peer report is the discriminator: the sealed branch's kind narrowing
+      // already rescues every other kind, so only a `peer` item proves the
+      // latch itself was cleared.
       manager.leaderCallback?.('after rollback', 'after rollback', [
         'security',
       ]);
+      await session.enqueueBackgroundNotification({
+        displayText: 'Agent completed.',
+        modelText: '<task-notification />',
+        taskId: 'agent-after-rollback',
+        status: 'completed',
+        kind: 'agent',
+      });
 
+      // Both take the live path again — queued, accounted as completions, and
+      // drained to the leader — instead of being cold-stored or dropped.
       expect(
         mockChatRecordingService.recordBackgroundTaskCompleted,
       ).toHaveBeenCalledWith(
         expect.objectContaining({ displayText: 'after rollback' }),
       );
       expect(
-        mockChatRecordingService.recordNotification,
-      ).not.toHaveBeenCalled();
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          backgroundTask: expect.objectContaining({
+            taskId: 'agent-after-rollback',
+            kind: 'agent',
+          }),
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(vi.mocked(mockChat.sendMessageStream)).toHaveBeenCalled(),
+      );
+      // The drain records the warm copy before prompting the leader, so the
+      // property under test is "recorded", not "not yet recorded" (R2-18).
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalled();
       session.dispose();
     });
 
-    it('still records a shell completion that arrives while peer intake is sealed', async () => {
-      // The seal is about peer reports. A shell/monitor/agent/workflow
-      // completion that lands in the sealed window still owes the client its
-      // display frame and the recorder its completion record; the cold-copy
-      // branch writes neither, because it skips every non-peer item.
+    it('records the warm copy after a rolled-back flush landed the report cold', async () => {
+      // R2-21: the pre-close flush writes the cold copy and marks the item
+      // persisted. When the close is rolled back the release re-drains the same
+      // item to the leader; without clearing the mark the warm record is
+      // skipped and the transcript keeps only the "model never told" copy.
+      const internals = session as unknown as {
+        notificationQueue: Array<Record<string, unknown>>;
+      };
+      internals.notificationQueue.push({
+        taskId: 'peer-rolled-back',
+        kind: 'peer',
+        status: 'message',
+        modelText: 'peer report',
+        displayText: 'peer report',
+        producer: 'teammate',
+        continuesTodoStopGuardWorkChain: false,
+        agent: { agentName: 'reviewer', depth: 1, kind: 'teammate' },
+      });
+      const releaseClose = session.beginClose();
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+      await session.flushPendingPeerNotifications();
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledTimes(
+        1,
+      );
+      releaseClose();
+      await vi.waitFor(() =>
+        expect(vi.mocked(mockChat.sendMessageStream)).toHaveBeenCalled(),
+      );
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledTimes(
+        2,
+      );
+      session.dispose();
+    });
+
+    it('delivers a report that arrives inside the sealed window when the close rolls back', async () => {
+      // R4-1: the flush only remembers the items already in the queue. A peer
+      // report delivered after the flush is cold-stored and never queued, so
+      // the rollback un-seals the session but has nothing to re-drain and the
+      // report stays invisible to the model.
+      const manager = makeFakeTeamManager();
+      session.dispose();
       vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const releaseClose = session.beginClose();
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+      await session.flushPendingPeerNotifications();
+      manager.leaderCallback?.(
+        'report inside the window',
+        'report inside the window',
+        ['security'],
+      );
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledTimes(
+        1,
+      );
+      releaseClose();
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      await vi.waitFor(() => expect(sendMessageStream).toHaveBeenCalled());
+      const prompted = sendMessageStream.mock.calls
+        .map((call) =>
+          ((call[1] as { message?: Array<{ text?: string }> }).message ?? [])
+            .map((part) => part.text ?? '')
+            .join('\n'),
+        )
+        .join('\n');
+      expect(prompted).toContain('report inside the window');
+      session.dispose();
+    });
+
+    it('still records a non-peer completion that arrives inside the sealed window', async () => {
+      // The seal is about peer reports. `#landUndrainedPeerNotifications` skips
+      // every other kind, so routing an agent/shell/monitor/workflow/cron
+      // completion through that branch loses its transcript record, its display
+      // frame and its dropped tally at once — and during managed shutdown the
+      // window is wide enough for a background task to finish inside it.
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
@@ -2338,24 +2442,61 @@ describe('Session', () => {
       ).mockClear();
 
       await session.enqueueBackgroundNotification({
-        displayText: 'npm test finished',
+        displayText: 'Agent completed.',
         modelText: '<task-notification />',
-        taskId: 'shell-sealed-window',
+        taskId: 'agent-in-sealed-window',
         status: 'completed',
-        kind: 'shell',
+        kind: 'agent',
       });
 
       expect(
         mockChatRecordingService.recordBackgroundTaskCompleted,
       ).toHaveBeenCalledWith(
         expect.objectContaining({
-          displayText: 'npm test finished',
           backgroundTask: expect.objectContaining({
-            taskId: 'shell-sealed-window',
-            kind: 'shell',
+            taskId: 'agent-in-sealed-window',
+            kind: 'agent',
           }),
         }),
       );
+      session.dispose();
+    });
+
+    it('splits a mixed-status exit burst so no member takes another status', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      sendMessageStream.mockClear();
+      sendMessageStream.mockResolvedValue(createEmptyStream());
+      manager.emit('teammate_exited', {
+        agentId: 'qa-a',
+        name: 'qa-a',
+        status: 'completed',
+        timestamp: 1,
+      });
+      manager.emit('teammate_exited', {
+        agentId: 'qa-b',
+        name: 'qa-b',
+        status: 'failed',
+        timestamp: 2,
+      });
+
+      await vi.waitFor(() =>
+        expect(sendMessageStream).toHaveBeenCalledTimes(2),
+      );
+      const prompted = sendMessageStream.mock.calls
+        .map((call) => JSON.stringify(call[1]))
+        .join('\n');
+      expect(prompted).toContain('qa-a left the team (completed)');
+      expect(prompted).toContain('qa-b left the team (failed)');
       session.dispose();
     });
 
@@ -2403,6 +2544,140 @@ describe('Session', () => {
         .join('\n');
       expect(prompted).toContain('qa-0');
       expect(prompted).toContain('qa-9');
+      // The coalesced frame carries every departed member structurally, so
+      // a client reconstructing membership can retire all ten instead of
+      // parsing the prose (#15659 review, R1-3).
+      const frames = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter(
+          (update) =>
+            (
+              update._meta?.['backgroundTask'] as
+                | { kind?: string; status?: string }
+                | undefined
+            )?.kind === 'peer' &&
+            (update._meta?.['backgroundTask'] as { status?: string })
+              ?.status === 'exited',
+        );
+      // The same queued item is displayed at enqueue and again when the
+      // automatic turn consumes it; one TASK is the coalescing contract.
+      const exitedTaskIds = new Set(
+        frames.map(
+          (frame) =>
+            (frame._meta?.['backgroundTask'] as { taskId: string }).taskId,
+        ),
+      );
+      expect(exitedTaskIds.size).toBe(1);
+      expect(
+        (
+          frames[0]!._meta?.['backgroundTask'] as {
+            rosterMembers: Array<{ name: string; status?: string }>;
+          }
+        ).rosterMembers,
+      ).toEqual(
+        Array.from({ length: 10 }, (_, i) => ({
+          name: `qa-${i}`,
+          status: 'cancelled',
+        })),
+      );
+      session.dispose();
+    });
+
+    it('coalesces a join burst into one automatic leader turn', async () => {
+      // `team_create` spawns up to ten teammates inside one leader turn.
+      // Each queued peer item drains as its own full-context automatic
+      // turn, so an uncoalesced join burst wakes the leader ten times to
+      // announce a roster its own tool call just created (#15659 review,
+      // R1-4). The members still travel structurally on the single frame.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      sendMessageStream.mockClear();
+      sendMessageStream.mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      for (let i = 0; i < 5; i++) {
+        manager.emit('teammate_joined', {
+          agentId: `a${i}`,
+          name: `dev-${i}`,
+          timestamp: i,
+        });
+      }
+
+      await vi.waitFor(() =>
+        expect(sendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(sendMessageStream).toHaveBeenCalledTimes(1);
+      const frames = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter(
+          (update) =>
+            (
+              update._meta?.['backgroundTask'] as
+                | { kind?: string; status?: string }
+                | undefined
+            )?.kind === 'peer' &&
+            (update._meta?.['backgroundTask'] as { status?: string })
+              ?.status === 'joined',
+        );
+      const joinedTaskIds = new Set(
+        frames.map(
+          (frame) =>
+            (frame._meta?.['backgroundTask'] as { taskId: string }).taskId,
+        ),
+      );
+      expect(joinedTaskIds.size).toBe(1);
+      expect(
+        (
+          frames[0]!._meta?.['backgroundTask'] as {
+            rosterMembers: Array<{ name: string }>;
+          }
+        ).rosterMembers.map((member) => member.name),
+      ).toEqual(['dev-0', 'dev-1', 'dev-2', 'dev-3', 'dev-4']);
+      session.dispose();
+    });
+
+    it('coalesces joins that arrive one per macrotask, as production spawns do', async () => {
+      // R2-3: spawnTeammate emits TEAMMATE_JOINED after an awaited fs
+      // write, so production joins land in distinct event-loop turns. A
+      // microtask-only flush drains between them and coalesces nothing;
+      // the timer-bounded flush must still yield ONE automatic turn.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      sendMessageStream.mockClear();
+      sendMessageStream.mockResolvedValue(createEmptyStream());
+      for (let i = 0; i < 5; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        manager.emit('teammate_joined', {
+          agentId: `a${i}`,
+          name: `dev-${i}`,
+          timestamp: i,
+        });
+      }
+      await vi.waitFor(() =>
+        expect(sendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(sendMessageStream).toHaveBeenCalledTimes(1);
       session.dispose();
     });
 
@@ -2613,6 +2888,230 @@ describe('Session', () => {
         ).status,
       ).toBe('joined');
       release();
+      session.dispose();
+    });
+
+    it('projects teammate activity and inter-teammate messages without waking the leader', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      manager.emit('teammate_activity', {
+        agentId: 'a1',
+        name: 'researcher',
+        toolName: 'read_file',
+        phase: 'call',
+        description: 'Read notes.md',
+        timestamp: 1,
+      });
+      manager.emit('message_sent', {
+        from: 'writer',
+        to: 'checker',
+        message: 'sky sentence',
+        timestamp: 2,
+      });
+      manager.emit('message_sent', {
+        from: 'checker',
+        to: 'leader',
+        message: 'checked',
+        timestamp: 3,
+      });
+      manager.emit('message_sent', {
+        from: 'unknown',
+        to: 'checker',
+        message: 'unattributed message',
+        timestamp: 4,
+      });
+
+      // Events become client-visible frames with the acting or receiving agent.
+      await vi.waitFor(() =>
+        expect(
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([notification]) => notification.update)
+            .filter(
+              (update) =>
+                (update._meta?.['source'] as string | undefined) ===
+                'teammate_activity',
+            ),
+        ).toHaveLength(3),
+      );
+      const activityFrames = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter(
+          (update) =>
+            (update._meta?.['source'] as string | undefined) ===
+            'teammate_activity',
+        );
+      expect(activityFrames[0]).toMatchObject({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: 'researcher started read_file: Read notes.md',
+        },
+        _meta: {
+          agent: {
+            agentName: '/root/researcher',
+            depth: 1,
+            kind: 'teammate',
+          },
+          backgroundTask: { kind: 'peer', status: 'call' },
+        },
+      });
+      expect(activityFrames[1]).toMatchObject({
+        content: {
+          type: 'text',
+          text: 'writer → checker: sky sentence',
+        },
+        _meta: {
+          // The recipient names the frame, matching OpenAI's agent_message
+          // where `agent.agent_name` is the recipient's path…
+          agent: {
+            agentName: '/root/checker',
+            depth: 1,
+            kind: 'teammate',
+          },
+          backgroundTask: {
+            kind: 'peer',
+            status: 'message',
+            // …and the sender travels as the structured author field.
+            author: {
+              agentName: '/root/writer',
+              depth: 1,
+              kind: 'teammate',
+            },
+          },
+        },
+      });
+
+      expect(activityFrames[2]).toMatchObject({
+        _meta: {
+          agent: { agentName: '/root/checker', depth: 1, kind: 'teammate' },
+        },
+      });
+      expect(activityFrames[2]?._meta?.['backgroundTask']).not.toHaveProperty(
+        'author',
+      );
+
+      // …but the leader is never prompted: activity is observational and
+      // must not queue a turn the way a report does.
+      expect(vi.mocked(mockChat.sendMessageStream)).not.toHaveBeenCalled();
+
+      session.dispose();
+      expect(manager.listenerCount('teammate_activity')).toBe(0);
+      expect(manager.listenerCount('message_sent')).toBe(0);
+    });
+
+    it('projects a failed teammate tool call as a failure the client can render', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      manager.emit('teammate_activity', {
+        agentId: 'a1',
+        name: 'researcher',
+        toolName: 'write_file',
+        phase: 'result',
+        success: false,
+        description: 'EACCES',
+        timestamp: 1,
+      });
+
+      const frames = () =>
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([notification]) => notification.update)
+          .filter(
+            (update) =>
+              (update._meta?.['source'] as string | undefined) ===
+              'teammate_activity',
+          );
+      await vi.waitFor(() => expect(frames()).toHaveLength(1));
+      // `SystemMessage.tsx` switches `backgroundTask.status` on exactly
+      // `completed` / `failed` / `cancelled`; a raw `result` phase renders the
+      // neutral row and `description` is the only carrier of the error text.
+      expect(frames()[0]).toMatchObject({
+        content: {
+          type: 'text',
+          text: 'researcher finished write_file: EACCES',
+        },
+        _meta: {
+          backgroundTask: { kind: 'peer', status: 'failed' },
+        },
+      });
+
+      session.dispose();
+    });
+
+    it('projects a successful teammate tool result as completed', async () => {
+      // R3-1: the Web Shell maps only completed/failed/cancelled; a raw
+      // `result` phase renders like a started call and finish counters
+      // miss it. The machine-readable phase/success pair stays intact.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      manager.emit('teammate_activity', {
+        agentId: 'a1',
+        name: 'researcher',
+        toolName: 'write_file',
+        phase: 'result',
+        success: true,
+        timestamp: 1,
+      });
+      const frames = () =>
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([notification]) => notification.update)
+          .filter(
+            (update) =>
+              (update._meta?.['source'] as string | undefined) ===
+              'teammate_activity',
+          );
+      await vi.waitFor(() => expect(frames()).toHaveLength(1));
+      expect(frames()[0]).toMatchObject({
+        _meta: {
+          backgroundTask: {
+            kind: 'peer',
+            status: 'completed',
+            phase: 'result',
+            success: true,
+          },
+        },
+      });
       session.dispose();
     });
 
@@ -2854,8 +3353,22 @@ describe('Session', () => {
         timestamp: 1,
       });
 
-      await vi.waitFor(() => expect(sentPeerNotifications()).toHaveLength(1));
-      const [peer] = sentPeerNotifications();
+      // The join travels through the burst buffer (a microtask); the
+      // automatic turn may consume and re-display the same queued item, so
+      // one TASK — not one frame — is the contract.
+      await vi.waitFor(() =>
+        expect(sentPeerNotifications().length).toBeGreaterThanOrEqual(1),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const joins = sentPeerNotifications();
+      const joinTaskIds = new Set(
+        joins.map(
+          (update) =>
+            (update._meta?.['backgroundTask'] as { taskId: string }).taskId,
+        ),
+      );
+      expect(joinTaskIds.size).toBe(1);
+      const [peer] = joins;
       expect(
         (peer!._meta?.['backgroundTask'] as { status: string }).status,
       ).toBe('joined');
