@@ -132,6 +132,7 @@ import {
   superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
+import { maybeRelinkResumeSession } from './utils/session-relink.js';
 import { isInteractiveInvocation } from './utils/interactive-mode.js';
 import { selectNpmBunHandoff } from './utils/npm-runtime.js';
 import { createLocalWorkflowAncestorTrustProvider } from './config/trustedFolders.js';
@@ -740,9 +741,14 @@ export async function main() {
     // another way to decouple refreshAuth from requiring a config.
 
     if (sandboxConfig) {
+      const sandboxBootstrapArgv = {
+        ...argv,
+        continue: undefined,
+        resume: undefined,
+      };
       const partialConfig = await loadCliConfig(
         settings.merged,
-        argv,
+        sandboxBootstrapArgv,
         undefined,
         [],
         // Pass separated hooks for proper source attribution
@@ -1076,7 +1082,41 @@ export async function main() {
         process.exit(0);
       }
     }
-    // else: argv.resume is already a valid UUID, pass through to loadCliConfig
+    // A full UUID can identify a session saved under the project's previous
+    // path. Only this explicit form is eligible for cross-project lookup;
+    // picker, title, and --continue behavior remains project-scoped.
+    if (
+      typeof argv.resume === 'string' &&
+      argv.resume !== '' &&
+      cliConfig.isValidSessionId(argv.resume) &&
+      resolvedSessionId === undefined
+    ) {
+      const relink = await maybeRelinkResumeSession({
+        sessionId: argv.resume,
+        cwd: process.cwd(),
+        interactive:
+          isInteractiveInvocation(argv) &&
+          Boolean(process.stdout.isTTY) &&
+          !(
+            isAcpMode ||
+            argv.inputFormat === InputFormat.STREAM_JSON ||
+            (argv.inputFile ?? settings.merged.dualOutput?.inputFile) ||
+            argv.jsonFd !== undefined
+          ),
+      });
+      if (relink.status === 'blocked') {
+        writeStderrLine(relink.message);
+        process.exit(1);
+      }
+      if (relink.status === 'cancelled') {
+        process.exit(0);
+      }
+      if (relink.status === 'relinked') {
+        writeStderrLine(
+          `Reattached session ${argv.resume} to ${process.cwd()} (previously ${relink.previousCwd}).`,
+        );
+      }
+    }
   }
 
   // We are now past the logic handling potentially launching a child process
