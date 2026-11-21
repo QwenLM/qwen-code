@@ -18,6 +18,40 @@ import {
 const LONG_TITLE = '优化 iPhone 会话列表标题与拉取请求审阅流程';
 const THEMES: readonly VisualTheme[] = ['dark', 'light'];
 
+function createSessionListScenario() {
+  const workspaceCwd = '/tmp/qwen-web-shell-mobile-sidebar';
+  const sessions: DaemonSessionSummary[] = [
+    {
+      sessionId: 'density-long-title',
+      workspaceCwd,
+      createdAt: '2026-07-03T00:00:00.000Z',
+      updatedAt: '2026-07-03T00:00:00.000Z',
+      displayName: LONG_TITLE,
+      clientCount: 1,
+      hasActivePrompt: false,
+      prs: [
+        {
+          number: 52484,
+          state: 'open',
+          url: 'https://github.com/QwenLM/qwen-code/pull/52484',
+        },
+      ],
+    },
+  ];
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd,
+    sessionId: 'density-long-title',
+    displayName: LONG_TITLE,
+    sessions,
+  });
+  scenario.capabilities.features.push(
+    'session_organization',
+    'session_archive',
+    'session_archive_idle_guard',
+  );
+  return scenario;
+}
+
 for (const theme of THEMES) {
   test(`iPhone session list prioritizes the title (${theme})`, async ({
     browser,
@@ -31,36 +65,7 @@ for (const theme of THEMES) {
     });
     try {
       const page = await context.newPage();
-      const workspaceCwd = '/tmp/qwen-web-shell-mobile-sidebar';
-      const sessions: DaemonSessionSummary[] = [
-        {
-          sessionId: 'mobile-long-title',
-          workspaceCwd,
-          createdAt: '2026-07-03T00:00:00.000Z',
-          updatedAt: '2026-07-03T00:00:00.000Z',
-          displayName: LONG_TITLE,
-          clientCount: 1,
-          hasActivePrompt: false,
-          prs: [
-            {
-              number: 52484,
-              state: 'open',
-              url: 'https://github.com/QwenLM/qwen-code/pull/52484',
-            },
-          ],
-        },
-      ];
-      const scenario = createWebShellDaemonScenario({
-        workspaceCwd,
-        sessionId: 'mobile-long-title',
-        displayName: LONG_TITLE,
-        sessions,
-      });
-      scenario.capabilities.features.push(
-        'session_organization',
-        'session_archive',
-        'session_archive_idle_guard',
-      );
+      const scenario = createSessionListScenario();
       const daemon = await installScenario(page, scenario, baseURL);
       await gotoSession(page, scenario, daemon, theme);
       await page.getByRole('button', { name: 'Toggle menu' }).tap();
@@ -105,8 +110,8 @@ for (const theme of THEMES) {
       });
 
       expect(sidebarBox.width).toBeCloseTo(390 * 0.85, 1);
-      // Keep at least one third of the 390px viewport for the session title.
-      expect(titleBox.width).toBeGreaterThan(130);
+      // Preserve the visible PR state while keeping at least 120px for the title.
+      expect(titleBox.width).toBeGreaterThan(120);
       await expect(
         row.getByRole('button', { name: 'Pin', exact: true }),
       ).toHaveCount(0);
@@ -114,7 +119,9 @@ for (const theme of THEMES) {
       await expect(prBadge).toHaveCSS('padding-left', '2px');
       await expect(prBadge).toHaveCSS('padding-right', '2px');
       await expect(prBadge).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
-      await expect(prBadge.locator('svg')).toBeHidden();
+      await expect(
+        prBadge.locator('svg.lucide-git-pull-request'),
+      ).toBeVisible();
       await captureScreenshot(page, `iphone-session-list-${theme}`);
 
       await row
@@ -128,5 +135,55 @@ for (const theme of THEMES) {
     } finally {
       await context.close();
     }
+  });
+
+  test(`Desktop session list uses the same density (${theme})`, async ({
+    page,
+  }, testInfo) => {
+    const scenario = createSessionListScenario();
+    const daemon = await installScenario(
+      page,
+      scenario,
+      resolveBaseURL(testInfo),
+    );
+    await gotoSession(page, scenario, daemon, theme);
+    const sidebar = page.getByRole('complementary', {
+      name: 'Workspace sidebar',
+    });
+    const title = sidebar
+      .locator('[data-web-shell-session-title]')
+      .filter({ hasText: LONG_TITLE });
+    await expect(title).toHaveCount(1);
+    const row = title.locator('..');
+    await row.hover();
+    const prBadge = row.getByRole('link', {
+      name: 'Pull Request #52484',
+      exact: true,
+    });
+    const more = row.getByRole('button', { name: 'More actions', exact: true });
+    await expect(prBadge).toBeVisible();
+    await expect(prBadge).toContainText('#52484');
+    await expect(more).toBeVisible();
+    await expect(more).toHaveCSS('opacity', '1');
+    await expect(
+      row.getByRole('button', { name: 'Pin', exact: true }),
+    ).toHaveCount(0);
+    await expect(prBadge).toHaveCSS('margin-left', '2px');
+    await expect(prBadge).toHaveCSS('padding-left', '2px');
+    await expect(prBadge).toHaveCSS('padding-right', '2px');
+    await expect(prBadge).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+    await expect(prBadge.locator('svg.lucide-git-pull-request')).toBeVisible();
+    const titleBox = await title.boundingBox();
+    if (!titleBox)
+      throw new Error('The desktop session title is not laid out.');
+    expect(titleBox.width).toBeGreaterThan(120);
+    await captureScreenshot(page, `desktop-session-list-${theme}`);
+
+    await more.click();
+    const menu = page.getByRole('menu');
+    await expect(
+      menu.getByRole('menuitem', { name: 'Pin', exact: true }),
+    ).toBeVisible();
+    await captureScreenshot(page, `desktop-session-list-menu-${theme}`);
   });
 }

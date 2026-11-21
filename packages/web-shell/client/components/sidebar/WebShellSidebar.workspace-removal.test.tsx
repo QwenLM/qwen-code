@@ -3405,7 +3405,7 @@ describe('WebShellSidebar workspace removal', () => {
         : [],
     );
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: ['pin'] } });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -3416,7 +3416,10 @@ describe('WebShellSidebar workspace removal', () => {
     const items = await openSessionMenuItems('Pinned secondary');
     expect(items).toEqual(expect.arrayContaining(['Rename', 'Delete']));
 
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -7387,7 +7390,7 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
     enableOrganization();
     useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: ['pin'] } });
     await settle();
     expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
     expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(0);

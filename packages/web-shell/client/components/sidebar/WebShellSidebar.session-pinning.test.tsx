@@ -147,7 +147,7 @@ function renderSidebar(
           onNewSession={() => false}
           onLoadSession={loadSession}
           onError={onError}
-          sessionActions={props.sessionActions}
+          sessionActions={props.sessionActions ?? { inlineItems: ['pin'] }}
         />
       </I18nProvider>,
     );
@@ -1877,7 +1877,7 @@ describe('WebShellSidebar PR badge rows', () => {
     return slot;
   }
 
-  it('keeps the hover actions width reserved on rows that show a PR badge', async () => {
+  it('reserves the default dropdown width on rows that show a PR badge', async () => {
     active.sessions = [
       makeSession('with-pr', {
         displayName: 'With PR',
@@ -1891,15 +1891,14 @@ describe('WebShellSidebar PR badge rows', () => {
     ];
     active.data = active.sessions;
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: [] } });
     await flushSidebar();
 
-    // Revealing Pin + More on hover must not slide the badge under the
-    // pointer, so the slot already holds both buttons' width at rest.
+    // The default More button must not slide the badge under the pointer.
     const withPr = metaSlotFor('With PR');
     expect(withPr.className).toMatch(/sessionMetaSlotReserved/);
     expect(withPr.style.getPropertyValue('--session-actions-width')).toBe(
-      '52px',
+      '26px',
     );
     // A filtered binding renders no badge, so there is nothing to hold still.
     expect(metaSlotFor('Unsafe PR').className).not.toMatch(

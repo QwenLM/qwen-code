@@ -478,8 +478,8 @@ export interface WebShellSidebarSessionActionsOptions {
   items?: readonly WebShellSidebarSessionActionItem[];
   /**
    * Which items appear as inline buttons on standard session rows (on hover).
-   * Coarse-pointer devices keep these actions in the dropdown instead.
-   * Defaults to ['pin'];
+   * Defaults to none so titles keep the available width. Coarse-pointer
+   * devices always keep these actions in the dropdown instead.
    * archive stays in the dropdown so a stray click on the hover slot cannot
    * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
@@ -506,7 +506,7 @@ export const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionAction
   ];
 
 const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
-  ['pin'];
+  [];
 
 /**
  * Palette order for the quick color-grouping buckets. Mirrors core's
@@ -1416,16 +1416,17 @@ export function WebShellSidebar({
     () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
     [sessionActionsOptions?.items],
   );
-  const compactSessionRows = isCoarsePointerDevice();
+  const coarsePointer = isCoarsePointerDevice();
   const inlineActionItems = useMemo(
     () =>
       new Set<WebShellSidebarSessionInlineActionItem>(
-        compactSessionRows
+        coarsePointer
           ? []
           : (sessionActionsOptions?.inlineItems ?? DEFAULT_INLINE_ACTION_ITEMS),
       ),
-    [compactSessionRows, sessionActionsOptions?.inlineItems],
+    [coarsePointer, sessionActionsOptions?.inlineItems],
   );
+  const compactSessionRows = inlineActionItems.size === 0;
   const shouldRenderBrand =
     branding !== false && !(mobileOpen && branding?.hideWhenCompact);
   const organizationEnabled = Boolean(

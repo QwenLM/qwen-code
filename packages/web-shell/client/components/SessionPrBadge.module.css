@@ -40,11 +40,6 @@
   background: transparent;
 }
 
-/* Compact badges keep the PR state in their accessible label. */
-.sessionPrBadgeCompact svg {
-  display: none;
-}
-
 /* State is carried by the GitHub-style icon, not the pill background. */
 .sessionPrBadge svg {
   width: 12px;

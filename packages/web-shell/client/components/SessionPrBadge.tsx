@@ -19,7 +19,7 @@ interface SessionPrBadgeProps {
    * owns roving-tabindex keyboard navigation (e.g. picker dialogs).
    */
   tabIndex?: number;
-  /** Shows only the PR number in space-constrained sidebar rows. */
+  /** Uses tighter spacing without pill decoration in narrow sidebar rows. */
   compact?: boolean;
 }
 
