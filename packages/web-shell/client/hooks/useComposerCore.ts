@@ -54,6 +54,7 @@ import type { CommandInfo } from '../adapters/types';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useOptionalComposerWorkspace } from './useComposerWorkspace.js';
+import { withActionTimeout } from '../daemon/timing.js';
 import {
   getImplicitTabCompletion,
   getMissingSlashPrefixCompletion,
@@ -1876,6 +1877,13 @@ export function useComposerCore(
         }
         return result;
       },
+      loadMcpStatus: () =>
+        withActionTimeout(client.runtimeMcp(), 'Load MCP status timed out'),
+      loadMcpResources: (serverName) =>
+        withActionTimeout(
+          client.runtimeMcpResources(serverName),
+          'Load MCP resources timed out',
+        ),
     };
   } else {
     workspaceActionsRef.current = workspace?.actions;

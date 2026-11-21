@@ -17,6 +17,8 @@ import {
 } from './useComposerCore';
 import { getPromptHistoryStorageKey } from './useInputHistory';
 import { createFakeIndexedDB } from '../test/fake-indexeddb';
+import { ComposerWorkspaceProvider } from './useComposerWorkspace';
+import type { DaemonWorkspaceContextValue } from '../daemon/workspace/types';
 import type {
   UserMessageContentParser,
   WebShellComposerInput,
@@ -150,6 +152,7 @@ async function mount({
   attachmentsEnabled,
   persistFileReferences,
   disabled,
+  composerWorkspace,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -180,6 +183,7 @@ async function mount({
   attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
   persistFileReferences?: boolean;
   disabled?: UseComposerCoreOptions['disabled'];
+  composerWorkspace?: DaemonWorkspaceContextValue;
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -196,33 +200,35 @@ async function mount({
     root!.render(
       <WebShellPortalRootContext.Provider value={currentPortalRoot}>
         <I18nProvider language="en">
-          <Harness
-            composerInput={composerInput}
-            onSubmit={onSubmit}
-            prepareSubmit={prepareSubmit}
-            submitDisabled={submitDisabled}
-            renderComposerTag={renderComposerTag}
-            renderComposerTagTooltip={renderComposerTagTooltip}
-            onFileTagClick={onFileTagClick}
-            parseUserMessageContent={parseUserMessageContent}
-            followupState={followupState}
-            sessionId={currentSessionId}
-            atWorkspaceCwd={currentWorkspaceCwd}
-            composerScopeKey={currentComposerScopeKey}
-            disableLegacyHistoryFallback={disableLegacyHistoryFallback}
-            shellModeEnabled={shellModeEnabled}
-            commands={currentCommands}
-            allowEmptySlashMenu={currentAllowEmptySlashMenu}
-            cycleModeOnTab={cycleModeOnTab}
-            onCycleMode={onCycleMode}
-            onFocusFooter={onFocusFooter}
-            onImageIngestionNotice={onImageIngestionNotice}
-            workspaceUploadBusy={workspaceUploadBusy}
-            fileDragEnabled={fileDragEnabled}
-            attachmentsEnabled={currentAttachmentsEnabled}
-            persistFileReferences={persistFileReferences}
-            disabled={disabled}
-          />
+          <ComposerWorkspaceProvider value={composerWorkspace}>
+            <Harness
+              composerInput={composerInput}
+              onSubmit={onSubmit}
+              prepareSubmit={prepareSubmit}
+              submitDisabled={submitDisabled}
+              renderComposerTag={renderComposerTag}
+              renderComposerTagTooltip={renderComposerTagTooltip}
+              onFileTagClick={onFileTagClick}
+              parseUserMessageContent={parseUserMessageContent}
+              followupState={followupState}
+              sessionId={currentSessionId}
+              atWorkspaceCwd={currentWorkspaceCwd}
+              composerScopeKey={currentComposerScopeKey}
+              disableLegacyHistoryFallback={disableLegacyHistoryFallback}
+              shellModeEnabled={shellModeEnabled}
+              commands={currentCommands}
+              allowEmptySlashMenu={currentAllowEmptySlashMenu}
+              cycleModeOnTab={cycleModeOnTab}
+              onCycleMode={onCycleMode}
+              onFocusFooter={onFocusFooter}
+              onImageIngestionNotice={onImageIngestionNotice}
+              workspaceUploadBusy={workspaceUploadBusy}
+              fileDragEnabled={fileDragEnabled}
+              attachmentsEnabled={currentAttachmentsEnabled}
+              persistFileReferences={persistFileReferences}
+              disabled={disabled}
+            />
+          </ComposerWorkspaceProvider>
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
     );
@@ -782,6 +788,34 @@ describe('useComposerCore history and drafts', () => {
           '[]',
       ),
     ).toEqual(['prompt from b']);
+  });
+
+  it('scopes MCP status and resources to the composer workspace', async () => {
+    const primaryLoadMcpStatus = vi.fn().mockResolvedValue({ servers: [] });
+    const runtimeMcp = vi.fn().mockResolvedValue({ servers: [] });
+    const runtimeMcpResources = vi.fn().mockResolvedValue({ resources: [] });
+    const workspaceByCwd = vi.fn(() => ({
+      runtimeMcp,
+      runtimeMcpResources,
+    }));
+
+    await mount({
+      atWorkspaceCwd: '/workspace/b',
+      composerWorkspace: {
+        client: { workspaceByCwd },
+        actions: { loadMcpStatus: primaryLoadMcpStatus },
+      } as unknown as DaemonWorkspaceContextValue,
+    });
+
+    await act(async () => {
+      await latest!.workspaceActionsRef.current?.loadMcpStatus?.();
+      await latest!.workspaceActionsRef.current?.loadMcpResources?.('srv');
+    });
+
+    expect(workspaceByCwd).toHaveBeenCalledWith('/workspace/b');
+    expect(runtimeMcp).toHaveBeenCalledTimes(1);
+    expect(runtimeMcpResources).toHaveBeenCalledWith('srv');
+    expect(primaryLoadMcpStatus).not.toHaveBeenCalled();
   });
 
   it('isolates standalone history without falling back to legacy workspace prompts', async () => {
