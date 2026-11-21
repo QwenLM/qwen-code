@@ -562,6 +562,38 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('restores the paste map when history recalls a collapsed paste', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'pasted body'.padEnd(1200, 'x');
+    const pasteExpansions = new Map([[placeholder, body]]);
+    const onPendingPastesChange = vi.fn();
+    props.pendingPastes = new Map();
+    props.onPendingPastesChange = onPendingPastesChange;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: placeholder,
+          pasteExpansions,
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    act(() => historyArgs.onChange(placeholder));
+
+    expect(onPendingPastesChange).toHaveBeenCalledWith(pasteExpansions);
+    expect(props.buffer.setText).toHaveBeenCalledWith(placeholder);
+    unmount();
+  });
+
   it('queues the prompt for the next turn on Ctrl+Q', async () => {
     props.buffer.setText('send this later');
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);

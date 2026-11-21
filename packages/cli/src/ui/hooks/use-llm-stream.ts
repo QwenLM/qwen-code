@@ -2341,6 +2341,7 @@ export const useLlmStream = (
               type: MessageType.USER,
               text: userText,
               ...(recallText !== userText ? { recallText } : {}),
+              ...(pasteExpansions?.size ? { pasteExpansions } : {}),
               promptId: prompt_id,
               // The envelope masked a leading `?` from the lexical fallback in
               // isRealUserTurn; an un-noticed prompt keeps that fallback.

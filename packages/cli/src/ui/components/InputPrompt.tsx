@@ -18,6 +18,7 @@ import {
 import {
   expandPendingPastePlaceholders,
   framePasteExpansion,
+  restorePasteDraft,
   unframeClipboardPastes,
 } from '../utils/paste-placeholders.js';
 import { Box, Text } from 'ink';
@@ -621,16 +622,35 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
       uiActions.invalidateSubmittedPromptProvenance();
-      // History holds the submitted (framed) value; recall restores the
-      // user's own characters, not the model-facing attribution.
-      const restored = unframeClipboardPastes(newText);
+      // Recall restores the user's own characters, not model-facing framing;
+      // a collapsed paste also recovers the map back to its raw body.
+      let restored = unframeClipboardPastes(newText);
+      const recalledItem = uiState.history?.findLast(
+        (item) =>
+          item.type === 'user' &&
+          item.sentToModel !== false &&
+          (item.recallText ?? item.text) === newText,
+      );
+      const recalledPastes =
+        recalledItem?.type === 'user'
+          ? recalledItem.pasteExpansions
+          : undefined;
+      if (recalledPastes) {
+        const draft = restorePasteDraft(
+          restored,
+          recalledPastes,
+          pendingPastes,
+        );
+        restored = draft.text;
+        setPendingPastes(draft.pasteExpansions);
+      }
       // The refill replaces the buffer, so a clipboard read started before
       // the recall must not land at the recalled prompt's cursor.
       submitEpochRef.current += 1;
       buffer.setText(restored);
       setHistoryRestoredText(restored);
     },
-    [buffer, uiActions],
+    [buffer, pendingPastes, setPendingPastes, uiActions, uiState.history],
   );
 
   const inputHistory = useInputHistory({

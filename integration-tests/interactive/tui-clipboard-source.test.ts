@@ -323,6 +323,38 @@ it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`,
       });
       reached['nativeRawRecallEdit'] = true;
       reached['actualModelJournal'] = true;
+    } else {
+      active.pressKey('\x1b[A');
+      await active.idle(350, 1000);
+      expect(server.requests).toHaveLength(1);
+      frames['recall'] = await active.viewport();
+      await type('_RECALL_EDIT');
+      active.pressKey('\r');
+      await until(
+        async () =>
+          (await active.viewport()).includes('PASTE_SOURCE_RECALL_DONE'),
+        'explicit recalled-edit reply missing',
+      );
+      await active.idle(250, 750);
+      expect(server.requests).toHaveLength(2);
+      const secondUsers = (
+        server.requests[1].body['messages'] as Message[]
+      ).filter((message) => message.role === 'user');
+      expect(secondUsers).toHaveLength(2);
+      const secondContent = secondUsers[1].content;
+      const secondParts =
+        typeof secondContent === 'string'
+          ? [{ type: 'text', text: secondContent }]
+          : secondContent;
+      const edited = secondParts.filter((part) =>
+        part.text?.includes('_RECALL_EDIT'),
+      );
+      expect(edited).toHaveLength(1);
+      expect(edited[0].text).toBe(
+        expectedModelText.replace('OWNER_END\n', 'OWNER_END_RECALL_EDIT\n'),
+      );
+      json(join(evidence, 'actual-recalled-model-user.json'), secondUsers[1]);
+      reached['nativeRawRecallEdit'] = true;
     }
     await active.idle(250, 750);
     await active.send('/quit');
@@ -332,7 +364,7 @@ it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`,
     );
     expect(active.exitResult()).toEqual({ exitCode: 0, signal: 0 });
     reached['naturalQuit'] = true;
-    expect(server.requests).toHaveLength(renderer === 'opentui' ? 2 : 1);
+    expect(server.requests).toHaveLength(2);
   } catch (error) {
     recordFailure(error);
   } finally {
