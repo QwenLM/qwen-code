@@ -231,11 +231,9 @@ class WorkspaceLifecycleStoreTest {
                 (row, index) -> new String(row.getBytes(1), java.nio.charset.StandardCharsets.UTF_8),
                 "tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8),
                 "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, 'tenant', ?, 'EXTERNAL')",
-                RuntimeAdmissionFences.storageAliasKey("tenant", storage),
-                RuntimeAdmissionFences.storageFenceKey("tenant"),
-                RuntimeAdmissionFences.storageFenceKey(storage), storage);
+        fixture.jdbc.update("INSERT INTO ma_storage (alias_key,"
+                        + " tenant_id, storage_id, storage_kind) VALUES (?, 'tenant', ?, 'EXTERNAL')",
+                RuntimeAdmissionFences.storageAliasKey("tenant", storage), storage);
         fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?",
                 WorkspaceToolProfiles.EXTERNAL_FILES);
         var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(
@@ -390,10 +388,9 @@ class WorkspaceLifecycleStoreTest {
             }
             ManagedHookRecords.requireExecution(record);
             var ref = fixture.resource(event + "-record", "hook-execution", record);
-            fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
+            fixture.jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id,"
                     + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
-                    + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
-                    ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
+                    + " VALUES (?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
                     ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", id),
                     fixture.session, id, "a".repeat(64), ref.path("resourceId").asText());
             effects.addObject().put("event", event).set("recordRef", ref);
@@ -468,10 +465,9 @@ class WorkspaceLifecycleStoreTest {
         }
         ManagedHookRecords.requireExecution(record);
         var ref = fixture.resource("SessionEnd-record", "hook-execution", record);
-        fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
+        fixture.jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id,"
                 + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
-                + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
+                + " VALUES (?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
                 ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", occurrence),
                 fixture.session, occurrence, "a".repeat(64), ref.path("resourceId").asText());
         // The first close persists its effects — the fence moves to
@@ -981,8 +977,8 @@ class WorkspaceLifecycleStoreTest {
         ObjectNode resource(String id, String kind, JsonNode body) throws Exception {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                    ManagedSchemaKeys.key(ManagedSessionStore.sessionScopeKey("tenant", session), id), ManagedSessionStore.sessionScopeKey("tenant", session), session, id, kind, bytes.length, digest, bytes);
+            jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, 'tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                    ManagedSchemaKeys.key(ManagedSessionStore.sessionScopeKey("tenant", session), id), session, id, kind, bytes.length, digest, bytes);
             return json.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         }
 

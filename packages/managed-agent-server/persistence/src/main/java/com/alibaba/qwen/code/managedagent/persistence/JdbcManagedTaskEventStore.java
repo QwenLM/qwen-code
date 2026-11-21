@@ -289,7 +289,7 @@ public class JdbcManagedTaskEventStore
             return new CursorState(List.of(), Map.of());
         }
         return jdbc.query("SELECT inline_bytes,sha256,byte_length FROM ma_resource WHERE resource_key = ?"
-                        + " AND session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                        + " AND tenant_id = ? AND session_id = ?"
                         + " AND storage_kind = 'MYSQL_INLINE' AND state = 'REFERENCED' AND kind = ? AND schema_version = 1",
                 (row, index) -> {
                     byte[] bytes = row.getBytes("inline_bytes");
@@ -308,7 +308,7 @@ public class JdbcManagedTaskEventStore
                     } catch (java.io.IOException exception) {
                         throw new IllegalStateException("The task cursor resource is corrupt", exception);
                     }
-                }, resourceKey, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, "task-artifact-refs/1")
+                }, resourceKey, tenantId, sessionId, "task-artifact-refs/1")
                 .stream().findFirst().orElseThrow(() -> new IllegalStateException("The task cursor resource is missing"));
     }
 
@@ -327,22 +327,22 @@ public class JdbcManagedTaskEventStore
         String ownerKey = ManagedSchemaKeys.key(scope, "TASK", taskId);
         String workspace = jdbc.queryForObject("SELECT workspace_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenantId, sessionId);
-        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create) VALUES (?,?,?,?,?,?,'task-artifact-refs/1',1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key = resource_key",
-                resourceKey, scope, tenantId, workspace, sessionId, resourceId, bytes.length, digest, bytes);
+        jdbc.update("INSERT INTO ma_resource (resource_key,tenant_id,workspace_id,session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create) VALUES (?,?,?,?,?,'task-artifact-refs/1',1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key = resource_key",
+                resourceKey, tenantId, workspace, sessionId, resourceId, bytes.length, digest, bytes);
         Boolean same = jdbc.queryForObject("SELECT inline_bytes,sha256,byte_length,kind,schema_version,state FROM ma_resource"
-                        + " WHERE resource_key = ? AND session_scope_key = ? AND tenant_id = ? AND session_id = ?",
+                        + " WHERE resource_key = ? AND tenant_id = ? AND session_id = ?",
                 (row, index) -> java.util.Arrays.equals(bytes, row.getBytes("inline_bytes"))
                         && digest.equals(row.getString("sha256")) && bytes.length == row.getLong("byte_length")
                         && "task-artifact-refs/1".equals(row.getString("kind")) && row.getInt("schema_version") == 1
                         && "REFERENCED".equals(row.getString("state")),
-                resourceKey, scope, tenantId, sessionId);
+                resourceKey, tenantId, sessionId);
         if (!Boolean.TRUE.equals(same)) {
             throw new IllegalStateException("The task Artifact reference resource identity conflicts");
         }
-        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'EVENT_STREAM' AND owner_key = ?",
-                scope, ownerKey);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,workspace_id,session_id,gmt_create) VALUES (?,'EVENT_STREAM',?,?,?,?,?,?," + ManagedSchemaTime.SQL_NOW + ")",
-                scope, ownerKey, revision, resourceKey, tenantId, workspace, sessionId);
+        jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'EVENT_STREAM'"
+                + " AND owner_key = ?", tenantId, sessionId, ownerKey);
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind,owner_key,owner_revision,resource_key,tenant_id,workspace_id,session_id,gmt_create) VALUES ('EVENT_STREAM',?,?,?,?,?,?," + ManagedSchemaTime.SQL_NOW + ")",
+                ownerKey, revision, resourceKey, tenantId, workspace, sessionId);
         jdbc.update("UPDATE ma_event_stream SET artifact_refs_resource_key = ?, gmt_modified = ? WHERE tenant_id = ?"
                         + " AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?",
                 resourceKey, occurredAt, tenantId, sessionId, taskId);
