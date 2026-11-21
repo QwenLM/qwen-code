@@ -7839,9 +7839,8 @@ export function registerSessionRoutes(
     }
 
     try {
-      const result = await archiveCoordinator.runSharedMany(
-        [sessionId],
-        async () => {
+      const result = await runWithoutDebugLogSession(() =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
           const runtime = await resolveTranscriptSessionRuntime(
             res,
             route,
@@ -7852,15 +7851,41 @@ export function registerSessionRoutes(
           const assertRuntimeGenerationOpen =
             captureRuntimeGenerationAssertion(runtime);
           assertRuntimeGenerationOpen?.();
-          const page = await runtime.bridge.getSessionTurnIndexPage({
-            sessionId,
-            ...(snapshot !== undefined ? { snapshot } : {}),
-            ...(start !== undefined ? { start } : {}),
-            ...(limit !== undefined ? { limit } : {}),
+          // Read daemon-local so turn navigation's anchor snapshot survives
+          // ACP child exit, the same reason as the default transcript route.
+          // undefined codec => the persisted per-workspace key, matching the
+          // default transcript route that consumes this snapshot. Resolution
+          // already asserted loadability, so skip the redundant re-check.
+          return runWithWorkspaceRuntimeStorage(runtime, async () => {
+            try {
+              const page = await new SessionTranscriptReader(
+                runtime.workspaceCwd,
+              ).readTurnIndexPage(sessionId, {
+                ...(snapshot !== undefined ? { snapshot } : {}),
+                ...(start !== undefined ? { start } : {}),
+                ...(limit !== undefined ? { limit } : {}),
+              });
+              assertRuntimeGenerationOpen?.();
+              return page;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                throw error;
+              }
+              if (snapshot !== undefined) {
+                throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+              }
+              const service = createWorkspaceRuntimeSessionService(runtime);
+              const location = await service.getSessionLocation(sessionId);
+              if (location === 'archived') {
+                throw new SessionArchivedError(sessionId);
+              }
+              if (location === 'conflict') {
+                throw new SessionConflictError(sessionId);
+              }
+              throw new SessionNotFoundError(sessionId);
+            }
           });
-          assertRuntimeGenerationOpen?.();
-          return page;
-        },
+        }),
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(

@@ -35978,30 +35978,7 @@ describe('createServeApp', () => {
 
     it('returns sparse turn-index pages through the owning runtime', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaae';
-      const bridge = fakeBridge({
-        sessionTurnIndexImpl: async (req) => {
-          if (req.start !== undefined && req.start > 1) {
-            throw Object.assign(new Error('Invalid transcript cursor'), {
-              data: { errorKind: 'invalid_transcript_cursor' },
-            });
-          }
-          return {
-            v: 1,
-            sessionId: req.sessionId,
-            snapshot: 'snapshot-1',
-            totalTurns: 1,
-            start: 0,
-            turns: [
-              {
-                ordinal: 0,
-                turnId: 'record-1',
-                kind: 'prompt',
-                label: 'hello transcript',
-              },
-            ],
-          };
-        },
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -36021,19 +35998,147 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.headers['cache-control']).toBe('no-store');
-      expect(res.body).toMatchObject({
-        snapshot: 'snapshot-1',
-        totalTurns: 1,
-      });
-      expect(bridge.sessionTurnIndexCalls).toEqual([
-        { sessionId: sid, limit: 2 },
-      ]);
+      // Daemon-local read mints a real persisted-key snapshot.
+      expect(typeof res.body.snapshot).toBe('string');
+      expect(res.body.totalTurns).toBe(1);
+      expect(res.body.turns[0].label).toBe('hello transcript');
+      expect(bridge.sessionTurnIndexCalls).toEqual([]);
+
       const outOfRange = await request(app)
-        .get(`/session/${sid}/turn-index?snapshot=snapshot-1&start=2`)
+        .get(
+          `/session/${sid}/turn-index?snapshot=${encodeURIComponent(res.body.snapshot)}&start=2`,
+        )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(outOfRange.status).toBe(400);
       expect(outOfRange.body.code).toBe('invalid_transcript_cursor');
       expect(bridge.loadCalls).toHaveLength(0);
+    });
+
+    it('reuses the daemon-side index for turn-index without an ACP child', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff1';
+      resetSessionTranscriptIndexCacheForTest();
+      let builds = 0;
+      setSessionTranscriptIndexBuildCompleteHookForTest(() => {
+        builds++;
+      });
+      try {
+        const bridge = fakeBridge();
+        await writeTranscriptSession(sid);
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          { bridge, boundWorkspace: wsDir },
+        );
+        const first = await request(app)
+          .get(`/session/${sid}/turn-index`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const second = await request(app)
+          .get(`/session/${sid}/turn-index`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(first.status).toBe(200);
+        expect(second.status).toBe(200);
+        expect(builds).toBe(1);
+        expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+        expect(bridge.sessionTurnIndexCalls).toEqual([]);
+      } finally {
+        setSessionTranscriptIndexBuildCompleteHookForTest(undefined);
+        resetSessionTranscriptIndexCacheForTest();
+      }
+    });
+
+    it('pins the daemon-local replay tool-metadata fallback (accepted trade)', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeef';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid);
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      const append = async (rec: Record<string, unknown>) => {
+        await fsp.appendFile(
+          chatsFile,
+          JSON.stringify({
+            sessionId: sid,
+            cwd: wsDir,
+            version: '1.0.0',
+            timestamp: '2026-05-28T12:00:02.000Z',
+            ...rec,
+          }) + '\n',
+        );
+      };
+      await append({
+        uuid: `${sid}-a1`,
+        parentUuid: `${sid}-user-1`,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'read_file',
+                args: { absolute_path: '/tmp/file.txt' },
+              },
+            },
+          ],
+        },
+      });
+      await append({
+        uuid: `${sid}-r1`,
+        parentUuid: `${sid}-a1`,
+        type: 'tool_result',
+        toolCallResult: {
+          callId: 'call-1',
+          name: 'read_file',
+          status: 'success',
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ],
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      const events = res.body.events as Array<{
+        data?: Record<string, unknown>;
+      }>;
+      const toolEvent = events.find((e) => {
+        const u = (e.data?.['update'] ?? e.data) as
+          | Record<string, unknown>
+          | undefined;
+        return (
+          u?.['sessionUpdate'] === 'tool_call' && u?.['toolCallId'] === 'call-1'
+        );
+      });
+      if (!toolEvent) {
+        throw new Error('no tool_call for call-1: ' + JSON.stringify(events));
+      }
+      const update = (toolEvent.data?.['update'] ?? toolEvent.data) as Record<
+        string,
+        unknown
+      >;
+      // Daemon-local replay passes no Config, so resolveToolMetadata falls
+      // back to the persisted name, kind 'other', empty locations. This is
+      // the accepted trade documented in the design doc (the workspace route
+      // has always fallen back the same way).
+      expect(update['title']).toBe('read_file');
+      expect(update['kind']).toBe('other');
+      expect(update['locations']).toEqual([]);
     });
 
     it('forwards snapshot-bound turn anchors and response metadata', async () => {
@@ -36311,12 +36416,10 @@ describe('createServeApp', () => {
       expect(turnIndex.status).toBe(200);
       expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
       expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
-      // Transcript reads daemon-local from the owning internal runtime; the
-      // turn index still goes through that runtime's bridge.
+      // Transcript and turn index both read daemon-local from the owning
+      // internal runtime; neither bridge method is called.
       expect(internalBridge.sessionTranscriptCalls).toEqual([]);
-      expect(internalBridge.sessionTurnIndexCalls).toEqual([
-        { sessionId: sid },
-      ]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([]);
     });
 
     it('rejects transcript and turn index for a child of an explicit standalone session', async () => {
@@ -36521,9 +36624,7 @@ describe('createServeApp', () => {
       expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
       expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
       expect(internalBridge.sessionTranscriptCalls).toEqual([]);
-      expect(internalBridge.sessionTurnIndexCalls).toEqual([
-        { sessionId: childSid },
-      ]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([]);
     });
 
     it('skips the internal runtime for a transcript from a non-conversation source', async () => {
