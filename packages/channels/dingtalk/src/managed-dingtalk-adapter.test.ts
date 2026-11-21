@@ -880,7 +880,7 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
-  it('a failure on a later segment settles only that segment, leaving the prefix delivered (R12)', async () => {
+  it("a failure on a later segment settles the delivery unknown, keeping the prefix's per-ordinal receipts (R12)", async () => {
     const hooks: { beforeSend?: () => void } = {};
     const { adapter, plane, fake } = await connectedAdapter(tempCwd(), hooks);
     // beforeSend runs after the send is recorded and before the failure check,
@@ -1292,9 +1292,9 @@ describe('managed DingTalk adapter outbox', () => {
 describe('managed DingTalk adapter review fixes', () => {
   it('drops a group frame under the private-chat policy (R1-7)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // The drop is a policy decision after acceptance, so the frame must still
-    // be acked: an unacked frame would be redelivered forever and would also
-    // satisfy a bare "nothing was submitted" assertion.
+    // The drop is a policy decision, not an acceptance: no claim is staged, but
+    // the frame is still acked — an unacked frame would be redelivered forever
+    // and would also satisfy a bare "nothing was submitted" assertion.
     expect(
       fake.push(
         'msg-group',
