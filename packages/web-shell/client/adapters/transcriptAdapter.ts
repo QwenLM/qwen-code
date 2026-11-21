@@ -4,6 +4,7 @@ import type {
   PermissionRequest,
   PermissionOptionKind,
 } from './types.js';
+import { isAskUserPermission } from '../utils/askUserPermission.js';
 
 type PermissionTranscriptBlock = Extract<
   DaemonTranscriptBlock,
@@ -55,6 +56,29 @@ export function extractPendingPermission(
     };
   }
   return null;
+}
+
+/**
+ * Cheap block-level form of `isAskUserPermission(extractPendingPermission(...))`:
+ * it reads only the tool name and raw input the classification needs, without
+ * building the preview content (`escapePreviewText` of the serialized input).
+ * Callers that classify a pending set on every render use this so a streaming
+ * delta does not re-serialize each outstanding approval's payload.
+ */
+export function isAskUserPermissionBlock(
+  block: DaemonTranscriptBlock,
+): boolean {
+  if (!isPermissionBlock(block) || block.resolved) return false;
+  const toolCallRecord = getRecord(block.toolCall);
+  const metaRecord = getRecord(toolCallRecord?.['_meta']);
+  const toolName =
+    typeof metaRecord?.['toolName'] === 'string'
+      ? metaRecord['toolName']
+      : undefined;
+  return isAskUserPermission({
+    toolName,
+    rawInput: getPermissionRawInput(block.toolCall),
+  });
 }
 
 function hasPermissionDiffPreview(
