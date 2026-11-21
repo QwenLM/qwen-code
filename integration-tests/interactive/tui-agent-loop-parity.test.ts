@@ -157,11 +157,14 @@ interface Run {
 const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
 
 /**
- * The helper gate's ceiling. Past it the fake server answers 500 and the
- * CLI's retry adds a request the strict parity count rejects. The enclosing
- * waits (TURN_BUDGET) must stay strictly above this ceiling so a leader slow
- * to record its waiting answer reaches the gate, not the harness, first; a
- * leader stalled before that answer is sent never enters the gate.
+ * The helper gate's ceiling: hardening for a slow-but-live leader, not a fix
+ * for #18027. Past it the fake server answers 500 and the CLI's retry adds a
+ * request the strict parity count rejects — but a resend inflates that count
+ * with no expiry at all, since the server counts a request before it awaits
+ * the handler and writes any header. The enclosing waits (TURN_BUDGET) must
+ * stay strictly above this ceiling so a leader slow to record its waiting
+ * answer reaches the gate, not the harness, first; a leader stalled before
+ * that answer is sent never enters the gate.
  */
 const HELPER_GATE_BUDGET = 90_000;
 
