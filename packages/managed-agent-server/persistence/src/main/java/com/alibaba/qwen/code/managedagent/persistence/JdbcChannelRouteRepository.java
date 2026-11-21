@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelStoreSupport;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
@@ -70,10 +69,10 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
                     candidate.channelInstanceId(), candidate.accountGeneration(), candidate.semanticRevision(),
                     candidate.sessionId(), operation, now, now);
             if (admitted == 1) {
-                jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id,"
+                jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id,"
                                 + " session_id, target_kind, target_key, request_digest, request_json, result_json, phase, state,"
-                                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'CHANNEL_INGRESS', ?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?)",
-                        operation, ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId()), scope, route, candidate.tenantId(), candidate.sessionId(), target, digest, request,
+                                + " gmt_create, gmt_modified) VALUES (?, ?, 'CHANNEL_INGRESS', ?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?)",
+                        operation, scope, route, candidate.tenantId(), candidate.sessionId(), target, digest, request,
                         candidate.inputId() == null ? null : JSON.createObjectNode().put("inputId", candidate.inputId()).toString(),
                         "admitted".equals(candidate.state()) ? "ADMITTED" : "STAGING", candidate.state(), now, now);
             }

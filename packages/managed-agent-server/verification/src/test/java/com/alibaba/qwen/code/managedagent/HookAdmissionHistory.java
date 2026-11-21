@@ -207,10 +207,10 @@ final class HookAdmissionHistory {
         try (var insert =
                 connection.prepareStatement(
                         "INSERT INTO"
-                                + " ma_session_record (session_scope_key,"
-                                + " record_key, tenant_id, workspace_id, session_id, domain,"
+                                + " ma_session_record ("
+                                + "record_key, tenant_id, workspace_id, session_id, domain,"
                                 + " record_id, operation_hash, revision, record_resource_id,"
-                                + " gmt_create, hook_once_key_hash) SELECT session_scope_key, ?,"
+                                + " gmt_create, hook_once_key_hash) SELECT ?,"
                                 + " tenant_id, workspace_id, session_id, 'hook_execution',"
                                 + " 'intruder', ?, 1, record_resource_id, gmt_create, ? FROM"
                                 + " ma_session_record WHERE session_id = ?"

@@ -237,11 +237,11 @@ class ManagedPublishedAgentConfigurationTest {
     private void insertPublished(String sessionId, String resourceId, String kind,
             int schemaVersion, byte[] bytes) {
         String scopeKey = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
                         + " inline_bytes, publish_command_id, state, gmt_create, last_verified_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
-                ManagedSessionStore.resourceKey(scopeKey, resourceId), scopeKey, TENANT, WORKSPACE, sessionId,
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
+                ManagedSessionStore.resourceKey(scopeKey, resourceId), TENANT, WORKSPACE, sessionId,
                 resourceId, kind, schemaVersion, bytes.length, ExtensionRecordJournal.sha256(bytes), bytes,
                 resourceId, 1_000L, 1_000L);
     }
@@ -251,13 +251,13 @@ class ManagedPublishedAgentConfigurationTest {
         String scopeKey = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         // ck_ma_resource_capture ties capture_state to the capture identity tuple: those four columns
         // are NULL together or NOT NULL together, and uk_ma_capture_slot keeps the tuple unique.
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
                         + " inline_bytes, publish_command_id, state, scope_key, publication_id, slot_key,"
                         + " capture_state, gmt_create, last_verified_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 'managed-tool-outcome', 1, ?, ?, 'MYSQL_INLINE', ?, ?,"
+                        + " VALUES (?, ?, ?, ?, ?, 'managed-tool-outcome', 1, ?, ?, 'MYSQL_INLINE', ?, ?,"
                         + " 'REFERENCED', ?, ?, X'61646d697373696f6e', 'VERIFIED', ?, ?)",
-                ManagedSessionStore.resourceKey(scopeKey, resourceId), scopeKey, TENANT, WORKSPACE, sessionId,
+                ManagedSessionStore.resourceKey(scopeKey, resourceId), TENANT, WORKSPACE, sessionId,
                 resourceId, bytes.length, ExtensionRecordJournal.sha256(bytes), bytes, resourceId,
                 ManagedSchemaKeys.key("capture", resourceId), "publication-" + resourceId, 1_000L, 1_000L);
     }

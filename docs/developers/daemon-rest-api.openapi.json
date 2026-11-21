@@ -3717,6 +3717,10 @@
           "hasTurnError": {
             "type": "boolean"
           },
+          "needsContinuation": {
+            "type": "boolean",
+            "description": "Persisted prompt-ledger evidence that the session's latest prompt was cut off mid-flight (dangling admission, reconciled interruption, or a teardown flush), so opening the session can offer Continue execution. A list-surface hint only; the loaded session's recovery status stays authoritative. Absent when there is no ledger evidence; never false."
+          },
           "turnError": {
             "type": "object",
             "required": ["message"],

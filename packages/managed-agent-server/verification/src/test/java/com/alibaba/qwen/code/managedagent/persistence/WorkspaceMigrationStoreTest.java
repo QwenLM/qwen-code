@@ -180,10 +180,9 @@ class WorkspaceMigrationStoreTest {
                     + " VALUES ('tenant', ?, 'agent', ?, 1, 1, 'workspace', 1, '.', ?, 1, ?, ?)",
                     session, index == 33 ? "other-storage" : "storage", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, session_id, domain,"
+            jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, session_id, domain,"
                     + " record_id, revision, record_kind, state, action_id, action_version, options_json, gmt_create)"
-                    + " VALUES (?, ?, 'tenant', ?, 'approval', ?, 1, 'ACTION', 'requested', ?, 1, ?, 1)",
-                    scope, WorkspaceOperations.hash(session), session, session, session,
+                    + " VALUES (?, 'tenant', ?, 'approval', ?, 1, 'ACTION', 'requested', ?, 1, ?, 1)", WorkspaceOperations.hash(session), session, session, session,
                     JSON.createObjectNode().put("expiresAt", index >= 32 ? Long.MAX_VALUE : 0).toString());
         }
         assertThatThrownBy(() -> operation.retire(mock(RuntimeBrokerService.class)))
@@ -447,10 +446,10 @@ class WorkspaceMigrationStoreTest {
         String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, session_id,"
                 + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, available_at, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, 'RENAME', 'rename:1', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', ?, 'SUBMITTED', ?, 0, 1, 1)",
-                WorkspaceOperations.hash("rename"), scope, scope, WorkspaceOperations.hash("session"), state, state);
+                + " VALUES (?, ?, 'RENAME', 'rename:1', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', ?, 'SUBMITTED', ?, 0, 1, 1)",
+                WorkspaceOperations.hash("rename"), scope, WorkspaceOperations.hash("session"), state, state);
         assertThatThrownBy(() -> store(true)).hasMessageContaining("source_drift")
                 .hasMessageNotContaining("migration_work_unsettled");
     }
@@ -499,11 +498,11 @@ class WorkspaceMigrationStoreTest {
         String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, session_id,"
                 + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, failure_code, available_at, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, 'TASK_CANCEL', 'op_cancel', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', 'RECOVERY_BLOCKED',"
+                + " VALUES (?, ?, 'TASK_CANCEL', 'op_cancel', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', 'RECOVERY_BLOCKED',"
                 + " 'RECOVERY_BLOCKED', 'BLOCKED', 'task_cancel_unconfirmed', 0, 1, 1)",
-                WorkspaceOperations.hash("cancel"), scope, scope, WorkspaceOperations.hash("session"));
+                WorkspaceOperations.hash("cancel"), scope, WorkspaceOperations.hash("session"));
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
         // Settled, it no longer holds the move: the migration gets past its
