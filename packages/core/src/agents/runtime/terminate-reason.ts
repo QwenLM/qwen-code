@@ -54,8 +54,9 @@ export function describeAgentTerminateReason(
 export function terminateReasonMessage(
   reason: string | undefined,
   fallback: string,
+  loopType?: LoopType | null,
 ): string {
-  const described = describeAgentTerminateReason(reason);
+  const described = describeAgentTerminateReason(reason, loopType);
   if (described) return described;
   // Every AgentTerminateMode member is keyed by its own value, so the enum
   // object doubles as the lookup for "is this an internal token". `hasOwn`

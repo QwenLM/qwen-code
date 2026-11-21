@@ -378,6 +378,7 @@ export async function runManagedRememberByAgent(params: {
         result.status === 'failed'
           ? 'Remember agent failed'
           : 'Remember agent cancelled',
+        result.loopType,
       ),
     );
   }

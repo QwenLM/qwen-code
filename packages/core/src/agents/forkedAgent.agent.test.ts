@@ -16,6 +16,7 @@ import { AgentTerminateMode } from './runtime/agent-types.js';
 import type { ModelConfig, PromptConfig } from './runtime/agent-types.js';
 import { runForkedAgent, type AgentPathParams } from './forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { LoopType } from '../telemetry/types.js';
 import { EditTool } from '../tools/edit.js';
 import {
   hasRebuiltToolRegistry,
@@ -129,10 +130,12 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     terminateMode: AgentTerminateMode,
     finalText: string,
     execute = vi.fn().mockResolvedValue(undefined),
+    loopType: LoopType | null = null,
   ) =>
     ({
       execute,
       getTerminateMode: vi.fn().mockReturnValue(terminateMode),
+      getLoopType: vi.fn().mockReturnValue(loopType),
       getFinalText: vi.fn().mockReturnValue(finalText),
     }) as unknown as AgentHeadless;
 
@@ -352,6 +355,24 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
       expect(result.terminateReason).toBe(terminateMode);
     },
   );
+
+  it('carries the loop detector name into a loop-detected result', async () => {
+    const { parent } = await makeParent();
+    const restore = stubCreate(
+      fakeHeadless(
+        AgentTerminateMode.LOOP_DETECTED,
+        'stopped',
+        vi.fn().mockResolvedValue(undefined),
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      ),
+    );
+    const result = await fork(restore, parent);
+
+    // The memory callers build their failure message from these two fields;
+    // without the detector here every background stop reads the same (#9450).
+    expect(result.status).toBe('failed');
+    expect(result.loopType).toBe(LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS);
+  });
 
   it('reports successful reads and writes separately from attempted calls', async () => {
     const { parent } = await makeParent();
@@ -772,6 +793,7 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
             });
           }),
           getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+          getLoopType: vi.fn().mockReturnValue(null),
           getFinalText: vi.fn().mockReturnValue('done'),
         }) as unknown as AgentHeadless,
     );

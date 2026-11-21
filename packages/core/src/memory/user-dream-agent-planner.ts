@@ -132,7 +132,11 @@ export async function planUserAutoMemoryDreamByAgent(
     // marks the record 'cancelled' before aborting and then skips the
     // error update, so this text would never reach anyone.
     throw new Error(
-      terminateReasonMessage(result.terminateReason, 'User Dream agent failed'),
+      terminateReasonMessage(
+        result.terminateReason,
+        'User Dream agent failed',
+        result.loopType,
+      ),
     );
   }
   return result;

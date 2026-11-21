@@ -197,7 +197,11 @@ export async function planManagedAutoMemoryDreamByAgent(
 
   if (result.status === 'failed') {
     throw new Error(
-      terminateReasonMessage(result.terminateReason, 'Dream agent failed'),
+      terminateReasonMessage(
+        result.terminateReason,
+        'Dream agent failed',
+        result.loopType,
+      ),
     );
   }
 
@@ -211,6 +215,7 @@ export async function planManagedAutoMemoryDreamByAgent(
       terminateReasonMessage(
         result.terminateReason,
         'Dream agent cancelled before completion',
+        result.loopType,
       ),
     );
   }

@@ -55,6 +55,30 @@ describe('terminateReasonMessage', () => {
     ).toBe('Agent stopped: maximum turns reached.');
   });
 
+  it('names the loop detector when the caller supplies one', () => {
+    // Forked agents reach this helper with both fields; dropping the second
+    // would make a background stop read like every other loop stop (#9450).
+    expect(
+      terminateReasonMessage(
+        AgentTerminateMode.LOOP_DETECTED,
+        'Dream agent failed',
+        LoopType.ACTION_STAGNATION,
+      ),
+    ).toBe(
+      'Agent stopped: duplicate tool-call loop detected (action_stagnation).',
+    );
+  });
+
+  it('falls back to the generic wording when no detector is known', () => {
+    expect(
+      terminateReasonMessage(
+        AgentTerminateMode.LOOP_DETECTED,
+        'Dream agent failed',
+        null,
+      ),
+    ).toBe('Agent stopped: duplicate tool-call loop detected.');
+  });
+
   it('passes an unrecognized reason through unchanged', () => {
     expect(
       terminateReasonMessage('Model timed out', 'Dream agent failed'),
