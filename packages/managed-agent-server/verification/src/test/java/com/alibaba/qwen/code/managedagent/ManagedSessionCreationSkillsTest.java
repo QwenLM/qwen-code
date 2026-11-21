@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionP
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedSkillCatalogSource;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
@@ -25,6 +26,8 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
@@ -101,6 +104,19 @@ class ManagedSessionCreationSkillsTest {
                 + " display_name, config_ref, policy_ref, state) VALUES (?, 'ws', 1, 'storage', 'Test', 'config', 'policy', 'ACTIVE')", tenant);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'ws', ?, 'OPERATOR')",
                 tenant, "actor".getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void skillDiscoveryReadsTheProfileWhileTheWorkspaceRowIsLocked() {
+        enableBuiltinShell();
+        var discovery = new TransactionTemplate(transactionManager);
+        discovery.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        new TransactionTemplate(transactionManager).executeWithoutResult(holdingLock -> {
+            assertThat(jdbc.queryForObject("SELECT 1 FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ? FOR UPDATE",
+                    Integer.class, tenant, "ws")).isEqualTo(1);
+            String profile = discovery.execute(tx -> store.creationToolProfile(tenant, "actor", "qwen-code", null, "ws"));
+            assertThat(profile).isEqualTo(WorkspaceToolProfiles.SHELL);
+        });
     }
 
     @Test

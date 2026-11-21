@@ -388,12 +388,12 @@ resets that window, including when the channel was already live.
 
 - `BridgeOptions.maxSessions` (default 32) — cap.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
-- `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP child startup
-  deadline (Channel factory + `initialize` handshake) and default request
-  timeout.
-- `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — ACP `loadSession` / `unstable_resumeSession` deadline. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it.
+- `BridgeOptions.initializeTimeoutMs` (default 10s) — each of the channel factory and `initialize` handshake receives this startup budget, with their pair capped at twice it. Failed startup may additionally await one such budget for teardown. Other ACP requests retain this value as their default timeout.
+- `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — one budget for engine selection, channel readiness, remembered-language delivery, and ACP `loadSession` / `unstable_resumeSession`. The ACP request uses the remaining budget after preparation. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it. The deadline uses monotonic elapsed time, so system-clock corrections cannot extend or shorten it.
 - `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps after runtime work drains, except that plain preheat is preserved for first use; a positive value or active keepalive delays reaping, and the longer delay wins).
 - Capability tags: `session_create`, `session_startup_config`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_mod_rows`, `session_generation`, `session_btw`, `session_btw_stream`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
+
+The default restore deadline is `max(initializeTimeoutMs, 60000)`. For a slow cold start, allow up to twice `--initialize-timeout-ms` for spawning and initializing the child, plus time for engine selection, remembered-language delivery, and the ACP restore request. If initialization fails, teardown can take one more initialize interval before the bridge reports the underlying error. With a 40-second initialize timeout, for example, startup can take 80 seconds and failure cleanup can bring the total to 120 seconds. Set `--session-restore-timeout-ms` above the budget for the path you want to observe. A shorter explicit deadline returns a restore timeout if it expires first.
 
 ### Stateless generation (`session_generation` capability tag)
 

@@ -25,11 +25,11 @@ const SCRIPT = fileURLToPath(
 // where it lives, and which of the three arms (cmdline / cwd / environ) carries
 // the reference, because a detached daemon's argv usually carries none of it.
 //
-// `run` defaults to REAP_DRY_RUN=1, and every case that fabricates a pid keeps
-// it: those pids are real on the machine running the test, so signalling them
-// would signal whatever happens to own them. The signalling legs are covered
-// separately, against processes this file actually starts (or, for the
-// unreachable-pid case, one that cannot exist).
+// `run` defaults to REAP_DRY_RUN=1, and the selection fixtures keep it. Some
+// entries deliberately use real ancestor PIDs, so signalling them would target
+// the test runner. The signalling legs are covered separately, against
+// processes this file actually starts (or, for the unreachable-pid case, one
+// that cannot exist).
 function fakeProc({ procs, root }) {
   const proc = join(root, 'proc');
   mkdirSync(proc, { recursive: true });
@@ -92,6 +92,12 @@ function withRoot(fn) {
 const HOME = '/runner/_temp/qwen-no-ak-home-43011096774-1';
 const OTHER = '/runner/_temp/qwen-no-ak-home-99999999999-1';
 
+// Synthetic selection PIDs must not collide with the real ancestor chain.
+// Keep the original offsets so glob order stays stable across the fixtures.
+function fixturePid(offset) {
+  return Number.MAX_SAFE_INTEGER - 1_000 + offset;
+}
+
 // The real ancestor chain of this test process, including itself. The script
 // reads its own chain from the real /proc, so these are the pids it will
 // exclude; listing them in the scan root reproduces the cleanup shell's
@@ -129,7 +135,7 @@ describe('reap-isolated-home selection', () => {
         home: HOME,
         procs: [
           { pid: daemonPid, env: { HOME, QWEN_HOME: `${HOME}/.qwen` } },
-          { pid: 200, env: { HOME: OTHER } },
+          { pid: fixturePid(200), env: { HOME: OTHER } },
         ],
       });
       assert.equal(r.status, 0);
@@ -143,14 +149,18 @@ describe('reap-isolated-home selection', () => {
         root,
         home: HOME,
         procs: [
-          { pid: 101, argv: ['node', `${HOME}/daemon.js`] },
-          { pid: 102, cwd: `${HOME}/.qwen` },
-          { pid: 103, cwd: `${HOME} (deleted)` },
-          { pid: 201, argv: ['node', `${OTHER}/daemon.js`] },
+          { pid: fixturePid(101), argv: ['node', `${HOME}/daemon.js`] },
+          { pid: fixturePid(102), cwd: `${HOME}/.qwen` },
+          { pid: fixturePid(103), cwd: `${HOME} (deleted)` },
+          { pid: fixturePid(201), argv: ['node', `${OTHER}/daemon.js`] },
         ],
       });
       assert.equal(r.status, 0);
-      assert.deepEqual(reaped(r), [101, 102, 103]);
+      assert.deepEqual(reaped(r), [
+        fixturePid(101),
+        fixturePid(102),
+        fixturePid(103),
+      ]);
     });
   });
 
@@ -162,16 +172,16 @@ describe('reap-isolated-home selection', () => {
         root,
         home: HOME,
         procs: [
-          { pid: 300, env: { HOME: `${HOME}-extra` } },
-          { pid: 301, env: { HOME: '/runner/_temp' } },
-          { pid: 302, env: { PATH: `/usr/bin:${HOME}/bin` } },
-          { pid: 303, env: { HOME: OTHER } },
+          { pid: fixturePid(300), env: { HOME: `${HOME}-extra` } },
+          { pid: fixturePid(301), env: { HOME: '/runner/_temp' } },
+          { pid: fixturePid(302), env: { PATH: `/usr/bin:${HOME}/bin` } },
+          { pid: fixturePid(303), env: { HOME: OTHER } },
           // The argv arm had the same defect and only the environment arm was
           // pinned: a substring match here selected a neighbour's daemon on
           // hz3. Both the bare path and the `--flag=path` form are checked.
-          { pid: 304, argv: ['node', `${HOME}-extra/daemon.js`] },
-          { pid: 305, argv: ['node', `--home=${HOME}-extra`] },
-          { pid: 306, cwd: `${HOME}-extra` },
+          { pid: fixturePid(304), argv: ['node', `${HOME}-extra/daemon.js`] },
+          { pid: fixturePid(305), argv: ['node', `--home=${HOME}-extra`] },
+          { pid: fixturePid(306), cwd: `${HOME}-extra` },
         ],
       });
       assert.equal(r.status, 0);
@@ -185,10 +195,12 @@ describe('reap-isolated-home selection', () => {
       const r = run({
         root,
         home: HOME,
-        procs: [{ pid: 310, argv: ['node', `--home=${HOME}`, 'serve'] }],
+        procs: [
+          { pid: fixturePid(310), argv: ['node', `--home=${HOME}`, 'serve'] },
+        ],
       });
       assert.equal(r.status, 0);
-      assert.deepEqual(reaped(r), [310]);
+      assert.deepEqual(reaped(r), [fixturePid(310)]);
     });
   });
 
@@ -215,12 +227,12 @@ describe('reap-isolated-home selection', () => {
             // THE regression this pins: a detached daemon is reparented to
             // pid 1, which is on the ancestor chain. Excluding by parent
             // instead of by marker made the reaper select nothing on hz3.
-            { pid: 601, ppid: 1, env: { HOME } },
-            { pid: 600, ppid: 2, env: { HOME } },
+            { pid: fixturePid(601), ppid: 1, env: { HOME } },
+            { pid: fixturePid(600), ppid: 2, env: { HOME } },
           ],
         });
         assert.equal(r.status, 0);
-        assert.deepEqual(reaped(r), [600, 601]);
+        assert.deepEqual(reaped(r), [fixturePid(600), fixturePid(601)]);
       });
     },
   );
@@ -234,17 +246,17 @@ describe('reap-isolated-home selection', () => {
         home: HOME,
         procs: [
           {
-            pid: 800,
+            pid: fixturePid(800),
             ppid: 1,
             argv: ['grep', '-qF', '--', HOME],
             env: { HOME: '/root', REAP_SELF_MARKER: 'marker-under-test' },
           },
-          { pid: 801, ppid: 1, argv: ['node', `${HOME}/d.js`] },
+          { pid: fixturePid(801), ppid: 1, argv: ['node', `${HOME}/d.js`] },
         ],
         env: { REAP_SELF_MARKER: 'marker-under-test' },
       });
       assert.equal(r.status, 0);
-      assert.deepEqual(reaped(r), [801]);
+      assert.deepEqual(reaped(r), [fixturePid(801)]);
     });
   });
 
@@ -263,17 +275,16 @@ describe('reap-isolated-home selection', () => {
   });
 
   it('reports the selection and signals nothing under REAP_DRY_RUN', () => {
-    // This is what makes the selection testable at all: the fabricated pids
-    // are real pids on the test machine, so the dry run must not reach the
-    // signalling legs even when the selection is non-empty.
+    // Even with collision-free fixture PIDs, a dry run must not reach the
+    // signalling legs when the selection is non-empty.
     withRoot((root) => {
       const r = run({
         root,
         home: HOME,
-        procs: [{ pid: 800, ppid: 1, env: { HOME } }],
+        procs: [{ pid: fixturePid(800), ppid: 1, env: { HOME } }],
       });
       assert.equal(r.status, 0);
-      assert.deepEqual(reaped(r), [800]);
+      assert.deepEqual(reaped(r), [fixturePid(800)]);
       assert.match(r.stdout, /dry run; signalling nothing/);
       // The dry run must not remove anything either — HOME here is a fabricated
       // path, and the script now owns the removal.
@@ -291,7 +302,7 @@ describe('reap-isolated-home degradation', () => {
         const r = run({
           root,
           home,
-          procs: [{ pid: 700, env: { HOME: '/' } }],
+          procs: [{ pid: fixturePid(700), env: { HOME: '/' } }],
         });
         assert.equal(r.status, 0, home);
         assert.deepEqual(reaped(r), [], home);
