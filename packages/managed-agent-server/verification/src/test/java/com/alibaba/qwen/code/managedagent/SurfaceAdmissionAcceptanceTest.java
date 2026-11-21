@@ -911,11 +911,12 @@ public class SurfaceAdmissionAcceptanceTest {
         // The legacy arm is tenant-wide, anonymous callers included — but
         // only for a genuine no-row Session: the OWNER-created unbound
         // Session carries an ownership row, so an actorless by-id read of it
-        // answers 404 exactly as the anonymous list page hides it.
+        // names the missing identity (R7-1) exactly as the anonymous list
+        // page hides it.
         mvc.perform(get("/v1/agents/sessions/" + legacy)
                         .header(TenantContextFilter.HEADER, tenant))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.error.code").value("session_not_found"));
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("actor_required"));
         mvc.perform(get("/v1/agents/sessions/" + actorless)
                         .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())

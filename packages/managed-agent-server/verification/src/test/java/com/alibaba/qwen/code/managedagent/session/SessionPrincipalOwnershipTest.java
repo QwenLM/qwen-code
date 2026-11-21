@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
@@ -65,8 +66,9 @@ class SessionPrincipalOwnershipTest {
             String id = f.create(OWNER, "create");
             long events = f.count("ma_public_event");
             long receipts = f.count("ma_request_receipt");
-            denied(() -> f.store.insertTurnCommand("tenant", "SUBMIT_TURN", "anonymous",
-                    "digest", id, List.of(Map.of("type", "text", "text", "hello")),
+            actorRequired(() -> f.store.insertTurnCommand("tenant", "SUBMIT_TURN",
+                    "anonymous", "digest", id,
+                    List.of(Map.of("type", "text", "text", "hello")),
                     "payload", (SessionPrincipal) null));
             assertThat(f.count("ma_turn")).isZero();
             assertThat(f.count("ma_public_event")).isEqualTo(events);
@@ -79,7 +81,7 @@ class SessionPrincipalOwnershipTest {
         var f = new Fixture();
         f.tx.executeWithoutResult(status -> {
             String owned = f.create(OWNER, "owned");
-            denied(() -> f.service.getPublicSession("tenant", null, owned));
+            actorRequired(() -> f.service.getPublicSession("tenant", null, owned));
             String legacy = f.service.createSession("tenant", null,
                     "legacy", "qwen-code", null, "shared", Map.of(), List.of())
                     .sessionId();
@@ -87,6 +89,47 @@ class SessionPrincipalOwnershipTest {
                     .isEqualTo(legacy);
             assertThat(f.service.getPublicSession(OWNER, legacy).id())
                     .isEqualTo(legacy);
+        });
+    }
+
+    // R7-1: an owned Session can only answer an identity. A caller that
+    // carries none is told which identity is missing instead of being told the
+    // Session does not exist; a supplied non-owner keeps that 404.
+    @Test
+    void actorlessCallOnAnOwnedSessionNamesTheMissingIdentity() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String owned = f.create(OWNER, "owned");
+            // Both twins of the gate refuse a caller with no identity at all.
+            actorRequired(() -> ManagedSessionPrincipal.requireReadAuthority(
+                    f.jdbc, "tenant", owned, (String) null));
+            actorRequired(() -> ManagedSessionPrincipal.requireReadAuthority(
+                    f.jdbc, "tenant", owned, (SessionPrincipal) null));
+            // The 6-argument mutation overload an owner reaches without an
+            // actor says which identity is missing.
+            actorRequired(() -> f.store.beginSessionMutation("tenant",
+                    "RENAME_SESSION", "actorless-rename", "digest", owned,
+                    SessionMutationKind.RENAME));
+            // A supplied non-owner keeps the 404 that hides the Session.
+            denied(() -> ManagedSessionPrincipal.requireReadAuthority(
+                    f.jdbc, "tenant", owned, "other-actor"));
+            denied(() -> ManagedSessionPrincipal.requireReadAuthority(
+                    f.jdbc, "tenant", owned,
+                    SessionPrincipal.of("tenant", "user", "actor-B")));
+            denied(() -> f.store.beginSessionMutation("tenant",
+                    "RENAME_SESSION", "foreign-rename", "digest", owned,
+                    SessionMutationKind.RENAME, "other-actor"));
+            // The owner still admits through the principal twin.
+            ManagedSessionPrincipal.requireReadAuthority(f.jdbc, "tenant",
+                    owned, OWNER);
+            // A row-less legacy Session keeps the actorless path open.
+            String legacy = f.service.createSession("tenant", null, "legacy",
+                    "qwen-code", null, "shared", Map.of(), List.of()).sessionId();
+            assertThat(f.service.getPublicSession("tenant", (String) null, legacy)
+                    .id()).isEqualTo(legacy);
+            assertThat(f.store.beginSessionMutation("tenant", "RENAME_SESSION",
+                    "legacy-rename", "digest", legacy,
+                    SessionMutationKind.RENAME).status()).isEqualTo("PENDING");
         });
     }
 
@@ -321,7 +364,8 @@ class SessionPrincipalOwnershipTest {
             denied(() -> f.service.unarchiveSession(other, "unarchive", otherId));
             assertThat(f.jdbc.queryForObject("SELECT status FROM ma_session WHERE session_id=?", String.class, otherId))
                     .isEqualTo("ARCHIVED");
-            denied(() -> f.store.settleRenameSync("tenant", "null-owner", "digest", otherId, "title", (String) null));
+            actorRequired(() -> f.store.settleRenameSync("tenant", "null-owner",
+                    "digest", otherId, "title", (String) null));
         });
     }
 
@@ -677,6 +721,14 @@ class SessionPrincipalOwnershipTest {
             assertThat(f.store.findSession("tenant", live)).isPresent();
             ManagedSessionPrincipal.requireReadAuthority(f.jdbc, "tenant", live, OWNER);
         });
+    }
+
+    private static void actorRequired(Runnable action) {
+        assertThatThrownBy(action::run).isInstanceOfSatisfying(ManagedAgentException.class,
+                error -> {
+                    assertThat(error.getStatus()).isEqualTo(401);
+                    assertThat(error.getCode()).isEqualTo("actor_required");
+                });
     }
 
     private static void denied(Runnable action) {

@@ -219,6 +219,7 @@ public final class ManagedSessionPrincipal {
     private static void requireFetchedRawActor(Row row, int principalCreated,
             String actorId) {
         if (row != null) {
+            requireIdentity(actorId);
             // A raw actor carries no encoded subject, so it can only name a row
             // written without an actor present.
             if (row.version() != VERSION || row.actorPresent()
@@ -237,6 +238,7 @@ public final class ManagedSessionPrincipal {
     private static void requireFetched(String tenantId, Row row,
             int principalCreated, SessionPrincipal principal) {
         if (row != null) {
+            requireIdentity(principal);
             if (!matches(row, principal)) {
                 throw new ManagedAgentException(404,
                         "session_not_found", "The Session was not found.");
@@ -246,6 +248,19 @@ public final class ManagedSessionPrincipal {
         if (principalCreated != 0) {
             throw new ManagedAgentException(404,
                     "session_not_found", "The Session was not found.");
+        }
+    }
+
+    /**
+     * An ownership row can only be answered by an identity. A caller that
+     * supplies none is refused with the admission contract's missing-identity
+     * code rather than a 404 that would claim the Session does not exist;
+     * a supplied identity that does not own the row keeps its 404.
+     */
+    private static void requireIdentity(Object identity) {
+        if (identity == null) {
+            throw new ManagedAgentException(401, "actor_required",
+                    "A trusted actor is required.");
         }
     }
 
