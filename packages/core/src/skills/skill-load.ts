@@ -2,6 +2,7 @@ import {
   type SkillConfig,
   type SkillValidationResult,
   parseAllowedToolsField,
+  parseMcpServersField,
   parseModelField,
   parsePathsField,
   parseUserInvocableField,
@@ -186,6 +187,8 @@ export function parseSkillContent(
       : undefined;
   const userInvocable = parseUserInvocableField(frontmatter);
 
+  const mcpServers = parseMcpServersField(frontmatter);
+
   // Optional `paths` frontmatter: glob patterns that gate when this skill
   // is offered to the model (conditional skill).
   const paths = parsePathsField(frontmatter);
@@ -195,6 +198,7 @@ export function parseSkillContent(
     name,
     description,
     allowedTools,
+    mcpServers,
     argumentHint,
     model,
     filePath,

@@ -175,6 +175,7 @@ describe('SkillManager', () => {
     // Route each fixture's YAML to a result by its content.
     mockParseYaml.mockImplementation((yamlString: string) => {
       if (yamlString.includes('hooks:')) return yaml.parse(yamlString);
+      if (/^mcp:/m.test(yamlString)) return yaml.parse(yamlString);
       const testSkill = { name: 'test-skill', description: 'A test skill' };
       if (yamlString.includes('allowedTools:')) {
         return { ...testSkill, allowedTools: ['read_file', 'write_file'] };
@@ -257,6 +258,29 @@ describe('SkillManager', () => {
     parse(fm(`${TEST_FM}\n${extra}`, body));
 
   describe('parseSkillContent', () => {
+    it('parses the mcp frontmatter field: string, list, shorthand, malformed (#17317)', () => {
+      // One pin per accepted shape so a parser regression that silently
+      // drops the field (M01) cannot survive the suite.
+      expect(parseWith('mcp: github').mcpServers).toEqual(['github']);
+      expect(parseWith('mcp:\n  - github\n  - notion').mcpServers).toEqual([
+        'github',
+        'notion',
+      ]);
+      // Comma shorthand and padding normalize instead of inventing a
+      // server name no configuration can match (#17323 F4).
+      expect(parseWith('mcp: " github, notion "').mcpServers).toEqual([
+        'github',
+        'notion',
+      ]);
+      // A malformed value never breaks loading.
+      expect(parseWith('mcp:\n  size: 42').mcpServers).toBeUndefined();
+      expect(parse(validMarkdown).mcpServers).toBeUndefined();
+      // Trailing/empty segments drop rather than inventing a name
+      // (round-8 deferral oracle).
+      expect(parseWith('mcp: "jira, "').mcpServers).toEqual(['jira']);
+      expect(parseWith('mcp: " ,, "').mcpServers).toBeUndefined();
+    });
+
     it('should parse valid markdown content', () => {
       const config = parse(validMarkdown);
 

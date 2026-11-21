@@ -23,6 +23,7 @@ import {
   SkillError,
   SkillErrorCode,
   parseAllowedToolsField,
+  parseMcpServersField,
   parseModelField,
   parsePathsField,
   parseUserInvocableField,
@@ -809,6 +810,12 @@ export class SkillManager {
           : undefined;
       const userInvocable = parseUserInvocableField(frontmatter);
 
+      // Optional `mcp` frontmatter: MCP server names this skill depends on
+      // (#17317). Same shape as skill-load.ts's parser — accept a string or
+      // a list; anything else is ignored so malformed entries never break
+      // skill loading. Both SKILL.md parsers must agree on the field.
+      const mcpServers = parseMcpServersField(frontmatter);
+
       // Optional `paths` frontmatter: glob patterns that gate when this skill
       // is offered to the model (conditional skill).
       const paths = parsePathsField(frontmatter);
@@ -825,6 +832,7 @@ export class SkillManager {
         name,
         description,
         allowedTools,
+        mcpServers,
         hooks,
         skillRoot,
         argumentHint,

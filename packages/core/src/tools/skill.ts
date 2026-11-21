@@ -40,6 +40,7 @@ import {
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
   skillModelInvocationBlock,
+  buildMcpDependencyWarning,
 } from './skill-utils.js';
 
 /**
@@ -926,6 +927,13 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         activationWarning = ` Warning: review workflow activation failed (${error.message}); workflow dispatch may be unavailable.`;
       }
 
+      // MCP dependency check (#17317): a skill can declare the MCP servers
+      // it needs; surface missing/unusable ones in the activation output
+      // (before the first tool call fails with an opaque "tool not found")
+      // with how to fix each. Presence check only — installing servers
+      // stays a user action. Shared with the user-invoked paths (#17323 F3).
+      activationWarning += buildMcpDependencyWarning(this.config, skill);
+
       // Prevent re-invoking an already-loaded skill from appending
       // duplicate instructions to context. The first invocation
       // returns the full skill body; subsequent invocations return a
@@ -953,7 +961,13 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       });
 
       return {
-        llmContent: [{ text: llmContent }],
+        llmContent: [
+          {
+            text: activationWarning
+              ? `${llmContent}\n${activationWarning.trim()}`
+              : llmContent,
+          },
+        ],
         returnDisplay: skill.description,
         modelOverride: skill.model,
       };

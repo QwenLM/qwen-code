@@ -86,6 +86,18 @@ describe('skill-load', () => {
         const priority = yamlString.includes('priority: 25') ? 25 : true;
         return { ...base, priority };
       }
+      if (yamlString.includes('mcp:')) {
+        const mcp = yamlString.includes('- github')
+          ? ['github', 'notion']
+          : yamlString.includes('size: 42')
+            ? { size: 42 }
+            : yamlString.includes('mcp: github')
+              ? 'github'
+              : yamlString.includes('mcp: jira, ')
+                ? 'jira, '
+                : ' github, notion ';
+        return { ...base, mcp };
+      }
       return { ...base }; // Default case
     });
   });
@@ -107,6 +119,30 @@ describe('skill-load', () => {
       expect(config.body).toBe('You are a helpful assistant with this skill.');
       expect(config.level).toBe('extension');
       expect(config.filePath).toBe(testFilePath);
+    });
+
+    it('parses the mcp frontmatter field: string, list, shorthand, malformed (#17317)', () => {
+      // One pin per accepted shape so a parser regression that silently
+      // drops the field (M02) cannot survive the suite.
+      expect(parse({ extra: ['mcp: github'] }).mcpServers).toEqual(['github']);
+      expect(
+        parse({ extra: ['mcp:', '  - github', '  - notion'] }).mcpServers,
+      ).toEqual(['github', 'notion']);
+      // Comma shorthand and padding normalize instead of inventing a
+      // server name no configuration can match (#17323 F4).
+      expect(parse({ extra: ['mcp: " github, notion "'] }).mcpServers).toEqual([
+        'github',
+        'notion',
+      ]);
+      // A malformed value never breaks loading.
+      expect(
+        parse({ extra: ['mcp:', '  size: 42'] }).mcpServers,
+      ).toBeUndefined();
+      expect(parse({}).mcpServers).toBeUndefined();
+      // Trailing/empty segments drop rather than inventing a name
+      // (round-8 deferral oracle). The mock returns 'jira, ' for this
+      // fixture shape.
+      expect(parse({ extra: ['mcp: jira, '] }).mcpServers).toEqual(['jira']);
     });
 
     it('should parse markdown with CRLF line endings (Windows format)', () => {
